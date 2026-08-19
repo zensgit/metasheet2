@@ -268,6 +268,155 @@ test("SQL: (documented residual, not a passing security assertion) an E-string's
   assert.deepEqual(findNonReadonlyStatements(doctored), [], 'documents the known gap: without the ban above, this would erase the DELETE')
 })
 
+// ---------------------------------------------------------------------------
+// P3-1 gate fix (round 4): the observation `.sql` is not only SQL — the file's own
+// "HOW TO RUN" header instructs `psql "$DATABASE_URL" -f
+// scripts/ops/multitable-o2-observation.sql`, and psql interprets its input file as a
+// SCRIPT, not merely as a stream of SQL statements. A line beginning with `\` is a psql
+// BACKSLASH METACOMMAND — `\gexec`, `\g`, `\gset`, `\i`, `\o`, `\copy`, `\!`, `\q`, and any
+// name psql adds in a future version — and metacommands carry no `;`, so they are absorbed
+// into the PRECEDING `SELECT`-headed statement by splitStatements above and never appear as
+// their own statement at all. Every static predicate in this file — findNonReadonlyStatements,
+// findUnsafeConstructs, findDisallowedPgFunctionCalls, findDisallowedFunctionCalls — operates
+// on the output of splitStatements, so all four are STRUCTURALLY BLIND to this channel: not a
+// gap in any one regex, a gap in the SQL-statement model itself, which a metacommand is
+// outside of by construction. psql, meanwhile, executes it.
+//
+// Round-4 gate reproduction, verified against a real, freshly migrated scratch Postgres:
+//   D4 — `SELECT 'COMM'||'IT' \gexec` / `SELECT 'SET default_transaction_read_only = off'
+//        \gexec` / `SELECT 'CREA'||'TE TABLE o2_pwn_np AS SELECT 1' \gexec` / `SELECT 'SET
+//        default_transaction_read_only = on' \gexec` — every statement head is SELECT, no
+//        `||`-split literal matches DDL_KEYWORD_RE, and the payload avoids a `name(` shape —
+//        created a REAL, PERSISTENT table (`o2_pwn_np`, confirmed present in
+//        information_schema.tables) while findNonReadonlyStatements, findUnsafeConstructs,
+//        AND the execution-layer's OWN "pristine SQL file runs clean" positive control all
+//        stayed GREEN. (An unobfuscated `SELECT 'CREATE TEMP TABLE …' \gexec` variant IS
+//        caught, but only INCIDENTALLY — DDL_KEYWORD_RE matches the literal CREATE inside the
+//        string — and string concatenation (`'CREA' || 'TE …'`) removes that incidental catch,
+//        same mechanism as the round-3 `\q` case below.)
+//   D5 — `SELECT 1 AS probe` followed by `\! touch /tmp/o2_shell_probe` — arbitrary SHELL
+//        EXECUTION from inside the file psql, an OWNER-GATED runbook, and this test's own
+//        `psql -f` invocation all run directly.
+//
+// This ALSO corrects the shape of the `BEGIN READ ONLY` wrap's own disclosed residual, further
+// down this file (see runReadOnlySql's comment and the BOUNDED_DISARM_WRITE_SHAPE section): that
+// residual previously read as "harness-scoped — sound INSIDE the harness, uncovered only for the
+// runbook's plain operator invocation". D4 falsifies the "sound inside the harness" half — a
+// metacommand rides inside the wrapped script too (the wrap only governs SQL statements executed
+// inside the transaction; `\gexec`/`\!` are interpreted by psql itself, outside any transaction's
+// reach) and defeats it from within, including delivering a bare `COMMIT;` (D4's first `\gexec`
+// leg) to end the wrapping transaction early. The corrected, precise shape: the metacommand
+// channel escapes BOTH the plain operator invocation AND this harness's own `BEGIN READ ONLY`
+// wrap equally — it is not a harness-only soundness gap, it is a gap in what layer 1 (the static
+// census) was checking. See the correction inline at runReadOnlySql's comment.
+//
+// FIX: this is NOT another name to add to a blocklist (the family — \gexec, \g, \gset, \i, \o,
+// \copy, \!, \q, and anything psql adds later — is exactly the trap-enumeration shape this file's
+// own convention rejects). Structural instead: the observation SQL is pure SQL BY CONTRACT (its
+// own header says so, and says how it is invoked) — so a single property check, independent of
+// which metacommand name is used AND of WHERE it sits, closes the whole family at once: after
+// comments are stripped, the file must contain NO backslash at all.
+//
+// POSITION MATTERS, and a line-leading-only rule is NOT enough — this was caught by re-verifying
+// the first version of this fix rather than trusting it: `\gexec`'s canonical idiom is TRAILING,
+// on the same line as the statement it re-executes. Proven against a real database:
+//   SELECT 'CREA'||'TE TABLE o2_pwn_eol AS SELECT 1' \gexec
+// psql exits 0 and the table IS created, while a `/^[ \t]*\\/` line-leading test never fires.
+// Stripping comments first is what makes a whole-file backslash ban zero-false-positive here: the
+// pristine file's ONLY backslash lives in a comment (`-- loop (e.g. \watch 5) …`), and a backslash
+// has no legitimate use in this file's executable text — E-strings and dollar-quoting are already
+// banned above, so no escape syntax needs one. This is LOAD-BEARING for D4 and D5 (neither slipped
+// through any OTHER predicate in this file — see the negative-control test below, which disables
+// this predicate alone and confirms D4/D5 pass every remaining check) — it is not defense-in-depth
+// alongside a stronger structural catch, it is the only static catch either shape has. It also
+// SUBSUMES the round-3 `\q` case: a bare `\q` immediately after a `;` was, until now, caught only
+// INCIDENTALLY — findNonReadonlyStatements takes the first whitespace-delimited token of the
+// following (`;`-split) statement as its head, so `\q` merges into that role and gets flagged as
+// offender `\Q` purely by accident of position; a `\q` that instead lands mid-statement (with no
+// preceding `;` on the same "statement" the tokenizer sees) would NOT be a head token and would
+// slip that check entirely — verified below (the same dedicated test also proves the new
+// predicate catches `\q` regardless of position, not just the accidentally-caught one).
+/** Line numbers (1-based) carrying a backslash in the COMMENT-STRIPPED SQL — i.e. a psql
+ *  metacommand in any position (line-leading `\q`, trailing `\gexec`, mid-line `\!`), or any
+ *  other executable backslash. Empty means clean. `stripComments` preserves newlines, so line
+ *  numbers map 1:1 onto the original file. */
+function findMetacommandLines(sql) {
+  return stripComments(sql)
+    .split('\n')
+    .map((line, i) => [i + 1, line])
+    .filter(([, line]) => line.includes('\\'))
+    .map(([lineNo]) => lineNo)
+}
+
+test('SQL: contains no psql backslash metacommand anywhere — the file is pure SQL by contract (its own "HOW TO RUN" header says `psql -f`), and psql ALSO runs it as a SCRIPT: \\gexec/\\!/\\i/\\copy/\\o/\\q and any future psql metacommand carry no `;`, so they are invisible to every statement-based predicate in this file (findNonReadonlyStatements, findUnsafeConstructs, findDisallowedPgFunctionCalls, findDisallowedFunctionCalls all operate on splitStatements output) while psql executes them regardless (P3-1 round-4 gate fix — see D4/D5 above)', () => {
+  assert.deepEqual(findMetacommandLines(sqlText), [], 'observation SQL must not contain a backslash outside comments — a psql metacommand in ANY position (line-leading, trailing, mid-line) is executed by psql while being invisible to every statement-based predicate here')
+})
+
+test('SQL: metacommand ban is LOAD-BEARING for D4/D5 — with this predicate alone disabled, the exact gate-reproduced \\gexec write chain and the \\! shell-execution line pass every OTHER static predicate in this file (positive control: this is the only static catch either shape has, not defense-in-depth alongside a stronger one)', () => {
+  const gexecChain =
+    "SELECT 'COMM' || 'IT'\n\\gexec\nSELECT 'SET default_transaction_read_only = off'\n\\gexec\n" +
+    "SELECT 'CREA' || 'TE TABLE o2_pwn_np AS SELECT 1'\n\\gexec\nSELECT 'SET default_transaction_read_only = on'\n\\gexec\n"
+  const shellLine = 'SELECT 1 AS probe\n\\! touch /tmp/o2_shell_probe_mutation_check\n'
+  for (const doctored of [gexecChain, shellLine]) {
+    assert.deepEqual(findNonReadonlyStatements(doctored), [], 'every statement head is SELECT — findNonReadonlyStatements does not see this shape')
+    assert.deepEqual(findUnsafeConstructs(doctored), [], 'no CTE/locking/pg_*/DDL/function-call shape here — findUnsafeConstructs does not see this shape either')
+  }
+  // The metacommand ban itself IS the catch — proven by the primary test above, not repeated
+  // here (this test's job is only to show every OTHER predicate stays silent).
+  assert.ok(findMetacommandLines(gexecChain).length > 0 && findMetacommandLines(shellLine).length > 0)
+})
+
+test('SQL: metacommand ban is not vacuous — a doctored copy containing a real metacommand IS caught at the correct line, in EVERY position psql accepts (line-leading, trailing, mid-line), and a backslash inside a string is ALSO refused by deliberate contract', () => {
+  /** 1-based line number of the APPENDED metacommand line, computed from the text itself so this
+   *  control cannot drift with the pristine file's trailing-newline shape. Uses the LAST
+   *  backslash-bearing line on purpose: the pristine file legitimately carries one earlier
+   *  backslash inside a COMMENT (`-- loop (e.g. \watch 5) …`), which the predicate strips and
+   *  must never report — searching from the front would pin that comment line instead and make
+   *  this control assert the wrong thing. */
+  const backslashLineOf = (text) => {
+    const lines = text.split('\n')
+    for (let i = lines.length - 1; i >= 0; i -= 1) if (lines[i].includes('\\')) return i + 1
+    throw new Error('backslashLineOf: no backslash in the doctored text — the probe itself is broken')
+  }
+
+  const lineLeading = `${sqlText}\nSELECT 1;\n\\gexec\n`
+  assert.deepEqual(findMetacommandLines(lineLeading), [backslashLineOf(lineLeading)])
+
+  // TRAILING `\gexec` — the canonical idiom, and the shape that defeated this rule's first,
+  // line-leading-only version. Verified against a real database while re-checking that fix:
+  //   SELECT 'CREA'||'TE TABLE o2_pwn_eol AS SELECT 1' \gexec
+  // psql exits 0 and the table IS created. A `/^[ \t]*\\/` test never fires on it.
+  const trailing = `${sqlText}\nSELECT 'CREA'||'TE TABLE o2_pwn_eol AS SELECT 1' \\gexec\n`
+  assert.deepEqual(findMetacommandLines(trailing), [backslashLineOf(trailing)])
+
+  // MID-LINE shell escape.
+  const midLine = `${sqlText}\nSELECT 1; \\! touch /tmp/o2_pwn\n`
+  assert.deepEqual(findMetacommandLines(midLine), [backslashLineOf(midLine)])
+
+  // A backslash inside a STRING literal is refused too. That is a deliberate contract choice,
+  // not an oversight: psql itself would treat it as data, but this file's tokenizer is hand
+  // written, and a divergence between what IT calls a string and what PSQL calls a string is
+  // exactly the class that already bit this guard once (E-strings, banned above for the same
+  // reason). The observation SQL needs no backslash in executable text — the pristine file's
+  // only backslash is in a comment — so refusing them outright costs nothing today and removes
+  // a whole category of parser-divergence reasoning. Comments are still exempt (stripped first),
+  // which is what keeps this zero-false-positive on the pristine file.
+  assert.deepEqual(findMetacommandLines("SELECT 'a \\ b' AS x;\n"), [1])
+  assert.deepEqual(findMetacommandLines("-- a comment mentioning \\watch 5\nSELECT 1;\n"), [])
+})
+
+test('SQL: metacommand ban subsumes the round-3 `\\q` case — the OLD incidental catch only fires when `\\q` happens to land right after a `;` (so it becomes the next merged statement\'s head token); a `\\q` sitting MID-STATEMENT (no preceding `;`) slipped findNonReadonlyStatements entirely — verified here — while the new predicate catches BOTH, regardless of position', () => {
+  const afterSemicolon = `${sqlText}\n\\q\n`
+  assert.deepEqual(findMetacommandLines(afterSemicolon), [sqlText.split('\n').length + 1])
+  // The case the OLD mechanism actually missed: no preceding `;` on the same tokenizer
+  // "statement", so `\q` is never a head token and findNonReadonlyStatements sees nothing.
+  const midStatement = 'SELECT count(*)\n\\q\nFROM meta_sheets;'
+  assert.deepEqual(findNonReadonlyStatements(midStatement), [], "documents the old mechanism's blind spot: mid-statement \\q was never a head token")
+  assert.deepEqual(findMetacommandLines(midStatement), [2], 'the new predicate catches it anyway — position-independent, unlike the old incidental catch')
+})
+
+// ---------------------------------------------------------------------------
+
 // P3-3 gate fix regression legs: synthetic inputs (NOT sqlText — a 367-line file that
 // itself contains none of $$, /*, or a `--` inside a string means every one of these
 // predicates would be untested, hence unmutation-testable, if only run against the real
@@ -1346,6 +1495,17 @@ function stripInvisibleMarkdown(text) {
   let out = text
   // 1. HTML comments — never rendered, in any renderer (round-1 fix, kept).
   out = out.replace(/<!--[\s\S]*?-->/g, '')
+  // 1b. P3-3 gate fix (round 4): an UNTERMINATED HTML comment — `<!-- OWNER-GATED` with no
+  //    closing `-->` anywhere in the rest of the document. Step 1's lazy `[\s\S]*?-->` only
+  //    matches a comment that DOES close, so an unterminated one survived the strip entirely
+  //    while every real Markdown/HTML renderer swallows everything from the unterminated
+  //    `<!--` to end-of-document as comment content (nothing after it is reader-visible
+  //    either). Runs strictly AFTER step 1, which is what makes this safe: every comment that
+  //    HAS a closing `-->` was already removed by step 1, so any `<!--` still present at this
+  //    point is, by construction, unterminated for the rest of the text — this cannot
+  //    mis-fire on a well-formed comment. Strips from that `<!--` to the true end of the
+  //    string (greedy `[\s\S]*` already reaches the end on its own; no `$` anchor needed).
+  out = out.replace(/<!--[\s\S]*/, '')
   // 2. Link-reference definitions — `[label]: destination "title"` (title may also be
   //    `'title'` or `(title)`). CommonMark renders a well-formed reference-definition line
   //    as NOTHING — covers both `[OWNER-GATED]: # (…)` (marker in the label) and the
@@ -1363,7 +1523,19 @@ function stripInvisibleMarkdown(text) {
   // 4. HTML tags themselves (including all attributes: `title=`, `alt=`, `data-*`, …) —
   //    strip the markup, but keep whatever text sits BETWEEN an opening and closing tag
   //    (that text IS rendered and visible, e.g. `<b>OWNER-GATED</b>: …` must still gate).
-  out = out.replace(/<[^>\n]+>/g, '')
+  //    P3-2 gate fix (round 4): the `\n` exclusion below used to make this single-line-only —
+  //    `<span\ntitle="OWNER-GATED">\n</span>` slipped past entirely because no single LINE
+  //    contained both the opening `<` and its closing `>`, even though CommonMark/HTML both
+  //    parse a tag's attributes across line breaks without incident (an attacker gets a
+  //    genuinely invisible marker for free just by wrapping it). Dropping `\n` from the
+  //    excluded-character class lets the match span newlines — no `s`/dotAll flag is needed
+  //    for that (a negated class `[^>]` already includes `\n` on its own merits; `s` only
+  //    changes what bare `.` matches, and this pattern uses a class, not `.`). Fail-closed
+  //    direction preserved: this can only ever strip MORE candidate marker text (⇒ more
+  //    offenders flagged), never remove a host command from hostVerbOccurrences' raw-text
+  //    scan — see the negative controls below for the over-stripping check this widening
+  //    itself needs (a real marker must still survive a real, unrelated multi-line tag).
+  out = out.replace(/<[^>]+>/g, '')
   // 5. P3-4 gate fix (round 3): a fenced code block's INFO STRING — the text on the same
   //    line as the opening ``` /~~~ fence (e.g. "```bash OWNER-GATED"). No Markdown
   //    renderer displays the info string as page content (GitHub and CommonMark both use
@@ -1567,6 +1739,48 @@ test('runbook: negative controls for the round-3 invisible-marker fix — a mark
   // link's own visible text portion).
   const linkTextMarker = runbookText + '\n\nSee the [OWNER-GATED](./notes.md) step. `ssh deploy@host verify` now.\n'
   assert.equal(findUngatedHostCommands(linkTextMarker).length, 0)
+})
+
+// P3-2/P3-3 gate fix (round 4): two more invisible-marker escapes. P3-2 is the file's own
+// round-3 residual, previously disclosed as "not confirmed reachable" — the round-4 gate
+// CONFIRMED it reachable, so that qualifier is dropped here, not carried forward. P3-3 is a
+// sixth, previously undisclosed form.
+
+test('runbook: a marker hidden in an HTML tag whose attributes WRAP ACROSS LINES (`<span\\ntitle="OWNER-GATED">`) does NOT gate — CommonMark/HTML parse a tag\'s attributes across line breaks without incident, but the round-3 tag-strip regex was single-line-only (P3-4 gate reproduction, round 4 — CONFIRMED reachable; the round-3 disclosure of this shape as "not confirmed reachable" is retracted, not merely superseded)', () => {
+  const attack =
+    runbookText + '\n\n<span\ntitle="OWNER-GATED">\n</span>\nRun `ssh deploy@host systemctl stop metasheet` now.\n'
+  const offenders = findUngatedHostCommands(attack)
+  assert.equal(offenders.length, 1)
+  assert.match(offenders[0], /ssh deploy@host systemctl stop metasheet/)
+})
+
+test('runbook: a marker hidden in an UNTERMINATED HTML comment (`<!-- OWNER-GATED` with no closing `-->` anywhere in the rest of the document) does NOT gate — every real renderer swallows the remainder of the document as comment content, so nothing after it is reader-visible either, yet the terminated-comment-only strip left it untouched (P3-4 gate reproduction, round 4 — sixth form, previously undisclosed)', () => {
+  const attack = runbookText + '\n\n<!-- OWNER-GATED\nRun `ssh deploy@host systemctl stop metasheet` now.\n'
+  const offenders = findUngatedHostCommands(attack)
+  assert.equal(offenders.length, 1)
+  assert.match(offenders[0], /ssh deploy@host systemctl stop metasheet/)
+})
+
+test('runbook: negative controls for the round-4 invisible-marker fix — a real marker survives an UNRELATED multi-line tag or a properly TERMINATED comment sitting nearby, and a genuinely multi-line VISIBLE tag body (text between the tags) still gates', () => {
+  // An unrelated multi-line tag near a real, separately-stated visible marker must not
+  // consume it — discriminates the widened tag-strip from over-stripping real prose that
+  // merely follows a `<...>` spanning lines.
+  const multilineTagNearby =
+    runbookText +
+    '\n\n<span\nclass="note">unrelated</span>\nOWNER-GATED: run exactly this. `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(multilineTagNearby).length, 0)
+  // A genuine, PROPERLY TERMINATED HTML comment elsewhere in the block must still be
+  // stripped as before (step 1, unaffected by the new step 1b) — a real marker after it
+  // still gates.
+  const terminatedCommentNearby =
+    runbookText + '\n\n<!-- reviewer note -->\nOWNER-GATED: run exactly this. `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(terminatedCommentNearby).length, 0)
+  // A real marker as the visible TEXT content between two tags that themselves span lines
+  // is still genuinely rendered — must still gate (discriminates "strip the markup" from
+  // "strip everything from the first multi-line `<` onward").
+  const multilineTagVisibleBody =
+    runbookText + '\n\n<b\nclass="x">OWNER-GATED</b>: run this. `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(multilineTagVisibleBody).length, 0)
 })
 
 test('runbook: widened verb inventory — git push, gh pr merge, telnet, socat are each caught (P3-5 gate reproduction, round 2)', () => {
@@ -2043,7 +2257,8 @@ $o2_ro_invariant_canary$;
 // attempted — see the dedicated bounded-disarm test below, which is the mechanical proof
 // of this claim rather than an unverified comment.
 //
-// NOT claimed: that this closes the bounded-disarm class for an OPERATOR following the
+// NOT claimed: that this closes the bounded-disarm class (pure SQL: `set_config(…,'off',…)`,
+// a write, `set_config(…,'on',…)`, no metacommand involved) for an OPERATOR following the
 // runbook's own documented invocation (`psql "$DATABASE_URL" -f
 // scripts/ops/multitable-o2-observation.sql`, plain, no explicit transaction) — that
 // invocation has no `BEGIN READ ONLY` wrapper and relies solely on the session-level GUC
@@ -2052,6 +2267,22 @@ $o2_ro_invariant_canary$;
 // file's own "HOW TO RUN" header) to recommend the explicit-transaction form — outside
 // this test file's remit, and the runbook/SQL blobs are unmodified by this fix (both
 // remain byte-identical to `main`). This is a real, disclosed residual, not a closed gap.
+//
+// CORRECTION (P3-1, round-4 gate): an earlier version of this residual read as
+// "harness-scoped" — true for the bounded pure-SQL disarm above, but understated for a
+// DIFFERENT class this same round found: psql backslash metacommands (`\gexec`, `\!`, …).
+// Those are NOT SQL statements at all — they are interpreted by psql itself, outside
+// anything a `BEGIN READ ONLY; … COMMIT;` wrap governs — so the wrap being "sound inside
+// the harness" was FALSE for that class: `\gexec` delivering a bare `COMMIT` mid-script (see
+// D4, above) ends the wrapping transaction from within the harness just as it would for a
+// plain operator invocation, defeating the wrap symmetrically for both. That class is now
+// closed — for BOTH invocation styles equally, not merely for this harness — by the P3-1
+// static ban above (`SQL: contains no psql backslash metacommand anywhere`): since it
+// operates on the checked-in `.sql` file's own content (layer 1, hermetic, no DB needed),
+// it protects whoever runs that exact file, wrapped or not. So the residual precisely
+// narrows to: the bounded PURE-SQL disarm class only, for the plain operator invocation only
+// — not, as the earlier wording implied, "anything not covered by the wrap is also uncovered
+// by everything else this kit checks".
 //
 // This does NOT retire the session-level `SET default_transaction_read_only = on;` (kept
 // below) or the end-of-session canary above — both remain independent, cheap
