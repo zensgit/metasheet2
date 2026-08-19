@@ -53,7 +53,6 @@ import {
   bindApprovalUsableMemberGroup,
   unbindApprovalUsableMemberGroup,
   resolveDirectoryUsersByIds,
-  resolveDirectoryRolesByIds,
 } from '../services/approval-directory'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import { createDelegation, listDelegations, disableDelegation, updateDelegation, disableOwnDelegation, countDelegatedApprovals } from '../services/ApprovalDelegationConfig'
@@ -900,19 +899,25 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
     }
   })
 
-  // member-display-identity (2026-08-19): authorized-scope EXACT id->name batch resolver, for
-  // every viewer-facing display/selector that only has an assigneeId/roleId and needs a human
-  // name (not a search box). SAME guard as the participant search above (`approvalParticipantDirectoryGuard`
-  // — approvals:read|write|act union) — no new authz surface for USER resolution, since any
-  // participant could already recover a user's name one id at a time via `?userIds=<id>` on the
-  // search route above (`q` omitted -> exact `id = ANY($1)`, no ILIKE). ROLE resolution genuinely
-  // widens what a participant can look up (no role endpoint was reachable to a non-template-admin
-  // before this route) — deliberately narrow: id-exact only, no listing/prefix search, and only
-  // for role ids the caller already has in hand from an approval/template they can already view.
-  // Values-free on miss (never a raw id, never an error): an id the DB has no active/name-bearing
-  // row for is simply OMITTED from the response — see resolveDirectoryUsersByIds/
-  // resolveDirectoryRolesByIds in approval-directory.ts for the exact-match SQL. Registered BEFORE
-  // '/api/approvals/:id' so 'directory' is never matched as an :id (same reason as the route above).
+  // member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+  // stays admin-only): authorized-scope EXACT id->name batch resolver, for every viewer-facing
+  // display/selector that only has an assigneeId and needs a human name (not a search box). USERS
+  // ONLY. SAME guard as the participant search above (`approvalParticipantDirectoryGuard` —
+  // approvals:read|write|act union) — this route's authz is now IDENTICAL to that already-shipped
+  // search route, no new authz surface: any participant could already recover a user's name one id
+  // at a time via `?userIds=<id>` on the search route above (`q` omitted -> exact `id = ANY($1)`,
+  // no ILIKE); this route just batches the same lookup. Values-free on miss (never a raw id, never
+  // an error): an id the DB has no active/name-bearing row for is simply OMITTED from the response
+  // — see resolveDirectoryUsersByIds in approval-directory.ts for the exact-match SQL. Registered
+  // BEFORE '/api/approvals/:id' so 'directory' is never matched as an :id (same reason as the route
+  // above).
+  //
+  // An earlier revision of this route also resolved `roleIds` (a role-id->name oracle newly
+  // reachable to any participant — no such role resolver existed before it). Owner review flagged
+  // that as a real authz delta and declined to ratify it; it has been REMOVED, not merely
+  // undocumented — a `roleIds` query param is silently ignored (no role lookup happens, no `roles`
+  // key on the response). Role resolution stays behind `approvalTemplateAdminGuard`
+  // (`/api/approval-templates/directory/roles`), unchanged by this route.
   r.get('/api/approvals/directory/resolve', authenticate, approvalParticipantDirectoryGuard, async (req: Request, res: Response) => {
     try {
       const parseIds = (value: unknown): string[] => {
@@ -920,12 +925,8 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return value.split(',').map((entry) => entry.trim()).filter((entry) => entry.length > 0).slice(0, 200)
       }
       const userIds = parseIds(req.query.userIds)
-      const roleIds = parseIds(req.query.roleIds)
-      const [users, roles] = await Promise.all([
-        userIds.length > 0 ? resolveDirectoryUsersByIds(userIds) : Promise.resolve([]),
-        roleIds.length > 0 ? resolveDirectoryRolesByIds(roleIds) : Promise.resolve([]),
-      ])
-      res.json({ users, roles })
+      const users = userIds.length > 0 ? await resolveDirectoryUsersByIds(userIds) : []
+      res.json({ users })
     } catch (error) {
       handleApprovalsError(res, error, 'APPROVAL_DIRECTORY_RESOLVE_FAILED', 'Failed to resolve directory ids')
     }

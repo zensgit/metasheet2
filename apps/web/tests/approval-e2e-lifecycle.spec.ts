@@ -133,7 +133,6 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_9', name: '', email: '' },
     ]),
     resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersMock(...args),
-    resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
   }
 })
 

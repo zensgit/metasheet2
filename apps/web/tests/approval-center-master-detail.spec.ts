@@ -106,7 +106,6 @@ vi.mock('../src/approvals/api', () => ({
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
   getApproval: (...args: [string]) => getApprovalSpy(...args),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
-  resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
 }))
 
 vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({

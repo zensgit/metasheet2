@@ -96,15 +96,23 @@ function sanitizeResolveIds(ids: readonly string[]): string[] {
 }
 
 /**
- * member-display-identity (2026-08-19) — EXACT batch id->name resolver for the participant
- * directory. Distinct from `searchDirectoryUsers`: no ILIKE/substring matching (the id list is
- * ANDed with `id = ANY($1)`, never combined with a `q` term), and — the important difference for
- * a values-free display resolver — a row whose `name` is null/blank is DROPPED from the result
- * rather than returned with an empty string, so "absent from the response" is the single,
- * unambiguous unresolved signal a caller needs (no per-caller "is this name blank" convention).
- * `is_active = TRUE` (same predicate `searchDirectoryUsers` uses): a deactivated/removed account
- * resolves to unresolved, not an error and not its old name — the caller decides how to render
- * that (a values-free placeholder / count, never the raw id).
+ * member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+ * stays admin-only) — EXACT batch id->name resolver for the participant directory. Distinct from
+ * `searchDirectoryUsers`: no ILIKE/substring matching (the id list is ANDed with `id = ANY($1)`,
+ * never combined with a `q` term), and — the important difference for a values-free display
+ * resolver — a row whose `name` is null/blank is DROPPED from the result rather than returned with
+ * an empty string, so "absent from the response" is the single, unambiguous unresolved signal a
+ * caller needs (no per-caller "is this name blank" convention). `is_active = TRUE` (same predicate
+ * `searchDirectoryUsers` uses): a deactivated/removed account resolves to unresolved, not an error
+ * and not its old name — the caller decides how to render that (a values-free placeholder / count,
+ * never the raw id).
+ *
+ * USERS ONLY: an earlier revision of this route also shipped a sibling role-id resolver function
+ * (id-exact role lookup) behind the SAME participant guard. Owner review flagged that as a genuine,
+ * previously-unreachable authz delta — no role-resolving endpoint was reachable to a plain
+ * participant before it — and the owner decision was to remove it rather than ratify it: role
+ * resolution stays admin-only (`/api/approval-templates/directory/roles`, gated by
+ * `approvalTemplateAdminGuard`). This function now has no role counterpart on the participant path.
  *
  * Ids are de-duplicated and capped at `RESOLVE_MAX_IDS` (200, matching the existing `?userIds=`
  * scope-narrowing cap on the participant directory search route) so a hostile query cannot smuggle
@@ -122,24 +130,6 @@ export async function resolveDirectoryUsersByIds(ids: readonly string[]): Promis
   return result.rows
     .filter((row) => typeof row.name === 'string' && row.name.trim().length > 0)
     .map((row) => ({ id: row.id, name: (row.name as string).trim(), email: row.email ?? '' }))
-}
-
-/**
- * member-display-identity (2026-08-19) — EXACT batch id->name resolver for roles, the sibling of
- * `resolveDirectoryUsersByIds` above. Roles carry no `is_active` column (unlike users) — a role
- * row either exists with a name or it does not; a blank/null name (or a deleted role id) is
- * dropped the same values-free way.
- */
-export async function resolveDirectoryRolesByIds(ids: readonly string[]): Promise<DirectoryRoleOption[]> {
-  const safeIds = sanitizeResolveIds(ids)
-  if (safeIds.length === 0) return []
-  const result = await query<{ id: string; name: string | null }>(
-    `SELECT id, name FROM roles WHERE id = ANY($1::varchar[])`,
-    [safeIds],
-  )
-  return result.rows
-    .filter((row) => typeof row.name === 'string' && row.name.trim().length > 0)
-    .map((row) => ({ id: row.id, name: (row.name as string).trim() }))
 }
 
 /**

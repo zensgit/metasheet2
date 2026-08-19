@@ -13,7 +13,7 @@ vi.mock('../src/utils/api', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
 }))
 
-import { searchApprovalDirectoryUsers, resolveApprovalDirectoryUsers, resolveApprovalDirectoryRoles } from '../src/approvals/api'
+import { searchApprovalDirectoryUsers, resolveApprovalDirectoryUsers, ApprovalDirectoryResolveError } from '../src/approvals/api'
 
 function jsonResponse(body: unknown, init: { status?: number; ok?: boolean } = {}): Response {
   const status = init.status ?? 200
@@ -105,9 +105,12 @@ describe('searchApprovalDirectoryUsers', () => {
   })
 })
 
-// member-display-identity (2026-08-19) — unit coverage for the typed frontend wrappers around the
-// EXACT batch resolve endpoint (GET /api/approvals/directory/resolve). Same degrade-to-empty
-// doctrine + apiFetch-mocking approach as searchApprovalDirectoryUsers above.
+// member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+// stays admin-only) — unit coverage for the typed frontend wrapper around the EXACT batch resolve
+// endpoint (GET /api/approvals/directory/resolve). UNLIKE searchApprovalDirectoryUsers above, this
+// wrapper does NOT degrade failures to [] -- it THROWS (see the P3-3 fix note on the export
+// itself), so the caller (directoryResolve.ts) can tell a transient failure apart from a
+// confirmed-empty result. Same apiFetch-mocking approach as searchApprovalDirectoryUsers above.
 describe('resolveApprovalDirectoryUsers', () => {
   beforeEach(() => { apiFetchMock.mockReset() })
   afterEach(() => { vi.clearAllMocks() })
@@ -142,48 +145,26 @@ describe('resolveApprovalDirectoryUsers', () => {
     expect(result).toEqual([{ id: 'u3', name: 'Bob' }])
   })
 
-  it('a non-OK response resolves to [] (never throws)', async () => {
+  // P3-3 fix (member-display-identity gate report, 2026-08-19): a non-OK response is a FAILURE the
+  // caller (directoryResolve.ts's flushUsers) must be able to distinguish from a confirmed-empty
+  // result, so this wrapper now THROWS instead of degrading to []. `status` is carried on the error
+  // so the caller can tell 401/403 (terminal) apart from everything else (transient, retryable).
+  it('a non-OK response THROWS ApprovalDirectoryResolveError carrying the status (no longer degrades to [])', async () => {
     apiFetchMock.mockResolvedValue(jsonResponse({}, { status: 403, ok: false }))
-    await expect(resolveApprovalDirectoryUsers(['u1'])).resolves.toEqual([])
+    await expect(resolveApprovalDirectoryUsers(['u1'])).rejects.toMatchObject({
+      status: 403,
+    })
+    await expect(resolveApprovalDirectoryUsers(['u1'])).rejects.toBeInstanceOf(ApprovalDirectoryResolveError)
   })
 
-  it('a network/fetch rejection resolves to [] (never throws)', async () => {
+  it('a network/fetch rejection propagates (no longer degrades to [])', async () => {
     apiFetchMock.mockRejectedValue(new Error('network down'))
-    await expect(resolveApprovalDirectoryUsers(['u1'])).resolves.toEqual([])
+    await expect(resolveApprovalDirectoryUsers(['u1'])).rejects.toThrow('network down')
   })
 
-  it('a malformed (non-array `users`) body resolves to []', async () => {
+  it('a malformed (non-array `users`) body on an OK response still resolves to [] -- the server DID answer, nothing to retry', async () => {
     apiFetchMock.mockResolvedValue(jsonResponse({ users: 'nope' }))
     await expect(resolveApprovalDirectoryUsers(['u1'])).resolves.toEqual([])
-  })
-})
-
-describe('resolveApprovalDirectoryRoles', () => {
-  beforeEach(() => { apiFetchMock.mockReset() })
-  afterEach(() => { vi.clearAllMocks() })
-
-  it('sends ?roleIds=<comma-joined> and maps the bare {roles} shape', async () => {
-    apiFetchMock.mockResolvedValue(jsonResponse({ roles: [{ id: 'r1', name: 'Finance' }] }))
-
-    const result = await resolveApprovalDirectoryRoles(['r1'])
-
-    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/approvals/directory/resolve?roleIds=r1')
-    expect(result).toEqual([{ id: 'r1', name: 'Finance' }])
-  })
-
-  it('drops a blank-name role row (values-free on miss)', async () => {
-    apiFetchMock.mockResolvedValue(jsonResponse({ roles: [{ id: 'r1', name: '' }, { id: 'r2', name: 'HR' }] }))
-    await expect(resolveApprovalDirectoryRoles(['r1', 'r2'])).resolves.toEqual([{ id: 'r2', name: 'HR' }])
-  })
-
-  it('an empty input never calls apiFetch', async () => {
-    await expect(resolveApprovalDirectoryRoles([])).resolves.toEqual([])
-    expect(apiFetchMock).not.toHaveBeenCalled()
-  })
-
-  it('a non-OK response resolves to [] (never throws)', async () => {
-    apiFetchMock.mockResolvedValue(jsonResponse({}, { status: 500, ok: false }))
-    await expect(resolveApprovalDirectoryRoles(['r1'])).resolves.toEqual([])
   })
 })
 
@@ -260,24 +241,67 @@ describe('directoryResolve (the shared resolver cache)', () => {
     expect(getResolvedUserName('u119')).toBe('name-u119')
   })
 
-  it('a resolve() rejection degrades the whole batch to unresolved -- never throws, never crashes the caller', async () => {
+  // P3-3 fix (member-display-identity gate report, 2026-08-19): a rejection never throws out of
+  // `ensureUserNamesResolved`/crashes the caller (unchanged from before the fix) -- but the id must
+  // stay RETRYABLE, not get cached as a confirmed miss. `getResolvedUserName === null` alone proves
+  // nothing here (it is `null` for both "absent" and "cached null" -- see the tri-state doc in
+  // directoryResolve.ts), so the load-bearing assertion is the SECOND `apiFetch` call after a fresh
+  // `ensure`, contrasted with the confirmed-miss test above (line ~196) which asserts the opposite:
+  // exactly one call, never re-fetched.
+  it('a TRANSIENT resolve() failure (network rejection) never throws, and leaves the id RETRYABLE -- not cached as a confirmed miss', async () => {
     const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
-    apiFetchMock.mockRejectedValue(new Error('network down'))
+    apiFetchMock.mockRejectedValueOnce(new Error('network down'))
 
     expect(() => ensureUserNamesResolved(['u1'])).not.toThrow()
     await flushMicrotasks()
-    expect(getResolvedUserName('u1')).toBeNull()
+    expect(getResolvedUserName('u1'), 'unresolved after a failure -- rendering must still fall back to a placeholder').toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+
+    // Retry: a fresh `ensure` call for the SAME id after a transient failure MUST re-fetch --
+    // unlike the confirmed-miss case, where the sibling test above proves it does NOT.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
+    ensureUserNamesResolved(['u1'])
+    await flushMicrotasks()
+    expect(apiFetchMock, 'a transient failure must not permanently disable retry for this id').toHaveBeenCalledTimes(2)
+    expect(getResolvedUserName('u1')).toBe('Alice')
   })
 
-  it('roles mirror users: resolves via ensureRoleNamesResolved/getResolvedRoleName', async () => {
-    const { ensureRoleNamesResolved, getResolvedRoleName } = await import('../src/approvals/directoryResolve')
-    apiFetchMock.mockResolvedValue(jsonResponse({ roles: [{ id: 'role_a', name: 'Finance' }] }))
+  // A 5xx (non-OK, but not 401/403) is transient the same way a network throw is -- same retry
+  // contract, different failure shape (this wrapper throws ApprovalDirectoryResolveError for it,
+  // not a bare rejection).
+  it('a TRANSIENT resolve() failure (500 response) also leaves the id RETRYABLE', async () => {
+    const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 500, ok: false }))
 
-    ensureRoleNamesResolved(['role_a', 'role_b'])
+    ensureUserNamesResolved(['u1'])
     await flushMicrotasks()
+    expect(getResolvedUserName('u1')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
 
-    expect(getResolvedRoleName('role_a')).toBe('Finance')
-    expect(getResolvedRoleName('role_b')).toBeNull()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
+    ensureUserNamesResolved(['u1'])
+    await flushMicrotasks()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    expect(getResolvedUserName('u1')).toBe('Alice')
+  })
+
+  // A TERMINAL failure (401/403 -- the caller structurally lacks approvals:read|write|act, or the
+  // session is gone) is the ONE failure mode that still caches `null` -- retrying cannot succeed,
+  // so it degrades exactly like a confirmed miss (matches the pre-P3-3 contract for this one case).
+  it('a TERMINAL resolve() failure (403) IS cached as a confirmed miss -- no retry, matches the pre-fix contract for this case', async () => {
+    const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 403, ok: false }))
+
+    ensureUserNamesResolved(['u1'])
+    await flushMicrotasks()
+    expect(getResolvedUserName('u1')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
+    ensureUserNamesResolved(['u1'])
+    await flushMicrotasks()
+    expect(apiFetchMock, '403 is terminal -- must NOT re-fetch').toHaveBeenCalledTimes(1)
+    expect(getResolvedUserName('u1')).toBeNull()
   })
 
   it('joinIfAllResolved: joined names only when EVERY id resolves, null on any miss, [] for an empty list', async () => {

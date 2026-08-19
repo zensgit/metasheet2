@@ -1311,17 +1311,31 @@ export async function searchApprovalDirectoryUsers(
 }
 
 // ---------------------------------------------------------------------------
-// member-display-identity (2026-08-19) — authorized-scope EXACT batch id->name resolver, wrapping
-// GET /api/approvals/directory/resolve. SAME degrade-to-empty-safely doctrine as
-// searchApprovalDirectoryUsers above (network error / non-OK / malformed JSON / malformed entries
-// all resolve to [], never throw) — a caller with no name for an id shows a values-free
-// placeholder/count, it never crashes. An id absent from the response is the SERVER's own
-// unresolved signal (inactive user / blank name / nonexistent id / role id the caller cannot
-// resolve) — this wrapper does not invent a fallback name, it just omits what the server omitted.
+// member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+// stays admin-only) — authorized-scope EXACT batch id->name resolver, wrapping GET
+// /api/approvals/directory/resolve. USERS ONLY: this module's earlier role-id wrapper function has
+// been DELETED, not merely left unused — the backend route no longer resolves `roleIds` at all
+// (see approval-directory.ts / approvals.ts). An id absent from the response is the SERVER's own
+// unresolved signal (inactive user / blank name / nonexistent id) — this wrapper does not invent a
+// fallback name, it just omits what the server omitted.
 // ---------------------------------------------------------------------------
-export interface ApprovalDirectoryRole {
-  id: string
-  name: string
+
+/**
+ * Thrown by `resolveApprovalDirectoryUsers` when a request fails, carrying the HTTP `status` when
+ * one exists (absent for a network-level failure, e.g. `fetch` rejecting before any response).
+ * `directoryResolve.ts`'s `flushUsers` reads `status` to tell a TERMINAL failure (401/403 — the
+ * caller structurally lacks `approvals:read|write|act`, or the session is gone; retrying will not
+ * help) apart from a TRANSIENT one (network drop, 5xx, anything else) — see the P3-3 fix note in
+ * directoryResolve.ts. Only 401/403 are cached as a confirmed miss; every other failure is left
+ * unresolved so the next resolve trigger retries it instead of sticking it as "no name" forever.
+ */
+export class ApprovalDirectoryResolveError extends Error {
+  readonly status: number | undefined
+  constructor(message: string, status: number | undefined) {
+    super(message)
+    this.name = 'ApprovalDirectoryResolveError'
+    this.status = status
+  }
 }
 
 function parseIdNameArray(value: unknown): Array<{ id: string; name: string }> {
@@ -1338,36 +1352,26 @@ function parseIdNameArray(value: unknown): Array<{ id: string; name: string }> {
   return out
 }
 
-/** Resolves a batch of user ids to `{id,name}` — never a raw id, never blank-name padding. */
+/**
+ * Resolves a batch of user ids to `{id,name}` — never a raw id, never blank-name padding.
+ * UNLIKE `searchApprovalDirectoryUsers` above, this THROWS (`ApprovalDirectoryResolveError`) on a
+ * non-OK response or a network/fetch failure instead of swallowing to `[]` — the caller
+ * (`directoryResolve.ts`'s `flushUsers`) needs to distinguish a transient failure from a
+ * confirmed-empty result to avoid caching a false "this id has no name" negative for the rest of
+ * the session (P3-3). A malformed/unparseable JSON body on an OK response still degrades to `[]`
+ * — the server did answer, there is nothing meaningful to retry there.
+ */
 export async function resolveApprovalDirectoryUsers(ids: readonly string[]): Promise<Array<{ id: string; name: string }>> {
   const cleanIds = ids.map((id) => id.trim()).filter((id) => id.length > 0)
   if (cleanIds.length === 0) return []
-  try {
-    const params = new URLSearchParams()
-    params.set('userIds', cleanIds.join(','))
-    const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
-    if (!response.ok) return []
-    const payload = await response.json().catch(() => null) as { users?: unknown } | null
-    return parseIdNameArray(payload?.users)
-  } catch {
-    return []
+  const params = new URLSearchParams()
+  params.set('userIds', cleanIds.join(','))
+  const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
+  if (!response.ok) {
+    throw new ApprovalDirectoryResolveError(`resolveApprovalDirectoryUsers: request failed (${response.status})`, response.status)
   }
-}
-
-/** Resolves a batch of role ids to `{id,name}` — never a raw id, never blank-name padding. */
-export async function resolveApprovalDirectoryRoles(ids: readonly string[]): Promise<ApprovalDirectoryRole[]> {
-  const cleanIds = ids.map((id) => id.trim()).filter((id) => id.length > 0)
-  if (cleanIds.length === 0) return []
-  try {
-    const params = new URLSearchParams()
-    params.set('roleIds', cleanIds.join(','))
-    const response = await apiFetch(`/api/approvals/directory/resolve?${params.toString()}`)
-    if (!response.ok) return []
-    const payload = await response.json().catch(() => null) as { roles?: unknown } | null
-    return parseIdNameArray(payload?.roles)
-  } catch {
-    return []
-  }
+  const payload = await response.json().catch(() => null) as { users?: unknown } | null
+  return parseIdNameArray(payload?.users)
 }
 
 // ---------------------------------------------------------------------------

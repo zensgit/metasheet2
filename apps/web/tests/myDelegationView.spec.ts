@@ -47,7 +47,6 @@ vi.mock('../src/approvals/api', async () => {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
     resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
-    resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
   }
 })
 

@@ -773,9 +773,7 @@ import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import {
   ensureUserNamesResolved,
-  ensureRoleNamesResolved,
   getResolvedUserName,
-  getResolvedRoleName,
   joinIfAllResolved,
 } from '../../approvals/directoryResolve'
 import {
@@ -929,24 +927,30 @@ function visibilityScopeLabel(scope: ApprovalTemplateVisibilityScope): string {
   return map[scope.type]
 }
 
-// member-display-identity (2026-08-19) — this view is reachable by ANY authenticated user
-// (`requiresAuth` only, no `approval-templates:manage`/`approvals:*` gate — see appRoutes.ts), so
-// both the visibility-scope ids AND the legacy per-node assignee ids used to render the raw
-// member/role ids to every viewer regardless of `canManageTemplates`. Resolved names joined when
-// EVERY id resolves; otherwise a values-free count (`用户 2`/`角色 2`/`部门 2`, matching
-// TemplateCenterView.vue's own `visibilityScopeLabel` count wording) — never the raw id join.
-// Department ids have NO resolver anywhere on the approval surface (net-new, a separate owner
-// decision per the scout report), so a `dept` scope is ALWAYS the count form.
-const NON_ALL_SCOPE_UNIT_LABEL: Record<'dept' | 'role' | 'user', string> = { dept: '部门', role: '角色', user: '用户' }
+// member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+// stays admin-only) — this view is reachable by ANY authenticated user (`requiresAuth` only, no
+// `approval-templates:manage`/`approvals:*` gate — see appRoutes.ts), so both the visibility-scope
+// ids AND the legacy per-node assignee ids used to render the raw member/role ids to every viewer
+// regardless of `canManageTemplates`. USER ids: resolved names joined when EVERY id resolves,
+// otherwise a values-free count (`用户 2`, matching TemplateCenterView.vue's own
+// `visibilityScopeLabel` count wording) — never the raw id join. ROLE ids: there is no
+// participant-reachable role resolver (removed per owner decision, see the P3-1 note in
+// approval-directory.ts) — a role scope/assignee is ALWAYS the same values-free generic count the
+// static_role assignee-source summary already uses on other viewer surfaces
+// (`requesterFacingSourceSummary` in assigneeSource.ts: `指定角色（N 个）`), never resolved to a
+// name and never the raw id. Department ids have NO resolver anywhere on the approval surface
+// (net-new, a separate owner decision per the scout report), so a `dept` scope is ALWAYS the count
+// form.
+const NON_ALL_SCOPE_UNIT_LABEL: Record<'dept' | 'user', string> = { dept: '部门', user: '用户' }
 
 function resolvedIdsOrCount(kind: 'dept' | 'role' | 'user', ids: readonly string[] | undefined | null): string {
   const safeIds = ids ?? []
   if (safeIds.length === 0) return '-'
+  if (kind === 'role') {
+    return `指定角色（${safeIds.length} 个）`
+  }
   if (kind === 'user') {
     const names = joinIfAllResolved(safeIds, getResolvedUserName)
-    if (names) return names.join('、')
-  } else if (kind === 'role') {
-    const names = joinIfAllResolved(safeIds, getResolvedRoleName)
     if (names) return names.join('、')
   }
   return `${NON_ALL_SCOPE_UNIT_LABEL[kind]} ${safeIds.length}`
@@ -962,28 +966,26 @@ function legacyAssigneeIdsDisplay(assigneeType: 'user' | 'role' | undefined, ass
   return resolvedIdsOrCount(assigneeType === 'role' ? 'role' : 'user', assigneeIds)
 }
 
-// Collects EVERY member/role id this view might need a display name for — the visibility scope's
-// ids (when type is user/role) PLUS every node's legacy `assigneeType`/`assigneeIds` (when user/
-// role) — and kicks off the batch resolve. A `watch` (side effect), never inside the `computed`-
-// style display functions above, which read the resolved cache but must never write to it.
+// Collects EVERY member id this view might need a display name for — the visibility scope's ids
+// (when type is user) PLUS every node's legacy `assigneeType`/`assigneeIds` (when type is user) —
+// and kicks off the batch resolve. A `watch` (side effect), never inside the `computed`-style
+// display functions above, which read the resolved cache but must never write to it. ROLE ids are
+// deliberately NOT collected here: there is no participant-reachable role resolver to feed (see
+// `resolvedIdsOrCount` above), so a role scope/assignee is always the generic count, never queued.
 watch(
   () => {
     const userIds: string[] = []
-    const roleIds: string[] = []
     const scope = template.value?.visibilityScope
     if (scope?.type === 'user') userIds.push(...(scope.ids ?? []))
-    else if (scope?.type === 'role') roleIds.push(...(scope.ids ?? []))
     for (const node of template.value?.approvalGraph?.nodes ?? []) {
       const cfg = node.config as { assigneeType?: string; assigneeIds?: string[] }
       if (!cfg || !('assigneeType' in cfg) || !cfg.assigneeType) continue
-      if (cfg.assigneeType === 'role') roleIds.push(...(cfg.assigneeIds ?? []))
-      else userIds.push(...(cfg.assigneeIds ?? []))
+      if (cfg.assigneeType !== 'role') userIds.push(...(cfg.assigneeIds ?? []))
     }
-    return { userIds, roleIds }
+    return userIds
   },
-  ({ userIds, roleIds }) => {
+  (userIds) => {
     ensureUserNamesResolved(userIds)
-    ensureRoleNamesResolved(roleIds)
   },
   { immediate: true },
 )

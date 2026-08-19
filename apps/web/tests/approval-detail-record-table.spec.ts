@@ -55,7 +55,6 @@ vi.mock('../src/approvals/api', () => ({
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
   searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
-  resolveApprovalDirectoryRoles: vi.fn().mockResolvedValue([]),
 }))
 
 const mockCurrentUserId = ref<string | null>(null)

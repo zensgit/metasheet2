@@ -7,18 +7,22 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 /**
- * member-display-identity (2026-08-19) — the authorized-scope EXACT batch id->name resolver:
- *   GET /api/approvals/directory/resolve?userIds=&roleIds=
+ * member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+ * stays admin-only) — the authorized-scope EXACT batch id->name resolver:
+ *   GET /api/approvals/directory/resolve?userIds=
  *
  * Sibling of `approval-participant-directory.api.test.ts` (the `/directory/users` SEARCH route
  * this resolver reuses the guard from) — mirrors its structure so the two routes' authz posture is
  * provably identical, not just documented as identical. Distinguishing behavior under test:
  *
  *   - EXACT match, not ILIKE substring: `user_1` never pulls in `user_10`.
- *   - VALUES-FREE ON MISS: an inactive user / a blank-name user / roles.
- *   - roles are id-exact only (no listing) — a genuine, narrow authz delta from before this route
- *     existed (no role resolver was reachable to a plain participant), disclosed rather than
- *     claimed as "no widening".
+ *   - VALUES-FREE ON MISS: an inactive user / a blank-name user.
+ *   - USERS ONLY: an earlier revision also resolved `roleIds` (a role-id->name oracle newly
+ *     reachable to any participant — a genuine authz delta from before this route existed, since no
+ *     role resolver was reachable to a plain participant). Owner review declined to ratify that
+ *     delta; it was REMOVED rather than disclosed-and-kept, so this route's authz is now IDENTICAL
+ *     to `/directory/users`'s (same guard, same reachable data shape: user names only). A stray
+ *     `roleIds` query param must be silently ignored, never resurrected as a lookup.
  *   - same three-permission union guard as `/directory/users`, registered before `/api/approvals/:id`.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -33,7 +37,6 @@ const BOB = `${PREFIX}-bob`
 const INACTIVE = `${PREFIX}-inactive`
 const NAMELESS = `${PREFIX}-nameless`
 const ROLE_A = `${PREFIX}-role-a`
-const ROLE_B = `${PREFIX}-role-b`
 
 async function canListenOnEphemeralPort(): Promise<boolean> {
   return await new Promise((resolve) => {
@@ -83,10 +86,12 @@ describeIfDatabase('approval participant directory RESOLVE endpoint (member-disp
     // for ALICE must never also return this one.
     await seedUser(`${ALICE}-decoy`, 'RmarkerX Alice Decoy')
 
+    // Seeded only to prove a `roleIds` query param is IGNORED (no role lookup happens) -- not to
+    // exercise a role resolver, which this route no longer has.
     await pool.query(
-      `INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4)
+      `INSERT INTO roles (id, name) VALUES ($1, $2)
        ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
-      [ROLE_A, 'RmarkerX Role A', ROLE_B, 'RmarkerX Role B'],
+      [ROLE_A, 'RmarkerX Role A'],
     )
 
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -106,7 +111,7 @@ describeIfDatabase('approval participant directory RESOLVE endpoint (member-disp
       await poolManager.get().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [
         [READER, WRITER, ACTOR, NONE, ALICE, BOB, INACTIVE, NAMELESS, `${ALICE}-decoy`],
       ])
-      await poolManager.get().query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_A, ROLE_B]])
+      await poolManager.get().query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_A]])
     } catch { /* ignore */ }
     if (server) await server.stop()
   })
@@ -130,7 +135,7 @@ describeIfDatabase('approval participant directory RESOLVE endpoint (member-disp
   it('resolves exact ids to {id,name} — never the raw id join, and never an ILIKE-substring extra match', async () => {
     const res = await get(baseUrl, `/api/approvals/directory/resolve?userIds=${ALICE},${BOB}`, readerToken)
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { users: Array<{ id: string; name: string; email: string }>; roles: unknown[] }
+    const body = (await res.json()) as { users: Array<{ id: string; name: string; email: string }> }
     const ids = body.users.map((u) => u.id)
     expect(ids).toContain(ALICE)
     expect(ids).toContain(BOB)
@@ -156,36 +161,33 @@ describeIfDatabase('approval participant directory RESOLVE endpoint (member-disp
     expect(ids).not.toContain(bogus)
   })
 
-  it('resolves roles by exact id — a genuinely NEW authz surface for a plain participant (no role resolver existed before this route)', async () => {
-    const res = await get(baseUrl, `/api/approvals/directory/resolve?roleIds=${ROLE_A},${ROLE_B}`, actorToken)
-    expect(res.status).toBe(200)
-    const body = (await res.json()) as { users: unknown[]; roles: Array<{ id: string; name: string }> }
-    const ids = body.roles.map((r) => r.id)
-    expect(ids).toContain(ROLE_A)
-    expect(ids).toContain(ROLE_B)
-    const a = body.roles.find((r) => r.id === ROLE_A)
-    expect(Object.keys(a as Record<string, unknown>).sort()).toEqual(['id', 'name'])
-  })
-
-  it('a nonexistent role id is omitted (values-free on miss, roles too)', async () => {
-    const bogus = `${PREFIX}-role-does-not-exist`
-    const res = await get(baseUrl, `/api/approvals/directory/resolve?roleIds=${ROLE_A},${bogus}`, actorToken)
-    const body = (await res.json()) as { roles: Array<{ id: string }> }
-    expect(body.roles.map((r) => r.id)).toEqual([ROLE_A])
-  })
-
-  it('users AND roles resolve together in one call, each shape minimal ({id,name,email} / {id,name})', async () => {
+  // P3-1 CLOSURE: a `roleIds` param must be silently IGNORED -- no role lookup, no `roles` key on
+  // the response, and NO EFFECT on the users the same call resolves. ROLE_A exists (seeded above)
+  // precisely so a bug that resurrected role resolution would make this a false negative (it would
+  // still 200 whether or not roleIds worked) -- the shape assertion is what catches it: `roles`
+  // must be ABSENT from the JSON body entirely, not merely empty.
+  it('a `roleIds` query param is silently ignored -- no role lookup, no `roles` key on the response', async () => {
     const res = await get(baseUrl, `/api/approvals/directory/resolve?userIds=${ALICE}&roleIds=${ROLE_A}`, readerToken)
-    const body = (await res.json()) as { users: Array<Record<string, unknown>>; roles: Array<Record<string, unknown>> }
-    expect(Object.keys(body.users[0]).sort()).toEqual(['email', 'id', 'name'])
-    expect(Object.keys(body.roles[0]).sort()).toEqual(['id', 'name'])
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(Object.keys(body)).toEqual(['users'])
+    expect('roles' in body).toBe(false)
+    const users = body.users as Array<Record<string, unknown>>
+    expect(Object.keys(users[0]).sort()).toEqual(['email', 'id', 'name'])
   })
 
-  it('no ids at all -> {users:[],roles:[]}, no query executed, no error', async () => {
+  it('no ids at all -> {users:[]}, no query executed, no error', async () => {
     const res = await get(baseUrl, '/api/approvals/directory/resolve', readerToken)
     expect(res.status).toBe(200)
-    const body = (await res.json()) as { users: unknown[]; roles: unknown[] }
-    expect(body).toEqual({ users: [], roles: [] })
+    const body = (await res.json()) as { users: unknown[] }
+    expect(body).toEqual({ users: [] })
+  })
+
+  it('a `roleIds`-only call (no userIds) still 200s with an empty users array, never a role lookup', async () => {
+    const res = await get(baseUrl, `/api/approvals/directory/resolve?roleIds=${ROLE_A}`, actorToken)
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as Record<string, unknown>
+    expect(body).toEqual({ users: [] })
   })
 
   it('CANDIDATE resolver, NOT an authorization fact: resolving a name says nothing about being an assignee/approver of anything', async () => {
@@ -208,5 +210,16 @@ describeIfDatabase('approval participant directory RESOLVE endpoint (member-disp
     expect(dirIdx).toBeGreaterThan(-1)
     expect(idIdx).toBeGreaterThan(-1)
     expect(dirIdx).toBeLessThan(idIdx)
+  })
+
+  // P3-1 CLOSURE (source-level companion to the runtime test above): the role-id->name oracle must
+  // be GONE, not merely unreachable -- `resolveDirectoryRolesByIds` no longer exists anywhere in
+  // the service, so a regression that resurrects role handling on this route has nothing to import.
+  it('source-level: resolveDirectoryRolesByIds does not exist -- role resolution has no participant-reachable implementation to regress toward', () => {
+    const routeSrc = readFileSync(path.resolve(__dirname, '../../src/routes/approvals.ts'), 'utf8')
+    const serviceSrc = readFileSync(path.resolve(__dirname, '../../src/services/approval-directory.ts'), 'utf8')
+    expect(routeSrc).not.toContain('resolveDirectoryRolesByIds')
+    expect(serviceSrc).not.toContain('resolveDirectoryRolesByIds')
+    expect(serviceSrc).toContain('export async function resolveDirectoryUsersByIds')
   })
 })

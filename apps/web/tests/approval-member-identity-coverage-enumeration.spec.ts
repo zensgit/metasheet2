@@ -111,23 +111,29 @@ const SITES: SiteEntry[] = [
     }],
   },
   {
+    // member-display-identity tightening (2026-08-19): role scope ids are now ALWAYS a generic
+    // count (`resolvedIdsOrCount`'s 'role' branch never resolves a name -- see the sourceChecks
+    // mustNotContain below) -- coverage points at the still-live USER-type positive control, which
+    // proves the underlying resolver call/display pattern this site depends on.
     site: 'TemplateDetailView.vue — 可见范围 ids (visibilityScope, any authenticated viewer)',
     status: 'GUARDED',
-    coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'template detail visibility scope shows RESOLVED role names when every id resolves'],
+    coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'template detail visibility scope (user type) shows RESOLVED user names when every id resolves'],
     sourceChecks: [{
       file: 'src/views/approval/TemplateDetailView.vue',
       mustContain: ['function visibilityScopeIdsDisplay', 'visibilityScopeIdsDisplay(template.visibilityScope)'],
-      mustNotContain: ['template.visibilityScope.ids.join'],
+      mustNotContain: ['template.visibilityScope.ids.join', 'getResolvedRoleName', 'ensureRoleNamesResolved'],
     }],
   },
   {
+    // Same tightening as the row above -- coverage now points at the USER-only positive control
+    // (role stays a values-free count, asserted in the same test -- see the spec's own comment).
     site: 'TemplateDetailView.vue — node assignee ids (legacy assigneeType/assigneeIds, any authenticated viewer)',
     status: 'GUARDED',
-    coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'template detail node assignee ids show RESOLVED names once the resolver returns them'],
+    coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'POSITIVE CONTROL: template detail node assignee ids show a RESOLVED user name once the user resolver returns it'],
     sourceChecks: [{
       file: 'src/views/approval/TemplateDetailView.vue',
       mustContain: ['function legacyAssigneeIdsDisplay', 'legacyAssigneeIdsDisplay((node.config as any).assigneeType'],
-      mustNotContain: ['(node.config as any).assigneeIds?.join'],
+      mustNotContain: ['(node.config as any).assigneeIds?.join', 'getResolvedRoleName', 'ensureRoleNamesResolved'],
     }],
   },
   {
@@ -141,8 +147,19 @@ const SITES: SiteEntry[] = [
     }],
   },
   {
+    // P3-2 fix (member-display-identity gate report, 2026-08-19): the ORIGINAL reason recorded
+    // here ("authoring-only ...") was FALSE for the user_group branch -- `assigneeSourceSummary`'s
+    // static_user/static_role cases are authoring-only (intercepted to count-only upstream by
+    // `requesterFacingSourceSummary` for any viewer-facing caller -- see that SITE's own sourceChecks
+    // above), but `nodeAssigneeSourceSummary` DELEGATES `user_group` straight to
+    // `assigneeSourceSummary`, which joins raw group ids (`用户组：${groupIds.join('、')}`) and is
+    // reachable on the VIEWER-FACING flow previews at ApprovalNewView.vue and ApprovalDetailView.vue
+    // -- not authoring-only at all. The disposition (OUT-OF-SCOPE, outside the member/role/dept
+    // PERSON-identity class this file enumerates) is still correct: group ids are template-authored
+    // references, a Lock-1 §K1/§2.6-permitted vocabulary, not person identities -- they are
+    // intentionally rendered on viewer previews, not accidentally leaked.
     site: 'assigneeSource.ts — assigneeSourceSummary static_user/static_role/user_group raw-id joins',
-    status: 'OUT-OF-SCOPE', // authoring-only (TemplateAuthoringView G-1 preview, linearStepSpine) — Lock-1 §2.6
+    status: 'OUT-OF-SCOPE', // static_user/static_role: authoring-only (intercepted to count-only for viewers). user_group: group ids are template-authored references (Lock-1 §K1/§2.6), NOT person identities -- and ARE rendered on viewer-facing previews (ApprovalNewView/ApprovalDetailView), intentionally out of the person-identity class.
   },
   {
     site: 'assigneeSource.ts — form_field_user (`表单用户字段：{fieldId}`)',
@@ -211,12 +228,34 @@ describe('member-display-identity coverage enumeration (mechanical, mirrors FAIL
     expect(content).not.toContain('this exact decoy title does not exist anywhere in this spec file 4477')
   })
 
-  it('the new backend resolver route + service functions exist on disk (companion to the FE guard above)', () => {
+  it('the new backend resolver route + service function exist on disk, USERS ONLY (companion to the FE guard above)', () => {
     const routeSrc = readSrc('../../packages/core-backend/src/routes/approvals.ts')
     expect(routeSrc).toContain("r.get('/api/approvals/directory/resolve'")
     expect(routeSrc).toContain('approvalParticipantDirectoryGuard')
     const serviceSrc = readSrc('../../packages/core-backend/src/services/approval-directory.ts')
     expect(serviceSrc).toContain('export async function resolveDirectoryUsersByIds')
-    expect(serviceSrc).toContain('export async function resolveDirectoryRolesByIds')
+    // P3-1 CLOSURE: role resolution was REMOVED from the participant path per owner decision, not
+    // merely left unreachable -- `resolveDirectoryRolesByIds` must not exist anywhere in the
+    // service or the route, so a regression cannot silently re-wire a call to a function that is
+    // still there but unused.
+    expect(serviceSrc).not.toContain('resolveDirectoryRolesByIds')
+    expect(routeSrc).not.toContain('resolveDirectoryRolesByIds')
+  })
+
+  // P3-1 CLOSURE (FE mirror of the backend `apps/web` guard above): no FE source file resolves
+  // role names any more -- the entire ensureRoleNamesResolved/getResolvedRoleName/
+  // resolveApprovalDirectoryRoles plumbing was deleted, not just left unused.
+  it('no FE source file references role-name resolution -- the plumbing was deleted, not just unused', () => {
+    const files = [
+      'src/approvals/directoryResolve.ts',
+      'src/approvals/api.ts',
+      'src/views/approval/TemplateDetailView.vue',
+    ]
+    for (const file of files) {
+      const content = readSrc(file)
+      expect(content, `${file} still references role-name resolution`).not.toMatch(
+        /ensureRoleNamesResolved|getResolvedRoleName|resolveApprovalDirectoryRoles|resolvedRoleNames/,
+      )
+    }
   })
 })
