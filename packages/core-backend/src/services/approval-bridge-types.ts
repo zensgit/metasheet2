@@ -43,10 +43,12 @@ export interface UnifiedApprovalDTO {
    * Lock-7 OD-L7-10 — the ACTOR-SCOPED per-field access map for THIS viewer at their claimed
    * seat(s): fieldId → one NodeFieldAccess value. Present ONLY on the DETAIL read
    * (`getApproval`) — the list DTO stays byte-identical. Derived from the SAME
-   * `resolveFieldAccessAtNodes` the write mask uses, so a field reported `editable` here is exactly a
-   * field the write path accepts (never over-reports: a seatless / role-only viewer gets no map, and
-   * multi-seat is most-restrictive). Absent from the map ≡ `editable` (OD-L7-9). The FE grid uses it
-   * to render `readonly` fields read-only; it is presentation only — enforcement is server-side.
+   * `resolveFieldAccessAtNodes` the write mask uses, so a field reported `editable` OR `required` here
+   * is exactly a field the write path accepts (Lock-7B §2.2 widens the write mask to the SAME
+   * `editable ∪ required` set this map is derived from — never over-reports: a seatless / role-only
+   * viewer gets no map, and multi-seat is most-restrictive). Absent from the map ≡ `editable`
+   * (OD-L7-9). The FE grid uses it to render `readonly` fields read-only; it is presentation only —
+   * enforcement is server-side.
    */
   fieldAccess?: Record<string, NodeFieldAccess> | null
   /**

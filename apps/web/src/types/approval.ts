@@ -159,11 +159,14 @@ export interface HandlerNodeConfig {
 }
 
 // Byte-mirrors backend packages/core-backend/src/types/approval-product.ts NodeFieldAccess (P1-C
-// node-level field permissions). `editable` (the absent default) === current behavior. `hidden` and
-// `readonly` are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a
-// write; `readonly` refuses a write at that node. The authoring editor sets `hidden`/`readonly`; both
-// round-trip and are enforced.
-export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
+// node-level field permissions, widened by Lock-7B docs/development/approval-lock7b-required-at-node-
+// 20260820.md OD-L7B-1). `editable` (the absent default) === current behavior. `hidden` and `readonly`
+// are BOTH enforced server-side (Lock-7 P4-B): `hidden` redacts the read echo + refuses a write;
+// `readonly` refuses a write at that node. `required` is `editable` PLUS a submit-time obligation
+// (Lock-7B): writable, enforced at handler submit — NOT more restrictive than `editable` for read/mask
+// purposes. The canvas authoring editor offers `required` on handler nodes only (OD-L7B-7); the linear
+// editor (approval steps) never offers it. All four round-trip.
+export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden' | 'required'
 export interface NodeFieldPermission {
   fieldId: string
   access: NodeFieldAccess
@@ -181,8 +184,9 @@ export interface ApprovalNodeConfig {
   approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
-  // Node-level field permissions. Default-absent === editable === current behavior. `hidden`
-  // entries are enforced server-side (echo-redaction); `readonly`/`editable` are runtime-inert.
+  // Node-level field permissions. Default-absent === editable === current behavior. `hidden`/
+  // `readonly` are enforced server-side (Lock-7 P4-B); `required` is `editable` plus a submit-time
+  // obligation, enforced at handler submit (Lock-7B).
   fieldPermissions?: NodeFieldPermission[]
   // P1-C (T1-1): node-level SLA timeout. Byte-mirrors what backend `normalizeNodeTimeout` re-emits;
   // see `NodeTimeoutConfig`. Never present on a `handler` node config (§1.2 forbidden-key list,

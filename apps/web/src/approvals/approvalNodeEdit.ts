@@ -453,7 +453,7 @@ export function validateApprovalNodeEdits(
       if (!fieldId || (fields && !fields.some((field) => field.id.trim() === fieldId))) {
         errors.push(`${nodeLabel} ${edit.nodeKey} 的字段权限引用了不存在的字段`)
       }
-      if (!(['editable', 'readonly', 'hidden'] as const).includes(permission.access)) {
+      if (!(['editable', 'readonly', 'hidden', 'required'] as const).includes(permission.access)) {
         errors.push(`${nodeLabel} ${edit.nodeKey} 的字段权限类型无效`)
       }
     }

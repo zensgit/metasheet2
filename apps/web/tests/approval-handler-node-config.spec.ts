@@ -291,4 +291,41 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     expect([...HANDLER_ASSIGNEE_SOURCE_KINDS]).toContain(newKind) // in-roster
     expect(['continuous_managers', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level']).not.toContain(newKind)
   })
+
+  // Lock-7B OD-L7B-7 / G-15 (docs/development/approval-lock7b-required-at-node-20260820.md) — the
+  // fourth `必填` option renders on HANDLER nodes ONLY, and is ABSENT (not disabled-greyed, M7) on
+  // approval nodes.
+  it('G-15: the field-permissions select on a HANDLER node offers 必填 (value="required") among its options', () => {
+    const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
+    const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
+    const select = c.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    const values = Array.from(select.querySelectorAll('option')).map((o) => o.getAttribute('value'))
+    expect(values.sort()).toEqual(['editable', 'hidden', 'readonly', 'required'])
+  })
+
+  // The APPROVAL-node "three options only, 必填 absent" half is covered end-to-end in
+  // approval-template-authoring-canvas-inspector.spec.ts (a full TemplateAuthoringView mount already
+  // exercises an approval node's field-permissions select there) — this file's stub API is
+  // handler-only (it does not implement `approvalNodeTimeout` and the other approval-node-only
+  // accessors the editor's approval branch reads).
+
+  it('G-15 positive control: a handler node carrying `required` round-trips save -> reload -> publish unchanged (validateApprovalNodeEdits accepts it)', async () => {
+    const { validateApprovalNodeEdits } = await import('../src/approvals/approvalNodeEdit')
+    const api = createStubConfigApi({
+      handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }], fieldPermissions: [{ fieldId: 'amount', access: 'required' }] },
+    })
+    const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
+    // The select reflects the seeded `required` value.
+    const select = c.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    expect(select.value).toBe('required')
+    // The C-6 validator (`approvalNodeEdit.ts:456`, covers handler AND approval nodes) does NOT push
+    // "字段权限类型无效" for a `required` entry — the true one-change coupling this gate closes.
+    const edit = api.approvalNodeEditFor('handler_h')!
+    const errors = validateApprovalNodeEdits(
+      { handler_h: { ...edit, nodeType: 'handler' } } as any,
+      [{ id: 'amount', type: 'text' }],
+    )
+    expect(errors).toEqual([])
+  })
 })

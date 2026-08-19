@@ -80,22 +80,52 @@ export type ApprovalTemplateVisibilityType = 'all' | 'dept' | 'role' | 'user'
 export type FormFieldVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'notEmpty'
 
 /**
- * P1-C node-level field permissions (HIDDEN subset).
+ * P1-C node-level field permissions, widened by Lock-7B (docs/development/
+ * approval-lock7b-required-at-node-20260820.md OD-L7B-1) with a FOURTH member, `required` (必填).
  *
  * `editable` (the absent default) === current behavior — a node without
  * `fieldPermissions` leaves every form field fully visible/editable, so every
  * pre-existing template and instance is byte-for-byte unchanged.
  *
- * Only `hidden` is enforced at runtime (server-side echo-redaction: a hidden
- * field is stripped from the `formSnapshot` echoed in read DTOs while the
- * instance is AT the hiding node). `readonly`/`editable` are part of the
- * contract enum (default-preserving, normalized-through) but have NO runtime
- * effect yet — they are blocked on the edit-form-at-node prerequisite (form
- * snapshots are written once at create and no dispatch branch edits them, so
- * `readonly` is indistinguishable from plain display today). The enum members
- * are declared now so the contract is forward-stable; do not wire them.
+ * `hidden` is enforced at runtime (server-side echo-redaction: a hidden field is stripped from the
+ * `formSnapshot` echoed in read DTOs while the instance is AT the hiding node) and refuses a write
+ * (Lock-7 P4-B). `readonly` also refuses a write at that node (Lock-7 P4-B). `required` is `editable`
+ * PLUS a submit-time obligation (Lock-7B OD-L7B-1/§1.1): it is WRITABLE, never hides or redacts
+ * anything, and a node marking a field `required` must see it non-empty in the effective snapshot by
+ * the time the handler at that node submits (`APPROVAL_HANDLER_REQUIRED_FIELD_EMPTY`, Lock-7B §1.3).
+ * A node's `fieldPermissions` assigns exactly ONE access per field (the `seen.has(fieldId)` dedup
+ * guard below), so `required` × `hidden` at the SAME node is unrepresentable by construction
+ * (OD-L7B-1) — masks are per node and independent, so `hidden` at one node and `required` at another
+ * is legal (OD-L7B-2). `required` is satisfiable on HANDLER nodes only in v1 (OD-L7B-3): publish
+ * rejects it on an approval node, on a routing-driver field, and on `explanation` / `record-link` /
+ * `attachment` (OD-L7B-4/OD-L7B-9).
  */
-export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden'
+export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden' | 'required'
+
+/**
+ * Lock-7B OD-L7B-10 — the ONE canonical enumeration of `NodeFieldAccess` members. Every consumer that
+ * needs to test membership (publish admission, the `resolveFieldAccessAtNodes` read-axis filter, the
+ * author-facing publish-rejection message) reads THIS Set rather than hand-copying the literal list —
+ * a mechanical enumeration, never an appended `|| candidate === 'required'` arm (which reproduces the
+ * identical silent-drop defect for a future fifth member). Exported from the same module as the type
+ * (the source of truth) so `approval-form-redaction.ts` can import it without a circular dependency on
+ * `ApprovalProductService.ts` (which imports FROM approval-form-redaction.ts, not the reverse).
+ */
+export const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden', 'required'])
+
+/**
+ * Lock-7B §2.2 — the WRITABLE subset of `NodeFieldAccess`: a field marked `editable` OR `required` at
+ * its node accepts a handler write; `readonly`/`hidden` refuse one. DERIVED from
+ * `NODE_FIELD_ACCESS_VALUES` (never an independent literal) so that removing a member from the
+ * canonical enumeration also removes it from here — the write mask (`applyHandlerFieldWrites`) and the
+ * publish driver pin (`validateFieldEditEnforcementPins` pin 1) both consume this ONE named set rather
+ * than a second hand-maintained list (G-2's third arm: deleting `'required'` from
+ * `NODE_FIELD_ACCESS_VALUES` must also close the write mask, not just the publish admission and the
+ * read-axis resolver).
+ */
+export const NODE_FIELD_ACCESS_WRITABLE_VALUES = new Set<NodeFieldAccess>(
+  (['editable', 'required'] as const).filter((value) => NODE_FIELD_ACCESS_VALUES.has(value)),
+)
 
 export interface NodeFieldPermission {
   fieldId: string
@@ -214,9 +244,10 @@ export interface ApprovalNodeConfig {
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy
   // P1-C node-level field permissions. Default-absent === editable === current
-  // behavior. `hidden` entries are enforced server-side; `readonly`/`editable`
-  // are inert (forward-stable contract only). Orthogonal to FormFieldVisibilityRule
-  // (data-value-keyed); fieldPermissions is node-keyed.
+  // behavior. `hidden`/`readonly` are enforced server-side (Lock-7 P4-B); `required`
+  // is `editable` plus a submit-time obligation, enforced at handler submit
+  // (Lock-7B). Orthogonal to FormFieldVisibilityRule (data-value-keyed);
+  // fieldPermissions is node-keyed.
   fieldPermissions?: NodeFieldPermission[]
   // T1-1 node-level SLA: optional per-node timeout + effect (slice 1: remind only).
   timeout?: NodeTimeoutConfig

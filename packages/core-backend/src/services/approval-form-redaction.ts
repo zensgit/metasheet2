@@ -1,11 +1,16 @@
-import type { NodeFieldAccess, NodeFieldPermission } from '../types/approval-product'
+import { NODE_FIELD_ACCESS_VALUES, type NodeFieldAccess, type NodeFieldPermission } from '../types/approval-product'
 
-// Lock-7 L7-A — most-restrictive-wins ordering across nodes: hidden ≻ readonly ≻ editable.
-// Higher rank is more restrictive. Absent from the matrix ≡ `editable` (OD-L7-9, rank 0).
+// Lock-7 L7-A — most-restrictive-wins ordering across nodes: hidden ≻ readonly ≻ required ≻ editable.
+// Higher rank is more restrictive. Absent from the matrix ≡ `editable` (OD-L7-9, rank 0). Lock-7B
+// (OD-L7B-1/§2.3) inserts `required` immediately above `editable` and below `readonly`: `required` is
+// `editable` plus an obligation, never more restrictive than `readonly`/`hidden` on the read axis.
+// `Record<NodeFieldAccess, number>` is EXHAUSTIVE — a member added to the type without a rank here
+// fails the build (the one compiler-guarded census site, C-3).
 const NODE_FIELD_ACCESS_RANK: Record<NodeFieldAccess, number> = {
   editable: 0,
-  readonly: 1,
-  hidden: 2,
+  required: 1,
+  readonly: 2,
+  hidden: 3,
 }
 
 /**
@@ -88,7 +93,14 @@ export function resolveFieldAccessAtNodes(
     for (const permission of permissions) {
       if (!permission || typeof permission.fieldId !== 'string') continue
       const candidate = permission.access
-      if (candidate !== 'editable' && candidate !== 'readonly' && candidate !== 'hidden') continue
+      // Lock-7B OD-L7B-10 / G-2 anti-gate — MECHANICAL enumeration over the canonical Set, never an
+      // appended `|| candidate === 'required'` literal arm (which would pass every test written for
+      // THIS member and reproduce the identical silent-drop defect for the NEXT one). This is C-4, the
+      // one census site that fails OPEN and SILENTLY when it drifts (§2.3/§2.3a): an unrecognized
+      // candidate is simply skipped, and the field falls back to absent ≡ `editable` (OD-L7-9) with no
+      // error anywhere — and since Lock-7B keys the whole required-at-node enforcement path on this
+      // resolver's output (OD-L7B-11), a drift here silently discharges every 必填 obligation (G-3).
+      if (!NODE_FIELD_ACCESS_VALUES.has(candidate)) continue
       const existing = access.get(permission.fieldId)
       // Most-restrictive-wins: keep the higher rank. First-seen wins ties (identical rank).
       if (existing === undefined || NODE_FIELD_ACCESS_RANK[candidate] > NODE_FIELD_ACCESS_RANK[existing]) {

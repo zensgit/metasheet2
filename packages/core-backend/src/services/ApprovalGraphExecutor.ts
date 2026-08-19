@@ -202,7 +202,11 @@ function normalizeComparableValue(value: unknown): number | string | null {
   return null
 }
 
-function isEmptyValue(value: unknown): boolean {
+// Lock-7B §0.2 — the ONE type-agnostic emptiness predicate, reused VERBATIM (holes and all: `0`,
+// `false`, a whitespace-only string, `{}` are all non-empty) by the required-at-node handler-submit
+// check (`ApprovalProductService.ts`) so create-time and node-time never disagree about the same
+// value. Exported so that reuse is an import, never a second definition.
+export function isEmptyValue(value: unknown): boolean {
   return value === null
     || value === undefined
     || value === ''

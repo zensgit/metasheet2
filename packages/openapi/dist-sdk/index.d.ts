@@ -16605,15 +16605,17 @@ export interface components {
                 [key: string]: unknown;
             } | null;
             /**
-             * @description Lock-7 OD-L7-10 — the actor-scoped per-field access map for the viewer
-             *     at their claimed handler seat(s): fieldId → editable | readonly |
-             *     hidden. Present ONLY on the DETAIL read (getApproval); absent on the
-             *     list. A field absent from the map is editable (legacy default, OD-L7-9).
-             *     Presentation only — enforcement is server-side (a masked field write is
-             *     refused regardless of what the client renders).
+             * @description Lock-7 OD-L7-10 (widened by Lock-7B OD-L7B-1) — the actor-scoped per-field
+             *     access map for the viewer at their claimed handler seat(s): fieldId ->
+             *     editable | readonly | hidden | required. Present ONLY on the DETAIL read
+             *     (getApproval); absent on the list. A field absent from the map is editable
+             *     (legacy default, OD-L7-9). `required` is editable plus a submit-time
+             *     obligation enforced at handler submit. Presentation only — enforcement is
+             *     server-side (a masked field write is refused regardless of what the client
+             *     renders).
              */
             fieldAccess?: {
-                [key: string]: "editable" | "readonly" | "hidden";
+                [key: string]: "editable" | "readonly" | "hidden" | "required";
             } | null;
             currentNodeKey?: string | null;
             /**

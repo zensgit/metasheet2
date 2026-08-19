@@ -534,7 +534,7 @@ function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldTy
 }
 
 function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {
-  return value === 'editable' || value === 'readonly' || value === 'hidden'
+  return value === 'editable' || value === 'readonly' || value === 'hidden' || value === 'required'
 }
 
 /**
@@ -995,7 +995,8 @@ function hasKeyOutside(value: unknown, allowed: string[]): boolean {
 }
 
 // T1-4: a `fieldPermissions[]` entry the backend `normalizeApprovalGraph` re-emits verbatim is EXACTLY
-// `{ fieldId: <non-empty string>, access: 'editable'|'readonly'|'hidden' }`. Anything else — an extra key,
+// `{ fieldId: <non-empty string>, access: 'editable'|'readonly'|'hidden'|'required' }` (Lock-7B widens
+// the access enum). Anything else — an extra key,
 // a non-string/empty fieldId, OR an out-of-enum access value — is dropped/normalized away on save. Both the
 // linear authoring guard and the complex-drop check must treat such an entry as a backend-drop (fail-closed
 // to read-only) so hydrate/buildStepConfig never SILENTLY flattens it. Single source of truth for both.

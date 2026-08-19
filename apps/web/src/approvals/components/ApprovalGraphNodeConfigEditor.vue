@@ -1033,6 +1033,10 @@
             <el-option label="可编辑" value="editable" />
             <el-option label="只读" value="readonly" />
             <el-option label="隐藏" value="hidden" />
+            <!-- Lock-7B OD-L7B-7 (G-15): the fourth option renders on HANDLER nodes ONLY — ABSENT
+                 (not disabled-greyed, M7) on approval nodes, since `required` is unsatisfiable there
+                 (OD-L7B-3). The linear editor (approval steps) never renders it at all. -->
+            <el-option v-if="node.type === 'handler'" label="必填" value="required" />
           </el-select>
           <!-- Lock-7 G-13: the readonly honesty copy is retired here in the SAME change as the linear
                editor (L0-6 one-change rule) — `只读`/`隐藏` are now enforced server-side. -->
