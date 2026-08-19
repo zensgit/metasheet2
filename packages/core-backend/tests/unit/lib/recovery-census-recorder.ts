@@ -15,12 +15,36 @@
  * installed by `censusFile()` at collection time — asserts that the set of sites actually
  * RECORDED during this file's run is EXACTLY the set the census table assigns to it.
  *
+ * P3-1 residual (2nd adversarial gate, still against the L0 blocker) — a SOURCE-WINDOW
+ * structural check ("record() sits between the tag line and the next test declaration")
+ * is satisfiable WITHOUT the leg ever running, by moving the recorder call into a sibling
+ * statement that shares the window:
+ *
+ *   (iii) `it.each([] as unknown[])(...)` registers ZERO test instances, so the tagged
+ *         leg never runs; moving `census.record('roles:update')` one line down — past the
+ *         leg's closing `})`, still inside the linkage window — runs it at COLLECTION
+ *         time instead. Over a dead src/routes/roles.ts:66: exit 0, ALL FILES PASSED,
+ *         0 skipped — no skip signal at all.
+ *   (iv)  `it.skipIf(true)(...)` never runs the leg either; a `beforeEach(() => {
+ *         census.record('roles:update') })` fires on every OTHER test in the file instead.
+ *         Over the same dead call site: exit 0, "N passed | 1 skipped".
+ *
+ * `record()` therefore no longer trusts WHERE in the source it was called from — it binds
+ * to vitest's own ground truth for "which test is executing right now",
+ * `expect.getState().currentTestName`, and throws unless the running test's name contains
+ * this exact `[recovery-census:<site>]` tag. A call from a hook, a describe-body
+ * statement (collection time — no test is running, `currentTestName` is `undefined`), or
+ * a neighbouring test can never satisfy that, regardless of which skip/data-driven idiom
+ * suppressed the leg — so this closes the whole window/idiom family at once instead of
+ * enumerating members to ban.
+ *
  * Fail-closed properties, each one deliberate:
  *   - MISSING site  → skip / only / partial run / deleted leg  → the file reds.
  *   - EXTRA site    → a leg recording someone else's site       → the file reds.
  *   - unknown FILE  → `censusFile('typo.test.ts')` throws, so a copy-pasted installer
  *                     can never yield a vacuously empty expected set.
  *   - foreign SITE  → `record()` throws when the site is not owned by this file.
+ *   - WRONG test    → `record()` throws unless the running test is the tagged leg itself.
  *   - deleted installer → every `census.record(...)` call becomes a ReferenceError.
  *
  * `afterAll` runs even when tests are skipped by `.only`/`.skip`, which is exactly why
@@ -33,7 +57,7 @@
  * deterministic, needs zero wiring, and is auto-collected.
  */
 
-import { afterAll } from 'vitest'
+import { afterAll, expect } from 'vitest'
 import { censusSitesByTestFile } from './recovery-census-table'
 
 export type CensusFileRecorder = {
@@ -134,6 +158,40 @@ export function assertOwnedCensusSite(
 }
 
 /**
+ * P3-1 (2nd gate) guard for {@link CensusFileRecorder.record}: the call must be made
+ * while vitest is actually RUNNING the test declaration tagged `[recovery-census:<site>]`
+ * — not merely from source text that sits between that tag and the next declaration.
+ *
+ * `expect.getState().currentTestName` is vitest's own runtime ground truth for "which
+ * test is executing right now": it is `undefined` during collection (a describe-body
+ * statement, or a call moved past a leg's closing `})` by an `it.each([])` that
+ * registered zero instances runs HERE, before any test starts), and during any OTHER
+ * test's run when a hook such as `beforeEach` fires for a leg that was itself
+ * `.skip`/`.skipIf`-suppressed. Neither case can spell the tagged leg's own name, so
+ * binding to it closes the whole skip/data-driven-idiom family in one guard instead of
+ * enumerating members to ban (the approach `EXECUTION_SUPPRESSING_MEMBERS` takes, and
+ * which `skipIf`/`each` deliberately evade by design).
+ *
+ * Exported (like the sibling guards) so the census suite can attack it directly with a
+ * planted `expect.getState()` shape rather than only through a full vitest run.
+ */
+export function assertRecordedFromOwnTaggedLeg(
+  testFile: string,
+  site: string,
+  currentTestName: string | undefined,
+): void {
+  const tag = `[recovery-census:${site}]`
+  if (currentTestName === undefined || !currentTestName.includes(tag)) {
+    throw new Error(
+      `census.record("${site}") in ${testFile} was not called from inside its own `
+      + `tagged leg ${tag} (current test: "${currentTestName ?? '<no test running>'}") — `
+      + 'a recorder call firing from a hook, a describe-body statement, or a '
+      + 'neighbouring test cannot satisfy this site',
+    )
+  }
+}
+
+/**
  * Bind this test file to its census legs and install the file-level coverage assertion.
  * Call ONCE at module top level:
  *
@@ -154,6 +212,7 @@ export function censusFile(testFile: string): CensusFileRecorder {
     testFile,
     record(site: string): void {
       assertOwnedCensusSite(testFile, expected, site)
+      assertRecordedFromOwnTaggedLeg(testFile, site, expect.getState().currentTestName)
       seen.add(site)
     },
     recorded(): string[] {

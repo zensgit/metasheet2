@@ -60,6 +60,7 @@ import {
 import {
   assertCensusCoverage,
   assertOwnedCensusSite,
+  assertRecordedFromOwnTaggedLeg,
   assertRegisteredCensusFile,
   censusCoverageViolations,
   expectedCensusSites,
@@ -97,7 +98,48 @@ function countCalls(strippedSource: string, token: string): number {
  * (`it.only`, `describe.skip`, `it.concurrent.only`, …).
  */
 const DECL_RE = /^\s*(?:it|test|describe|suite)((?:\s*\.\s*[A-Za-z_$][\w$]*)*)\s*\(/
-const DECL_SCAN_RE = /\b(?:it|test|describe|suite)((?:\s*\.\s*[A-Za-z_$][\w$]*)+)\s*\(/g
+
+/**
+ * P3-2 (adversarial gate) — the ban scan's chain must also see BRACKET-notation members,
+ * quote-enclosed after `it`/`test`/`describe`/`suite` (e.g. a bracket spelling of
+ * `.skip`), not just `.dot` ones: `DECL_SCAN_RE` used to require at least one DOTTED
+ * member, so the bracket spelling on an UNTAGGED family test was invisible to it — a
+ * real safety negative control silently disabled, "N passed | 1 skipped", exit 0.
+ * `MEMBER_SEGMENT_RE` accepts either form per chain link; `DECL_SCAN_RE` requires at
+ * least one link of EITHER form so a bracket-only chain still counts as "has a member
+ * chain". `DECL_RE` (above) is left dot-only on purpose — it is what makes a
+ * bracket-form TAGGED leg fail to read as "a test declaration" at all, which is the
+ * existing (and still-wanted) incidental catch route for that case via the linkage
+ * audit; widening it would only change which audit names the same violation.
+ *
+ * Deliberately NOT chasing fully computed member access (a variable holding the member
+ * name, or a variable holding a reference to the suppressing function itself, called
+ * later under a different name): no regex can resolve an arbitrary expression to "which
+ * vitest member this is" without evaluating it, so trying converges nowhere (枚举陷阱不
+ * 收敛) — the same reason the ban scans raw source instead of a stripped one. Literal
+ * bracket notation (single- or double-quoted) is the concrete, closeable escape; the
+ * fully-dynamic form is a disclosed residual, not a gap this regex claims to close.
+ *
+ * (This comment avoids spelling out the bracket examples literally — like the module
+ * header above, doing so would make this very file trip its own ban scan.)
+ */
+const MEMBER_SEGMENT_RE = String.raw`(?:\.\s*[A-Za-z_$][\w$]*|\[\s*(?:'[^']*'|"[^"]*")\s*\])`
+const DECL_SCAN_RE = new RegExp(
+  `\\b(?:it|test|describe|suite)((?:\\s*${MEMBER_SEGMENT_RE})+)\\s*\\(`,
+  'g',
+)
+/** Pulls each member NAME out of a captured chain, dot or bracket form alike. */
+const MEMBER_TOKEN_RE = /\.\s*([A-Za-z_$][\w$]*)|\[\s*'([^']*)'\s*\]|\[\s*"([^"]*)"\s*\]/g
+
+/** Every member name in a captured chain string (`.only`, `['skip']`, `["todo"]`, …). */
+function chainMembers(chain: string): string[] {
+  const members: string[] = []
+  for (const token of chain.matchAll(MEMBER_TOKEN_RE)) {
+    const name = token[1] ?? token[2] ?? token[3]
+    if (name) members.push(name)
+  }
+  return members
+}
 
 /** Chain members that suppress execution. `skipIf`/`runIf` are gating idioms, not bans. */
 const EXECUTION_SUPPRESSING_MEMBERS = new Set(['only', 'skip', 'todo'])
@@ -270,8 +312,7 @@ function auditNoSuppressedTests(testContents: ReadonlyMap<string, string>): stri
       continue
     }
     for (const match of content.matchAll(DECL_SCAN_RE)) {
-      const members = match[1].split('.').map((part) => part.trim()).filter(Boolean)
-      for (const member of members) {
+      for (const member of chainMembers(match[1])) {
         if (EXECUTION_SUPPRESSING_MEMBERS.has(member)) {
           violations.push(
             `${file}: focused/skipped test declaration \`${match[0].trim()}\` — `
@@ -550,6 +591,39 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     }
   })
 
+  it('P3-2 (adversarial gate): a BRACKET-notation focused/skipped declaration is caught, not just dot-notation', () => {
+    // Built by concatenation so this file never literally contains a banned declaration
+    // (the scanner runs over this file too) — same convention as the dot-notation
+    // control above.
+    const bracketSkipSingle = `${'it'}['skip']('planted', () => {})`
+    const bracketOnlyDouble = `${'it'}["only"]('planted', () => {})`
+    const bracketTodo = `${'test'}['todo']('planted')`
+    const chainedDotThenBracket = `${'it'}.concurrent['only']('planted', () => {})`
+    const chainedBracketThenDot = `${'it'}['concurrent'].only('planted', () => {})`
+    for (const planted of [
+      bracketSkipSingle,
+      bracketOnlyDouble,
+      bracketTodo,
+      chainedDotThenBracket,
+      chainedBracketThenDot,
+    ]) {
+      const violations = auditNoSuppressedTests(new Map([['planted.test.ts', `${planted}\n`]]))
+      expect(violations.length).toBe(1)
+      expect(violations[0]).toContain('planted.test.ts')
+      expect(violations[0]).toContain('suppresses execution')
+    }
+    // Positive control for the OTHER direction: a bracket-notation chain with NO
+    // suppressing member must NOT be flagged, or the widened scan would just red
+    // everything bracket-shaped regardless of which member it names.
+    const allowedBracket = [
+      `${'it'}['concurrent']('gated', () => {})`,
+      `${'describe'}["skipIf"](false)('gated', () => {})`,
+    ]
+    for (const source of allowedBracket) {
+      expect(auditNoSuppressedTests(new Map([['planted.test.ts', `${source}\n`]]))).toEqual([])
+    }
+  })
+
   it('NEGATIVE CONTROL: a focused declaration hidden behind a // inside a STRING is still caught', () => {
     // The evasion that a comment-stripping scan permits: the regex line-comment stripper
     // is not string-aware, so it deletes from the `//` to end of line and eats the
@@ -664,5 +738,60 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
     )
     // Positive control: its own site is accepted.
     expect(() => assertOwnedCensusSite(RBAC, expected, 'roles:update')).not.toThrow()
+  })
+})
+
+/**
+ * P3-1 (2nd adversarial gate) — `assertRecordedFromOwnTaggedLeg` under direct attack.
+ * Pins the exact class of counterexample the gate demonstrated over a real vitest run
+ * (`it.each([])` + a record call moved past the leg's closing brace; `it.skipIf(true)`
+ * + a `beforeEach` recorder): both satisfy the OLD source-window linkage check while the
+ * leg never executes. This guard closes them by binding to
+ * `expect.getState().currentTestName` instead of to source position, so these tests pin
+ * the predicate directly rather than only through a full suite run (which the M6/M7
+ * mutation-tested reproductions in the PR body additionally cover end to end).
+ */
+describe('P3-1 (2nd gate) — record() binds to the RUNNING test, not to source position', () => {
+  it('a call from inside its own tagged leg is accepted (positive control)', () => {
+    expect(() => assertRecordedFromOwnTaggedLeg(
+      RBAC,
+      'roles:update',
+      `${RBAC} > routes/roles.ts > [recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the UPDATE → exact uniform retryable 409`,
+    )).not.toThrow()
+  })
+
+  it('a call with NO test running (collection time) reds and says so — the it.each([]) + moved-record shape', () => {
+    // This is exactly what `expect.getState().currentTestName` is when a
+    // `census.record(...)` statement runs as a bare describe-body statement instead of
+    // inside a test body — which is what an `it.each([] as unknown[])` leg (zero
+    // registered instances) plus a record call moved past its closing `})` produces.
+    expect(() => assertRecordedFromOwnTaggedLeg(RBAC, 'roles:update', undefined)).toThrowError(
+      /was not called from inside its own tagged leg .*<no test running>/,
+    )
+  })
+
+  it('a call from a DIFFERENT, currently-running test reds and NAMES that foreign test — the skipIf + beforeEach shape', () => {
+    // This is what happens when a `beforeEach(() => { census.record(site) })` fires for
+    // every OTHER test in the file because the tagged leg itself was `.skipIf(true)`-d.
+    const foreignTest = `${RBAC} > routes/roles.ts > [recovery-census:roles:create] POST /api/roles: marker 40001 on the write → exact uniform retryable 409`
+    expect(() => assertRecordedFromOwnTaggedLeg(RBAC, 'roles:update', foreignTest)).toThrowError(
+      /was not called from inside its own tagged leg/,
+    )
+    try {
+      assertRecordedFromOwnTaggedLeg(RBAC, 'roles:update', foreignTest)
+      expect.unreachable('must throw')
+    } catch (error) {
+      expect(String(error)).toContain(foreignTest)
+    }
+  })
+
+  it('a currentTestName that merely CONTAINS a different site’s tag does not satisfy this one', () => {
+    // Guards against a sloppy substring match accepting any tagged test, not specifically
+    // the one whose site is being recorded.
+    expect(() => assertRecordedFromOwnTaggedLeg(
+      RBAC,
+      'roles:update',
+      `${RBAC} > routes/roles.ts > [recovery-census:roles:create] POST /api/roles`,
+    )).toThrowError(/was not called from inside its own tagged leg \[recovery-census:roles:update\]/)
   })
 })
