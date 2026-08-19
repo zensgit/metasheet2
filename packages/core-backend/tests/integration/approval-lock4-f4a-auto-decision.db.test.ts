@@ -295,11 +295,22 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
   })
 
   // ─────────────────────────────────────────────────────────────────────────────────────────────
-  // A-3 — no historical residue: dedupeHistoricalApprover exemption + the disclosed
-  // mergeAdjacentApprover suppression side effect, both pinned with positive controls
+  // A-3 — no historical residue: dedupeHistoricalApprover is UNAFFECTED by an intervening
+  // auto_approve node (it searches history filtered by actor id, so the system-sentinel event
+  // is skipped rather than shielding anything), while mergeAdjacentApprover — whose search has
+  // NO actor filter, only a same-node exclusion — IS suppressed by the same sentinel event
+  // becoming the new "latest" entry. This asymmetry was caught empirically (real-DB CI run,
+  // 2026-08-19): the original draft of the dedupeHistoricalApprover test asserted the WRONG
+  // outcome ('pending') by wrongly assuming both policies share mergeAdjacentApprover's strict
+  // positional-adjacency semantics. `findLatestApprovalHistory` (ApprovalProductService.ts) is
+  // a single shared backward-search helper; dedupeHistoricalApprover's caller passes a predicate
+  // that includes `entry.actorId === assignment.assigneeId`, so it walks PAST the sentinel event
+  // to find P's earlier manual1 approval — this is pre-existing dedup behavior, not something
+  // F4-A changes; F4-A only adds a new kind of history entry that this pre-existing search must
+  // (and correctly does) skip when it doesn't match the actor filter.
   // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-  it('A-3: after an auto_approve node, a later node assigned to a real user with dedupeHistoricalApprover is NOT auto-deduped — P must actually approve manually', async () => {
+  it('A-3: dedupeHistoricalApprover DOES dedupe across an intervening auto_approve node (actor-filtered search skips the system sentinel and finds P\'s earlier approval)', async () => {
     const suffix = 'a3-dedupe'
     const p = `l4-p-${TS}-${suffix}`
     const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
@@ -334,17 +345,14 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
     const afterFirst = await act(pTok, inst.id, { action: 'approve' })
     expect(afterFirst.status, await afterFirst.clone().text()).toBe(200)
     const afterFirstBody = (await afterFirst.json()) as { status: string; currentNodeKey: string | null }
-    // NOT auto-deduped: the instance is STILL pending at manual3 — P's earlier approval at manual1
-    // (buried behind auto2's system:auto-approval as the LATEST history entry) did not dedupe it.
-    expect(afterFirstBody.status).toBe('pending')
-    expect(afterFirstBody.currentNodeKey).toBe('manual3')
-
-    const finalApprove = await act(pTok, inst.id, { action: 'approve' })
-    expect(finalApprove.status, await finalApprove.clone().text()).toBe(200)
-    expect(((await finalApprove.json()) as { status: string }).status).toBe('approved')
+    // Deduped: manual1's approval by P, auto2's sentinel event (skipped — actor mismatch), then
+    // manual3's dedupeHistoricalApprover finds P's manual1 approval and auto-completes the instance
+    // in the SAME request — no second `act` call is reachable, there is no pending seat left.
+    expect(afterFirstBody.status).toBe('approved')
+    expect(afterFirstBody.currentNodeKey).toBeNull()
   })
 
-  it('POSITIVE CONTROL for A-3 — WITHOUT the auto_approve node in between, the identical dedupeHistoricalApprover DOES auto-dedupe manual3 (a genuine human approval triggers the dedup — the exemption is event-selected, not structural)', async () => {
+  it('CONTROL for A-3 — WITHOUT the auto_approve node in between, dedupeHistoricalApprover produces the IDENTICAL outcome (auto2\'s presence makes no observable difference to this policy)', async () => {
     const suffix = 'a3-dedupe-ctl'
     const p = `l4-p-${TS}-${suffix}`
     const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
@@ -377,7 +385,6 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
     const afterFirst = await act(pTok, inst.id, { action: 'approve' })
     expect(afterFirst.status, await afterFirst.clone().text()).toBe(200)
     const afterFirstBody = (await afterFirst.json()) as { status: string }
-    // The dedup fires (no auto2 node buries the LATEST history entry) — the instance completes.
     expect(afterFirstBody.status).toBe('approved')
   })
 
