@@ -1,5 +1,42 @@
 name: Multitable On-Prem Package Build
 
+# Dispatchable build -> verify -> (optional) GitHub Release for the multitable
+# on-prem package.
+#
+# FREEZE BLOCK (#4708 / #4693; ranked #1 in
+# docs/development/onprem-deploy-path-acceleration-20260818.md §e). After the
+# archives are built and verified this job additionally
+#   (a) runs the package archive contract test
+#       scripts/ops/multitable-onprem-package-no-node-modules.test.mjs, which
+#       until now shipped in ZERO build lanes (only .github/workflows/plugin-tests.yml
+#       ran it, on a different trigger), and
+#   (b) emits the paste-ready five-field freeze block the S6-B instruction
+#       requires, so the operator stops hand-assembling it from a separate
+#       `node -e` invocation and a second workflow run.
+#
+# THE CONTRACT TEST CAN FAIL THIS JOB, AND THAT IS INTENDED. It pins the
+# node_modules pruning helper, the shipped-verifier / repository-only-builder
+# split, and the release + artifact bootstrap-sidecar roster. A build whose own
+# archive contract has regressed must not reach "Publish GitHub Release". It is
+# hermetic (no network, no service containers) and runs against the repository
+# tree, so it costs seconds.
+#
+# Everything else added here is read-only reporting over bytes the build already
+# produced. With the default inputs (publish_release=false) the observable
+# behaviour is unchanged apart from one extra file in the uploaded artifact
+# (freeze-block.txt) and one extra $GITHUB_STEP_SUMMARY section.
+#
+# packageProvenanceManifestDigest is NOT recomputed here. It is read out of the
+# BUILT package by the product's own module: the packaged
+# plugins/plugin-integration-core/lib/sealed-export/sealed-export-package-provenance.cjs,
+# whose verifySealedExportRuntimePackageProvenance().frozenManifestDigest is the
+# sha256 of the packaged
+# plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json.
+# That is the same value stock-prep-s6a-postgres17-validation.yml:105-119
+# compares against its frozen pin, and the same command the S6-A runbook
+# (docs/operations/stock-preparation-s6a-sqlserver-onprem-runbook-20260731.md §1.5)
+# tells the operator to run by hand.
+
 on:
   workflow_dispatch:
     inputs:
@@ -131,6 +168,151 @@ jobs:
           mv "$tmp" "$PACKAGE_META_FILE"
           echo "gitSha=$BUILD_SHA bound into $(basename "$PACKAGE_META_FILE") for human/tooling reference. NOTE: the one-click acceptance -ExpectedGitSha lock verifies BUILD_PROVENANCE.json.gitCommit INSIDE the archive (the checksummed bytes), NOT this external sidecar — an old archive cannot be laundered by a fresh sidecar."
 
+      # Wiring only — the test itself is unchanged. It asserts the build script
+      # prunes node_modules, that the builder stays repository-only while the
+      # verifier ships, and that BOTH first-hop bootstrap sidecars appear in the
+      # `assets=(` list and the artifact globs of THIS file. Deliberately placed
+      # before the release step: a regressed archive contract must not publish.
+      - name: Package archive contract test (no bundled node_modules)
+        run: node --test scripts/ops/multitable-onprem-package-no-node-modules.test.mjs
+
+      - name: Emit paste-ready freeze block
+        env:
+          PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          out_dir="output/releases/multitable-onprem"
+          command -v unzip >/dev/null 2>&1 || {
+            echo "unzip is required to read the built package" >&2
+            exit 1
+          }
+          freeze_root="$(mktemp -d)"
+          unzip -q "$PACKAGE_FILE_ZIP" -d "$freeze_root"
+          pkg_root="${freeze_root}/$(basename "${PACKAGE_FILE_ZIP%.zip}")"
+          test -d "$pkg_root"
+
+          # serviceRuntimeSha is read from BUILD_PROVENANCE.json INSIDE the
+          # checksummed archive, not from the external sidecar the previous step
+          # stamped, and is then required to equal this job's build SHA. Same
+          # reasoning as stock-prep-main-package-verify.yml PIN-3: a freeze block
+          # must quote the commit the shipped bytes claim, not the one the run
+          # believes it built.
+          archive_git_commit="$(node - "$pkg_root" <<'NODE'
+          const fs = require('node:fs')
+          const path = require('node:path')
+          const root = process.argv[2]
+          const provenance = JSON.parse(
+            fs.readFileSync(path.join(root, 'BUILD_PROVENANCE.json'), 'utf8'),
+          )
+          console.log(provenance.gitCommit)
+          NODE
+          )"
+          if [[ "$archive_git_commit" != "$BUILD_SHA" ]]; then
+            echo "FATAL: in-archive BUILD_PROVENANCE.json gitCommit (${archive_git_commit}) != this job's build SHA (${BUILD_SHA})." >&2
+            exit 1
+          fi
+
+          # packageProvenanceManifestDigest — produced by the product's own
+          # verifier, loaded FROM the package and run AGAINST the package. No
+          # re-implementation of the digest here or anywhere in this file.
+          provenance_manifest_digest="$(node - "$pkg_root" <<'NODE'
+          const path = require('node:path')
+          const root = process.argv[2]
+          const verifier = require(
+            path.join(
+              root,
+              'plugins/plugin-integration-core/lib/sealed-export/' +
+                'sealed-export-package-provenance.cjs',
+            ),
+          )
+          const result = verifier.verifySealedExportRuntimePackageProvenance({
+            repoRoot: root,
+          })
+          if (
+            result?.verified !== true
+            || result?.runtimePackageVerified !== true
+            || result?.externalPackagePinRequired !== true
+          ) {
+            process.exit(1)
+          }
+          console.log(result.frozenManifestDigest)
+          NODE
+          )"
+          rm -rf "$freeze_root"
+
+          zip_sha256="$(sha256sum "$PACKAGE_FILE_ZIP" | awk '{print $1}')"
+          tgz_sha256="$(sha256sum "$PACKAGE_FILE" | awk '{print $1}')"
+          # The build already wrote .sha256 sidecars and SHA256SUMS; requiring
+          # the recomputation to agree keeps the block from quoting a digest that
+          # the published checksum files contradict.
+          sidecar_zip_sha256="$(awk '{print $1}' "${PACKAGE_FILE_ZIP}.sha256")"
+          sidecar_tgz_sha256="$(awk '{print $1}' "${PACKAGE_FILE}.sha256")"
+          if [[ "$zip_sha256" != "$sidecar_zip_sha256" || "$tgz_sha256" != "$sidecar_tgz_sha256" ]]; then
+            echo "FATAL: recomputed archive SHA-256 disagrees with the build's own .sha256 sidecar." >&2
+            exit 1
+          fi
+
+          # Closed token, never an invented tag: with publish_release=false (the
+          # default) nothing is published, so there is no releaseTag to quote.
+          if [[ "${PUBLISH_RELEASE}" == "true" && -n "${RELEASE_TAG}" ]]; then
+            resolved_release_tag="${RELEASE_TAG}"
+          else
+            resolved_release_tag="NOT_PUBLISHED"
+          fi
+
+          if [[ ! "$archive_git_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "FATAL: serviceRuntimeSha is not 40-hex; refusing to emit a freeze block." >&2
+            exit 1
+          fi
+          for digest in "$zip_sha256" "$tgz_sha256" "$provenance_manifest_digest"; do
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "FATAL: a freeze-block digest is not 64-hex; refusing to emit a freeze block." >&2
+              exit 1
+            fi
+          done
+
+          # Exactly the eight lines #4708 / #4693 consume, in that order, and
+          # values-free: sha, tag, basename, digests and closed tokens only. Any
+          # supplementary field stays OUTSIDE this file so a whole-file paste is
+          # always the block and nothing but the block.
+          freeze_block_file="${out_dir}/freeze-block.txt"
+          {
+            echo "serviceRuntimeSha=${archive_git_commit}"
+            echo "releaseTag=${resolved_release_tag}"
+            echo "packageFile=$(basename "$PACKAGE_FILE_ZIP")"
+            echo "packageSha256=${zip_sha256}"
+            echo "packageProvenanceManifestDigest=${provenance_manifest_digest}"
+            echo "customerScope=SYNTHETIC_SINGLE_CUSTOMER"
+            echo "sourceMode=READ_ONLY"
+            echo "externalWrite=false"
+          } > "$freeze_block_file"
+
+          echo "FREEZE_BLOCK_FILE=$freeze_block_file" >> "$GITHUB_ENV"
+
+          echo "::group::Paste-ready freeze block"
+          cat "$freeze_block_file"
+          echo "::endgroup::"
+          echo "packageTgzSha256=${tgz_sha256}"
+          echo "buildProvenanceGitCommitMatchesBuildSha=PASS"
+          echo "archiveSha256MatchesSidecar=PASS"
+
+          {
+            echo "## Paste-ready freeze block"
+            echo ""
+            echo "Copy the block below verbatim into the #4708 / #4693 comment."
+            echo ""
+            echo '```text'
+            cat "$freeze_block_file"
+            echo '```'
+            echo ""
+            echo "Supplementary (NOT part of the block — the block pins the .zip):"
+            echo ""
+            echo "- \`packageTgzSha256=${tgz_sha256}\`"
+            echo "- \`packageFileTgz=$(basename "$PACKAGE_FILE")\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Publish GitHub Release
         if: ${{ inputs.publish_release == 'true' }}
         env:
@@ -184,6 +366,11 @@ jobs:
             output/releases/multitable-onprem/*.json
             output/releases/multitable-onprem/verify/*.json
             output/releases/multitable-onprem/verify/*.md
+            # Written by "Emit paste-ready freeze block". Listed explicitly:
+            # no glob above matches .txt, and it is deliberately NOT added to
+            # SHA256SUMS or to the release asset list — it is a report about the
+            # archives, not a shipped package byte.
+            output/releases/multitable-onprem/freeze-block.txt
           retention-days: 14
 
       - name: Step summary
@@ -197,6 +384,7 @@ jobs:
             echo "- First-hop bootstrap (.bat): \`${PACKAGE_BOOTSTRAP_BAT}\`"
             echo "- Verify (.tgz JSON): \`${PACKAGE_VERIFY_TGZ_JSON}\`"
             echo "- Verify (.zip JSON): \`${PACKAGE_VERIFY_ZIP_JSON}\`"
+            echo "- Freeze block: \`${FREEZE_BLOCK_FILE}\` (also rendered above, and in the artifact)"
             echo "- Artifact: \`multitable-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
             if [[ "${{ inputs.publish_release }}" == "true" ]]; then
               echo "- Release tag: \`${{ inputs.release_tag }}\`"
