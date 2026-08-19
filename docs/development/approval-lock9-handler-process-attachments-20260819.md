@@ -9,8 +9,10 @@ PR, required checks, an independent adversarial gate, and a ledger row.
 draft time; do not hand-expand the abbreviated form). Every anchor below was READ AT THIS BASELINE — line
 numbers are exact here and may differ from other documents' own citations. The repository is not shallow,
 so the ancestry statements are trustworthy. Unqualified `:NNNN` anchors are
-`packages/core-backend/src/services/ApprovalProductService.ts` (APS); `ATT-*` anchors are the attachment
-pipeline files named inline.
+`packages/core-backend/src/services/ApprovalProductService.ts` (APS); `types/*` anchors resolve to
+`packages/core-backend/src/types/*` (e.g. `types/approval-product.ts` =
+`packages/core-backend/src/types/approval-product.ts`); `ATT-*` anchors are the attachment pipeline files
+named inline.
 **Parents:** `approval-parity-master-design-lock-20260817.md` (RATIFIED) — **M9** ("Action attachments
 are a capability, not dialog chrome", `:233-238`) is the authorizing provision for this entire document
 and is quoted in §1.0; M8 (`:226-231`) and M11 (`:246-249`) govern the honesty language.
@@ -101,19 +103,43 @@ already carries `status ∈ {unbound,bound,deleted}` (`:41-42`), the `instance_i
 CASCADE` (`:29-30`), the row-delete → purge-intent trigger (`:103-118`), and the per-file 20 MB CHECK
 (`:39-40`). Reuse it, adding a discriminator and the audit-binding columns:
 
-- `bind_kind text NOT NULL DEFAULT 'form_field' CHECK (bind_kind IN ('form_field','process'))` — every
-  existing row is `form_field` by the default, so the migration is additive and legacy-inert.
-- `field_id` **must become nullable-when-process.** Today `field_id text NOT NULL CHECK (field_id ~
-  '[!-~]')` (ATT-migration `:31-32`) and `AttachmentRowForAuth.fieldId: string` (ATT-storage `:217`,
-  non-optional) are both mandatory. A process attachment has **no** form field, so the CHECK is
-  re-expressed as `CHECK (bind_kind = 'process' OR field_id ~ '[!-~]')` and the `NOT NULL` dropped. This
-  is the crux the download gate rests on (L9-C): a process row's `field_id` is genuinely `NULL`, which
-  makes the hidden-gate skip an **explicit `bind_kind` branch**, not an accidental sentinel pass.
+- `bind_kind text NOT NULL DEFAULT 'form_field' CHECK (bind_kind IN ('form_field','process'))` — a **pure
+  column ADD**: every existing row is `form_field` by the default, so this column is additive and
+  legacy-inert. (The `field_id` relaxation below is NOT — see the DDL hazard note.)
+- `field_id` **must become nullable-when-process, and this is a CONSTRAINT MUTATION, not an additive
+  change.** Today `field_id text NOT NULL CONSTRAINT approval_att_field_nonblank CHECK (field_id ~ '[!-~]')`
+  (ATT-migration `:31-32`) and `AttachmentRowForAuth.fieldId: string` (ATT-storage `:218`, non-optional)
+  are both mandatory. A process attachment has **no** form field, so the migration must (i) `ALTER COLUMN
+  field_id DROP NOT NULL`, and (ii) `DROP CONSTRAINT approval_att_field_nonblank` then re-`ADD` it
+  re-expressed as `CHECK (bind_kind = 'process' OR field_id ~ '[!-~]')`. Dropping and re-adding a **named,
+  shipped** constraint is the crux the download gate rests on (L9-C): a process row's `field_id` is
+  genuinely `NULL`, which makes the hidden-gate skip an **explicit `bind_kind` branch**, not an accidental
+  sentinel pass. The type surface widens in lock-step: `AttachmentRowForAuth.fieldId` becomes `string |
+  null` and gains `bind_kind`, and the two inline SELECTs that read `field_id` — the `/download` route's
+  row type (ATT-routes `:255-270`) and the `/refs` bound-metadata row type (ATT-routes `:408-423`) — must
+  each SELECT `bind_kind` and type `field_id` as `string | null`; missing any one leaves the accidental
+  pass live on that surface (NIT-1).
 - `node_key text` and `action_record_id text` (FK to `approval_records(id)`), populated only for
   `bind_kind='process'` and only at commit (L9-D). `actor_id` reuses the existing `uploader_id` column —
   for a process attachment the uploader IS the acting approver, so no new actor column is minted.
 - `staged_instance_id text` — the upload-time target instance, kept SEPARATE from `instance_id` (see L9-D
   / OD-L9-5); `instance_id` continues to mean "committed to a submission" for BOTH kinds.
+
+**DDL hazard — a new migration, ordered late, one-way-once-ON (OD-L9-2, task item 4).** The changes land in
+a NEW migration file `packages/core-backend/src/db/migrations/zzzz<ts>_approval_attachments_process_binding.ts`
+whose `<ts>` MUST sort **after** both the table-creation migration `zzzz20260715210000` AND the current
+latest migration `zzzz20260818120000` (so `<ts> > 20260818120000`) — a `field_id` column that is still
+`NOT NULL` when the first NULL-`field_id` write runs is a hard INSERT failure, so the relaxation is a
+**deploy precondition**: it must land BEFORE `APPROVAL_ATTACHMENTS_ENABLED` may be turned ON in any
+environment. The idempotent shape to follow already lives in this very table's own migration — the
+`DROP CONSTRAINT IF EXISTS … ADD CONSTRAINT …` pair (ATT-migration `:79-80`) and the `IF NOT EXISTS
+(SELECT 1 FROM pg_constraint WHERE conname = …)` guard (`:91-93`); reuse that shape, do not invent one.
+**Rollback is the unstated half:** a `down` that re-adds `field_id NOT NULL` / re-adds the original
+`approval_att_field_nonblank` **fails if any `bind_kind='process'` row exists**, so the relaxation is
+effectively **one-way once the flag has been ON** — a genuine rollback requires purging all
+`bind_kind='process'` rows first. The migration's `down` must state this (either refuse when process rows
+exist, or document the purge-first precondition), not silently fail mid-deploy. A gate pins the ordering
+and the re-expressed CHECK (§3 G-14).
 
 **Rejected — a new table** (`approval_process_attachments`). It would re-implement, byte for byte, the
 storage-key derivation (`deriveStorageKey`, ATT-storage `:39-45`), the scope-prefix partition
@@ -123,33 +149,56 @@ narrowing" the program's own discipline flags. The discriminator-column arm reus
 what a process binding genuinely needs. Rejected on the reuse principle, cited to the pipeline lock's §2
 "the approval line adds NO transport of its own" (ATT-storage `:130-146`).
 
-### L9-B — Who may upload: the acting approver at the active node, server-derived (OD-L9-3)
+### L9-B — Who may upload: the acting approver at the active node, enforced at TWO points (OD-L9-3)
 
-Only the principal who could commit the action may stage its attachment. The authorization is **exactly
-the action's own authorization**, evaluated server-side, never the request body:
+Only the principal who could commit the action may stage its attachment. The seat authorization is the
+**action's own authorization** — the seat predicate `actorCanAct` — evaluated server-side, never the
+request body. It is enforced at two distinct points that must not be conflated:
 
-1. the shipped RBAC scope `approvals:act` (`types/approval-product.ts:4`, in `APPROVAL_PRODUCT_PERMISSIONS
-   :1-9`) — the coarse gate; AND
-2. the shipped **active-seat check**: `actorCanAct` (APS `:8249`), computed from `actorBranchNodeKey`
-   (`:8227-8239`), `currentNodeAssignments` (`:8244`) and `actorAssignments` (`:8247`), which throws
-   `APPROVAL_ASSIGNMENT_REQUIRED` (403) at `:8252-8253` when the caller holds no seat at the instance's
-   current (branch-effective) node. This is the exact anchor Lock-7 §L7-A named as the reuse point for
-   "the actor's node," and it binds the upload to THIS instance/node — which `approvals:act` alone (a
-   global scope) does not.
+1. **Bind-time (LOAD-BEARING, genuine REUSE).** The process bind runs INSIDE `dispatchAction`, where
+   `actorCanAct` (APS `:8249`) is already computed and already throws `APPROVAL_ASSIGNMENT_REQUIRED` (403)
+   at `:8252-8253` for a non-acting caller (`request.action !== 'revoke' && !actorCanAct`). Because the
+   bind is a WHERE-guarded UPDATE inside that same transaction (L9-D), an attachment can only ever bind on
+   an action the seat check already authorized — the sole guarantee the security rests on. This reuses the
+   shipped seat check unchanged; it is the anchor Lock-7 §L7-A named for "the actor's node."
+2. **Upload-time (NEW surface, defense-in-depth — NOT a reuse of a callable).** `actorCanAct` is a **local
+   `const` inside `dispatchAction`** (APS `:8249`, `= actorAssignments.length > 0`), **not** a callable
+   primitive, and the shipped upload route
+   (`packages/core-backend/src/routes/approval-attachments.ts:186-246`) has **no seat check at all** — it
+   gates on `approvals:write` (`hasApprovalsWrite`, ATT-routes `:170`) plus template visibility
+   (`templateVisible`) plus `resolveAttachmentField`, and *requires* `fieldId`+`templateId`. A
+   process-upload seat check is therefore genuinely **NEW**: the implementing slice must EXTRACT/re-derive
+   the seat computation (`currentNodeAssignments` `:8244`, `actorAssignments` `:8247`,
+   `assignmentMatchesActor`, `actorCanAct` `:8249`) into a reusable server-side helper, or run the
+   equivalent seat query at the upload surface. This is a fail-fast surface only; correctness does not
+   depend on it (point 1 does). The process-upload scope is `approvals:act` (`types/approval-product.ts:4`,
+   the action's own scope) — deliberately DIFFERENT from the shipped form-upload gate's `approvals:write`
+   — plus the re-derived active-seat check; the readback asymmetry this creates (`approvals:act` to upload,
+   `approvals:read` to download/refs) is settled in OD-L9-14.
 
 Identity (`actor_id`/`uploader_id`, `org_id`) is server-derived from the session/JWT, mirroring the
-pipeline's own rule that a body-supplied `org_id` is a cross-tenant forgery (ATT-routes
-`packages/core-backend/src/routes/approval-attachments.ts:43-48`). The upload targets a `staged_instance_id`
-+ `node_key`, and the server rejects an upload whose caller does not hold the active seat at that node
-(same 403). **Rejected — arbitrary-participant upload** (any `isInstanceParticipant` viewer may attach):
-it would let a CC recipient or a past actor at a distant node inject "process" evidence they have no
-standing to add, and it breaks the audit tuple's meaning (the attachment would claim a `node_key`/`actor`
-the uploader never acted at). Rejected; the upload authority is the active-seat check, not participation.
+pipeline's own rule that a body-supplied `org_id` is a cross-tenant forgery (ATT-routes `:43-48`). The
+upload targets a `staged_instance_id`; the **active node is server-derived from that instance** for the
+seat check — the durable `node_key` is NOT written at upload (it is stamped only at commit, L9-A/L9-D), so
+there is no upload-time `node_key` to forge. **Rejected — arbitrary-participant upload** (any
+`isInstanceParticipant` viewer may attach): it would let a CC recipient or a past actor at a distant node
+inject "process" evidence they have no standing to add, and it breaks the audit tuple's meaning (the
+committed attachment would claim a `node_key`/`actor` the uploader never acted at). Rejected; the upload
+authority is the active-seat check, not participation.
 
-### L9-C — Download authz: reuse the participant predicate, DROP the hidden-field gate (OD-L9-4, OD-L9-13)
+### L9-C — Read authz on BOTH surfaces: reuse the participant predicate, DROP the hidden-field gate (OD-L9-4, OD-L9-13)
 
-`authorizeAttachmentDownload` (ATT-storage `:254-298`) runs three gates: gate 0 org-pin (`:260-263`), gate
-1 instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), gate 3 lifecycle/scan
+Two read surfaces serve attachment data and they authorize **independently** — the slice must EXTEND both,
+not just `authorizeAttachmentDownload`:
+
+- the **byte path** `/download` (ATT-routes `:247-303`), which delegates to `authorizeAttachmentDownload`;
+- the **metadata path** `/refs` bound mode (`handleRefs`, ATT-routes `:365-454`), which does **NOT** call
+  `authorizeAttachmentDownload` — it re-implements gate 1 (`isInstanceParticipant`, `:405-407`) and gate 2
+  (`isFieldHiddenAtActiveNode` per distinct `field_id`, `:427-434`) INLINE, and echoes `fileName` to the
+  caller (`:441`).
+
+**Byte path (`authorizeAttachmentDownload`).** It runs gate 0 org-pin (`:260-263`), gate 1
+instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), gate 3 lifecycle/scan
 (`:293-297`). For a process attachment:
 
 - **Gate 0 + gate 1 are reused unchanged.** A bound process row has a real `instance_id`, so gate 1 takes
@@ -171,8 +220,23 @@ the uploader never acted at). Rejected; the upload authority is the active-seat 
   the skip a design decision the test can pin, not an emergent side effect of a sentinel value.
 - **Gate 3 unchanged**; deleted/infected still tombstone (410) only after authorization (no oracle).
 
+**Metadata path (`/refs` bound mode) needs the SAME explicit branch — this is an EXTEND, not a REUSE.**
+Its inline gate 2 loops `isFieldHiddenAtActiveNode(instanceId, field_id)` over each distinct `field_id`
+(ATT-routes `:427-434`). Verified against the shipped primitive: `isFieldHiddenAtActiveNode` (ATT-runtime
+`:252-268`) does **NOT** throw for a fieldless row on a live instance — it loads the instance and returns
+`hidden.has(field_id)`, and for `field_id = NULL` that is `hidden.has(null) === false` (NULL is absent from
+the hidden-field-id set). So the `.catch(() => true)` fail-closed arm is **never reached**; the process
+row's metadata (including `fileName`) renders by the **same accidental pass** the byte path condemns. The
+fix is identical: an explicit `if (row.bind_kind === 'process') { …render without a hidden evaluation… }`
+branch, not reliance on the NULL `field_id` traversing the form gate. Without it, `/refs` leaks process
+metadata regardless of the byte-path branch — the two surfaces must be fixed together. (This confirms the
+review's leak direction; it is not a fail-closed drop.)
+
 Failure remains the pipeline's values-free 404 for every authorization denial and 410 for a post-authz
-tombstone (ATT-routes `:284-289`), so a process attachment discloses no more than a form one.
+tombstone (ATT-routes `:284-289`), so a process attachment discloses no more than a form one. **Who** a
+bound process attachment is readable BY — every participant, versus approvers-only or node-scoped — is a
+confidentiality value-call the form path's hidden gate no longer bounds for process rows; it is settled
+explicitly in OD-L9-14, not by omission here.
 
 ### L9-D — Lifecycle: bound inside the action transaction, immutable after, orphans to GC (OD-L9-5, OD-L9-6, OD-L9-7)
 
@@ -187,7 +251,17 @@ org_id=$6 AND bind_kind='process' AND status='unbound' AND staged_instance_id=$1
 (ATT-reconciler `:93-100`). It runs INSIDE the approval action's transaction (the same transaction that
 inserts the `action_record_id` audit row), so the attachment binds if and only if the action commits;
 any bind failure rolls back the action (fail-closed), and a crashed/abandoned action leaves the row
-`unbound`.
+`unbound`. **Advance-race (closes P3-2's node question):** if the instance advances between staging and
+commit, `actorCanAct` in `dispatchAction` re-authorizes the caller at the NEW current node before the bind
+runs — a stale-seat bind is impossible, and the durable `node_key` is stamped from the action that
+actually committed, so it always records where the approver truly acted (never the upload-time guess).
+
+**The bind branch is itself flag-gated (closes P3-1).** The bind runs in the **always-registered**
+`dispatchAction`, not in the flag-gated router — so "no-op when OFF" is NOT automatic here. With
+`APPROVAL_ATTACHMENTS_ENABLED` unset, `dispatchAction` MUST NOT read `attachmentIds` at all: an action that
+happens to carry an `attachmentIds` field is dispatched EXACTLY as it is today (a plain `comment` still
+succeeds), never routed into the rowCount-equality bind that would 400 a previously-succeeding action. The
+flag gate wraps the bind branch, not merely the upload route; a gate pins it (§3 G-12).
 
 **`staged_instance_id` in the WHERE is the OD-L9-5 fix.** Do **not** stamp `instance_id` at upload:
 `authorizeAttachmentDownload` branches on `!row.instanceId` (ATT-storage `:269-271`) — no instance ⇒
@@ -202,6 +276,10 @@ breaks the `!row.instanceId` uploader-only semantics and leaks staged bytes to p
 **Immutable after commit; orphans fall to the existing GC.** Once bound, a process attachment is
 **audit** — no edit, no delete surface is added (a bound row is already frozen against the GC; ATT-gc
 `packages/core-backend/src/services/approval-attachment-gc.ts` sweeps `status='unbound'` only, `:34-36`).
+The shipped uploader-retract DELETE (ATT-routes `:320-343`) is `status='unbound'` **only** and so **cannot
+reach a bound row** — it strengthens, not contradicts, this immutability: an approver may retract their own
+*staged* process upload before commit (identical to the form path), but no route can delete a *bound*
+process attachment. This adds no new delete surface; L9 introduces none.
 Unbound orphans (uploaded, action abandoned) are swept by the **existing** `sweepUnboundAttachments` at
 the ratified `UNBOUND_ATTACHMENT_TTL_HOURS = 168` (ATT-gc `:22`, `:29-50`) and their blobs drained by
 `drainPurgeIntents` — process rows are `unbound` like any other, so the TTL sweep needs **no change**. The
@@ -274,11 +352,12 @@ narrowly-scoped surface.
 
 | M9 surface | Contract | Anchor(s) | Disposition |
 |---|---|---|---|
-| upload ownership | L9-B | `approvals:act` `types/approval-product.ts:4`; active-seat `APS:8227-8253` | REUSE — action's own authz; identity server-derived (ATT-routes `:43-48`) |
-| binding | L9-A, L9-D | ATT-migration `:29-47`; ATT-reconciler `:64-112` (shape, NOT called) | NEW columns `bind_kind`/`node_key`/`action_record_id`/`staged_instance_id`; NEW process-bind fn |
-| authorization (download) | L9-C | `authorizeAttachmentDownload` ATT-storage `:254-298`; participant ATT-runtime `:201-244` | REUSE gate 0/1/3; EXTEND gate 2 with a `bind_kind='process'` skip branch |
+| upload ownership | L9-B | bind-time seat `actorCanAct` APS `:8249,:8252-8253`; upload-time re-derive `APS:8244-8249`; scope `approvals:act` `types/approval-product.ts:4` | REUSE (bind-time, load-bearing) — the action's own `actorCanAct`; NEW (upload-time) — seat re-derived (`actorCanAct` is a local const, not callable; shipped upload gate is `approvals:write`+visibility, no seat); identity server-derived (ATT-routes `:43-48`) |
+| binding | L9-A, L9-D | ATT-migration `:29-47`; ATT-reconciler `:64-112` (shape, NOT called) | NEW columns `bind_kind`/`node_key`/`action_record_id`/`staged_instance_id` (field_id relaxation = constraint MUTATION, new migration `> zzzz20260818120000`); NEW process-bind fn |
+| authorization (read) | L9-C | byte: `authorizeAttachmentDownload` ATT-storage `:254-298`; metadata: `/refs` inline gates ATT-routes `:405-434`; participant ATT-runtime `:201-244` | REUSE gate 0/1/3 + participant predicate; EXTEND gate 2 with a `bind_kind='process'` skip branch on BOTH surfaces (`/download` AND `/refs`'s own inline gate 2) |
 | retention | L9-D | GC `sweepUnboundAttachments` ATT-gc `:22`,`:29-50`; reconciler ATT-reconciler `:174-265` | REUSE — process rows are `unbound` like any other; no GC change |
-| download | L9-C | ATT-routes download `:247-303`; `/refs` `:365-454` | REUSE — same auth-proxied byte path, values-free 404/410 |
+| download | L9-C | ATT-routes `/download` `:247-303` | REUSE — same auth-proxied byte path, values-free 404/410 |
+| metadata (`/refs`) | L9-C | ATT-routes `handleRefs` `:365-454` | EXTEND — inline gate 2 needs the `bind_kind='process'` branch (else `hidden.has(null)=false` renders `fileName`); readback scope `approvals:read` (OD-L9-14) |
 | audit | L9-A, L9-G | `approval_records`; `action_record_id` FK | NEW binding tuple; audit carries attachment **id** only (OD-L9-12) |
 | failure semantics | L9-D, L9-E | rowCount-equality rollback ATT-reconciler `:93-109`; validators ATT-validation `:100-141` | REUSE — bind failure rolls back the action; upload validation verbatim |
 
@@ -289,10 +368,13 @@ Additional shipped facts the implementing slice depends on and must NOT silently
   asserts it (§3 G-9).
 - **The FE flag is the shipped one.** `apps/web/src/stores/featureFlags.ts:29`, default `false` at `:80`.
   No new FE flag (OD-L9-11).
-- **Legacy default.** With `APPROVAL_ATTACHMENTS_ENABLED` unset the router factory returns `null`
-  (ATT-routes `isApprovalAttachmentsEnabled :106-108`, `createApprovalAttachmentRouter :111-112`), the
-  process-upload/bind path is never registered, and the current 400 at APS `:10508` stays. Byte-for-byte
-  no-op when OFF.
+- **Legacy default — TWO independent gates, not one.** (a) With `APPROVAL_ATTACHMENTS_ENABLED` unset the
+  router factory returns `null` (ATT-routes `isApprovalAttachmentsEnabled :106-108`,
+  `createApprovalAttachmentRouter :111-112`), so the process-upload route is never registered and the 400
+  at APS `:10508` stays. (b) But the process BIND lives in the **always-registered** `dispatchAction`, so
+  the same flag MUST also gate the bind branch there (L9-D): OFF, `dispatchAction` ignores `attachmentIds`
+  and a `comment`/`handle`/`approve` dispatches byte-for-byte as today. "No-op when OFF" is only true once
+  BOTH gates hold — the router gate alone does not cover the dispatch path. Pinned by §3 G-12.
 
 ## 3. Acceptance gates
 
@@ -313,8 +395,11 @@ document authorizes none of them to run.
 | G-9 | The form-field refusal stays fenced | with the flag ON, a handler writing an attachment-TYPED form field is STILL 400 `APPROVAL_FIELD_WRITE_UNSUPPORTED_TYPE` (APS `:10508`) — the process path is a different surface | removing the `field.type === 'attachment'` disjunct at `:10507` reds a named test — proving the gap line is untouched |
 | G-10 | No new action verb | `APPROVAL_ACTION_TYPES` (`types/approval-product.ts:60-73`) is byte-identical after the slice; the process attachment rides `comment`/`handle`/`approve` | adding a verb to the const reds an exact-set census test (OD-L9-10) — the rider is an action field, not a verb |
 | G-11 | Values-free scoped correctly | upload/download/bind ERROR payloads carry no filename/uploader/size; the audit surface carries the attachment ID only; an AUTHORIZED download still serves the real `file_name` | a filename leaked into a 404/413/415 body reds a named test; an audit row carrying a filename reds another (OD-L9-12) |
-| G-12 | Legacy OFF is a byte-for-byte no-op | with `APPROVAL_ATTACHMENTS_ENABLED` unset, no process-upload route registers and APS `:10508` stays 400 | flipping the flag ON in the same fixture registers the route — proving OFF is the inert path, not an absent feature |
+| G-12 | Legacy OFF is a byte-for-byte no-op on BOTH gates | with `APPROVAL_ATTACHMENTS_ENABLED` unset: (a) no process-upload route registers and APS `:10508` stays 400; AND (b) an action carrying `attachmentIds` through the always-registered `dispatchAction` dispatches identically to today — a `comment` still succeeds, the bind branch is never entered | flipping the flag ON registers the route (proving OFF is inert, not absent); AND with the flag OFF an action carrying `attachmentIds` that previously succeeded as a `comment` STILL succeeds (mutation: an ungated bind branch would 400 it on rowCount-equality — reds this positive control) |
 | G-13 | GC/reconciler reuse | an abandoned (unbound) process attachment is swept at 168 h by the UNCHANGED `sweepUnboundAttachments`; its blob drains via the existing purge-intent worker | a bound process attachment is NEVER swept (bound-frozen) — the sweep is status-selected, unchanged from the form path |
+| G-14 | DDL relaxation + ordering + rollback | the new migration sorts after `zzzz20260818120000`; after it, a `bind_kind='process'` row with `field_id IS NULL` is ACCEPTED and a `form_field` row with NULL `field_id` is still REJECTED by the re-expressed `CHECK (bind_kind='process' OR field_id ~ '[!-~]')`; the `down` refuses (or documents purge-first) when any process row exists | running the ON-path write BEFORE the relaxation migration reds a named test (INSERT fails on `NOT NULL`) — proving the relaxation is a deploy precondition, not additive; a `down` that re-adds `NOT NULL` with a process row present is asserted to fail/refuse |
+| G-15 | `/refs` metadata skip is explicit, not accidental | a bound process attachment renders in `/refs` bound mode via an explicit `bind_kind='process'` branch with NO field-hidden evaluation; a `form_field` ref at a HIDDEN node still renders NO metadata (inline gate 2 intact for forms) | removing the `/refs` `bind_kind` branch and relying on `isFieldHiddenAtActiveNode(instanceId, null)` reds a named test — proving the skip is `bind_kind`-selected, not the `hidden.has(null)=false` accidental pass (the leak the byte-path branch alone would leave live) |
+| G-16 | Read scope is a decided posture (OD-L9-14) | a bound process attachment is readable by the SAME participant set the form path resolves (all participants, gate 1) on BOTH `/download` and `/refs`; an approver holding only `approvals:act` (not `approvals:read`) is REFUSED readback (values-free 404) — the upload/read asymmetry is asserted, not accidental | narrowing readback to approvers-only would require a new predicate — asserted ABSENT (Lock-7 D-4); an `approvals:act`-only principal's `/download` returns 404 while a participant with `approvals:read` succeeds |
 
 ## 4. Owner ratification block
 
@@ -335,22 +420,45 @@ are not re-proposed):
            reused": it forces an approver to WRITE requester form fields and drags in Lock-7 OD-L7-3's
            create-time record-link confused-deputy authz + immutable-snapshot binding (APS :10489-10493)]
   OD-L9-2  Storage shape — (a)[R] minimal reuse of approval_attachments via new columns bind_kind
-           ('form_field'|'process'), field_id nullable-when-process (CHECK re-expressed, ATT-migration
-           :31-32), node_key, action_record_id, staged_instance_id · (b) a new approval_process_attachments
-           table [rejected §L9-A: re-implements deriveStorageKey/scope-prefix/GC/purge state machine —
-           the "second narrower artifact" narrowing]. A sentinel non-blank field_id on a process row is
-           rejected under BOTH arms (OD-L9-4 trap)
-  OD-L9-3  Upload authority — (a)[R] ONLY the acting approver/handler at the ACTIVE node: shipped
-           approvals:act scope (types/approval-product.ts:4) AND the shipped active-seat check
-           (actorCanAct APS :8249, 403 APPROVAL_ASSIGNMENT_REQUIRED :8252-8253); identity server-derived,
-           never the body · (b) any instance participant may upload [rejected §L9-B: a CC recipient/past
-           actor has no standing to add process evidence and would falsify the audit tuple's node_key]
-  OD-L9-4  Download authz — (a)[R] reuse authorizeAttachmentDownload gates 0/1/3 unchanged; DROP gate 2
-           (hidden-field) via an explicit bind_kind='process' branch (a process attachment is not a form
-           field), ATT-storage :281-292 · (b) keep gate 2 with a sentinel field_id [rejected §L9-C:
-           isFieldHiddenAtActiveNode(sentinel) returns hidden.has(sentinel)=false ⇒ gate passes BY
-           ACCIDENT — the criterion becomes the vulnerability]. Failure stays values-free 404 / post-authz
-           410 (ATT-routes :284-289)
+           ('form_field'|'process'), node_key, action_record_id, staged_instance_id (pure ADDs,
+           legacy-inert), PLUS a field_id relaxation that is a CONSTRAINT MUTATION not an additive change:
+           ALTER field_id DROP NOT NULL + DROP the named shipped CONSTRAINT approval_att_field_nonblank +
+           re-ADD it as CHECK (bind_kind='process' OR field_id ~ '[!-~]') (ATT-migration :31-32), in a NEW
+           migration whose zzzz timestamp sorts AFTER zzzz20260818120000 (the current latest) and follows
+           the in-repo idempotent DROP…ADD / pg_constraint-guard shape (ATT-migration :79-80,:91-93). The
+           relaxation is a DEPLOY PRECONDITION (must land before the flag may go ON — a NOT NULL field_id
+           hard-fails the first NULL-field_id INSERT) and is ONE-WAY once ON (a down that re-adds NOT NULL
+           fails while any bind_kind='process' row exists ⇒ rollback requires purge-first) · (b) a new
+           approval_process_attachments table [rejected §L9-A: re-implements deriveStorageKey/scope-prefix/
+           GC/purge state machine — the "second narrower artifact" narrowing]. A sentinel non-blank
+           field_id on a process row is rejected under BOTH arms (OD-L9-4 trap). Pinned by G-14
+  OD-L9-3  Upload authority — (a)[R] ONLY the acting approver/handler at the ACTIVE node, enforced at TWO
+           points: (i) LOAD-BEARING at BIND time — the action's own actorCanAct inside dispatchAction
+           (APS :8249, 403 APPROVAL_ASSIGNMENT_REQUIRED :8252-8253), a genuine REUSE the security rests on;
+           (ii) fail-fast at UPLOAD time — a NEW surface: actorCanAct is a LOCAL const (APS :8249), not a
+           callable, and the shipped upload route has NO seat check (it gates on approvals:write +
+           templateVisible + resolveAttachmentField, ATT-routes :170,:186-246), so the slice must
+           re-derive the seat (currentNodeAssignments :8244 / actorAssignments :8247 /
+           assignmentMatchesActor / actorCanAct :8249). Process-upload scope is approvals:act
+           (types/approval-product.ts:4), DELIBERATELY DIFFERENT from the shipped form-upload's
+           approvals:write; identity server-derived, never the body; node_key NOT persisted at upload
+           (active node server-derived from staged_instance_id), stamped only at commit · (b) any instance
+           participant may upload [rejected §L9-B: a CC recipient/past actor has no standing to add process
+           evidence and would falsify the audit tuple's node_key]. NOT a reuse of a callable seat primitive
+           — the upload-time check is new code; corrects the draft's "REUSE actorCanAct" overclaim
+  OD-L9-4  Read authz on BOTH surfaces — (a)[R] reuse gates 0/1/3 unchanged and DROP gate 2 (hidden-field)
+           via an explicit bind_kind='process' branch on BOTH read surfaces, not just the byte path:
+           (i) /download's authorizeAttachmentDownload gate 2 (ATT-storage :281-292); AND (ii) /refs bound
+           mode's OWN inline gate 2 (isFieldHiddenAtActiveNode loop, ATT-routes :427-434) which does NOT
+           route through authorizeAttachmentDownload — corrects the draft's "download REUSE unchanged"
+           overclaim, /refs is an EXTEND · (b) keep gate 2 with a sentinel/NULL field_id [rejected §L9-C:
+           isFieldHiddenAtActiveNode does NOT throw for a live instance; for field_id=NULL it returns
+           hidden.has(null)=false ⇒ BOTH gates pass BY ACCIDENT and /refs echoes fileName — the criterion
+           becomes the vulnerability; verified leak direction, not a fail-closed drop]. Failure stays
+           values-free 404 / post-authz 410 (ATT-routes :284-289). Type surface widens in lock-step:
+           AttachmentRowForAuth.fieldId → string|null + bind_kind (ATT-storage :218), and the /download and
+           /refs inline SELECTs + row types (ATT-routes :255-270, :408-423) each SELECT bind_kind. Pinned by
+           G-3 (byte) + G-15 (/refs)
   OD-L9-5  Upload-time instance stamping — (a)[R] record staged_instance_id in a NEW column; leave
            instance_id NULL until commit so authorizeAttachmentDownload's !row.instanceId uploader-only
            branch (ATT-storage :269-271) is preserved; the bind UPDATE keys staged_instance_id=$1 so
@@ -398,9 +506,76 @@ are not re-proposed):
            (ATT-runtime :219-222) is self-satisfied by the process row itself once bound, so an
            attachment-only instance resolves participants with no change · (b) mint a process-specific
            predicate [rejected: Lock-7 §L7-A / D-4 "Do not mint a fourth participant predicate"]
+  OD-L9-14 Post-commit read scope — a bound process attachment has NO form-field hidden gate (dropped in
+           OD-L9-4), so "who may read it back" is a confidentiality value-call this document must decide,
+           not leave to omission (Lock-7 D-5 "who may fetch the instance" does NOT cover it). (a)[R] ALL
+           instance participants, via the reused gate-1 participant predicate on BOTH /download and /refs —
+           the same set that reads a comment; exposure stated plainly: the requester and any CC recipients
+           can read a file an approver attached at a node they never saw. Approvers-only and node-scoped are
+           the rejected arms BECAUSE each would require minting a new participant/scope predicate that
+           Lock-7 D-4 forbids · (b) approvers-only · (c) node-scoped [both rejected: new predicate, D-4].
+           SCOPE ASYMMETRY folded here: readback requires approvals:read (the shipped /download and /refs
+           gate, ATT-routes :251,:402) while upload requires approvals:act (OD-L9-3) — an act-only principal
+           can upload a process attachment they cannot read back; ACCEPTED (an approver ordinarily also
+           holds read; the alternative widens the upload gate to read, coupling two scopes). Pinned by G-16.
+           This is an owner value-call surfaced explicitly for ratification, [R]=(a)
 
 Runtime authorization: NONE. Ratifying this document authorizes DESIGN ONLY. Each contract still needs
 its own PR, required checks, an independent adversarial gate, and a ledger row. No flag change, no UAT,
 no deployment, no completion label. The gap line APS :10507-10508 stays fenced; the requester form
 attachment field is NOT reused as a carrier; instance-detail read scope (Lock-7 D-5) remains external.
 ```
+
+## 5. Independent-review disposition (2026-08-19)
+
+An independent Opus refute-first review of PR #5011 at baseline `origin/main@2a3b8033f5` returned
+REQUEST-CHANGES with four P2s, two P3s, and two NITs. All are folded above; each was re-verified against
+the baseline code before folding.
+
+**P2 (ratify-blocking) — all closed:**
+
+- **P2-1** (upload ownership "REUSE actorCanAct" infeasible-as-stated). CONFIRMED: `actorCanAct` is a local
+  `const` inside `dispatchAction` (APS `:8249`), not a callable; the shipped upload route has no seat check
+  (gates on `approvals:write`+visibility). Fixed by splitting L9-B / OD-L9-3 into bind-time REUSE
+  (load-bearing) and upload-time NEW (re-derived seat), and correcting the §2 table row.
+- **P2-2** (`/refs` ignored; "REUSE unchanged" false). CONFIRMED: `/refs` bound mode (ATT-routes
+  `:365-454`) has its own inline gate 2 not routed through `authorizeAttachmentDownload`; for a NULL
+  `field_id`, `isFieldHiddenAtActiveNode` (ATT-runtime `:252-268`) returns `hidden.has(null)=false` (a leak,
+  not a fail-closed drop — verified) and echoes `fileName`. Fixed by adding the `/refs` EXTEND to L9-C,
+  OD-L9-4, the §2 table (new metadata row), and gate G-15; scope mismatch (`act` upload vs `read` readback)
+  settled in OD-L9-14.
+- **P2-3** (DDL/deploy-ordering hazard unstated). CONFIRMED: `field_id` is `NOT NULL` under the named
+  shipped constraint `approval_att_field_nonblank`; the relaxation is a constraint mutation. Fixed by
+  rewriting the L9-A storage bullet + OD-L9-2 with the new migration name/ordering
+  (`> zzzz20260818120000`), the in-repo idempotent shape, the deploy precondition, the one-way-once-ON
+  rollback hazard, and gate G-14.
+- **P2-4** (post-commit read-scope settled silently). CONFIRMED as an omission. Fixed by adding OD-L9-14
+  (an explicit owner value-call, [R]=all-participants, rejected arms cited to Lock-7 D-4) and gate G-16.
+
+**P3 — both closed:**
+
+- **P3-1** ("byte-for-byte no-op OFF" proven only for the router). CONFIRMED: the bind runs in the
+  always-registered `dispatchAction`. Fixed by flag-gating the bind branch (L9-D), the §2 legacy-default
+  fact (two gates), and G-12 (positive control: an OFF action carrying `attachmentIds` still succeeds as a
+  `comment`).
+- **P3-2** (node_key internal inconsistency: written at commit vs upload "targets" it). CONFIRMED. Fixed by
+  removing the upload-time `node_key` (active node server-derived from `staged_instance_id`; durable
+  `node_key` stamped only at commit) and adding the advance-race resolution in L9-D.
+
+**NITs — both closed:**
+
+- **NIT-1** (`AttachmentRowForAuth.fieldId` line + type). CONFIRMED `:218` (not `:217`), non-optional.
+  Fixed: L9-A / OD-L9-4 now enumerate every type-widening site (`fieldId → string|null` + `bind_kind` in
+  the interface `:218` and the `/download` `:255-270` and `/refs` `:408-423` inline SELECTs/row types).
+- **NIT-2** (`types/approval-product.ts` unresolvable from root). CONFIRMED. Fixed by defining the `types/*`
+  anchor prefix (`= packages/core-backend/src/types/*`) in the baseline note.
+
+**Review's survived-attack prose — one factual error noted, no doc change (not a finding):** the review's
+"no delete route exists" is inaccurate — a shipped `router.delete` (ATT-routes `:320-343`) retracts an
+uploader's own `status='unbound'` row. It cannot reach a bound row, so OD-L9-6's post-commit immutability is
+unaffected and in fact strengthened; L9-D now cites it as supporting evidence. This is an erratum in the
+review's favourable prose, not a P-level finding against the design.
+
+**Nothing rebutted as a false-positive:** every P1/P2/P3/NIT reproduced against the baseline. §4 remains
+BLANK (ratify-ready, not ratified). This document is DESIGN-ONLY and authorizes no implementation; it awaits
+owner ratification (or in-session goal-set provenance) before any slice lands.
