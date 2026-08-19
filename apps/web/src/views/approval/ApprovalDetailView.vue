@@ -722,13 +722,13 @@
                next pick. `addSignUserIds` (the submit payload shape) is unchanged. -->
           <div v-if="addSignUserIds.length > 0" class="approval-detail__add-sign-chips" data-testid="approval-add-sign-chips">
             <el-tag
-              v-for="uid in addSignUserIds"
+              v-for="(uid, chipIndex) in addSignUserIds"
               :key="uid"
               closable
               class="approval-detail__add-sign-chip"
               @close="removeAddSignUser(uid)"
             >
-              {{ addSignUserLabels[uid] || uid }}
+              {{ addSignUserLabels[uid] || `成员 ${chipIndex + 1}` }}
             </el-tag>
           </div>
           <ApprovalUserPicker
@@ -1965,11 +1965,21 @@ function openAddSignDialog() {
 // B3-04 D-2: repeated-pick handler for the add-sign target picker — append the picked id (no
 // duplicates), remember its display label for the chip, then reset the picker's transient slot
 // so it is ready for the next pick.
+//
+// raw-id-exposure-fix (20260819): `searchApprovalDirectoryUsers` defaults a missing/non-string
+// backend `name` to `''` (see api.ts) — a real, reachable shape, not a type-only possibility. The
+// old `option.name || option.id` fallback rendered the raw directory user id verbatim as the chip
+// text in that case. Only a non-blank name is stored here now; the template falls back to a
+// values-free, still-distinguishable per-list ordinal (`成员 N`) when no label is stored, the same
+// convention used by `assignmentDisplayLabel`/`reducibleAssignees` above.
 function onAddSignUserSelected(option: ApprovalDirectoryUser | null): void {
   if (!option) return
   if (!addSignUserIds.value.includes(option.id)) {
     addSignUserIds.value = [...addSignUserIds.value, option.id]
-    addSignUserLabels.value = { ...addSignUserLabels.value, [option.id]: option.name || option.id }
+    const name = option.name.trim()
+    if (name) {
+      addSignUserLabels.value = { ...addSignUserLabels.value, [option.id]: name }
+    }
   }
   addSignPickerValue.value = null
 }

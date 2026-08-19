@@ -110,6 +110,12 @@ vi.mock('../src/approvals/store', () => ({
 // assertions further down keep working unchanged. `vi.importActual` keeps every OTHER export
 // (dispatchAction, ApprovalApiError, ...) real — only this one function is overridden.
 // ---------------------------------------------------------------------------
+// raw-id-exposure-fix (20260819): `user_9` has a blank `name` — the same shape
+// `searchApprovalDirectoryUsers` (api.ts) produces for a real backend directory record whose
+// `name` field is missing/non-string (defaulted to `''`, not omitted). Appended rather than
+// replacing any of the three named fixtures above, so every pre-existing assertion that reads
+// user_2/3/4 stays byte-identical; `toBeGreaterThanOrEqual(3)` / `>= 3` option-count assertions
+// elsewhere in this file are unaffected by the fourth entry.
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -118,6 +124,7 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_2', name: '李四', email: '' },
       { id: 'user_3', name: '王五', email: '' },
       { id: 'user_4', name: '赵六', email: '' },
+      { id: 'user_9', name: '', email: '' },
     ]),
   }
 })
@@ -1357,6 +1364,34 @@ describe('Approval E2E Lifecycle', () => {
       // friendly name, not the raw id, proving the `select` event's richer option payload wired
       // through to the label map.
       expect(dialog.querySelector('[data-testid="approval-add-sign-chips"]')?.textContent).toContain('李四')
+    })
+
+    // Discriminating negative (raw-id-exposure-fix, 20260819): `onAddSignUserSelected`
+    // (ApprovalDetailView.vue) used to store `option.name || option.id` — when the picked
+    // directory user has no name (`user_9` below, the exact shape a real backend record with a
+    // missing/non-string `name` produces — see the api.ts mock comment above), the chip rendered
+    // the raw directory user id verbatim. Goes through the REAL ApprovalUserPicker + REAL
+    // directory search mock, not a hand-rolled stub payload.
+    it('a picked user with no directory name never renders the raw id as the chip label (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'user_9'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const chips = dialog.querySelector('[data-testid="approval-add-sign-chips"]')
+      expect(chips?.textContent).not.toContain('user_9')
+      // Values-free but still distinguishable — a stable ordinal, not a blank chip.
+      expect(chips?.textContent?.trim()).toBe('成员 1')
     })
   })
 
