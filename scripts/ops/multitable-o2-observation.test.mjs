@@ -401,29 +401,144 @@ test('drift guard: observed tables exist in migrations (no phantom sinks)', () =
 // ---------------------------------------------------------------------------
 // Runbook: host-reaching commands must be OWNER-GATED
 // ---------------------------------------------------------------------------
+//
+// Verb inventory — WHY each family is listed:
+//   ssh / sftp / scp / rsync      remote shell + file transfer: the canonical host reach.
+//   curl / wget                   arbitrary HTTP from an operator shell — the natural way
+//                                 to POST this drill's own destructive revert-execute /
+//                                 reset-execute endpoints.
+//   psql / pg_dump / pg_restore   DB-reaching CLIs; psql runs arbitrary DDL/DML via -c.
+//                                 ONE positive exemption below: the exact invocation of
+//                                 the observation file this same test proves read-only.
+//   docker / kubectl / helm       container & orchestrator control planes (bare `docker`
+//                                 covers exec/compose/run/cp and every other subcommand).
+//   aws / gcloud / az             cloud-provider CLIs (infrastructure mutation).
+//   gh workflow / gh api /        GitHub-side dispatch surfaces; the runbook itself states
+//   gh run rerun                  that dispatching the containment workflow reaches the
+//                                 deploy host over ssh.
+// Local read-only tools (git, node, pnpm, `gh pr view`) are deliberately out of scope.
+// This is an inventory, not a proof of completeness: widening it can only ADD reds
+// (fail-closed direction) — it can never un-gate a block.
+const HOST_VERB_RE =
+  /\b(?:ssh|sftp|scp|rsync|curl|wget|psql|pg_dump|pg_restore|docker|kubectl|helm|aws|gcloud|az|gh\s+workflow|gh\s+api|gh\s+run\s+rerun)\b/gi
 
-const HOST_COMMAND_RE = /\b(ssh|scp|rsync|kubectl|gh workflow run|docker exec|docker compose)\b/i
+// The ONE exempt invocation: running the observation SQL file — proven read-only by the
+// statement-head census at the top of this test — against the operator's own
+// already-authorized database, with NO further arguments. Anchored at the occurrence
+// (no `m` flag: `^` must match the psql token itself, so an exempt invocation elsewhere
+// in the same block can never launder a hostile occurrence), and the lookahead requires
+// the path to be immediately followed by a closing backtick or the end of that same line
+// — a trailing ` -c 'ALTER …'`, ` < file`, or ` \` continuation must NOT ride the
+// exemption.
+const EXEMPT_PSQL_RE =
+  /^psql "\$DATABASE_URL" -f scripts\/ops\/multitable-o2-observation\.sql(?=`|[ \t]*(?:\n|$))/
 
-/** Split markdown into blocks: a block is a list item (with its indented continuation
- *  lines), a table row, a heading, or a blank-line-separated paragraph. */
+/** Structural block model — the gating unit. A block is exactly one of:
+ *    - a fenced code block (``` or ~~~ up to its closing fence or EOF). If the fence
+ *      opens while a list item is textually open (no blank line in between), the fence is
+ *      FOLDED INTO that list item's block; otherwise the fence is its own block and its
+ *      marker context additionally includes ONLY the single non-blank line immediately
+ *      above the opening fence (the fence's introducing line);
+ *    - a list item: a line starting with a bullet (-, *, +) or an ordered marker
+ *      (`1.` / `1)`), plus its directly following continuation lines. EVERY list-item
+ *      start begins a NEW block, so a marker on item N never gates item N+1 or a nested
+ *      child item;
+ *    - a heading line (own block);
+ *    - a single table row (own block per row);
+ *    - a contiguous blockquote run;
+ *    - a contiguous run of any other non-blank lines (a paragraph).
+ *  A blank line outside a fence ALWAYS terminates the current block. The OWNER-GATED
+ *  marker gates only the block it appears in (plus the two fence inheritances above);
+ *  a marker in an earlier, separate block never satisfies the scan.
+ *  Returns [{ text, extraContext }] — extraContext is the inherited introducing line for
+ *  a standalone fence, '' otherwise.
+ */
 function markdownBlocks(md) {
+  const lines = md.split('\n')
   const blocks = []
-  let current = []
-  for (const line of md.split('\n')) {
-    const isNewBlock = /^\s*$/.test(line) || /^\s*[-*] /.test(line) || /^#/.test(line) || /^\|/.test(line) || /^> /.test(line)
-    if (isNewBlock && current.length > 0) {
-      blocks.push(current.join('\n'))
-      current = []
+  let cur = null // { kind: 'list' | 'para' | 'quote', lines: [...] }
+  const flush = () => {
+    if (cur) {
+      blocks.push({ text: cur.lines.join('\n'), extraContext: '' })
+      cur = null
     }
-    if (!/^\s*$/.test(line)) current.push(line)
   }
-  if (current.length > 0) blocks.push(current.join('\n'))
+  const LIST_START = /^\s*(?:[-*+]|\d{1,4}[.)])\s+/
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const fenceMatch = line.match(/^\s*(```|~~~)/)
+    if (fenceMatch) {
+      const marker = fenceMatch[1]
+      const fenceLines = [line]
+      let j = i + 1
+      for (; j < lines.length; j++) {
+        fenceLines.push(lines[j])
+        if (lines[j].trimStart().startsWith(marker)) break
+      }
+      if (cur && cur.kind === 'list') {
+        cur.lines.push(...fenceLines) // fence folded into the open list item
+      } else {
+        const intro = i > 0 && lines[i - 1].trim() !== '' ? lines[i - 1] : ''
+        flush()
+        blocks.push({ text: fenceLines.join('\n'), extraContext: intro })
+      }
+      i = j
+      continue
+    }
+    if (/^\s*$/.test(line)) {
+      flush()
+      continue
+    }
+    if (/^#{1,6}\s/.test(line) || /^\s*\|/.test(line)) {
+      flush()
+      blocks.push({ text: line, extraContext: '' })
+      continue
+    }
+    if (/^\s*>/.test(line)) {
+      if (cur && cur.kind === 'quote') cur.lines.push(line)
+      else {
+        flush()
+        cur = { kind: 'quote', lines: [line] }
+      }
+      continue
+    }
+    if (LIST_START.test(line)) {
+      flush()
+      cur = { kind: 'list', lines: [line] }
+      continue
+    }
+    if (cur && (cur.kind === 'list' || cur.kind === 'para')) cur.lines.push(line)
+    else {
+      flush()
+      cur = { kind: 'para', lines: [line] }
+    }
+  }
+  flush()
   return blocks
 }
 
-/** Blocks that mention a host-reaching command but are not marked OWNER-GATED. */
+/** All host-verb occurrences in a block's text (matchAll clones the regex, so the /g
+ *  lastIndex state can never leak between calls). */
+function hostVerbOccurrences(text) {
+  return [...text.matchAll(HOST_VERB_RE)]
+}
+
+/** An occurrence is exempt ONLY if it is a psql token that begins, at that exact
+ *  position, the proven-read-only observation-file invocation with no further args. */
+function isExemptOccurrence(text, m) {
+  return m[0].toLowerCase() === 'psql' && EXEMPT_PSQL_RE.test(text.slice(m.index))
+}
+
+/** Blocks containing at least one non-exempt host-reaching command occurrence whose own
+ *  block (or inherited fence context) carries no OWNER-GATED marker. */
 function findUngatedHostCommands(md) {
-  return markdownBlocks(md).filter((b) => HOST_COMMAND_RE.test(b) && !b.includes('OWNER-GATED'))
+  const offenders = []
+  for (const b of markdownBlocks(md)) {
+    if (b.text.includes('OWNER-GATED') || b.extraContext.includes('OWNER-GATED')) continue
+    const live = hostVerbOccurrences(b.text).filter((m) => !isExemptOccurrence(b.text, m))
+    if (live.length > 0) offenders.push(b.text)
+  }
+  return offenders
 }
 
 test('runbook: every host-reaching command block is OWNER-GATED', () => {
@@ -432,13 +547,118 @@ test('runbook: every host-reaching command block is OWNER-GATED', () => {
 })
 
 test('runbook: gating scan is not vacuous — commands exist AND the scanner catches an unmarked one', () => {
-  // Positive control 1: the runbook genuinely mentions host-reaching commands (else the
-  // "all gated" assertion above would be green against nothing).
-  const gatedMentions = markdownBlocks(runbookText).filter((b) => HOST_COMMAND_RE.test(b))
-  assert.ok(gatedMentions.length >= 2, 'expected ≥2 host-command mentions in the runbook')
+  // Positive control 1: the runbook genuinely contains gated host-reaching commands (else
+  // the "all gated" assertion above would be green against nothing).
+  const gatedMentions = markdownBlocks(runbookText).filter(
+    (b) =>
+      (b.text.includes('OWNER-GATED') || b.extraContext.includes('OWNER-GATED')) &&
+      hostVerbOccurrences(b.text).some((m) => !isExemptOccurrence(b.text, m)),
+  )
+  assert.ok(gatedMentions.length >= 3, 'expected >=3 gated host-command blocks in the runbook')
   // Positive control 2: an unmarked command in a doctored copy IS caught.
   const doctored = runbookText + '\n\n- [ ] run `ssh deploy@host disable-triggers.sh` now\n'
   assert.equal(findUngatedHostCommands(doctored).length, 1)
+})
+
+test('runbook: widened verbs are caught — ungated curl POST and psql write are red', () => {
+  // The drill's own destructive endpoint reached via curl, unmarked: exactly one offender.
+  const curlAttack =
+    runbookText +
+    '\n\nFinish by running `curl -X POST "$HOST/api/base/sheets/1/revert-execute" -H "Authorization: Bearer $T"` yourself.\n'
+  const curlOffenders = findUngatedHostCommands(curlAttack)
+  assert.equal(curlOffenders.length, 1)
+  assert.match(curlOffenders[0], /revert-execute/)
+  // An unmarked psql write statement: exactly one offender.
+  const psqlAttack =
+    runbookText +
+    '\n\nThen run `psql "$DATABASE_URL" -c \'ALTER TABLE meta_sheets DISABLE TRIGGER ALL\'` to stand down.\n'
+  const psqlOffenders = findUngatedHostCommands(psqlAttack)
+  assert.equal(psqlOffenders.length, 1)
+  assert.match(psqlOffenders[0], /ALTER TABLE/)
+  // wget is in the same family as curl.
+  const wgetAttack = runbookText + '\n\nAlso `wget --post-data=x "$HOST/api/reset-execute"` here.\n'
+  assert.equal(findUngatedHostCommands(wgetAttack).length, 1)
+})
+
+test('runbook: psql exemption is exact — abuse of the allowlisted prefix stays red', () => {
+  // Allowlisted invocation + trailing write args must NOT ride the exemption.
+  const trailing =
+    runbookText +
+    '\n\nRun `psql "$DATABASE_URL" -f scripts/ops/multitable-o2-observation.sql -c \'ALTER TABLE x ADD y int\'` now.\n'
+  assert.equal(findUngatedHostCommands(trailing).length, 1)
+  // A hostile psql occurrence is not laundered by an exempt invocation later in the SAME
+  // block (the exemption is anchored per-occurrence, not per-block).
+  const laundered =
+    runbookText +
+    '\n\nFirst `psql "$DATABASE_URL" -c \'ALTER TABLE meta_sheets DISABLE TRIGGER ALL\'` and then\n`psql "$DATABASE_URL" -f scripts/ops/multitable-o2-observation.sql` afterwards.\n'
+  assert.equal(findUngatedHostCommands(laundered).length, 1)
+  // Backslash line-continuation after the allowlisted path must not ride the exemption.
+  const continued =
+    runbookText +
+    '\n\nRun `psql "$DATABASE_URL" -f scripts/ops/multitable-o2-observation.sql \\\n  -c \'DROP TABLE meta_sheets\'` now.\n'
+  assert.equal(findUngatedHostCommands(continued).length, 1)
+  // POSITIVE CONTROL for the exemption itself: the exact read-only invocation, ungated,
+  // is NOT an offender — and the real runbook still carries it in an ungated block (the
+  // §2 baseline step), so the exemption is load-bearing, not dead code.
+  const exemptDoctored =
+    runbookText +
+    '\n\nBaseline again: `psql "$DATABASE_URL" -f scripts/ops/multitable-o2-observation.sql` only.\n'
+  assert.equal(findUngatedHostCommands(exemptDoctored).length, 0)
+  const realExemptBlocks = markdownBlocks(runbookText).filter(
+    (b) =>
+      !b.text.includes('OWNER-GATED') &&
+      hostVerbOccurrences(b.text).some((m) => isExemptOccurrence(b.text, m)),
+  )
+  assert.equal(realExemptBlocks.length, 1, 'expected exactly the §2 baseline psql step to ride the exemption')
+  assert.match(realExemptBlocks[0].text, /Run the full observation file/)
+})
+
+test('runbook: OWNER-GATED scoping is block-local — distant markers do not gate', () => {
+  // A fence whose only marker sits in a DIFFERENT earlier block (blank line between): red.
+  const fenceAttack =
+    runbookText +
+    '\n\nOWNER-GATED: an unrelated marked step.\n\n```bash\nssh deploy@host systemctl stop metasheet\n```\n'
+  assert.equal(findUngatedHostCommands(fenceAttack).length, 1)
+  // The historical scoping hole: marked paragraph, then adjacent numbered items, then a
+  // fence — the old splitter merged all of it into the marked paragraph. Must be red.
+  const mergeAttack =
+    runbookText +
+    '\n\nOWNER-GATED: rotate the drill log (unrelated marked step).\n1. first do the harmless step\n2. then run:\n```bash\nssh deploy@host systemctl stop metasheet\n```\n'
+  assert.equal(findUngatedHostCommands(mergeAttack).length, 1)
+  // A marker on list item N does not gate item N+1.
+  const siblingAttack =
+    runbookText + '\n\n- OWNER-GATED: step A does something manual\n- run `ssh deploy@host stop` here\n'
+  assert.equal(findUngatedHostCommands(siblingAttack).length, 1)
+  // NEGATIVE CONTROLS (the two sanctioned inheritances — no over-tightening):
+  // marker on the fence's introducing line gates the fence…
+  const introGated =
+    runbookText + '\n\nOWNER-GATED: run exactly this, with per-rung authorization:\n```bash\nssh deploy@host verify-posture\n```\n'
+  assert.equal(findUngatedHostCommands(introGated).length, 0)
+  // …and a marker inside a list item gates a fence folded into that same item.
+  const itemGated =
+    runbookText + '\n\n- [ ] OWNER-GATED: with authorization, run:\n```bash\nssh deploy@host verify-posture\n```\n'
+  assert.equal(findUngatedHostCommands(itemGated).length, 0)
+  // …and fence collection is load-bearing: a blank line INSIDE a gated fence must not
+  // split the fence into an ungated paragraph (discriminates the fence branch from
+  // plain-line continuation).
+  const fenceWithBlank =
+    runbookText + '\n\nOWNER-GATED: run exactly this:\n```bash\n\nssh deploy@host verify-posture\n```\n'
+  assert.equal(findUngatedHostCommands(fenceWithBlank).length, 0)
+})
+
+test('runbook: removing OWNER-GATED from a real gated block goes red (marker is load-bearing)', () => {
+  // §1 rung-posture block (gh workflow run + ssh).
+  const anchor1 = 'OWNER-GATED: dispatch the existing'
+  assert.ok(runbookText.includes(anchor1), 'mutation anchor 1 missing from runbook')
+  const stripped1 = findUngatedHostCommands(runbookText.replace(anchor1, 'dispatch the existing'))
+  assert.equal(stripped1.length, 1)
+  assert.match(stripped1[0], /gh workflow run/)
+  // §5 rollback block (ssh / workflow dispatch).
+  const anchor2 = 'OWNER-GATED: any ssh session'
+  assert.ok(runbookText.includes(anchor2), 'mutation anchor 2 missing from runbook')
+  const stripped2 = findUngatedHostCommands(runbookText.replace(anchor2, 'any ssh session'))
+  assert.equal(stripped2.length, 1)
+  assert.match(stripped2[0], /rollback \(including re-running the containment workflow\)/)
 })
 
 test('runbook: declares itself non-executing and authorization-free', () => {
