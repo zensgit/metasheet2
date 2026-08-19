@@ -451,7 +451,9 @@ async function awaitApprovalDepartureTransferBarrier(
 export type ApprovalDepartureTransferSkipReason =
   | 'not-found'
   | 'not-pending'
+  | 'attendance-central-unsupported'
   | 'no-active-seat'
+  | 'target-is-requester'
   | 'target-already-assignee'
   | 'error'
 
@@ -7935,6 +7937,15 @@ export class ApprovalProductService {
    * - Fail-closed default (locked, not an enum): when no ACTIVE manager is resolvable, the
    *   assignment is LEFT IN PLACE — an audit row (`outcome: 'no_manager_resolved'`) plus an operator
    *   warning log are emitted. Never auto-approved, never dropped, never escalated to an admin seat.
+   * - P26 attendance boundary: an attendance-central instance is skipped (`attendance-central-
+   *   unsupported`), mirroring the identical `assertAttendanceCentralMutationFailClosed` guard the
+   *   SLA timeout transfer runs — both are SYSTEM-actor writers on this discovery shape
+   *   (`source_system='platform' AND status='pending'`, which cannot itself distinguish an
+   *   attendance-central row), unlike `bulkReassignApprovals`'s authorized-human-actor path.
+   * - Self-approval guard: mirrors `bulkReassignApprovals`'s `target-is-requester` skip — a
+   *   departed approver's manager can, in a small org chart, be the instance's own requester; that
+   *   case is skipped (`target-is-requester`) rather than seating the requester as their own
+   *   approver by substitution.
    * - NOT parallel-restricted: unlike the SLA transfer (which hands the WHOLE node over and must
    *   therefore refuse an in-flight parallel region), this method only ever touches the departed
    *   user's OWN seat rows by `assignee_id` — it never deactivates a node wholesale — so a departed
@@ -7979,6 +7990,10 @@ export class ApprovalProductService {
       )
     }
 
+    // Deliberately UNBOUNDED (bulkReassignApprovals caps admin-driven discovery at LIMIT 200,
+    // because that path is an interactive admin request). A departure is a one-time system-fired
+    // sweep of exactly one now-departed user's own pending seats — bounded by how many approvals a
+    // single person can hold, not by an admin's blast radius — so no cap is applied here.
     const candidates = await pool.query<{ instance_id: string }>(
       `SELECT DISTINCT a.instance_id
          FROM approval_assignments a
@@ -8014,6 +8029,24 @@ export class ApprovalProductService {
           await client.query('ROLLBACK')
           skip(instanceId, 'not-pending')
           continue
+        }
+
+        // P26: attendance-central instances are not a departure-transfer target on this system
+        // writer path, mirroring the identical guard in `applyNodeTimeoutEffect` immediately above
+        // (both are SYSTEM-actor writers, not an authorized-human admin path like
+        // `bulkReassignApprovals`'s `classifyAndLockAttendanceRequestForInstance`) — this method's
+        // discovery filter (`source_system='platform' AND status='pending'`) alone cannot
+        // distinguish an attendance-central instance from any other, so the fail-closed check must
+        // run per-instance, after the row is locked.
+        try {
+          await assertAttendanceCentralMutationFailClosed(client, instance)
+        } catch (error) {
+          if (error instanceof AttendanceCentralApprovalError) {
+            await client.query('ROLLBACK')
+            skip(instanceId, 'attendance-central-unsupported')
+            continue
+          }
+          throw error
         }
 
         // Holds the instance FOR UPDATE — a concurrent decide/reassign on this instance blocks here
@@ -8069,6 +8102,18 @@ export class ApprovalProductService {
             `approval departure transfer: no manager resolved for departed user on instance ${instanceId}; seat(s) left in place (operator action required)`,
           )
           result.noManagerResolved.push(instanceId)
+          continue
+        }
+
+        // Mirrors bulkReassignApprovals's `target-is-requester` skip: the resolved manager must not
+        // become an approver of their own request. A departed approver's manager CAN be the
+        // instance's requester (a small-team org chart), and nothing else in this method excludes
+        // that — self-approval-by-substitution is exactly the shape adversarial review looks for.
+        const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
+        const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
+        if (requesterId && requesterId === resolvedManagerId) {
+          await client.query('ROLLBACK')
+          skip(instanceId, 'target-is-requester')
           continue
         }
 

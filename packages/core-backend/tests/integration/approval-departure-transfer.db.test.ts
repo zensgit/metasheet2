@@ -31,6 +31,8 @@ const OTHER = `dep-other-${TS}` // E-1 control: co-assignee at the same node, mu
 const U2 = `dep-u2-${TS}` // E-2 positive control: a resolvable-manager departure in the same fixture
 const NOMGR = `dep-nomgr-${TS}` // E-2 negative: no directory link at all → no manager resolvable
 const U3 = `dep-u3-${TS}` // concurrency race: sole assignee, resolvable manager
+const U4 = `dep-u4-${TS}` // P26: departed user on an attendance-central instance (must skip, not move)
+const U5 = `dep-u5-${TS}` // self-approval guard: U5's manager (MGR) is ALSO the requester of U5's instance
 const DELEGATOR = `dep-delegator-${TS}` // E-3: delegates away, then departs
 const DELEGATEE = `dep-delegatee-${TS}` // E-3: holds the substituted seat, then departs
 const DELEGATEE_MGR = `dep-delegatee-mgr-${TS}` // leader of DEPT2
@@ -88,6 +90,7 @@ async function createPublishedInstance(
   service: ApprovalProductService,
   key: string,
   userIds: string[],
+  requesterId: string = REQ,
 ): Promise<string> {
   const template = await service.createTemplate({
     key,
@@ -98,7 +101,7 @@ async function createPublishedInstance(
   await service.publishTemplate(template.id, { policy: { allowRevoke: true } })
   const approval = await service.createApproval(
     { templateId: template.id, formData: { reason: 'r' } },
-    { userId: REQ, userName: REQ },
+    { userId: requesterId, userName: requesterId },
   )
   return approval.id
 }
@@ -113,7 +116,7 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
     await pool.query(
       `INSERT INTO users (id, email, password_hash)
        VALUES ($1,$2,'x'),($3,$4,'x'),($5,$6,'x'),($7,$8,'x'),($9,$10,'x'),($11,$12,'x'),
-              ($13,$14,'x'),($15,$16,'x'),($17,$18,'x')`,
+              ($13,$14,'x'),($15,$16,'x'),($17,$18,'x'),($19,$20,'x'),($21,$22,'x')`,
       [
         REQ, `${REQ}@example.test`,
         U, `${U}@example.test`,
@@ -124,6 +127,8 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         DELEGATOR, `${DELEGATOR}@example.test`,
         DELEGATEE, `${DELEGATEE}@example.test`,
         DELEGATEE_MGR, `${DELEGATEE_MGR}@example.test`,
+        U4, `${U4}@example.test`,
+        U5, `${U5}@example.test`,
       ],
     )
     // NOMGR deliberately gets a `users` row (so the target-active check on a hypothetical resolve
@@ -132,6 +137,9 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
     // absence-of-user.
     await pool.query(`INSERT INTO users (id, email, password_hash) VALUES ($1,$2,'x')`, [NOMGR, `${NOMGR}@example.test`])
     await grantApprovalWriteForIntegrationActor(REQ)
+    // MGR also acts as a REQUESTER for the self-approval-guard test below (MGR is both U5's manager
+    // and the requester of U5's own instance there).
+    await grantApprovalWriteForIntegrationActor(MGR)
 
     integrationId = (
       await pool.query<{ id: string }>(
@@ -180,11 +188,11 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
       )
     }
 
-    // DEPT1: MGR is leader; U, U2, U3 are ordinary members (all managed by MGR).
+    // DEPT1: MGR is leader; U, U2, U3, U4, U5 are ordinary members (all managed by MGR).
     const accMgr = await makeAccount(MGR, 'MGR', DEPT1)
     await link(accMgr, MGR)
     await primaryOf(accMgr, dept1Id)
-    for (const [extId, localId] of [[U, U] as const, [U2, U2] as const, [U3, U3] as const]) {
+    for (const [extId, localId] of [[U, U] as const, [U2, U2] as const, [U3, U3] as const, [U4, U4] as const, [U5, U5] as const]) {
       const acc = await makeAccount(extId, extId, undefined)
       await link(acc, localId)
       await primaryOf(acc, dept1Id)
@@ -228,7 +236,7 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         await pool.query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
       }
       await pool.query(`DELETE FROM users WHERE id = ANY($1)`, [
-        [REQ, U, MGR, OTHER, U2, NOMGR, U3, DELEGATOR, DELEGATEE, DELEGATEE_MGR],
+        [REQ, U, MGR, OTHER, U2, NOMGR, U3, U4, U5, DELEGATOR, DELEGATEE, DELEGATEE_MGR],
       ])
     } catch {
       /* best effort */
@@ -440,6 +448,78 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
   )
 
   it(
+    'P26: an attendance-central instance is skipped, not moved — the departed user\'s seat on it is byte-identical after the call, ' +
+      "and a genuinely non-attendance instance in the SAME run for the SAME user DOES transfer",
+    async () => {
+      const keyAttendance = `dep-p26-attendance-${TS}`
+      const keyPlatform = `dep-p26-platform-${TS}`
+      templateKeys.push(keyAttendance, keyPlatform)
+      const attendanceInstanceId = await createPublishedInstance(service, keyAttendance, [U4])
+      const platformInstanceId = await createPublishedInstance(service, keyPlatform, [U4])
+
+      // Mark ONLY the first instance attendance-central, mirroring the sole classification signal
+      // `classifyAndLockAttendanceRequestForInstance` reads (workflow_key === 'attendance.request')
+      // — no attendance_requests row is needed for the classification itself to fire.
+      await pool.query(`UPDATE approval_instances SET workflow_key = 'attendance.request' WHERE id = $1`, [attendanceInstanceId])
+
+      const attendanceSeatBefore = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`, [attendanceInstanceId])
+      ).rows[0]
+
+      const result = await service.applyApprovalDepartureTransfer(U4)
+
+      // Negative: the attendance-central instance is neither transferred nor silently no-manager'd
+      // — it is a DISTINCT skip reason, and the seat is UNCHANGED.
+      expect(result.transferred).not.toContain(attendanceInstanceId)
+      expect(result.noManagerResolved).not.toContain(attendanceInstanceId)
+      expect(result.skipped).toContainEqual({ id: attendanceInstanceId, reason: 'attendance-central-unsupported' })
+      const attendanceSeatAfter = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE id = $1`, [attendanceSeatBefore.id])
+      ).rows[0]
+      expect(attendanceSeatAfter).toEqual(attendanceSeatBefore)
+      // No 'reassign' audit row (the ROLLBACK inside the P26 guard discards any partial write) — the
+      // instance still carries only its original 'created' row from createApproval.
+      const attendanceReassignCount = await pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_records WHERE instance_id = $1 AND action = 'reassign'`,
+        [attendanceInstanceId],
+      )
+      expect(Number(attendanceReassignCount.rows[0].count)).toBe(0)
+
+      // Positive control (SAME run, SAME departed user): the genuinely non-attendance instance DOES transfer.
+      expect(result.transferred).toContain(platformInstanceId)
+      const platformSeat = (
+        await pool.query<AssignmentRow>(`SELECT assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`, [platformInstanceId])
+      ).rows[0]
+      expect(platformSeat.assignee_id).toBe(MGR)
+    },
+  )
+
+  it(
+    "self-approval guard: the resolved manager is skipped (not seated) when they are ALSO the instance's own requester, " +
+      'mirroring bulkReassignApprovals target-is-requester',
+    async () => {
+      const key = `dep-self-approve-${TS}`
+      templateKeys.push(key)
+      // MGR (U5's manager) is the REQUESTER of this specific instance.
+      const instanceId = await createPublishedInstance(service, key, [U5], MGR)
+
+      const seatBefore = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`, [instanceId])
+      ).rows[0]
+
+      const result = await service.applyApprovalDepartureTransfer(U5)
+      expect(result.transferred).not.toContain(instanceId)
+      expect(result.noManagerResolved).not.toContain(instanceId)
+      expect(result.skipped).toContainEqual({ id: instanceId, reason: 'target-is-requester' })
+
+      const seatAfter = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE id = $1`, [seatBefore.id])
+      ).rows[0]
+      expect(seatAfter).toEqual(seatBefore)
+    },
+  )
+
+  it(
     'concurrency (constructed, not argued): a departure racing a concurrent decide on the same seat resolves via the ' +
       "instance FOR UPDATE lock — the blocked decide re-reads post-transfer state and is rejected as not-assigned, and exactly one reassign audit row exists (no double-move)",
     async () => {
@@ -472,9 +552,21 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         // issues its own `SELECT ... FOR UPDATE` on the instance row and REAL-blocks in Postgres
         // (not simulated) until the departure txn above commits or rolls back.
         const decidePromise = service.dispatchAction(instanceId, { action: 'approve' }, { userId: U3, userName: U3 })
-        // Let the second connection's BEGIN + SELECT FOR UPDATE actually reach Postgres and start
-        // waiting on the lock before we release the first transaction.
-        await new Promise((resolve) => setTimeout(resolve, 200))
+
+        // Prove REAL blocking, not merely "not yet awaited": race decidePromise against a timer
+        // WHILE the departure txn still holds the instance FOR UPDATE lock (barrier not yet
+        // released). If Postgres were not serialising these two writers, decidePromise would settle
+        // before the timer and this assertion would flip — this is the assertion that dies if the
+        // lock stops doing its job, unlike asserting only the post-release outcome below.
+        const STILL_BLOCKED = Symbol('still-blocked')
+        const raceOutcome = await Promise.race([
+          decidePromise.then(
+            () => 'settled' as const,
+            () => 'settled' as const,
+          ),
+          new Promise<typeof STILL_BLOCKED>((resolve) => setTimeout(() => resolve(STILL_BLOCKED), 300)),
+        ])
+        expect(raceOutcome).toBe(STILL_BLOCKED)
 
         releaseBarrier()
         const [departureOutcome, decideOutcome] = await Promise.allSettled([departurePromise, decidePromise])
