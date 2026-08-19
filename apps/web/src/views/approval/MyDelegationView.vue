@@ -10,7 +10,9 @@
     </PageHeader>
 
     <el-table v-loading="loading" :data="delegations" data-testid="my-delegation-table" empty-text="暂无委托">
-      <el-table-column label="被委托人" prop="delegateeUserId" />
+      <el-table-column label="被委托人">
+        <template #default="{ row }">{{ delegateeDisplay(row.delegateeUserId) }}</template>
+      </el-table-column>
       <el-table-column label="范围">
         <template #default="{ row }">{{ row.scope === 'template' ? `指定模板：${row.scopeTemplateId}` : '全部审批' }}</template>
       </el-table-column>
@@ -68,7 +70,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
 import PageHeader from '../../components/layout/PageHeader.vue'
@@ -84,6 +86,7 @@ import {
 import { delegationDisplayStatus } from '../../approvals/delegationStatus'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import StatusTag from '../../components/status/StatusTag.vue'
+import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 
 const delegations = ref<DelegationRecord[]>([])
 const loading = ref(false)
@@ -102,6 +105,20 @@ function fmt(iso: string): string {
   const d = new Date(iso)
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
 }
+
+// member-display-identity (2026-08-19): this self-service view is reachable by ANY authenticated
+// user (`/my-delegation`, `requiresAuth` only — see appRoutes.ts) and used to bind the 被委托人
+// column's cell straight to the raw delegatee id column value. Resolved name when available; a
+// values-free "未知用户" placeholder otherwise — never the raw id.
+function delegateeDisplay(delegateeUserId: string): string {
+  return getResolvedUserName(delegateeUserId) ?? '未知用户'
+}
+
+watch(
+  () => delegations.value.map((d) => d.delegateeUserId),
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 
 async function load() {
   loading.value = true

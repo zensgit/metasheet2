@@ -14,6 +14,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -61,6 +62,14 @@ vi.mock('vue-router', async () => {
 // hardcoded 王五 option used to hardcode, so the existing `select.value = 'user_3'` assertion
 // keeps working unchanged.
 // ---------------------------------------------------------------------------
+// member-display-identity (2026-08-19; tightened 2026-08-19 per owner decision — role resolution
+// stays admin-only): defaults to "nothing resolves" — the pre-existing pinned tests below use
+// raw-id-shaped scope/node fixtures with no producer of a real name, so the default keeps them
+// landing on the values-free count fallback unless a test overrides it. There is no
+// resolveApprovalDirectoryRoles mock any more — that export was deleted along with the
+// participant-reachable role resolver; a role id/scope is now ALWAYS the generic count on every
+// surface this file mounts, never a resolver call.
+const resolveApprovalDirectoryUsersMock = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -70,6 +79,7 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_3', name: '王五', email: '' },
       { id: 'user_4', name: '赵六', email: '' },
     ]),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersMock(...args),
   }
 })
 
@@ -465,6 +475,11 @@ describe('Approval E2E Permissions', () => {
     // jsdom's default `navigator.language` (same fix as approval-e2e-lifecycle.spec.ts's UF-3
     // pin for the approvalInstance domain).
     useLocale().setLocale('zh-CN')
+
+    // member-display-identity (2026-08-19): the resolver cache is a module singleton — reset it
+    // (and its controllable mocks) every test.
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
 
     mockActiveApproval.value = null
     mockHistoryRef.value = []
@@ -973,18 +988,103 @@ describe('Approval E2E Permissions', () => {
       expect(meta?.textContent).toContain('TPL-001')
     })
 
-    it('template detail shows visibility scope metadata', async () => {
+    // member-display-identity tightening (2026-08-19, owner decision — role resolution stays
+    // admin-only): this view is reachable by ANY authenticated user (no approval-templates:manage
+    // gate — see appRoutes.ts), so the visibility-scope ids used to render the raw role ids to
+    // every viewer. There is no participant-reachable role resolver any more (removed, not merely
+    // undocumented — see the P3-1 note in approval-directory.ts), so a `role`-typed scope is now
+    // ALWAYS the same generic count `assigneeSource.ts`'s `requesterFacingSourceSummary` already
+    // uses for static_role ("指定角色（N 个）") — never a resolved name, never the raw id, and
+    // (unlike the pre-tightening code) not even a resolver call is made for it.
+    it('template detail visibility scope (role type) is ALWAYS a values-free generic count -- no participant role resolver exists', async () => {
       setMockPermissions(['approval-templates:manage'])
       routeParams = { id: 'tpl_1' }
       mockActiveTemplate.value = mockPublishedTemplate({
         visibilityScope: { type: 'role', ids: ['finance', 'manager'] },
       })
       await mountTemplateDetailView()
+      await flushUi(12)
 
       const visibilityTag = container!.querySelector('[data-testid="template-detail-visibility-tag"]')
       expect(visibilityTag?.textContent).toContain('按角色')
       const visibilityIds = container!.querySelector('[data-testid="template-detail-visibility-ids"]')
-      expect(visibilityIds?.textContent).toContain('finance, manager')
+      expect(visibilityIds?.textContent).toContain('指定角色（2 个）')
+      expect(visibilityIds?.textContent).not.toContain('finance')
+      expect(visibilityIds?.textContent).not.toContain('manager')
+    })
+
+    // A `user`-typed visibility scope resolves through the USER resolver (a different function
+    // than the role case above) — proves both branches, not just role.
+    it('template detail visibility scope (user type) shows RESOLVED user names when every id resolves', async () => {
+      resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_finance_lead', name: '陈十' }])
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_1' }
+      mockActiveTemplate.value = mockPublishedTemplate({
+        visibilityScope: { type: 'user', ids: ['user_finance_lead'] },
+      })
+      await mountTemplateDetailView()
+      await flushUi(12)
+
+      const visibilityIds = container!.querySelector('[data-testid="template-detail-visibility-ids"]')
+      expect(visibilityIds?.textContent).toContain('陈十')
+      expect(visibilityIds?.textContent).not.toContain('user_finance_lead')
+    })
+
+    // Department ids have NO resolver anywhere on the approval surface (scout report) -- ALWAYS a
+    // count, even if a user/role resolver mock happens to be armed, since resolveIdsOrCount only
+    // ever consults the resolver for 'user'/'role' kinds.
+    it('template detail visibility scope (dept type) is ALWAYS a values-free count -- no dept resolver exists', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_1' }
+      mockActiveTemplate.value = mockPublishedTemplate({
+        visibilityScope: { type: 'dept', ids: ['dept_finance', 'dept_hr'] },
+      })
+      await mountTemplateDetailView()
+      await flushUi(12)
+
+      const visibilityIds = container!.querySelector('[data-testid="template-detail-visibility-ids"]')
+      expect(visibilityIds?.textContent).toContain('部门 2')
+      expect(visibilityIds?.textContent).not.toContain('dept_finance')
+      expect(visibilityIds?.textContent).not.toContain('dept_hr')
+    })
+
+    // member-display-identity (2026-08-19) -- the LEGACY per-node assigneeType/assigneeIds display
+    // (TemplateDetailView's `defaultApprovalGraph()` fixture already carries both a role node and
+    // a user node -- see helpers/approval-test-fixtures.ts). Unresolved user -> values-free count;
+    // role -> ALWAYS the generic count (no resolver exists). Never the raw ids this line used to
+    // join.
+    it('template detail node assignee ids render as a values-free count when unresolved, real names when resolved', async () => {
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_1' }
+      mockActiveTemplate.value = mockPublishedTemplate()
+      await mountTemplateDetailView()
+
+      const nodeAssigneeSpans = Array.from(container!.querySelectorAll('.template-detail__node-assignee'))
+      const text = nodeAssigneeSpans.map((el) => el.textContent).join(' | ')
+      expect(text).toContain('指定角色（1 个）') // assigneeType: 'role', assigneeIds: ['role_manager']
+      expect(text).toContain('用户 1') // assigneeType: 'user', assigneeIds: ['user_finance']
+      expect(text).not.toContain('role_manager')
+      expect(text).not.toContain('user_finance')
+    })
+
+    // member-display-identity tightening (2026-08-19): only the user assignee resolves now -- the
+    // role assignee stays the generic count `指定角色（1 个）` EVEN THOUGH nothing arms a role
+    // resolver mock here any more (there is no such export left to arm), proving the role branch
+    // never attempts to resolve in the first place.
+    it('POSITIVE CONTROL: template detail node assignee ids show a RESOLVED user name once the user resolver returns it', async () => {
+      resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_finance', name: '财务小李' }])
+      setMockPermissions(['approval-templates:manage'])
+      routeParams = { id: 'tpl_1' }
+      mockActiveTemplate.value = mockPublishedTemplate()
+      await mountTemplateDetailView()
+      await flushUi(12)
+
+      const nodeAssigneeSpans = Array.from(container!.querySelectorAll('.template-detail__node-assignee'))
+      const text = nodeAssigneeSpans.map((el) => el.textContent).join(' | ')
+      expect(text).toContain('指定角色（1 个）')
+      expect(text).toContain('财务小李')
+      expect(text).not.toContain('role_manager')
+      expect(text).not.toContain('user_finance')
     })
 
     it('template detail renders the field visibility section when rules exist', async () => {

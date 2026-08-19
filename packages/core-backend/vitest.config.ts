@@ -37,6 +37,13 @@ export default defineConfig({
       'tests/integration/after-sales-registry-backfill.test.ts',
       'tests/integration/approval-directory-endpoints.api.test.ts',
       'tests/integration/approval-participant-directory.api.test.ts',
+      // member-display-identity (2026-08-19): the authorized-scope EXACT id->name batch resolver
+      // (GET /api/approvals/directory/resolve). Requires real PostgreSQL (users/roles rows);
+      // excluded from the no-DB job so describeIfDatabase cannot skip-green it, and wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-directory-resolve.yml
+      // lane (NOT plugin-tests.yml — that file is s6a sha256-pinned provenance input and stays
+      // byte-identical to main; see that workflow's own header for the precedent/rationale).
+      'tests/integration/approval-directory-resolve.api.test.ts',
       'tests/integration/approval-p1c-field-permissions.api.test.ts',
       'tests/integration/approval-wp-add-reduce-sign.api.test.ts',
       'tests/integration/approval-direct-manager.api.test.ts',

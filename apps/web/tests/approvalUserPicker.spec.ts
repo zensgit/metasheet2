@@ -217,4 +217,47 @@ describe('ApprovalUserPicker', () => {
     expect(labels).toEqual(['成员 1', '成员 2'])
     expect(new Set(labels).size).toBe(2)
   })
+
+  // member-display-identity (2026-08-19) — owner directive: this picker backs FLOW-CHANGING
+  // selections (transfer/add-sign/fill-form-user/delegatee), so an unidentifiable directory entry
+  // must be more than relabelled -- it must be unselectable.
+  it('a directory user with no name is rendered DISABLED (cannot be selected for a flow-changing action)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'user_9', name: '', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    const alice = options.find((o) => o.value === 'u1')!
+    const nameless = options.find((o) => o.value === 'user_9')!
+    expect(alice.disabled, 'a resolved (named) option must stay selectable').toBe(false)
+    expect(nameless.disabled, 'an unresolvable option must be disabled').toBe(true)
+  })
+
+  // POSITIVE CONTROL for the disabled-state test above: proves it is name-selected, not "every
+  // option is disabled" -- two named options both stay selectable.
+  it('POSITIVE CONTROL: every option with a real name stays selectable (not disabled)', async () => {
+    searchSpy.mockResolvedValue([
+      { id: 'u1', name: 'Alice', email: 'a@x.io' },
+      { id: 'u2', name: 'Bob', email: '' },
+    ])
+    await mountPicker()
+
+    const options = Array.from(container!.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options).toHaveLength(2)
+    for (const option of options) expect(option.disabled).toBe(false)
+  })
+
+  // The field must never reject its OWN current selection as unidentifiable, even if that
+  // selection's `initialOption` carries no name (a preselected id whose display name genuinely
+  // could not be recovered) -- otherwise a form field would appear to invalidate its own value.
+  it('the CURRENT modelValue is never rendered disabled, even if its initialOption has no name', async () => {
+    searchSpy.mockResolvedValue([])
+    await mountPicker({ modelValue: 'u-preset', initialOption: { id: 'u-preset', name: '', email: '' } })
+
+    const option = container!.querySelector('option') as HTMLOptionElement
+    expect(option.value).toBe('u-preset')
+    expect(option.disabled).toBe(false)
+  })
 })

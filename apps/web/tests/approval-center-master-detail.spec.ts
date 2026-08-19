@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   createApp,
   defineComponent,
@@ -92,6 +93,9 @@ const remindApprovalSpy = vi.fn().mockResolvedValue({ ok: true, data: {} })
 const getTemplateSpy = vi.fn().mockResolvedValue({ formSchema: { fields: [] } })
 const listTemplatesSpy = vi.fn().mockResolvedValue({ data: [], total: 0 })
 const getApprovalSpy = vi.fn()
+// member-display-identity (2026-08-19): defaults to "nothing resolves" — matches this file's
+// pre-existing raw-id-shaped fixtures (zero producers of `metadata.assigneeName`).
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 
 vi.mock('../src/approvals/api', () => ({
   dispatchAction: (...args: [string, unknown]) => dispatchActionSpy(...args),
@@ -101,6 +105,7 @@ vi.mock('../src/approvals/api', () => ({
   getTemplate: (...args: [string]) => getTemplateSpy(...args),
   listTemplates: (...args: unknown[]) => listTemplatesSpy(...args),
   getApproval: (...args: [string]) => getApprovalSpy(...args),
+  resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
 }))
 
 vi.mock('../src/approvals/useApprovalCountsRealtime', () => ({
@@ -446,6 +451,8 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     listTemplatesSpy.mockClear()
     getApprovalSpy.mockClear()
     getApprovalSpy.mockReset()
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
     mockRoute.name = 'approval-list'
     mockRoute.query = {}
     setViewport('wide')
@@ -647,6 +654,28 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
 
     const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
     expect(text).toContain('王五')
+    expect(text).not.toContain('user_9')
+  })
+
+  // POSITIVE CONTROL, resolver path this time (member-display-identity, 2026-08-19): proves the
+  // NEW `getResolvedUserName`/`ensureUserNamesResolved` path itself upgrades the ordinal to a real
+  // name — not just the pre-existing `metadata.assigneeName` path the test above already covers.
+  it('pending-approver label resolves to a real name via the directory resolver when metadata.assigneeName is absent (positive control)', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'user_9', name: '钱八' }])
+    const row = pendingRow('apv_1', '出差报销', {
+      assignments: [
+        { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      ],
+    })
+    getApprovalSpy.mockResolvedValue(row)
+    mockPendingApprovals.value = [row]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi(12)
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(text).toContain('钱八')
     expect(text).not.toContain('user_9')
   })
 

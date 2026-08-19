@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import { useLocale } from '../src/composables/useLocale'
 import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../src/approvals/addSignHonestyCopy'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import {
   mockPendingApproval,
   mockApprovedApproval,
@@ -116,6 +117,11 @@ vi.mock('../src/approvals/store', () => ({
 // replacing any of the three named fixtures above, so every pre-existing assertion that reads
 // user_2/3/4 stays byte-identical; `toBeGreaterThanOrEqual(3)` / `>= 3` option-count assertions
 // elsewhere in this file are unaffected by the fourth entry.
+// member-display-identity (2026-08-19): `resolveApprovalDirectoryUsersMock` defaults to "nothing
+// resolves" — this file's raw-id-shaped fixtures (user_current/user_secret_777/manager-*/...) have
+// no producer of `metadata.assigneeName`, and this default keeps them staying unresolved (matching
+// their pre-existing pinned assertions) unless a specific test overrides it.
+const resolveApprovalDirectoryUsersMock = vi.fn().mockResolvedValue([])
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -126,6 +132,7 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_4', name: '赵六', email: '' },
       { id: 'user_9', name: '', email: '' },
     ]),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersMock(...args),
   }
 })
 
@@ -537,6 +544,11 @@ describe('Approval E2E Lifecycle', () => {
     // whole spec's fixtures/assertions are Chinese, so pin the locale explicitly rather than
     // relying on jsdom's default `navigator.language`.
     useLocale().setLocale('zh-CN')
+
+    // member-display-identity (2026-08-19): the resolver cache is a module singleton — reset it
+    // (and its controllable mock) every test, or an earlier test's resolved name leaks forward.
+    resolveApprovalDirectoryUsersMock.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
 
     // Reset all reactive state
     mockActiveApproval.value = null
@@ -1184,7 +1196,12 @@ describe('Approval E2E Lifecycle', () => {
         sourceStep: 1,
         nodeKey: 'approval_1',
         isActive: true,
-        metadata: { addSign: true, addedBy: 'user_current' },
+        // member-display-identity (2026-08-19): `assigneeName` present -- this fixture's seat is
+        // RESOLVABLE, matching the ordinary production case, so the 减签 option this test submits
+        // through stays selectable (an unresolvable option is now `disabled` and the submit
+        // handler itself refuses it). The deliberately-UNRESOLVABLE shape is exercised by
+        // approval-member-bar-operation-policy.spec.ts's own dedicated fixtures.
+        metadata: { addSign: true, addedBy: 'user_current', assigneeName: '九号经理' },
       }
     }
 
@@ -1442,6 +1459,32 @@ describe('Approval E2E Lifecycle', () => {
       expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
       expect(labels.join('|')).not.toContain('user_9')
     })
+
+    // member-display-identity (2026-08-19) — owner directive: 转交/加签 hand real approval
+    // authority to whoever is picked, so the blank-name `user_9` option (same fixture every other
+    // test in this block already uses) must be UNSELECTABLE, not just relabelled. The named options
+    // stay selectable (positive control folded in, same assertion block).
+    it('the 转交/加签 dropdowns disable the unresolvable option and keep named options selectable', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      for (const [label, dialogTitle] of [['转交', '转交审批'], ['加签', '加签']] as const) {
+        const btn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+          .find((b) => b.textContent?.trim() === label)
+        btn!.click()
+        await flushUi()
+
+        const dialog = container!.querySelector(`[data-dialog-visible="true"][data-el-dialog="${dialogTitle}"]`)!
+        const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+        const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+        const nameless = options.find((o) => o.value === 'user_9')!
+        expect(nameless.disabled, `${label}: the nameless option must be disabled`).toBe(true)
+        for (const named of options.filter((o) => o.value !== 'user_9')) {
+          expect(named.disabled, `${label}: option ${named.value} has a real name and must stay selectable`).toBe(false)
+        }
+      }
+    })
   })
 
   // =========================================================================
@@ -1677,6 +1720,28 @@ describe('Approval E2E Lifecycle', () => {
       const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
       expect(item!.textContent).toContain('王五')
       expect(item!.textContent).not.toContain('user_secret_777')
+    })
+
+    // POSITIVE CONTROL, resolver path (member-display-identity, 2026-08-19): proves the NEW
+    // `getResolvedUserName` path (not just the pre-existing `metadata.assigneeName` path the test
+    // above already covers) turns the values-free "审批人" placeholder into the real name.
+    it('member-display-identity: resolves to a real name via the directory resolver when metadata.assigneeName is absent', async () => {
+      resolveApprovalDirectoryUsersMock.mockResolvedValue([{ id: 'user_secret_777', name: '钱八' }])
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval({
+        currentNodeKey: 'approval_1',
+        assignments: [{
+          id: 'asgn_1', type: 'approval', assigneeId: 'user_secret_777', sourceStep: 1,
+          nodeKey: 'approval_1', isActive: true, metadata: {},
+        }],
+      })
+      await mountDetailView()
+      await flushUi(12)
+
+      const item = container!.querySelector('[data-testid="approval-current-handler-item"]')
+      expect(item!.textContent).toContain('钱八')
+      expect(item!.textContent).not.toContain('user_secret_777')
+      expect(item!.textContent).not.toContain('审批人')
     })
 
     it('a non-pending instance renders NO current/upcoming section', async () => {

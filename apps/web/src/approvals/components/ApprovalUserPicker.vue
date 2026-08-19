@@ -18,6 +18,7 @@
       :key="option.id"
       :label="optionLabel(option, index)"
       :value="option.id"
+      :disabled="isUnidentifiable(option)"
     />
   </el-select>
 </template>
@@ -94,6 +95,20 @@ function optionLabel(option: ApprovalUserPickerOption, index: number): string {
   const primary = option.name?.trim() || `成员 ${index + 1}`
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
+}
+
+// member-display-identity (2026-08-19) — owner directive: this picker backs 4+ FLOW-CHANGING
+// selections (transfer / add-sign / fill-form user field / delegation delegatee), so a directory
+// entry with no resolvable name must be more than relabelled with an ordinal — it must be
+// UNSELECTABLE, so an admin can never hand real approval authority to an account they cannot
+// identify. The directory search result already carries the freshest name truth for this id (same
+// `users.name` column a separate batch resolve call would read), so no extra round trip is needed
+// here — a blank `option.name` IS the unresolved signal. The current `modelValue`'s own option
+// (typically surfaced via `initialOption`) is exempt: a caller must never render its OWN existing
+// selection as unselectable, or the field would appear to reject its own current value.
+function isUnidentifiable(option: ApprovalUserPickerOption): boolean {
+  if (option.id === props.modelValue) return false
+  return !option.name?.trim()
 }
 
 async function runSearch(query: string): Promise<void> {

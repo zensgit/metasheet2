@@ -791,6 +791,7 @@
               :key="assignee.assigneeId"
               :label="assignee.label"
               :value="assignee.assigneeId"
+              :disabled="assignee.disabled"
             />
           </el-select>
         </el-form-item>
@@ -931,6 +932,7 @@ import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
 import { useApprovalTemplateStore } from '../../approvals/templateStore'
 import { markApprovalRead, remindApproval, type ApprovalDirectoryUser } from '../../approvals/api'
+import { ensureUserNamesResolved, getResolvedUserName } from '../../approvals/directoryResolve'
 import ApprovalUserPicker from '../../approvals/components/ApprovalUserPicker.vue'
 import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
@@ -1353,13 +1355,19 @@ interface CurrentHandlerEntry {
 // unconditionally at `当前处理人：{{ entry.label }}` on every PENDING instance with an active user
 // assignment — the single most reachable member-facing raw-id leak found in this file (not an
 // exotic drift shape, the ordinary case). `metadata.assigneeName` has zero producers repo-wide
-// today, so this reachable branch is effectively always the one that renders — never the raw id
-// (values-free doctrine). No richer resolution is available from data already in scope (unlike
-// `cancelledAssigneesLabel` below, this function sees only the ONE assignment row, not the full
-// list, so there is nothing else here to cross-reference).
+// today, so this reachable branch was effectively always the values-free "审批人" placeholder.
+//
+// member-display-identity (2026-08-19): now tries the shared authorized-scope resolver
+// (`getResolvedUserName`, backed by `/api/approvals/directory/resolve`) BEFORE falling back to
+// the generic placeholder — `currentHandlerEntries` below `ensureUserNamesResolved`s every id in
+// view, so a resolvable assignee now shows their real name instead of "审批人". Still values-free
+// on a miss (deactivated account / unresolved): the SAME generic placeholder as before, never the
+// raw id.
 function assignmentDisplayLabel(assignment: ApprovalAssignmentDTO): string {
   const metaName = assignment.metadata.assigneeName
   if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  const resolved = getResolvedUserName(assignment.assigneeId)
+  if (resolved) return resolved
   return '审批人'
 }
 
@@ -1379,6 +1387,28 @@ const currentHandlerEntries = computed<CurrentHandlerEntry[]>(() => {
     .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
     .map((a) => ({ assignmentId: a.id, label: assignmentDisplayLabel(a), wait }))
 })
+
+// member-display-identity (2026-08-19): kicks off the batch resolve for every member id this view
+// might need to display a name for — every `assignments` row's `assigneeId` (feeds
+// `assignmentDisplayLabel`/`reducibleAssignees` above/below) PLUS every history item's
+// `metadata.aggregateCancelled` id list (feeds `cancelledAssigneesLabel` below). A single
+// consolidated `watch` (side effect) rather than one per consumer — they draw from overlapping id
+// universes and Vue de-dupes redundant `ensureUserNamesResolved` calls internally anyway. Never
+// inside a `computed` — mutating the resolver's cache from within a computed that itself reads
+// that cache would be a self-triggering dependency.
+watch(
+  () => {
+    const ids: string[] = []
+    for (const a of approval.value?.assignments ?? []) ids.push(a.assigneeId)
+    for (const item of store.history) {
+      const cancelled = item.metadata?.aggregateCancelled
+      if (Array.isArray(cancelled)) for (const id of cancelled) ids.push(String(id))
+    }
+    return ids
+  },
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 
 // Prefer the instance's FROZEN template version (pinned at creation) over the LIVE template
 // loaded below for `nodeLabel` — the live template may have been edited (renamed/reordered/
@@ -1452,13 +1482,21 @@ const reduceSignUserId = ref('')
 // picker still needs its options MUTUALLY DISTINGUISHABLE (an admin must be able to tell which
 // seat they are removing), so the fallback is a stable per-list ordinal (`成员 N`), not a single
 // repeated generic string. `assigneeId` stays the option VALUE (the actual submit payload) —
-// only the LABEL text changes; nothing here is rendered from a new fetch.
-const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>>(() => {
+// only the LABEL text changes.
+//
+// member-display-identity (2026-08-19) — owner directive: 减签 is a FLOW-CHANGING selector (it
+// removes a real approval seat), so a member who cannot be resolved to an identifiable name must
+// be DISABLED, never just relabelled with an ordinal and left pickable — a blind ordinal personnel
+// change is exactly what this directive forbids. `disabled` is `true` for BOTH "not yet resolved"
+// and "confirmed unresolved" (see directoryResolve.ts's tri-state doc) — there is no window where
+// an unconfirmed option is briefly selectable. When resolved, the real name replaces the ordinal
+// AND the option becomes selectable.
+const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; disabled: boolean }>>(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
   const currentNodeKey = approval.value.currentNodeKey
   if (!currentNodeKey) return []
   const seen = new Set<string>()
-  const result: Array<{ assigneeId: string; label: string }> = []
+  const result: Array<{ assigneeId: string; label: string; disabled: boolean }> = []
   let ordinal = 0
   for (const assignment of approval.value.assignments) {
     if (!assignment.isActive) continue
@@ -1469,8 +1507,10 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>
     seen.add(assignment.assigneeId)
     ordinal += 1
     const metaName = assignment.metadata?.assigneeName
-    const label = typeof metaName === 'string' && metaName.trim() ? metaName.trim() : `成员 ${ordinal}`
-    result.push({ assigneeId: assignment.assigneeId, label })
+    const trimmedMetaName = typeof metaName === 'string' ? metaName.trim() : ''
+    const resolvedName = trimmedMetaName || getResolvedUserName(assignment.assigneeId)
+    const label = resolvedName || `成员 ${ordinal}`
+    result.push({ assigneeId: assignment.assigneeId, label, disabled: !resolvedName })
   }
   return result
 })
@@ -1670,12 +1710,13 @@ function approvalModeLabel(mode: string): string {
  * aggregateCancelled list or when the list is empty — callers `v-if` on the truthy string.
  */
 // P7-R2 candidate #2 fix (values-free doctrine, confirmed member-facing raw-id exposure): resolve
-// each cancelled sibling to a display name using ONLY data already in scope (the instance's own
-// `assignments` array) — no new fetch, same "don't fetch, just display" convention as the rest of
-// this file. If EVERY id resolves to a real name, join the names; if any id has no reachable name,
-// fall back to a values-free count instead of a partial name list padded with a repeated generic
-// placeholder (which would read as a formatting bug
-// more than a redaction). Either branch, a raw user id is never rendered.
+// each cancelled sibling to a display name — first from data already in scope (the instance's own
+// `assignments` array's `metadata.assigneeName`, if a producer ever sets it), then (2026-08-19)
+// from the shared authorized-scope resolver cache (`getResolvedUserName`, ensured by the
+// consolidated watcher above). If EVERY id resolves to a real name, join the names; if any id has
+// no reachable name, fall back to a values-free count instead of a partial name list padded with a
+// repeated generic placeholder (which would read as a formatting bug more than a redaction).
+// Either branch, a raw user id is never rendered.
 function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
   if (!metadata) return ''
   const cancelled = metadata.aggregateCancelled
@@ -1683,14 +1724,20 @@ function cancelledAssigneesLabel(metadata?: Record<string, unknown>): string {
   const assignments = approval.value?.assignments ?? []
   const names: string[] = []
   for (const id of cancelled) {
-    const match = assignments.find((a) => a.assigneeId === String(id))
+    const idStr = String(id)
+    const match = assignments.find((a) => a.assigneeId === idStr)
     const metaName = match?.metadata?.assigneeName
     if (typeof metaName === 'string' && metaName.trim()) {
       names.push(metaName.trim())
       continue
     }
-    // No display name reachable from already-loaded assignment metadata — render a values-free
-    // count rather than ever falling back to the raw id.
+    const resolved = getResolvedUserName(idStr)
+    if (resolved) {
+      names.push(resolved)
+      continue
+    }
+    // No display name reachable from already-loaded metadata OR the resolver — render a
+    // values-free count rather than ever falling back to the raw id.
     return `其他 ${cancelled.length} 位审批人已失效`
   }
   return `其他审批人已失效: ${names.join('、')}`
@@ -2018,6 +2065,13 @@ function openReduceSignDialog() {
 
 async function submitReduceSign() {
   if (!reduceSignUserId.value) return
+  // member-display-identity (2026-08-19) — defense-in-depth mirror of the disabled `<el-option>`
+  // above: the primary gate is Element Plus refusing to select a disabled option, but this refuses
+  // the submit itself too if the target isn't (still) in the reducible-AND-resolved set, so the
+  // flow-changing action stays impossible for an unidentifiable member even if `reduceSignUserId`
+  // were ever set some other way than picking a rendered option.
+  const target = reducibleAssignees.value.find((a) => a.assigneeId === reduceSignUserId.value)
+  if (!target || target.disabled) return
   if (inFlightAction.value) return
   const id = route.params.id as string
   inFlightAction.value = 'reduce_sign'
