@@ -78,6 +78,7 @@ printf '__METRICS_SCRAPE_TOKEN_BEGIN__metrics-secret__METRICS_SCRAPE_TOKEN_END__
       DEPLOY_HOST: 'deploy.example.test',
       DEPLOY_USER: 'deployer',
       DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: 'deploy.example.test ssh-ed25519 AAAAfakePinnedHostKey',
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -127,6 +128,7 @@ printf '__METRICS_SCRAPE_TOKEN_BEGIN__metrics-secret__METRICS_SCRAPE_TOKEN_END__
       DEPLOY_HOST: 'deploy.example.test',
       DEPLOY_USER: 'deployer',
       DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: 'deploy.example.test ssh-ed25519 AAAAfakePinnedHostKey',
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -160,6 +162,7 @@ printf 'no token here\\n'
       DEPLOY_HOST: 'deploy.example.test',
       DEPLOY_USER: 'deployer',
       DEPLOY_SSH_KEY_B64: Buffer.from('fake-key').toString('base64'),
+      DEPLOY_KNOWN_HOSTS: 'deploy.example.test ssh-ed25519 AAAAfakePinnedHostKey',
     })
 
     assert.equal(result.status, 1)

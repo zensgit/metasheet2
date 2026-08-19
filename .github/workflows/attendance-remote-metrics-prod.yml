@@ -58,6 +58,7 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
           METRICS_AUTH_HEADER_SECRET: ${{ secrets.METRICS_AUTH_HEADER }}
@@ -72,9 +73,18 @@ jobs:
           }
 
           mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i ~/.ssh/deploy_key"
 
           DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
           DRILL_FAIL="${DRILL_FAIL:-false}"
@@ -89,7 +99,7 @@ jobs:
           METRICS_AUTH_HEADER="${METRICS_AUTH_HEADER_SECRET:-}"
           if [[ -z "$METRICS_AUTH_HEADER" ]]; then
             set +e
-            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
+            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false DEPLOY_KNOWN_HOSTS="${DEPLOY_KNOWN_HOSTS}" bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
             token_resolve_status=$?
             set -e
             if [[ "$token_resolve_status" != "0" ]]; then

@@ -1,0 +1,52 @@
+name: SSH Host-Key Pin Contract
+
+# Security regression guard for the SSH host-key-pinning sweep (2026-08-12).
+# Asserts that every workflow SSHing to the production deploy host verifies the
+# host identity (StrictHostKeyChecking=yes + fail-closed DEPLOY_KNOWN_HOSTS) and
+# that NO workflow reintroduces StrictHostKeyChecking=no in an executable line.
+# Tier 2 (2026-08-19) extends it to the shared resolve-*-token.sh scripts (a
+# set-equality census over scripts + 15 caller wirings) plus a behaviour test
+# that proves missing/malformed DEPLOY_KNOWN_HOSTS exits BEFORE any ssh.
+#
+# Hermetic (no DB, no pnpm install): checkout + setup-node + `node --test`, the
+# same shape as data-source-exposure-inventory.yml. Deliberately standalone so it
+# does NOT edit plugin-tests.yml and therefore does NOT perturb the sealed-export
+# s6a package-provenance pin.
+#
+# Path filter is intentionally the whole workflows dir: the sweep test scans every
+# workflow, so any workflow edit (which could add a new SSH call site) must re-run
+# this guard.
+
+# pull_request has NO path filter: this check is intended to become a REQUIRED status, and a
+# path-filtered required check strands every PR that doesn't trigger it at
+# "Expected — waiting for status". The suite is hermetic and runs in seconds on every PR.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
+      - 'scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs'
+      - 'scripts/ops/resolve-attendance-smoke-token.sh'
+      - 'scripts/ops/resolve-k3wise-smoke-token.sh'
+      - 'scripts/ops/resolve-metrics-scrape-token.sh'
+      - 'scripts/**/*.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: ssh host-key pin contract (fail-closed known_hosts)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Assert all production SSH workflows pin the deploy-host identity
+        run: node --test scripts/ops/ssh-hostkey-pin-family-contract.test.mjs
+      - name: Behaviour-prove the resolver scripts fail closed before ssh (PATH-shadow stub)
+        run: node --test scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs
