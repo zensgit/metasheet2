@@ -7946,6 +7946,19 @@ export class ApprovalProductService {
    *   departed approver's manager can, in a small org chart, be the instance's own requester; that
    *   case is skipped (`target-is-requester`) rather than seating the requester as their own
    *   approver by substitution.
+   * - Collision guard: mirrors `bulkReassignApprovals`'s `target-already-assignee` skip — if the
+   *   resolved manager already holds an active seat on the instance, the departed user's seat is
+   *   skipped (`target-already-assignee`) rather than risk a collision with the active-assignment
+   *   unique index.
+   * - Evidence parity (P2, gate 20260819): of the THREE manager-RESOLUTION outcomes that leave the
+   *   seat in place — `no_manager_resolved`, `target-is-requester`, `target-already-assignee` — all
+   *   three now get the SAME evidence: an audit row per seat (`outcome: 'no_manager_resolved'` /
+   *   `'target_is_requester'` / `'target_already_assignee'`) plus an operator warning, committed.
+   *   Scope note: this parity is about manager-resolution outcomes specifically. It does NOT extend
+   *   to the P26 attendance-central boundary immediately above, which deliberately emits neither —
+   *   that branch ROLLBACKs before any manager is even resolved, on a table this method has no
+   *   business writing to for that request kind; the departed user's seat there is asserted
+   *   byte-identical by the P26 test, and the absence of a `reassign` row is itself the assertion.
    * - NOT parallel-restricted: unlike the SLA transfer (which hands the WHOLE node over and must
    *   therefore refuse an in-flight parallel region), this method only ever touches the departed
    *   user's OWN seat rows by `assignee_id` — it never deactivates a node wholesale — so a departed
@@ -8109,10 +8122,42 @@ export class ApprovalProductService {
         // become an approver of their own request. A departed approver's manager CAN be the
         // instance's requester (a small-team org chart), and nothing else in this method excludes
         // that — self-approval-by-substitution is exactly the shape adversarial review looks for.
+        // P2 (gate 20260819): this is a "leave in place" outcome exactly like the no-manager
+        // fail-closed branch below, so it gets the SAME evidence — one audit row per seat + an
+        // operator warning, COMMITted (not rolled back into silence). Without this, a departed
+        // user keeps an active seat with zero durable trace of why.
         const requesterSnapshot = toNullableRecord(instance.requester_snapshot)
         const requesterId = typeof requesterSnapshot?.id === 'string' ? requesterSnapshot.id : null
         if (requesterId && requesterId === resolvedManagerId) {
-          await client.query('ROLLBACK')
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'target_is_requester',
+                fromUserId: userId,
+                // Diagnostic-only, like `no_manager_resolved`'s own metadata below — the seat did
+                // NOT move to this user, so `targetUserId` (the `target_user_id` COLUMN, which the
+                // 'transferred' outcome uses to name the seat's actual new holder) is deliberately
+                // left unset here; a reader keying off that column alone must not conflate "who
+                // would have received it" with "who now holds it".
+                toUserId: resolvedManagerId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: resolved manager is the requester on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
           skipDepartureTransfer(instanceId, 'target-is-requester')
           continue
         }
@@ -8121,6 +8166,8 @@ export class ApprovalProductService {
         // the resolved manager already holds ANY active seat on this instance, skip the whole
         // instance rather than risk a partial-mutation collision with the active-assignment unique
         // index (idx_approval_assignments_active_unique).
+        // P2 (gate 20260819): same "leave in place" evidence parity as above — audited + warned,
+        // never silent.
         const targetAssignments = await client.query<ApprovalAssignmentRow>(
           `SELECT id
              FROM approval_assignments
@@ -8129,7 +8176,32 @@ export class ApprovalProductService {
           [instanceId, resolvedManagerId],
         )
         if (targetAssignments.rows.length > 0) {
-          await client.query('ROLLBACK')
+          for (const assignment of sourceAssignments.rows) {
+            await this.insertApprovalRecord(client, instanceId, {
+              action: 'reassign',
+              actorId: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              actorName: APPROVAL_DEPARTURE_SYSTEM_ACTOR,
+              comment: null,
+              fromStatus: instance.status,
+              toStatus: instance.status,
+              fromVersion: instance.version,
+              toVersion: instance.version,
+              metadata: {
+                departureTransfer: true,
+                outcome: 'target_already_assignee',
+                fromUserId: userId,
+                // Diagnostic-only, same reasoning as target_is_requester above — the seat did NOT
+                // move, so target_user_id (the COLUMN) is deliberately left unset.
+                toUserId: resolvedManagerId,
+                nodeKey: assignment.node_key,
+                previousAssignmentId: assignment.id,
+              },
+            })
+          }
+          await client.query('COMMIT')
+          approvalProductLogger.warn(
+            `approval departure transfer: resolved manager already holds a seat on instance ${instanceId}; seat(s) left in place (operator action required)`,
+          )
           skipDepartureTransfer(instanceId, 'target-already-assignee')
           continue
         }

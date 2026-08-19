@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import {
   ApprovalProductService,
   __setApprovalDepartureTransferTestBarrierForTests,
 } from '../../src/services/ApprovalProductService'
 import { ServiceError } from '../../src/services/ApprovalBridgeService'
+import { Logger } from '../../src/core/logger'
 import type { ApprovalGraph, FormSchema } from '../../src/types/approval-product'
 import { grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
@@ -43,6 +44,8 @@ const NOMGR = `dep-nomgr-${TS}` // E-2 negative: no directory link at all → no
 const U3 = `dep-u3-${TS}` // concurrency race: sole assignee, resolvable manager
 const U4 = `dep-u4-${TS}` // P26: departed user on an attendance-central instance (must skip, not move)
 const U5 = `dep-u5-${TS}` // self-approval guard: U5's manager (MGR) is ALSO the requester of U5's instance
+const U6 = `dep-u6-${TS}` // P2 collision guard: U6's manager (MGR) already holds a seat on ONE instance; U6
+// also holds a seat on a second, non-colliding instance in the same fixture (positive control).
 const DELEGATOR = `dep-delegator-${TS}` // E-3: delegates away, then departs
 const DELEGATEE = `dep-delegatee-${TS}` // E-3: holds the substituted seat, then departs
 const DELEGATEE_MGR = `dep-delegatee-mgr-${TS}` // leader of DEPT2
@@ -126,7 +129,8 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
     await pool.query(
       `INSERT INTO users (id, email, password_hash)
        VALUES ($1,$2,'x'),($3,$4,'x'),($5,$6,'x'),($7,$8,'x'),($9,$10,'x'),($11,$12,'x'),
-              ($13,$14,'x'),($15,$16,'x'),($17,$18,'x'),($19,$20,'x'),($21,$22,'x')`,
+              ($13,$14,'x'),($15,$16,'x'),($17,$18,'x'),($19,$20,'x'),($21,$22,'x'),
+              ($23,$24,'x')`,
       [
         REQ, `${REQ}@example.test`,
         U, `${U}@example.test`,
@@ -139,6 +143,7 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         DELEGATEE_MGR, `${DELEGATEE_MGR}@example.test`,
         U4, `${U4}@example.test`,
         U5, `${U5}@example.test`,
+        U6, `${U6}@example.test`,
       ],
     )
     // NOMGR deliberately gets a `users` row (so the target-active check on a hypothetical resolve
@@ -202,7 +207,14 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
     const accMgr = await makeAccount(MGR, 'MGR', DEPT1)
     await link(accMgr, MGR)
     await primaryOf(accMgr, dept1Id)
-    for (const [extId, localId] of [[U, U] as const, [U2, U2] as const, [U3, U3] as const, [U4, U4] as const, [U5, U5] as const]) {
+    for (const [extId, localId] of [
+      [U, U] as const,
+      [U2, U2] as const,
+      [U3, U3] as const,
+      [U4, U4] as const,
+      [U5, U5] as const,
+      [U6, U6] as const,
+    ]) {
       const acc = await makeAccount(extId, extId, undefined)
       await link(acc, localId)
       await primaryOf(acc, dept1Id)
@@ -222,6 +234,10 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
        VALUES ($1, $2, $3, 'all', $4, $5, TRUE)`,
       [`dep-deleg-${TS}`, DELEGATOR, DELEGATEE, WINDOW.startAt, WINDOW.endAt],
     )
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
 
   afterAll(async () => {
@@ -246,7 +262,7 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         await pool.query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId])
       }
       await pool.query(`DELETE FROM users WHERE id = ANY($1)`, [
-        [REQ, U, MGR, OTHER, U2, NOMGR, U3, U4, U5, DELEGATOR, DELEGATEE, DELEGATEE_MGR],
+        [REQ, U, MGR, OTHER, U2, NOMGR, U3, U4, U5, U6, DELEGATOR, DELEGATEE, DELEGATEE_MGR],
       ])
     } catch {
       /* best effort */
@@ -506,7 +522,8 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
 
   it(
     "self-approval guard: the resolved manager is skipped (not seated) when they are ALSO the instance's own requester, " +
-      'mirroring bulkReassignApprovals target-is-requester',
+      'mirroring bulkReassignApprovals target-is-requester | P2 (gate 20260819): the skip is AUDITED and WARNED, ' +
+      'not silent — same evidence contract as the no-manager fail-closed branch',
     async () => {
       const key = `dep-self-approve-${TS}`
       templateKeys.push(key)
@@ -517,15 +534,131 @@ describeIfDatabase('F4-E departure fallback (离职自动转上级) — Lock-4 g
         await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`, [instanceId])
       ).rows[0]
 
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn')
       const result = await service.applyApprovalDepartureTransfer(U5)
       expect(result.transferred).not.toContain(instanceId)
       expect(result.noManagerResolved).not.toContain(instanceId)
       expect(result.skipped).toContainEqual({ id: instanceId, reason: 'target-is-requester' })
 
+      // Seat state: UNCHANGED (left in place), byte-identical to before the call.
       const seatAfter = (
         await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE id = $1`, [seatBefore.id])
       ).rows[0]
       expect(seatAfter).toEqual(seatBefore)
+
+      // Observable signal 1/2: an audit row, exactly like the no-manager fail-closed branch —
+      // NOT silent. fromVersion === toVersion / fromStatus === toStatus record nothing moved.
+      const audit = (
+        await pool.query<RecordRow>(
+          `SELECT action, actor_id, from_status, to_status, from_version, to_version, metadata, target_user_id
+             FROM approval_records WHERE instance_id = $1 AND action = 'reassign' ORDER BY created_at DESC LIMIT 1`,
+          [instanceId],
+        )
+      ).rows[0]
+      expect(audit).toBeDefined()
+      expect(audit.actor_id).toBe('system:approval-departure')
+      expect(audit.from_status).toBe(audit.to_status)
+      expect(Number(audit.from_version)).toBe(Number(audit.to_version))
+      // target_user_id (the COLUMN) is null: the seat did NOT move to MGR, so the column that
+      // names a seat's actual new holder must not claim MGR received it. The would-be target is
+      // recorded diagnostically in metadata.toUserId only.
+      expect(audit.target_user_id).toBeNull()
+      expect(audit.metadata).toMatchObject({
+        departureTransfer: true,
+        outcome: 'target_is_requester',
+        fromUserId: U5,
+        toUserId: MGR,
+      })
+
+      // Observable signal 2/2: an operator warning naming the instance.
+      const skipWarns = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('resolved manager is the requester') && call[0].includes(instanceId),
+      )
+      expect(skipWarns.length).toBeGreaterThanOrEqual(1)
+    },
+  )
+
+  it(
+    "collision guard: the resolved manager is skipped (not seated) when they ALREADY hold an active seat on the same " +
+      "instance, mirroring bulkReassignApprovals target-already-assignee | P2 (gate 20260819): the skip is AUDITED " +
+      'and WARNED, not silent | the resolvable, non-colliding case in the SAME run DOES transfer',
+    async () => {
+      const keyCollision = `dep-collision-${TS}`
+      const keyClean = `dep-collision-clean-${TS}`
+      templateKeys.push(keyCollision, keyClean)
+      // U6 and MGR are BOTH assignees on the same instance ('all' mode, 2 assignees) — MGR is
+      // U6's resolvable manager AND already holds a seat here.
+      const instanceCollision = await createPublishedInstance(service, keyCollision, [U6, MGR])
+      // U6 ALSO holds a seat, alone, on a second instance where MGR holds no seat — the positive
+      // control: SAME departed user, SAME run, SAME resolved manager, no collision on this one.
+      const instanceClean = await createPublishedInstance(service, keyClean, [U6])
+
+      const u6SeatBefore = (
+        await pool.query<AssignmentRow>(
+          `SELECT id, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND assignee_id = $2 AND is_active = TRUE`,
+          [instanceCollision, U6],
+        )
+      ).rows[0]
+      const mgrSeatBefore = (
+        await pool.query<AssignmentRow>(
+          `SELECT id, assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND assignee_id = $2 AND is_active = TRUE`,
+          [instanceCollision, MGR],
+        )
+      ).rows[0]
+      expect(u6SeatBefore).toBeDefined()
+      expect(mgrSeatBefore).toBeDefined()
+
+      const warnSpy = vi.spyOn(Logger.prototype, 'warn')
+      const result = await service.applyApprovalDepartureTransfer(U6)
+      expect(result.transferred).not.toContain(instanceCollision)
+      expect(result.noManagerResolved).not.toContain(instanceCollision)
+      expect(result.skipped).toContainEqual({ id: instanceCollision, reason: 'target-already-assignee' })
+
+      // Seat state: U6's seat UNCHANGED (left in place) — the departed user still holds it.
+      const u6SeatAfter = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE id = $1`, [u6SeatBefore.id])
+      ).rows[0]
+      expect(u6SeatAfter).toEqual(u6SeatBefore)
+      // MGR's own pre-existing seat is also untouched (no partial mutation, no duplicate row).
+      const mgrSeatAfter = (
+        await pool.query<AssignmentRow>(`SELECT id, assignee_id, is_active FROM approval_assignments WHERE id = $1`, [mgrSeatBefore.id])
+      ).rows[0]
+      expect(mgrSeatAfter).toEqual(mgrSeatBefore)
+
+      // Observable signal 1/2: an audit row, exactly like the no-manager fail-closed branch.
+      const audit = (
+        await pool.query<RecordRow>(
+          `SELECT action, actor_id, from_status, to_status, from_version, to_version, metadata, target_user_id
+             FROM approval_records WHERE instance_id = $1 AND action = 'reassign' ORDER BY created_at DESC LIMIT 1`,
+          [instanceCollision],
+        )
+      ).rows[0]
+      expect(audit).toBeDefined()
+      expect(audit.actor_id).toBe('system:approval-departure')
+      expect(audit.from_status).toBe(audit.to_status)
+      expect(Number(audit.from_version)).toBe(Number(audit.to_version))
+      // target_user_id (the COLUMN) is null — same reasoning as the target-is-requester branch:
+      // the seat did NOT move, so the column that names a seat's actual new holder stays unset.
+      expect(audit.target_user_id).toBeNull()
+      expect(audit.metadata).toMatchObject({
+        departureTransfer: true,
+        outcome: 'target_already_assignee',
+        fromUserId: U6,
+        toUserId: MGR,
+      })
+
+      // Observable signal 2/2: an operator warning naming the instance.
+      const skipWarns = warnSpy.mock.calls.filter(
+        (call) => typeof call[0] === 'string' && call[0].includes('resolved manager already holds a seat') && call[0].includes(instanceCollision),
+      )
+      expect(skipWarns.length).toBeGreaterThanOrEqual(1)
+
+      // Positive control (SAME run, SAME resolved manager, no collision): DOES transfer.
+      expect(result.transferred).toContain(instanceClean)
+      const cleanSeat = (
+        await pool.query<AssignmentRow>(`SELECT assignee_id, is_active FROM approval_assignments WHERE instance_id = $1 AND is_active = TRUE`, [instanceClean])
+      ).rows[0]
+      expect(cleanSeat.assignee_id).toBe(MGR)
     },
   )
 
