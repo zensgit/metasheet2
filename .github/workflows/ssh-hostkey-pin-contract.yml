@@ -17,16 +17,11 @@ name: SSH Host-Key Pin Contract
 # workflow, so any workflow edit (which could add a new SSH call site) must re-run
 # this guard.
 
+# pull_request has NO path filter: this check is intended to become a REQUIRED status, and a
+# path-filtered required check strands every PR that doesn't trigger it at
+# "Expected — waiting for status". The suite is hermetic and runs in seconds on every PR.
 on:
   pull_request:
-    paths:
-      - '.github/workflows/**'
-      - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
-      - 'scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs'
-      - 'scripts/ops/resolve-attendance-smoke-token.sh'
-      - 'scripts/ops/resolve-k3wise-smoke-token.sh'
-      - 'scripts/ops/resolve-metrics-scrape-token.sh'
-      - 'scripts/**/*.sh'
   push:
     branches: [main]
     paths:
