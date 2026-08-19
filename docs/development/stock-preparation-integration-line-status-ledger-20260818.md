@@ -23,7 +23,7 @@
 | 票 | 状态(2026-08-18) | 退出条件 | 谁能推动 |
 |---|---|---|---|
 | #4861 K3 exact-two Save-only Apply | OPEN;Op01–06 / Recovery01–06 均未执行 Apply(`rdK3CallCount=0`,`rdApplyDisabled=YES`);Recovery07 由 Codex 从最新 main 重建 | 一次 Save-only Apply 成功(`201 created` → 重放 `200 skipped_existing`,无第三次)+ K3 原生清理 + values-free receipt | owner(owner block)+ Codex(launcher)+ 实体机操作员;准备包见 #4985 |
-| #4693 S6-A 受控 SQL Server 密封快照运行时与包 | OPEN;S6-A walk 已在 CI 端到端跑通(2026-08-04),但冻结包需重冻结 | 从候选 commit 构建的包在 CI 合成走廊(见 #4987)全绿 → 重冻结五字段块 | CI + owner(冻结决定) |
+| #4693 S6-A 受控 SQL Server 密封快照运行时与包 | 重冻结完成:release stock-prep-onprem-s6a-20260819-6ace2e5a0,冻结块已贴 #4693/#4708(2026-08-19) | S6-B 窗口 PASS(#5006 已 OPEN…V2,2026-08-19) | DBA → 运维 → Codex |
 | #4708 合成 SQL Server e2e 实验室 | OPEN,停在 LAB-0 盘点;**6/8 证据项已在 CI 存在**(#4987) | 一次 dispatch(`s6a_row_count=24999`,或新 `lab_mode`)出全 8 项 → 机器只剩 Windows 安装器类主张 | 任何有 workflow 权限者 dispatch;LAB-0 由 #4986 的脚本替代人工 |
 | #4695 S6-B 一次受控实体机验收 | CLOSED(2026-08-03,"ops readiness pending",非 PASS);08-04 披露冻结包无法跑通、需重冻结;"PG17 未验证"已被 `stock-prep-s6a-postgres17-validation` 推翻 | 重冻结 + LAB-0 自动盘点通过 + 一次窗口 PASS | owner + ops |
 | #4437 RC-A 实体机受控验收 | OPEN;Operation16 PASS,Apply 仍关 | 视 owner 是否再开操作 | owner |
@@ -38,7 +38,7 @@
 | `MULTITABLE_STOCK_PREP_ERP_AUTOPERSIST_ENABLED` / `_PLM_AUTOPERSIST_ENABLED` / `_TABLE_ACTION_MVP_PERSIST_ENABLED` | `http-routes.cjs` | OFF;仅脚本化 OFF→ON→smoke→OFF 窗口 | owner 决定 + 窗口脚本 |
 | `MULTITABLE_STOCK_PREP_SQLSERVER_SEALED_SNAPSHOT_ENABLED` | `sealed-export/stock-preparation-runtime-config.cjs` | OFF;关着时路由不进 `ROUTES` | S6-A/S6-B 决定;**win32 另需** `..._WIN32_ARTIFACT_ACL_ATTESTED='true'`(#4989) |
 | K3 dead-letter replay | `pipeline-runner.cjs` `K3_WISE_REPLAY_DISABLED` | RATIFIED 无条件禁用 | 需新的 owner 裁定 |
-| GIP 运行时(拟) `INTEGRATION_GIP_BINDING_QUALIFICATION_RUNTIME_ENABLED` | 尚不存在 | 决定书草案 #4988 | `ownerGipRuntimeWiringDecision=` |
+| GIP 运行时(拟) `INTEGRATION_GIP_BINDING_QUALIFICATION_RUNTIME_ENABLED` | 尚不存在 | **已裁定 DEFER_UNTIL_B1A_REDO**(#4988 comment 5339974807,2026-08-19);前置 = ⟲OD2 真实盘点填充 (β)/(γ) | 新的 owner 决定 |
 
 ## 4. LATENT(已建、已测、无运行时消费者)
 
@@ -83,5 +83,5 @@
 
 1. #4861 一次 Save-only Apply 成功 + 清理 + receipt;
 2. S6-A 重冻结包在 CI 合成走廊全绿 → S6-B 一次实体窗口 PASS;
-3. owner 对 GIP 接线做出 RATIFIED 决定并执行一次受控窗口(或明确 DEFER 并记录);
+3. owner 对 GIP 接线的决定已落字:DEFER_UNTIL_B1A_REDO(#4988 comment 5339974807,2026-08-19)——本判据闭合;
 4. Apply 关闭、专用开关恢复、私密残留(远端 + 本地 `lia/outputs`、`lia/work`)= 0 的 values-free 收尾记录。
