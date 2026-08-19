@@ -598,6 +598,58 @@ describe('ApprovalCenterView — UI-7 desktop master-detail pane', () => {
     expect(text).not.toContain('当前节点')
   })
 
+  // Discriminating negative (raw-id-exposure-fix, 20260819): ApprovalCenterDetailPane.vue's own
+  // `assigneeLabel()`/`pendingApproverLabels` used to render the raw `assignment.assigneeId`
+  // verbatim whenever `metadata.assigneeName` was absent — the ORDINARY path, since no producer
+  // repo-wide sets `assigneeName` (grep-confirmed). Constructs that exact shape: two ACTIVE
+  // assignments at the current node, both `metadata: {}`, with the SAME raw-id-shaped ids
+  // (`user_9`/`user_42`) `pendingRow()`'s own default fixture already uses above — this is not an
+  // exotic id format. Asserts the rendered pane text contains NEITHER raw id, and that the two
+  // fallback labels stay MUTUALLY DISTINGUISHABLE (a stable per-list ordinal), not a single
+  // repeated generic string that would collapse two different approvers into one indistinguishable
+  // line.
+  it('pending-approver labels never render a raw assigneeId, and stay mutually distinguishable (discriminating negative)', async () => {
+    const row = pendingRow('apv_1', '出差报销', {
+      assignments: [
+        { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+        { id: 'asg_2', type: 'user', assigneeId: 'user_42', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: {} },
+      ],
+    })
+    getApprovalSpy.mockResolvedValue(row)
+    mockPendingApprovals.value = [row]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(text).not.toContain('user_9')
+    expect(text).not.toContain('user_42')
+    expect(text).toContain('成员 1')
+    expect(text).toContain('成员 2')
+  })
+
+  // POSITIVE CONTROL for the test above: with `metadata.assigneeName` present, the pane renders
+  // the real name (proving the assertion above isn't vacuously true against a component that never
+  // reads assignment data into the pane at all).
+  it('pending-approver label resolves to metadata.assigneeName when present (positive control)', async () => {
+    const row = pendingRow('apv_1', '出差报销', {
+      assignments: [
+        { id: 'asg_1', type: 'user', assigneeId: 'user_9', sourceStep: 1, nodeKey: 'node_manager', isActive: true, metadata: { assigneeName: '王五' } },
+      ],
+    })
+    getApprovalSpy.mockResolvedValue(row)
+    mockPendingApprovals.value = [row]
+    await mountView()
+
+    ;(container!.querySelector('[data-el-row="apv_1"]') as HTMLElement).click()
+    await flushUi()
+
+    const text = container!.querySelector('[data-testid="approval-detail-pane"]')?.textContent ?? ''
+    expect(text).toContain('王五')
+    expect(text).not.toContain('user_9')
+  })
+
   // -------------------------------------------------------------------------
   // Quick actions dispatch through the SAME handlers as row actions.
   // -------------------------------------------------------------------------

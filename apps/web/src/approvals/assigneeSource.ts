@@ -65,14 +65,38 @@ export function assigneeSourceSummary(source: ApprovalAssigneeSource): string {
  * gets a real summary instead of "unconfigured". `cc`/`condition`/`parallel`/`end` each get a
  * fixed one-line description; `start` (never an "upcoming" node in a valid DAG) falls through to
  * `''`.
+ *
+ * Both `assigneeSources`-shape id-bearing kinds (`static_user`/`static_role`) AND the legacy
+ * `assigneeType`/`assigneeIds` shape are count-only here, never a raw id join — this function's
+ * audience is the ordinary requester/approver reading "what's next" (see docstring above), not the
+ * template author. `assigneeSourceSummary`'s own `static_user`/`static_role` cases DO join raw ids
+ * (pinned byte-identical to the G-1 authoring preview it was moved from, `approval-assignee-source.
+ * test.ts`), so those two kinds are intercepted HERE before delegating, the same pattern
+ * `TemplateAuthoringView.vue`'s `nodeConfigSummary` and `ApprovalGraphNodeConfigEditor.vue`'s
+ * `configuredSourceSummaryLine` already use around the same shared helper. Every other kind
+ * (`user_group`/`form_field_user*`/`prior_node_approver`/…) keeps its template-authored
+ * id/field-id/node-key — Lock-1 §2.6 permits those; only person identities are values-free here.
  */
+function requesterFacingSourceSummary(source: ApprovalAssigneeSource): string {
+  if (source.kind === 'static_user') {
+    const count = source.userIds.length
+    return `指定用户${count ? `（${count} 人）` : '（无）'}`
+  }
+  if (source.kind === 'static_role') {
+    const count = source.roleIds.length
+    return `指定角色${count ? `（${count} 个）` : '（无）'}`
+  }
+  return assigneeSourceSummary(source)
+}
+
 export function nodeAssigneeSourceSummary(node: ApprovalNode, schema?: FormSchema | null): string {
   if (node.type === 'approval') {
     const cfg = node.config as ApprovalNodeConfig
     const sources = cfg.assigneeSources ?? []
-    if (sources.length > 0) return sources.map(assigneeSourceSummary).join('、')
+    if (sources.length > 0) return sources.map(requesterFacingSourceSummary).join('、')
     if (cfg.assigneeType && cfg.assigneeIds && cfg.assigneeIds.length > 0) {
-      return `${cfg.assigneeType === 'role' ? '指定角色' : '指定成员'}：${cfg.assigneeIds.join('、')}`
+      const count = cfg.assigneeIds.length
+      return cfg.assigneeType === 'role' ? `指定角色（${count} 个）` : `指定成员（${count} 人）`
     }
     return '（未配置审批人）'
   }

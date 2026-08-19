@@ -110,6 +110,12 @@ vi.mock('../src/approvals/store', () => ({
 // assertions further down keep working unchanged. `vi.importActual` keeps every OTHER export
 // (dispatchAction, ApprovalApiError, ...) real — only this one function is overridden.
 // ---------------------------------------------------------------------------
+// raw-id-exposure-fix (20260819): `user_9` has a blank `name` — the same shape
+// `searchApprovalDirectoryUsers` (api.ts) produces for a real backend directory record whose
+// `name` field is missing/non-string (defaulted to `''`, not omitted). Appended rather than
+// replacing any of the three named fixtures above, so every pre-existing assertion that reads
+// user_2/3/4 stays byte-identical; `toBeGreaterThanOrEqual(3)` / `>= 3` option-count assertions
+// elsewhere in this file are unaffected by the fourth entry.
 vi.mock('../src/approvals/api', async () => {
   const actual = await vi.importActual<typeof import('../src/approvals/api')>('../src/approvals/api')
   return {
@@ -118,6 +124,7 @@ vi.mock('../src/approvals/api', async () => {
       { id: 'user_2', name: '李四', email: '' },
       { id: 'user_3', name: '王五', email: '' },
       { id: 'user_4', name: '赵六', email: '' },
+      { id: 'user_9', name: '', email: '' },
     ]),
   }
 })
@@ -1358,6 +1365,83 @@ describe('Approval E2E Lifecycle', () => {
       // through to the label map.
       expect(dialog.querySelector('[data-testid="approval-add-sign-chips"]')?.textContent).toContain('李四')
     })
+
+    // Discriminating negative (raw-id-exposure-fix, 20260819): `onAddSignUserSelected`
+    // (ApprovalDetailView.vue) used to store `option.name || option.id` — when the picked
+    // directory user has no name (`user_9` below, the exact shape a real backend record with a
+    // missing/non-string `name` produces — see the api.ts mock comment above), the chip rendered
+    // the raw directory user id verbatim. Goes through the REAL ApprovalUserPicker + REAL
+    // directory search mock, not a hand-rolled stub payload.
+    it('a picked user with no directory name never renders the raw id as the chip label (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      select.value = 'user_9'
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      await flushUi()
+
+      const chips = dialog.querySelector('[data-testid="approval-add-sign-chips"]')
+      expect(chips?.textContent).not.toContain('user_9')
+      // Values-free but still distinguishable — a stable ordinal, not a blank chip.
+      expect(chips?.textContent?.trim()).toBe('成员 1')
+    })
+
+    // Discriminating negative (raw-id-exposure-fix FOLLOW-UP, 20260819): ApprovalUserPicker's OWN
+    // `optionLabel()` used to fall back to the raw directory `option.id` for the DROPDOWN option
+    // text whenever `option.name` was blank -- one DOM layer ABOVE the add-sign chip label the two
+    // tests above already cover (that fix only touched `onAddSignUserSelected`'s stored label, not
+    // the picker's own dropdown). `user_9` (blank name) sits in the SAME directory fixture every
+    // other test in this describe block already uses. Neither dialog's placeholder here advertises
+    // id-based search (加签: "搜索并添加加签人"; 转交: "搜索并选择转交对象" -- see ApprovalDetailView.vue),
+    // so a raw id rendered as option TEXT on these two flows was a plain leak, not a documented
+    // search affordance.
+    it('the add-sign picker DROPDOWN never renders a raw id as option text, and stays distinguishable (discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const addBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '加签')
+      addBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const options = Array.from(select.querySelectorAll('option'))
+      const labels = options.map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+      // The option VALUE (the real submit payload) is unaffected by the label fallback -- only
+      // the visible TEXT changed.
+      expect(options.map((o) => o.value)).toEqual(['user_2', 'user_3', 'user_4', 'user_9'])
+    })
+
+    it('the transfer picker DROPDOWN never renders a raw id as option text (same directory fixture, discriminating negative)', async () => {
+      routeParams = { id: 'apv_pending_1' }
+      mockActiveApproval.value = mockPendingApproval()
+      await mountDetailView()
+
+      const transferBtn = Array.from(container!.querySelectorAll('.approval-detail__actions button'))
+        .find((b) => b.textContent?.trim() === '转交')
+      transferBtn!.click()
+      await flushUi()
+
+      const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="转交审批"]')!
+      const select = dialog.querySelector('[data-el-select]') as HTMLSelectElement
+      const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent)
+
+      expect(labels).toEqual(['李四', '王五', '赵六', '成员 4'])
+      expect(labels.join('|')).not.toContain('user_9')
+    })
   })
 
   // =========================================================================
@@ -1619,8 +1703,10 @@ describe('Approval E2E Lifecycle', () => {
         expect.stringContaining('结束'),
       ])
       // legacy assigneeType/assigneeIds shape (the fixture graph predates assigneeSources) still
-      // resolves to a real summary, not "unconfigured".
-      expect(items[0].textContent).toContain('指定成员：user_finance')
+      // resolves to a real summary, not "unconfigured" — count-only, never the raw configured id
+      // (this is a requester-facing "what's next" surface, not an authoring tool; P3).
+      expect(items[0].textContent).toContain('指定成员（1 人）')
+      expect(items[0].textContent).not.toContain('user_finance')
       expect(items[1].textContent).toContain('流程结束')
       // Greyed via the dedicated CSS class (--future), not the current/highlighted one.
       expect(items[0].classList.contains('approval-detail__timeline-upcoming-item--future')).toBe(true)

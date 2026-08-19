@@ -618,6 +618,150 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
   })
 })
 
+// -----------------------------------------------------------------------------------------------
+// raw-id-exposure-fix (2026-08-19) — `reducibleAssignees` (ApprovalDetailView.vue, the 减签 picker
+// backing the `<el-option v-for="assignee in reducibleAssignees" ... :label="assignee.label"
+// :value="assignee.assigneeId" />` list) used to push `label: assignment.assigneeId` verbatim — the
+// picker showed the raw internal user id as its visible option text. `metadata.assigneeName` has
+// zero producers repo-wide (grep-confirmed), so that was the ORDINARY path, not an exotic shape.
+// Reuses THIS file's own real ElSelect/ElOption stubs (unlike the generic no-text div stub used
+// elsewhere in the approval spec suite) so option text is actually queryable, and this file's own
+// mount scaffold + `baseInstance()`/`ALL_ALLOWED` fixtures so 减签 is reachable exactly as the
+// sibling describe blocks above already prove it is.
+// -----------------------------------------------------------------------------------------------
+describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a raw assigneeId', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mockHistory.value = []
+    mockCanAct.value = true
+    mockCurrentUserId.value = 'user_1'
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of [
+      'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
+      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElAlert',
+    ]) {
+      app.component(name, stub(name))
+    }
+    app.component('ElButton', ElButton)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.component('ElDialog', ElDialog)
+    app.component('ElInput', ElInput)
+    app.component('ElFormItem', ElFormItem)
+    app.component('ElSelect', ElSelect)
+    app.component('ElOption', ElOption)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi()
+  }
+
+  // Two previously add-signed, still-active seats at the current node — reducible per the backend
+  // `reduce_sign` `removable` predicate (INV-2) — both `metadata: {}` (no `assigneeName`, the
+  // ordinary shape today) with raw-id-shaped ids.
+  function reduceSignInstance(): any {
+    return baseInstance({
+      nodeOperations: { ...ALL_ALLOWED },
+      assignments: [
+        { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+        { id: 'as_2', type: 'user', assigneeId: 'user_9', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true } },
+        { id: 'as_3', type: 'user', assigneeId: 'user_42', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true } },
+      ],
+    })
+  }
+
+  it('discriminating negative: the picker options never render a raw assigneeId, and stay mutually distinguishable', async () => {
+    mockActiveApproval.value = reduceSignInstance()
+    await mountView()
+
+    ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
+    expect(dialog).toBeTruthy()
+    const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options).toHaveLength(2)
+
+    // Neither option's VISIBLE text is the raw internal id.
+    for (const option of options) {
+      expect(option.textContent).not.toContain('user_9')
+      expect(option.textContent).not.toContain('user_42')
+    }
+    // The two options stay mutually distinguishable — a stable per-list ordinal, not a single
+    // repeated generic label an admin couldn't use to tell which seat they're removing.
+    const labels = options.map((o) => o.textContent?.trim())
+    expect(labels).toEqual(['成员 1', '成员 2'])
+    expect(new Set(labels).size).toBe(2)
+
+    // `assigneeId` is still the option VALUE — the real submit payload — even though the raw id is
+    // never SHOWN. Proves the fix keeps the wire contract, not just hides the leak by breaking it.
+    expect(options.map((o) => o.value)).toEqual(['user_9', 'user_42'])
+  })
+
+  // POSITIVE CONTROL: proves the assertions above aren't vacuously true against a component that
+  // never actually reads assignment data into the picker at all.
+  it('POSITIVE CONTROL: with metadata.assigneeName present, the real name renders as the option label', async () => {
+    mockActiveApproval.value = baseInstance({
+      nodeOperations: { ...ALL_ALLOWED },
+      assignments: [
+        { id: 'as_1', type: 'user', assigneeId: 'user_1', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: {} },
+        { id: 'as_2', type: 'user', assigneeId: 'user_9', sourceStep: 2, nodeKey: 'approval_2', isActive: true, metadata: { addSign: true, assigneeName: '赵六' } },
+      ],
+    })
+    await mountView()
+
+    ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
+    const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    const options = Array.from(select.querySelectorAll('option')) as HTMLOptionElement[]
+    expect(options).toHaveLength(1)
+    expect(options[0].textContent?.trim()).toBe('赵六')
+    expect(options[0].value).toBe('user_9')
+  })
+
+  it('submits the selected assigneeId (the option VALUE, not the fallback LABEL) through the real reduce_sign handler', async () => {
+    mockActiveApproval.value = reduceSignInstance()
+    await mountView()
+
+    ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
+    await flushUi()
+
+    const dialog = container!.querySelector('[data-el-dialog="减签"]') as HTMLElement
+    const select = dialog.querySelector('select[data-el-select]') as HTMLSelectElement
+    select.value = 'user_42'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+
+    ;(q(container!, 'approval-reduce-sign-submit') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(executeActionSpy).toHaveBeenCalled()
+    const lastCall = executeActionSpy.mock.calls[executeActionSpy.mock.calls.length - 1]
+    expect(lastCall[1]).toMatchObject({ action: 'reduce_sign', targetAssignmentUserId: 'user_42' })
+  })
+})
+
 describe('Lock-5 CR-3 (detail dialog) — the comment requirement derives from the effective policy', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null

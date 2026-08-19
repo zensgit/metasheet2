@@ -722,13 +722,13 @@
                next pick. `addSignUserIds` (the submit payload shape) is unchanged. -->
           <div v-if="addSignUserIds.length > 0" class="approval-detail__add-sign-chips" data-testid="approval-add-sign-chips">
             <el-tag
-              v-for="uid in addSignUserIds"
+              v-for="(uid, chipIndex) in addSignUserIds"
               :key="uid"
               closable
               class="approval-detail__add-sign-chip"
               @close="removeAddSignUser(uid)"
             >
-              {{ addSignUserLabels[uid] || uid }}
+              {{ addSignUserLabels[uid] || `成员 ${chipIndex + 1}` }}
             </el-tag>
           </div>
           <ApprovalUserPicker
@@ -1445,12 +1445,21 @@ const reduceSignUserId = ref('')
 // still-active, user-typed assignments at the CURRENT node are reducible.
 // Requester-original / template-resolved / role rows are never listed (mirrors
 // the backend `reduce_sign` `removable` predicate — INV-2).
+//
+// Values-free doctrine (mirrors `assignmentDisplayLabel` above): the option LABEL an admin reads
+// must never be the raw internal `assigneeId` — `metadata.assigneeName` has zero producers
+// repo-wide today, so this used to be the reachable, ordinary-path leak, not an exotic shape. The
+// picker still needs its options MUTUALLY DISTINGUISHABLE (an admin must be able to tell which
+// seat they are removing), so the fallback is a stable per-list ordinal (`成员 N`), not a single
+// repeated generic string. `assigneeId` stays the option VALUE (the actual submit payload) —
+// only the LABEL text changes; nothing here is rendered from a new fetch.
 const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>>(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
   const currentNodeKey = approval.value.currentNodeKey
   if (!currentNodeKey) return []
   const seen = new Set<string>()
   const result: Array<{ assigneeId: string; label: string }> = []
+  let ordinal = 0
   for (const assignment of approval.value.assignments) {
     if (!assignment.isActive) continue
     if (assignment.type !== 'user') continue
@@ -1458,7 +1467,10 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>
     if (assignment.metadata?.addSign !== true) continue
     if (seen.has(assignment.assigneeId)) continue
     seen.add(assignment.assigneeId)
-    result.push({ assigneeId: assignment.assigneeId, label: assignment.assigneeId })
+    ordinal += 1
+    const metaName = assignment.metadata?.assigneeName
+    const label = typeof metaName === 'string' && metaName.trim() ? metaName.trim() : `成员 ${ordinal}`
+    result.push({ assigneeId: assignment.assigneeId, label })
   }
   return result
 })
@@ -1953,11 +1965,21 @@ function openAddSignDialog() {
 // B3-04 D-2: repeated-pick handler for the add-sign target picker — append the picked id (no
 // duplicates), remember its display label for the chip, then reset the picker's transient slot
 // so it is ready for the next pick.
+//
+// raw-id-exposure-fix (20260819): `searchApprovalDirectoryUsers` defaults a missing/non-string
+// backend `name` to `''` (see api.ts) — a real, reachable shape, not a type-only possibility. The
+// old `option.name || option.id` fallback rendered the raw directory user id verbatim as the chip
+// text in that case. Only a non-blank name is stored here now; the template falls back to a
+// values-free, still-distinguishable per-list ordinal (`成员 N`) when no label is stored, the same
+// convention used by `assignmentDisplayLabel`/`reducibleAssignees` above.
 function onAddSignUserSelected(option: ApprovalDirectoryUser | null): void {
   if (!option) return
   if (!addSignUserIds.value.includes(option.id)) {
     addSignUserIds.value = [...addSignUserIds.value, option.id]
-    addSignUserLabels.value = { ...addSignUserLabels.value, [option.id]: option.name || option.id }
+    const name = option.name.trim()
+    if (name) {
+      addSignUserLabels.value = { ...addSignUserLabels.value, [option.id]: name }
+    }
   }
   addSignPickerValue.value = null
 }

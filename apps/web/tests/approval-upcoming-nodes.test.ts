@@ -71,7 +71,7 @@ describe('buildUpcomingNodes', () => {
     expect(upcoming[0]).toEqual({
       key: 'approval_2',
       name: '财务审批',
-      assigneeSummary: '指定用户：user_finance',
+      assigneeSummary: '指定用户（1 人）',
       isConditional: false,
     })
     expect(upcoming[1]).toEqual({
@@ -80,6 +80,56 @@ describe('buildUpcomingNodes', () => {
       assigneeSummary: '流程结束',
       isConditional: false,
     })
+  })
+
+  // Discriminating negative for the P3 fix (assigneeSource.ts's requesterFacingSourceSummary):
+  // a static_user source with raw-id-shaped ids must render as a COUNT, never the ids themselves,
+  // through the exact same real render chain (buildUpcomingNodes -> nodeAssigneeSourceSummary) the
+  // approval detail view's "upcoming nodes" timeline uses. Positive control: the count IS shown.
+  it('static_user source with raw-id-shaped ids: the summary is a count, never the raw ids (P3)', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', name: '成员审批', config: { assigneeSources: [{ kind: 'static_user' as const, userIds: ['user_9', 'user_42'] }] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const upcoming = buildUpcomingNodes(graph, 'start')
+    const summary = upcoming[0].assigneeSummary
+    // Positive control: a count IS shown.
+    expect(summary).toBe('指定用户（2 人）')
+    // Negative: neither raw id renders.
+    expect(summary).not.toContain('user_9')
+    expect(summary).not.toContain('user_42')
+  })
+
+  // Second, independent discriminating negative for the P3 fix — the LEGACY
+  // assigneeType/assigneeIds shape (no `assigneeSources` present, so this exercises
+  // `nodeAssigneeSourceSummary`'s other branch, not `requesterFacingSourceSummary` above). Gate
+  // report's exact cited line (`assigneeSource.ts:75`).
+  it('legacy assigneeType/assigneeIds source with raw-id-shaped ids: the summary is a count, never the raw ids (P3)', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', name: '成员审批', config: { assigneeType: 'user', assigneeIds: ['user_9', 'user_42'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'end' },
+      ],
+    }
+    const upcoming = buildUpcomingNodes(graph, 'start')
+    const summary = upcoming[0].assigneeSummary
+    // Positive control: a count IS shown.
+    expect(summary).toBe('指定成员（2 人）')
+    // Negative: neither raw id renders.
+    expect(summary).not.toContain('user_9')
+    expect(summary).not.toContain('user_42')
   })
 
   it('current at the last approval node before end: walk still resolves through to `end`', () => {

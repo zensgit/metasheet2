@@ -119,11 +119,15 @@ defineEmits<{
   (e: 'close'): void
 }>()
 
-// `assignment.metadata` carries no display name today — mirrors ApprovalDetailView's own
-// `assignmentDisplayLabel` fallback-to-id convention (no separate directory fetch here).
-function assigneeLabel(assignment: ApprovalAssignmentDTO): string {
+// `assignment.metadata` carries no display name today — only `assigneeId` (see
+// `ApprovalAssignmentDTO`). Prefers `metadata.assigneeName` if a producer ever populates it; when
+// unresolvable, falls back to a values-free, still-distinguishable ordinal (`成员 N`) rather than
+// the raw internal user id — mirrors ApprovalDetailView's own `assignmentDisplayLabel` values-free
+// convention (no separate directory fetch here; no new network call).
+function assigneeLabel(assignment: ApprovalAssignmentDTO, ordinal: number): string {
   const metaName = assignment.metadata?.assigneeName
-  return typeof metaName === 'string' && metaName.trim() ? metaName : assignment.assigneeId
+  if (typeof metaName === 'string' && metaName.trim()) return metaName.trim()
+  return `成员 ${ordinal}`
 }
 
 // Every ACTIVE assignment at the current node(s) — linear (`currentNodeKey`) or parallel
@@ -141,7 +145,7 @@ const pendingApproverLabels = computed<string[]>(() => {
   if (keys.size === 0) return []
   return detail.assignments
     .filter((a) => a.isActive && !!a.nodeKey && keys.has(a.nodeKey))
-    .map(assigneeLabel)
+    .map((a, index) => assigneeLabel(a, index + 1))
 })
 </script>
 

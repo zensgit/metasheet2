@@ -14,9 +14,9 @@
     @visible-change="onVisibleChange"
   >
     <el-option
-      v-for="option in displayOptions"
+      v-for="(option, index) in displayOptions"
       :key="option.id"
-      :label="optionLabel(option)"
+      :label="optionLabel(option, index)"
       :value="option.id"
     />
   </el-select>
@@ -79,8 +79,19 @@ const displayOptions = computed<ApprovalUserPickerOption[]>(() => {
   return [initial, ...fetchedOptions.value]
 })
 
-function optionLabel(option: ApprovalUserPickerOption): string {
-  const primary = option.name?.trim() || option.id
+// raw-id-exposure-fix (20260819) follow-up: this used to fall back to the raw directory
+// `option.id` whenever `option.name` was blank/absent — the exact shape `searchApprovalDirectoryUsers`
+// (api.ts) produces for a real backend record with a missing/non-string `name` (defaulted to `''`,
+// not omitted). Two of this component's own call sites (ApprovalDetailView's 转交/加签 pickers)
+// override the default placeholder with text that does NOT advertise id-based search, so a raw id
+// rendered here was a plain leak on those flows, not a documented/expected search affordance.
+// Falls back to the same values-free, per-list ordinal (`成员 N`) convention already used by
+// `assignmentDisplayLabel`/`reducibleAssignees`/`assigneeLabel` — distinguishable across options,
+// never the id. The `email` suffix (when present) is unaffected: it is real directory metadata,
+// not a values-free placeholder, and search-by-id still works server-side regardless of what the
+// option TEXT renders as.
+function optionLabel(option: ApprovalUserPickerOption, index: number): string {
+  const primary = option.name?.trim() || `成员 ${index + 1}`
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
 }
