@@ -77,26 +77,153 @@ const fenceText = readFileSync(FENCE_MODULE_PATH, 'utf8')
 // SQL statement census helpers
 // ---------------------------------------------------------------------------
 
-/** Strip `-- …` line comments, keep everything else. */
-function stripLineComments(sql) {
-  return sql
-    .split('\n')
-    .map((line) => {
-      const idx = line.indexOf('--')
-      return idx === -1 ? line : line.slice(0, idx)
-    })
-    .join('\n')
+// ---------------------------------------------------------------------------
+// P3-3 gate fix: string/dollar-quote-aware comment stripping + statement split.
+//
+// The previous `indexOf('--')`-per-line stripper was NOT string-aware: a `--` inside
+// a single-quoted string literal (e.g. `SELECT 'note -- see below'; DELETE …;`) was
+// treated as a comment start, deleting the rest of the physical line — including a
+// subsequent write statement on that SAME line — from the census input entirely.
+// That is not "failed to flag", it is "the evidence never reached the regex at all".
+// Fixed by making the stripper a real character-level scanner that treats
+// single-quoted strings ('' escaping) and dollar-quoted bodies ($tag$…$tag$) as
+// OPAQUE: a `--`, `/*`, or `;` inside either is data, never a comment start or a
+// statement terminator. Block comments are nesting-aware (Postgres nests them).
+//
+// FAIL TOWARD FLAGGING: an input the scanner cannot confidently parse — an
+// unterminated string, dollar-quoted body, or block comment — makes the scanner
+// THROW rather than silently swallow the remainder of the file as comment/string
+// content. A thrown error fails the calling test (red), which is the safe direction;
+// a silently-empty result would be the P3-3 failure mode all over again.
+// ---------------------------------------------------------------------------
+
+/** Matches an opening dollar-quote tag ($tag$ or the bare $$) at the given position. */
+const DOLLAR_TAG_RE = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/
+
+/** Strip `-- …` line comments and nesting-aware `/* … *\/` block comments, keeping
+ *  string/dollar-quoted content byte-for-byte (needed so a later `;`-split still sees
+ *  it, and so the "no $$ / no /*" positive-control assertion below still inspects the
+ *  untouched raw file, not this function's output). */
+function stripComments(sql) {
+  let out = ''
+  let i = 0
+  const n = sql.length
+  while (i < n) {
+    const two = sql.slice(i, i + 2)
+    if (two === '--') {
+      const nl = sql.indexOf('\n', i)
+      i = nl === -1 ? n : nl
+      continue
+    }
+    if (two === '/*') {
+      const start = i
+      let depth = 1
+      i += 2
+      while (i < n && depth > 0) {
+        const two2 = sql.slice(i, i + 2)
+        if (two2 === '/*') { depth += 1; i += 2 }
+        else if (two2 === '*/') { depth -= 1; i += 2 }
+        else { if (sql[i] === '\n') out += '\n'; i += 1 }
+      }
+      if (depth > 0) {
+        throw new Error(
+          `stripComments: unterminated /* block comment starting at offset ${start} — refusing to ` +
+            'silently treat the rest of the file as a comment (fail-toward-flagging)',
+        )
+      }
+      continue
+    }
+    if (sql[i] === "'") {
+      const start = i
+      out += "'"
+      i += 1
+      let closed = false
+      while (i < n) {
+        if (sql[i] === "'" && sql[i + 1] === "'") { out += "''"; i += 2; continue }
+        if (sql[i] === "'") { out += "'"; i += 1; closed = true; break }
+        out += sql[i]
+        i += 1
+      }
+      if (!closed) {
+        throw new Error(
+          `stripComments: unterminated string literal starting at offset ${start} — refusing to ` +
+            'silently treat the rest of the file as string content (fail-toward-flagging)',
+        )
+      }
+      continue
+    }
+    if (sql[i] === '$') {
+      const m = DOLLAR_TAG_RE.exec(sql.slice(i))
+      if (m) {
+        const tag = m[0]
+        const bodyStart = i + tag.length
+        const closeIdx = sql.indexOf(tag, bodyStart)
+        if (closeIdx === -1) {
+          throw new Error(
+            `stripComments: unterminated dollar-quoted body ${tag} starting at offset ${i} — refusing ` +
+              'to silently treat the rest of the file as its content (fail-toward-flagging)',
+          )
+        }
+        out += sql.slice(i, closeIdx + tag.length)
+        i = closeIdx + tag.length
+        continue
+      }
+    }
+    out += sql[i]
+    i += 1
+  }
+  return out
 }
 
-/** Split into statements on `;`. Sound ONLY while the file has no dollar-quoting /
- *  procedural bodies, and no slash-star block comments (a `;` inside one would
- *  mis-split, which the per-statement regex census in layer 1 relies on being
- *  correct) — both asserted separately below. */
+/** Split a SQL text into statements on `;`. Comments are stripped first (via
+ *  stripComments, itself string/dollar-quote-aware); this second pass re-tracks
+ *  string/dollar-quoted spans so a `;` inside either is data, not a terminator —
+ *  sound because stripComments has already removed every real comment, so the only
+ *  spans left to protect are strings and dollar-quoted bodies. */
 function splitStatements(sql) {
-  return stripLineComments(sql)
-    .split(';')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+  const stripped = stripComments(sql)
+  const statements = []
+  let cur = ''
+  let i = 0
+  const n = stripped.length
+  while (i < n) {
+    const ch = stripped[i]
+    if (ch === "'") {
+      cur += ch
+      i += 1
+      while (i < n) {
+        if (stripped[i] === "'" && stripped[i + 1] === "'") { cur += "''"; i += 2; continue }
+        cur += stripped[i]
+        const closing = stripped[i] === "'"
+        i += 1
+        if (closing) break
+      }
+      continue
+    }
+    if (ch === '$') {
+      const m = DOLLAR_TAG_RE.exec(stripped.slice(i))
+      if (m) {
+        const tag = m[0]
+        const closeIdx = stripped.indexOf(tag, i + tag.length)
+        const bodyEnd = closeIdx === -1 ? n : closeIdx + tag.length
+        cur += stripped.slice(i, bodyEnd)
+        i = bodyEnd
+        continue
+      }
+    }
+    if (ch === ';') {
+      const trimmed = cur.trim()
+      if (trimmed.length > 0) statements.push(trimmed)
+      cur = ''
+      i += 1
+      continue
+    }
+    cur += ch
+    i += 1
+  }
+  const tail = cur.trim()
+  if (tail.length > 0) statements.push(tail)
+  return statements
 }
 
 /** Returns the list of statements whose head keyword is NOT read-only. */
@@ -109,9 +236,108 @@ function findNonReadonlyStatements(sql) {
   return offenders
 }
 
-test('SQL: no dollar-quoting and no slash-star block comments, so the statement splitter (and the layer-1 per-statement census that depends on it) is sound', () => {
+// E'...' escape-strings (a Postgres extension: backslash-escapes are live inside them,
+// unlike a plain '...' literal under standard_conforming_strings) are the unconsidered
+// sibling of the exact P3-3 class this file fixes: `E'it\'s -- x'` — the `\'` is a literal
+// escaped apostrophe, NOT a closing quote, but this tokenizer (like every plain-'-'-aware
+// SQL parser that does not separately special-case E-strings) treats it as one, exits
+// string state one character early, and the same `--`-erasure this file exists to prevent
+// fires again. VERIFIED reachable: a synthetic `E'it\'s -- x'; DELETE FROM meta_sheets;`
+// fragment erases the DELETE from findNonReadonlyStatements's result exactly like the
+// original P3-3 repro. Rather than adding a third string-syntax state machine (E-strings
+// also interact with `standard_conforming_strings`, itself a session-level GUC this static
+// scanner cannot observe), this is closed the same way $$/`/*` are: banned from ever
+// appearing in this specific hand-authored, all-SELECT observation file, so the unsound
+// case is simply unreachable here — fail-toward-flagging applied to the INPUT rather than
+// attempting a more elaborate parser.
+const E_STRING_RE = /(?:^|[^A-Za-z0-9_])[Ee]'/
+
+test('SQL: no dollar-quoting, no slash-star block comments, and no E-string escapes — content-shape restrictions kept as defense-in-depth now that the splitter below is dollar-quote/block-comment-aware on its own merits (not the soundness basis it used to be); E-strings are banned outright because backslash-escape semantics inside them are NOT modeled by this tokenizer (see the comment above), so this restriction IS the soundness basis for that one shape', () => {
   assert.ok(!sqlText.includes('$$'), 'observation SQL must not contain $$ bodies')
   assert.ok(!sqlText.includes('/*'), 'observation SQL must not contain /* block comments (a `;` inside one would mis-split statements)')
+  assert.ok(!E_STRING_RE.test(sqlText), "observation SQL must not contain E'...' escape-strings (backslash-escape semantics are not modeled — see the comment above)")
+})
+
+test("SQL: E-string ban is not vacuous — a doctored copy containing E'...' IS caught", () => {
+  const doctored = `${sqlText}\nSELECT E'x';\n`
+  assert.ok(E_STRING_RE.test(doctored), "E-string ban must catch a real E'...' occurrence")
+})
+
+test("SQL: (documented residual, not a passing security assertion) an E-string's backslash-escaped quote IS mis-parsed as a close, reopening the P3-3 erasure path — this is exactly WHY E-strings are banned above, not a claim that the tokenizer handles them", () => {
+  const doctored = "SELECT E'it\\'s -- x'; DELETE FROM meta_sheets;"
+  assert.deepEqual(findNonReadonlyStatements(doctored), [], 'documents the known gap: without the ban above, this would erase the DELETE')
+})
+
+// P3-3 gate fix regression legs: synthetic inputs (NOT sqlText — a 367-line file that
+// itself contains none of $$, /*, or a `--` inside a string means every one of these
+// predicates would be untested, hence unmutation-testable, if only run against the real
+// file). One test per predicate so a regression in any single branch reds exactly its own
+// test, matching the file's established one-shape-one-test convention.
+
+test('SQL: statement tokenizer treats `--` inside a single-quoted string as data, not a comment start (the exact P3-3 gate reproduction)', () => {
+  const doctored = "SELECT 'note -- see below'; DELETE FROM meta_sheets;"
+  assert.deepEqual(findNonReadonlyStatements(doctored), ['DELETE'])
+})
+
+test('SQL: statement tokenizer does not split a statement on a `;` inside a single-quoted string', () => {
+  assert.equal(splitStatements("SELECT 'a;b;c' AS x;").length, 1)
+})
+
+// These two use a REAL trailing write statement on the SAME line as the embedded `--`
+// (mirroring the exact P3-3 shape) rather than only asserting a statement count: a weaker
+// count-only assertion would still pass under some dollar-quote mutations, because
+// splitStatements independently re-tracks dollar-quotes for its own `;`-split pass — two
+// redundant layers can silently "self-heal" a length-only check even when the tag content
+// was genuinely corrupted. Asserting the exact write-keyword outcome closes that gap: if
+// the embedded `--` is (wrongly) treated as a real comment start, it swallows everything to
+// end-of-line — including the closing tag AND the trailing `DELETE` — collapsing the whole
+// fragment to a single harmless-looking SELECT and erasing the DELETE from the result,
+// exactly the P3-3 failure mode.
+test('SQL: statement tokenizer treats dollar-quoted body content as opaque — an embedded `--` does not erase a trailing write statement', () => {
+  const doctored = 'SELECT $tag$ text -- $tag$; DELETE FROM meta_sheets;'
+  assert.deepEqual(findNonReadonlyStatements(doctored), ['DELETE'])
+})
+
+test('SQL: statement tokenizer handles the bare $$ dollar-quote tag (empty tag name) — same erasure risk as the named-tag case', () => {
+  const doctored = 'SELECT $$ text -- $$; DELETE FROM meta_sheets;'
+  assert.deepEqual(findNonReadonlyStatements(doctored), ['DELETE'])
+})
+
+// Isolates the SEPARATE dollar-quote tracking inside splitStatements's own `;`-split pass
+// (distinct from stripComments's dollar-quote handling — see the file-header comment on
+// the two-function design): no `--`/`/*` appears anywhere in this fragment, so
+// stripComments produces byte-identical output whether or not ITS dollar-quote branch is
+// present. Only splitStatements's independent re-tracking stands between the `;` inside
+// the dollar body and an incorrect 3-way split.
+test('SQL: statement tokenizer (`;`-split pass) independently protects a `;` inside a dollar-quoted body, even with no comment markers to catch it earlier', () => {
+  const doctored = 'SELECT $tag$ a;b $tag$ AS x; DELETE FROM meta_sheets;'
+  assert.deepEqual(findNonReadonlyStatements(doctored), ['DELETE'])
+})
+
+test('SQL: statement tokenizer handles nested /* */ block comments (Postgres nests them)', () => {
+  const doctored = 'SELECT 1 /* outer /* inner */ still-comment */ AS x;'
+  assert.deepEqual(splitStatements(doctored), ['SELECT 1  AS x'])
+})
+
+test('SQL: statement tokenizer handles \'\' escaped-quote-within-string without ending the string early', () => {
+  const doctored = "SELECT 'it''s -- not a comment; not a split' AS x;"
+  assert.equal(splitStatements(doctored).length, 1)
+  assert.deepEqual(findNonReadonlyStatements(doctored), [])
+})
+
+test('SQL: statement tokenizer FAILS LOUD (throws) on an unterminated string literal rather than silently swallowing a trailing write statement', () => {
+  assert.throws(
+    () => splitStatements("SELECT 'unterminated; DELETE FROM meta_sheets;"),
+    /unterminated string literal/,
+  )
+})
+
+test('SQL: statement tokenizer FAILS LOUD (throws) on an unterminated dollar-quoted body', () => {
+  assert.throws(() => splitStatements('SELECT $tag$ unterminated; DELETE FROM meta_sheets;'), /unterminated dollar-quoted body/)
+})
+
+test('SQL: statement tokenizer FAILS LOUD (throws) on an unterminated /* block comment', () => {
+  assert.throws(() => splitStatements('SELECT 1 /* unterminated; DELETE FROM meta_sheets;'), /unterminated \/\* block comment/)
 })
 
 test('SQL: every statement is SELECT/WITH (read-only by construction)', () => {
@@ -139,7 +365,11 @@ test('SQL: read-only census POSITIVE CONTROL — a write statement IS flagged', 
 // more lock/session functions, COPY … PROGRAM, and bare DDL keywords).
 // ---------------------------------------------------------------------------
 
-const CTE_WRITE_RE = /\bAS\s*\(\s*(INSERT|UPDATE|DELETE|MERGE)\b/i
+// P3-3 gate fix: `AS (` required MATERIALIZED to sit AFTER the paren; the real syntax is
+// `name AS [ [NOT] MATERIALIZED ] ( query )`, so `WITH d AS MATERIALIZED (DELETE …)` broke
+// the adjacency and slipped through undetected — the DELETE was never at the wrong keyword,
+// the regex was looking at the wrong position for the paren.
+const CTE_WRITE_RE = /\bAS\s*(?:(?:NOT\s+)?MATERIALIZED\s*)?\(\s*(INSERT|UPDATE|DELETE|MERGE)\b/i
 const LOCKING_CLAUSE_RE = /\bFOR\s+(UPDATE|NO\s+KEY\s+UPDATE|SHARE|KEY\s+SHARE)\b/i
 const INSERT_INTO_RE = /\bINSERT\s+INTO\b/gi
 const BARE_INTO_RE = /\bINTO\b/i
@@ -147,11 +377,31 @@ const BARE_INTO_RE = /\bINTO\b/i
 // data writes in the ordinary INSERT/UPDATE/DELETE sense, so a plain read-only
 // role or the read-only-transaction execution layer may not stop them (verified
 // for the advisory-lock and backend-signal families — see the execution-layer
-// tests below).
+// tests below). P3-4 gate fix additions: pg_read_file / pg_read_binary_file /
+// pg_ls_dir / pg_stat_file are server-side filesystem reads through the DB
+// connection (arbitrary host-file read / directory listing — plainly outside a
+// read-only OBSERVATION kit's remit and a real exfiltration surface, even though
+// they are not a *data write* and default_transaction_read_only does not gate
+// filesystem access at all); pg_logical_emit_message is a genuine WAL write that
+// default_transaction_read_only does NOT block (verified empirically — see the
+// EVASION_SHAPES entry below). All five: execution layer CANNOT catch them
+// (documented honestly, not merely asserted — see the 'not-blocked' shapes),
+// so the static census here is the sole guard.
 const LOCK_OR_SIDE_EFFECT_FN_RE =
-  /\b(pg_advisory_(?:xact_)?lock(?:_shared)?|pg_try_advisory_(?:xact_)?lock(?:_shared)?|pg_advisory_unlock(?:_all|_shared)?|pg_terminate_backend|pg_cancel_backend|pg_promote|pg_switch_wal|pg_switch_xlog|pg_reload_conf|pg_rotate_logfile|pg_create_restore_point|pg_backup_start|pg_backup_stop|pg_start_backup|pg_stop_backup|setval|nextval|dblink(?:_exec)?|lo_import|lo_export|lo_unlink)\s*\(/i
+  /\b(pg_advisory_(?:xact_)?lock(?:_shared)?|pg_try_advisory_(?:xact_)?lock(?:_shared)?|pg_advisory_unlock(?:_all|_shared)?|pg_terminate_backend|pg_cancel_backend|pg_promote|pg_switch_wal|pg_switch_xlog|pg_reload_conf|pg_rotate_logfile|pg_create_restore_point|pg_backup_start|pg_backup_stop|pg_start_backup|pg_stop_backup|setval|nextval|dblink(?:_exec)?|lo_import|lo_export|lo_unlink|pg_read_file|pg_read_binary_file|pg_ls_dir|pg_stat_file|pg_logical_emit_message)\s*\(/i
 const COPY_PROGRAM_RE = /\bCOPY\b[^;]*\b(FROM|TO)\s+PROGRAM\b/i
 const DDL_KEYWORD_RE = /\b(CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|VACUUM|REINDEX|CLUSTER)\b/i
+// P3-3 gate fix: dynamic-SQL-execution XML functions take a raw SQL TEXT argument and
+// EXECUTE it via SPI, returning the result as XML — a regex census cannot see inside the
+// string literal to know it carries a DELETE (query_to_xml('DELETE …', …) has a SELECT-
+// shaped call site and no banned head token). Deliberately narrower than the gate's own
+// suggested `query_to_xml|query_to_json|xpath`: `query_to_json` is not a real Postgres
+// builtin (nothing to flag, and naming a fictitious function in a security comment would
+// be dishonest), and bare `xpath(...)` evaluates an XPath expression against XML — it does
+// NOT execute embedded SQL, a different threat class than this family names. Included
+// instead: the full SQL/XML mapping family that shares query_to_xml's real mechanism.
+const DYNAMIC_SQL_EXEC_FN_RE =
+  /\b(query_to_xml|query_to_xmlschema|query_to_xml_and_xmlschema|cursor_to_xml|cursor_to_xmlschema)\s*\(/i
 
 /** Body-aware findings, per statement, for constructs a head-only census misses.
  *  Returns [{ stmt, reasons }] — empty array means clean. */
@@ -172,7 +422,16 @@ function findUnsafeConstructs(sql) {
       reasons.push('SELECT … INTO (creates a table)')
     }
     if (LOCK_OR_SIDE_EFFECT_FN_RE.test(stmt)) {
-      reasons.push('lock/session/side-effect function call (pg_advisory_*, pg_terminate_backend, setval, dblink, …)')
+      reasons.push(
+        'lock/session/side-effect/filesystem-reaching function call (pg_advisory_*, pg_terminate_backend, ' +
+          'setval, dblink, pg_read_file, pg_ls_dir, pg_logical_emit_message, …)',
+      )
+    }
+    if (DYNAMIC_SQL_EXEC_FN_RE.test(stmt)) {
+      reasons.push(
+        'dynamic-SQL-execution function (query_to_xml/query_to_xmlschema/cursor_to_xml family) — executes ' +
+          'an embedded SQL string this census cannot statically inspect',
+      )
     }
     if (COPY_PROGRAM_RE.test(stmt)) {
       reasons.push('COPY … PROGRAM (arbitrary shell execution)')
@@ -242,6 +501,56 @@ const EVASION_SHAPES = [
     // catch.
     executionMode: 'blocked-incidental',
   },
+  {
+    // P3-3 gate fix: CTE_WRITE_RE required the write verb's `(` to sit directly after
+    // `AS`; the real grammar allows `AS MATERIALIZED (` between them, which broke the
+    // adjacency and slipped a data-modifying CTE past the census entirely.
+    name: 'WITH … AS MATERIALIZED (DELETE …) (materialized data-modifying CTE)',
+    fragment:
+      'WITH d AS MATERIALIZED (DELETE FROM meta_recovery_token_burns WHERE 1=0 RETURNING sheet_id) SELECT count(*) FROM d;',
+    executionMode: 'blocked',
+  },
+  {
+    // P3-3 gate fix: dynamic-SQL execution — the DELETE lives inside a string argument,
+    // invisible to any regex operating on the statement's own SQL tokens. Postgres
+    // itself refuses it, but NOT via the read-only-transaction mechanism: query_to_xml
+    // requires its argument to be executable as a non-volatile query in this context,
+    // and a DELETE fails that check before read-only enforcement is even reached — a
+    // materially different refusal than the 25006 family, pinned separately so this is
+    // never mistaken for "the read-only session caught it".
+    name: "SELECT query_to_xml('DELETE …') (dynamic SQL execution via SQL/XML mapping function)",
+    fragment: "SELECT query_to_xml('DELETE FROM meta_records_trash WHERE 1=0', true, false, '');",
+    executionMode: 'blocked-incidental',
+    incidentalSignatureRe: /is not allowed in a non-volatile function/i,
+  },
+  {
+    // P3-4 gate fix: arbitrary host-file read through the observation connection. Not a
+    // data write, so default_transaction_read_only does not gate it at all — verified
+    // empirically (executionMode 'not-blocked' below) — but plainly outside a read-only
+    // OBSERVATION kit's remit and a real exfiltration surface. The static census is the
+    // only guard; the execution layer cannot ever catch this shape (documented, not
+    // merely asserted).
+    name: "SELECT pg_read_file('/etc/hosts') (server-side filesystem read)",
+    fragment: 'SELECT length(pg_read_file(\'/etc/hosts\'));',
+    executionMode: 'not-blocked',
+  },
+  {
+    // P3-4 gate fix: host directory listing through the observation connection. Same
+    // reasoning as pg_read_file — not a data write, not blocked by read-only mode,
+    // static census is the sole guard.
+    name: "SELECT … FROM pg_ls_dir('.') (server-side directory listing)",
+    fragment: "SELECT count(*) FROM pg_ls_dir('.');",
+    executionMode: 'not-blocked',
+  },
+  {
+    // P3-4 gate fix: a genuine WAL write. default_transaction_read_only does NOT block
+    // it (verified empirically) — it is a logical-decoding primitive, not a table data
+    // write, so it falls entirely outside what the read-only-transaction mechanism
+    // enforces. The static census is the only guard for this shape.
+    name: "SELECT pg_logical_emit_message(true, …) (WAL write, not blocked by read-only mode)",
+    fragment: "SELECT pg_logical_emit_message(true, 'o2probe', 'x');",
+    executionMode: 'not-blocked',
+  },
 ]
 
 // One test per shape (not one loop inside a single test) so a regression in
@@ -258,6 +567,34 @@ for (const shape of EVASION_SHAPES) {
 test('SQL: static census bonus shape — COPY … PROGRAM (arbitrary shell execution) is flagged', () => {
   const doctored = `${sqlText}\nCOPY (SELECT 1) TO PROGRAM 'echo pwned';\n`
   assert.ok(findUnsafeConstructs(doctored).length > 0, 'COPY … PROGRAM must be flagged')
+})
+
+// P3-3 gate fix: this shape is a plain top-level DELETE — once the tokenizer above splits
+// it correctly, findNonReadonlyStatements (the HEAD-keyword layer) is the one that catches
+// it, not findUnsafeConstructs (the body-aware layer covered by EVASION_SHAPES above), so it
+// gets its own real-file regression test here rather than joining that array. Reused by the
+// execution-layer test further down (appended to the REAL file, exactly like EVASION_SHAPES,
+// so a run fails on the read-only mechanism itself, not an incidental "relation does not
+// exist").
+const COMMENT_HIDDEN_WRITE_FRAGMENT = "SELECT 'note -- see below'; DELETE FROM meta_records_trash WHERE 1=0;"
+
+test('SQL: read-only census catches a write statement hidden behind a `--` inside a preceding string literal (P3-3 gate reproduction, real file)', () => {
+  const doctored = `${sqlText}\n${COMMENT_HIDDEN_WRITE_FRAGMENT}\n`
+  assert.deepEqual(findNonReadonlyStatements(doctored), ['DELETE'])
+})
+
+// P3-4 gate fix, static-only siblings: added to LOCK_OR_SIDE_EFFECT_FN_RE for defense-in-
+// depth (same filesystem-read family as pg_read_file/pg_ls_dir) but not given their own
+// EVASION_SHAPES execution-layer entry — pg_stat_file needs a real, stable server-side path
+// to avoid an execution-layer test that is flaky on the path argument rather than meaningful
+// on the read-only mechanism, and pg_read_binary_file is the same primitive as pg_read_file
+// with a different return type. Synthetic-input static tests only.
+test('SQL: static census catches pg_stat_file(…) (server-side file metadata read)', () => {
+  assert.ok(findUnsafeConstructs("SELECT * FROM pg_stat_file('/etc/hosts');").length > 0)
+})
+
+test('SQL: static census catches pg_read_binary_file(…) (server-side binary file read)', () => {
+  assert.ok(findUnsafeConstructs("SELECT pg_read_binary_file('/etc/hosts');").length > 0)
 })
 
 test('SQL: balanced parentheses per statement (parse-shape sanity)', () => {
@@ -413,11 +750,48 @@ test('drift guard: observed tables exist in migrations (no phantom sinks)', () =
 //   gh workflow / gh api /        GitHub-side dispatch surfaces; the runbook itself states
 //   gh run rerun                  that dispatching the containment workflow reaches the
 //                                 deploy host over ssh.
-// Local read-only tools (git, node, pnpm, `gh pr view`) are deliberately out of scope.
-// This is an inventory, not a proof of completeness: widening it can only ADD reds
-// (fail-closed direction) — it can never un-gate a block.
+//   nc                            raw TCP/UDP to any host:port — bare, like `docker`, since
+//                                 every subcommand-shaped use (listener, relay, port probe)
+//                                 is host-reaching by the tool's whole purpose.
+//   openssl                       bare, like `docker` — `s_client` is the host-reaching
+//                                 subcommand named by the gate, but narrowing to just that
+//                                 one subcommand would silently re-open every sibling
+//                                 (`s_server`, future subcommands); openssl is not a tool an
+//                                 operator runs routinely in this runbook, so bare-word cost
+//                                 is negligible and the fail-closed direction wins.
+//   node -e/--eval, python3 -c    P3-5 gate fix (was entirely absent): NARROWED to the
+//   (python -c also accepted)     inline-code-execution flag specifically (both the short
+//                                 `-e` and long `--eval` spellings of Node's flag), NOT bare
+//                                 `node`/`python3` — those interpreters are explicitly named
+//                                 above as local, non-host-reaching tools (see the
+//                                 out-of-scope line below) and are legitimately mentioned
+//                                 elsewhere (e.g. `node --test`). `-e`/`--eval`/`-c` is the
+//                                 flag shape that lets an inline script embed a network call
+//                                 (the gate's own reproduction: `node -e "fetch(...)"`).
+//   bare https?:// URL            P3-5 gate fix: an imperative instruction naming a
+//                                 destination URL with NO verb at all (the gate's own
+//                                 `curl`-less repro) still reaches a host once *anything*
+//                                 acts on it — matched as its own alternative below, not a
+//                                 "verb".
+// Local read-only tools (git, node, pnpm, python3, `gh pr view`) are deliberately out of
+// scope EXCEPT the narrow -e/-c inline-execution flag shapes above.
+// This is an inventory, not a proof of completeness — the family enumeration below is not
+// claimed to converge (widening it can only ADD reds, fail-closed direction; it can never
+// un-gate a block). The convergent alternative — a closed-world allowlist of every token
+// that can legitimately appear in a backtick span — was considered and rejected: this
+// runbook's backticks are dense with repo paths, error-class identifiers
+// (`ApplyRefusalError('preview-drift', …)`), flag/constant names
+// (`RECOVERY_LEASE_BACKOFF_MAX_ATTEMPTS`), and ad hoc CLI invocations (`\watch 5`), so a
+// values-free allowlist would itself become an unbounded enumeration, just inverted. The
+// actual compensating controls are structural, not enumerative: (1) the workflow
+// path-filter guard below re-runs this exact scan on every PR that touches this runbook,
+// so a widened inventory is never a one-time check that can go stale unnoticed; (2) per the
+// ladder this runbook is a companion to, no step here executes anything by itself — every
+// gated or ungated command still requires a human operator to read, authorize, and manually
+// run it (ladder §3 owner-authorization-per-rung), so a scanner miss is a defense-in-depth
+// gap, not the sole safety mechanism.
 const HOST_VERB_RE =
-  /\b(?:ssh|sftp|scp|rsync|curl|wget|psql|pg_dump|pg_restore|docker|kubectl|helm|aws|gcloud|az|gh\s+workflow|gh\s+api|gh\s+run\s+rerun)\b/gi
+  /\b(?:ssh|sftp|scp|rsync|curl|wget|psql|pg_dump|pg_restore|docker|kubectl|helm|aws|gcloud|az|gh\s+workflow|gh\s+api|gh\s+run\s+rerun|nc|openssl|node\s+(?:-e|--eval)|python3?\s+-c)\b|https?:\/\/\S+/gi
 
 // The ONE exempt invocation: running the observation SQL file — proven read-only by the
 // statement-head census at the top of this test — against the operator's own
@@ -526,12 +900,22 @@ function isExemptOccurrence(text, m) {
   return m[0].toLowerCase() === 'psql' && EXEMPT_PSQL_RE.test(text.slice(m.index))
 }
 
+/** P3-5 gate fix: a marker must be VISIBLE in rendered Markdown to gate anything. The
+ *  previous check was a raw substring test, so `<!-- OWNER-GATED -->` — an HTML comment,
+ *  invisible in every Markdown renderer and on GitHub's PR/file view — satisfied it exactly
+ *  as well as a real, human-visible marker, gating a visibly-ungated command that a human
+ *  reviewer reading the rendered page would never see excused. Strips HTML comments before
+ *  testing so only an occurrence OUTSIDE one can ever gate a block. */
+function hasVisibleGateMarker(text) {
+  return text.replace(/<!--[\s\S]*?-->/g, '').includes('OWNER-GATED')
+}
+
 /** Blocks containing at least one non-exempt host-reaching command occurrence whose own
- *  block (or inherited fence context) carries no OWNER-GATED marker. */
+ *  block (or inherited fence context) carries no VISIBLE OWNER-GATED marker. */
 function findUngatedHostCommands(md) {
   const offenders = []
   for (const b of markdownBlocks(md)) {
-    if (b.text.includes('OWNER-GATED') || b.extraContext.includes('OWNER-GATED')) continue
+    if (hasVisibleGateMarker(b.text) || hasVisibleGateMarker(b.extraContext)) continue
     const live = hostVerbOccurrences(b.text).filter((m) => !isExemptOccurrence(b.text, m))
     if (live.length > 0) offenders.push(b.text)
   }
@@ -548,7 +932,7 @@ test('runbook: gating scan is not vacuous — commands exist AND the scanner cat
   // the "all gated" assertion above would be green against nothing).
   const gatedMentions = markdownBlocks(runbookText).filter(
     (b) =>
-      (b.text.includes('OWNER-GATED') || b.extraContext.includes('OWNER-GATED')) &&
+      (hasVisibleGateMarker(b.text) || hasVisibleGateMarker(b.extraContext)) &&
       hostVerbOccurrences(b.text).some((m) => !isExemptOccurrence(b.text, m)),
   )
   assert.ok(gatedMentions.length >= 3, 'expected >=3 gated host-command blocks in the runbook')
@@ -577,6 +961,99 @@ test('runbook: widened verbs are caught — ungated curl POST and psql write are
   assert.equal(findUngatedHostCommands(wgetAttack).length, 1)
 })
 
+// P3-5 gate fix: an HTML comment is invisible in rendered Markdown, so a marker hidden
+// inside one must not gate a visibly-ungated command. One test per shape, matching the
+// file's established convention — a shared loop would hide which regressed.
+
+test('runbook: a marker inside an HTML comment does NOT gate — invisible marker, visibly ungated command (P3-5 gate reproduction)', () => {
+  const commentMarkerAttack =
+    runbookText + '\n\n<!-- OWNER-GATED -->\nRun `ssh deploy@host systemctl stop metasheet` now.\n'
+  const offenders = findUngatedHostCommands(commentMarkerAttack)
+  assert.equal(offenders.length, 1)
+  assert.match(offenders[0], /ssh deploy@host systemctl stop metasheet/)
+})
+
+test('runbook: an HTML comment around a REAL marker word elsewhere in the block does not disable a genuine, human-visible gate', () => {
+  // Negative control for the fix itself: a visible marker survives comment-stripping even
+  // when an unrelated HTML comment sits in the same block.
+  const mixed = runbookText + '\n\nOWNER-GATED: run this. <!-- reviewer note --> `ssh deploy@host verify` now.\n'
+  assert.equal(findUngatedHostCommands(mixed).length, 0)
+})
+
+test('runbook: widened verb inventory — nc, openssl, node -e, python3 -c, and a bare URL are each caught (P3-5 gate reproduction)', () => {
+  const ncAttack = runbookText + '\n\nRun `nc deploy-host 22 < payload` now.\n'
+  assert.equal(findUngatedHostCommands(ncAttack).length, 1)
+
+  const opensslAttack = runbookText + '\n\nRun `openssl s_client -connect deploy-host:443` now.\n'
+  assert.equal(findUngatedHostCommands(opensslAttack).length, 1)
+
+  const nodeAttack =
+    runbookText +
+    '\n\nRun `node -e "fetch(\'https://deploy-host/api/reset-execute\',{method:\'POST\'})"` now.\n'
+  assert.equal(findUngatedHostCommands(nodeAttack).length, 1)
+
+  // Long-flag spelling of the same mechanism (`--eval` is not a distinct threat, just an
+  // unmatched alias of `-e` if left out).
+  const nodeEvalAttack =
+    runbookText +
+    '\n\nRun `node --eval "fetch(\'https://deploy-host/api/reset-execute\',{method:\'POST\'})"` now.\n'
+  assert.equal(findUngatedHostCommands(nodeEvalAttack).length, 1)
+
+  const pythonAttack =
+    runbookText +
+    '\n\nRun `python3 -c "import urllib.request; urllib.request.urlopen(\'https://deploy-host/api/reset-execute\')"` now.\n'
+  assert.equal(findUngatedHostCommands(pythonAttack).length, 1)
+
+  // Bare `python` (not `python3`) is also accepted.
+  const pythonBareAttack =
+    runbookText +
+    "\n\nRun `python -c \"import urllib.request; urllib.request.urlopen('https://deploy-host/api/reset-execute')\"` now.\n"
+  assert.equal(findUngatedHostCommands(pythonBareAttack).length, 1)
+
+  const bareUrlAttack =
+    runbookText + '\n\nThen visit https://deploy-host/api/base/sheets/1/revert-execute to finish the rollback.\n'
+  const bareUrlOffenders = findUngatedHostCommands(bareUrlAttack)
+  assert.equal(bareUrlOffenders.length, 1)
+  assert.match(bareUrlOffenders[0], /revert-execute/)
+})
+
+// The gate's own `node -e`/`python3 -c` reproductions above embed a bare `https://` URL
+// inside the script argument — which the URL alternative ALSO matches independently. That
+// makes them a fine literal repro but a confounded isolation test: removing JUST the
+// `node\s+(?:-e|--eval)` / `python3?\s+-c` alternatives from HOST_VERB_RE would NOT red
+// them (the embedded URL alone still trips the match). These use a network reach with no
+// URL literal at all, so each is caught on its own token or not at all.
+test('runbook: node -e / --eval / python3 -c are each caught on their OWN token — isolated from the bare-URL alternative (no embedded URL literal)', () => {
+  const nodeEIsolated = runbookText + "\n\nRun `node -e \"require('net').connect(9999,'deploy-host')\"` now.\n"
+  assert.equal(findUngatedHostCommands(nodeEIsolated).length, 1)
+
+  const nodeEvalIsolated = runbookText + "\n\nRun `node --eval \"require('net').connect(9999,'deploy-host')\"` now.\n"
+  assert.equal(findUngatedHostCommands(nodeEvalIsolated).length, 1)
+
+  const python3Isolated =
+    runbookText + '\n\nRun `python3 -c "import socket; socket.create_connection((\'deploy-host\',9999))"` now.\n'
+  assert.equal(findUngatedHostCommands(python3Isolated).length, 1)
+})
+
+test('runbook: node -e / --eval / python3 -c isolation negative control — bare `node`/`python3` (no -e/-c/--eval flag) with the SAME network-reach payload is NOT caught (confirms the isolation fragments above are exercising the flag, not something else in the payload)', () => {
+  // Tested on the FRAGMENT alone, not runbookText + fragment — the real runbook already
+  // contains legitimate gated ssh/curl/psql/etc. occurrences elsewhere, so counting over
+  // the whole doctored text would never read 0 regardless of this fragment.
+  const bareNode = "Run `node \"require('net').connect(9999,'deploy-host')\"` now."
+  assert.equal(hostVerbOccurrences(bareNode).length, 0)
+  const barePython3 = 'Run `python3 "import socket; socket.create_connection((\'deploy-host\',9999))"` now.'
+  assert.equal(hostVerbOccurrences(barePython3).length, 0)
+})
+
+test('runbook: widened verb inventory negative controls — bare `node`/`python3` (no -e/-c) and non-network `openssl` local ops stay non-offending on their own merits, matching the documented local-tool carve-out', () => {
+  // node/python3 WITHOUT the inline-execution flag: not caught by the new alternatives
+  // (still local-tool territory) — confirms the narrowing is real, not a silent bare match.
+  const benignNode = 'node --test scripts/ops/multitable-o2-observation.test.mjs'
+  assert.equal(hostVerbOccurrences(benignNode).length, 0)
+  const benignPython = 'python3 --version'
+  assert.equal(hostVerbOccurrences(benignPython).length, 0)
+})
+
 test('runbook: psql exemption is exact — abuse of the allowlisted prefix stays red', () => {
   // Allowlisted invocation + trailing write args must NOT ride the exemption.
   const trailing =
@@ -603,7 +1080,7 @@ test('runbook: psql exemption is exact — abuse of the allowlisted prefix stays
   assert.equal(findUngatedHostCommands(exemptDoctored).length, 0)
   const realExemptBlocks = markdownBlocks(runbookText).filter(
     (b) =>
-      !b.text.includes('OWNER-GATED') &&
+      !hasVisibleGateMarker(b.text) &&
       hostVerbOccurrences(b.text).some((m) => isExemptOccurrence(b.text, m)),
   )
   assert.equal(realExemptBlocks.length, 1, 'expected exactly the §2 baseline psql step to ride the exemption')
@@ -871,13 +1348,19 @@ if (canRunExecutionLayer) {
             `expected a read-only-transaction refusal (SQLSTATE 25006 family); got exit ${result.status}, stderr:\n${result.stderr}`,
           )
         } else if (shape.executionMode === 'blocked-incidental') {
-          // Aborts, but NOT via the read-only mechanism — via the backend
-          // self-terminating. Pin to that specific, distinct signature so this
-          // is not mistaken for a 25006 read-only refusal.
+          // Aborts, but NOT via the read-only mechanism — via some OTHER Postgres
+          // refusal specific to this shape (self-termination for
+          // pg_terminate_backend; a volatility restriction for query_to_xml; …).
+          // Pin to the shape's own specific signature (default: the
+          // self-termination text, for backward compat with the original shape)
+          // so this is never mistaken for a 25006 read-only refusal.
+          const incidentalRe =
+            shape.incidentalSignatureRe ??
+            /terminating connection due to administrator command|server closed the connection unexpectedly/i
           assert.match(
             result.stderr,
-            /terminating connection due to administrator command|server closed the connection unexpectedly/i,
-            `expected the self-termination signature (NOT a read-only refusal); got exit ${result.status}, stderr:\n${result.stderr}`,
+            incidentalRe,
+            `expected the shape's own incidental-abort signature (NOT a read-only refusal); got exit ${result.status}, stderr:\n${result.stderr}`,
           )
           assert.doesNotMatch(
             result.stderr,
@@ -904,7 +1387,7 @@ if (canRunExecutionLayer) {
           assert.equal(
             result.status,
             0,
-            `expected pg_advisory_lock NOT to be blocked by read-only mode (documents the real gap the static census covers); stderr:\n${result.stderr}`,
+            `expected "${shape.name}" NOT to be blocked by read-only mode (documents the real gap the static census covers); stderr:\n${result.stderr}`,
           )
           assert.ok(
             findUnsafeConstructs(doctored).length > 0,
@@ -916,4 +1399,17 @@ if (canRunExecutionLayer) {
       }
     })
   }
+
+  // P3-3 gate fix, execution-layer leg for the head-keyword shape (findNonReadonlyStatements,
+  // not findUnsafeConstructs — see the static test's comment above) — kept outside
+  // EVASION_SHAPES for the same reason.
+  test('EXECUTION: doctored copy with a `--`-hidden DELETE behind a preceding string literal is blocked (SQLSTATE 25006 family)', () => {
+    const doctored = `${sqlText}\n${COMMENT_HIDDEN_WRITE_FRAGMENT}\n`
+    const result = runReadOnlySql(doctored)
+    assert.match(
+      result.stderr,
+      /cannot execute \S+.*in a read-only transaction/i,
+      `expected a read-only-transaction refusal (SQLSTATE 25006 family); got exit ${result.status}, stderr:\n${result.stderr}`,
+    )
+  })
 }
