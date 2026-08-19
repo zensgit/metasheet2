@@ -2500,21 +2500,30 @@ if (canRunExecutionLayer) {
             'static census must catch this shape — the execution-layer abort above is incidental, not a reliable guarantee',
           )
         } else {
-          // executionMode 'not-blocked': documented Postgres behaviour, proven
-          // here with a real run — the read-only session does NOT stop this
-          // shape. The static census (asserted above) is this shape's actual
-          // guard; this assertion exists so a future Postgres/behavioural
-          // change that DID start blocking it would be noticed, not silently
-          // relied upon.
-          assert.equal(
-            result.status,
-            0,
-            `expected "${shape.name}" NOT to be blocked by read-only mode (documents the real gap the static census covers); stderr:\n${result.stderr}`,
-          )
+          // executionMode 'not-blocked': the read-only session is not this shape's guard — the
+          // STATIC CENSUS is. Whether the server also happens to refuse it is VERSION-DEPENDENT
+          // and must not be pinned: `lo_create`/`lo_from_bytea` run fine under
+          // `default_transaction_read_only = on` on PostgreSQL 15 (verified locally, 15.17) but
+          // are refused on the CI service image (postgres:16) — an earlier version of this branch
+          // asserted `status === 0` outright and went RED in CI for a reason that had nothing to
+          // do with the guard being wrong (运行器≠生产版本).
+          //
+          // So assert the two things that ARE version-independent, and record which branch the
+          // server took rather than demanding one:
+          //   1. the static census catches the shape (this is the actual guard, unconditional);
+          //   2. IF the server refused it, the refusal must be a real read-only refusal — not some
+          //      unrelated failure being mistaken for protection.
           assert.ok(
             findUnsafeConstructs(doctored).length > 0,
-            'static census must catch this shape since the execution layer does not',
+            'static census must catch this shape — the execution layer is not its guard on any server version',
           )
+          if (result.status !== 0) {
+            assert.match(
+              result.stderr,
+              /in a read-only transaction|permission denied|must be superuser|not permitted/i,
+              `"${shape.name}" was refused by the server, which is allowed (newer PostgreSQL refuses some of these) — but the refusal must be a real read-only/permission refusal, not an unrelated failure being mistaken for protection; got exit ${result.status}, stderr:\n${result.stderr}`,
+            )
+          }
         }
       } finally {
         if (shape.cleanupSql) runCleanupSql(shape.cleanupSql)
