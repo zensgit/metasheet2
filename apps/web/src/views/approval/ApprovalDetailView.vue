@@ -1445,12 +1445,21 @@ const reduceSignUserId = ref('')
 // still-active, user-typed assignments at the CURRENT node are reducible.
 // Requester-original / template-resolved / role rows are never listed (mirrors
 // the backend `reduce_sign` `removable` predicate — INV-2).
+//
+// Values-free doctrine (mirrors `assignmentDisplayLabel` above): the option LABEL an admin reads
+// must never be the raw internal `assigneeId` — `metadata.assigneeName` has zero producers
+// repo-wide today, so this used to be the reachable, ordinary-path leak, not an exotic shape. The
+// picker still needs its options MUTUALLY DISTINGUISHABLE (an admin must be able to tell which
+// seat they are removing), so the fallback is a stable per-list ordinal (`成员 N`), not a single
+// repeated generic string. `assigneeId` stays the option VALUE (the actual submit payload) —
+// only the LABEL text changes; nothing here is rendered from a new fetch.
 const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>>(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
   const currentNodeKey = approval.value.currentNodeKey
   if (!currentNodeKey) return []
   const seen = new Set<string>()
   const result: Array<{ assigneeId: string; label: string }> = []
+  let ordinal = 0
   for (const assignment of approval.value.assignments) {
     if (!assignment.isActive) continue
     if (assignment.type !== 'user') continue
@@ -1458,7 +1467,10 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string }>
     if (assignment.metadata?.addSign !== true) continue
     if (seen.has(assignment.assigneeId)) continue
     seen.add(assignment.assigneeId)
-    result.push({ assigneeId: assignment.assigneeId, label: assignment.assigneeId })
+    ordinal += 1
+    const metaName = assignment.metadata?.assigneeName
+    const label = typeof metaName === 'string' && metaName.trim() ? metaName.trim() : `成员 ${ordinal}`
+    result.push({ assigneeId: assignment.assigneeId, label })
   }
   return result
 })
