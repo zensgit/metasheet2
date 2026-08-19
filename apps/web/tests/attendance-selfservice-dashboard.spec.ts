@@ -3,6 +3,7 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from '../src/views/attendance/rulesMeContract'
 import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/makeupPunchRequestStatus'
 
 const authMockState = vi.hoisted(() => ({
@@ -679,6 +680,29 @@ describe('Attendance self-service dashboard', () => {
     app = null
     container = null
   })
+
+  it('rules/me is called with the COMPLETE SR-1 forbidden-header omit set (human-tail finding 2026-08-19)', async () => {
+    // The server rejects subject-override headers on PRESENCE (index.cjs
+    // ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS, 7 keys); authHeaders() injects
+    // x-tenant-id globally, so the call site MUST pass omitHeaders with the full set —
+    // a partial copy leaves the 400 banner reachable for the missed hint type, and
+    // reverting the fix left every required check green until this leg existed
+    // (#5012 gate P2-1).
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const rulesCalls = vi.mocked(apiFetch).mock.calls.filter(([input]) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      return url.includes('/api/attendance/rules/me')
+    })
+    expect(rulesCalls.length).toBeGreaterThan(0)
+    for (const [, init] of rulesCalls) {
+      const omitted = (init as { omitHeaders?: readonly string[] } | undefined)?.omitHeaders ?? []
+      expect([...omitted].sort()).toEqual([...ATTENDANCE_RULES_ME_OMIT_HEADERS].sort())
+    }
+  })
+
 
   it('renders self-service cards with status, request summaries, quick actions, and status guide', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })

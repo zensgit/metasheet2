@@ -291,7 +291,18 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
+# #5012 (2026-08-19, human-tail finding): tests/api.spec.ts carries the omitHeaders
+# MECHANIC leg (SR-1 rules/me self-service contract) — it ran in NO workflow before, so
+# reverting the apiFetch delete-loop was green across every required check.
+# tests/attendance-rules-me-contract-sync.spec.ts pins the FE omit set against the
+# server's forbidden set BY READING THE PLUGIN SOURCE; it must live in THIS always-on
+# lane because attendance-web-guard skips vitest for plugins/**-only diffs.
+# These two are the first path-prefixed tokens in this bare-basename list — full paths
+# chosen for exactness (a future `*-api.spec.ts` would substring-collide with a bare
+# `api.spec.ts` token; today the bare token still selects exactly one file).
 npx vitest run \
+  tests/api.spec.ts \
+  tests/attendance-rules-me-contract-sync.spec.ts \
   approval-canvas-commands \
   approval-form-commands \
   approval-authoring-history \

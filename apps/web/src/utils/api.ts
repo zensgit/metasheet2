@@ -25,6 +25,15 @@ let authRedirecting = false
 
 export interface ApiFetchOptions extends RequestInit {
   suppressUnauthorizedRedirect?: boolean
+  /**
+   * Header names to REMOVE after the global auth headers are applied. Needed for
+   * self-service routes whose contract REJECTS subject-override headers instead of
+   * ignoring them (e.g. attendance `rules/me`, SR-1): `authHeaders()` injects
+   * `x-tenant-id` globally, and a caller cannot un-send it by overriding the value —
+   * the guard fires on header PRESENCE. Deleting is the only spelling that honors
+   * the route contract.
+   */
+  omitHeaders?: readonly string[]
 }
 
 function resolveWindowOrigin(): string {
@@ -219,11 +228,12 @@ export async function apiFetch(
   options: ApiFetchOptions = {},
 ): Promise<Response> {
   const base = getApiBase()
-  const { suppressUnauthorizedRedirect = false, ...requestOptions } = options
+  const { suppressUnauthorizedRedirect = false, omitHeaders = [], ...requestOptions } = options
   const headers = new Headers({
     ...authHeaders(),
     ...(requestOptions.headers || {}),
   })
+  for (const name of omitHeaders) headers.delete(name)
   const body = requestOptions.body
   const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
   if (!isFormData && body != null && !headers.has('Content-Type')) {

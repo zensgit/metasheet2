@@ -10154,6 +10154,7 @@ import {
   type AttendanceLeaveQuickFillKind,
   type AttendanceLeaveQuickFillShiftWindow,
 } from './attendance/halfDayLeaveHelper'
+import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -24593,7 +24594,15 @@ async function loadSelfAttendanceRules(): Promise<void> {
   selfRulesLoading.value = true
   selfRulesError.value = null
   try {
-    const response = await apiFetch('/api/attendance/rules/me')
+    // SR-1 self-service contract: rules/me REJECTS subject-override headers (including
+    // the globally injected x-tenant-id) instead of ignoring them — subject and org come
+    // from the token alone. Human-tail finding 2026-08-19: real browsers with a tenant
+    // hint got a 400 banner here; synthetic traffic never sends the header.
+    const response = await apiFetch('/api/attendance/rules/me', {
+      // The COMPLETE server forbidden set, via the ONE shared contract mirror — the
+      // required-lane fixture-sync spec pins it against the server source (#5012).
+      omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
+    })
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
       throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
