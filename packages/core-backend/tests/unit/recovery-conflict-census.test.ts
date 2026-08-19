@@ -234,6 +234,55 @@ function auditCensusLegLinkage(testContents: ReadonlyMap<string, string>): strin
     }
     const lines = content.split('\n')
     const tag = `[recovery-census:${leg.site}]`
+    // P3-1 (2nd adversarial gate) — a DECOY declaration carrying the SAME tag, placed
+    // before the real leg, used to satisfy the `findIndex` below (first match) while
+    // the real leg was neutered (`it.each([])`) and its production call site left dead:
+    // the decoy's own `census.record(site)` ran, so the structural window check AND the
+    // runtime `currentTestName`-contains-tag check were both satisfied by a test that
+    // exercises nothing.
+    //
+    // The first fix for this counted DECL_RE-matching LINES, which is itself a name
+    // enumeration in disguise: `DECL_RE` is anchored at line start
+    // (`^\s*(?:it|test|describe|suite)…`), so a decoy called from inside another
+    // expression — `[1].forEach(() => it(tag, …))`, a helper function, a loop body —
+    // registers a real, running vitest test whose name still contains the tag while
+    // being INVISIBLE to a line-anchored count. That is the exact recurrence this PR's
+    // round-2 gate warned about: a newly-banned shape with an immediately unbanned
+    // sibling. Counting RAW OCCURRENCES of the tag substring across the whole file
+    // closes the family regardless of the calling shape around the `it(...)` — it is a
+    // property of the file's CONTENT (how many times this literal string appears), not
+    // of which lines are recognised as declarations, so no enumeration of calling forms
+    // can evade it. A well-formed leg's tag appears exactly once — inside its own test
+    // name — and nowhere else (verified over all 48 currently-registered legs).
+    //
+    // Disclosed residual, in the same spirit as the `MEMBER_SEGMENT_RE` comment above
+    // ("the fully-dynamic form is a disclosed residual, not a gap this regex claims to
+    // close"): this count is over the LITERAL tag substring. A decoy whose name is
+    // ASSEMBLED rather than written out — `` it(`${'[recovery-census:roles'}:delete] decoy`,
+    // …) `` — never puts the literal string in the file, so it is invisible to this
+    // count too (confirmed: 8 files, 208/208, GREEN). No string-level scan converges
+    // here — pinning the full registered NAME in the census table would only push the
+    // identical residual one level deeper (a decoy assembling the full name defeats
+    // that identically), so this is not chased further. What still constrains such a
+    // decoy: it must live in THIS SAME registered file — `assertOwnedCensusSite` throws
+    // on a cross-file attempt before the name check ever runs — and it is a visibly
+    // bogus, hand-written test that a diff reviewer sees. The accepted cost in the
+    // other direction, matching the raw-source ban-scan's own trade-off above: a
+    // comment or string in a registered suite that spells out a tag literally also
+    // reds here, and the fix is to reword it. Net: "a leg cannot satisfy its site
+    // without executing" is now mechanically true against every CALLING-SHAPE evasion
+    // (any idiom, any nesting) — it is NOT true against a NAME constructed to avoid the
+    // literal, which remains a disclosed, human-reviewable residual.
+    const tagOccurrences = content.split(tag).length - 1
+    if (tagOccurrences > 1) {
+      violations.push(
+        `${leg.site}: tag ${tag} appears ${tagOccurrences} times in ${leg.testFile} — a `
+        + 'second test carrying the same tag (in any calling shape) can satisfy the '
+        + 'runtime binding while the real leg is suppressed; the tag must be unique per '
+        + 'file',
+      )
+      continue
+    }
     const tagLine = lines.findIndex((line) => line.includes(tag) && DECL_RE.test(line))
     if (tagLine === -1) {
       violations.push(
@@ -539,6 +588,92 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     testContents.set(RBAC, mutated)
     const violations = auditCensusLegLinkage(testContents)
     expect(violations.some((entry) => entry.startsWith('roles:update: no test DECLARATION tagged'))).toBe(true)
+  })
+
+  it('NEGATIVE CONTROL (P3-1, 2nd adversarial gate): a DECOY declaration carrying the same tag turns the linkage audit red', () => {
+    // A decoy test declaration tagged with the SAME site, placed BEFORE the real leg,
+    // used to satisfy `findIndex` (first match) while the real leg was neutered
+    // elsewhere — this pins the content-level occurrence-count guard directly,
+    // independent of any particular suppression idiom on the real leg.
+    const testContents = loadRealTestContents()
+    const original = testContents.get(RBAC) as string
+    const lines = original.split('\n')
+    const tag = '[recovery-census:roles:update]'
+    const tagLine = lines.findIndex((line) => line.includes(tag) && DECL_RE.test(line))
+    expect(tagLine).toBeGreaterThan(-1)
+
+    // Plant a second declaration carrying the identical tag, immediately before the
+    // real one, that records the site itself — textually indistinguishable from a
+    // second legitimate leg to anything that only checks "does A tagged declaration
+    // exist" or "was the site recorded from within a line bearing this tag".
+    const decoy = [
+      `  it(${JSON.stringify(`${tag} decoy leg that exercises nothing`)}, () => {`,
+      "    census.record('roles:update')",
+      '  })',
+      '',
+    ]
+    lines.splice(tagLine, 0, ...decoy)
+    const mutated = lines.join('\n')
+    expect(mutated).not.toBe(original)
+
+    testContents.set(RBAC, mutated)
+    const violations = auditCensusLegLinkage(testContents)
+    expect(violations).toEqual([
+      `roles:update: tag ${tag} appears 2 times in ${RBAC} — a second test carrying the `
+      + 'same tag (in any calling shape) can satisfy the runtime binding while the real '
+      + 'leg is suppressed; the tag must be unique per file',
+    ])
+  })
+
+  it('NEGATIVE CONTROL (P3-1, 3rd adversarial pass): a decoy whose it(...) is NOT a DECL_RE-anchored line still turns the linkage audit red', () => {
+    // The FIRST fix here counted DECL_RE-matching lines, which only recognises a
+    // declaration anchored at the start of its line. A decoy invoked from inside
+    // another expression — `[1].forEach(() => it(tag, ...))` — registers a real,
+    // running vitest test whose name carries the tag while being invisible to that
+    // line-anchored count: measured GREEN (8 files, 207/207, identical to the fixed
+    // pristine baseline) before the occurrence-count widening below. This pins that the
+    // guard now catches the tag regardless of the calling shape around `it(...)`.
+    const testContents = loadRealTestContents()
+    const original = testContents.get(RBAC) as string
+    const lines = original.split('\n')
+    const tag = '[recovery-census:roles:update]'
+    const tagLine = lines.findIndex((line) => line.includes(tag) && DECL_RE.test(line))
+    expect(tagLine).toBeGreaterThan(-1)
+
+    const decoy = [
+      `  ;[1].forEach(() => it(${JSON.stringify(`${tag} decoy`)}, () => census.record('roles:update')))`,
+      '',
+    ]
+    // Sanity: this decoy line does NOT read as a DECL_RE declaration — that is exactly
+    // the escape this test exists to close.
+    expect(DECL_RE.test(decoy[0])).toBe(false)
+    lines.splice(tagLine, 0, ...decoy)
+    const mutated = lines.join('\n')
+    expect(mutated).not.toBe(original)
+
+    testContents.set(RBAC, mutated)
+    const violations = auditCensusLegLinkage(testContents)
+    expect(violations).toEqual([
+      `roles:update: tag ${tag} appears 2 times in ${RBAC} — a second test carrying the `
+      + 'same tag (in any calling shape) can satisfy the runtime binding while the real '
+      + 'leg is suppressed; the tag must be unique per file',
+    ])
+  })
+
+  it('POSITIVE CONTROL: every REAL registered site has its tag exactly once in its file', () => {
+    // The discriminating invariant the occurrence-count guard depends on: this is
+    // NOT the same assertion as "linkage is clean overall" (which the pre-existing
+    // "every census row is linked…" test already covers) — it isolates the specific
+    // per-site occurrence count the new guard reads, over the REAL unmutated sources.
+    const testContents = loadRealTestContents()
+    const counts = allCensusLegs().map((leg) => {
+      const content = testContents.get(leg.testFile) as string
+      const tag = `[recovery-census:${leg.site}]`
+      return { site: leg.site, occurrences: content.split(tag).length - 1 }
+    })
+    expect(counts.every((entry) => entry.occurrences === 1)).toBe(true)
+    // And the guard itself agrees — no false positive on the pristine suite.
+    expect(auditCensusLegLinkage(testContents)).toEqual([])
   })
 
   it('NEGATIVE CONTROL: removing the censusFile(...) installation turns the installation audit red', () => {
