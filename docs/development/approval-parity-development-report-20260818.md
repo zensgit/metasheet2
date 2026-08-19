@@ -395,7 +395,7 @@ K1 的 write-side 曾把 curated per-org 绑定的写路径开给它所约束的
 | **#4984 P2-1 / FAIL-0 枚举守卫** | 6 个新接线真库套件缺自身 anti-skip-green 哨兵；排除清单无机械枚举守卫 | ✅ **DISCHARGED @ #5004 `6ace2e5a01`**（机械枚举守卫 `approval-ci-coverage-enumeration.test.ts` 落地，闸门证实有牙且当场抓到真实未接线套件 `approval-pack1a-lifecycle`，§5.8） |
 | **#4995 残留** | G-6 gate 文本不可满足（owner 裁）；picker 跨命名空间元数据（已披露） | §5.9 |
 | **D-9** | 已合并 PR 的合并后 squash SHA 基本都未被重新过闸（闸门绑 pre-merge / requalified head） | 形状事实，不得塌缩成「闸门 CLEAR，已合并」 |
-| **D-10（新）** | **原始 user-ID 渲染残留** — 当前 head 机械核实：`apps/web/src/views/approval/ApprovalDetailView.vue:731` 加签（P1-B）弹窗 chip 渲染 `{{ addSignUserLabels[uid] \|\| uid }}`；`:1960` 标签写入本身在 picker 返回的 `option.name` 缺失时也回退为 `option.id`——两处在缺名场景下都会把原始内部 user id 渲染给普通管理员看。**这与 §0/§5.10 中已由 #4981 修复的三个候选是不同位置**（那三个在 `assignmentDisplayLabel` / `formatFieldValue` 数组分支 / 节点变更占位符，均在 #4981 diff 中逐条可查）。**由 Codex 独立复核（2026-08-19）标出为新发现；本报告只做了上述两行的静态代码核实，未对其可达性/机制做独立对抗闸门复核（无变异、无浏览器证据）。** | 需要新的修复 PR（fix PR: pending）；这是**代码工作，不是 owner 专属项** |
+| **D-10（新）** | **原始 user-ID 渲染残留** — **本次订正轮直接机械核实**（当前 head，静态代码读取）：`apps/web/src/views/approval/ApprovalDetailView.vue:731` 加签（P1-B）弹窗 chip 渲染 `{{ addSignUserLabels[uid] \|\| uid }}`；`:1960` 标签写入本身在 picker 返回的 `option.name` 缺失时也回退为 `option.id`——两处在缺名场景下都会把原始内部 user id 渲染给普通管理员看。**这与 §0/§5.10 中已由 #4981 修复的三个候选是不同位置**（那三个在 `assignmentDisplayLabel` / `formatFieldValue` 数组分支 / 节点变更占位符，均在 #4981 diff 中逐条可查）。**这两行是本次订正轮为核实而读的原始代码，非本报告自己的对抗闸门产出**：无变异、无浏览器证据、未做可达性分析。促成本行的是一轮 Codex REQUEST-CHANGES——但该复核的原文、轮次编号与具体日期不在本报告的核实范围内，此处不代其署名或标注日期。 | 需要新的修复 PR（fix PR: pending）；这是**代码工作，不是 owner 专属项** |
 
 ### 6.5 OD 勘误候选（汇总，逐条见 §7.4）
 
@@ -481,7 +481,7 @@ Lock-7 §2.7 把 D-5 read-scope 留作 OPEN 的 owner 问题；P4-B 闸门补充
   - **P3-A**（Lock-4 自动通过/拒绝、扩展空派单人兜底、离职兜底、`auto_reject` 等缺失语义，`NOT DRAFTED`）
   - **Lock-2 其余实现**（字段派生部门路由、部门/联系人字段类型；§L2-C 已由 K6 落地，其余 `NOT STARTED`）
   - **L5-B 后加签（`'after'`）运行时**（OD-L5-4/5，节点插入式后加签仍推迟）
-  - **原始 user-ID 渲染修复**（新增项，§6.4 D-10；Codex 独立复核 2026-08-19 标出，与 §0/§5.10 中已由 #4981 修复的三个候选不是同一处）
+  - **原始 user-ID 渲染修复**（新增项，§6.4 D-10；一轮 Codex REQUEST-CHANGES 促成，本次订正轮直接机械核实了两处代码，与 §0/§5.10 中已由 #4981 修复的三个候选不是同一处；该 Codex 复核本身的原文/轮次/日期不在本报告核实范围内）
 
   **上述五项都是代码工作，不是 owner 专属项。** owner 专属项单独集中于第 7 节，两者不得混为一谈。
 - 本 FINAL 新做的机械核实（均已在正文标注出处）：尾部六切片的合并 SHA 与闸门判定；派单人/字段/`ApprovalMode`/`nodeOperationPolicy` 的 union 与 registry 实测；F10 挂载与必需 job 收集；四个迁移枚举；run-list / vitest.config UNION 存活；V-3 闭合证据引用。
