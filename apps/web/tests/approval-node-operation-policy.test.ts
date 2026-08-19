@@ -443,8 +443,10 @@ describe('Lock-4 §3 F4-B / gate P3-2 — the LINEAR path re-emits designated + 
     expect(draft.steps[0]?.emptyAssigneeFallback).toBeUndefined()
     const config = buildApprovalGraph(draft).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
     expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
-    // Byte-stability for the (pre-existing) sibling key too: absent stays absent, never a
-    // resurrected 'error' default that would change what gets saved for an untouched template.
+    // Regression pin for the (pre-existing) sibling key: `emptyAssigneePolicy` is unconditionally
+    // emitted (never omitted, defaults to `'error'`) — this fix round's P1-1/P3-2 changes touch only
+    // hydration and `emptyAssigneeFallback`'s OWN conditional emission, never this always-emit
+    // behavior for an untouched template.
     expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneePolicy')).toBe(true)
     expect(config.emptyAssigneePolicy).toBe('error')
   })
@@ -469,6 +471,21 @@ describe('Lock-4 §3 F4-B / gate P3-2 — the LINEAR path re-emits designated + 
       emptyAssigneePolicy: 'not-a-real-policy',
     })))
     expect(draft.steps[0]?.emptyAssigneePolicy).toBe('not-a-real-policy')
+  })
+
+  it("switching a designated step's 空审批人策略 away (the shipped <el-select>, bound directly to step.emptyAssigneePolicy) leaves NO orphaned emptyAssigneeFallback key — otherwise P2-3's own validator 400s a save on a key no linear UI can see or clear", () => {
+    const draft = draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['admin-1'] },
+    })))
+    expect(draft.steps[0]?.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
+    // Mirrors what the shipped <el-select v-model="step.emptyAssigneePolicy"> does on selection —
+    // it writes the draft field directly; there is no separate "clear fallback" step in the UI.
+    draft.steps[0]!.emptyAssigneePolicy = 'error'
+    const config = buildApprovalGraph(draft).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('error')
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
   })
 })
 
@@ -530,5 +547,26 @@ describe('Lock-4 §3 F4-B / gate P3-2 — the CANVAS path preserves the key acro
       emptyAssigneePolicy: 'not-a-real-policy',
     }))
     expect(validateApprovalNodeEdits(edits).length).toBeGreaterThan(0)
+  })
+
+  it("switching a designated node's 空审批人策略 control away on the CANVAS path leaves NO orphaned emptyAssigneeFallback key — mirrors approvalThreshold's own conditional-clear arm in the same function", () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.approval_1?.emptyAssigneePolicy).toBe('designated')
+    // Mirrors what the shipped inspector control does — sets the edit's emptyAssigneePolicy field
+    // directly, with no separate "clear fallback" action.
+    edits.approval_1!.emptyAssigneePolicy = 'error'
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, edits)
+    const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('error')
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+  })
+
+  it('POSITIVE CONTROL — an UNTOUCHED designated edit (policy left as-is) keeps the fallback (the clear is policy-selected, not unconditional)', () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, approvalNodeEditsFromGraph(graph))
+    const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
   })
 })

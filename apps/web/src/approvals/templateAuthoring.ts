@@ -1776,7 +1776,14 @@ function buildStepConfig(
     // mode away never leaves an orphaned threshold key behind.
     ...(step.approvalMode === 'threshold' ? { approvalThreshold: step.approvalThreshold } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
-    ...(emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
+    // Fix-round advisor catch (post-P1-1): emitted ONLY under `emptyAssigneePolicy === 'designated'`
+    // — mirrors `approvalThreshold`'s own conditional emission immediately above. The 空审批人策略
+    // `<el-select>` (TemplateAuthoringView.vue) offers only 报错/自动通过 as options but is bound
+    // directly to `step.emptyAssigneePolicy`, which P1-1 now preserves as `'designated'` verbatim;
+    // an author switching a designated node's select to either option must not leave an orphaned
+    // `emptyAssigneeFallback` behind — P2-3's own validator would then 400 the save on a key no
+    // linear UI can see or clear.
+    ...(step.emptyAssigneePolicy === 'designated' && emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
     ...(timeout ? { timeout } : {}),

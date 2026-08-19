@@ -231,6 +231,13 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
       delete config.approvalThreshold
     }
     if (edit.emptyAssigneePolicy !== undefined) config.emptyAssigneePolicy = edit.emptyAssigneePolicy
+    // Fix-round advisor catch (post-P1-1): `emptyAssigneeFallback` rides ONLY with an effective
+    // policy of 'designated' — mirrors `approvalThreshold`'s own conditional-emission arm
+    // immediately above. It is not in the edit model (no typed picker ships yet), so it survives
+    // via the `{...originalConfig}` spread above UNLESS explicitly cleared here; an author
+    // switching a designated node's 空审批人策略 control away must not leave an orphaned key behind
+    // — P2-3's own new validator would then 400 the save on a key no canvas UI can see or clear.
+    if (config.emptyAssigneePolicy !== 'designated') delete config.emptyAssigneeFallback
     if (edit.autoApprovalPolicy === null) delete config.autoApprovalPolicy
     else if (edit.autoApprovalPolicy !== undefined) config.autoApprovalPolicy = cloneJson(edit.autoApprovalPolicy)
     if (edit.fieldPermissions !== undefined) {
