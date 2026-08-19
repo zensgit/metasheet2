@@ -148,6 +148,7 @@ jobs:
       DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
       DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
       DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
       DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
       DEPLOY_COMPOSE_FILE: ${{ secrets.DEPLOY_COMPOSE_FILE }}
       PERF_PROFILE: high-scale
@@ -211,6 +212,7 @@ jobs:
               DEPLOY_HOST="${DEPLOY_HOST}" \
               DEPLOY_USER="${DEPLOY_USER}" \
               DEPLOY_SSH_KEY_B64="${DEPLOY_SSH_KEY_B64}" \
+              DEPLOY_KNOWN_HOSTS="${DEPLOY_KNOWN_HOSTS}" \
               DEPLOY_PATH="${DEPLOY_PATH}" \
               DEPLOY_COMPOSE_FILE="${DEPLOY_COMPOSE_FILE}" \
               ./scripts/ops/resolve-attendance-smoke-token.sh 2> >(tee -a "${fallback_log}" >&2)

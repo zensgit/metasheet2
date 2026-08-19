@@ -99,7 +99,7 @@ jobs:
           METRICS_AUTH_HEADER="${METRICS_AUTH_HEADER_SECRET:-}"
           if [[ -z "$METRICS_AUTH_HEADER" ]]; then
             set +e
-            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
+            metrics_token="$(METRICS_SCRAPE_TOKEN_RESOLVE_REQUIRED=false DEPLOY_KNOWN_HOSTS="${DEPLOY_KNOWN_HOSTS}" bash scripts/ops/resolve-metrics-scrape-token.sh 2> >(tee "$token_fallback_log" >&2))"
             token_resolve_status=$?
             set -e
             if [[ "$token_resolve_status" != "0" ]]; then

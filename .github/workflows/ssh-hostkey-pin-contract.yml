@@ -4,6 +4,9 @@ name: SSH Host-Key Pin Contract
 # Asserts that every workflow SSHing to the production deploy host verifies the
 # host identity (StrictHostKeyChecking=yes + fail-closed DEPLOY_KNOWN_HOSTS) and
 # that NO workflow reintroduces StrictHostKeyChecking=no in an executable line.
+# Tier 2 (2026-08-19) extends it to the shared resolve-*-token.sh scripts (a
+# set-equality census over scripts + 15 caller wirings) plus a behaviour test
+# that proves missing/malformed DEPLOY_KNOWN_HOSTS exits BEFORE any ssh.
 #
 # Hermetic (no DB, no pnpm install): checkout + setup-node + `node --test`, the
 # same shape as data-source-exposure-inventory.yml. Deliberately standalone so it
@@ -19,11 +22,21 @@ on:
     paths:
       - '.github/workflows/**'
       - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
+      - 'scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs'
+      - 'scripts/ops/resolve-attendance-smoke-token.sh'
+      - 'scripts/ops/resolve-k3wise-smoke-token.sh'
+      - 'scripts/ops/resolve-metrics-scrape-token.sh'
+      - 'scripts/**/*.sh'
   push:
     branches: [main]
     paths:
       - '.github/workflows/**'
       - 'scripts/ops/ssh-hostkey-pin-family-contract.test.mjs'
+      - 'scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs'
+      - 'scripts/ops/resolve-attendance-smoke-token.sh'
+      - 'scripts/ops/resolve-k3wise-smoke-token.sh'
+      - 'scripts/ops/resolve-metrics-scrape-token.sh'
+      - 'scripts/**/*.sh'
 
 permissions:
   contents: read
@@ -40,3 +53,5 @@ jobs:
           node-version: 20
       - name: Assert all production SSH workflows pin the deploy-host identity
         run: node --test scripts/ops/ssh-hostkey-pin-family-contract.test.mjs
+      - name: Behaviour-prove the resolver scripts fail closed before ssh (PATH-shadow stub)
+        run: node --test scripts/ops/ssh-hostkey-pin-family-behavior.test.mjs

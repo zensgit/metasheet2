@@ -40,15 +40,25 @@ shell_quote() {
 }
 
 tmp_ssh_key=""
+tmp_known_hosts=""
 
 cleanup_tmp_key() {
   if [[ -n "${tmp_ssh_key}" && -f "${tmp_ssh_key}" ]]; then
     rm -f "${tmp_ssh_key}"
   fi
+  if [[ -n "${tmp_known_hosts}" && -f "${tmp_known_hosts}" ]]; then
+    rm -f "${tmp_known_hosts}"
+  fi
 }
 
 if [[ -z "${DEPLOY_HOST:-}" || -z "${DEPLOY_USER:-}" || -z "${DEPLOY_SSH_KEY_B64:-}" ]]; then
   warn_or_fail "ATTENDANCE_ADMIN_JWT is invalid and DEPLOY_HOST/DEPLOY_USER/DEPLOY_SSH_KEY_B64 are incomplete for deploy-host token fallback"
+fi
+
+# Host-key pinning (fail-closed): the SSH fallback must verify the deploy-host
+# identity, so DEPLOY_KNOWN_HOSTS is required BEFORE any ssh attempt.
+if [[ -z "${DEPLOY_KNOWN_HOSTS:-}" ]]; then
+  warn_or_fail "DEPLOY_KNOWN_HOSTS is required to pin the deploy-host identity for the Attendance smoke token fallback"
 fi
 
 tmp_ssh_key="$(mktemp "${TMPDIR:-/tmp}/attendance-smoke-ssh-key.XXXXXX")"
@@ -58,7 +68,17 @@ if ! printf '%s' "${DEPLOY_SSH_KEY_B64}" | base64 -d > "${tmp_ssh_key}"; then
 fi
 chmod 600 "${tmp_ssh_key}"
 
-ssh_opts=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i "${tmp_ssh_key}")
+tmp_known_hosts="$(mktemp "${TMPDIR:-/tmp}/attendance-smoke-known-hosts.XXXXXX")"
+decoded_known_hosts="$(printf '%s' "${DEPLOY_KNOWN_HOSTS}" | base64 -d 2>/dev/null || true)"
+if printf '%s' "${decoded_known_hosts}" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+  printf '%s\n' "${decoded_known_hosts}" > "${tmp_known_hosts}"
+elif printf '%s' "${DEPLOY_KNOWN_HOSTS}" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+  printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > "${tmp_known_hosts}"
+else
+  warn_or_fail "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key"
+fi
+
+ssh_opts=(-o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=${tmp_known_hosts}" -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -i "${tmp_ssh_key}")
 quoted_deploy_path="$(shell_quote "${deploy_path}")"
 quoted_compose_file="$(shell_quote "${deploy_compose_file}")"
 quoted_token_expiry="$(shell_quote "${token_expiry}")"
