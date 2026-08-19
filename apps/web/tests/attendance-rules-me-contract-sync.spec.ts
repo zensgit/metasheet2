@@ -28,6 +28,13 @@ describe('rules/me FE omit set ↔ server forbidden set sync', () => {
     const serverKeys = [...(anchor as RegExpMatchArray)[1].matchAll(/['"]([^'"]+)['"]/g)].map(
       (m) => m[1],
     )
+    // Structural, not enumerated (枚举陷阱不收敛): every comma-separated entry in the
+    // capture must have yielded a key — an entry in ANY unrecognized delimiter
+    // (backtick, template literal, bare identifier) reds this instead of vanishing.
+    const entryCount = (anchor as RegExpMatchArray)[1]
+      .split(',')
+      .filter((entry) => entry.trim().length > 0).length
+    expect(serverKeys.length).toBe(entryCount)
     expect(serverKeys.length).toBeGreaterThan(0)
     expect([...ATTENDANCE_RULES_ME_OMIT_HEADERS].sort()).toEqual([...serverKeys].sort())
   })

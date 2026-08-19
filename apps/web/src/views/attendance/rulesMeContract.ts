@@ -6,7 +6,7 @@
  * deliberately, never silently ignoring them — while the web app's `authHeaders()`
  * injects `x-tenant-id` globally. Every rules/me call must therefore omit EXACTLY this
  * set. ONE exported constant so the call site and the specs share a single copy; the
- * required-lane fixture-sync spec (attendance-selfservice-dashboard.spec.ts) compares
+ * required-lane fixture-sync spec (attendance-rules-me-contract-sync.spec.ts) compares
  * this array against the server source itself, so an 8th server key reds CI here
  * instead of silently re-opening the 400 banner for that hint type.
  *
