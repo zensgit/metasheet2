@@ -94,10 +94,14 @@ plus three additions:
 fields plus the LAB-0 environment facts from read-only probes: node/pwsh
 majors, TCP reachability, one catalog `SELECT` for `server_version_num` +
 `rolcreatedb|rolsuper` + `rolcreaterole|rolsuper`, an unauthenticated health
-GET, disk/memory classes. No install, download, DB or principal creation,
-deploy, flag change, business-row read, or write beyond stdout — pinned by
-`stock-preparation-lab0-inventory.test.mjs` (22 cases, two of them
-discriminating negative controls). Next: one `preflight-and-report.ps1`
+GET, disk/memory classes, and (closing a Windows runtime-parity class-2 risk
+in `fs.link()`-based S6-A staging) `artifactRootFilesystem`/
+`artifactRootHardlinkSupported` — a read-only `Get-Volume` probe of the
+configured artifact root's volume format, path never printed. No install,
+download, DB or principal creation, deploy, flag change, business-row read,
+or write beyond stdout — pinned by `stock-preparation-lab0-inventory.test.mjs`
+(28 cases, two of them discriminating negative controls). Next: one
+`preflight-and-report.ps1`
 composing this + `stock-preparation-s6a-operator-preflight.mjs` + a reader for
 the runbook §2 privilege triple — one command, one paste, replacing step 9.
 

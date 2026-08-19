@@ -27,8 +27,11 @@ import { fileURLToPath } from 'node:url'
 import {
   CATALOG_READ_SQL,
   ENV_VAR,
+  SEALED_EXPORT_ENV,
   SIX_FIELD_ORDER,
   TOKEN,
+  artifactRootHardlinkSupportedField,
+  classifyArtifactRootFilesystem,
   classifyDiskFree,
   classifyFactsProvider,
   classifyMemory,
@@ -46,10 +49,15 @@ const GIB = 1024 * 1024 * 1024
 // Credential-bearing inputs the tool is handed and must never echo.
 const SENTINEL_PG_URL = 'postgres://SENTINELUSER:SENTINELSECRET@SENTINELHOST.invalid:5432/SENTINELDB'
 const SENTINEL_HEALTH_URL = 'http://SENTINELRUNTIME.invalid:9901/api/health'
-const SENTINELS = ['SENTINELUSER', 'SENTINELSECRET', 'SENTINELHOST', 'SENTINELDB', 'SENTINELRUNTIME']
+const SENTINEL_ARTIFACT_ROOT = 'Z:\\SENTINELARTIFACTROOT\\blobs\\staging'
+const SENTINELS = [
+  'SENTINELUSER', 'SENTINELSECRET', 'SENTINELHOST', 'SENTINELDB', 'SENTINELRUNTIME',
+  'SENTINELARTIFACTROOT',
+]
 
 function goodProbes(overrides = {}) {
   return {
+    artifactRootFilesystem: () => 'NTFS',
     diskFreeBytes: () => 64 * GIB,
     health: async () => true,
     memory: () => ({ freeBytes: 24 * GIB, totalBytes: 64 * GIB }),
@@ -73,6 +81,7 @@ function goodEnv(overrides = {}) {
     [ENV_VAR.factsProvider]: '@lab0-operator',
     [ENV_VAR.healthUrl]: SENTINEL_HEALTH_URL,
     [ENV_VAR.postgresUrl]: SENTINEL_PG_URL,
+    [SEALED_EXPORT_ENV.artifactRoot]: SENTINEL_ARTIFACT_ROOT,
     ...overrides,
   }
 }
@@ -138,6 +147,27 @@ test('classifyFactsProvider: handle shapes accepted, anything else refused rathe
   assert.equal(classifyFactsProvider('a'.repeat(40)), TOKEN.INVALID_FORMAT)
 })
 
+test('classifyArtifactRootFilesystem: NTFS/ReFS are exact (case-insensitive), everything else is OTHER, absence is UNRESOLVED', () => {
+  assert.equal(classifyArtifactRootFilesystem('NTFS'), TOKEN.NTFS)
+  assert.equal(classifyArtifactRootFilesystem('ntfs'), TOKEN.NTFS)
+  assert.equal(classifyArtifactRootFilesystem('ReFS'), TOKEN.REFS)
+  assert.equal(classifyArtifactRootFilesystem('REFS'), TOKEN.REFS)
+  assert.equal(classifyArtifactRootFilesystem('FAT32'), TOKEN.OTHER)
+  assert.equal(classifyArtifactRootFilesystem('exFAT'), TOKEN.OTHER)
+  assert.equal(classifyArtifactRootFilesystem(null), TOKEN.UNRESOLVED)
+  assert.equal(classifyArtifactRootFilesystem(undefined), TOKEN.UNRESOLVED)
+  assert.equal(classifyArtifactRootFilesystem(''), TOKEN.UNRESOLVED)
+  assert.equal(classifyArtifactRootFilesystem('   '), TOKEN.UNRESOLVED)
+})
+
+test('artifactRootHardlinkSupportedField: only NTFS/ReFS answer YES, OTHER is NO, everything else is UNKNOWN', () => {
+  assert.equal(artifactRootHardlinkSupportedField(TOKEN.NTFS), TOKEN.YES)
+  assert.equal(artifactRootHardlinkSupportedField(TOKEN.REFS), TOKEN.YES)
+  assert.equal(artifactRootHardlinkSupportedField(TOKEN.OTHER), TOKEN.NO)
+  assert.equal(artifactRootHardlinkSupportedField(TOKEN.UNRESOLVED), TOKEN.UNKNOWN)
+  assert.equal(artifactRootHardlinkSupportedField(TOKEN.NOT_CONFIGURED), TOKEN.UNKNOWN)
+})
+
 // ---------------------------------------------------------------------------
 // 2. Orchestration outcomes.
 // ---------------------------------------------------------------------------
@@ -158,6 +188,8 @@ test('fully-known host: every six-field value is determinate, lab0Status=COMPLET
   assert.equal(result.fields.pwsh7Available, TOKEN.YES)
   assert.equal(result.fields.diskFreeClass, TOKEN.DISK_GE_40GIB)
   assert.equal(result.fields.freeDiskAtLeast40GiB, TOKEN.YES)
+  assert.equal(result.fields.artifactRootFilesystem, TOKEN.NTFS)
+  assert.equal(result.fields.artifactRootHardlinkSupported, TOKEN.YES)
   assert.equal(result.fields.externalWrite, 'false')
 })
 
@@ -240,6 +272,51 @@ test('no connection string configured: PostgreSQL fields are UNKNOWN and nothing
   assert.equal(result.sixField.postgresServiceAvailable, TOKEN.UNKNOWN)
   assert.equal(result.sixField.postgresMajorVersion, TOKEN.UNKNOWN)
   assert.equal(result.lab0Status, TOKEN.BLOCKED)
+})
+
+test('artifact-root env var unset: NOT_CONFIGURED, hardlink UNKNOWN, and the probe is never called', async () => {
+  let probeCalls = 0
+  const env = goodEnv()
+  delete env[SEALED_EXPORT_ENV.artifactRoot]
+  const result = await runInventory({
+    env,
+    probes: goodProbes({
+      artifactRootFilesystem: () => {
+        probeCalls += 1
+        return 'NTFS'
+      },
+    }),
+  })
+  assert.equal(probeCalls, 0)
+  assert.equal(result.fields.artifactRootFilesystem, TOKEN.NOT_CONFIGURED)
+  assert.equal(result.fields.artifactRootHardlinkSupported, TOKEN.UNKNOWN)
+})
+
+test('artifact-root probe returns null (non-Windows or unresolvable path): UNRESOLVED, hardlink UNKNOWN', async () => {
+  const result = await runInventory({
+    env: goodEnv(),
+    probes: goodProbes({ artifactRootFilesystem: () => null }),
+  })
+  assert.equal(result.fields.artifactRootFilesystem, TOKEN.UNRESOLVED)
+  assert.equal(result.fields.artifactRootHardlinkSupported, TOKEN.UNKNOWN)
+})
+
+test('artifact-root volume is a non-NTFS/ReFS filesystem: OTHER, hardlink NO — the class-2 risk case', async () => {
+  const result = await runInventory({
+    env: goodEnv(),
+    probes: goodProbes({ artifactRootFilesystem: () => 'FAT32' }),
+  })
+  assert.equal(result.fields.artifactRootFilesystem, TOKEN.OTHER)
+  assert.equal(result.fields.artifactRootHardlinkSupported, TOKEN.NO)
+})
+
+test('artifact-root volume is ReFS: hardlink YES, same as NTFS', async () => {
+  const result = await runInventory({
+    env: goodEnv(),
+    probes: goodProbes({ artifactRootFilesystem: () => 'ReFS' }),
+  })
+  assert.equal(result.fields.artifactRootFilesystem, TOKEN.REFS)
+  assert.equal(result.fields.artifactRootHardlinkSupported, TOKEN.YES)
 })
 
 test('a missing or malformed factsProvider blocks instead of emitting a bare template', async () => {
@@ -367,12 +444,24 @@ test('no filesystem write API and no package-installing command appear in the so
   }
 })
 
-test('the only child process is the read-only PowerShell version probe', () => {
+test('the only child processes are the two read-only PowerShell probes (version + artifact-root volume format)', () => {
   const spawnCalls = SOURCE.split('spawnSync(').length - 1
-  assert.equal(spawnCalls, 1)
+  assert.equal(spawnCalls, 2)
   assert.ok(SOURCE.includes("'-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'"))
+  assert.ok(SOURCE.includes("'-NoProfile', '-NonInteractive', '-Command', "))
+  assert.ok(SOURCE.includes('Get-Volume'))
+  assert.ok(SOURCE.includes('.FileSystem'))
   for (const api of ['spawn(', 'exec(', 'execSync(', 'execFile(', 'fork(']) {
     assert.ok(!SOURCE.includes(api), `source must not use ${api}`)
+  }
+  // Both PowerShell call sites read state; neither may mutate a volume, a
+  // file, or anything else reachable through the shell.
+  for (const verb of [
+    'Set-Volume', 'Format-Volume', 'Initialize-Volume', 'Repair-Volume',
+    'New-Item', 'Remove-Item', 'Set-Content', 'Out-File', 'New-Volume',
+    'ConvertTo-', 'New-Hardlink', 'New-Item -ItemType HardLink',
+  ]) {
+    assert.ok(!SOURCE.includes(verb), `source must not use PowerShell verb ${verb}`)
   }
 })
 
@@ -402,6 +491,9 @@ test('CLI run with probes disabled emits a BLOCKED report and exit code 1', () =
   }
   delete env[ENV_VAR.postgresUrl]
   delete env[ENV_VAR.healthUrl]
+  // Guarantee NOT_CONFIGURED regardless of whether this host happens to have
+  // the real S6-A product env var set, so this subprocess run stays hermetic.
+  delete env[SEALED_EXPORT_ENV.artifactRoot]
 
   let stdout = ''
   let status = 0
@@ -420,5 +512,8 @@ test('CLI run with probes disabled emits a BLOCKED report and exit code 1', () =
   assert.ok(stdout.includes('businessRowsRead=0'))
   // A disabled probe must report UNKNOWN, never a fabricated NO.
   assert.ok(stdout.includes('powershell51Available=UNKNOWN'))
+  // An unset product env var is NOT_CONFIGURED, not UNKNOWN/UNRESOLVED.
+  assert.ok(stdout.includes('artifactRootFilesystem=NOT_CONFIGURED'))
+  assert.ok(stdout.includes('artifactRootHardlinkSupported=UNKNOWN'))
   assert.ok(!stdout.includes(os.tmpdir()))
 })
