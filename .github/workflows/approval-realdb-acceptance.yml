@@ -25,6 +25,13 @@ name: Approval real-DB acceptance (Lock-1 assignee kinds)
 #      pins C-1/C-2, door-2 create-time 422, create-time freeze + dispatch over BOTH pointers,
 #      C-4 pointer distinctness, empty-vs-wedge split, D-4 freeze purity/temporal, D-2 wedge,
 #      handler admission)
+#   - approval-realdb-pack1a-lifecycle: general approval lifecycle acceptance (residual-hardening,
+#     2026-08-19 — the FAIL-0 enumeration guard found this suite excluded from the no-DB job but
+#     wired into NO real-DB lane at all; a plain `describe` booting a real MetaSheetServer +
+#     poolManager, so it would hard-fail, not skip-green, if the exclude entry were simply deleted)
+#     (tests/integration/approval-pack1a-lifecycle.api.test.ts — approvalMode=all pending-until-
+#      final-assignee, return-to-a-previously-visited-node, auto-approve-empty-assignee with a
+#      system approval history entry)
 # Ephemeral first-party PostgreSQL container per job; no customer source, no deployment, no
 # flag change.
 #
@@ -59,6 +66,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-prior-node-approver.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-form-contact-extensions.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-pack1a-lifecycle.api.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
@@ -78,6 +86,7 @@ on:
       - 'packages/core-backend/tests/integration/approval-dept-head-at-level.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-prior-node-approver.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-form-contact-extensions.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-pack1a-lifecycle.api.test.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
       - 'packages/core-backend/src/services/ApprovalProductService.ts'
@@ -556,6 +565,84 @@ jobs:
             echo "suite=approval-form-contact-extensions.db.test.ts"
             echo "lock=approval-lock2-org-controls-field-routing-20260817 §L2-C"
             echo "gates=choke,C-1,C-2,door-2(§2.2),core-both-pointers,C-4,C-5,empty-vs-wedge,D-4,D-2,D-5,handler-admission"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  approval-realdb-pack1a-lifecycle:
+    name: approval-realdb-pack1a-lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's TOP-LEVEL anti-skip-green sentinel (the K2/K3/K6 posture): a run in this
+      # lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
+      # suite as skipped.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see the T8 note there and packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md
+          # for the per-item detail) — this lane provisions the identical schema the
+          # approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Pack 1A lifecycle real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green
+        # and hide regressions; verbose prints every collected test so an empty collection
+        # shows in the log instead of reading as green.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-pack1a-lifecycle.api.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suite=approval-pack1a-lifecycle.api.test.ts"
+            echo "gates=approvalMode=all pending-until-final-assignee, return-to-previously-visited-node, auto-approve-empty-assignee-with-system-history-entry"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"
