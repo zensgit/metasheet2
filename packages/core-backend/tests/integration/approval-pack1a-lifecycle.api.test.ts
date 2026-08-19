@@ -3,7 +3,7 @@ import net from 'net'
 import { randomUUID } from 'node:crypto'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
 
 // Residual-hardening (2026-08-19): this suite was excluded from the no-DB job (vitest.config.ts
 // test.exclude) but wired into NO real-DB lane at all — a live FAIL-0 gap the approval CI-coverage
@@ -36,6 +36,15 @@ async function canListenOnEphemeralPort(): Promise<boolean> {
 }
 
 async function authToken(baseUrl: string, userId: string): Promise<string> {
+  // FWB-0 Layer 2 P1-4 final write-boundary revalidation (ApprovalProductService.ts createApproval)
+  // is DB-only and does NOT accept JWT/actor.permissions as create-time authority — a dev-token's
+  // embedded roles=admin&perms=*:* alone is not enough to pass userHasApprovalsWriteOnQuery at the
+  // create boundary. Grant the DB-backed approvals:write permission code first, matching the
+  // established pattern every other real-DB approval-creation suite in this directory already uses
+  // (grantApprovalWriteForIntegrationActor, packages/core-backend/tests/helpers/
+  // approval-schema-bootstrap.ts) — this suite predated that helper and was never re-verified since
+  // (the exact rot the FAIL-0 CI-coverage guard wiring this suite in was built to surface).
+  await grantApprovalWriteForIntegrationActor(userId)
   const response = await fetch(
     `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`,
   )
