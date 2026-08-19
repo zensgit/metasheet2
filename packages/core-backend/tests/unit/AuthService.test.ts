@@ -615,10 +615,13 @@ describe('AuthService.register', () => {
     ).rejects.toBeInstanceOf(UserRoleAssignmentRecoveryBusyError)
 
     // Bounded: exactly the configured retry limit worth of attempts, never unbounded and never
-    // a single silent try.
+    // a single silent try. O2-S1 made the retry unit the WHOLE transaction, so each attempt
+    // re-runs the users insert too — one user_roles attempt per transaction attempt.
     expect(userRolesAttempts).toBe(USER_ROLE_ASSIGNMENT_RETRY_LIMIT)
-    // The users row and permissions DID persist (createUser's own transaction is untouched by
-    // this slice) — it is specifically the "success with no role" outcome that must not happen.
+    expect(poolMocks.transaction).toHaveBeenCalledTimes(USER_ROLE_ASSIGNMENT_RETRY_LIMIT)
+    // The users insert ran inside every attempted transaction (each rolled back on the real
+    // pool — zero residue is proven by the real-DB suite,
+    // tests/integration/auth-register-atomicity.db.test.ts).
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users'))).toBe(true)
   })
 })
