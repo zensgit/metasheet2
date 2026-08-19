@@ -3801,6 +3801,148 @@ describe('ApprovalProductService', () => {
     })
   })
 
+  // Fix-round P2-2 (gate P3A-F4B-20260819, Lock-4 §3 F4-B): `validateEmptyAssigneeFallbackConfigs`
+  // (B-s10) is called from all five authoring entry points (create/update/publish/restore/clone), but
+  // only `createTemplate` had a dedicated regression test — the gate's mutation ledger neutered each
+  // of the other four call sites INDIVIDUALLY and the 1141-test sweep stayed green every time. This
+  // block pins the remaining four, GOLDEN-style, mirroring the "parallel branch all-path join
+  // reachability" describe block above (restoreTemplateVersion mirrors the OD-L8-7 gate C-2 pattern
+  // near the top of this file). `createTemplate` itself is already covered by
+  // approval-p3a-f4b-designated-fallback-normalize.test.ts's B-s10 tests, so it is not duplicated here.
+  describe('P3-A F4-B fix-round P2-2: validateEmptyAssigneeFallbackConfigs pinned at the remaining four authoring chokes', () => {
+    // A stored 'designated' node with NO emptyAssigneeFallback — readable per the B-s10 boundary test
+    // in the normalize file (a historical row that predates the rule, or was written through a
+    // bypass) — must still 400 at every authoring choke that re-validates it, never silently pass.
+    function f4bDanglingGraph() {
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            config: { assigneeType: 'user', assigneeIds: ['mgr-1'], emptyAssigneePolicy: 'designated' },
+          },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+        ],
+        policy: { allowRevoke: true },
+      }
+    }
+
+    const f4bReject = {
+      statusCode: 400,
+      code: 'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED',
+    }
+
+    it('restoreTemplateVersion re-validates a historical designated-with-no-fallback graph and rejects', async () => {
+      const graph = f4bDanglingGraph()
+      const templateRow = {
+        id: 'tpl-f4b-restore', key: 'f4b-restore', name: 'F4-B Restore', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+        active_version_id: 'ver-current', latest_version_id: 'ver-current',
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      const historicalVersionRow = {
+        id: 'ver-historical', template_id: 'tpl-f4b-restore', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [templateRow], rowCount: 1 }
+        if (s.includes('FROM approval_template_versions') && s.includes('WHERE id = $1 AND template_id = $2')) {
+          return { rows: [historicalVersionRow], rowCount: 1 }
+        }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().restoreTemplateVersion('tpl-f4b-restore', 'ver-historical', {
+        expectedLatestVersionId: 'ver-current',
+      } as never)).rejects.toMatchObject(f4bReject)
+    })
+
+    it('updateTemplate (form-only edit) re-validates the copied historical graph and rejects', async () => {
+      const graph = f4bDanglingGraph()
+      const templateRow = {
+        id: 'tpl-f4b-update', key: 'f4b-update', name: 'F4-B Update', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-update',
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-f4b-update', template_id: 'tpl-f4b-update', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date('2026-08-19T00:00:00.000Z'), updated_at: new Date('2026-08-19T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [templateRow], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE template_id = $1')) return { rows: [versionRow], rowCount: 1 }
+        if (s.startsWith('SELECT COALESCE(MAX(version), 0)::text')) return { rows: [{ max_version: '1' }], rowCount: 1 }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().updateTemplate('tpl-f4b-update', {
+        formSchema: { fields: [] },
+      } as never)).rejects.toMatchObject(f4bReject)
+    })
+
+    it('publishTemplate rejects the stored designated-with-no-fallback graph at the strict write gate', async () => {
+      const graph = f4bDanglingGraph()
+      const template = {
+        id: 'tpl-f4b-publish', key: 'f4b-publish', name: 'F4-B Publish', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-publish', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-f4b-publish', template_id: 'tpl-f4b-publish', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1 FOR UPDATE')) return { rows: [template], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (s.startsWith('UPDATE approval_published_definitions SET is_active = FALSE')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-f4b-publish', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject(f4bReject)
+    })
+
+    it('cloneTemplate rejects the stored designated-with-no-fallback graph before creating a new draft version', async () => {
+      const graph = f4bDanglingGraph()
+      const template = {
+        id: 'tpl-f4b-clone', key: 'f4b-clone', name: 'F4-B Clone', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-f4b-clone', created_at: new Date(), updated_at: new Date(),
+      }
+      const version = {
+        id: 'ver-f4b-clone', template_id: 'tpl-f4b-clone', version: 1, status: 'draft',
+        form_schema: { fields: [] }, approval_graph: graph,
+        created_at: new Date(), updated_at: new Date(),
+      }
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s.startsWith('SELECT * FROM approval_templates WHERE id = $1')) return { rows: [template], rowCount: 1 }
+        if (s.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) return { rows: [version], rowCount: 1 }
+        if (s.startsWith('SELECT runtime_graph FROM approval_published_definitions')) return { rows: [] }
+        if (s.startsWith('SELECT * FROM approval_published_definitions')) return { rows: [], rowCount: 0 }
+        throw new Error(`Unhandled pool query: ${s}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      await expect(new ApprovalProductService().cloneTemplate('tpl-f4b-clone')).rejects.toMatchObject(f4bReject)
+    })
+  })
+
   it('rejects empty assigneeSources and invalid form field sources before hitting the database', async () => {
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const service = new ApprovalProductService()

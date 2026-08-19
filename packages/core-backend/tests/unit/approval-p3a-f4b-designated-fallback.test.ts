@@ -188,7 +188,20 @@ describe('P3-A F4-B: designated empty-assignee fallback (Lock-4 §3)', () => {
     )
   })
 
-  it("gate B-2 \"'designated' resolving to zero active users terminates at APPROVAL_ASSIGNEE_EMPTY with { nodeKey } only; it never becomes auto-approve\" (X-4: values-free payload, no fallback ids)", () => {
+  // GATE B-2 DISCLOSURE (fix-round P2-1, gate P3A-F4B-20260819): the lock names THREE zero-assignee
+  // cases — "empty list, deactivated ids, role with no members". This test exercises ONLY the first:
+  // the `{userIds:[], roleIds:[]}` shape below never chains to auto-approve. It is NOT persistable
+  // through the production authoring API — B-s10 (`validateEmptyAssigneeFallbackConfigs`) rejects an
+  // empty fallback at every authoring choke, and `normalizeEmptyAssigneeFallback` collapses it to
+  // `undefined` before that — so this exercises a defense-in-depth branch inside the pure executor,
+  // reached only by constructing a `RuntimeGraph` directly (as this test does), not a state
+  // production can reach. The other two named cases (deactivated ids, role with no members) are NOT
+  // enforced anywhere in this codebase today: `resolveDesignatedFallbackAssignments`'s own doc
+  // comment (ApprovalGraphExecutor.ts) records why — no active-status filter or role-membership
+  // check exists on the shared `static_user`/`static_role` resolver path, and adding one would need
+  // either a live DB read inside the resolver (forbidden by Lock-1 §2.1) or a new frozen-snapshot
+  // mechanism — an owner-level scope decision, not something asserted as covered here.
+  it("gate B-2 (partial — see disclosure above) \"'designated' resolving to an EMPTY fallback list terminates at APPROVAL_ASSIGNEE_EMPTY with { nodeKey } only; it never becomes auto-approve\" (X-4: values-free payload, no fallback ids)", () => {
     const executor = new ApprovalGraphExecutor(
       linearGraph({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { userIds: [], roleIds: [] } }),
       {},

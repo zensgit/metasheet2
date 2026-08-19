@@ -28,7 +28,22 @@ export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'reques
 // mirror of that exact region definition.
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold'
 export type ParallelJoinMode = 'all' | 'any'
-export type EmptyAssigneePolicy = 'error' | 'auto-approve'
+// Fix-round P1-1 (gate P3A-F4B-20260819): widened to add 'designated', byte-mirroring backend
+// packages/core-backend/src/types/approval-product.ts `EmptyAssigneePolicy`
+// (docs/development/approval-lock4-flow-policies-20260817.md §3 F4-B). See `EmptyAssigneeFallback`
+// below for the ONE new carrier key `'designated'` targets.
+export type EmptyAssigneePolicy = 'error' | 'auto-approve' | 'designated'
+/**
+ * Lock-4 §3 F4-B — byte-mirrors backend `EmptyAssigneeFallback`. The ONLY carrier for
+ * `emptyAssigneePolicy: 'designated'` targets (one key, not two). Filled through typed pickers
+ * only (D0 §10.2) — no picker ships in this fix round, so this type exists purely so the FE
+ * hydrate/rebuild paths preserve a persisted value verbatim instead of silently dropping it
+ * (gate X-2: the template must stay EDITABLE, not merely round-trip-safe).
+ */
+export interface EmptyAssigneeFallback {
+  userIds?: string[]
+  roleIds?: string[]
+}
 
 // P1-C: byte-mirrors backend packages/core-backend/src/types/approval-product.ts `NodeTimeoutEffect`
 // — the FULL declared enum, so a persisted/loaded graph round-trips any value without narrowing. Only
@@ -180,6 +195,9 @@ export interface ApprovalNodeConfig {
   // node carrying it under a different mode is a backend-drop shape, never a valid persisted state.
   approvalThreshold?: number
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
+  // other policy value (byte-mirrors backend types/approval-product.ts's own comment).
+  emptyAssigneeFallback?: EmptyAssigneeFallback
   autoApprovalPolicy?: AutoApprovalPolicy
   // Node-level field permissions. Default-absent === editable === current behavior. `hidden`
   // entries are enforced server-side (echo-redaction); `readonly`/`editable` are runtime-inert.

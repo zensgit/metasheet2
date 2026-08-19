@@ -7,6 +7,7 @@ import type {
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVisibilityScope,
   AutoApprovalPolicy,
+  EmptyAssigneeFallback,
   EmptyAssigneePolicy,
   FormField,
   FormFieldType,
@@ -227,6 +228,15 @@ export interface ApprovalStepDraft {
   // `validateTemplateApprovalFlow` for the (integer-only) client-side preview.
   approvalThreshold: number
   emptyAssigneePolicy: EmptyAssigneePolicy
+  /**
+   * Fix-round P1-1 (gate P3A-F4B-20260819) — PRESERVE-VERBATIM carrier for `'designated'`'s target
+   * set. The linear editor has no typed userIds/roleIds picker yet (deferred follower work), so
+   * this field is never authored here; it exists so hydrate → `buildStepConfig` re-emits the
+   * persisted object unchanged instead of silently dropping it on save. Same role as
+   * `nodeOperationPolicy` / `originalAutoApprovalPolicy`. Absent unless `emptyAssigneePolicy` is
+   * `'designated'`, and omitted from the built config when absent (byte-stability).
+   */
+  emptyAssigneeFallback?: EmptyAssigneeFallback
   // Self-approver authoring: the editable toggle (merge the requester in as an
   // auto-approval). `originalAutoApprovalPolicy` preserves the three non-merge
   // sub-fields (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode),
@@ -756,7 +766,15 @@ function stepDraftFromApprovalNode(
     groupIds,
     approvalMode,
     approvalThreshold,
-    emptyAssigneePolicy: config.emptyAssigneePolicy === 'auto-approve' ? 'auto-approve' : 'error',
+    // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4): the out-of-union coercion to
+    // `'error'` is DELETED — this used to map `'designated'` (and any future value) to `'error'`,
+    // exactly the silent downgrade M4's no-flatten clause exists to make impossible (the same
+    // deletion `approvalMode` above already went through). `unsupportedTemplateAuthoringReason`'s
+    // `emptyAssigneePolicy` out-of-union check is the SINGLE door for a genuinely unrecognised
+    // value: it forces the whole template read-only and blocks `persistDraft`, so this line never
+    // re-decides that question. Hydration therefore preserves whatever was persisted verbatim; only
+    // a genuinely ABSENT `emptyAssigneePolicy` takes the documented `'error'` default.
+    emptyAssigneePolicy: config.emptyAssigneePolicy === undefined ? 'error' : (config.emptyAssigneePolicy as EmptyAssigneePolicy),
     mergeWithRequester,
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
@@ -771,6 +789,11 @@ function stepDraftFromApprovalNode(
     // read-only, so save is blocked) — this hydrate never repairs or flattens it.
     ...(config.nodeOperationPolicy !== undefined
       ? { nodeOperationPolicy: config.nodeOperationPolicy as NodeOperationPolicy }
+      : {}),
+    // Fix-round P1-1 — stash the persisted `'designated'` target set so `buildStepConfig` re-emits
+    // it verbatim (same rationale as `nodeOperationPolicy` immediately above).
+    ...(config.emptyAssigneeFallback !== undefined
+      ? { emptyAssigneeFallback: config.emptyAssigneeFallback as EmptyAssigneeFallback }
       : {}),
   }
 }
@@ -877,6 +900,17 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'approvalMode',
   'approvalThreshold',
   'emptyAssigneePolicy',
+  // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 2 of 4. The backend
+  // approval-node rebuild re-emits `emptyAssigneeFallback` (ApprovalProductService.ts, the
+  // `case 'approval'` spread — landed as "allowlist 1 of 4" in the same PR that introduced the
+  // key), so a template carrying it must stay EDITABLE rather than being forced read-only by the
+  // drop-check below. All four allowlists move in ONE slice or the key inherits
+  // `signaturePolicy`'s live state (read-only in both editors) — gate A-3's positive control
+  // (reused below) is precisely that `signaturePolicy` STILL goes read-only here, proving the
+  // guard was widened for this key and not removed. The NESTED shape check lives in
+  // `emptyAssigneeFallbackHasBackendDrop` below (§2.3: "a widened enum and a new config key … the
+  // nested shape needs its own key list").
+  'emptyAssigneeFallback',
   'autoApprovalPolicy',
   'fieldPermissions',
   'timeout',
@@ -939,6 +973,20 @@ function requesterChoiceSourceHasBackendDrop(source: Record<string, unknown>): b
   if (!allowedScopeKeys || hasKeyOutside(scope, allowedScopeKeys)) return true
   if (scope.type === 'members' && !Array.isArray(scope.userIds)) return true
   if (scope.type === 'role' && !Array.isArray(scope.roleIds)) return true
+  return false
+}
+// Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — the nested key list beside
+// `BACKEND_AUTO_APPROVAL_POLICY_KEYS`: the backend `normalizeEmptyAssigneeFallback`
+// (ApprovalProductService.ts) rebuilds this object from a fixed sub-key set and REJECTS (400) any
+// other sub-key — same posture as `requesterChoiceSourceHasBackendDrop` above: a shape the backend
+// will not re-emit verbatim must still force read-only here, never silently flatten on save.
+const BACKEND_EMPTY_ASSIGNEE_FALLBACK_KEYS = ['userIds', 'roleIds']
+
+function emptyAssigneeFallbackHasBackendDrop(value: unknown): boolean {
+  if (!isPlainRecord(value)) return true
+  if (hasKeyOutside(value, BACKEND_EMPTY_ASSIGNEE_FALLBACK_KEYS)) return true
+  if (value.userIds !== undefined && !Array.isArray(value.userIds)) return true
+  if (value.roleIds !== undefined && !Array.isArray(value.roleIds)) return true
   return false
 }
 const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
@@ -1054,6 +1102,9 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
   if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
   if (thresholdConfigHasBackendDrop(config)) return true
   if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
+  // Fix-round P1-1 (gate P3A-F4B-20260819) — allowlist 4 of 4, the nested shape check for the key
+  // added to allowlist 2 above.
+  if (config.emptyAssigneeFallback !== undefined && emptyAssigneeFallbackHasBackendDrop(config.emptyAssigneeFallback)) return true
   const sources = config.assigneeSources
   if (Array.isArray(sources)) {
     for (const source of sources) {
@@ -1201,6 +1252,13 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       // that would force the whole template read-only (master §P1-C I12/I13 no-flatten).
       'approvalThreshold',
       'emptyAssigneePolicy',
+      // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 3 of 4. The
+      // linear editor does NOT author `emptyAssigneeFallback` (no typed userIds/roleIds picker
+      // ships in this fix round), but gate X-2's bar is "stays EDITABLE", not merely "round-trips
+      // safely". `stepDraftFromApprovalNode` / `buildStepConfig` re-emit it VERBATIM (the
+      // `nodeOperationPolicy` preserve-verbatim pattern immediately below), so this allowlist
+      // entry does not by itself risk a silent flatten.
+      'emptyAssigneeFallback',
       'autoApprovalPolicy',
       // T1-4: `fieldPermissions` is now authored + preserved by the linear path (buildStepConfig),
       // so it is no longer an unknown config key that would force the whole template read-only.
@@ -1228,6 +1286,17 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     ) return true
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
+    // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4 "no silent flatten of an unknown
+    // persisted value") — mirrors the `approvalMode` check immediately above. `'designated'` is now
+    // a KNOWN value (`stepDraftFromApprovalNode` preserves it verbatim, never coercing it to
+    // `'error'`), so only a genuinely off-enum value fails closed to read-only here.
+    if (
+      config.emptyAssigneePolicy !== undefined
+      && !['error', 'auto-approve', 'designated'].includes(config.emptyAssigneePolicy as string)
+    ) return true
+    // Fix-round P1-1 — the linear-path counterpart of `emptyAssigneeFallbackHasBackendDrop` above
+    // (same predicate, reused rather than duplicated).
+    if (config.emptyAssigneeFallback !== undefined && emptyAssigneeFallbackHasBackendDrop(config.emptyAssigneeFallback)) return true
     if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
     // The linear path preserves the object verbatim, so a shape the backend would reject or
     // re-emit differently must still fail closed to read-only (same predicate as the complex path).
@@ -1694,6 +1763,11 @@ function buildStepConfig(
   const nodeOperationPolicy = step.nodeOperationPolicy
     ? (JSON.parse(JSON.stringify(step.nodeOperationPolicy)) as NodeOperationPolicy)
     : undefined
+  // Fix-round P1-1 — re-emit the preserved `'designated'` target set VERBATIM (fresh deep copy,
+  // same discipline as `nodeOperationPolicy` immediately above).
+  const emptyAssigneeFallback = step.emptyAssigneeFallback
+    ? (JSON.parse(JSON.stringify(step.emptyAssigneeFallback)) as EmptyAssigneeFallback)
+    : undefined
   return {
     assigneeSources: [sourceFromStep(step, allSteps)],
     approvalMode: step.approvalMode,
@@ -1702,6 +1776,7 @@ function buildStepConfig(
     // mode away never leaves an orphaned threshold key behind.
     ...(step.approvalMode === 'threshold' ? { approvalThreshold: step.approvalThreshold } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
+    ...(emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
     ...(timeout ? { timeout } : {}),

@@ -2186,6 +2186,19 @@ function validateEmptyAssigneeFallbackConfigs(approvalGraph: ApprovalGraph): voi
   for (const node of approvalGraph.nodes) {
     if (node.type !== 'approval') continue
     const config = node.config as { emptyAssigneePolicy?: EmptyAssigneePolicy; emptyAssigneeFallback?: EmptyAssigneeFallback }
+    // Fix-round P2-3 (gate P3A-F4B-20260819) — symmetric to the check below: `emptyAssigneeFallback`
+    // is a dangling key under any policy value OTHER than `'designated'` (types/approval-product.ts's
+    // own contract: "ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
+    // other policy value"). Without this, a present-but-inert fallback widens the P1-1 bricking
+    // surface to any stray key, not just authors who actually use the feature. X-4 values-free: the
+    // message carries the node key and the POLICY NAME only, never the fallback's ids.
+    if (config.emptyAssigneeFallback !== undefined && config.emptyAssigneePolicy !== 'designated') {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} emptyAssigneeFallback is only allowed when emptyAssigneePolicy is 'designated' (got ${config.emptyAssigneePolicy ?? 'absent'})`,
+        400,
+        'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED',
+      )
+    }
     if (config.emptyAssigneePolicy !== 'designated') continue
     const fallback = config.emptyAssigneeFallback
     const hasTarget = Boolean(fallback && ((fallback.userIds?.length ?? 0) > 0 || (fallback.roleIds?.length ?? 0) > 0))

@@ -167,6 +167,36 @@ describe('P3-A F4-B designated fallback — publish/normalize contract (Lock-4 �
     await expect(create({ emptyAssigneePolicy: 'auto-approve' })).resolves.toBeDefined()
   })
 
+  // Fix-round P2-3 (gate P3A-F4B-20260819) — the symmetric direction of B-s10: `emptyAssigneeFallback`
+  // is a DANGLING key under any policy other than 'designated' (types/approval-product.ts's own
+  // contract). Before the fix these two normalized/persisted successfully and then bricked BOTH
+  // FE editors read-only (P1-1's blast radius), even though the author never touched the new feature.
+  it("P2-3: rejects emptyAssigneeFallback present when emptyAssigneePolicy is 'error' (dangling key)", async () => {
+    await expect(create({
+      emptyAssigneePolicy: 'error',
+      emptyAssigneeFallback: { userIds: ['admin-1'] },
+    })).rejects.toMatchObject({
+      code: 'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED',
+      statusCode: 400,
+    })
+  })
+
+  it('P2-3: rejects emptyAssigneeFallback present when emptyAssigneePolicy is ABSENT entirely (dangling key)', async () => {
+    await expect(create({
+      emptyAssigneeFallback: { userIds: ['admin-1'] },
+    })).rejects.toMatchObject({ code: 'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED' })
+  })
+
+  it('P2-3: X-4 values-free — the rejection message carries the node key and policy name only, never the fallback ids', async () => {
+    await expect(create({
+      emptyAssigneePolicy: 'auto-approve',
+      emptyAssigneeFallback: { userIds: ['admin-secret-1'] },
+    })).rejects.toMatchObject({
+      code: 'APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED',
+      message: expect.not.stringContaining('admin-secret-1'),
+    })
+  })
+
   it('emptyAssigneeFallback rejects an unknown key (Lock-1 §G-1 posture for new kinds — no silent drop)', async () => {
     await expect(create({
       emptyAssigneePolicy: 'designated',
