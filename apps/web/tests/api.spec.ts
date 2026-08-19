@@ -27,6 +27,29 @@ describe('apiFetch', () => {
     }
   })
 
+  it('omitHeaders deletes globally injected headers AFTER auth headers apply (SR-1 self-service mechanic, #5012)', async () => {
+    store.tenantId = 'tenant_42'
+    store.auth_token = 'token-abc'
+
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, statusText: 'OK' })
+    vi.stubGlobal('fetch', fetchMock)
+
+    // POSITIVE CONTROL: without omitHeaders the hint IS sent — proves the omit case
+    // below discriminates rather than passing against a hint that was never there.
+    await apiFetch('/api/attendance/rules/me', { suppressUnauthorizedRedirect: true })
+    const controlHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers
+    expect(controlHeaders.get('x-tenant-id')).toBe('tenant_42')
+
+    await apiFetch('/api/attendance/rules/me', {
+      suppressUnauthorizedRedirect: true,
+      omitHeaders: ['x-tenant-id'],
+    })
+    const omittedHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers
+    expect(omittedHeaders.has('x-tenant-id')).toBe(false)
+    // Non-subject headers survive the omit.
+    expect(omittedHeaders.get('authorization')).toBe('Bearer token-abc')
+  })
+
   it('forwards the stored tenant hint through auth headers', async () => {
     store.tenantId = 'tenant_42'
 

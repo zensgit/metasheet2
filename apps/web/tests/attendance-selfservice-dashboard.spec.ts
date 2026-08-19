@@ -3,6 +3,9 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { useLocale } from '../src/composables/useLocale'
 import { apiFetch } from '../src/utils/api'
+import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from '../src/views/attendance/rulesMeContract'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/makeupPunchRequestStatus'
 
 const authMockState = vi.hoisted(() => ({
@@ -697,16 +700,28 @@ describe('Attendance self-service dashboard', () => {
     })
     expect(rulesCalls.length).toBeGreaterThan(0)
     for (const [, init] of rulesCalls) {
-      expect((init as { omitHeaders?: readonly string[] } | undefined)?.omitHeaders ?? []).toEqual([
-        'x-user-id',
-        'x-org-id',
-        'x-tenant-id',
-        'x-workspace-id',
-        'x-group-id',
-        'x-attendance-group-id',
-        'x-schedule-group-id',
-      ])
+      const omitted = (init as { omitHeaders?: readonly string[] } | undefined)?.omitHeaders ?? []
+      expect([...omitted].sort()).toEqual([...ATTENDANCE_RULES_ME_OMIT_HEADERS].sort())
     }
+  })
+
+  it('FIXTURE-SYNC: the FE omit set equals the SERVER forbidden set, read from the plugin source (#5012)', () => {
+    // Kills the silent-drift channel (#5012 gate round-2 P3): an 8th key added to the
+    // server's ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS must red THIS spec instead of
+    // silently re-opening the 400 banner for that hint type. Same fixture-sync idiom as
+    // attendance-import-header-recognition.spec.ts (readFileSync + anchored regex +
+    // non-empty anchor assertion + sorted equality).
+    const pluginSource = readFileSync(
+      join(__dirname, '../../../plugins/plugin-attendance/index.cjs'),
+      'utf8',
+    )
+    const anchor = pluginSource.match(
+      /const ATTENDANCE_RULES_ME_FORBIDDEN_HEADER_KEYS = new Set\(\[([^\]]+)\]\)/,
+    )
+    expect(anchor, 'server forbidden-set literal must be found in the plugin source').toBeTruthy()
+    const serverKeys = [...(anchor as RegExpMatchArray)[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+    expect(serverKeys.length).toBeGreaterThan(0)
+    expect([...ATTENDANCE_RULES_ME_OMIT_HEADERS].sort()).toEqual([...serverKeys].sort())
   })
 
   it('renders self-service cards with status, request summaries, quick actions, and status guide', async () => {

@@ -291,7 +291,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
+# #5012 (2026-08-19, human-tail finding): tests/api.spec.ts carries the omitHeaders
+# MECHANIC leg (SR-1 rules/me self-service contract) — it ran in NO workflow before, so
+# reverting the apiFetch delete-loop was green across every required check. Full path
+# token: a bare `api.spec.ts` would substring-match other *-api specs.
 npx vitest run \
+  tests/api.spec.ts \
   approval-canvas-commands \
   approval-form-commands \
   approval-authoring-history \
