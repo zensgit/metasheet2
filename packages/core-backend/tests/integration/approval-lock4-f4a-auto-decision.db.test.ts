@@ -321,6 +321,18 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
   // event the ONLY prior history entry (nothing else to dedupe against), which is the actual bar:
   // the F4-A sentinel row carries no `originalApprover` / actor identity for P, so it must NOT be
   // mistaken for a real P approval by the dedup search.
+  //
+  // Self-correction (same fix round): the FIRST draft of this pair set BOTH `dedupeHistoricalApprover`
+  // and `mergeAdjacentApprover` on manual2. `evaluateAutoApprovalCascade`'s arms short-circuit in a
+  // fixed order (mergeWithRequester -> mergeAdjacentApprover -> dedupeHistoricalApprover,
+  // ApprovalProductService.ts :4594-4642) — so the control's `approved` outcome was actually produced
+  // by the MERGE arm (P's manual1 approval is also the immediately-preceding history entry), never
+  // reaching the dedup arm at all. That reproduced the EXACT defect this fix round exists to close:
+  // an outcome asserted, the mechanism unverified. Fixed by dropping `mergeAdjacentApprover` from
+  // BOTH configs (the two graphs now differ ONLY in the prior event, which is the actual
+  // "event-selected, not position-selected" claim) and asserting the auto-pass record's
+  // `metadata.reason === 'auto-dedupe-historical'` in the control, so a future regression that
+  // routes through a different cascade arm fails here instead of passing for the wrong reason.
   // ─────────────────────────────────────────────────────────────────────────────────────────────
 
   it('A-3 (RATIFIED): dedupeHistoricalApprover does NOT auto-approve manual2 when the auto_approve node is the ONLY prior history entry (the sentinel carries no P identity to dedupe against)', async () => {
@@ -343,7 +355,7 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
             assigneeType: 'user',
             assigneeIds: [p],
             approvalMode: 'single',
-            autoApprovalPolicy: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true },
+            autoApprovalPolicy: { dedupeHistoricalApprover: true },
           },
         },
         { key: 'end', type: 'end', config: {} },
@@ -366,7 +378,7 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
     expect(((await finish.json()) as { status: string }).status).toBe('approved')
   })
 
-  it('CONTROL for RATIFIED A-3 — replacing auto1 with a node P GENUINELY approves DOES trigger dedupeHistoricalApprover at manual2 (the exemption is event-selected, not position-selected)', async () => {
+  it('CONTROL for RATIFIED A-3 — replacing auto1 with a node P GENUINELY approves DOES trigger dedupeHistoricalApprover at manual2, MECHANISM-VERIFIED via the auto-pass record reason (the exemption is event-selected, not position-selected)', async () => {
     const suffix = 'a3-ratified-ctl'
     const p = `l4-p-${TS}-${suffix}`
     const adminToken = await authToken(baseUrl, `l4-admin-${TS}-${suffix}`)
@@ -386,7 +398,10 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
             assigneeType: 'user',
             assigneeIds: [p],
             approvalMode: 'single',
-            autoApprovalPolicy: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true },
+            // Deliberately NOT mergeAdjacentApprover: true — that arm is checked FIRST in the
+            // cascade and would fire here too (manual1 IS the immediately-preceding entry, also
+            // authored by P), silently masking whether the dedup arm itself ever runs.
+            autoApprovalPolicy: { dedupeHistoricalApprover: true },
           },
         },
         { key: 'end', type: 'end', config: {} },
@@ -407,6 +422,12 @@ describeIfDatabase('Lock-4 F4-A — node-level auto_approve (审批类型): serv
     // A GENUINE P approval at the same position DOES dedupe manual2 away in the same request.
     expect(afterFirstBody.status).toBe('approved')
     expect(afterFirstBody.currentNodeKey).toBeNull()
+    // Mechanism-verified: the auto-pass fired through the DEDUP arm specifically, not merely
+    // "some cascade arm or other" — the reason string is the cascade's own arm discriminator.
+    const records = await recordsFor(inst.id)
+    const autoRow = records.find((r) => r.metadata?.reason === 'auto-dedupe-historical')
+    expect(autoRow).toBeTruthy()
+    expect(autoRow!.actor_id).toBe('system:auto-approval')
   })
 
   it('REGRESSION PIN (asymmetry, not A-3 acceptance): dedupeHistoricalApprover\'s actor-filtered search skips an intervening auto_approve sentinel and finds P\'s EARLIER genuine approval', async () => {
