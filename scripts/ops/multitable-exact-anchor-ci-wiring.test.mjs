@@ -19,6 +19,7 @@ const FILES = [
   'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
   // Closeout database guard: authority reader/writer leases.
   'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
+  'tests/integration/multitable-recovery-lease-backoff-realdb.test.ts',
   // Closeout goldens added by the TM-closeout slices — must stay two-point wired (no manual-only goldens).
   'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
   'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',

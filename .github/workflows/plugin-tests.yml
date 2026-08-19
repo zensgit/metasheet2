@@ -1063,8 +1063,10 @@ jobs:
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
+            tests/integration/multitable-recovery-lease-backoff-realdb.test.ts \
             tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts \
             tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
+            tests/integration/recovery-conflict-classifier-realdb.test.ts \
             tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
@@ -1264,6 +1266,7 @@ jobs:
             tests/integration/directory-deprovision-compensation.db.test.ts \
             tests/integration/directory-activation-source-lock.db.test.ts \
             tests/integration/login-alias-writers.db.test.ts \
+            tests/integration/auth-register-atomicity.db.test.ts \
             tests/integration/directory-deprovision-ledger-schema.db.test.ts \
             tests/integration/directory-deprovision-writer-ledger.db.test.ts \
             tests/integration/directory-deprovision-race-supersede.db.test.ts \

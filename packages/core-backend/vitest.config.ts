@@ -72,6 +72,9 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // O2-S1 register() whole-transaction atomicity goldens: DATABASE_URL-gated; excluded here so
+      // the no-DB job cannot skip-green it; wired whole-file into the auth real-DB step in plugin-tests.yml.
+      'tests/integration/auth-register-atomicity.db.test.ts',
       // P2-1 (post-#3972 review): proves the create-time email existence check is
       // case-insensitive and that batchAdmitDirectoryAccountUsers enforces server-side
       // eligibility (no duplicate `users` row for a differently-cased email; no silent
@@ -1059,6 +1062,9 @@ export default defineConfig({
       // Time Machine closeout guard: per-subject authority leases. It is DATABASE_URL-gated and
       // pinned by the shared exact-anchor CI wiring contract.
       'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
+      // O2-S3 lease-starvation backoff goldens (DATABASE_URL-gated; two-point wired via the
+      // exact-anchor CI wiring contract).
+      'tests/integration/multitable-recovery-lease-backoff-realdb.test.ts',
       // TM-closeout slice goldens (DATABASE_URL-gated; two-point wired via the exact-anchor CI wiring contract).
       'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
