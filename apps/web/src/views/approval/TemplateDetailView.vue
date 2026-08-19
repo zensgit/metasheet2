@@ -1130,7 +1130,14 @@ function nodeTimeoutEffectLabel(effect: string | undefined): string {
 }
 
 function emptyAssigneePolicyLabel(policy: EmptyAssigneePolicy): string {
-  const map: Record<EmptyAssigneePolicy, string> = { error: '无人时报错', 'auto-approve': '无人时自动通过' }
+  // Fix-round P1-1 (gate P3A-F4B-20260819) — 'designated' added so this compiles against the
+  // widened `EmptyAssigneePolicy` union (read-only detail echo; NOT an authoring surface, so no
+  // FE follower-slice scope is implied by this label existing).
+  const map: Record<EmptyAssigneePolicy, string> = {
+    error: '无人时报错',
+    'auto-approve': '无人时自动通过',
+    designated: '无人时转交指定人员',
+  }
   return map[policy] ?? policy
 }
 

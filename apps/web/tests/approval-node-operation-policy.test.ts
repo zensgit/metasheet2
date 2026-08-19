@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type {
   ApprovalGraph,
   ApprovalTemplateDetailDTO,
+  EmptyAssigneeFallback,
   NodeOperationPolicy,
 } from '../src/types/approval'
 import {
@@ -12,6 +13,7 @@ import {
 import {
   applyApprovalNodeEditsToGraph,
   approvalNodeEditsFromGraph,
+  validateApprovalNodeEdits,
 } from '../src/approvals/approvalNodeEdit'
 import {
   OPERATION_POLICY_MIXED_HINT,
@@ -352,5 +354,219 @@ describe('Lock-5 gate E-1 — the tab is registry-driven, per node type', () => 
       .toEqual(['transfer'])
     expect(DEFAULT_APPROVAL_CAPABILITY_REGISTRY.operationPoliciesByNodeType.approval!.map((c) => c.id))
       .toEqual(['transfer', 'add_reduce_sign', 'return'])
+  })
+})
+
+// ── Fix-round P1-1 (gate P3A-F4B-20260819, docs/development/approval-lock4-flow-policies-20260817.md
+// §3 F4-B / §2.3) — `emptyAssigneeFallback` joins the FOUR allowlists in this one slice, mirroring
+// Lock-5's own §2.2/gate A-3 structure above (fixture helpers `tpl`/`linearGraph`/`complexGraph`
+// reused unchanged). Before this fix-round a template carrying the key was bricked READ-ONLY in
+// BOTH editors (X-2 empirically FAILED); §2.1/P3-2 additionally required the linear enum-flatten
+// repair and the canvas validator widening to move in the SAME slice, or the naive allowlist-only
+// fix would silently downgrade a persisted `'designated'` to `'error'` on save.
+function complexGraphWithF4B(fallback: EmptyAssigneeFallback): ApprovalGraph {
+  return complexGraph({
+    assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+    emptyAssigneePolicy: 'designated',
+    emptyAssigneeFallback: fallback,
+  })
+}
+
+describe('Lock-4 §3 F4-B / gate X-2 — emptyAssigneeFallback stays EDITABLE in BOTH editors', () => {
+  const fallback: EmptyAssigneeFallback = { userIds: ['admin-1'], roleIds: ['approval-admin'] }
+
+  it('COMPLEX editor: a template carrying designated + emptyAssigneeFallback is editable (not forced read-only)', () => {
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraphWithF4B(fallback)))).toBeNull()
+  })
+
+  it('LINEAR editor: a template carrying designated + emptyAssigneeFallback is editable (not forced read-only)', () => {
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: fallback,
+    })))).toBeNull()
+  })
+
+  it('POSITIVE CONTROL — `signaturePolicy` STILL forces read-only in both, so the allowlists were widened for THIS key and not removed (reused verbatim from gate A-3)', () => {
+    const sig = { assigneeSources: [{ kind: 'requester' }], signaturePolicy: { required: true } }
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(sig)))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(sig)))).not.toBeNull()
+  })
+
+  it('a shape the BACKEND normalizer would reject still fails closed to read-only in both editors', () => {
+    for (const bad of [
+      { extra: true },                 // unknown sub-key → backend 400
+      { userIds: 'admin-1' },          // not an array → backend 400
+      { roleIds: 42 },                 // not an array → backend 400
+      [],                              // not an object at all
+      'nope',                          // not an object at all
+    ]) {
+      const cfg = {
+        assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: bad,
+      }
+      expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(cfg))), JSON.stringify(bad)).not.toBeNull()
+      expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(cfg))), JSON.stringify(bad)).not.toBeNull()
+    }
+  })
+
+  it('a genuinely UNKNOWN emptyAssigneePolicy value still fails closed to read-only on the LINEAR path (the out-of-union door stays shut)', () => {
+    const cfg = { assigneeSources: [{ kind: 'requester' }], emptyAssigneePolicy: 'not-a-real-policy' }
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(cfg)))).toBeNull()
+    // ^ COMPLEX path preserves scalars verbatim without an enum check (matches `approvalMode`'s own
+    // posture on this path — the complex path never flattens a scalar, so an off-enum value simply
+    // round-trips unchanged; the backend rejects it explicitly at save, never a silent drop). The
+    // LINEAR path is the one with an explicit out-of-union door, asserted below.
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(cfg)))).not.toBeNull()
+  })
+})
+
+describe('Lock-4 §3 F4-B / gate P3-2 — the LINEAR path re-emits designated + fallback verbatim (no silent flatten)', () => {
+  it("hydrate → buildApprovalGraph round-trips 'designated' + emptyAssigneeFallback unchanged (the master M4 no-flatten check)", () => {
+    const fallback: EmptyAssigneeFallback = { userIds: ['admin-1', 'admin-2'], roleIds: ['approval-admin'] }
+    const draft = draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: fallback,
+    })))
+    expect(draft.steps[0]?.emptyAssigneePolicy).toBe('designated')
+    expect(draft.steps[0]?.emptyAssigneeFallback).toEqual(fallback)
+    const rebuilt = buildApprovalGraph(draft)
+    const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual(fallback)
+  })
+
+  it('POSITIVE CONTROL — a linear step with NO fallback emits NO key (byte-stability for every existing template)', () => {
+    const draft = draftFromTemplate(tpl(linearGraph({ assigneeSources: [{ kind: 'requester' }] })))
+    expect(draft.steps[0]?.emptyAssigneeFallback).toBeUndefined()
+    const config = buildApprovalGraph(draft).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+    // Regression pin for the (pre-existing) sibling key: `emptyAssigneePolicy` is unconditionally
+    // emitted (never omitted, defaults to `'error'`) — this fix round's P1-1/P3-2 changes touch only
+    // hydration and `emptyAssigneeFallback`'s OWN conditional emission, never this always-emit
+    // behavior for an untouched template.
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneePolicy')).toBe(true)
+    expect(config.emptyAssigneePolicy).toBe('error')
+  })
+
+  it('the re-emitted emptyAssigneeFallback object is a COPY, never an alias of the reactive draft', () => {
+    const draft = draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['admin-1'] },
+    })))
+    const rebuilt = buildApprovalGraph(draft)
+    const emitted = (rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>)
+      .emptyAssigneeFallback as EmptyAssigneeFallback
+    expect(emitted).not.toBe(draft.steps[0]!.emptyAssigneeFallback)
+    emitted.userIds = ['tampered']
+    expect(draft.steps[0]!.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
+  })
+
+  it("an OFF-ENUM emptyAssigneePolicy value is preserved verbatim by hydrate (never coerced to 'error') — the read-only guard is the single door, not this line", () => {
+    const draft = draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'requester' }],
+      emptyAssigneePolicy: 'not-a-real-policy',
+    })))
+    expect(draft.steps[0]?.emptyAssigneePolicy).toBe('not-a-real-policy')
+  })
+
+  it("switching a designated step's 空审批人策略 away (the shipped <el-select>, bound directly to step.emptyAssigneePolicy) leaves NO orphaned emptyAssigneeFallback key — otherwise P2-3's own validator 400s a save on a key no linear UI can see or clear", () => {
+    const draft = draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['admin-1'] },
+    })))
+    expect(draft.steps[0]?.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
+    // Mirrors what the shipped <el-select v-model="step.emptyAssigneePolicy"> does on selection —
+    // it writes the draft field directly; there is no separate "clear fallback" step in the UI.
+    draft.steps[0]!.emptyAssigneePolicy = 'error'
+    const config = buildApprovalGraph(draft).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('error')
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+  })
+})
+
+describe('Lock-4 §3 F4-B / gate P3-2 — the CANVAS path preserves the key across an edit it does not own', () => {
+  it('an untouched seed + rebuild reproduces the persisted designated + emptyAssigneeFallback byte-for-byte (spread-preserve, no edit-model entry needed)', () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, approvalNodeEditsFromGraph(graph))
+    expect(rebuilt.nodes.find((n) => n.key === 'approval_1')!.config).toEqual(
+      graph.nodes.find((n) => n.key === 'approval_1')!.config,
+    )
+  })
+
+  it('editing an UNRELATED node leaves a designated node (which the author never opened) byte-identical', () => {
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        {
+          key: 'approval_1',
+          type: 'approval',
+          name: '审批人 1',
+          config: {
+            assigneeSources: [{ kind: 'static_user', userIds: ['admin-1'] }],
+            emptyAssigneePolicy: 'designated',
+            emptyAssigneeFallback: { userIds: ['admin-1'] },
+          } as never,
+        },
+        {
+          key: 'approval_2',
+          type: 'approval',
+          name: '审批人 2',
+          config: { assigneeSources: [{ kind: 'requester' }] } as never,
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'approval_2' },
+        { key: 'e3', source: 'approval_2', target: 'end' },
+      ],
+    }
+    const edits = approvalNodeEditsFromGraph(graph)
+    edits.approval_2!.assigneeSources = [{ kind: 'static_role', roleIds: ['finance'] }]
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, edits)
+    expect(rebuilt.nodes.find((n) => n.key === 'approval_1')!.config).toEqual(
+      graph.nodes.find((n) => n.key === 'approval_1')!.config,
+    )
+  })
+
+  it("validateApprovalNodeEdits no longer flags a seeded 'designated' edit — an untouched, valid, persisted value must not block save on a node the author never opened", () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.approval_1?.emptyAssigneePolicy).toBe('designated')
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — validateApprovalNodeEdits still rejects a genuinely unknown emptyAssigneePolicy value', () => {
+    const edits = approvalNodeEditsFromGraph(complexGraph({
+      assigneeSources: [{ kind: 'requester' }],
+      emptyAssigneePolicy: 'not-a-real-policy',
+    }))
+    expect(validateApprovalNodeEdits(edits).length).toBeGreaterThan(0)
+  })
+
+  it("switching a designated node's 空审批人策略 control away on the CANVAS path leaves NO orphaned emptyAssigneeFallback key — mirrors approvalThreshold's own conditional-clear arm in the same function", () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.approval_1?.emptyAssigneePolicy).toBe('designated')
+    // Mirrors what the shipped inspector control does — sets the edit's emptyAssigneePolicy field
+    // directly, with no separate "clear fallback" action.
+    edits.approval_1!.emptyAssigneePolicy = 'error'
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, edits)
+    const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('error')
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+  })
+
+  it('POSITIVE CONTROL — an UNTOUCHED designated edit (policy left as-is) keeps the fallback (the clear is policy-selected, not unconditional)', () => {
+    const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, approvalNodeEditsFromGraph(graph))
+    const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
   })
 })

@@ -231,6 +231,13 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
       delete config.approvalThreshold
     }
     if (edit.emptyAssigneePolicy !== undefined) config.emptyAssigneePolicy = edit.emptyAssigneePolicy
+    // Fix-round advisor catch (post-P1-1): `emptyAssigneeFallback` rides ONLY with an effective
+    // policy of 'designated' — mirrors `approvalThreshold`'s own conditional-emission arm
+    // immediately above. It is not in the edit model (no typed picker ships yet), so it survives
+    // via the `{...originalConfig}` spread above UNLESS explicitly cleared here; an author
+    // switching a designated node's 空审批人策略 control away must not leave an orphaned key behind
+    // — P2-3's own new validator would then 400 the save on a key no canvas UI can see or clear.
+    if (config.emptyAssigneePolicy !== 'designated') delete config.emptyAssigneeFallback
     if (edit.autoApprovalPolicy === null) delete config.autoApprovalPolicy
     else if (edit.autoApprovalPolicy !== undefined) config.autoApprovalPolicy = cloneJson(edit.autoApprovalPolicy)
     if (edit.fieldPermissions !== undefined) {
@@ -396,7 +403,13 @@ export function validateApprovalNodeEdits(
       if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold'] as const).includes(edit.approvalMode)) {
         errors.push(`审批节点 ${edit.nodeKey} 的审批模式无效`)
       }
-      if (edit.emptyAssigneePolicy !== undefined && !(['error', 'auto-approve'] as const).includes(edit.emptyAssigneePolicy)) {
+      // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819) — widened to admit `'designated'`, seeded
+      // verbatim by `approvalNodeEditsFromGraph` from a persisted value. Without this, a canvas
+      // node carrying `emptyAssigneePolicy: 'designated'` would fail THIS preview the moment its
+      // edit is seeded — even for an author who never touched the node — blocking save on an
+      // untouched, valid, persisted value (the same class of defect gate X-2 targets, on a
+      // different code path than `unsupportedTemplateAuthoringReason`).
+      if (edit.emptyAssigneePolicy !== undefined && !(['error', 'auto-approve', 'designated'] as const).includes(edit.emptyAssigneePolicy)) {
         errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略无效`)
       }
       const inParallelRegion = parallelRegionNodeKeys?.has(edit.nodeKey) ?? false
