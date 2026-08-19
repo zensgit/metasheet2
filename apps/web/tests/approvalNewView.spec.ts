@@ -262,8 +262,8 @@ const ElSelect = defineComponent({
 })
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
-  render() { return h('option', { value: this.value }, this.label) },
+  props: { label: String, value: String, disabled: Boolean },
+  render() { return h('option', { value: this.value, disabled: this.disabled || undefined }, this.label) },
 })
 const ElDatePicker = defineComponent({
   name: 'ElDatePicker',
@@ -1695,5 +1695,60 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
         requesterChoices: { approval_1: ['u_alpha'] },
       }),
     )
+    // POSITIVE CONTROL for the raw-id-render fix below: 'u_alpha' carries a real directory name
+    // ('Alpha'), so isChoiceOptionUnidentifiable never disables its option and this submit was
+    // never blocked by the new identity gate -- the happy path is unaffected by the fix.
+  })
+
+  // raw-id-render fix (2026-08-19; census 3rd missed site): a scope-matched candidate whose
+  // directory record has a blank name must render the SAME values-free ordinal ApprovalUserPicker
+  // uses ("成员 N"), never the raw directory id, and must be non-selectable -- discriminating
+  // negative (nameless) + positive (named) in ONE mount so both branches of the same computed
+  // function are proven against the SAME candidate list.
+  it('a nameless candidate renders "成员 N" (never the raw id) and is disabled; a named sibling renders its name and stays selectable', async () => {
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([
+      { id: 'user_secret_raw_id_9', name: '', email: '' },
+      { id: 'u_bob', name: 'Bob', email: 'b@x.test' },
+    ])
+    await mountView()
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    const options = Array.from(picker.querySelectorAll('option'))
+    const blankOption = options.find((o) => o.value === 'user_secret_raw_id_9')
+    const namedOption = options.find((o) => o.value === 'u_bob')
+    expect(blankOption, 'the nameless candidate must still render as a selectable-shaped option (disabled, not absent)').toBeTruthy()
+    expect(namedOption).toBeTruthy()
+
+    expect(blankOption!.textContent).toContain('成员 1')
+    expect(blankOption!.textContent).not.toContain('user_secret_raw_id_9')
+    expect(blankOption!.disabled, 'an unidentifiable candidate must be disabled, not merely relabelled').toBe(true)
+
+    expect(namedOption!.textContent).toContain('Bob')
+    expect(namedOption!.disabled, 'a directory-named candidate must stay selectable').toBe(false)
+  })
+
+  // Defense-in-depth proof for `firstUnidentifiableChoiceNode`: even if an unidentifiable id
+  // reaches `requesterChoices` (the disabled-option UI gate above is the FIRST line of defense;
+  // this jsdom native-<select> stub does not itself enforce HTML `disabled` the way a real
+  // browser/Element Plus would, so assigning `.value` directly is how this test simulates that
+  // bypass), the submit-time gate must still block it -- mirrors the 减签 submit-guard posture.
+  it('submit is blocked (and createApproval never called) when the selected choice has no confirmed name, even if the disabled option is bypassed', async () => {
+    searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'user_secret_raw_id_9', name: '', email: '' }])
+    await mountView()
+    const picker = chooserPicker()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    picker.value = 'user_secret_raw_id_9'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    submitButton().click()
+    await flushUi()
+
+    expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
   })
 })

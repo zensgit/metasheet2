@@ -241,47 +241,52 @@ describe('directoryResolve (the shared resolver cache)', () => {
     expect(getResolvedUserName('u119')).toBe('name-u119')
   })
 
-  // P3-3 fix (member-display-identity gate report, 2026-08-19): a rejection never throws out of
-  // `ensureUserNamesResolved`/crashes the caller (unchanged from before the fix) -- but the id must
-  // stay RETRYABLE, not get cached as a confirmed miss. `getResolvedUserName === null` alone proves
-  // nothing here (it is `null` for both "absent" and "cached null" -- see the tri-state doc in
-  // directoryResolve.ts), so the load-bearing assertion is the SECOND `apiFetch` call after a fresh
-  // `ensure`, contrasted with the confirmed-miss test above (line ~196) which asserts the opposite:
-  // exactly one call, never re-fetched.
-  it('a TRANSIENT resolve() failure (network rejection) never throws, and leaves the id RETRYABLE -- not cached as a confirmed miss', async () => {
+  // P3-3 fix (member-display-identity gate report, 2026-08-19; retry redesign 2026-08-19): a
+  // rejection never throws out of `ensureUserNamesResolved`/crashes the caller, and the id must
+  // stay RETRYABLE, not get cached as a confirmed miss. The gate finding was that NOTHING on the
+  // consuming pages ever re-triggers `ensureUserNamesResolved` after a blip (no poller, no
+  // render-driven retry) -- so retryability alone is not enough; the retry must happen WITHOUT any
+  // second `ensure` call. This is the load-bearing proof: ONE `ensureUserNamesResolved` call, a
+  // mock that fails once then recovers, and the name resolves anyway.
+  it('a TRANSIENT resolve() failure (network rejection) is retried IN PLACE and recovers WITHOUT a second ensure call', async () => {
     const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
     apiFetchMock.mockRejectedValueOnce(new Error('network down'))
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
 
     expect(() => ensureUserNamesResolved(['u1'])).not.toThrow()
-    await flushMicrotasks()
-    expect(getResolvedUserName('u1'), 'unresolved after a failure -- rendering must still fall back to a placeholder').toBeNull()
-    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    // More cycles than the single-attempt tests above: TWO sequential attempts, and the second
+    // (successful) one has an extra `await response.json()` hop the reject-only path doesn't.
+    await flushMicrotasks(20)
 
-    // Retry: a fresh `ensure` call for the SAME id after a transient failure MUST re-fetch --
-    // unlike the confirmed-miss case, where the sibling test above proves it does NOT.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
-    ensureUserNamesResolved(['u1'])
-    await flushMicrotasks()
-    expect(apiFetchMock, 'a transient failure must not permanently disable retry for this id').toHaveBeenCalledTimes(2)
+    expect(apiFetchMock, 'the bounded in-place retry must have made a second attempt on its own -- no manual re-ensure call above').toHaveBeenCalledTimes(2)
     expect(getResolvedUserName('u1')).toBe('Alice')
   })
 
   // A 5xx (non-OK, but not 401/403) is transient the same way a network throw is -- same retry
   // contract, different failure shape (this wrapper throws ApprovalDirectoryResolveError for it,
-  // not a bare rejection).
-  it('a TRANSIENT resolve() failure (500 response) also leaves the id RETRYABLE', async () => {
+  // not a bare rejection). This test proves the OTHER half of the contract: the in-place retry is
+  // BOUNDED (not an infinite loop against a persistently-failing endpoint), and a failure that
+  // outlasts the bound still leaves the id RETRYABLE (not a confirmed miss) for a LATER `ensure`
+  // call -- mirrors the pre-redesign test this replaces, updated for the new call count.
+  it('a TRANSIENT resolve() failure (500) that persists past the retry bound leaves the id RETRYABLE for a LATER ensure call', async () => {
     const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({}, { status: 500, ok: false }))
+    apiFetchMock.mockResolvedValue(jsonResponse({}, { status: 500, ok: false })) // every attempt fails
 
     ensureUserNamesResolved(['u1'])
     await flushMicrotasks()
-    expect(getResolvedUserName('u1')).toBeNull()
-    expect(apiFetchMock).toHaveBeenCalledTimes(1)
 
+    expect(getResolvedUserName('u1'), 'unresolved after every retry attempt fails -- rendering must still fall back to a placeholder').toBeNull()
+    // 3 == RESOLVE_MAX_ATTEMPTS (directoryResolve.ts, not exported -- pinned here by count so a
+    // change to the bound is a deliberate, visible edit to this assertion).
+    expect(apiFetchMock, 'bounded -- exactly the retry-attempt cap for ONE ensure call, not unbounded').toHaveBeenCalledTimes(3)
+
+    // A fresh `ensure` call later (e.g. the user re-fetching detail/history) still retries --
+    // unlike the confirmed-miss case (sibling test above), where re-ensuring does NOT re-fetch.
+    apiFetchMock.mockReset()
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
     ensureUserNamesResolved(['u1'])
     await flushMicrotasks()
-    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
     expect(getResolvedUserName('u1')).toBe('Alice')
   })
 
