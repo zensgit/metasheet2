@@ -1,33 +1,52 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /**
- * member-display-identity (2026-08-19) — mechanical ENUMERATION guard, mirroring
- * `packages/core-backend/tests/unit/approval-ci-coverage-enumeration.test.ts`'s (FAIL-0) own
- * discipline and its own stated tier: FAIL-0 does not RE-EXECUTE the approval suites it guards —
- * it proves each one is WIRED (collected by a named, un-skippable CI lane, or explicitly
- * allowlisted). This file is the frontend analogue for the raw-id-render class: it does not
- * RE-MOUNT every component (that would duplicate, not strengthen, the mounted discriminating
- * negatives + positive controls already added to the six spec files below) — it mechanically
- * proves each SITE's guarding pattern is (a) present in the SOURCE file and (b) still named in its
- * covering spec file, so a regression that deletes the resolver call OR quietly renames/removes
- * the covering test turns this file red.
+ * member-display-identity (2026-08-19; REBUILT 2026-08-19 into a genuine PATTERN census) — this
+ * file used to be a hand-written `SITES` array: a fixed list of sites a human remembered to add.
+ * A 3rd-round adversarial gate found a genuine requester-facing raw-id leak
+ * (ApprovalNewView.vue's `choiceOptionLabel` — the requester_choice submit-time picker) that the
+ * hand list had ZERO entry for at all — not even an OUT-OF-SCOPE row. A frozen list can only ever
+ * re-verify sites someone remembered to type in; it structurally cannot catch a NEW site nobody
+ * thought to add. That is the exact failure this rebuild closes.
  *
- * BEHAVIOR proof (the actual runtime assertion that a raw id never reaches the DOM) lives in the
- * MOUNTED tests this file only points at — see each entry's `coverage` field. This file's own
- * assertions are WIRING/PRESENCE checks (source-text search), the same tier FAIL-0 operates at for
- * the backend — never mistake either for the other (feedback_source_text_assertions_are_not_
- * behaviour.md): the mounted tests carry the behavioral teeth, this file carries the "did someone
- * quietly delete the guard" teeth.
+ * TWO TIERS now coexist, and (feedback_source_text_assertions_are_not_behaviour.md) neither one is
+ * a substitute for the other:
  *
- * Covers EVERY row of the scout's viewer-facing site table. Three statuses:
- *   - GUARDED       — this PR added/changed the resolver call; a mounted discriminating negative +
- *                      positive control exist in `coverage`.
- *   - ALREADY-SAFE  — pre-existing #5010 fix already closed this row (values-free before this PR);
- *                      unchanged here, `coverage` still points at its pre-existing pinned test.
- *   - OUT-OF-SCOPE  — authoring-only / admin-only / non-person-id audience, per Lock-1 §2.6 and
- *                      the #5010 precedent; listed for completeness, no coverage pointer needed.
+ *   TIER A — REGRESSION_GUARDS (below): named, historically-significant fixes (the sites a human
+ *   DID already find and fix). Each pins "the resolver call is still there" + "the old raw-id
+ *   pattern has not silently come back", and points at the MOUNTED spec that carries the actual
+ *   behavioral proof (a raw id never reaches the DOM). This tier is unchanged in spirit from the
+ *   original file — see each entry's own history note.
+ *
+ *   TIER B — the MECHANICAL PATTERN CENSUS (`scanForViolations` + `ALLOWLIST` below): at test
+ *   time, this file itself READS every source file under `src/approvals/**` and
+ *   `src/views/approval/**` (via `readdirSync` — a new .vue dropped into either tree is scanned
+ *   automatically, no registration needed) and greps each line against the same raw-id-render
+ *   pattern set the adversarial census used to FIND the missed site (name-or-id fallback, `.name`
+ *   fallback, mustache-rendered id/key, id-array joins, template-string id interpolation,
+ *   non-mustache attribute id renders). EVERY matching line needs an explicit `ALLOWLIST` entry —
+ *   either because it is a values-free-fixed pattern (the fix itself, e.g. `成员 N` ordinals) or
+ *   because it is genuinely outside the member/role/dept-identity class (a structural field/node
+ *   key, a template/version/instance id, a localStorage cache key, an authoring-only surface, a
+ *   count-only length read, …). A line with NO matching allowlist entry — because it is new, or
+ *   because someone deleted the entry that used to cover it — fails this file. This is what makes
+ *   the census "derived from source, never a frozen hand list" (the task's own framing): the
+ *   SITES ARE the source, not a list a human maintains in parallel with it and can forget to sync.
+ *
+ * Every pattern in TIER B carries a POSITIVE CONTROL — a real, currently-scanned line the pattern
+ * MUST still match — because a rotted pattern (the exact defect that made the census's own initial
+ * `\b`-in-POSIX-ERE grep silently match zero results) is indistinguishable from "no violations
+ * exist" without one. Every ALLOWLIST entry is checked for STALENESS (its `contains` substring
+ * must still exist somewhere in its file) so a deleted/renamed line cannot leave a dead entry
+ * silently pre-authorizing whatever gets written in its place. And the scan itself is checked
+ * non-empty against known basenames, so a typo'd scan root cannot pass by finding nothing.
+ *
+ * NOT duplicated here: mounted DOM assertions that a raw id never actually reaches rendered output
+ * (that lives in each site's own `*.spec.ts`, referenced by TIER A's `coverage` pointer) — this
+ * file's own assertions are text-search PRESENCE/ABSENCE checks, the same tier the backend FAIL-0
+ * guard operates at. Never mistake this tier for the other.
  */
 
 const repoRoot = join(__dirname, '..')
@@ -38,19 +57,20 @@ function readTest(relPath: string): string {
   return readFileSync(join(__dirname, relPath), 'utf8')
 }
 
-interface SiteEntry {
+// ---------------------------------------------------------------------------
+// TIER A — regression guards for historically-significant fixes. Each `sourceChecks` entry proves
+// (a) the resolver-call pattern is present in the source and (b) the pre-fix raw-join pattern has
+// not reappeared; `coverage` names the MOUNTED spec carrying the actual behavioral proof.
+// ---------------------------------------------------------------------------
+interface RegressionGuard {
   site: string
-  status: 'GUARDED' | 'ALREADY-SAFE' | 'OUT-OF-SCOPE'
-  /** [source file, testFile, test-title-substring] — omitted for OUT-OF-SCOPE rows. */
-  coverage?: [string, string, string]
-  /** Source-text checks proving the guarding pattern is actually IN the source (not just claimed). */
-  sourceChecks?: Array<{ file: string; mustContain: string[]; mustNotContain?: string[] }>
+  coverage: [sourceFile: string, testFile: string, testTitleSubstring: string]
+  sourceChecks: Array<{ file: string; mustContain: string[]; mustNotContain?: string[] }>
 }
 
-const SITES: SiteEntry[] = [
+const REGRESSION_GUARDS: RegressionGuard[] = [
   {
     site: 'ApprovalDetailView.vue — 当前处理人 (assignmentDisplayLabel)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-e2e-lifecycle.spec.ts', 'resolves to a real name via the directory resolver when metadata.assigneeName is absent'],
     sourceChecks: [{
       file: 'src/views/approval/ApprovalDetailView.vue',
@@ -59,7 +79,6 @@ const SITES: SiteEntry[] = [
   },
   {
     site: 'ApprovalDetailView.vue — 其他审批人已失效 (cancelledAssigneesLabel)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-detail-record-table.spec.ts', 'resolves to real names via the directory resolver when no assignment metadata carries them'],
     sourceChecks: [{
       file: 'src/views/approval/ApprovalDetailView.vue',
@@ -68,7 +87,6 @@ const SITES: SiteEntry[] = [
   },
   {
     site: 'ApprovalDetailView.vue — 减签 picker (reducibleAssignees, FLOW-CHANGING)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-member-bar-operation-policy.spec.ts', 'a member resolvable via the directory resolver gets its real name AND becomes selectable'],
     sourceChecks: [{
       file: 'src/views/approval/ApprovalDetailView.vue',
@@ -77,24 +95,19 @@ const SITES: SiteEntry[] = [
   },
   {
     site: 'ApprovalDetailView.vue — 加签 picker chip (onAddSignUserSelected)',
-    status: 'ALREADY-SAFE',
     coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-e2e-lifecycle.spec.ts', 'a picked user with no directory name never renders the raw id as the chip label'],
+    sourceChecks: [],
   },
   {
     site: 'ApprovalDetailView.vue / ApprovalNewView.vue — upcoming-node assignee summary (nodeAssigneeSourceSummary)',
-    status: 'ALREADY-SAFE',
     coverage: ['src/approvals/assigneeSource.ts', 'approval-upcoming-nodes.test.ts', 'the summary is a count, never the raw ids (P3)'],
     sourceChecks: [{
-      // requesterFacingSourceSummary intercepts static_user/static_role to COUNT-ONLY before ever
-      // delegating to assigneeSourceSummary's own raw-id-joining cases — that interception is the
-      // guard; asserting its presence is what would catch someone deleting it.
       file: 'src/approvals/assigneeSource.ts',
       mustContain: ['function requesterFacingSourceSummary', "return `指定用户${count ? `（${count} 人）`", "return `指定角色${count ? `（${count} 个）`"],
     }],
   },
   {
     site: 'ApprovalUserPicker.vue — 转交/加签/表单用户字段/委托 dropdown options (FLOW-CHANGING, 6+ call sites)',
-    status: 'GUARDED',
     coverage: ['src/approvals/components/ApprovalUserPicker.vue', 'approvalUserPicker.spec.ts', 'a directory user with no name is rendered DISABLED'],
     sourceChecks: [{
       file: 'src/approvals/components/ApprovalUserPicker.vue',
@@ -102,21 +115,7 @@ const SITES: SiteEntry[] = [
     }],
   },
   {
-    site: 'ApprovalCenterDetailPane.vue — 待处理人 (assigneeLabel, desktop master-detail pane)',
-    status: 'GUARDED',
-    coverage: ['src/views/approval/ApprovalCenterDetailPane.vue', 'approval-center-master-detail.spec.ts', 'resolves to a real name via the directory resolver when metadata.assigneeName is absent'],
-    sourceChecks: [{
-      file: 'src/views/approval/ApprovalCenterDetailPane.vue',
-      mustContain: ['function assigneeLabel', 'getResolvedUserName(assignment.assigneeId)'],
-    }],
-  },
-  {
-    // member-display-identity tightening (2026-08-19): role scope ids are now ALWAYS a generic
-    // count (`resolvedIdsOrCount`'s 'role' branch never resolves a name -- see the sourceChecks
-    // mustNotContain below) -- coverage points at the still-live USER-type positive control, which
-    // proves the underlying resolver call/display pattern this site depends on.
     site: 'TemplateDetailView.vue — 可见范围 ids (visibilityScope, any authenticated viewer)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'template detail visibility scope (user type) shows RESOLVED user names when every id resolves'],
     sourceChecks: [{
       file: 'src/views/approval/TemplateDetailView.vue',
@@ -125,10 +124,7 @@ const SITES: SiteEntry[] = [
     }],
   },
   {
-    // Same tightening as the row above -- coverage now points at the USER-only positive control
-    // (role stays a values-free count, asserted in the same test -- see the spec's own comment).
     site: 'TemplateDetailView.vue — node assignee ids (legacy assigneeType/assigneeIds, any authenticated viewer)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/TemplateDetailView.vue', 'approval-e2e-permissions.spec.ts', 'POSITIVE CONTROL: template detail node assignee ids show a RESOLVED user name once the user resolver returns it'],
     sourceChecks: [{
       file: 'src/views/approval/TemplateDetailView.vue',
@@ -138,7 +134,6 @@ const SITES: SiteEntry[] = [
   },
   {
     site: 'MyDelegationView.vue — 被委托人 column (self-service, any authenticated user)',
-    status: 'GUARDED',
     coverage: ['src/views/approval/MyDelegationView.vue', 'myDelegationView.spec.ts', 'the 被委托人 column shows the RESOLVED name once the directory resolver returns it'],
     sourceChecks: [{
       file: 'src/views/approval/MyDelegationView.vue',
@@ -146,57 +141,279 @@ const SITES: SiteEntry[] = [
       mustNotContain: ['prop="delegateeUserId"'],
     }],
   },
+  // raw-id-render fix (2026-08-19; census 3rd missed site) — the requester-choice submit-time
+  // approver picker (Lock-1 §K2). The site the hand-list had NO entry for at all. Fixed to the
+  // same contract as ApprovalUserPicker (values-free ordinal + disabled-when-unidentifiable), plus
+  // a submit-time gate mirroring 减签's disable+guard posture.
   {
-    // P3-2 fix (member-display-identity gate report, 2026-08-19): the ORIGINAL reason recorded
-    // here ("authoring-only ...") was FALSE for the user_group branch -- `assigneeSourceSummary`'s
-    // static_user/static_role cases are authoring-only (intercepted to count-only upstream by
-    // `requesterFacingSourceSummary` for any viewer-facing caller -- see that SITE's own sourceChecks
-    // above), but `nodeAssigneeSourceSummary` DELEGATES `user_group` straight to
-    // `assigneeSourceSummary`, which joins raw group ids (`用户组：${groupIds.join('、')}`) and is
-    // reachable on the VIEWER-FACING flow previews at ApprovalNewView.vue and ApprovalDetailView.vue
-    // -- not authoring-only at all. The disposition (OUT-OF-SCOPE, outside the member/role/dept
-    // PERSON-identity class this file enumerates) is still correct: group ids are template-authored
-    // references, a Lock-1 §K1/§2.6-permitted vocabulary, not person identities -- they are
-    // intentionally rendered on viewer previews, not accidentally leaked.
-    site: 'assigneeSource.ts — assigneeSourceSummary static_user/static_role/user_group raw-id joins',
-    status: 'OUT-OF-SCOPE', // static_user/static_role: authoring-only (intercepted to count-only for viewers). user_group: group ids are template-authored references (Lock-1 §K1/§2.6), NOT person identities -- and ARE rendered on viewer-facing previews (ApprovalNewView/ApprovalDetailView), intentionally out of the person-identity class.
-  },
-  {
-    site: 'assigneeSource.ts — form_field_user (`表单用户字段：{fieldId}`)',
-    status: 'OUT-OF-SCOPE', // a form-FIELD id, not a member/role/dept identity
-  },
-  {
-    site: 'DelegationSettingsView.vue — admin delegation table (delegatorUserId/delegateeUserId)',
-    status: 'OUT-OF-SCOPE', // admin-only, gated approval-templates:manage — authoring/admin audience
-  },
-  {
-    site: 'TemplateDetailView.vue — visibilityIdsDraft (edit-mode textarea seed)',
-    status: 'OUT-OF-SCOPE', // author-facing (canManageTemplates edit mode), not a rendered display
-  },
-  {
-    site: 'TemplateAuthoringView.vue / linearStepSpine.ts / ApprovalGraphNodeConfigEditor.vue — authoring previews',
-    status: 'OUT-OF-SCOPE', // template author, not requester/approver
-  },
-  {
-    site: 'TemplateCenterView.vue — visibilityScopeLabel (count only, e.g. "角色 2")',
-    status: 'OUT-OF-SCOPE', // already count-only, no id ever rendered — not a leak
+    site: 'ApprovalNewView.vue — requester_choice submit-time approver picker (choiceOptionLabel, REQUESTER-facing SELECT)',
+    coverage: ['src/views/approval/ApprovalNewView.vue', 'approvalNewView.spec.ts', 'a nameless candidate renders "成员 N" (never the raw id) and is disabled'],
+    sourceChecks: [{
+      file: 'src/views/approval/ApprovalNewView.vue',
+      mustContain: [
+        'function choiceOptionLabel',
+        'function isChoiceOptionUnidentifiable',
+        'function firstUnidentifiableChoiceNode',
+      ],
+      mustNotContain: ['option.name?.trim() || option.id', 'option.name.trim() || option.id'],
+    }],
   },
 ]
 
-describe('member-display-identity coverage enumeration (mechanical, mirrors FAIL-0 discipline)', () => {
-  it('sentinel: every SITE entry has a status and, if not OUT-OF-SCOPE, a coverage pointer', () => {
-    for (const entry of SITES) {
-      expect(entry.status, entry.site).toMatch(/^(GUARDED|ALREADY-SAFE|OUT-OF-SCOPE)$/)
-      if (entry.status !== 'OUT-OF-SCOPE') {
-        expect(entry.coverage, `${entry.site} must name its covering test`).toBeTruthy()
-      }
+// ---------------------------------------------------------------------------
+// TIER B — the mechanical pattern census.
+// ---------------------------------------------------------------------------
+
+const SCAN_ROOTS = ['src/approvals', 'src/views/approval']
+
+/** Recursively lists every non-test .ts/.vue file under `dir` (repo-relative), sorted. */
+function listSourceFiles(dir: string): string[] {
+  const abs = join(repoRoot, dir)
+  const out: string[] = []
+  for (const entry of readdirSync(abs, { withFileTypes: true })) {
+    const relPath = `${dir}/${entry.name}`
+    if (entry.isDirectory()) {
+      out.push(...listSourceFiles(relPath))
+      continue
+    }
+    if (!entry.isFile()) continue
+    if (!/\.(ts|vue)$/.test(entry.name)) continue
+    if (/\.(spec|test)\.ts$/.test(entry.name)) continue
+    out.push(relPath)
+  }
+  return out.sort()
+}
+
+const SCANNED_FILES = SCAN_ROOTS.flatMap((d) => listSourceFiles(d))
+
+interface PatternDef {
+  id: string
+  label: string
+  regex: RegExp
+  /** A real, currently-scanned line this pattern MUST still match — proves the pattern isn't dead. */
+  positiveControl: { file: string; lineContains: string }
+}
+
+const PATTERNS: PatternDef[] = [
+  {
+    id: 'name-or-id-fallback',
+    label: '`||`/`??` falling back to a bare `.id`/`.userId`/`.roleId`/`.deptId`/`.departmentId`/`.memberId` expression',
+    regex: /(?:\|\||\?\?)\s*[A-Za-z_$][\w$.?[\]]*\.(id|userId|roleId|deptId|departmentId|memberId)\b/,
+    positiveControl: { file: 'src/approvals/useApprovalDirectory.ts', lineContains: 'user.name.trim() || user.id' },
+  },
+  {
+    id: 'name-dot-fallback',
+    label: '`.name` (optionally `?.trim()`) immediately followed by a `||` fallback',
+    regex: /\.name(?:\?\.trim\(\))?\s*\|\|/,
+    positiveControl: { file: 'src/approvals/components/ApprovalUserPicker.vue', lineContains: 'option.name?.trim() ||' },
+  },
+  {
+    id: 'mustache-id',
+    label: 'a `{{ }}` mustache directly rendering `.id`/`.key`/`.userId`/`.assigneeId`/`.delegateeUserId`/`.deptId`',
+    regex: /\{\{[^}]*\.(id|key|userId|assigneeId|delegateeUserId|deptId)\b[^}]*\}\}/,
+    positiveControl: { file: 'src/views/approval/DelegationSettingsView.vue', lineContains: 'row.delegateeUserId' },
+  },
+  {
+    id: 'id-array-join',
+    label: 'an `.ids`/`.Ids` array `.join(`',
+    regex: /\.(ids|Ids)\??\.join\(|\.id\)\.join\(/,
+    positiveControl: { file: 'src/views/approval/TemplateDetailView.vue', lineContains: 'visibilityScope.ids.join' },
+  },
+  {
+    id: 'template-string-id-interp',
+    label: 'a `${...}` template-string interpolation of an id/Ids/userId/roleId/deptId expression',
+    regex: /\$\{[^}]*(\.id\b|Ids|\.ids\b|userId|roleId|deptId)[^}]*\}/,
+    positiveControl: { file: 'src/approvals/assigneeSource.ts', lineContains: "source.userIds.join('、')" },
+  },
+  {
+    id: 'attr-id-render',
+    label: 'a non-mustache attribute (`:title`/`:aria-label`/`v-text`/`:placeholder`/`:content`) binding an id expression',
+    regex: /:(title|aria-label|v-text|placeholder|content)="[^"]*\.(id|userId|assigneeId|deptId|delegateeUserId)\b/,
+    positiveControl: { file: 'src/approvals/components/ApprovalGraphNodeConfigEditor.vue', lineContains: ':title="`插入 requester.role' },
+  },
+]
+
+interface AllowlistEntry {
+  file: string
+  /** A stable substring of the matched line (not a line number — resilient to unrelated edits shifting lines elsewhere in the file). */
+  contains: string
+  disposition: 'VALUES-FREE-FIXED' | 'OUT-OF-SCOPE'
+  reason: string
+}
+
+function group(disposition: AllowlistEntry['disposition'], reason: string, entries: Array<[file: string, contains: string]>): AllowlistEntry[] {
+  return entries.map(([file, contains]) => ({ file, contains, disposition, reason }))
+}
+
+const ALLOWLIST: AllowlistEntry[] = [
+  // ---- VALUES-FREE-FIXED: the pattern IS the fix (an ordinal/resolver-backed fallback, not a leak) ----
+  ...group('VALUES-FREE-FIXED', 'ApprovalUserPicker optionLabel -- values-free ordinal, the shipped fix itself', [
+    ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+  ]),
+  ...group('VALUES-FREE-FIXED', 'ApprovalNewView choiceOptionLabel -- values-free ordinal, this PR\'s fix (census 3rd missed site)', [
+    ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+  ]),
+  ...group('VALUES-FREE-FIXED', 'MyDelegationView delegateeDisplay -- resolver-wrapped, never the raw column value directly', [
+    ['src/views/approval/MyDelegationView.vue', 'delegateeDisplay(row.delegateeUserId)'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: admin-only raw-id render, matches the pre-existing #5010/hand-list precedent ----
+  ...group('OUT-OF-SCOPE', 'admin-only delegation table (approval-templates:manage) -- intentional raw id for the admin audience', [
+    ['src/views/approval/DelegationSettingsView.vue', 'row.delegateeUserId'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: author-facing script assignment / comparison, not a display render ----
+  ...group('OUT-OF-SCOPE', 'author-facing edit-mode textarea SEED (canManageTemplates edit mode) -- a script assignment, not a rendered display', [
+    ['src/views/approval/TemplateDetailView.vue', 'visibilityIdsDraft.value = template.value.visibilityScope.ids.join'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a change-detection COMPARISON (dirty-check), never rendered to the DOM', [
+    ['src/views/approval/TemplateDetailView.vue', 'current.ids.join(\'\\n\') === nextScope.ids.join'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: comments referencing the OLD (pre-fix) pattern in prose, not live code ----
+  ...group('OUT-OF-SCOPE', 'a code COMMENT describing the historical pre-fix pattern in prose, not a live expression', [
+    ['src/views/approval/ApprovalDetailView.vue', 'old `option.name || option.id` fallback rendered the raw directory user id'],
+    ['src/views/approval/ApprovalMetricsView.vue', 'The previous `row.name || row.key || \'未归属发起人\'` fell back to that RAW USER ID'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: authoring-only member/role/group formatters (Lock-1 §2.6 audience) ----
+  ...group('OUT-OF-SCOPE', 'authoring-only directory-label formatter (useApprovalDirectory: consumed by ApprovalGraphNodeConfigEditor / TemplateAuthoringView pickers, template-author audience, not requester/approver)', [
+    ['src/approvals/useApprovalDirectory.ts', 'user.name.trim() || user.id'],
+    ['src/approvals/useApprovalDirectory.ts', 'role.name.trim() || role.id'],
+    ['src/approvals/useApprovalDirectory.ts', 'group.name.trim() || group.id'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'authoring-only condition-formula role insert snippet/test-hook (template author composing a formula, not a viewer render)', [
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', ':title="`插入 requester.role in [&quot;${role.id}&quot;]`"'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approval-condition-formula-insert-role-${role.id}'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'authoring-only scope COUNT (`.length`), never the ids themselves', [
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'source.scope.userIds.length'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'source.scope.roleIds.length'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'assigneeSource.ts static_user/static_role -- authoring-only raw-id join, intercepted to count-only for every viewer-facing caller by requesterFacingSourceSummary (see REGRESSION_GUARDS above); user_group -- template-authored group references (Lock-1 §K1/§2.6), not person identities, intentionally rendered on viewer previews', [
+    ['src/approvals/assigneeSource.ts', "source.userIds.join('、')"],
+    ['src/approvals/assigneeSource.ts', "source.roleIds.join('、')"],
+    ['src/approvals/assigneeSource.ts', "source.groupIds.join('、')"],
+  ]),
+  ...group('OUT-OF-SCOPE', 'authoring formula text under construction by the template author, not a viewer render', [
+    ['src/views/approval/TemplateAuthoringView.vue', 'requester.role in [${JSON.stringify(roleId)}]'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a COUNT (`.length`), never the raw ids', [
+    ['src/views/approval/TemplateAuthoringView.vue', '(cfg.targetIds ?? []).length'],
+    ['src/views/approval/TemplateDetailView.vue', '指定角色（${safeIds.length} 个）'],
+    ['src/views/approval/TemplateDetailView.vue', 'NON_ALL_SCOPE_UNIT_LABEL[kind]} ${safeIds.length}'],
+    ['src/views/approval/ApprovalNewView.vue', 'scan.staleIds.length'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'the requester DEPARTMENT dimension (census site L3): backend keyExpr/nameSelect are the SAME expression for this dimension (name === key always), so `row.key` here is a department STRING, never an internal person id -- unlike the sibling requester-dimension row this PR fixes (L2)', [
+    ['src/views/approval/ApprovalMetricsView.vue', "row.name || row.key || '未归属部门'"],
+  ]),
+  ...group('OUT-OF-SCOPE', 'an ATTACHMENT FILE id/name fallback (G13 stale-ref restore), not a member identity', [
+    ['src/views/approval/ApprovalNewView.vue', 'ref.fileName ?? ref.id'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: structural field/column/node identifiers -- not a member/role/dept identity ----
+  ...group('OUT-OF-SCOPE', 'a form FIELD/COLUMN id (structural authored key), not a member identity -- excluded by class definition', [
+    ['src/approvals/conditionEdit.ts', 'field.label || field.id'],
+    ['src/approvals/conditionEdit.ts', "token: `{${field.id}}`, label: field.label || field.id"],
+    ['src/approvals/conditionEdit.ts', 'token: `{${field.id}.${column.id}}`'],
+    ['src/approvals/conditionEdit.ts', 'label: `${field.label || field.id}.${column.label || column.id}`'],
+    ['src/approvals/detailField.ts', 'column.label.trim() || column.id.trim()'],
+    ['src/approvals/detailField.ts', 'errors.push(`明细字段 ${label} 的子字段 ${column.id.trim()'],
+    ['src/approvals/detailField.ts', 'const fieldLabel = field.label || field.id'],
+    ['src/approvals/detailField.ts', 'violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)'],
+    ['src/approvals/detailField.ts', 'label: column.label || column.id,'],
+    ['src/approvals/detailField.ts', 'result.push({ key: field.id, label: field.label || field.id, value: text })'],
+    ['src/approvals/detailField.ts', 'label: field.label || field.id,'],
+    ['src/approvals/fieldVisibility.ts', 'reference.field.label || reference.field.id'],
+    ['src/approvals/templateAuthoring.ts', '字段 ${field.label.trim() || field.id}（关联记录）'],
+    ['src/approvals/templateVersionDiff.ts', 'return field.label || field.id'],
+    ['src/views/approval/ApprovalDetailView.vue', 'formatFieldValue(row.cells[column.id], column)'],
+    ['src/views/approval/ApprovalNewView.vue', 'approval-attachment-input-${field.id}'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'approval-step-field-access-${field.id}'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approval-node-field-access-${field.id}'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a graph NODE key/name (structural authored key), not a member identity -- excluded by class definition', [
+    ['src/approvals/graphLayout.ts', 'node.name || \'未命名节点\'}」无法从发起节点到达'],
+    ['src/approvals/graphLayout.ts', 'node.name || \'未命名节点\'}」没有后继连线'],
+    ['src/approvals/graphLayout.ts', 'node.name || \'未命名节点\'}」无法到达结束节点'],
+    ['src/approvals/templateAuthoring.ts', 'unknownNode.name || \'未命名节点\''],
+    ['src/approvals/templateAuthoring.ts', 'unsupportedNode.name || \'未命名节点\''],
+    ['src/approvals/templateAuthoring.ts', 'unsupportedApproval.name || \'未命名节点\''],
+    ['src/approvals/templateVersionDiff.ts', 'return node.name || node.key'],
+    ['src/approvals/upcomingNodes.ts', "node.name?.trim() || node.key"],
+    ['src/views/approval/TemplateAuthoringView.vue', 'node.name?.trim() || \'未命名节点\''],
+    ['src/views/approval/TemplateAuthoringView.vue', "node?.name?.trim() || '（未命名节点）'"],
+    ['src/views/approval/TemplateAuthoringView.vue', 'node.name?.trim() || nodeTypeLabel(node.type)'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'canvasNodeByKey(key)?.name?.trim() || \'未命名节点\''],
+    ['src/views/approval/TemplateAuthoringView.vue', "label: node.name?.trim() || '未命名节点',"],
+    ['src/views/approval/TemplateDetailView.vue', "node?.name?.trim() || (node ? nodeTypeLabel(node.type) : '流程节点')"],
+    ['src/views/approval/TemplateDetailView.vue', '{{ node.name ?? node.key }}'],
+    ['src/views/approval/TemplateDetailView.vue', '模板 Key: {{ template.key }}'],
+    ['src/approvals/components/ApprovalCanvasNodeInspector.vue', '{{ graphNodeLabel(node.key) }}'],
+    ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
+    ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'conditionFormulaDryRunResult(node.key, branch.edgeKey)'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceCount(node.key)'],
+    ['src/views/approval/TemplateDetailView.vue', "versionDualNodeLabel('left', pos.key)"],
+    ['src/views/approval/TemplateDetailView.vue', "versionDualNodeLabel('right', pos.key)"],
+    ['src/views/approval/TemplateDetailView.vue', 'versionChangeKindLabel(versionDualCanvas.nodeChange(pos.key)!)'],
+    ['src/views/approval/TemplateDetailView.vue', 'versionOverlayNodeLabel(pos.key)'],
+    ['src/views/approval/TemplateDetailView.vue', 'versionChangeKindLabel(versionOverlayNodeChange(pos.key)!)'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a UI/DOM structural id (tab id, section id, preset id, test-hook data-testid/aria-controls) -- not a member identity, and data-testid is never a visible render', [
+    ['src/approvals/components/ApprovalCanvasNodeInspector.vue', 'approval-canvas-inspector-tab-${tab.id}'],
+    ['src/approvals/components/ApprovalCanvasNodeInspector.vue', 'approval-canvas-inspector-tabpanel-${tab.id}'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approval-node-operation-policy-${policy.id}'],
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approval-node-operation-policy-mixed-${policy.id}'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'section.label} ${section.description}${section.id'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-section-${section.id}'],
+    ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-preset-${preset.id}'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: non-person entity ids (approval instance / template / version row) in a data-testid, route path, or a function-call argument (not a rendered id -- the FUNCTION'S RETURN is what renders) ----
+  ...group('OUT-OF-SCOPE', 'an APPROVAL INSTANCE id (not a person id) -- a data-testid, or the argument to a helper whose OWN return is what renders, never the id itself', [
+    ['src/views/approval/ApprovalCenterView.vue', 'approval-row-approve-${row.id}'],
+    ['src/views/approval/ApprovalCenterView.vue', 'approval-row-reject-${row.id}'],
+    ['src/views/approval/ApprovalCenterView.vue', 'approval-urge-${row.id}'],
+    ['src/views/approval/ApprovalCenterView.vue', '{{ urgeState(row.id).label }}'],
+    ['src/views/approval/ApprovalCenterView.vue', ':title="urgeState(row.id).title"'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a TEMPLATE/VERSION id (not a person id) used for navigation (route path) or a data-testid, never rendered as visible text', [
+    ['src/views/approval/TemplateDetailView.vue', 'template-version-compare-${row.id}'],
+    ['src/views/approval/TemplateDetailView.vue', 'template-version-restore-${row.id}'],
+    ['src/views/approval/TemplateDetailView.vue', "path: `/approvals/new/${template.value.id}`"],
+    ['src/views/approval/TemplateDetailView.vue', "path: `/approval-templates/${template.value.id}/edit`"],
+    ['src/views/approval/TemplateAuthoringView.vue', "path: `/approval-templates/${created.id}/edit` "],
+    ['src/views/approval/TemplateAuthoringView.vue', "await router.push({ path: `/approval-templates/${saved.id}` })"],
+    ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${row.id}` })"],
+    ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${cloned.id}` })"],
+    ['src/views/approval/TemplateAuthoringView.vue', 'id: `${next.id}_col1`,'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: ids embedded in a non-rendered cache/storage/dedup key ----
+  ...group('OUT-OF-SCOPE', 'a localStorage/dedup CACHE KEY string -- never rendered to the DOM', [
+    ['src/approvals/formDraft.ts', 'approval-form-draft:${userId}:${templateId}'],
+    ['src/approvals/formDraft.ts', '${field.id}:record-link:${baseId}:${sheetId}'],
+    ['src/approvals/formDraft.ts', '${field.id}:${field.type}'],
+    ['src/approvals/parallelEdit.ts', 'user_group:${[...source.groupIds].sort().join'],
+    ['src/approvals/quickPhrases.ts', '${KEY_PREFIX}${userId}:${action}'],
+    ['src/approvals/recentTemplates.ts', '${KEY_PREFIX}${userId}'],
+  ]),
+]
+
+describe('member-display-identity coverage enumeration — TIER A (named regression guards)', () => {
+  it('sentinel: every REGRESSION_GUARDS entry names its coverage pointer', () => {
+    for (const entry of REGRESSION_GUARDS) {
+      expect(entry.coverage, entry.site).toBeTruthy()
     }
   })
 
-  it('every GUARDED/ALREADY-SAFE site\'s covering test file actually contains a matching it(...) title', () => {
+  it('every entry\'s covering test file actually contains a matching it(...) title', () => {
     const testFileCache = new Map<string, string>()
-    for (const entry of SITES) {
-      if (!entry.coverage) continue
+    for (const entry of REGRESSION_GUARDS) {
       const [, testFile, titleSubstring] = entry.coverage
       if (!testFileCache.has(testFile)) testFileCache.set(testFile, readTest(testFile))
       const content = testFileCache.get(testFile)!
@@ -204,10 +421,9 @@ describe('member-display-identity coverage enumeration (mechanical, mirrors FAIL
     }
   })
 
-  it('every GUARDED site\'s source-level guarding pattern is present (and the pre-fix raw-join pattern is gone)', () => {
+  it('every entry\'s source-level guarding pattern is present (and the pre-fix raw-join pattern is gone)', () => {
     const srcCache = new Map<string, string>()
-    for (const entry of SITES) {
-      if (!entry.sourceChecks) continue
+    for (const entry of REGRESSION_GUARDS) {
       for (const check of entry.sourceChecks) {
         if (!srcCache.has(check.file)) srcCache.set(check.file, readSrc(check.file))
         const content = srcCache.get(check.file)!
@@ -227,7 +443,106 @@ describe('member-display-identity coverage enumeration (mechanical, mirrors FAIL
     const content = readTest('approval-e2e-lifecycle.spec.ts')
     expect(content).not.toContain('this exact decoy title does not exist anywhere in this spec file 4477')
   })
+})
 
+describe('member-display-identity coverage enumeration — TIER B (mechanical pattern census)', () => {
+  it('the readdirSync-derived scan actually found files under both scan roots (a path typo scanning nothing must not pass green)', () => {
+    expect(SCANNED_FILES.length).toBeGreaterThan(50)
+    const basenames = new Set(SCANNED_FILES.map((f) => f.split('/').pop()))
+    expect(basenames.has('ApprovalNewView.vue')).toBe(true)
+    expect(basenames.has('ApprovalDetailView.vue')).toBe(true)
+    expect(basenames.has('directoryResolve.ts')).toBe(true)
+    expect(basenames.has('ApprovalUserPicker.vue')).toBe(true)
+    // Sanity: both roots actually contributed files, not just one.
+    expect(SCANNED_FILES.some((f) => f.startsWith('src/approvals/'))).toBe(true)
+    expect(SCANNED_FILES.some((f) => f.startsWith('src/views/approval/'))).toBe(true)
+  })
+
+  it('each pattern still matches its named positive-control line (a rotted pattern silently matching nothing must fail HERE, not pass green -- this is the exact class of bug that made the census\'s own initial POSIX-ERE `\\b` grep silently match zero)', () => {
+    for (const pattern of PATTERNS) {
+      const content = readSrc(pattern.positiveControl.file)
+      const line = content.split('\n').find((l) => l.includes(pattern.positiveControl.lineContains))
+      expect(line, `${pattern.id}: positive-control text "${pattern.positiveControl.lineContains}" not found in ${pattern.positiveControl.file} -- update the pointer if the line legitimately moved/changed`).toBeTruthy()
+      expect(pattern.regex.test(line!), `${pattern.id}: the pattern regex no longer matches its own positive-control line -- the pattern has rotted`).toBe(true)
+    }
+  })
+
+  it('every ALLOWLIST entry still appears in its file (a stale entry silently pre-authorizes whatever gets written in its place)', () => {
+    const srcCache = new Map<string, string>()
+    for (const entry of ALLOWLIST) {
+      if (!srcCache.has(entry.file)) srcCache.set(entry.file, readSrc(entry.file))
+      const content = srcCache.get(entry.file)!
+      expect(content, `stale ALLOWLIST entry: "${entry.contains}" (${entry.disposition}) no longer appears in ${entry.file}`).toContain(entry.contains)
+    }
+  })
+
+  it('every raw-id-render pattern occurrence across BOTH scanned trees has an explicit ALLOWLIST triage entry -- an untriaged hit (new, or a deleted allowlist entry) fails here', () => {
+    const violations: string[] = []
+    for (const file of SCANNED_FILES) {
+      const content = readSrc(file)
+      const lines = content.split('\n')
+      lines.forEach((line, idx) => {
+        for (const pattern of PATTERNS) {
+          if (!pattern.regex.test(line)) continue
+          const covered = ALLOWLIST.some((e) => e.file === file && line.includes(e.contains))
+          if (!covered) {
+            violations.push(`${file}:${idx + 1} [${pattern.id}] ${line.trim().slice(0, 160)}`)
+          }
+        }
+      })
+    }
+    expect(
+      violations,
+      `untriaged raw-id-render pattern hit(s) -- each needs an explicit ALLOWLIST entry (VALUES-FREE-FIXED or OUT-OF-SCOPE with a reason):\n${violations.join('\n')}`,
+    ).toEqual([])
+  })
+
+  // Scope-leak sweep (census §B pattern 8): no member-identity resolver/type reference should
+  // exist ANYWHERE in apps/web/src outside the two scanned trees, other than the shared type defs.
+  it('scope-leak sweep: no member-identity resolver/type reference exists outside the two scanned trees (except the allowlisted shared type defs)', () => {
+    const SWEEP_ALLOWLIST = new Set(['src/types/approval.ts'])
+    const SWEEP_PATTERN = /getResolvedUserName|ApprovalDirectoryUser|assigneeId/
+    const allFiles = listSourceFiles('src')
+    const leaks: string[] = []
+    for (const file of allFiles) {
+      if (SCAN_ROOTS.some((root) => file.startsWith(`${root}/`))) continue
+      if (SWEEP_ALLOWLIST.has(file)) continue
+      if (SWEEP_PATTERN.test(readSrc(file))) leaks.push(file)
+    }
+    expect(
+      leaks,
+      `member-identity resolver/type references found OUTSIDE apps/web/src/{approvals,views/approval} and the allowlisted type defs -- scope-leak, needs review:\n${leaks.join('\n')}`,
+    ).toEqual([])
+  })
+
+  // Self-test of the scanning MECHANISM itself, against a synthetic (non-file) fixture -- proves
+  // both directions without ever mutating real source at test time: an untriaged hit is flagged,
+  // and the SAME hit, once given an allowlist entry, is not.
+  it('DECOY: the scan mechanism is discriminating against a synthetic fixture -- untriaged hits are flagged, triaged ones are not', () => {
+    function scanLine(line: string, file: string, allowlist: AllowlistEntry[]): boolean {
+      const matchesSomePattern = PATTERNS.some((p) => p.regex.test(line))
+      if (!matchesSomePattern) return false
+      return !allowlist.some((e) => e.file === file && line.includes(e.contains))
+    }
+
+    const syntheticLeak = '  const label = candidate.name?.trim() || candidate.id'
+    expect(scanLine(syntheticLeak, 'synthetic-fixture.ts', []), 'a synthetic untriaged hit must be flagged').toBe(true)
+
+    const triaged: AllowlistEntry[] = [{
+      file: 'synthetic-fixture.ts',
+      contains: 'candidate.id',
+      disposition: 'OUT-OF-SCOPE',
+      reason: 'decoy fixture, not real code',
+    }]
+    expect(scanLine(syntheticLeak, 'synthetic-fixture.ts', triaged), 'the SAME hit, once triaged, must not be flagged').toBe(false)
+
+    // The allowlist entry must be FILE-scoped -- the same `contains` string under a DIFFERENT file
+    // must NOT be silently covered by another file's entry.
+    expect(scanLine(syntheticLeak, 'a-different-file.ts', triaged), 'an allowlist entry must not leak coverage across files').toBe(true)
+  })
+})
+
+describe('member-display-identity coverage enumeration — backend companions (unchanged tier)', () => {
   it('the new backend resolver route + service function exist on disk, USERS ONLY (companion to the FE guard above)', () => {
     const routeSrc = readSrc('../../packages/core-backend/src/routes/approvals.ts')
     expect(routeSrc).toContain("r.get('/api/approvals/directory/resolve'")

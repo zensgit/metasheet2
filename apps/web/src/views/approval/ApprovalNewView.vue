@@ -177,10 +177,11 @@
                 @visible-change="(visible: boolean) => visible && searchChoiceCandidates(chooser, '')"
               >
                 <el-option
-                  v-for="option in choiceOptions[chooser.nodeKey] ?? []"
+                  v-for="(option, optionIndex) in choiceOptions[chooser.nodeKey] ?? []"
                   :key="option.id"
-                  :label="choiceOptionLabel(option)"
+                  :label="choiceOptionLabel(option, optionIndex)"
                   :value="option.id"
+                  :disabled="isChoiceOptionUnidentifiable(chooser, option)"
                 />
               </el-select>
             </el-form-item>
@@ -684,6 +685,7 @@ import {
 } from '../../approvals/attachmentUpload'
 import { collectAttachmentRefIds, dropStaleAttachmentRefs } from '../../approvals/attachmentRefs'
 import { useFeatureFlags } from '../../stores/featureFlags'
+import { ensureUserNamesResolved } from '../../approvals/directoryResolve'
 
 const route = useRoute()
 const router = useRouter()
@@ -945,6 +947,16 @@ const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
 const requesterChoices = reactive<Record<string, string[]>>({})
 const choiceOptions = reactive<Record<string, ApprovalDirectoryUser[]>>({})
 const choiceSearchLoading = reactive<Record<string, boolean>>({})
+// member-display-identity (2026-08-19; requester-choice raw-id-render fix): nodeKey -> id -> real
+// name, populated SYNCHRONOUSLY from every search result (`searchChoiceCandidates` below) and
+// never pruned. `searchApprovalDirectoryUsers` already carries the freshest directory name per id
+// (same `users.name` column a separate batch-resolve call would read — see
+// `ApprovalUserPicker.vue`'s identical precedent), so this needs no extra round trip; accumulating
+// across searches (rather than replacing per page) is what lets a candidate picked from an EARLIER
+// search page stay identifiable at submit time even after a LATER search's result page doesn't
+// happen to include that id again. This is the source of truth `isChoiceOptionUnidentifiable` and
+// the submit-time gate below both read.
+const choiceConfirmedNames = reactive<Record<string, Record<string, string>>>({})
 
 function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
   if (chooser.scope.type === 'members') return '限指定成员'
@@ -952,10 +964,26 @@ function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
   return '全公司可选'
 }
 
-function choiceOptionLabel(option: ApprovalDirectoryUser): string {
-  const primary = option.name?.trim() || option.id
+// raw-id-render fix (2026-08-19): SAME contract as ApprovalUserPicker.vue's `optionLabel` — a
+// blank/unresolved directory name falls back to a values-free, per-list ordinal ("成员 N"), NEVER
+// the raw directory id. Previously this fell back to `option.id`, which a requester (not just an
+// admin) would see whenever a scope-matched candidate's directory record has no name — the
+// primary site this fix closes (census class: requester-facing SELECT leak).
+function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string {
+  const primary = option.name?.trim() || `成员 ${index + 1}`
   const email = option.email?.trim()
   return email ? `${primary} · ${email}` : primary
+}
+
+// Mirrors ApprovalUserPicker.vue's `isUnidentifiable`: a candidate with no resolvable name must be
+// UNSELECTABLE (never merely relabelled), so a requester can never hand approval authority to an
+// account they cannot identify by name. The chooser's OWN currently-selected ids are exempt — a
+// picker must never render its own existing selection as rejectable, and (unlike the single-select
+// ApprovalUserPicker) this chooser can be `multi`, so the exemption checks membership in the whole
+// selection array, not equality against a single modelValue.
+function isChoiceOptionUnidentifiable(chooser: RequesterChoiceChooser, option: ApprovalDirectoryUser): boolean {
+  if ((requesterChoices[chooser.nodeKey] ?? []).includes(option.id)) return false
+  return !option.name?.trim()
 }
 
 async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string): Promise<void> {
@@ -968,7 +996,22 @@ async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string
       : chooser.scope.type === 'role'
         ? { roleIds: chooser.scope.roleIds }
         : {}
-    choiceOptions[chooser.nodeKey] = await searchApprovalDirectoryUsers(q, 20, scope)
+    const results = await searchApprovalDirectoryUsers(q, 20, scope)
+    choiceOptions[chooser.nodeKey] = results
+    // Synchronous, authoritative identifiability record for the submit-time gate (see
+    // choiceConfirmedNames' own doc above) — never pruned, so it survives a later search whose
+    // page happens not to re-include this id.
+    const confirmed = choiceConfirmedNames[chooser.nodeKey] ?? (choiceConfirmedNames[chooser.nodeKey] = {})
+    for (const candidate of results) {
+      const name = candidate.name?.trim()
+      if (name) confirmed[candidate.id] = name
+    }
+    // Also prime the shared authorized-scope resolver cache (directoryResolve.ts) with these
+    // candidate ids — harmless if this component never reads it back, but keeps this picker
+    // consistent with every other viewer-facing member-identity site's contract of feeding the one
+    // shared cache, and means a LATER unrelated resolve() elsewhere on this session for the same
+    // id does not need its own network round trip.
+    ensureUserNamesResolved(results.map((candidate) => candidate.id))
   } finally {
     choiceSearchLoading[chooser.nodeKey] = false
   }
@@ -991,6 +1034,23 @@ function missingRequesterChoiceNode(): RequesterChoiceChooser | null {
   for (const chooser of requesterChoiceNodes.value) {
     const ids = requesterChoices[chooser.nodeKey] ?? []
     if (chooser.mode === 'single' ? ids.length !== 1 : ids.length === 0) return chooser
+  }
+  return null
+}
+
+/**
+ * raw-id-render fix (2026-08-19), defense in depth: `isChoiceOptionUnidentifiable` already
+ * disables an unidentifiable option so it cannot be SELECTED in the first place, but this gate
+ * closes the same case `reducibleAssignees`' submit-guard closes for 减签 — a chosen id that is no
+ * longer identifiable (e.g. the disabled-option check has any gap this fix did not foresee) must
+ * still never reach `createApproval`. First chooser carrying a selected id with no confirmed name;
+ * null when every selection across every chooser is identifiable.
+ */
+function firstUnidentifiableChoiceNode(): RequesterChoiceChooser | null {
+  for (const chooser of requesterChoiceNodes.value) {
+    const confirmed = choiceConfirmedNames[chooser.nodeKey] ?? {}
+    const ids = requesterChoices[chooser.nodeKey] ?? []
+    if (ids.some((id) => !confirmed[id]?.trim())) return chooser
   }
   return null
 }
@@ -1346,6 +1406,15 @@ async function handleSubmit() {
   const missingChoice = missingRequesterChoiceNode()
   if (missingChoice) {
     ElMessage.warning(`请为「${missingChoice.nodeName}」选择审批人`)
+    return
+  }
+
+  // raw-id-render fix (2026-08-19): mirrors the 减签 disable+submit-guard posture — a selection
+  // that cannot be shown by name must never be submittable, defense in depth alongside the
+  // disabled-option UI gate above.
+  const unidentifiableChoice = firstUnidentifiableChoiceNode()
+  if (unidentifiableChoice) {
+    ElMessage.warning(`「${unidentifiableChoice.nodeName}」选择的审批人暂无法确认身份，请重新选择`)
     return
   }
 

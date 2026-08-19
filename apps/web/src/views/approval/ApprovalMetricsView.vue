@@ -163,8 +163,8 @@
       <div data-testid="metrics-table-people">
         <el-table :data="people" stripe v-loading="peopleLoading" empty-text="暂无发起人数据">
           <el-table-column label="发起人" min-width="220">
-            <template #default="{ row }">
-              <span>{{ row.name || row.key || '未归属发起人' }}</span>
+            <template #default="{ row, $index }">
+              <span>{{ requesterDisplayLabel(row, $index) }}</span>
             </template>
           </el-table-column>
           <el-table-column prop="total" label="总量" width="90" />
@@ -469,6 +469,24 @@ async function loadTemplateNames(): Promise<void> {
 
 function templateDisplayName(templateId: string): string {
   return templateNameById.value.get(templateId) ?? templateId
+}
+
+// raw-id-render fix (2026-08-19; census site L2): `getMetricsByDimension('requester')` groups by
+// the raw requester `id` (`row.key`) and picks a representative `MIN(name)` (`row.name`, null when
+// no snapshot in the group carried one) — see ApprovalMetricsService.ts's `keyExpr`/`nameSelect`.
+// The previous `row.name || row.key || '未归属发起人'` fell back to that RAW USER ID whenever no
+// snapshot in the group had a name. Admin-gated (this whole section only renders behind
+// `canViewPeople`), but still a raw internal id reaching a rendered label — never shown now.
+// `row.key === null` is the genuinely different "no requester at all" bucket (Postgres GROUP BY
+// treats NULL as its own single group), so that case keeps the generic '未归属发起人' text with NO
+// ordinal; a real-but-nameless requester id gets a per-row ordinal ("发起人 N") so multiple such
+// rows in the SAME table stay visually distinct, matching the "成员 N" convention used everywhere
+// else a resolvable identity is unavailable.
+function requesterDisplayLabel(row: { name?: string | null; key?: string | null }, index: number): string {
+  const name = typeof row.name === 'string' ? row.name.trim() : ''
+  if (name) return name
+  if (!row.key) return '未归属发起人'
+  return `发起人 ${index + 1}`
 }
 
 function barWidth(rate: number | null | undefined): string {
