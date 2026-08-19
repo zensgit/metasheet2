@@ -35,7 +35,26 @@
 //     against pg_roles/current_setting, and it is the ONLY SQL string in the
 //     file;
 //   * no write of any kind beyond stdout: no file is created, appended to, or
-//     removed, and no environment variable is exported.
+//     removed, and no environment variable is exported;
+//   * no hardlink, directory creation, or any other filesystem mutation — the
+//     artifact-root filesystem probe below reads volume metadata only (the
+//     drive's format, via a read-only PowerShell `Get-Volume`), never the
+//     artifact root's contents, and it never calls fs.link().
+//
+// ARTIFACT-ROOT FILESYSTEM PROBE
+// -------------------------------
+// A Windows runtime-parity sweep found a class-2 risk: `fs.link()` in
+// lib/sealed-export/private-ingestion-blob-store.cjs runs inside the S6-A
+// artifact root, and on exFAT/FAT32 or an SMB-mounted artifact root that
+// returns EPERM/ENOTSUP this surfaces at runtime as
+// SEALED_EXPORT_STAGING_WRITE_FAILED. `artifactRootFilesystem` reports the
+// volume format of the configured artifact root (env var name read from
+// plugins/plugin-integration-core/lib/sealed-export/
+// stock-preparation-runtime-config.cjs's ENV.artifactRoot, so the two files
+// cannot drift) as a closed token, and `artifactRootHardlinkSupported` is
+// derived from it. The path itself is never printed — see
+// assertNoConfiguredInputLeaked, which treats it exactly like the PostgreSQL
+// connection string and health URL.
 //
 // VALUES-FREE DISCIPLINE
 // ----------------------
@@ -62,6 +81,22 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 const require = createRequire(import.meta.url)
+const REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+)
+
+// The artifact-root env var name lives in the runtime config module, not
+// here, so the two files cannot drift. Only the ENV name mapping is read —
+// no loader function in that module is ever called, so nothing is executed
+// beyond resolving the object literal.
+const { ENV: SEALED_EXPORT_ENV } = require(
+  path.join(
+    REPO_ROOT,
+    'plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-config.cjs',
+  ),
+)
 
 // ---------------------------------------------------------------------------
 // The complete closed token vocabulary. Nothing outside this set (plus a
@@ -82,13 +117,17 @@ const TOKEN = Object.freeze({
   NODE20: 'NODE20',
   NODE22: 'NODE22',
   NODE_OTHER: 'NODE_OTHER',
+  NOT_CONFIGURED: 'NOT_CONFIGURED',
+  NTFS: 'NTFS',
   OTHER: 'OTHER',
   PASS: 'PASS',
   PG15: 'PG15',
   PG16: 'PG16',
   PG17: 'PG17',
   PG_OTHER: 'PG_OTHER',
+  REFS: 'REFS',
   UNKNOWN: 'UNKNOWN',
+  UNRESOLVED: 'UNRESOLVED',
   UNSET: 'UNSET',
   YES: 'YES',
   ZERO: '0',
@@ -160,6 +199,28 @@ function postgresMajorField(versionClass) {
   return TOKEN.UNKNOWN
 }
 
+// Maps the raw `FileSystem` token the probe reads off the artifact root's
+// volume to the closed set. null/empty (probe failed, timed out, or the path
+// was not drive-letter-rooted) is UNRESOLVED, never guessed as OTHER.
+function classifyArtifactRootFilesystem(raw) {
+  if (raw === null || raw === undefined) return TOKEN.UNRESOLVED
+  const normalized = String(raw).trim().toUpperCase()
+  if (normalized === '') return TOKEN.UNRESOLVED
+  if (normalized === 'NTFS') return TOKEN.NTFS
+  if (normalized === 'REFS') return TOKEN.REFS
+  return TOKEN.OTHER
+}
+
+// fs.link() (hardlink) is supported by NTFS and ReFS; every other Windows
+// filesystem this probe can observe (exFAT, FAT32, an SMB share reporting
+// something else) is a NO, and an inconclusive probe is UNKNOWN — never a
+// silent YES.
+function artifactRootHardlinkSupportedField(filesystemClass) {
+  if (filesystemClass === TOKEN.NTFS || filesystemClass === TOKEN.REFS) return TOKEN.YES
+  if (filesystemClass === TOKEN.OTHER) return TOKEN.NO
+  return TOKEN.UNKNOWN
+}
+
 function classifyDiskFree(freeBytes) {
   if (!Number.isFinite(freeBytes) || freeBytes < 0) return TOKEN.UNKNOWN
   if (freeBytes >= DISK_HIGH_WATER_BYTES) return TOKEN.DISK_GE_40GIB
@@ -218,6 +279,40 @@ function probePowerShellMajor(executable) {
     )
     if (result.error || result.status !== 0) return null
     return Number.parseInt(String(result.stdout).trim(), 10)
+  } catch {
+    return null
+  }
+}
+
+// Extracts a bare drive letter ("C") from a drive-letter-rooted Windows path
+// such as "C:\ArtifactRoot" or "C:/ArtifactRoot". UNC paths, relative paths,
+// and POSIX paths return null so the probe fails closed to UNRESOLVED
+// instead of guessing a volume.
+function windowsDriveLetter(targetPath) {
+  const match = String(targetPath ?? '').match(/^([A-Za-z]):[\\/]/)
+  return match ? match[1].toUpperCase() : null
+}
+
+// Read-only volume-format probe. `Get-Volume` reads volume metadata; it
+// creates nothing, attempts no hardlink, and never touches the artifact
+// root's contents. Only the drive letter is ever interpolated into the
+// command (regex-validated to a single A-Z above), and it is never printed.
+// Windows only, matching probePowerShellMajor's pattern: -NoProfile keeps a
+// profile script from running, a timeout bounds the call, and any error,
+// non-zero exit, or unparsable path returns null (-> UNRESOLVED).
+function probeArtifactRootFilesystem(targetPath) {
+  if (process.platform !== 'win32') return null
+  const drive = windowsDriveLetter(targetPath)
+  if (!drive) return null
+  try {
+    const result = spawnSync(
+      'powershell',
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-Volume -DriveLetter ${drive}).FileSystem`],
+      { encoding: 'utf8', timeout: DEFAULT_TIMEOUT_MS, windowsHide: true },
+    )
+    if (result.error || result.status !== 0) return null
+    const token = String(result.stdout).trim()
+    return token || null
   } catch {
     return null
   }
@@ -317,6 +412,7 @@ function probeMemory() {
 }
 
 const DEFAULT_PROBES = Object.freeze({
+  artifactRootFilesystem: probeArtifactRootFilesystem,
   diskFreeBytes: probeDiskFreeBytes,
   health: probeHealth,
   memory: probeMemory,
@@ -342,6 +438,11 @@ const ENV_VAR = Object.freeze({
 
 function readConfig(env) {
   return Object.freeze({
+    // Not an LAB0_-prefixed operator toggle: this is the real S6-A product
+    // env var (see SEALED_EXPORT_ENV above). Used only to derive a drive
+    // letter for the probe below and to self-scan the report for a leak —
+    // see assertNoConfiguredInputLeaked — never printed.
+    artifactRootPath: env[SEALED_EXPORT_ENV.artifactRoot] || '',
     diskPath: env[ENV_VAR.diskPath] || path.parse(process.cwd()).root || process.cwd(),
     factsProviderRaw: env[ENV_VAR.factsProvider] || '',
     healthProbeEnabled: env[ENV_VAR.probeHealth] !== '0',
@@ -405,6 +506,14 @@ async function runInventory({ env = process.env, probes = DEFAULT_PROBES } = {})
     ? postgres.canCreateRole
     : null
 
+  // NOT_CONFIGURED short-circuits before the probe runs at all — same shape
+  // as the postgresUrl gate above: an absent env var is a fact, not a probe
+  // failure, so it must not read as UNRESOLVED.
+  const artifactRootFilesystemClass = config.artifactRootPath
+    ? classifyArtifactRootFilesystem(p.artifactRootFilesystem(config.artifactRootPath))
+    : TOKEN.NOT_CONFIGURED
+  const artifactRootHardlinkSupported = artifactRootHardlinkSupportedField(artifactRootFilesystemClass)
+
   const runtimeHealthy = config.healthProbeEnabled ? await p.health(config.healthUrl) : null
 
   const diskFreeClass = classifyDiskFree(p.diskFreeBytes(config.diskPath))
@@ -413,6 +522,8 @@ async function runInventory({ env = process.env, probes = DEFAULT_PROBES } = {})
   const memoryFreeClass = classifyMemory(memory.freeBytes)
 
   const fields = Object.freeze({
+    artifactRootFilesystem: artifactRootFilesystemClass,
+    artifactRootHardlinkSupported,
     canCreateIsolatedTestDatabase: yesNo(isolatedDatabaseCapability),
     canCreateSelectOnlyTestPrincipal: yesNo(selectOnlyPrincipalCapability),
     diskFreeClass,
@@ -487,6 +598,8 @@ const HOST_FIELD_ORDER = Object.freeze([
   'metasheetRuntimeHealth',
   'diskFreeClass',
   'freeDiskAtLeast40GiB',
+  'artifactRootFilesystem',
+  'artifactRootHardlinkSupported',
   'memoryTotalClass',
   'freeMemoryAtLeast16GiB',
   'externalWrite',
@@ -504,7 +617,7 @@ function assertClosedSet(fields) {
 // Composed-output self-scan: nothing the operator configured may appear in the
 // report. Cheap, and it converts "we were careful" into "it cannot ship".
 function assertNoConfiguredInputLeaked(report, config) {
-  const sentinels = [config.postgresUrl, config.healthUrl, config.diskPath]
+  const sentinels = [config.postgresUrl, config.healthUrl, config.diskPath, config.artifactRootPath]
   for (const sentinel of sentinels) {
     if (typeof sentinel !== 'string' || sentinel.length < 4) continue
     if (report.includes(sentinel)) {
@@ -554,6 +667,11 @@ function buildOperatorGuidance() {
     `${pad(`${ENV_VAR.probeHealth}=0`)}skip the health probe (reports UNKNOWN).`,
     `${pad(`${ENV_VAR.probePowerShell}=0`)}skip the PowerShell probes (report UNKNOWN).`,
     '',
+    `artifactRootFilesystem/artifactRootHardlinkSupported read the S6-A`,
+    `sealed-export artifact-root env var (${SEALED_EXPORT_ENV.artifactRoot}) if it is`,
+    'already set in this environment — not an LAB0_ flag, and never printed.',
+    'Unset -> NOT_CONFIGURED. Windows only; every other platform -> UNRESOLVED.',
+    '',
     'The only SQL this tool executes is one read-only catalog SELECT against',
     'pg_roles for the connected session\'s own role. It creates no database, no',
     'role, and no grant; those remain a later, separately authorized step.',
@@ -589,9 +707,12 @@ export {
   CLOSED_TOKENS,
   ENV_VAR,
   HOST_FIELD_ORDER,
+  SEALED_EXPORT_ENV,
   SIX_FIELD_ORDER,
   TOKEN,
+  artifactRootHardlinkSupportedField,
   buildOperatorGuidance,
+  classifyArtifactRootFilesystem,
   classifyDiskFree,
   classifyFactsProvider,
   classifyMemory,
