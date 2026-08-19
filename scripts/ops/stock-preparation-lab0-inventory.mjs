@@ -630,7 +630,7 @@ function assertNoConfiguredInputLeaked(report, config) {
 function formatReport(result) {
   assertClosedSet(result.fields)
   const lines = [
-    '=== LAB-0 host inventory (DRAFT — non-mutating, values-free) ===',
+    '=== LAB-0 host inventory (DRAFT -- non-mutating, values-free) ===',
     'inventoryTool=stock-preparation-lab0-inventory/v1-draft',
     'mutationsPerformed=0',
     'businessRowsRead=0',
@@ -669,7 +669,7 @@ function buildOperatorGuidance() {
     '',
     `artifactRootFilesystem/artifactRootHardlinkSupported read the S6-A`,
     `sealed-export artifact-root env var (${SEALED_EXPORT_ENV.artifactRoot}) if it is`,
-    'already set in this environment — not an LAB0_ flag, and never printed.',
+    'already set in this environment -- not an LAB0_ flag, and never printed.',
     'Unset -> NOT_CONFIGURED. Windows only; every other platform -> UNRESOLVED.',
     '',
     'The only SQL this tool executes is one read-only catalog SELECT against',
@@ -677,7 +677,7 @@ function buildOperatorGuidance() {
     'role, and no grant; those remain a later, separately authorized step.',
     '',
     'lab0Status=BLOCKED means at least one fact is still UNKNOWN (or factsProvider',
-    'was not supplied) — report it as-is; do not fill a gap by hand.',
+    'was not supplied) -- report it as-is; do not fill a gap by hand.',
   ].join('\n')
 }
 

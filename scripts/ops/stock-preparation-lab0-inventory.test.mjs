@@ -31,6 +31,7 @@ import {
   SIX_FIELD_ORDER,
   TOKEN,
   artifactRootHardlinkSupportedField,
+  buildOperatorGuidance,
   classifyArtifactRootFilesystem,
   classifyDiskFree,
   classifyFactsProvider,
@@ -516,4 +517,48 @@ test('CLI run with probes disabled emits a BLOCKED report and exit code 1', () =
   assert.ok(stdout.includes('artifactRootFilesystem=NOT_CONFIGURED'))
   assert.ok(stdout.includes('artifactRootHardlinkSupported=UNKNOWN'))
   assert.ok(!stdout.includes(os.tmpdir()))
+})
+
+// ---------------------------------------------------------------------------
+// 6. ASCII-only printed output (Windows console code page 936 mojibake guard).
+//
+// A non-ASCII glyph (the tool used an em dash) renders as mojibake ("锟?" /
+// "�?") on a Windows console running the code page 936 (Simplified Chinese)
+// codepage that this tool's on-prem host uses. This is a byte-level property
+// of the rendered output, not something the closed-token assertions above
+// exercise: every classified FIELD value is already an ASCII token, but the
+// surrounding banner and help text are free text that could carry a stray
+// non-ASCII character.  Encode to the same UTF-8 bytes process.stdout.write
+// emits and assert every one is < 0x80.
+// ---------------------------------------------------------------------------
+test('a COMPLETE report + operator guidance render as pure ASCII bytes', async () => {
+  const result = await runInventory({ env: goodEnv(), probes: goodProbes() })
+  const rendered = `${formatReport(result)}\n\n${buildOperatorGuidance()}\n`
+  const bytes = Buffer.from(rendered, 'utf8')
+  assert.ok(bytes.length > 0, 'rendered output must not be empty')
+  for (let i = 0; i < bytes.length; i += 1) {
+    assert.ok(
+      bytes[i] < 0x80,
+      `non-ASCII byte 0x${bytes[i].toString(16)} at offset ${i} in rendered LAB-0 output`,
+    )
+  }
+})
+
+test('a BLOCKED report (unset inputs, every optional probe off) also renders as pure ASCII bytes', async () => {
+  const env = goodEnv({ [ENV_VAR.factsProvider]: '' })
+  delete env[ENV_VAR.postgresUrl]
+  delete env[SEALED_EXPORT_ENV.artifactRoot]
+  const result = await runInventory({
+    env,
+    probes: goodProbes({ health: async () => null, powerShellMajor: () => null }),
+  })
+  assert.equal(result.lab0Status, TOKEN.BLOCKED)
+  const rendered = `${formatReport(result)}\n\n${buildOperatorGuidance()}\n`
+  const bytes = Buffer.from(rendered, 'utf8')
+  for (let i = 0; i < bytes.length; i += 1) {
+    assert.ok(
+      bytes[i] < 0x80,
+      `non-ASCII byte 0x${bytes[i].toString(16)} at offset ${i} in rendered LAB-0 output`,
+    )
+  }
 })
