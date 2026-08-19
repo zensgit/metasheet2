@@ -37,16 +37,13 @@
 // it, and pins the SPECIFIC error text so an incidental abort is never
 // mistaken for read-only enforcement.
 //
-// ⚠ CURRENT CI WIRING GAP: .github/workflows/multitable-o2-observation-kit.yml
-// is deliberately hermetic (checkout + setup-node only — no postgres
-// service, no DATABASE_URL, no pnpm install, no METASHEET_REAL_DB_TEST_STEP)
-// and this file does not add a workflow to change that. So on every PR today,
-// layer 2 ALWAYS takes the loud-skip path and layer 1 (the static blocklist)
-// is the ONLY layer actually gating a change to the .sql file in CI. Layer 2
-// is real and load-bearing for an operator/local run against a reachable
-// DATABASE_URL (or once a DB-enabled job is wired to set
-// METASHEET_REAL_DB_TEST_STEP=1) — but until that wiring lands, do not read
-// "two layers" as "CI enforces both".
+// CI WIRING (both layers are enforced): multitable-o2-observation-kit.yml runs
+// TWO jobs — `contract` (hermetic: checkout + node only) exercises layer 1 on
+// every trigger, and `execution-proof` (postgres:16 service + real migrations)
+// sets DATABASE_URL *and* METASHEET_REAL_DB_TEST_STEP=1 so layer 2 runs for
+// real; in that lane a missing DATABASE_URL is a RED run (see the sentinel test
+// below), never a silent skipped-green. Outside those jobs — a local run with no
+// DATABASE_URL — layer 2 still takes the LOUD skip path by design.
 //
 // What NEITHER layer claims: that the queries return the documented per-ladder-
 // level SHAPES against a real database — that evidence leg is a separate,
