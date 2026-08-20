@@ -117,6 +117,19 @@
 # categories (⑥审批人来源) and never fabricated for the other five — see
 # docs/development/attendance-vnext-wave5-explainability-data-contract-lock-20260722.md §9/§10 and
 # docs/development/attendance-vnext-wave5-explainability-development-verification-20260724.md).
+# Self-service tail UX (2026-08-21, staging trial fix): attendance-date-only-format.spec.ts
+# (pure-module tests for src/views/attendance/dateOnlyFormat.ts, the formatDate() date-only
+# 'YYYY-MM-DD' UTC-round-trip fix extracted out of AttendanceView.vue) — both the new module
+# and the new spec are added to the path filter (dateOnlyFormat.ts already falls under the
+# existing `apps/web/src/views/attendance/**` glob, but is listed explicitly per this file's
+# two-point-wiring convention) and to the vitest run token list.
+# GATE-5047 P2-1 rework (2026-08-21): added attendance-date-only-format-tz-probe.spec.ts
+# (out-of-process TZ spawns proving the date-only fix — and a mutation reverting it — is
+# discriminating even when the outer `vitest run` process runs at UTC, this guard's actual
+# CI host) and its fixture tests/helpers/dateOnlyTzProbe.ts, both added to the path filter.
+# NOT added as a separate vitest-run token: the existing bare `attendance-date-only-format`
+# token already substring-matches the new spec's longer filename (verified —
+# `npx vitest run attendance-date-only-format --reporter=verbose` selects both files).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -188,6 +201,10 @@ on:
       - 'apps/web/tests/attendanceGroupEffectivePolicyLabels.spec.ts'
       - 'apps/web/tests/AttendanceGroupEffectivePolicyPanel.spec.ts'
       - 'apps/web/tests/attendanceGroupContextHostEffectivePolicyGate.spec.ts'
+      - 'apps/web/src/views/attendance/dateOnlyFormat.ts'
+      - 'apps/web/tests/attendance-date-only-format.spec.ts'
+      - 'apps/web/tests/attendance-date-only-format-tz-probe.spec.ts'
+      - 'apps/web/tests/helpers/dateOnlyTzProbe.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -276,6 +293,10 @@ jobs:
               apps/web/tests/attendanceGroupEffectivePolicyLabels.spec.ts|\
               apps/web/tests/AttendanceGroupEffectivePolicyPanel.spec.ts|\
               apps/web/tests/attendanceGroupContextHostEffectivePolicyGate.spec.ts|\
+              apps/web/src/views/attendance/dateOnlyFormat.ts|\
+              apps/web/tests/attendance-date-only-format.spec.ts|\
+              apps/web/tests/attendance-date-only-format-tz-probe.spec.ts|\
+              apps/web/tests/helpers/dateOnlyTzProbe.ts|\
               .github/workflows/attendance-web-guard.yml)
                 relevant=true
                 break
@@ -337,4 +358,4 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-web-guard-workflow.spec --reporter=dot
+        run: pnpm --filter @metasheet/web exec vitest run attendance-admin-regressions attendance-shift-segments attendance-admin-anchor-nav useAttendanceAdminRail useAttendanceAdminRailNavigation AttendanceRequestCenterSection.result-edit attendance-selfservice-dashboard attendance-caliber-transparency attendance-punch-outcome attendance-import-override-guard attendance-halfday-leave-helper attendance-schedule-bulk-apply attendance-import-file-guard attendance-import-preview-regression useAttendanceAdminImportWorkflow attendance-import-template-columns attendance-import-header-recognition attendance-import-xlsx-convert useAttendanceAdminImportBatches dingtalk-container LoginView attendance-token-ratchet attendance-approval-steps AttendanceApprovalFlowStepsEditor attendance-report-xlsx-export attendance-reports-analytics attendance-bulk-balance-adjust attendance-overview-priority AttendanceAdminTaskHome attendance-experience-entrypoints attendance-experience-mobile-zh attendanceGroupContextRoute attendanceGroupContextHost attendanceGroupRouteHydration attendance-group-context-history attendance-setup-readiness AttendanceSetupReadiness.spec useAttendanceSetupReadiness attendance-setup-templates attendance-decision-trace.spec AttendanceDecisionTrace.spec attendance-decision-trace-wiring attendance-context-help.spec AttendanceContextHelp.spec attendance-context-help-wiring attendance-decision-trace-metric attendanceGroupEffectivePolicyLabels AttendanceGroupEffectivePolicyPanel attendanceGroupContextHostEffectivePolicyGate attendance-date-only-format attendance-web-guard-workflow.spec --reporter=dot

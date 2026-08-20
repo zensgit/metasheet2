@@ -58,7 +58,7 @@
           </select>
         </label>
         <template v-if="isLoggedIn">
-          <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+          <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
           <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -81,6 +81,7 @@ import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
+import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
@@ -182,6 +183,16 @@ const accountEmail = computed(() => {
   void route.fullPath
   return getAccessSnapshot().email
 })
+
+// The header keeps this narrow (nav-user's max-width / flex-shrink); a plain end-ellipsis
+// hides the suffix that actually distinguishes long account identifiers (every
+// 'synth-w4w7-<org>-u<NN>@w4w7-soak.synthetic' staging account shares the same 20-char
+// domain, so a plain trailing-N-chars truncation keeps only the domain and collapses every
+// account to the same text). truncateAccountIdentity() drops the domain for email-shaped
+// values that need truncating and keeps the identity-bearing local-part tail instead — the
+// only browser-measured candidate that survives down to the narrowest tested viewport (see
+// PR body). The full value is still on the title attribute above.
+const accountEmailDisplay = computed(() => truncateAccountIdentity(accountEmail.value))
 
 async function logout(): Promise<void> {
   const token = getToken()
@@ -295,7 +306,18 @@ html, body {
 .nav-actions {
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
+  /* flex-shrink: 0 (not 1). .nav-links is the sibling built to absorb width loss — it has
+     its own overflow-x: auto and scrolls internally. If .nav-actions were allowed to
+     shrink (flex: 0 1 auto), the flex algorithm can squeeze this container narrower than
+     its content's post-floor width (nav-locale + nav-user's 14ch min-width + gaps), and
+     since .nav-actions itself has no overflow clipping, that content spills past the
+     container edge into page-level horizontal scroll (browser-measured: 14/67/84 px of
+     document.documentElement.scrollWidth overhang at 900/800/769 px with the 5-link zh
+     nav, 190 px at 769 with the ~17-link admin nav). flex: 0 0 auto keeps .nav-actions at
+     its natural content width and pushes the crunch onto .nav-links instead, which
+     already handles it via internal scroll — re-verified zero page-level scroll at
+     1440/1024/900/800/769 for both navsets after this change. */
+  flex: 0 0 auto;
   gap: 12px;
   min-width: 0;
 }
@@ -304,7 +326,15 @@ html, body {
   color: #6b7280;
   font-size: 13px;
   max-width: clamp(120px, 18vw, 260px);
-  min-width: 0;
+  /* Without a floor, flex-shrink (nav-user is the only shrinkable child of nav-actions —
+     its siblings are all flex: 0 0/1 auto) can crush this to 0 px well before the
+     clamp()'s 120 px minimum is ever reached (measured: 0 px at 800/900px-narrower
+     viewports with a normal nav-link count). 14ch is browser-measured sufficient to keep
+     the truncateAccountIdentity() output ('…' + up to 12 local-part chars, 13 chars) fully
+     on screen for the self-service nav (1-link and 5-link) down to 769 px — re-measure if
+     used behind a much wider nav (e.g. the ~17-link admin nav). Pair with .nav-actions's
+     flex: 0 0 auto (below) so this floor doesn't just push overflow out to the page. */
+  min-width: 14ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
