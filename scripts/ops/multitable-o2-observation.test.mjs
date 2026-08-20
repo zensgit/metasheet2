@@ -2520,7 +2520,12 @@ if (canRunExecutionLayer) {
           if (result.status !== 0) {
             assert.match(
               result.stderr,
-              /in a read-only transaction|permission denied|must be superuser|not permitted/i,
+              // Anchored on PostgreSQL's OWN refusal phrasing. A bare /permission denied/i would
+              // also accept infrastructure failures that are not protection at all —
+              // `psql: error: could not open file "…": Permission denied`, `EACCES: permission
+              // denied` — i.e. "not error X" masquerading as an outcome assertion. Require the
+              // server's ERROR line and its specific wording instead.
+              /ERROR:[^\n]*(?:in a read-only transaction|permission denied for|must be superuser|must be owner|not permitted in a read-only transaction)/i,
               `"${shape.name}" was refused by the server, which is allowed (newer PostgreSQL refuses some of these) — but the refusal must be a real read-only/permission refusal, not an unrelated failure being mistaken for protection; got exit ${result.status}, stderr:\n${result.stderr}`,
             )
           }
