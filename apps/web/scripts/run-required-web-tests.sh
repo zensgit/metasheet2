@@ -298,8 +298,7 @@
 # P5-C-1 (2026-08-20, member-action dialog grammar unification): `approval-member-action-dialog-
 # grammar` — mounted coverage for the NEW chrome this slice added (six dialog-root testids, the
 # transfer/return/comment confirm-disabled predicates, the stale-error-on-reopen guard now that
-# `actionDialogError` backs all six dialogs instead of two, and focus-on-open for the dialogs whose
-# primary control is a native Element Plus input/select) plus a pure byte-identical-strings check
+# `actionDialogError` backs all six dialogs instead of two) plus a pure byte-identical-strings check
 # on `memberActionDialogGrammar.ts` itself. Bare basename token; verified to match exactly one
 # file and not to collide with `approval-member-bar-operation-policy` or `approval-member-
 # identity-coverage-enumeration` (diverges at "action-dialog-grammar", a substring of neither).
