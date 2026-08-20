@@ -39,8 +39,11 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
       「pending migrations = 0」在 staging 上**不成立**，需按
       `docs/development/staging-migration-alignment-runbook-verification-20260519.md` 单独处置后再开 L1。
 - [x] **census 可达性升级已闭合**（对抗门 P3-1 已收口：48 站点行为腿 + 运行时执行绑定 + tag 唯一 + 一名一 tag 全落地，见 #5018/#5020）。**剩余的不是这个缺陷，而是 owner 对天花板类残留的裁量**（T2 空壳替换 / 构造式 tag / `CLASSIFIER_MODULE` 迁移——文本守卫无法证明 src 站点可达性）；该裁量是 L0 的一个独立 owner 决策项，不是编码缺口。
-- [ ] 回滚路径演练过一次：`ALTER TABLE … DISABLE TRIGGER` 全量脚本 + 单 flag 移除步骤
-      （见 §5），并重跑 postdeploy-full 验证回到 inert 姿态。
+- [x] 回滚路径**脚本侧已演练一次**：`scripts/ops/multitable-recovery-authority-triggers.mjs`
+      （`disable`=大红回滚，从 census 派生 9 目标、单事务、亏损即回滚），在真库上跑通
+      enable→disable 往返并验回到出厂指纹（见 §5 演练记录，#5037 `a875950936`）。
+      ⚠️ **L0 剩这一条的另一半仍开着**：在**目标主机**上跑 `postdeploy-full` 验证回到 inert
+      姿态，属 owner-gated 主机动作，本地演练不覆盖——L1 前须由 owner 执行一次。
 
 ## 2. 阶梯（每级 = 独立 owner 授权 + 观察期）
 
@@ -92,3 +95,18 @@ flag 级：从 compose/env 移除该 flag → 重启 → `predeploy-flags` 验�
 trigger 级（大红开关）：9/9 `DISABLE TRIGGER` → `postdeploy-full` 验证回到出厂 inert
 指纹（`8c1be0b0…`/`14c180aa…` 仍应精确匹配——DISABLE 不改函数体）。
 回滚不需要迁移、不丢数据（authority locks 表保留，无消费者时惰性）。
+
+### 5.1 演练记录（2026-08-20，作者在全新 PG15.17 库上**独立复现**，非只信实现车道 transcript）
+
+演练用可执行脚本 `scripts/ops/multitable-recovery-authority-triggers.mjs`，判定用 `multitable-recovery-schema-containment.mjs` 的**原始输出**逐步核对：
+
+| 步 | 动作 | 结果 |
+|---|---|---|
+| baseline | 全新迁移库 | containment PASS；触发器 `8c1be0b0…`；函数 `14c180aa…`；9/9 `tgenabled='D'` |
+| enable | 脚本 `enable` | 9/9 armed；containment FAIL；触发器漂移到 `b87ded5a…`；**函数仍 `14c180aa…`**（证 DISABLE/ENABLE 不碰函数体） |
+| disable | 脚本 `disable`（大红回滚） | containment PASS；触发器**精确回到** `8c1be0b0…`；函数 `14c180aa…`；0/9 armed |
+| 变异 | armed 全 9，手动只 disable 8/9（留 `trg_user_roles_…`） | containment **FAIL**，一枚仍 armed——证演练能发现**不完整**回滚，非只对干净态点头 |
+| 原子性 | 脚本目标注入一枚伪触发器 | 42704，整事务回滚，**0/9 armed**，containment 仍 PASS |
+
+hermetic 守卫 13 测试在无 node_modules 纯净树 13/13,已接入 obs-kit contract required 车道。
+**未行使的轴（如实披露)**:PG16 / musl / x86(本地=PG15 Homebrew aarch64)、`lock_timeout` 路径(空库无并发写者)、以及**目标主机**上的 postdeploy-full(见上 ⚠️,owner-gated)。
