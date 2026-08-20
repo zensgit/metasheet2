@@ -984,19 +984,31 @@ function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string
   return email ? `${primary} · ${email}` : primary
 }
 
-// Mirrors ApprovalUserPicker.vue's `isUnidentifiable`: a candidate with no resolvable name must be
-// UNSELECTABLE (never merely relabelled), so a requester can never hand approval authority to an
-// account they cannot identify by name. Stale-cache fix (2026-08-21): this now reads
-// `choiceConfirmedNames` (the freshest-wins record) rather than the CURRENT render page's
-// `option.name` directly, and there is deliberately NO "currently-selected ids are exempt"
-// special case any more — that exemption was checking `option.name` against the page the option
-// happens to be rendered from, which is exactly the site a stale/renamed-to-blank directory
-// record slipped through: the id was selected while an EARLIER page still confirmed a real name,
-// a LATER page then re-confirmed it blank (deleting the entry above), and the exemption kept the
-// now-unconfirmed option enabled anyway. Reading `choiceConfirmedNames` alone already preserves
-// the one property the exemption existed for — a selection confirmed on an earlier page stays
-// selectable even when a later page's results don't happen to re-include that id at all — without
-// ever re-enabling an id the freshest page has actively retracted.
+// Same GOAL as ApprovalUserPicker.vue's `isUnidentifiable` (a candidate with no resolvable name
+// must be UNSELECTABLE, never merely relabelled, so a requester can never hand approval authority
+// to an account they cannot identify by name) but NO LONGER the same shape as of the 2026-08-21
+// stale-cache fix -- this now reads `choiceConfirmedNames` (the freshest-wins record) rather than
+// the CURRENT render page's `option.name` directly, and there is deliberately NO "currently-
+// selected ids are exempt" special case any more. That exemption (which ApprovalUserPicker.vue
+// still has, unchanged by this PR: `if (option.id === props.modelValue) return false`) was
+// checking `option.name` against the page the option happens to be rendered from, which is
+// exactly the site a stale/renamed-to-blank directory record slipped through here: the id was
+// selected while an EARLIER page still confirmed a real name, a LATER page then re-confirmed it
+// blank (deleting the entry above), and the exemption kept the now-unconfirmed option enabled
+// anyway. Reading `choiceConfirmedNames` alone already preserves the one property the exemption
+// existed for -- a selection confirmed on an earlier page stays selectable even when a later
+// page's results don't happen to re-include that id at all -- without ever re-enabling an id the
+// freshest page has actively retracted.
+//
+// SIBLING NOT FIXED HERE (2026-08-21 audit, out of this PR's scope): ApprovalUserPicker.vue keeps
+// its `modelValue`-exemption AND has no `choiceConfirmedNames`-style freshest-wins record --
+// `fetchedOptions` is replaced wholesale per search rather than accumulated, so a re-search that
+// returns the CURRENTLY-selected id with a newly-blank name would hit the same exemption shape
+// this fix removed. Whether that is exploitable end-to-end depends on whether its 4 consuming
+// flows (transfer / add-sign / fill-form user field / delegation delegatee) each enforce
+// identifiability independently server-side -- NOT verified by this PR, which only touches the
+// requester_choice path (this file + ApprovalProductService.ts's validateAndFreezeRequesterChoices).
+// Flagged as a candidate follow-up, deliberately not expanded into this diff.
 function isChoiceOptionUnidentifiable(chooser: RequesterChoiceChooser, option: ApprovalDirectoryUser): boolean {
   return !choiceConfirmedNames[chooser.nodeKey]?.[option.id]?.trim()
 }

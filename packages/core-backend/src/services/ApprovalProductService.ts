@@ -6668,20 +6668,33 @@ export class ApprovalProductService {
    * predicate — importing it here would silently fail every choice scoped to a non-curated
    * role. K2's role scope is plain role membership.
    *
-   * IDENTIFIABILITY (2026-08-21, Codex #4 P2-1 backend derivation of the owner-ratified 方案A
-   * ruling — resolver + 残余禁选 for flow-changing selectors): active + in-scope is necessary but
-   * not sufficient. A chosen approver whose directory row has a blank/absent display name is
-   * REJECTED here too — `APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED`, values-free (node key only,
-   * never the chosen id) — the SAME invariant `apps/web`'s requester-choice picker enforces
-   * client-side (`ApprovalNewView.vue`'s `choiceConfirmedNames`/`isChoiceOptionUnidentifiable`/
-   * `firstUnidentifiableChoiceNode`), landed as an owner-visible FE gate first. The server is the
-   * authoritative layer for that same invariant: a client that skips/bypasses the FE gate (a
-   * modified request, a future caller of this method) must not be able to freeze an assignment a
-   * requester could never have identified by name. Reuses `resolveDirectoryUsersByIds`
+   * IDENTIFIABILITY (2026-08-21, Codex #4 P2-1 backend derivation): active + in-scope is
+   * necessary but not sufficient. A chosen approver whose directory row has a blank/absent
+   * display name is REJECTED here too — `APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED`, values-free
+   * (node key only, never the chosen id) — the SAME invariant `apps/web`'s requester-choice
+   * picker enforces client-side (`ApprovalNewView.vue`'s
+   * `choiceConfirmedNames`/`isChoiceOptionUnidentifiable`/`firstUnidentifiableChoiceNode`),
+   * landed first as an FE-only gate. This PR's rationale for also enforcing it server-side: a
+   * client that skips or bypasses the FE gate (a modified request, a future caller of this
+   * method) should not be able to freeze an assignment a requester could never have identified
+   * by name — the FE check alone is not authoritative for a server-side invariant. The
+   * verification pass that raised this finding attributed the FE-only posture to an
+   * owner-ratified "方案A" design decision for flow-changing selectors (resolver + 残余禁选); that
+   * attribution comes from this session's own task framing, NOT from an owner comment this PR
+   * can point to, and must not be read as ratified — flagged here explicitly for contract-
+   * fidelity review to confirm or correct. Reuses `resolveDirectoryUsersByIds`
    * (approval-directory.ts) — the SAME exact-id, active-only, blank-name-DROPPED resolver the
    * participant directory's `/api/approvals/directory/resolve` route already serves to the FE —
    * so "identifiable" means exactly what the picker's own name-confirmation call means, not a
    * second, potentially-drifting definition of the same fact.
+   *
+   * COMPATIBILITY NOTE: `users.name` is nullable with no default (migration 054), and this repo's
+   * own real-DB fixtures had every K2 test user seeded nameless before this change (see this
+   * method's test file) — i.e. blank-named active users are a real, populated shape in this
+   * schema, not a hypothetical. A request shape that returned 201 before this PR — choosing an
+   * active, in-scope, but nameless approver — now returns 422 under this new error code. No
+   * existing client has ever seen this code; this is a genuine, intentional narrowing of what a
+   * requester_choice create-time request can select, not a purely additive change.
    */
   private async validateAndFreezeRequesterChoices(
     payload: Record<string, string[]> | undefined,

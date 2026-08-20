@@ -90,6 +90,22 @@ let userFlushScheduled = false
 // __resetResolvedDirectoryNamesForTests) is always "clear everything outstanding", never a
 // single id, so a Set of handles is enough -- no id-keyed bookkeeping needed.
 const pendingRetryTimeouts = new Set<ReturnType<typeof setTimeout>>()
+// In-flight dedup (2026-08-21, Codex #4 P3 gate finding): an id is a member of this set for the
+// ENTIRE duration of its group's retry sequence, including every backoff delay -- not just while
+// an individual `resolveApprovalDirectoryUsers` call is awaited. Before the backoff fix above, the
+// window during which an id was in NEITHER `resolvedUserNames` NOR `pendingUserIds` (see
+// `ensureUserNamesResolved`'s dedup checks) was microtask-short, bounded only by however long the
+// actual fetch attempts took -- practically never wide enough for a second `ensureUserNamesResolved`
+// call for the SAME id to land inside it. The backoff delays widen that window to ~1.5s worst
+// case, which an ordinary keystroke or route change hits routinely -- and does so specifically
+// DURING the outage the retry exists for. Without this set, that second call would start an
+// independent 3-attempt retry chain for the same id, doubling (or worse, with more overlapping
+// calls) the request volume against a server that is already struggling. `ensureUserNamesResolved`
+// treats an in-flight id as a no-op (it will observe the in-flight chain's own result once it
+// settles); the id is removed from this set the moment its chain concludes -- success, terminal,
+// or exhausted -- so a call arriving AFTER the chain finishes unsuccessfully still retries fresh,
+// preserving the existing "stays retryable for a LATER ensure call" contract.
+const inFlightUserIds = new Set<string>()
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = []
@@ -122,52 +138,62 @@ async function flushUsers(): Promise<void> {
   userFlushScheduled = false
   if (ids.length === 0) return
   for (const group of chunk(ids, RESOLVE_CHUNK)) {
-    let resolved: Array<{ id: string; name: string }> | null = null
-    let terminal = false
-    for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt += 1) {
-      // Backoff (2026-08-21, Codex #4 P3): every retry attempt (not the first) waits before
-      // firing, giving a transient outage real wall-clock time to clear on its own.
-      if (attempt > 1) await delay(RESOLVE_RETRY_DELAY_MS[attempt - 2])
-      try {
-        resolved = await resolveApprovalDirectoryUsers(group)
-        break
-      } catch (error) {
-        // A thrown/non-OK fetch is NOT automatically a confirmed miss. Only a TERMINAL failure --
-        // 401/403, meaning the caller structurally lacks approvals:read|write|act or the session
-        // is gone -- is cached as `null` (a caller who can never succeed here degrades the same
-        // way an id the server has no name for does, and retrying cannot help). Every OTHER
-        // failure (network drop, timeout, 5xx, a malformed test mock throwing) is TRANSIENT and
-        // retried in place (P3-3), up to RESOLVE_MAX_ATTEMPTS total attempts for this group.
-        const status = error instanceof ApprovalDirectoryResolveError ? error.status : undefined
-        if (status === 401 || status === 403) {
-          terminal = true
+    // In-flight dedup (see `inFlightUserIds`'s own doc above): marked BEFORE the first `await` in
+    // this group's retry sequence, so there is no gap in which a synchronously-issued second
+    // `ensureUserNamesResolved` for the same id could slip past both this and `pendingUserIds`.
+    // Cleared in `finally` so it is removed no matter which exit path below is taken.
+    for (const id of group) inFlightUserIds.add(id)
+    try {
+      let resolved: Array<{ id: string; name: string }> | null = null
+      let terminal = false
+      for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt += 1) {
+        // Backoff (2026-08-21, Codex #4 P3): every retry attempt (not the first) waits before
+        // firing, giving a transient outage real wall-clock time to clear on its own.
+        if (attempt > 1) await delay(RESOLVE_RETRY_DELAY_MS[attempt - 2])
+        try {
+          resolved = await resolveApprovalDirectoryUsers(group)
           break
+        } catch (error) {
+          // A thrown/non-OK fetch is NOT automatically a confirmed miss. Only a TERMINAL failure --
+          // 401/403, meaning the caller structurally lacks approvals:read|write|act or the session
+          // is gone -- is cached as `null` (a caller who can never succeed here degrades the same
+          // way an id the server has no name for does, and retrying cannot help). Every OTHER
+          // failure (network drop, timeout, 5xx, a malformed test mock throwing) is TRANSIENT and
+          // retried in place (P3-3), up to RESOLVE_MAX_ATTEMPTS total attempts for this group.
+          const status = error instanceof ApprovalDirectoryResolveError ? error.status : undefined
+          if (status === 401 || status === 403) {
+            terminal = true
+            break
+          }
+          // Transient -- fall through to the next attempt (or, once attempts are exhausted, out of
+          // this loop with `resolved` still null).
         }
-        // Transient -- fall through to the next attempt (or, once attempts are exhausted, out of
-        // this loop with `resolved` still null).
       }
+      if (terminal) {
+        for (const id of group) resolvedUserNames[id] = null
+        continue
+      }
+      if (resolved === null) {
+        // Every in-place retry attempt failed transiently. Leave every id in this group ABSENT
+        // from resolvedUserNames (not a confirmed miss) so a LATER `ensureUserNamesResolved` call
+        // -- e.g. the user re-fetching detail/history via an unrelated action -- still retries it
+        // fresh (the `finally` below has already released it from `inFlightUserIds` by the time
+        // that later call runs). Rendering stays fail-closed regardless -- getResolvedUserName
+        // treats "absent" and "null" identically -- only the RETRY behavior differs.
+        continue
+      }
+      const found = new Set<string>()
+      for (const row of resolved) {
+        if (!row || typeof row.id !== 'string' || !row.id) continue
+        found.add(row.id)
+        resolvedUserNames[row.id] = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
+      }
+      // A successful response (the server answered, no failure was thrown) naming none of these
+      // ids is a CONFIRMED miss -- cache null so this id is not repeatedly re-fetched forever.
+      for (const id of group) if (!found.has(id)) resolvedUserNames[id] = null
+    } finally {
+      for (const id of group) inFlightUserIds.delete(id)
     }
-    if (terminal) {
-      for (const id of group) resolvedUserNames[id] = null
-      continue
-    }
-    if (resolved === null) {
-      // Every in-place retry attempt failed transiently. Leave every id in this group ABSENT from
-      // resolvedUserNames (not a confirmed miss) so a LATER `ensureUserNamesResolved` call -- e.g.
-      // the user re-fetching detail/history via an unrelated action -- still retries it fresh.
-      // Rendering stays fail-closed regardless -- getResolvedUserName treats "absent" and "null"
-      // identically -- only the RETRY behavior differs.
-      continue
-    }
-    const found = new Set<string>()
-    for (const row of resolved) {
-      if (!row || typeof row.id !== 'string' || !row.id) continue
-      found.add(row.id)
-      resolvedUserNames[row.id] = typeof row.name === 'string' && row.name.trim() ? row.name.trim() : null
-    }
-    // A successful response (the server answered, no failure was thrown) naming none of these ids
-    // is a CONFIRMED miss -- cache null so this id is not repeatedly re-fetched forever.
-    for (const id of group) if (!found.has(id)) resolvedUserNames[id] = null
   }
 }
 
@@ -186,6 +212,10 @@ export function ensureUserNamesResolved(ids: Iterable<string | null | undefined>
     if (!id) continue
     if (Object.prototype.hasOwnProperty.call(resolvedUserNames, id)) continue
     if (pendingUserIds.has(id)) continue
+    // In-flight dedup (2026-08-21, Codex #4 P3 gate finding -- see `inFlightUserIds`'s own doc):
+    // an id already mid-retry-sequence (including a backoff delay) is a no-op here, not a second
+    // independent retry chain -- it will pick up the in-flight chain's own result.
+    if (inFlightUserIds.has(id)) continue
     pendingUserIds.add(id)
     scheduled = true
   }
@@ -235,4 +265,5 @@ export function __resetResolvedDirectoryNamesForTests(): void {
   userFlushScheduled = false
   for (const handle of pendingRetryTimeouts) clearTimeout(handle)
   pendingRetryTimeouts.clear()
+  inFlightUserIds.clear()
 }

@@ -393,4 +393,38 @@ describe('directoryResolve (the shared resolver cache)', () => {
     expect(apiFetchMock, 'the cancelled backoff timer must never fire -- a surviving timer would have added a 2nd (or more) call here').toHaveBeenCalledTimes(1)
     expect(mod.getResolvedUserName('u1'), 'reset also clears the cache -- nothing resolved from the abandoned attempt').toBeNull()
   })
+
+  // In-flight dedup (2026-08-21, Codex #4 P3 gate finding, post-backoff): the backoff delays
+  // widen the window during which an id is mid-retry from microtask-short to ~1.5s worst case --
+  // long enough that an ordinary second `ensureUserNamesResolved` call for the SAME id (a
+  // keystroke, a route change) lands inside it routinely, and does so specifically DURING the
+  // outage the retry exists for. Without in-flight tracking this would start a SECOND, independent
+  // 3-attempt retry chain for the same id -- 6 requests instead of 3, doubling load against a
+  // server that is already struggling. This is the discriminating construction: fire `ensure`,
+  // advance PART way into the backoff window (attempt 1 has failed, attempt 2 has not yet fired),
+  // fire `ensure` AGAIN for the same id, then let everything settle -- exactly 3 calls, never 6.
+  it('a second ensure() call for the SAME id DURING the backoff window does not start a duplicate retry chain (3 calls, not 6)', async () => {
+    vi.useFakeTimers()
+    const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockResolvedValue(jsonResponse({}, { status: 500, ok: false })) // every attempt fails
+
+    ensureUserNamesResolved(['u1'])
+    await vi.advanceTimersByTimeAsync(150) // attempt 1 done and failed; mid-backoff BEFORE attempt 2 fires (fires at 300ms)
+    expect(apiFetchMock, 'sanity: exactly one attempt has run so far').toHaveBeenCalledTimes(1)
+
+    ensureUserNamesResolved(['u1']) // a route change / keystroke during the SAME outage
+    await vi.advanceTimersByTimeAsync(3000) // let the in-flight chain's remaining attempts settle
+
+    expect(apiFetchMock, 'a duplicate retry chain would show 6 calls here -- the in-flight id must be a no-op for the second ensure() call').toHaveBeenCalledTimes(3)
+    expect(getResolvedUserName('u1'), 'permanent failure still stays fail-closed, and still retryable by a LATER ensure once this chain has concluded').toBeNull()
+
+    // AFTER the chain concludes (this test's own advance above ran it to exhaustion), a FRESH
+    // ensure call for the same id must still retry -- in-flight dedup must not become permanent.
+    apiFetchMock.mockReset()
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
+    ensureUserNamesResolved(['u1'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(getResolvedUserName('u1')).toBe('Alice')
+  })
 })
