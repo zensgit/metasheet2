@@ -2042,8 +2042,17 @@ test('runbook: contains the ladder §4 no-40P01 link-in concurrent-write step fo
 // lands green and the kit goes stale-red on a later, unrelated PR. So: every
 // runbook-cited repo path must appear in BOTH trigger path filters, mechanically.
 
-const KIT_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/multitable-o2-observation-kit.yml')
+// The kit runs in TWO lanes since the contract check became a REQUIRED status:
+//  • kit.yml        — hermetic contract job, NO pull_request path filter (a path-filtered required
+//                     check strands PRs that don't trigger it at "Expected — waiting for status").
+//  • kit-realdb.yml — the postgres-backed execution proof, which KEEPS the original path filters
+//                     so unrelated PRs don't pay for a service container + full migrations.
+// The runbook-citation drift guard therefore targets the realdb lane (the one with filters); the
+// contract lane gets its own guard below asserting it has no pull_request filter at all.
+const KIT_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/multitable-o2-observation-kit-realdb.yml')
 const kitWorkflowText = readFileSync(KIT_WORKFLOW_PATH, 'utf8')
+const CONTRACT_WORKFLOW_PATH = resolve(ROOT, '.github/workflows/multitable-o2-observation-kit.yml')
+const contractWorkflowText = readFileSync(CONTRACT_WORKFLOW_PATH, 'utf8')
 
 /** Every `- 'entry'` list under each `paths:` key, in file order (comments/blanks skipped). */
 function workflowPathSections(ymlText) {
@@ -2095,6 +2104,26 @@ test('workflow: every runbook-cited repo path is in BOTH trigger path filters (r
   assert.ok(cited.length >= 10, `expected ≥10 cited repo paths, found ${cited.length}`)
   const missing = missingFilterEntries(kitWorkflowText, cited)
   assert.deepEqual(missing, [], `runbook-cited paths missing from workflow path filters:\n${missing.join('\n')}`)
+})
+
+test('workflow: the REQUIRED contract lane has NO pull_request path filter — a path-filtered required check strands every PR that does not trigger it', () => {
+  const onBlock = contractWorkflowText.slice(
+    contractWorkflowText.indexOf('\non:\n'),
+    contractWorkflowText.indexOf('\npermissions:\n'),
+  )
+  assert.ok(onBlock.includes('pull_request'), 'contract lane must still run on pull_request')
+  // Structural: inside the on: block, the pull_request key must be followed by the next trigger
+  // (push) or the end of the block — never by a `paths:` list of its own.
+  const prIdx = onBlock.indexOf('pull_request:')
+  const afterPr = onBlock.slice(prIdx + 'pull_request:'.length)
+  const nextTrigger = afterPr.search(/\n {2}\w/)
+  const prBody = nextTrigger === -1 ? afterPr : afterPr.slice(0, nextTrigger)
+  assert.ok(
+    !/paths(-ignore)?:/.test(prBody),
+    'the REQUIRED contract lane must NOT path-filter pull_request — put path-filtered work in multitable-o2-observation-kit-realdb.yml instead',
+  )
+  // And the expensive lane must still BE path-filtered, or the split bought nothing.
+  assert.ok(/pull_request:\s*\n\s*paths:/.test(kitWorkflowText), 'the realdb lane must keep its pull_request path filter')
 })
 
 test('workflow filter guard is not vacuous: removing a cited path from one filter IS caught', () => {
