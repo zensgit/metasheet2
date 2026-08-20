@@ -1047,6 +1047,39 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
   })
 
+  it('leg 5d-boundary — inactive membership refused directly at the W4C-2 preflight recheck, independent of any route-level gate (zero claimed rows)', async () => {
+    // Coverage note (membership-derived punch-route org resolution): the punch route now
+    // resolves/authorizes the org BEFORE this preflight ever runs (see leg 5d below), so an
+    // inactive-membership request never reaches this recheck through the HTTP route anymore.
+    // This leg proves the underlying boundary behavior directly, the same way legs 5a/5c/5e
+    // do — real witness, real preflight call, real transaction — so the recheck itself stays
+    // covered independent of the route's own (earlier, differently-coded) gate.
+    const envelope = livePunchEnvelope(authzOrg, inactiveMemberUser, randomUUID(), '2026-07-20T03:30:00.000Z')
+    const witness = createAuthorizedAttendanceWriteContextV1({
+      actorId: inactiveMemberUser,
+      actorPosture: 'self',
+      tokenSubjectUserId: inactiveMemberUser,
+      orgId: authzOrg,
+      subjectScope: { kind: 'self', userId: inactiveMemberUser },
+      capability: 'punch',
+      sourceRef: 'w4c2-e5:leg5d-boundary-inactive-membership',
+    })
+    const opsBefore = (await operationRows(authzOrg)).length
+    const raw = await pool.connect()
+    try {
+      await expect(
+        runAttendanceResultOperationTransactionV1(raw as unknown as AttendanceW4TransactionClientV1, (trx) =>
+          attendanceResultOperationPreflightV1(trx, witness, envelope.registryInput),
+        ),
+      ).rejects.toThrow('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+    } finally {
+      raw.release()
+    }
+    // The claim rolled back with the transaction: no new operation rows (delta, not
+    // absolute — this leg runs before leg 5d below has written anything to authzOrg).
+    expect((await operationRows(authzOrg)).length).toBe(opsBefore)
+  })
+
   it('leg 5d — inactive membership: the stable-ID punch is a values-free 403 with ZERO source DML; re-activating the membership makes the identical punch write (positive control)', async () => {
     const token = await mintToken(inactiveMemberUser)
     const body = {
@@ -1057,8 +1090,13 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     const refused = await punch(token, body)
     expect(refused.status).toBe(403)
-    expect(refused.body?.error?.code).toBe('ATTENDANCE_WRITE_NOT_AUTHORIZED')
-    expect(refused.body?.error?.message).toBe('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+    // Membership-derived punch-route org resolution (this route only): with the
+    // caller's `user_orgs` row for authzOrg INACTIVE, the caller has zero ACTIVE
+    // memberships matching the requested org, so the route's own resolver refuses
+    // BEFORE the request ever reaches the W4C-2 preflight recheck covered directly
+    // by leg 5d-boundary above (same underlying invariant — active membership
+    // required — enforced earlier and with a punch-specific code).
+    expect(refused.body).toEqual({ ok: false, error: { code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' } })
     expect(await eventCount(inactiveMemberUser)).toBe(0)
     expect(await recordCount(inactiveMemberUser)).toBe(0)
     // The claim rolled back with the transaction: zero operation rows.

@@ -954,6 +954,11 @@ export default defineConfig({
       // W4-shadow org — meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-soak-diff-families.db.test.ts',
+      // Punch route's membership-derived org resolution (rules a-e). Boots a real
+      // MetaSheetServer with the real plugin and drives the real punch route against
+      // real `user_orgs` membership rows — meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-punch-org-resolution.db.test.ts',
       // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
       // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
       // values against real CHECK constraints and deferred triggers, walks the

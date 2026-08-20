@@ -20,6 +20,7 @@ const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/atten
 // the FSER instance the /effective-policy route builds.
 const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-group-fixed-schedule-producer-key.cjs')
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
+const { resolvePunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
@@ -29701,7 +29702,17 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        // Membership-derived org resolution (this route only — see
+        // lib/attendance-punch-org-resolution.cjs's module doc comment for the
+        // full rule set). `getOrgId(req)` is still computed here, unchanged, so
+        // it can serve as the zero-membership fallback (rule 3) without this
+        // route re-deriving that helper's own precedence chain.
+        const punchOrgResolution = await resolvePunchOrgIdV1(db, req, getOrgId(req))
+        if (!punchOrgResolution.ok) {
+          res.status(punchOrgResolution.status).json({ ok: false, error: { code: punchOrgResolution.code } })
+          return
+        }
+        const orgId = punchOrgResolution.orgId
         const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
         const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
         if (rawOccurredAt && !occurredAt) {
