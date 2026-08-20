@@ -9930,6 +9930,7 @@
 <script setup lang="ts">
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { formatCalendarDate } from './attendance/dateOnlyFormat'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
@@ -16458,12 +16459,9 @@ function formatDateTime(value: string | null | undefined): string {
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) return '--'
-  const direct = String(value).trim()
-  if (!direct) return '--'
-  const date = new Date(direct)
-  if (Number.isNaN(date.getTime())) return direct
-  return date.toLocaleDateString(locale.value)
+  // Date-only values (e.g. work_date = 'YYYY-MM-DD') are rendered from local y/m/d
+  // components so they never round-trip through UTC parsing; see dateOnlyFormat.ts.
+  return formatCalendarDate(value, locale.value)
 }
 
 function displayTimezone(value: string | null | undefined): string {
