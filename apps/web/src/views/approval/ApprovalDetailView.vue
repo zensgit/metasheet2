@@ -620,6 +620,7 @@
       v-model="actionDialogVisible"
       :title="actionDialogTitle"
       width="480px"
+      :data-testid="ACTION_DIALOG_TEST_ID"
     >
       <!-- B1-04: dialog-scoped failure message — the server's own reason, kept in place of a
            generic toast so the reader learns WHY without losing the dialog/typed comment. -->
@@ -651,10 +652,12 @@
             </el-tag>
           </div>
           <el-input
+            ref="actionDialogCommentRef"
             v-model="actionComment"
             type="textarea"
             :rows="3"
             :placeholder="actionCommentPlaceholder"
+            :aria-label="actionCommentLabel"
           />
         </el-form-item>
       </el-form>
@@ -675,23 +678,38 @@
     <!-- Transfer dialog -->
     <el-dialog
       v-model="transferDialogVisible"
-      title="转交审批"
+      :title="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTitle"
       width="480px"
+      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.dialogTestId"
     >
+      <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above — the
+           non-policy branch of `handleMemberActionFailure` now renders here instead of a toast
+           (see that function's doc comment); a policy denial still toasts + closes the dialog. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
         <el-form-item label="转交给">
           <ApprovalUserPicker
             :model-value="transferUserId || null"
             placeholder="搜索并选择转交对象"
+            aria-label="转交给"
             @update:model-value="transferUserId = $event ?? ''"
           />
         </el-form-item>
-        <el-form-item label="转交说明">
+        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="2"
-            placeholder="请输入转交说明"
+            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentRows"
+            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentPlaceholder"
+            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.transfer.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -700,10 +718,11 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'transfer'"
+          :disabled="!transferUserId"
           data-testid="approval-transfer-submit"
           @click="submitTransfer"
         >
-          确认转交
+          {{ MEMBER_ACTION_DIALOG_GRAMMAR.transfer.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -711,9 +730,20 @@
     <!-- P1-B 加签 dialog -->
     <el-dialog
       v-model="addSignDialogVisible"
-      title="加签"
+      :title="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTitle"
       width="480px"
+      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.dialogTestId"
     >
+      <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
         <el-form-item label="加签人">
           <!-- P1-B 加签 target picker: ApprovalUserPicker is single-select by design (v-model one
@@ -734,6 +764,7 @@
           <ApprovalUserPicker
             :model-value="addSignPickerValue"
             placeholder="搜索并添加加签人"
+            aria-label="搜索并添加加签人"
             @select="onAddSignUserSelected"
           />
         </el-form-item>
@@ -748,12 +779,13 @@
         <el-form-item label="加签方式">
           <span class="approval-detail__hint" data-testid="approval-add-sign-mode-hint">{{ ADD_SIGN_MODE_HINT }}</span>
         </el-form-item>
-        <el-form-item label="加签说明">
+        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="2"
-            placeholder="请输入加签说明"
+            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentRows"
+            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentPlaceholder"
+            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -766,7 +798,7 @@
           data-testid="approval-add-sign-submit"
           @click="submitAddSign"
         >
-          确认加签
+          {{ MEMBER_ACTION_DIALOG_GRAMMAR.add_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -774,15 +806,28 @@
     <!-- P1-B 减签 dialog -->
     <el-dialog
       v-model="reduceSignDialogVisible"
-      title="减签"
+      :title="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTitle"
       width="480px"
+      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.dialogTestId"
     >
+      <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
         <el-form-item label="减签人">
           <el-select
+            ref="reduceSignSelectRef"
             v-model="reduceSignUserId"
             filterable
             placeholder="选择要移除的加签人"
+            aria-label="选择要移除的加签人"
             class="ms-w-100pct"
             data-testid="approval-reduce-sign-user"
           >
@@ -795,12 +840,13 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="减签说明">
+        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="2"
-            placeholder="请输入减签说明"
+            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentRows"
+            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentPlaceholder"
+            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -813,7 +859,7 @@
           data-testid="approval-reduce-sign-submit"
           @click="submitReduceSign"
         >
-          确认减签
+          {{ MEMBER_ACTION_DIALOG_GRAMMAR.reduce_sign.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -821,8 +867,9 @@
     <!-- Comment dialog -->
     <el-dialog
       v-model="commentDialogVisible"
-      title="添加评论"
+      :title="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTitle"
       width="480px"
+      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.comment.dialogTestId"
     >
       <!-- B1-04: same dialog-scoped failure message as the 通过/驳回 dialog above. -->
       <el-alert
@@ -835,7 +882,7 @@
         class="approval-detail__dialog-error"
       />
       <el-form>
-        <el-form-item label="评论内容">
+        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel">
           <!-- B1-05: quick phrases — see the 通过/驳回 dialog above for the same mechanics. -->
           <div v-if="quickPhraseChips.length > 0" class="approval-detail__quick-phrases">
             <el-tag
@@ -850,10 +897,12 @@
             </el-tag>
           </div>
           <el-input
+            ref="commentDialogInputRef"
             v-model="actionComment"
             type="textarea"
-            :rows="3"
-            placeholder="请输入评论内容"
+            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentRows"
+            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentPlaceholder"
+            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -862,10 +911,11 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'comment'"
+          :disabled="!actionComment.trim()"
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
-          提交评论
+          {{ MEMBER_ACTION_DIALOG_GRAMMAR.comment.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -873,12 +923,29 @@
     <!-- Return dialog -->
     <el-dialog
       v-model="returnDialogVisible"
-      title="退回审批"
+      :title="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTitle"
       width="480px"
+      :data-testid="MEMBER_ACTION_DIALOG_GRAMMAR.return.dialogTestId"
     >
+      <!-- P5-C-1: same dialog-scoped failure grammar as approve/reject/comment above. -->
+      <el-alert
+        v-if="actionDialogError"
+        type="error"
+        show-icon
+        :closable="false"
+        :title="actionDialogError"
+        data-testid="approval-action-dialog-error"
+        class="approval-detail__dialog-error"
+      />
       <el-form>
         <el-form-item label="退回至节点">
-          <el-select v-model="returnTargetNodeKey" placeholder="选择退回目标节点" class="ms-w-100pct">
+          <el-select
+            ref="returnSelectRef"
+            v-model="returnTargetNodeKey"
+            placeholder="选择退回目标节点"
+            aria-label="选择退回目标节点"
+            class="ms-w-100pct"
+          >
             <el-option
               v-for="node in returnableNodes"
               :key="node.key"
@@ -887,12 +954,13 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="退回说明">
+        <el-form-item :label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel">
           <el-input
             v-model="actionComment"
             type="textarea"
-            :rows="2"
-            placeholder="请输入退回说明"
+            :rows="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentRows"
+            :placeholder="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentPlaceholder"
+            :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.return.commentLabel"
           />
         </el-form-item>
       </el-form>
@@ -901,10 +969,11 @@
         <el-button
           type="warning"
           :loading="inFlightAction === 'return'"
+          :disabled="!returnTargetNodeKey"
           data-testid="approval-return-submit"
           @click="submitReturn"
         >
-          确认退回
+          {{ MEMBER_ACTION_DIALOG_GRAMMAR.return.confirmLabel }}
         </el-button>
       </template>
     </el-dialog>
@@ -912,7 +981,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, type Ref } from 'vue'
+import { ref, computed, onMounted, watch, nextTick, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -959,6 +1028,7 @@ import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
 import { buildUpcomingNodes, type UpcomingApprovalNode } from '../../approvals/upcomingNodes'
 import { ADD_SIGN_MODE_HINT, CLIENT_ADD_SIGN_MODE } from '../../approvals/addSignHonestyCopy'
 import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
+import { MEMBER_ACTION_DIALOG_GRAMMAR, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
@@ -1441,11 +1511,15 @@ const commentDialogVisible = ref(false)
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
-// B1-04: dialog-scoped failure message for the approve/reject + comment dialogs (宽恕型错误三件套
-// part 2). Cleared on next dialog open / next submit attempt; the catch blocks below set it
-// INSTEAD OF a generic toast so the reader sees the server's actual reason without losing their
-// typed comment — the dialog stays open (see `submitAction`/`submitComment`). Non-dialog actions
-// (revoke's popconfirm) are unaffected and keep their existing toast.
+// B1-04, extended by P5-C-1: dialog-scoped failure message, now shared by ALL SIX member-action
+// dialogs (approve/reject/comment originally; transfer/add-sign/reduce-sign/return joined in
+// P5-C-1's failure-surfacing unification — see `handleMemberActionFailure` below). Cleared on
+// every dialog's own `open*` / next submit attempt, so a stale error from one verb's dialog can
+// never bleed into a freshly-opened OTHER dialog. The catch blocks set it INSTEAD OF a generic
+// toast so the reader sees the server's actual reason without losing their typed comment/pick —
+// the dialog stays open. A POLICY denial (§2.3) is the one exception: it still toasts (the honest
+// copy) AND closes the dialog, so there is nothing for this ref to render. Non-dialog actions
+// (revoke's popconfirm) are unaffected and keep their own toast (see `handleRevoke`).
 const actionDialogError = ref<string | null>(null)
 // B3-13 按动作 loading: which action's request is in flight right now (null = none). Each action
 // button/dialog-confirm binds `:loading` to `inFlightAction === '<its action>'` so ONLY the
@@ -1470,6 +1544,30 @@ const addSignUserLabels = ref<Record<string, string>>({})
 // semantic we implement, so the wire contract is unchanged for the server and for replay.
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
+
+// P5-C-1 — focus-on-open for the dialogs whose primary control is a plain Element Plus
+// input/select rendered directly in THIS view (both expose a public `focus()` method). The two
+// `ApprovalUserPicker`-backed dialogs (transfer / add-sign) are deliberately excluded: the picker
+// is a `<script setup>` SFC that does not `defineExpose` a `focus` method today, so a ref to it
+// would resolve to nothing callable — giving it one is real scope (a picker-level change under
+// C5), not dialog chrome, so it is left for a follow-on rather than faked here.
+const actionDialogCommentRef = ref<{ focus?: () => void } | null>(null)
+const commentDialogInputRef = ref<{ focus?: () => void } | null>(null)
+const reduceSignSelectRef = ref<{ focus?: () => void } | null>(null)
+const returnSelectRef = ref<{ focus?: () => void } | null>(null)
+
+/**
+ * Best-effort focus-on-open for a dialog's primary control. `nextTick` is enough here because
+ * none of these dialogs lazy-mount their body on open (Element Plus renders dialog content
+ * unconditionally and toggles visibility via its own transition/overlay) — the target element
+ * already exists by the time `open*` runs. C7 (scout brief): real focus-TRAP / focus-RETURN /
+ * ESC-dismissal are Element Plus's own `<el-dialog>` behavior and have no real-browser harness in
+ * this repo to verify against — this helper only owns the "move focus into the dialog's primary
+ * field on open" half, which the guarded call below keeps genuinely mutation-testable.
+ */
+function focusPrimaryControl(target: Ref<{ focus?: () => void } | null>): void {
+  void nextTick(() => target.value?.focus?.())
+}
 
 // P1-B 减签 picker — only previously add-signed (`metadata.addSign === true`),
 // still-active, user-typed assignments at the CURRENT node are reducible.
@@ -1875,18 +1973,24 @@ function openActionDialog(action: 'approve' | 'reject') {
   actionComment.value = ''
   actionDialogError.value = null
   actionDialogVisible.value = true
+  focusPrimaryControl(actionDialogCommentRef)
 }
 
 function openTransferDialog() {
   transferUserId.value = ''
   actionComment.value = ''
+  // P5-C-1: stale-error guard — every `open*` resets the shared `actionDialogError` so a failure
+  // left over from a DIFFERENT verb's dialog can never render in this freshly-opened one.
+  actionDialogError.value = null
   transferDialogVisible.value = true
 }
 
 function openReturnDialog() {
   returnTargetNodeKey.value = ''
   actionComment.value = ''
+  actionDialogError.value = null
   returnDialogVisible.value = true
+  focusPrimaryControl(returnSelectRef)
 }
 
 function openCommentDialog() {
@@ -1896,6 +2000,7 @@ function openCommentDialog() {
   actionComment.value = ''
   actionDialogError.value = null
   commentDialogVisible.value = true
+  focusPrimaryControl(commentDialogInputRef)
 }
 
 // T3-1 v0 (ballot Q7): the mobile surface reuses the SAME version-less unified
@@ -1968,22 +2073,39 @@ async function submitAction() {
  * nothing. One helper means one pin covers all four, and a fifth verb cannot be added with a private
  * copy of the rule.
  *
- * A policy denial is PERMANENT for this node, so it says so (values-free, no 请重试) and CLOSES the
- * dialog: the old bare `catch {}` discarded the server's code, invited a retry, and every retry
- * minted another `policy_denied` audit row that D-3 then hides from the timeline. Any OTHER failure
- * surfaces the SERVER's own message when it has one (`fallback` is used only for a message-less or
- * non-`Error` throw) and leaves the dialog OPEN, because retrying those is legitimate.
+ * A policy denial is PERMANENT for this node, so it says so (values-free, no 请重试), TOASTS it, and
+ * CLOSES the dialog: the old bare `catch {}` discarded the server's code, invited a retry, and every
+ * retry minted another `policy_denied` audit row that D-3 then hides from the timeline. A toast is
+ * still right for THIS branch specifically — the dialog is disappearing, so an alert rendered inside
+ * it would never be seen.
+ *
+ * P5-C-1 (member-action dialog grammar unification): any OTHER failure used to toast too, while the
+ * approve/reject/comment dialogs already rendered the server's message INLINE via `actionDialogError`
+ * and stayed open — two different failure grammars for the same "retry is legitimate" outcome. That
+ * divergence is now closed: a non-policy failure sets `dialogError` (the same shared ref those three
+ * dialogs already render through) instead of toasting, so all six member-action dialogs surface a
+ * non-fatal failure the same way. `fallback` is used only for a message-less or non-`Error` throw.
  */
-function handleMemberActionFailure(error: unknown, fallback: string, dialogVisible: Ref<boolean>): void {
+function handleMemberActionFailure(
+  error: unknown,
+  fallback: string,
+  dialogVisible: Ref<boolean>,
+  dialogError: Ref<string | null>,
+): void {
   const failure = memberActionFailure(error, fallback)
-  ElMessage.error(failure.message)
-  if (failure.isPolicyDenial) dialogVisible.value = false
+  if (failure.isPolicyDenial) {
+    ElMessage.error(failure.message)
+    dialogVisible.value = false
+    return
+  }
+  dialogError.value = failure.message
 }
 
 async function submitTransfer() {
   if (!transferUserId.value) return
   if (inFlightAction.value) return
   const id = route.params.id as string
+  actionDialogError.value = null
   inFlightAction.value = 'transfer'
   try {
     await store.executeAction(id, {
@@ -1995,7 +2117,7 @@ async function submitTransfer() {
     transferDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible)
+    handleMemberActionFailure(error, '转交失败，请重试', transferDialogVisible, actionDialogError)
   } finally {
     inFlightAction.value = null
   }
@@ -2006,6 +2128,7 @@ function openAddSignDialog() {
   addSignUserLabels.value = {}
   addSignPickerValue.value = null
   actionComment.value = ''
+  actionDialogError.value = null
   addSignDialogVisible.value = true
 }
 
@@ -2039,6 +2162,7 @@ async function submitAddSign() {
   if (addSignUserIds.value.length === 0) return
   if (inFlightAction.value) return
   const id = route.params.id as string
+  actionDialogError.value = null
   inFlightAction.value = 'add_sign'
   try {
     await store.executeAction(id, {
@@ -2051,7 +2175,7 @@ async function submitAddSign() {
     addSignDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible)
+    handleMemberActionFailure(error, '加签失败，请重试', addSignDialogVisible, actionDialogError)
   } finally {
     inFlightAction.value = null
   }
@@ -2060,7 +2184,9 @@ async function submitAddSign() {
 function openReduceSignDialog() {
   reduceSignUserId.value = ''
   actionComment.value = ''
+  actionDialogError.value = null
   reduceSignDialogVisible.value = true
+  focusPrimaryControl(reduceSignSelectRef)
 }
 
 async function submitReduceSign() {
@@ -2074,6 +2200,7 @@ async function submitReduceSign() {
   if (!target || target.disabled) return
   if (inFlightAction.value) return
   const id = route.params.id as string
+  actionDialogError.value = null
   inFlightAction.value = 'reduce_sign'
   try {
     await store.executeAction(id, {
@@ -2085,7 +2212,7 @@ async function submitReduceSign() {
     reduceSignDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible)
+    handleMemberActionFailure(error, '减签失败，请重试', reduceSignDialogVisible, actionDialogError)
   } finally {
     inFlightAction.value = null
   }
@@ -2119,6 +2246,7 @@ async function submitReturn() {
   if (!returnTargetNodeKey.value) return
   if (inFlightAction.value) return
   const id = route.params.id as string
+  actionDialogError.value = null
   inFlightAction.value = 'return'
   try {
     await store.executeAction(id, {
@@ -2130,12 +2258,19 @@ async function submitReturn() {
     returnDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
-    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible)
+    handleMemberActionFailure(error, '退回失败，请重试', returnDialogVisible, actionDialogError)
   } finally {
     inFlightAction.value = null
   }
 }
 
+// P5-C-1: 撤回 has no dialog (a popconfirm, not a member-action dialog — deliberately OUT of the
+// grammar unification per the scout brief: wrapping it in one would ADD a flow, not unify one).
+// The only in-scope fix here is message FIDELITY — the old bare `catch {}` discarded whatever the
+// server actually said and always rendered the same fixed copy. `dialogErrorMessage` (already used
+// by `submitAction`/`submitComment` above) prefers the thrown error's own message and falls back to
+// this same fixed string only for a message-less/non-`Error` throw, so a legacy/mocked rejection
+// still renders something instead of a blank toast.
 async function handleRevoke() {
   if (inFlightAction.value) return
   const id = route.params.id as string
@@ -2144,8 +2279,8 @@ async function handleRevoke() {
     await store.executeAction(id, { action: 'revoke' })
     ElMessage.success('审批已撤回')
     await store.loadHistory(id)
-  } catch {
-    ElMessage.error('撤回失败，请重试')
+  } catch (error) {
+    ElMessage.error(dialogErrorMessage(error, '撤回失败，请重试'))
   } finally {
     inFlightAction.value = null
   }

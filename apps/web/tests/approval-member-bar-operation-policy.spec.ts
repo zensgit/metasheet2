@@ -158,6 +158,17 @@ const ElPopconfirm = defineComponent({
   },
 })
 
+// P5-C-1: a title-rendering stub (the generic `stub()` above drops the `title` PROP entirely, so
+// it cannot back an assertion on alert CONTENT — matches `approvalDetailPolish.spec.ts`'s own
+// `ElAlert` stub, which already solves this same problem in a mounted harness).
+const ElAlert = defineComponent({
+  name: 'ElAlert',
+  props: { title: String, type: String, closable: Boolean, showIcon: Boolean },
+  setup(props) {
+    return () => h('div', { 'data-el-alert': props.type || 'default' }, props.title)
+  },
+})
+
 const ElDialog = defineComponent({
   name: 'ElDialog',
   props: { modelValue: Boolean, title: String },
@@ -303,11 +314,12 @@ describe('Lock-5 A-2 (FE door) — the member bar mirrors the per-node operation
     app = createApp(Host)
     for (const name of [
       'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
-      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElAlert',
+      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag',
     ]) {
       app.component(name, stub(name))
     }
     app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
     app.component('ElPopconfirm', ElPopconfirm)
     app.component('ElDialog', ElDialog)
     app.component('ElInput', ElInput)
@@ -439,11 +451,12 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
     app = createApp(Host)
     for (const name of [
       'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
-      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElAlert',
+      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag',
     ]) {
       app.component(name, stub(name))
     }
     app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
     app.component('ElPopconfirm', ElPopconfirm)
     app.component('ElDialog', ElDialog)
     app.component('ElInput', ElInput)
@@ -584,8 +597,18 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
     })
   }
 
-  it('WIRING (mounted) POSITIVE CONTROL: a NON-policy failure keeps the dialog OPEN', async () => {
+  it('WIRING (mounted) POSITIVE CONTROL: a NON-policy failure keeps the dialog OPEN — P5-C-1: and now renders INLINE, not a toast', async () => {
     // Without this, "dialog closed" above could be green against a handler that closes on ANY error.
+    //
+    // P5-C-1 re-point: this test used to assert `ElMessage.error('目标用户不存在')` — a TOAST. That
+    // was the exact divergence the scout brief's grammar table named (§1b "Failure surfacing"): the
+    // approve/reject/comment dialogs already rendered a non-policy failure INLINE via
+    // `actionDialogError` and stayed open; the four deferred verbs toasted the same outcome instead.
+    // `handleMemberActionFailure` now routes the non-policy branch through the SAME shared
+    // `actionDialogError` ref (see that function's updated doc comment in ApprovalDetailView.vue) —
+    // so this test now asserts NO toast and an inline `approval-action-dialog-error` alert instead.
+    // The POLICY-denial branch is UNCHANGED (still toasts + closes) — proved by the `DENIAL_VERBS`
+    // loop and the transfer-specific WIRING test above, neither of which this edit touches.
     const { ElMessage } = await import('element-plus')
     const errorSpy = vi.spyOn(ElMessage, 'error').mockImplementation(() => undefined as never)
     try {
@@ -604,7 +627,8 @@ describe('Lock-5 §2.3 residual repair — a policy denial says so, and stops in
 
       const dialog = container!.querySelector('[data-el-dialog="转交审批"]') as HTMLElement
       expect(dialog.getAttribute('data-dialog-visible')).toBe('true')
-      expect(errorSpy).toHaveBeenCalledWith('目标用户不存在')
+      expect(errorSpy).not.toHaveBeenCalled()
+      expect(dialog.querySelector('[data-testid="approval-action-dialog-error"]')?.textContent).toBe('目标用户不存在')
     } finally {
       errorSpy.mockRestore()
     }
@@ -674,11 +698,12 @@ describe('raw-id-exposure-fix (20260819) — the 减签 picker never renders a r
     app = createApp(Host)
     for (const name of [
       'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
-      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElAlert',
+      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag',
     ]) {
       app.component(name, stub(name))
     }
     app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
     app.component('ElPopconfirm', ElPopconfirm)
     app.component('ElDialog', ElDialog)
     app.component('ElInput', ElInput)
@@ -880,11 +905,12 @@ describe('Lock-5 CR-3 (detail dialog) — the comment requirement derives from t
     app = createApp(Host)
     for (const name of [
       'ElDivider', 'ElEmpty', 'ElTable', 'ElTableColumn', 'ElTimeline', 'ElTimelineItem',
-      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag', 'ElAlert',
+      'ElForm', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElTag',
     ]) {
       app.component(name, stub(name))
     }
     app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
     app.component('ElPopconfirm', ElPopconfirm)
     app.component('ElDialog', ElDialog)
     app.component('ElInput', ElInput)
