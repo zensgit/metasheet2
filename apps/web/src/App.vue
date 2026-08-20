@@ -58,7 +58,7 @@
           </select>
         </label>
         <template v-if="isLoggedIn">
-          <span v-if="accountEmail" class="nav-user">{{ accountEmail }}</span>
+          <span v-if="accountEmail" class="nav-user" :title="accountEmail">{{ accountEmailDisplay }}</span>
           <router-link to="/settings" class="nav-link">{{ navLabels.mySessions }}</router-link>
           <button class="nav-link nav-link--button" type="button" @click="logout">{{ navLabels.signOut }}</button>
         </template>
@@ -81,6 +81,7 @@ import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
+import { middleEllipsis } from './utils/middleEllipsis'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
@@ -182,6 +183,12 @@ const accountEmail = computed(() => {
   void route.fullPath
   return getAccessSnapshot().email
 })
+
+// The header keeps this narrow (nav-user's max-width); a plain end-ellipsis hides the
+// suffix that actually distinguishes long account identifiers (e.g. 'synth-w4w7-…' for
+// every synth-* account). Keep both ends visible instead — the full value is still on the
+// title attribute above.
+const accountEmailDisplay = computed(() => middleEllipsis(accountEmail.value))
 
 async function logout(): Promise<void> {
   const token = getToken()

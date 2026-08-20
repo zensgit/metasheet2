@@ -2,6 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App as VueApp, type Component } from 'vue'
 import App from '../src/App.vue'
 import { setMultitableApiErrorLocaleResolver } from '../src/multitable/api/client'
+import { middleEllipsis } from '../src/utils/middleEllipsis'
+
+function fakeJwt(payload: Record<string, unknown>): string {
+  const base64url = (input: string): string =>
+    Buffer.from(input, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  const header = base64url(JSON.stringify({ alg: 'none', typ: 'JWT' }))
+  const body = base64url(JSON.stringify(payload))
+  return `${header}.${body}.signature`
+}
 
 const mocks = vi.hoisted(() => ({
   route: {
@@ -213,5 +222,93 @@ describe('App guest bootstrap', () => {
       expect(window.localStorage.getItem(key)).toBeNull()
     }
     expect(assign).toHaveBeenCalledWith('/login')
+  })
+})
+
+describe('App top-bar account identity display', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    mocks.route.path = '/attendance'
+    mocks.route.fullPath = '/attendance'
+    mocks.route.meta = {}
+    mocks.loadProductFeatures.mockResolvedValue(undefined)
+    mocks.fetchPlugins.mockResolvedValue(undefined)
+    mocks.getApiBase.mockReturnValue('https://api.example.com')
+    window.localStorage.clear()
+    globalThis.fetch = vi.fn(async () => new Response('{}', { status: 200 })) as typeof fetch
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    setMultitableApiErrorLocaleResolver(undefined)
+    window.localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  async function mountApp(): Promise<HTMLDivElement> {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(App as Component)
+    app.component('router-view', { render: () => h('div') })
+    app.component('router-link', {
+      props: ['to'],
+      render() {
+        return h('a', { href: this.$props.to }, this.$slots.default ? this.$slots.default() : [])
+      },
+    })
+    app.mount(container)
+    for (let i = 0; i < 4; i += 1) {
+      await Promise.resolve()
+      await nextTick()
+    }
+    return container
+  }
+
+  it('carries the FULL account name on title and keeps the distinguishing tail visible for a long name', async () => {
+    const longEmail = 'synth-w4w7-9f2ab61c@example.com'
+    const token = fakeJwt({ email: longEmail })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    const navUser = el.querySelector('.nav-user') as HTMLElement | null
+    expect(navUser).toBeTruthy()
+
+    // Full value must be recoverable regardless of visible truncation.
+    expect(navUser?.getAttribute('title')).toBe(longEmail)
+
+    // The visible text must retain the distinguishing tail — the exact truncation shape
+    // is middleEllipsis's own contract (tests/middleEllipsis.spec.ts); here we assert the
+    // wiring: App renders whatever middleEllipsis produces for this value, not the raw
+    // (head-only-visible) string.
+    expect(navUser?.textContent).toBe(middleEllipsis(longEmail))
+    expect(navUser?.textContent).not.toBe(longEmail)
+    expect(navUser?.textContent?.endsWith(longEmail.slice(-10))).toBe(true)
+  })
+
+  it('renders a short account name unchanged, with title still present', async () => {
+    const shortEmail = 'a@b.io'
+    const token = fakeJwt({ email: shortEmail })
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    const navUser = el.querySelector('.nav-user') as HTMLElement | null
+    expect(navUser?.getAttribute('title')).toBe(shortEmail)
+    expect(navUser?.textContent).toBe(shortEmail)
+  })
+
+  it('renders nothing when there is no account email (no title, no element)', async () => {
+    const token = fakeJwt({}) // no email claim
+    window.localStorage.setItem('auth_token', token)
+    window.localStorage.setItem('jwt', token)
+
+    const el = await mountApp()
+    expect(el.querySelector('.nav-user')).toBeNull()
   })
 })
