@@ -1007,7 +1007,8 @@ function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string
 // this fix removed. Whether that is exploitable end-to-end depends on whether its 4 consuming
 // flows (transfer / add-sign / fill-form user field / delegation delegatee) each enforce
 // identifiability independently server-side -- NOT verified by this PR, which only touches the
-// requester_choice path (this file + ApprovalProductService.ts's validateAndFreezeRequesterChoices).
+// requester_choice path (this file only, frontend-side; the backend identifiability arm was
+// withdrawn -- it contradicted the RATIFIED Lock-1 §K2 create-time contract, see PR #5043 body).
 // Flagged as a candidate follow-up, deliberately not expanded into this diff.
 function isChoiceOptionUnidentifiable(chooser: RequesterChoiceChooser, option: ApprovalDirectoryUser): boolean {
   return !choiceConfirmedNames[chooser.nodeKey]?.[option.id]?.trim()
