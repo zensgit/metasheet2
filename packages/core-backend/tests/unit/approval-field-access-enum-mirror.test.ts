@@ -445,24 +445,37 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       designed to. v4 closes it directly: every file that currently carries N complete clusters is
   //       pinned to exactly N, so a brand-new complete duplicate (N+1) reds immediately instead of
   //       waiting for it to later go stale.
-  //   (h) VUE TEMPLATE MARKUP (MECHANISM FIX v3) — `declarationBoundaries` deliberately derives NO
-  //       boundaries inside Vue TEMPLATE content (see the DECLARATION BOUNDARIES discussion above):
-  //       that permissiveness is what keeps FormView.vue's `hidden`+`required` pair (a `<div>`'s class
-  //       binding and a NESTED `<label>`'s, two different elements) and TemplateAuthoringView.vue's
-  //       by-design three-option list clustering correctly. The SAME permissiveness means v3's
-  //       per-unit gate is INERT inside template markup: every individual `<el-option value="…">` (or
-  //       similar) tag naturally carries exactly ONE tracked word, so no template-markup unit can ever
-  //       independently reach the 2-member threshold the gate keys off, and R7-style absorption is
-  //       therefore UNCLOSED there. Verified live (own-devised probe, not one of the reported R7
-  //       shapes): three `<el-option value="editable|readonly|hidden">` lines plus an unrelated
-  //       `<span data-state="required">` within the window, appended to an ALREADY-listed file
-  //       (`MetaSheetPermissionManager.vue`, far from its own existing clusters) — **43 passed, no
-  //       failure**; the new complete cluster is silent, caught by neither the per-cluster test (it is
-  //       complete) nor the file-list test (the file was already expected). Closing this would need
-  //       parsing actual tag nesting (treating a parent element's subtree as the unit), a materially
-  //       larger change than the cheap regex boundaries used elsewhere in this mechanism, and was not
-  //       attempted this round — recorded here rather than left implicit or covered by an unqualified
-  //       claim.
+  //   (h) VUE TEMPLATE MARKUP (MECHANISM FIX v3, NARROWED by v4) — `declarationBoundaries`
+  //       deliberately derives NO boundaries inside Vue TEMPLATE content (see the DECLARATION
+  //       BOUNDARIES discussion above): that permissiveness is what keeps FormView.vue's
+  //       `hidden`+`required` pair (a `<div>`'s class binding and a NESTED `<label>`'s, two different
+  //       elements) and TemplateAuthoringView.vue's by-design three-option list clustering correctly.
+  //       The SAME permissiveness means v3's per-unit gate is INERT inside template markup: every
+  //       individual `<el-option value="…">` (or similar) tag naturally carries exactly ONE tracked
+  //       word, so no template-markup unit can ever independently reach the 2-member threshold the
+  //       gate keys off. The ORIGINAL live reproduction (own-devised probe, not one of the six
+  //       reported R7 reproductions) — three `<el-option value="editable|readonly|hidden">` lines plus
+  //       an unrelated `<span data-state="required">` within the window, appended to an ALREADY-listed
+  //       file (`MetaSheetPermissionManager.vue`, far from its own existing clusters) — chained through
+  //       single-member units into its OWN NEW complete four-member cluster, and is now CAUGHT: v4's
+  //       per-file complete-count pin does not care WHY a file's complete-cluster count grew, only
+  //       THAT it did, so this specific probe now reds `MetaSheetPermissionManager.vue carries 1
+  //       complete NodeFieldAccess copies, expected 0` (re-verified against this head). What v4 does
+  //       NOT catch, and what remains the true, narrower continuation of (h): an INCOMPLETE stale copy
+  //       written in template markup that ABSORBS INTO an ALREADY-COUNTED complete Vue-template
+  //       carrier (extending that ONE cluster's byte span rather than contributing an independent NEW
+  //       one) — v4 pins a per-file COUNT of complete clusters, not their identity or span, so a
+  //       merge that leaves the count unchanged is invisible to it exactly as it is to v3's boundary
+  //       gate. This requires a real, hand-written COMPLETE four-member carrier living in Vue template
+  //       markup for the stale copy to merge into — none exists in the tree today
+  //       (`ApprovalGraphNodeConfigEditor.vue`'s `<el-option>` list, the one that used to, was
+  //       converted to import the canonical array in round 2) — so nothing currently evades this
+  //       narrower gap either, but a NEW template-markup carrier written in the future, with a stale
+  //       copy planted to merge into it rather than beside it, still would. Closing this fully would
+  //       need parsing actual tag nesting (treating a parent element's subtree as the unit), a
+  //       materially larger change than the cheap regex boundaries used elsewhere in this mechanism,
+  //       and was not attempted this round — recorded here rather than left implicit or covered by an
+  //       unqualified claim.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
   // R1 found), as of v3, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key carrier,
   // and, as of v4, to a brand-new COMPLETE duplicate of an existing carrier appearing in an
