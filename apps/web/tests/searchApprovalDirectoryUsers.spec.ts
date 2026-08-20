@@ -427,4 +427,29 @@ describe('directoryResolve (the shared resolver cache)', () => {
     expect(apiFetchMock).toHaveBeenCalledTimes(1)
     expect(getResolvedUserName('u1')).toBe('Alice')
   })
+
+  // In-flight dedup, >50-id case (2026-08-21, gate follow-up on the fix above): an earlier
+  // revision of `inFlightUserIds` marked/cleared PER GROUP (per RESOLVE_CHUNK-sized chunk) rather
+  // than for the whole flush -- which reopened the exact gap the fix above closes, just shifted
+  // from cross-CALL to cross-GROUP: while group 1 (ids 0..49) is mid-backoff, every id in group 2
+  // (ids 50+) was in NEITHER `resolvedUserNames` NOR `pendingUserIds` NOR (with the per-group
+  // bug) `inFlightUserIds`, so a second `ensureUserNamesResolved` call for a group-2 id during
+  // group 1's retry sequence would start its own duplicate chain for that id. Discriminating
+  // construction: 60 ids (2 chunks of RESOLVE_CHUNK=50), touch a GROUP-2 id again while GROUP-1
+  // is still mid-backoff -- clean is exactly 6 total calls (3 per group); a surviving per-group
+  // gap would show more.
+  it('a >50-id flush: touching a GROUP-2 id again while GROUP-1 is still mid-backoff does not double-fetch it (6 calls total, not more)', async () => {
+    vi.useFakeTimers()
+    const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockImplementation(async () => jsonResponse({}, { status: 500, ok: false }))
+
+    const ids = Array.from({ length: 60 }, (_, i) => `u${i}`) // group 1 = u0..u49, group 2 = u50..u59
+    ensureUserNamesResolved(ids)
+    await vi.advanceTimersByTimeAsync(150) // group 1's attempt 1 done+failed; mid-backoff before its attempt 2
+    ensureUserNamesResolved(['u55']) // a GROUP-2 id, touched again WHILE group 1 is still retrying
+    await vi.advanceTimersByTimeAsync(5000) // let both groups' retry sequences fully settle
+
+    expect(apiFetchMock, '3 attempts for group 1 + 3 for group 2 = 6; a surviving per-group gap would double-fetch u55').toHaveBeenCalledTimes(6)
+    expect(getResolvedUserName('u55'), 'permanent failure stays fail-closed').toBeNull()
+  })
 })

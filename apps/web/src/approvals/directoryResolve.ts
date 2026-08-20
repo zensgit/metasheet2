@@ -137,13 +137,23 @@ async function flushUsers(): Promise<void> {
   pendingUserIds.clear()
   userFlushScheduled = false
   if (ids.length === 0) return
-  for (const group of chunk(ids, RESOLVE_CHUNK)) {
-    // In-flight dedup (see `inFlightUserIds`'s own doc above): marked BEFORE the first `await` in
-    // this group's retry sequence, so there is no gap in which a synchronously-issued second
-    // `ensureUserNamesResolved` for the same id could slip past both this and `pendingUserIds`.
-    // Cleared in `finally` so it is removed no matter which exit path below is taken.
-    for (const id of group) inFlightUserIds.add(id)
-    try {
+  // In-flight dedup (see `inFlightUserIds`'s own doc above): the WHOLE flush's ids are marked
+  // BEFORE the first `await` in the group loop below, and cleared in a single `finally` once
+  // every group has settled -- not per group. Marking only the CURRENT group (an earlier revision
+  // of this fix did exactly that) leaves every id in a LATER, not-yet-reached group unguarded for
+  // the full duration of every EARLIER group's retry sequence -- for a >50-id flush (chunked by
+  // RESOLVE_CHUNK), that is exactly the same class of gap this set exists to close, just shifted
+  // to cross-group instead of cross-call. Marking the whole flush's ids up front trades a
+  // narrower, real gap for a bounded, deliberate one: an id whose OWN group already concluded
+  // (successfully or not) is not retryable by a fresh `ensureUserNamesResolved` call until every
+  // OTHER group in this same flush also concludes -- at most a few backoff cycles' worth of
+  // delay, never unbounded, and `resolvedUserNames`/`pendingUserIds` are unaffected (a
+  // successfully-resolved id short-circuits `ensureUserNamesResolved` before it ever reaches the
+  // `inFlightUserIds` check, so this only widens a RETRY-availability window, never masks an
+  // already-known answer).
+  for (const id of ids) inFlightUserIds.add(id)
+  try {
+    for (const group of chunk(ids, RESOLVE_CHUNK)) {
       let resolved: Array<{ id: string; name: string }> | null = null
       let terminal = false
       for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt += 1) {
@@ -177,9 +187,11 @@ async function flushUsers(): Promise<void> {
         // Every in-place retry attempt failed transiently. Leave every id in this group ABSENT
         // from resolvedUserNames (not a confirmed miss) so a LATER `ensureUserNamesResolved` call
         // -- e.g. the user re-fetching detail/history via an unrelated action -- still retries it
-        // fresh (the `finally` below has already released it from `inFlightUserIds` by the time
-        // that later call runs). Rendering stays fail-closed regardless -- getResolvedUserName
-        // treats "absent" and "null" identically -- only the RETRY behavior differs.
+        // fresh once the whole-flush `finally` below has released it from `inFlightUserIds` (after
+        // every OTHER group in this SAME flush has also settled -- see that finally's own doc for
+        // why this is whole-flush, not per-group). Rendering stays fail-closed regardless --
+        // getResolvedUserName treats "absent" and "null" identically -- only the RETRY behavior
+        // differs.
         continue
       }
       const found = new Set<string>()
@@ -191,9 +203,12 @@ async function flushUsers(): Promise<void> {
       // A successful response (the server answered, no failure was thrown) naming none of these
       // ids is a CONFIRMED miss -- cache null so this id is not repeatedly re-fetched forever.
       for (const id of group) if (!found.has(id)) resolvedUserNames[id] = null
-    } finally {
-      for (const id of group) inFlightUserIds.delete(id)
     }
+  } finally {
+    // Whole-flush release (see the marking comment above): every id from this flush, not just
+    // the group last processed -- runs once every group has settled (or thrown), regardless of
+    // outcome.
+    for (const id of ids) inFlightUserIds.delete(id)
   }
 }
 
