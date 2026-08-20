@@ -129,6 +129,31 @@ L4/L5: one link-in concurrent-write scenario confirming no deadlock.
   `packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts`
   (P22 fence availability + deadlock-freedom).
 
+#### 3.5a Second link-in shape: an FK **into a platform-auth table** (found 2026-08-20)
+
+The scenario above exercises the multitable-side shape (`meta_links` → drill-sheet records). A
+**different** instance of the same residual class exists on the platform side and must be drilled
+too, because it touches a table the ladder's own triggers sit on:
+
+`approval_usable_member_groups.created_by` carries an FK to **`users.id`**
+(`packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts`).
+Inserting into that table therefore takes a `KEY SHARE` lock on a `users` row — and `users` is one
+of the eight platform-auth tables whose recovery-authority trigger is ENABLED from L1 onward. That
+is exactly the ladder §4 shape (FK `KEY SHARE` vs row-level `FOR UPDATE`), reached through a
+**different, non-multitable** write path that the 3.5 scenario does not cover.
+
+- [ ] While a revert/reset is executing (so recovery holds its exclusive lease and the authority
+  triggers are live), drive an approval write that inserts into `approval_usable_member_groups`
+  (i.e. a member-group usability change on the canary org) in a loop.
+- [ ] Expected: same criterion as 3.5 — the approval writer may see a transient retryable 409/busy,
+  but **Q4 `deadlocks` delta = 0**; neither side deadlocks.
+- [ ] ⛔ STOP on any nonzero delta. Note in the drill record which of 3.5 / 3.5a produced it — they
+  are different lock shapes and a fix for one does not imply the other.
+- [ ] Applicability check first: this table only exists once the approval migration above is
+  applied. If the target host is behind on it, record 3.5a as **NOT RUN (table absent)** rather
+  than as passed — an absent table cannot deadlock, and reading that as a pass would be exactly
+  the empty-read trap.
+
 ### 3.6 Trash / link state check
 
 - [ ] Paste the canary sheet ids into Q8's `EDIT ME` list and run it.

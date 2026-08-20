@@ -21,6 +21,7 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
       - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
       # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
@@ -54,6 +55,7 @@ on:
       - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
       - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260818120000_create_approval_usable_member_groups.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
       # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
