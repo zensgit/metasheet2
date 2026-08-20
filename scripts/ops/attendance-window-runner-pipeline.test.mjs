@@ -1094,6 +1094,17 @@ function assertSoakContract({ remote, workflow }) {
   ]) {
     assert.ok(slices.status.includes(label), `soak-status must run the monitoring-pack ${label} read`)
   }
+  // Q17/Q18 are pinned at their CALL SITES (gate #5041 P2): the bare label check above is
+  // satisfied by the section comment alone, so deleting both reads stayed green. These match the
+  // `soak_status_rows "[Qn] …"` invocation text and the load-bearing predicates.
+  assert.match(slices.status, /soak_status_rows "\[Q17\] synthetic-account attendance_records by ACTUAL org_id/,
+    'Q17 read must be invoked (call site, not just the section comment)')
+  assert.match(slices.status, /soak_status_rows "\[Q18\] tester \(u01\) attendance_records rows/,
+    'Q18 read must be invoked (call site, not just the section comment)')
+  assert.match(slices.status, /GROUP BY r\.org_id/, 'Q17 must group by the ACTUAL org_id (org-agnostic attribution)')
+  assert.match(slices.status, /to_jsonb\(r\) - 'id' - 'user_id' - 'org_id'/, 'Q18 must stay column-agnostic via to_jsonb')
+  assert.match(slices.status, /u\.username LIKE '\$\{SOAK_USER_PREFIX\}%'/, 'Q17 must key on SOAK_USER_PREFIX, not a hardcoded prefix')
+  assert.match(slices.status, /u\.username LIKE '\$\{SOAK_USER_PREFIX\}%-u01'/, 'Q18 must key on SOAK_USER_PREFIX, not a hardcoded prefix')
   assert.ok(slices.status.includes('w7GroupShadowCompare'), 'W7-2 counters must scope on the writer-controlled marker')
   // Post-merge review P1: the W4-side operations join is STRUCTURALLY EMPTY for a
   // legacy_only org, so C1/C2/C3 evidence must reach the control arm through its own

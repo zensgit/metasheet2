@@ -2513,9 +2513,9 @@ action_soak_status() {
   # the blind spot); Q18 dumps the tester accounts' (u01) rows column-agnostically (to_jsonb) so a
   # schema rename can't silently blank the read. Read-only; no alert semantics (disposition by hand).
   soak_status_rows "[Q17] synthetic-account attendance_records by ACTUAL org_id, last 96h (tail attribution; rows outside the soak orgs = default-org fallthrough)" \
-    "SELECT r.org_id, count(*)::int AS n, min(r.work_date)::text AS first_work_date, max(r.work_date)::text AS last_work_date FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.email LIKE '%@w4w7-soak.synthetic' AND r.updated_at >= now() - interval '96 hours' GROUP BY r.org_id ORDER BY n DESC;"
+    "SELECT r.org_id, count(*)::int AS n, min(r.work_date)::text AS first_work_date, max(r.work_date)::text AS last_work_date FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE '${SOAK_USER_PREFIX}%' AND r.updated_at >= now() - interval '96 hours' GROUP BY r.org_id ORDER BY n DESC;"
   soak_status_rows "[Q18] tester (u01) attendance_records rows, last 96h, column-agnostic (to_jsonb minus ids)" \
-    "SELECT u.username, r.org_id, (to_jsonb(r) - 'id' - 'user_id' - 'org_id')::text AS row_json FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE 'synth-w4w7-%-u01' AND r.updated_at >= now() - interval '96 hours' ORDER BY u.username, r.work_date;"
+    "SELECT u.username, r.org_id, (to_jsonb(r) - 'id' - 'user_id' - 'org_id')::text AS row_json FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE '${SOAK_USER_PREFIX}%-u01' AND r.updated_at >= now() - interval '96 hours' ORDER BY u.username, r.work_date;"
 
   # --- [Q8] 8-cell request-snapshot defect report — the EXISTING function, never raw SQL --
   # (W8-RECONCILIATION-PACK Q8 rule: re-deriving classifyAttendanceRequestSnapshotDefectsV1
