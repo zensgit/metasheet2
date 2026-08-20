@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { formSchemaSignature } from '../src/approvals/formDraft'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -86,6 +87,29 @@ vi.mock('../src/composables/useAuth', () => ({
 // keeps every other export (dispatchAction, createApproval, ...) real; this suite's OTHER tests
 // never render a `user`-type field so this mock is inert for them.
 const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+// Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): the K2
+// requester_choice suite's `searchChoiceCandidates` unconditionally calls
+// `ensureUserNamesResolved`, which (through the shared `directoryResolve.ts` module singleton)
+// calls this REAL, unmocked `resolveApprovalDirectoryUsers` against a real `fetch` -- which always
+// fails under jsdom (no server). Left real, EVERY test in that describe block that fires a picker
+// search schedules a genuine `setTimeout(..., 300)` backoff retry through an unawaited
+// `flushUsers()` promise chain that is NOT tied to the test's own lifecycle -- a probe confirmed
+// the timer is not even created yet when the NEXT test's `beforeEach` runs (so
+// `__resetResolvedDirectoryNamesForTests()` alone cannot cancel it: it gets scheduled fresh,
+// mid-flight, during that next test). Mocked here to resolve immediately so the retry/backoff
+// path is never entered at all -- the fix is "never schedule the timer", not "cancel it after the
+// fact". Confirmed by reachability, checked at the granularity of what is actually mocked below
+// (`resolveApprovalDirectoryUsers`, not merely `ensureUserNamesResolved`): across all of
+// `apps/web/src`, `resolveApprovalDirectoryUsers` is called from exactly one place --
+// `directoryResolve.ts`'s own `flushUsers` -- which is reachable only through
+// `ensureUserNamesResolved`, whose only call site in `ApprovalNewView.vue` is
+// `searchChoiceCandidates` (`:1046`). No other describe block in this file mounts a component that
+// imports `ensureUserNamesResolved` (`ApprovalDetailView`/`ApprovalCenterDetailPane`/
+// `MyDelegationView`/`TemplateDetailView` are never referenced here); the `ApprovalUserPicker`
+// describe block below mounts a DIFFERENT component that only calls `searchApprovalDirectoryUsers`
+// (already mocked separately, above) and never imports `directoryResolve.ts` at all. So mocking
+// `resolveApprovalDirectoryUsers` file-wide cannot change behavior anywhere else in this file.
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 // B2-13 — the resubmit-prefill suite mocks the source-instance fetch; every other describe block
 // in this file never sets `?fromInstance=`, so `applyResubmitPrefill` short-circuits before ever
 // calling this, leaving it unused (and unconfigured) for them.
@@ -95,6 +119,7 @@ vi.mock('../src/approvals/api', async () => {
   return {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
     getApproval: (...args: unknown[]) => getApprovalSpy(...args),
   }
 })
@@ -1586,8 +1611,22 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rc_1' }))
     searchApprovalDirectoryUsersSpy.mockReset()
     searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'u_alpha', name: 'Alpha', email: 'a@x.test' }])
+    // Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): two separate
+    // mechanisms, two separate jobs -- neither one alone is sufficient.
+    //   1. `resolveApprovalDirectoryUsersSpy` (declared above) keeps `ensureUserNamesResolved`'s
+    //      indirect call off the real transient-retry/backoff path, so no `setTimeout(..., 300)`
+    //      is ever SCHEDULED by this suite in the first place. This is the one that actually
+    //      matters: a probe proved the timer usually does not exist yet when THIS beforeEach
+    //      runs (the unawaited `flushUsers()` chain from the previous test schedules it a couple
+    //      of milliseconds LATER, inside the next test) -- so step 2 below cannot reach it.
+    //   2. `__resetResolvedDirectoryNamesForTests()` clears the module-singleton name cache
+    //      (`resolvedUserNames`/`pendingUserIds`) and cancels any timer that IS already pending
+    //      at this exact moment -- cache-state hygiene, and the same call every other consuming
+    //      spec makes, but not what closes the leak on its own.
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     messageWarningSpy.mockClear()
     pushSpy.mockClear()
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })

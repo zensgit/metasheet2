@@ -69,14 +69,37 @@ const RESOLVE_CHUNK = 50
 // a real cross-test timer leak: this module is a session-lifetime singleton shared across every
 // mounted test in the same spec file, and a background real timer left running past a test's own
 // microtask-flush window would fire during a LATER, unrelated test and silently pollute its
-// apiFetch call-count assertions. That objection is answered here, not sidestepped: every
-// `setTimeout` this module schedules is tracked in `pendingRetryTimeouts`, and
-// `__resetResolvedDirectoryNamesForTests` -- already REQUIRED in every consuming spec's
-// `beforeEach`, per its own doc below -- cancels every one of them before the next test runs, so a
-// delayed retry scheduled by one test can never fire into a LATER, unrelated one. Production code
-// never calls that reset function, so this cancellation path exists purely for test isolation and
-// changes no production behavior. Tests drive this with `vi.useFakeTimers()` +
-// `vi.advanceTimersByTimeAsync` rather than real waits.
+// apiFetch call-count assertions. Two DIFFERENT mechanisms are involved, and they are NOT
+// interchangeable:
+//   1. Every `setTimeout` this module schedules is tracked in `pendingRetryTimeouts`, and
+//      `__resetResolvedDirectoryNamesForTests` cancels every timer that IS ALREADY PENDING at the
+//      moment it runs. A spec that imports this module BY NAME (e.g.
+//      `searchApprovalDirectoryUsers.spec.ts`, `approval-e2e-permissions.spec.ts`) calls it in
+//      `beforeEach`; a spec that only reaches `ensureUserNamesResolved` INDIRECTLY, through a
+//      mounted component (e.g. `approvalNewView.spec.ts`'s K2 requester_choice suite), does NOT
+//      get this for free and must add the same call itself. A prior revision of this comment
+//      claimed the reset was "already required in every consuming spec's beforeEach"; that was
+//      false for every spec in the second category.
+//   2. The reset ALONE IS NOT SUFFICIENT for a spec whose `resolveApprovalDirectoryUsers` call is
+//      real (unmocked) and genuinely fails: `flushUsers()` is an unawaited async chain with no
+//      lifecycle tie to the test that started it, so its `setTimeout` call can happen AFTER the
+//      test has already ended and the NEXT test's `beforeEach` reset has already run -- there is
+//      nothing yet in `pendingRetryTimeouts` for the reset to cancel. Verified empirically with a
+//      two-test timer-tagging probe against `approvalNewView.spec.ts`'s K2 suite: at the end of
+//      the test that triggered the resolve, ZERO timers had been scheduled yet; the 300ms timer
+//      was scheduled a couple of milliseconds INTO the next test, and fired there, with the reset
+//      already having run and found nothing to cancel. The fix for that suite was NOT "cancel the
+//      timer" but "never schedule it" -- `resolveApprovalDirectoryUsers` is now mocked to resolve
+//      immediately there, so the retry/backoff path is never entered. The reset call is kept for
+//      cache-state hygiene (matching every other consuming spec) but is not what closes that leak.
+// Production code never calls the reset function, so mechanism 1 exists purely for test isolation
+// and changes no production behavior. `searchApprovalDirectoryUsers.spec.ts` drives the delay
+// directly with `vi.useFakeTimers()` + `vi.advanceTimersByTimeAsync`, which sidesteps this
+// altogether (no real timer is ever pending across a test boundary under fake timers). Any OTHER
+// spec that mounts a directoryResolve-consuming component with a REAL, unmocked
+// `resolveApprovalDirectoryUsers` and does not itself guarantee success (or a terminal 401/403,
+// which never retries) is exposed to the same class of leak this one was; that has not been swept
+// across every consuming spec and should not be assumed closed elsewhere.
 const RESOLVE_MAX_ATTEMPTS = 3
 // Delay BEFORE each retry attempt (attempt 1 always fires immediately -- this array holds
 // RESOLVE_MAX_ATTEMPTS - 1 entries, indexed by `attempt - 2`). Front-loaded (short, then longer)
