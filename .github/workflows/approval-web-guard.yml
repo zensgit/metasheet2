@@ -305,6 +305,10 @@ on:
       - 'apps/web/src/approvals/memberActionErrorCopy.ts'
       - 'apps/web/src/approvals/cardDecision.ts'
       - 'apps/web/tests/approval-member-bar-operation-policy.spec.ts'
+      # P5-C-1 (2026-08-20, scout brief 'P5-C IMPLEMENTATION BRIEF'): member-action dialog
+      # grammar unification — shared copy module + its mounted coverage.
+      - 'apps/web/src/approvals/memberActionDialogGrammar.ts'
+      - 'apps/web/tests/approval-member-action-dialog-grammar.spec.ts'
       # P7-R1 (FAIL-0/FAIL-7): 批量驳回 (batch reject) core module — bounded-concurrency fan-out,
       # per-row isolation, {succeeded, failed} failure manifest. Had no path entry before this fix,
       # so an edit to either file never triggered this guard.
@@ -582,6 +586,10 @@ on:
       - 'apps/web/src/approvals/memberActionErrorCopy.ts'
       - 'apps/web/src/approvals/cardDecision.ts'
       - 'apps/web/tests/approval-member-bar-operation-policy.spec.ts'
+      # P5-C-1 (2026-08-20, scout brief 'P5-C IMPLEMENTATION BRIEF'): member-action dialog
+      # grammar unification — shared copy module + its mounted coverage.
+      - 'apps/web/src/approvals/memberActionDialogGrammar.ts'
+      - 'apps/web/tests/approval-member-action-dialog-grammar.spec.ts'
       # P7-R1 (FAIL-0/FAIL-7): same set as the pull_request block above.
       - 'apps/web/src/approvals/useApprovalBatchActions.ts'
       - 'apps/web/tests/useApprovalBatchActions.spec.ts'

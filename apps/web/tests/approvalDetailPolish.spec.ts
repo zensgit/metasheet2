@@ -284,6 +284,38 @@ describe('ApprovalDetailView — B3-13 curated FE polish', () => {
 
       expect(q(container!, 'approval-revoke-button')).toBeNull()
     })
+
+    // P5-C-1 (member-action dialog grammar unification, item 3): `handleRevoke`'s bare
+    // `catch { ElMessage.error('撤回失败，请重试') }` used to discard the server's OWN message —
+    // every failure rendered the same fixed copy no matter what the server actually said. It now
+    // reuses `dialogErrorMessage` (the same helper `submitAction`/`submitComment` already use),
+    // which prefers the thrown error's real message. Mutation: revert `handleRevoke`'s catch to
+    // the bare fixed string and this test reds (the fixed copy is a SUBSTRING of the real message
+    // below, so a broken fallback would make this assertion fail on the exact server text).
+    it('撤回 failure surfaces the SERVER\'s own message, not a fixed generic copy', async () => {
+      mockCurrentUserId.value = 'user_99'
+      mockActiveApproval.value = baseInstance({ policy: { allowRevoke: true } })
+      executeActionSpy.mockRejectedValueOnce(new Error('该审批已被他人处理，无法撤回'))
+      await mountView()
+
+      q(container!, 'popconfirm-confirm-trigger')!.click()
+      await flushUi()
+
+      expect(document.body.textContent).toContain('该审批已被他人处理，无法撤回')
+      expect(document.body.textContent).not.toContain('撤回失败，请重试')
+    })
+
+    it('撤回 failure with a message-less throw still falls back to the fixed copy (never a blank toast)', async () => {
+      mockCurrentUserId.value = 'user_99'
+      mockActiveApproval.value = baseInstance({ policy: { allowRevoke: true } })
+      executeActionSpy.mockRejectedValueOnce({})
+      await mountView()
+
+      q(container!, 'popconfirm-confirm-trigger')!.click()
+      await flushUi()
+
+      expect(document.body.textContent).toContain('撤回失败，请重试')
+    })
   })
 
   // -------------------------------------------------------------------------
