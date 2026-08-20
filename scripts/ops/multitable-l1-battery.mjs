@@ -1350,12 +1350,16 @@ export async function runBattery({ env = process.env, options } = {}) {
       try {
         const residue = await cleanupAndScan(admin.client, cleanupState.ctx, cleanupState.names)
         evidence.residue = residue
-        lines.push(
-          `  cleanup (early-exit best-effort): ${residue.total} residual row(s) after delete` +
-            (residue.total ? ` — ${residue.remaining.map((r) => `${r.relation}:${r.count}`).join(', ')}` : ''),
-        )
+        // P3-6 (regate): report on stdout via log(), not lines.push, and record the outcome in
+        // evidence — an early-exit that leaves residue must be visible, not silent.
+        log(lines, `  cleanup (early-exit best-effort): ${residue.total} residual row(s) after delete` +
+          (residue.total ? ` — ${residue.remaining.map((r) => `${r.relation}:${r.count}`).join(', ')}` : ''))
+        if (residue.total > 0 || residue.delete_errors.length > 0) {
+          evidence.failures.push({ phase: 'cleanup', failure: 'early_exit_residue', reason: `${residue.total} residual rows after an early-exit cleanup` })
+        }
       } catch (cleanupError) {
-        lines.push(`  WARNING: early-exit cleanup failed (${cleanupError?.name ?? 'Error'}) — residue may remain`)
+        log(lines, `  WARNING: early-exit cleanup failed (${cleanupError?.name ?? 'Error'}) — residue may remain`)
+        evidence.failures.push({ phase: 'cleanup', failure: 'early_exit_cleanup_failed', reason: cleanupError?.name ?? 'Error' })
       }
     }
     await lease.close().catch(() => {})
@@ -1396,11 +1400,11 @@ async function cleanupAndScan(client, ctx, names) {
     ['user_sessions', 'DELETE FROM user_sessions WHERE user_id = $1', [ctx.userId]],
     ['user_login_aliases', 'DELETE FROM user_login_aliases WHERE user_id = $1', [ctx.userId]],
     // P1-1 (gate): phase-1 `POST /api/admin/users` writes user_invites via invite-ledger.ts.
-    // That table has NO FK cascade from users, and its rows carry the invited email (stamped) but
-    // a server-minted id — so both the stamp axis (email) and the user-id axis reach it. Missing
-    // from the first version of this list, it accumulated one row per run and yet PHASE 5 printed
-    // CLEAN. Deleted by stamped email OR by invited_by = the battery user.
-    ['user_invites', "DELETE FROM user_invites WHERE email LIKE $1 OR invited_by = $2", [like, ctx.userId]],
+    // That table has NO FK cascade from users, and it accumulated one row per run while PHASE 5
+    // printed CLEAN. Two genuinely independent keys reach it: the stamped invited email, and
+    // user_invites.user_id = the created user's id (NOT invited_by, which holds the ADMIN caller —
+    // P2-3 corrected that dead disjunct).
+    ['user_invites', 'DELETE FROM user_invites WHERE email LIKE $1 OR user_id = $2', [like, ctx.userId]],
     ['users', 'DELETE FROM users WHERE id = $1', [ctx.userId]],
   ]
   // A swallowed delete error is indistinguishable from a successful delete, and would only be
@@ -1434,7 +1438,7 @@ async function cleanupAndScan(client, ctx, names) {
     ['user_orgs', 'SELECT COUNT(*)::int AS c FROM user_orgs WHERE user_id = $1', [ctx.userId]],
     // P1-1 (gate): the relation the CLEAN verdict was blind to. Scanned by the same two axes it is
     // deleted by, so a surviving invite row now reds PHASE 5 instead of being invisible.
-    ['user_invites', 'SELECT COUNT(*)::int AS c FROM user_invites WHERE email LIKE $1 OR invited_by = $2', [like, ctx.userId]],
+    ['user_invites', 'SELECT COUNT(*)::int AS c FROM user_invites WHERE email LIKE $1 OR user_id = $2', [like, ctx.userId]],
   ]
   const remaining = []
   const scope = []

@@ -402,6 +402,40 @@ test('a fully armed posture IS armed — for every tgenabled letter that means "
 })
 
 // ---------------------------------------------------------------------------
+// P2-4 (regate): guard the three round-two behavioural fixes. Before these, reverting any of the
+// fixes left the required contract lane 39/39 green — the fixes were unobserved. Each test below
+// reds if its fix is reverted, so the required lane now observes the properties this round secured.
+// ---------------------------------------------------------------------------
+
+test('P2-4: REPLICA (tgenabled=R) must NOT count as armed — reverting P2-1 reds here', () => {
+  // 'R' fires only under session_replication_role=replica, never for an ordinary app write, so a
+  // DB with an authority trigger at 'R' is NOT at L1 posture. Re-adding 'R' to the set reverts P2-1.
+  assert.equal(ENABLED_TRIGGER_STATES.has('R'), false, "tgenabled 'R' (replica-only) must not certify ARMED")
+  assert.equal(ENABLED_TRIGGER_STATES.has('O'), true)
+  assert.equal(ENABLED_TRIGGER_STATES.has('A'), true)
+  const posture = evaluatePosture(postureRows('R'), fakeExpected)
+  assert.equal(posture.armed, false, "a posture of all-'R' triggers must read NOT armed")
+})
+
+test('P2-4: user_invites is on BOTH the delete and scan lists, keyed by user_id — reverting P1-1/P2-3 reds here', () => {
+  // The false-CLEAN relation (P1-1) and its live key (P2-3). Reverting either — dropping the
+  // user_invites entry, or switching the key back to the dead invited_by — reds this test.
+  const deleteStmt = /DELETE FROM user_invites WHERE email LIKE \$1 OR user_id = \$2/
+  const scanStmt = /SELECT COUNT\(\*\)::int AS c FROM user_invites WHERE email LIKE \$1 OR user_id = \$2/
+  assert.match(BATTERY_SOURCE, deleteStmt, 'user_invites must be DELETED by stamped email OR user_id (not invited_by, which holds the admin caller)')
+  assert.match(BATTERY_SOURCE, scanStmt, 'user_invites must be SCANNED by the same two keys it is deleted by')
+  // And the dead key must not reappear on user_invites.
+  assert.doesNotMatch(BATTERY_SOURCE, /user_invites[^;]*invited_by = \$2/, 'invited_by is the admin caller, a dead key for the battery user')
+})
+
+test('P2-4: the early-exit cleanup reports via log() and records residue — reverting P3-6 reds here', () => {
+  // The finally-block best-effort cleanup must be visible on stdout and recorded in evidence, not
+  // silent. Reverting to lines.push / no failure entry reds this.
+  assert.match(BATTERY_SOURCE, /early_exit_residue/, 'an early-exit that leaves residue must record a failure entry')
+  assert.match(BATTERY_SOURCE, /log\(lines, `  cleanup \(early-exit best-effort\)/, 'the early-exit cleanup must report via log(), not lines.push')
+})
+
+// ---------------------------------------------------------------------------
 // 4. Discrimination: the three failure classes must stay three
 // ---------------------------------------------------------------------------
 
