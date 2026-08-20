@@ -5,12 +5,14 @@ import { join, resolve } from 'path'
 /**
  * Lock-7 G-14 (widened by Lock-7B OD-L7B-10, docs/development/approval-lock7b-required-at-node-
  * 20260820.md §0.4/§3) — the hand-mirrored sites of the `NodeFieldAccess` access enum are asserted
- * equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2, further down this
+ * equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2/v3, further down this
  * docstring — the census ALSO scans the trees it walks for any literal co-occurrence of the same
  * four words it does not already know about, so a NEW copy landing in an already-scanned file is
- * caught rather than passing unnoticed, subject to v2's own honestly-stated residual (three concrete
- * gaps, named just above `PARTIAL_CARRIER_ALLOWLIST` below — this is deliberately NOT phrased as an
- * unqualified "any incomplete copy anywhere fails the census" guarantee). These are hand copies —
+ * caught rather than passing unnoticed, subject to the mechanism's own honestly-stated residual
+ * (several concrete gaps, labelled (a)–(g) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
+ * below; deliberately NOT phrased as an unqualified "any incomplete copy anywhere fails the census"
+ * guarantee, and the letter RANGE rather than a transcribed count is what a future edit must keep in
+ * sync — see the note at the top of that list). These are hand copies —
  * the compiler catches none of the drift for most of them; `NODE_FIELD_ACCESS_RANK` (C-3, backend)
  * and `FIELD_ACCESS_LABELS` (`ApprovalGraphNodeConfigEditor.vue`, added by v2) are the two
  * EXCEPTIONS — both are `Record<NodeFieldAccess, …>`, so TypeScript itself fails the build on a
@@ -47,13 +49,35 @@ import { join, resolve } from 'path'
  * evasion. v2 (implemented below, replacing the shape-family scan entirely) drops shape recognition
  * and detects a carrier by LITERAL CO-OCCURRENCE instead: two or more of the four ratified words
  * spelled out as literals (quoted, bare object/YAML key, or bare list/flow item — never as English
- * prose) within a 150-byte proximity window, regardless of what connects them. See the full mechanism
- * docstring immediately above `PARTIAL_CARRIER_ALLOWLIST` below for the window derivation, the
- * preprocessing that excludes comment prose, and the honestly-scoped residual (this is NOT an
- * unconditional "any incomplete copy anywhere fails the census" guarantee — three concrete gaps are
- * named there). `ApprovalGraphNodeConfigEditor.vue`'s field-access option list — R1's live example —
- * was also CONVERTED to import the canonical `NODE_FIELD_ACCESS_VALUES` array instead of hand-writing
- * the four literals, removing that carrier rather than merely allowlisting it.
+ * prose) within a 150-byte proximity window, regardless of what connects them. `ApprovalGraphNodeConfigEditor.vue`'s
+ * field-access option list — R1's live example — was also CONVERTED to import the canonical
+ * `NODE_FIELD_ACCESS_VALUES` array instead of hand-writing the four literals, removing that carrier
+ * rather than merely allowlisting it.
+ *
+ * MECHANISM FIX v3 (2026-08-20, third-round requalification, finding R7): an UNCONDITIONAL
+ * "a cluster may never merge across a declaration boundary" rule was tried FIRST and MEASURED, not
+ * assumed, to be the wrong fix — under it, R1's own B6 shape (`const E = 'editable'`; `const R =
+ * 'required'`; `const H = 'hidden'`; then `new Set([E, R, H, 'readonly'])`, four separate top-level
+ * statements each carrying exactly one tracked word) reduces every occurrence to its own 1-member
+ * cluster, drops the whole file below the 2-member floor, and the file stops being detected as a
+ * carrier at all — strictly WORSE than v2, and a regression this fix is required not to introduce.
+ * v3 (implemented below) instead adds a NARROWER, still-effective gate on top of v2's proximity
+ * window: a third independent gate proved the window, taken alone, was a genuine DEFECT — a STALE
+ * (incomplete) hand copy landing within 150 bytes of any REAL carrier's declaration was unioned into
+ * that carrier's cluster and silently inherited its completeness, with no allowlist involvement at
+ * all, in BOTH directions (above or below) and even for a 2-member fragment; five of the report's six
+ * silent reproductions plus a self-added below-placement variant all RED under the fix below (one
+ * report item, on inspection, turned out to be a DIFFERENT, pre-existing gap — see residual (g) — not
+ * an instance of this one). v3 does NOT widen or narrow the 150-byte window; it adds a SECOND,
+ * independent gate that proximity clustering must also clear: two occurrences may merge across a
+ * declaration/statement boundary only when NEITHER of the two units either side of that boundary is,
+ * on its own, already a 2+-member candidate carrier — permissive enough to keep detecting B6 (chaining
+ * through single-word units is untouched), strict enough that a stale/foreign declaration which
+ * already holds 2+ of the four words by itself can never borrow a neighbour's completeness. See the
+ * full mechanism docstring immediately above `PARTIAL_CARRIER_ALLOWLIST` below for the boundary
+ * derivation and the honestly-scoped residual this leaves (this is NOT an unconditional "any
+ * incomplete copy anywhere fails the census" guarantee — several concrete gaps are named there,
+ * letters (a)–(g)).
  */
 const REPO = resolve(__dirname, '../../../..')
 const MEMBERS = ['editable', 'hidden', 'readonly', 'required'] // sorted
@@ -179,7 +203,8 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     // 400-body assertion here would just re-implement that test against the same source text.
   })
 
-  // --- MECHANISM v2 (2026-08-20, R1 requalification fix): shape-agnostic LITERAL CO-OCCURRENCE ---
+  // --- MECHANISM v2/v3 (2026-08-20, R1 then R7 requalification fixes): shape-agnostic LITERAL
+  //     CO-OCCURRENCE, now gated by declaration boundaries ---
   //
   // The v1 scan (P2-1, see the top-of-file docstring) still recognised "carrier syntax" — six named
   // regex families (type union, Set/array, guard disjunction, rank table, wire enum, derived
@@ -235,19 +260,68 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // 150 already excludes. Occurrences chain: two literals adjacent within 150 bytes join one
   // cluster, and a cluster transitively spans further when each step is within budget.
   //
-  // WHY 150 AND NOT WIDER, stated as a direction argument, not just a headroom number: getting the
-  // window too SMALL fails CLOSED for a real four-member copy — it splits into two clusters, each
-  // incomplete, and an incomplete cluster with no matching allowlist entry REDS loudly, by name. A
-  // real copy can therefore only go SILENT if the window is too small AND a coincidentally-matching
-  // allowlist entry happens to excuse the resulting fragment — a narrow, structurally unlikely
-  // failure this file's own `matchingAllowlistEntries` exactly-one-match check narrows further (see
-  // residual (d) below). Getting the window too WIDE fails OPEN in the more dangerous direction: it
-  // merges unrelated code into false "candidate carriers", which does not hide a real drift but does
-  // grow the allowlist with looser, more collision-prone anchors (residual (d)) — the opposite of
-  // safe. 150 is therefore chosen from below (the tightest window that still unions every real
-  // carrier into one complete cluster) rather than from above (an arbitrarily generous margin), and
-  // residual (b)'s window-evasion gap is exactly the mirror of this: a copy whose members are spread
-  // WIDER than a human would ever reasonably format them.
+  // WHY 150 AND NOT WIDER — CORRECTED BY MECHANISM FIX v3 (R7). A prior version of this paragraph
+  // argued getting the window too WIDE only "merges unrelated code into false candidate carriers …
+  // which does not hide a real drift". That claim was FALSE, and a third independent gate (R7)
+  // disproved it directly, seven ways: a STALE (incomplete) hand copy landing within the window of
+  // ANY real carrier's declaration — above it, below it, even a 2-member fragment — unioned into that
+  // carrier's cluster and silently inherited its completeness, with NO allowlist involvement at all.
+  // A wide window was exactly the mechanism that hid the drift, the opposite of what the old
+  // paragraph claimed. MECHANISM FIX v3 fixes this WITHOUT touching the 150-byte figure below (moving
+  // the number was never the defect — the union rule was): clustering now ALSO requires that a merge
+  // crossing a declaration/statement boundary (see the boundary description above
+  // `PARTIAL_CARRIER_ALLOWLIST`) never touch a unit that is, on its own, already a 2+-member candidate
+  // carrier. A real complete carrier is exactly such a unit (all of C-1, C-2, C-3, C-5, C-6, C-7, C-8
+  // and the two new FE sites place all four words inside ONE declaration, never split across a
+  // boundary) — so an adjacent stale/foreign declaration can no longer borrow its completeness,
+  // REGARDLESS of window width. What the window still governs, honestly, is ONLY how far apart two
+  // occurrences may sit WITHIN a chain of units that never independently reach 2 members (a legitimate
+  // multi-line reformat, or R1's B6 `const` indirection) — getting it too SMALL still fails CLOSED
+  // there (splits into incomplete fragments that RED unless an allowlist entry excuses each); getting
+  // it too WIDE still risks merging genuinely unrelated single-word occurrences into a spurious
+  // partial cluster (residual (d)) — but, post-v3, WIDE no longer risks silently completing a stale
+  // copy, because the boundary gate refuses that specific union unconditionally. Residual (b)'s
+  // window-evasion gap is the mirror case this file was always honest about: a copy whose members are
+  // spread WIDER than a human would ever reasonably format them.
+  //
+  // DECLARATION BOUNDARIES (MECHANISM FIX v3 / R7) — how a "unit" is derived and why the merge rule
+  // is NOT a blanket "never cross a boundary". Boundaries are found by two CHEAP, file-type-keyed
+  // structural markers, never a real parser:
+  //   - TS/JS/Vue-script: a line with NO leading whitespace (column 0) starting with `export`
+  //     followed by `const`/`let`/`var`/`type`/`interface`/`enum`/`function`/`class`, or one of those
+  //     keywords unexported. This is deliberately narrow: it fires on every real carrier's own
+  //     top-level declaration line (all nine are `export const`/`export type` at column 0) and on
+  //     every R7 stale-copy shape reported (each was itself a top-level `const`/`export const`), but
+  //     it does NOT fire inside Vue TEMPLATE markup (`<div>`, `<el-option>`, `<label>`, …), which
+  //     starts with `<`, not a keyword — so the proximity-only behaviour the cross-element/cross-tag
+  //     partial-carrier allowlist entries below rely on (FormView.vue's `hidden`+`required` pair
+  //     spanning a `<div>` and a nested `<label>`; TemplateAuthoringView.vue's linear-editor options)
+  //     is completely unaffected by v3.
+  //   - YAML (`.yml`): every mapping-key line (`key:`), at ANY indentation depth, starts a new unit —
+  //     cheaper than tracking indentation levels, and sufficient because no real carrier or allowlist
+  //     entry in this repo needs two DIFFERENT YAML keys' values merged into one cluster.
+  // A cluster may merge two occurrences across a boundary ONLY IF NEITHER of the two units either
+  // side of that specific crossing is, on its OWN (counting only that one unit's own occurrences,
+  // never the accumulating cluster), already a 2-or-more-member candidate carrier. This is a
+  // deliberately weaker rule than "never cross a boundary at all", and the difference matters: an
+  // absolute rule was tried first and REJECTED because it silently stopped detecting R1's own B6
+  // shape (`const E = 'editable'`; `const R = 'required'`; `const H = 'hidden'`; then
+  // `new Set([E, R, H, 'readonly'])`) — four separate top-level statements, each carrying exactly ONE
+  // tracked word on its own, so an absolute per-boundary block reduces every occurrence to its own
+  // 1-member cluster and the whole file vanishes below the 2-member floor, undoing v2's own fix for
+  // that exact shape. Under the per-unit rule, chaining through a run of single-literal units stays
+  // exactly as permissive as before v3 (B6 still resolves to one complete 4-member cluster), while a
+  // stale/foreign declaration that ALREADY holds 2+ of the four words by itself — every R7 shape — is
+  // judged entirely on its own occurrences the instant either side of a crossing reaches that
+  // threshold, because a unit reaching it is, definitionally, already a candidate partial or complete
+  // carrier in its own right and merging it into a neighbour would either manufacture a false
+  // completion (R7) or steal credit from a genuinely separate finding. `spansDeclarationBoundary`
+  // (set on each `CarrierCluster`, gating `isComplete` alongside the member-count check below)
+  // recomputes this SAME 2+-member-endpoint condition independently from the cluster's final span,
+  // rather than being trusted forward from the merge loop, so a bug in the loop's own `blocked` check
+  // cannot silently let a boundary-spanning, already-multi-member-endpoint cluster take the complete
+  // short-circuit. Residual (f) below names the narrower gap this weaker-than-absolute rule leaves
+  // open on its own terms.
   //
   // Clustering with 2+ distinct words finds FOURTEEN files with at least one candidate cluster in
   // the scanned trees at this window — only SEVEN of which are complete four-member NodeFieldAccess
@@ -271,15 +345,26 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // label map (`FIELD_ACCESS_LABELS`) that plays the same exhaustiveness role C-3's rank table plays
   // on the backend.
   //
-  // RESIDUAL (stated precisely, not swept under this mechanism's greater reach than v1's): this scan
-  // is NOT an unconditional guarantee that "any file anywhere carrying an incomplete copy fails the
-  // census". Three concrete gaps remain, all inherent to literal-text scanning rather than to shape
-  // enumeration, so no amount of ADDING shape families would close them either:
+  // RESIDUAL (stated precisely, not swept under this mechanism's greater reach than v1's, and NOT
+  // pinned to a transcribed count that can silently go stale — this file's own COUNT HISTORY
+  // discipline at the top applies here too): this scan is NOT an unconditional guarantee that "any
+  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(g), are
+  // ALL that are currently known; grep this file for the next unused letter before adding one, and
+  // update the "labelled (a)–(g)" cross-references at the top of this file (there are two) in the same
+  // change. Most are inherent to literal-text scanning rather than to shape enumeration, so no amount
+  // of ADDING shape families would close them either — (f) and (g) are the two exceptions, both
+  // introduced by MECHANISM FIX v3 itself and named so, not folded silently into the older letters:
   //   (a) SCOPE — only `packages/core-backend/src`, `apps/web/src`, `packages/openapi/src` are
   //       walked (via the same `readdirSync`-based `walk()` as before, so a NEW file in an
   //       already-scanned tree is picked up automatically; a copy in a tree not walked at all, or in
-  //       a `.test.ts`/`.spec.ts`/`__tests__` file, or under `openapi/dist*`, is out of scope by the
-  //       same design the v1 scan already had);
+  //       a `.test.ts`/`.spec.ts`/`__tests__` file, or under a directory literally named `dist` or
+  //       `dist-sdk` ANYWHERE (not just under `packages/openapi`), is out of scope by the same design
+  //       the v1 scan already had). This also names the EXTENSION allowlist explicitly, which prior
+  //       revisions of this residual did not: `scanTree` only reads files ending `.ts`, `.vue`, or
+  //       `.yml` — a copy written in `.js`, `.mjs`, `.tsx`, `.json`, or `.yaml` is invisible even
+  //       inside an otherwise-scanned root, and this is not hypothetical: `src/server.js` and
+  //       `src/db/migrations/_meta/applied.json` both live inside `packages/core-backend/src` today,
+  //       a scanned root, and neither is walked;
   //   (b) WINDOW EVASION — a copy whose four members are deliberately spread further apart than 150
   //       bytes (e.g. four separate top-level consts, each used independently, never co-located)
   //       does not cluster and is invisible; widening the window trades this off against merging
@@ -317,9 +402,39 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       code-spans throughout) — recognising backtick required a way to tell a markdown code-span
   //       from a real backtick string literal that this text-level scan does not have, so it is left
   //       named here rather than "fixed" by re-widening the pattern and re-introducing prose noise.
+  //   (f) SINGLE-LITERAL-UNIT SPLITTING (MECHANISM FIX v3) — the boundary gate above blocks a merge
+  //       only when EITHER side of the crossing is, on its own, already a 2+-member unit; chaining
+  //       through a run of units that each carry exactly ONE tracked word is deliberately still
+  //       permitted (that permissiveness is what keeps R1's B6 const-indirection shape detected — see
+  //       the DECLARATION BOUNDARIES discussion above). A drifter who splits a stale copy into THREE
+  //       separate single-word declarations (`const A = 'editable'`; `const B = 'readonly'`;
+  //       `const C = 'hidden'`), each never independently reaching 2 members, then adds a fourth
+  //       single-word declaration holding `'required'` within the window, evades: the running cluster
+  //       accumulates all four through crossings where neither immediate endpoint is ever, by itself,
+  //       a 2+-member unit, and completes silently (own-devised probe, verified: three single-word
+  //       consts + one separate, plainly-unrelated single-word const holding 'required' — 43 passed,
+  //       no failure — see the PR body). None of the reported R7 reproductions took this shape (every
+  //       one used a single MULTI-member array/object literal for the stale part, the natural
+  //       "accidental hand copy" shape) and it requires a drifter to deliberately fragment a value
+  //       across as many single-purpose declarations as there are stale members — a materially more
+  //       contrived construction than an accidental copy-paste — but it is a real, narrower residual
+  //       of the v3 fix and is recorded rather than left implicit;
+  //   (g) DUPLICATE COMPLETE CARRIER — a BRAND NEW, already-COMPLETE four-member hand copy added
+  //       inside a file that is already in `expectedFiles` contributes its own new cluster (so it IS
+  //       visible in the per-cluster test list) but that cluster is complete and therefore asserts
+  //       nothing — the census has no notion of "this file should carry exactly N complete carriers".
+  //       This is NOT an R7 cluster-merge-absorption case (nothing merges; the new copy is complete
+  //       from the moment it is written, so there is no incompleteness for a boundary gate to protect)
+  //       — it is a pre-existing, structurally different gap that MECHANISM FIX v3 does not close and
+  //       was not designed to. It is bounded: the duplicate itself becomes a tracked complete site the
+  //       moment it is added, so IT will red the instant it later goes stale (the same teeth every
+  //       other complete site has) — the exposure window is only "between being added complete and
+  //       later drifting", not indefinite.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
-  // R1 found), not agnostic to file scope, spatial layout, literal-vs-symbolic encoding, allowlist
-  // anchor collisions, or the specific quote/delimiter character set recognised.
+  // R1 found) and, as of v3, to a stale copy's PROXIMITY to a real carrier's own declaration — not
+  // agnostic to file scope, file extension, spatial layout, literal-vs-symbolic encoding, allowlist
+  // anchor collisions, the specific quote/delimiter character set recognised, a copy fragmented across
+  // many single-purpose declarations, or a brand-new complete duplicate of an existing carrier.
 
   interface CarrierCluster {
     file: string
@@ -327,6 +442,7 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     end: number
     members: string[] // distinct, sorted
     snippet: string
+    spansDeclarationBoundary: boolean // set by clusterOccurrences; see MECHANISM FIX v3 below
   }
 
   const PROXIMITY_WINDOW = 150
@@ -376,22 +492,96 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     return occ
   }
 
+  // TS/JS top-level (column-0) declaration-start keywords. Deliberately does NOT match Vue TEMPLATE
+  // markup (`<div>`, `<label>`, …), which starts with `<`, not a keyword — see the MECHANISM FIX v3
+  // docstring above `clusterOccurrences` for why that is required, not an oversight.
+  const TS_DECLARATION_BOUNDARY_RE = /^(export\s+)?(const|let|var|type|interface|enum|function|class)\b/gm
+  // Every YAML mapping-key line, at ANY indentation depth, starts a new declaration/mapping unit.
+  const YAML_KEY_BOUNDARY_RE = /^[ \t]*[A-Za-z_][\w.-]*:/gm
+
+  /**
+   * Positions where a NEW declaration/statement-ish unit begins, per MECHANISM FIX v3 below.
+   */
+  function declarationBoundaries(file: string, src: string): number[] {
+    const re = file.endsWith('.yml') || file.endsWith('.yaml') ? YAML_KEY_BOUNDARY_RE : TS_DECLARATION_BOUNDARY_RE
+    const boundaries: number[] = []
+    re.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = re.exec(src))) boundaries.push(m.index)
+    return boundaries
+  }
+
+  // Which unit (0-indexed segment between consecutive boundaries) `pos` falls in — the count of
+  // boundary starts at-or-before `pos`.
+  function unitIndexOf(boundaries: number[], pos: number): number {
+    let lo = 0
+    let hi = boundaries.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (boundaries[mid]! <= pos) lo = mid + 1
+      else hi = mid
+    }
+    return lo
+  }
+
   function clusterOccurrences(file: string, src: string): CarrierCluster[] {
     const occ = rawLiteralOccurrences(src)
+    const boundaries = declarationBoundaries(file, src)
+    const withUnit = occ.map((o) => ({ ...o, unit: unitIndexOf(boundaries, o.index) }))
+
+    // Distinct tracked words each unit carries ON ITS OWN, ignoring every other unit — computed
+    // once, from the SAME occurrence list clustering will walk. A unit that independently reaches 2
+    // is already a candidate partial/complete carrier in its own right (a hand-written array/object/
+    // union literal listing two or more of the four words together); one that never exceeds 1 is a
+    // single-literal alias (`const E = 'editable'`, a `case 'editable':` label, one YAML `- editable`
+    // list item, …) that carries no drift signal by itself — see MECHANISM FIX v3 below for why the
+    // clustering rule keys off THIS distinction rather than blocking every boundary crossing.
+    const unitMemberCounts = new Map<number, Set<string>>()
+    for (const o of withUnit) {
+      let set = unitMemberCounts.get(o.unit)
+      if (!set) unitMemberCounts.set(o.unit, (set = new Set()))
+      set.add(o.word)
+    }
+    const isMultiMemberUnit = (unit: number) => (unitMemberCounts.get(unit)?.size ?? 0) >= 2
+
     const clusters: CarrierCluster[] = []
-    let cur: CarrierCluster | null = null
-    for (const o of occ) {
-      if (cur && o.index - cur.end <= PROXIMITY_WINDOW) {
+    let cur: (CarrierCluster & { lastUnit: number }) | null = null
+    for (const o of withUnit) {
+      const crossesBoundary = cur !== null && o.unit !== cur.lastUnit
+      // A boundary crossing is refused only when at least one of the two units either side of it is
+      // ALREADY, on its own, a 2+-member candidate carrier — chaining through a run of harmless
+      // single-literal units (B6's `const E =`/`const R =`/`const H =` indirection, a `switch`
+      // ladder's `case` labels, a YAML block list's `- editable` items) stays exactly as permissive
+      // as before MECHANISM FIX v3. What changes is a stale/foreign multi-member declaration (R7):
+      // the instant either endpoint of a crossing is itself a 2+-member unit, the crossing is
+      // refused, so that unit is judged ENTIRELY on its own occurrences, never merged with a
+      // neighbour's.
+      const blocked = crossesBoundary && (isMultiMemberUnit(cur!.lastUnit) || isMultiMemberUnit(o.unit))
+      if (cur && o.index - cur.end <= PROXIMITY_WINDOW && !blocked) {
         cur.end = Math.max(cur.end, o.end)
+        cur.lastUnit = o.unit
         if (!cur.members.includes(o.word)) cur.members.push(o.word)
       } else {
-        cur = { file, start: o.index, end: o.end, members: [o.word], snippet: '' }
+        cur = { file, start: o.index, end: o.end, members: [o.word], snippet: '', spansDeclarationBoundary: false, lastUnit: o.unit }
         clusters.push(cur)
       }
     }
     for (const c of clusters) {
       c.members.sort()
       c.snippet = src.slice(c.start, c.end).replace(/\s+/g, ' ').slice(0, 90)
+      // Defense in depth, RECOMPUTED independently of the merge loop above rather than carried
+      // forward from it, so a future bug in that loop's `blocked` check cannot silently re-open R7
+      // by letting a boundary-spanning, ALREADY-2+-member-unit-adjacent cluster take the
+      // `isComplete` short-circuit below. True iff the cluster's final span straddles a boundary
+      // whose EITHER side is (independently, on its own occurrences) a 2+-member unit — the exact
+      // condition the merge loop's `blocked` check refuses, checked here again from the cluster's
+      // resulting span rather than trusted from construction. A cluster built entirely by chaining
+      // through single-literal units (B6's `const E =`/`const R =`/`const H =` indirection, a
+      // `switch` ladder, a YAML block list) legitimately straddles boundaries too, but never one
+      // where either side independently reaches 2 — this stays false for those, by design.
+      c.spansDeclarationBoundary = boundaries.some(
+        (b) => b > c.start && b < c.end && (isMultiMemberUnit(unitIndexOf(boundaries, b - 1)) || isMultiMemberUnit(unitIndexOf(boundaries, b))),
+      )
     }
     return clusters.filter((c) => c.members.length >= 2)
   }
@@ -496,13 +686,26 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
         "editability) — no 'required' member.",
     },
     {
+      // MECHANISM FIX v3 (R7): `type FieldVisibility = 'hidden' | 'visible'` and the very next line
+      // `type FieldEditability = 'readonly' | 'editable'` are two SEPARATE column-0 declarations, so
+      // they no longer cluster together — FieldVisibility's lone 'hidden' occurrence falls below the
+      // 2-member floor and contributes no cluster at all; only FieldEditability's own two words form
+      // one now. Pre-v3 this was one merged 3-member {editable, hidden, readonly} cluster; the
+      // updated member set below is what the SAME real declaration now types as.
       file: 'apps/web/src/views/AfterSalesView.vue',
-      members: ['editable', 'hidden', 'readonly'],
+      members: ['editable', 'readonly'],
       nearSymbol: 'FieldEditability',
       symbolWindow: 150,
-      reason: 'Same TicketFieldPolicy system: the FieldVisibility/FieldEditability type declarations themselves.',
+      reason: 'Same TicketFieldPolicy system: the FieldEditability type declaration itself.',
     },
     {
+      // Unchanged by MECHANISM FIX v3: `const isRefundAmountHidden = computed(...)` and
+      // `const isRefundAmountEditable = computed(...)` are two SEPARATE column-0 `const`
+      // declarations, but EACH carries only ONE tracked word on its own ('hidden' / 'editable' —
+      // 'visible' inside `isRefundAmountEditable`'s own predicate is not a tracked word), so neither
+      // is independently a 2+-member unit and the boundary between them does not block chaining
+      // (see the `isMultiMemberUnit` gate in `clusterOccurrences`) — this pair still merges into one
+      // 2-member cluster exactly as before v3, and still needs this entry.
       file: 'apps/web/src/views/AfterSalesView.vue',
       members: ['editable', 'hidden'],
       nearSymbol: 'isRefundAmountEditable',
@@ -649,12 +852,16 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
       // four distinct words HERE, which routes this exact source location into a differently-named,
       // one-fewer-member test that must then clear the allowlist check below (and normally can't,
       // since no allowlist entry has four members and none is scoped to a real NodeFieldAccess site)
-      // — a stale hand copy is recognised BY its incomplete member set, instead of being invisible to
-      // the scan that found it. `isComplete` itself is not asserted directly below (it would be
-      // vacuously true by construction: `c.members` is already a deduped subset of `MEMBERS`, so
-      // `c.members.length === 4` already IS `c.members equals MEMBERS`) — the assertion that carries
-      // weight is the allowlist check, which the `isComplete` branch is exempt from.
-      const isComplete = c.members.length === MEMBERS.length
+      // — a stale hand copy IN ITS OWN DECLARATION is recognised BY its incomplete member set,
+      // instead of being invisible to the scan that found it. A stale copy sitting near (but in a
+      // DIFFERENT declaration from) a real complete carrier is recognised the SAME way, because
+      // `isComplete` below is ALSO false for any cluster `clusterOccurrences` marked as spanning a
+      // declaration boundary — see MECHANISM FIX v3 above `PARTIAL_CARRIER_ALLOWLIST` for why this
+      // half did NOT hold before v3 (R7) and does now. `isComplete` is not asserted directly below
+      // beyond that gate (the `c.members.length === 4` half would be vacuously true by construction:
+      // `c.members` is already a deduped subset of `MEMBERS`) — the assertion that carries weight is
+      // the allowlist check, which the `isComplete` branch is exempt from.
+      const isComplete = c.members.length === MEMBERS.length && !c.spansDeclarationBoundary
       it(`${c.file} @${c.start}-${c.end} :: {${c.members.join(', ')}} (\`${c.snippet}\`)`, () => {
         const matches = isComplete ? [] : matchingAllowlistEntries(c, f.src)
         if (!isComplete && matches.length === 1) allowlistHits.add(matches[0]!)
@@ -662,12 +869,18 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
           isComplete || matches.length === 1,
           isComplete
             ? ''
-            : `${c.file}@${c.start} carries ONLY {${c.members.join(', ')}} of the four ratified ` +
-                `members and matched ${matches.length} PARTIAL_CARRIER_ALLOWLIST entries (expected ` +
+            : `${c.file}@${c.start} carries {${c.members.join(', ')}}` +
+                (c.spansDeclarationBoundary && c.members.length === MEMBERS.length
+                  ? ' but the cluster SPANS MORE THAN ONE DECLARATION (MECHANISM FIX v3 / R7) — a ' +
+                    'multi-declaration cluster is never treated as complete, even carrying all four ' +
+                    'words, because at least one contributing declaration is a DIFFERENT unit from ' +
+                    'the real carrier and must be judged on its own'
+                  : ' of the four ratified members') +
+                ` and matched ${matches.length} PARTIAL_CARRIER_ALLOWLIST entries (expected ` +
                 `exactly 1${matches.length ? ': ' + matches.map((i) => PARTIAL_CARRIER_ALLOWLIST[i]!.nearSymbol).join(', ') : ''}) — ` +
                 (matches.length === 0
-                  ? 'either complete this copy to {editable, hidden, readonly, required} or add a ' +
-                    'new, symbol-anchored allowlist entry justifying the partial match'
+                  ? 'either complete this copy to {editable, hidden, readonly, required} within ONE ' +
+                    'declaration or add a new, symbol-anchored allowlist entry justifying the partial match'
                   : 'tighten nearSymbol/symbolWindow on the colliding entries so exactly one matches'),
         ).toBe(true)
       })
