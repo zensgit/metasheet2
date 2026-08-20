@@ -3,14 +3,18 @@
  *
  * The plain CSS `text-overflow: ellipsis` truncation used elsewhere in the app keeps the
  * BEGINNING of a string and hides the end — fine for prose, but wrong for identifiers
- * whose distinguishing part is a suffix (e.g. account names shaped like
- * 'synth-w4w7-9f2ab61c@example.com': a long shared prefix followed by the part that
- * actually tells two accounts apart). Truncating from the end there renders every such
- * account as an indistinguishable 'synth-w4w7-…'.
+ * whose distinguishing part is a suffix. Truncating from the end there can render several
+ * such identifiers as an indistinguishable shared prefix.
  *
  * This helper keeps a short head (for at-a-glance recognizability) AND a tail (the
  * distinguishing suffix), eliding only the middle. Callers should still put the full,
  * untruncated value in a `title` attribute so it's available on hover/inspection.
+ *
+ * NOT the account-identity display: for email-shaped values, `accountIdentityDisplay.ts`'s
+ * `truncateAccountIdentity()` supersedes this module — a fixed-length tail here lands on
+ * the DOMAIN for long-domain shapes (see that module's header comment for why that's a
+ * regression, not just a style choice), so it drops the domain entirely and keeps the
+ * local-part tail instead. This module remains the generic path for non-email identifiers.
  */
 
 export interface MiddleEllipsisOptions {
@@ -23,11 +27,12 @@ export interface MiddleEllipsisOptions {
 }
 
 // Default tail is deliberately generous (20, not the ~10 a plain "keep a few trailing
-// chars" truncation would use): for 'synth-w4w7-9f2ab61c@example.com' — the exact shape
-// named in the design note — a tail of 10 lands mid-domain ('…xample.com'), still hiding
-// the '9f2ab61c' segment that actually distinguishes one account from another. A tail of
-// 20 captures that whole segment plus the domain ('…9f2ab61c@example.com'); only the
-// shared, non-distinguishing 'w4w7-' batch tag falls into the elided middle.
+// chars" truncation would use) for the generic, non-email identifiers this module still
+// truncates directly (see accountIdentityDisplay.spec.ts and middleEllipsis.spec.ts for the
+// fixtures). For email-shaped account identities specifically, this fixed-length tail is
+// NOT sufficient on its own — a long enough domain consumes the whole tail budget and this
+// module can't tell "keep the domain" from "keep the distinguishing local-part suffix"
+// apart; that email-aware decision is `accountIdentityDisplay.ts`'s job, not this module's.
 const DEFAULT_HEAD_LENGTH = 6
 const DEFAULT_TAIL_LENGTH = 20
 const ELLIPSIS = '…' // …

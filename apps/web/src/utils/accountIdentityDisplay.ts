@@ -23,6 +23,15 @@
  *
  * The full, untruncated value belongs on a `title` attribute regardless — this module only
  * decides what's in the visible text node.
+ *
+ * Suffix-priority assumption (GATE-5047 P3-4): keeping the TAIL of the local part is a
+ * deliberate bet that the staging shape's distinguishing segment sits at the end
+ * ('...853b767f-u01'). It is not a general solution for every naming scheme — two long
+ * local parts that are distinguished by a PREFIX instead, e.g. 'alice.smith.engineering@'
+ * and 'bob.smith.engineering@', collide on a 12-character tail by design
+ * ('...h.engineering' for both) the same way the pre-fix domain-tail truncation collided
+ * on the staging shape. This module does not attempt to detect or special-case that;
+ * `title` still carries the full, untruncated value as the recovery path.
  */
 
 import { middleEllipsis } from './middleEllipsis'
@@ -63,7 +72,11 @@ export function truncateAccountIdentity(
     const at = raw.lastIndexOf('@')
     const localPart = raw.slice(0, at)
     const tailLength = Math.max(0, options.emailLocalTailLength ?? DEFAULT_EMAIL_LOCAL_TAIL_LENGTH)
-    if (localPart.length <= tailLength) return localPart
+    // GATE-5047 P3-4: we already know raw.length > maxLength (that's how we got here) — so
+    // even when the whole local part fits under tailLength, the domain is still being
+    // dropped. Mark that with a trailing ellipsis instead of returning what would otherwise
+    // look like a complete, untruncated value.
+    if (localPart.length <= tailLength) return `${localPart}${ELLIPSIS}`
     // `.slice(-0)` returns the WHOLE string (negative zero is still zero as an index), not
     // an empty one — guard tailLength === 0 explicitly instead of relying on slice's sign.
     const tail = tailLength > 0 ? localPart.slice(-tailLength) : ''

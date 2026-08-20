@@ -40,9 +40,12 @@ interface ProbeResult {
 }
 
 function runProbe(tz: string, input = '2026-08-19'): ProbeResult {
+  // GATE-5047 P3-5: bound the spawn — a hung tsx child (e.g. a broken install) would
+  // otherwise block this required job indefinitely instead of failing fast.
   const stdout = execFileSync(TSX_BIN, [PROBE_SCRIPT, input], {
     env: { ...process.env, TZ: tz },
     encoding: 'utf8',
+    timeout: 60_000,
   })
   return JSON.parse(stdout) as ProbeResult
 }

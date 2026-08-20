@@ -59,9 +59,9 @@ describe('truncateAccountIdentity — general contract', () => {
     expect(truncateAccountIdentity(value)).toBe('…853b767f-u01')
   })
 
-  it('returns the bare local part (no ellipsis) when the local part itself is at or under the tail length', () => {
+  it('marks the value with a trailing ellipsis (GATE-5047 P3-4) when the local part itself is at or under the tail length, so a dropped domain is never silently invisible', () => {
     const value = 'ab@some-extremely-long-domain-name.example' // local part 'ab', 2 chars <= 12
-    expect(truncateAccountIdentity(value)).toBe('ab')
+    expect(truncateAccountIdentity(value)).toBe('ab…')
   })
 
   it('a leading "@" (empty local part) is NOT treated as email-shaped — falls through to the generic path', () => {
@@ -93,5 +93,16 @@ describe('truncateAccountIdentity — general contract', () => {
   it('returns an empty string for null/undefined input', () => {
     expect(truncateAccountIdentity(null)).toBe('')
     expect(truncateAccountIdentity(undefined)).toBe('')
+  })
+
+  it('documents the known suffix-priority limitation (GATE-5047 P3-4): two long local parts distinguished by a PREFIX collide on the tail, same as the domain-tail bug this module fixes', () => {
+    // Neither account name is the real staging shape (which is distinguished by a tail) —
+    // this is a deliberately different naming scheme to prove the tail-keeping strategy is
+    // not a general solution. `title` (not asserted here — that's App.spec.ts's concern)
+    // is the documented recovery path for this case.
+    const alice = truncateAccountIdentity('alice.smith.engineering@example-corp.com')
+    const bob = truncateAccountIdentity('bob.smith.engineering@example-corp.com')
+    expect(alice).toBe(bob)
+    expect(alice).toBe('….engineering')
   })
 })

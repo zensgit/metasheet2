@@ -306,7 +306,18 @@ html, body {
 .nav-actions {
   display: flex;
   align-items: center;
-  flex: 0 1 auto;
+  /* flex-shrink: 0 (not 1). .nav-links is the sibling built to absorb width loss — it has
+     its own overflow-x: auto and scrolls internally. If .nav-actions were allowed to
+     shrink (flex: 0 1 auto), the flex algorithm can squeeze this container narrower than
+     its content's post-floor width (nav-locale + nav-user's 14ch min-width + gaps), and
+     since .nav-actions itself has no overflow clipping, that content spills past the
+     container edge into page-level horizontal scroll (browser-measured: 14/67/84 px of
+     document.documentElement.scrollWidth overhang at 900/800/769 px with the 5-link zh
+     nav, 190 px at 769 with the ~17-link admin nav). flex: 0 0 auto keeps .nav-actions at
+     its natural content width and pushes the crunch onto .nav-links instead, which
+     already handles it via internal scroll — re-verified zero page-level scroll at
+     1440/1024/900/800/769 for both navsets after this change. */
+  flex: 0 0 auto;
   gap: 12px;
   min-width: 0;
 }
@@ -321,7 +332,8 @@ html, body {
      viewports with a normal nav-link count). 14ch is browser-measured sufficient to keep
      the truncateAccountIdentity() output ('…' + up to 12 local-part chars, 13 chars) fully
      on screen for the self-service nav (1-link and 5-link) down to 769 px — re-measure if
-     used behind a much wider nav (e.g. the ~17-link admin nav). */
+     used behind a much wider nav (e.g. the ~17-link admin nav). Pair with .nav-actions's
+     flex: 0 0 auto (below) so this floor doesn't just push overflow out to the page. */
   min-width: 14ch;
   overflow: hidden;
   text-overflow: ellipsis;
