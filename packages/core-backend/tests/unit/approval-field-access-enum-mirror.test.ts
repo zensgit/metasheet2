@@ -301,9 +301,25 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       within an EXISTING entry's (file, window) with the SAME member subset — it would match that
   //       one entry alone and be silently (and wrongly) excused. This is the same shape as the prior
   //       requalification's R5 nit, narrowed but not eliminated by per-occurrence anchoring.
+  //   (e) BACKTICK LITERALS — `QUOTED_LITERAL_RE` recognises `'` and `"` as quote characters, never
+  //       a backtick, so a genuine backtick STRING-LITERAL TYPE (`` `editable` | `readonly` ``, valid
+  //       TypeScript, just an unusual style) is invisible to the quoted form; the bare-word form does
+  //       not rescue it either, because a backtick is not one of the bare-delimiter characters (the
+  //       delimiter set was deliberately chosen NARROW, from the real carriers' actual punctuation —
+  //       see the PROXIMITY WINDOW discussion above — and a backtick-fenced bare word satisfies
+  //       neither `delimBefore` nor `delimAfter`). This was found empirically (own-devised probe
+  //       shape, not one of R1's eleven) while replaying this fix's own evasion suite — see the PR
+  //       body. It is a DIFFERENT gap from (c): the words ARE present as literal text, just fenced by
+  //       a quote character this scan does not recognise, so it is not closed by the compiler-guard
+  //       backstop that covers (c). Adding backtick to `QUOTED_LITERAL_RE` would close this
+  //       particular probe but reopen the ORIGINAL false-positive problem the backtick-adjacency
+  //       check exists to prevent (this file's own JSDoc comments quote identifiers with backtick
+  //       code-spans throughout) — recognising backtick required a way to tell a markdown code-span
+  //       from a real backtick string literal that this text-level scan does not have, so it is left
+  //       named here rather than "fixed" by re-widening the pattern and re-introducing prose noise.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
-  // R1 found), not agnostic to file scope, spatial layout, literal-vs-symbolic encoding, or allowlist
-  // anchor collisions.
+  // R1 found), not agnostic to file scope, spatial layout, literal-vs-symbolic encoding, allowlist
+  // anchor collisions, or the specific quote/delimiter character set recognised.
 
   interface CarrierCluster {
     file: string
