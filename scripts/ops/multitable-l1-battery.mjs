@@ -79,6 +79,7 @@
 
 import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { randomBytes } from 'node:crypto'
 
 import { EXPECTED_AUTHORITY_TRIGGERS } from './multitable-recovery-schema-containment.mjs'
 
@@ -101,8 +102,16 @@ export const RECOVERY_CONFLICT_HTTP_CODE = 'RECOVERY_AUTHORITY_BUSY'
  */
 export const REGISTRATION_RECOVERY_BUSY_CODE = 'USER_ROLE_ASSIGNMENT_RECOVERY_BUSY'
 
-/** tgenabled letters that mean "this trigger fires" (same set the rollback helper uses). */
-export const ENABLED_TRIGGER_STATES = new Set(['O', 'A', 'R'])
+/**
+ * tgenabled letters that mean "this trigger FIRES for an ordinary application write".
+ * 'O' = enabled (origin+replica), 'A' = always. Deliberately EXCLUDES 'R' (replica-only):
+ * under the normal `session_replication_role = origin` a replica-only trigger does NOT fire,
+ * so a database with a trigger at 'R' is NOT at L1 posture even though the trigger "exists".
+ * The gate (P2-1) constructed exactly this: three exempted triggers set to 'R' would otherwise
+ * certify 9/9 ARMED on a database where they never fire — and those three are the ones with
+ * zero behavioural coverage, i.e. the ones for which preflight is the only evidence.
+ */
+export const ENABLED_TRIGGER_STATES = new Set(['O', 'A'])
 export const EXPECTED_TRIGGER_COUNT = 9
 
 /** Lease functions, by kind — the exact names created by the migration. */
@@ -882,7 +891,10 @@ export async function runBattery({ env = process.env, options } = {}) {
   const adminPassword = String(env.BATTERY_ADMIN_PASSWORD ?? '')
   const stamp = buildStamp(env.BATTERY_STAMP)
   const names = buildNames(stamp)
-  const secrets = [databaseUrl, adminPassword].filter((value) => typeof value === 'string' && value.length >= 4)
+  // P3-2 (gate): the synthetic user's password must NOT be derivable from the published run
+  // stamp. Random per run; never written to evidence (it is in the `secrets` redaction list).
+  const batteryPassword = `Bat!${randomBytes(18).toString('base64url')}A9`
+  const secrets = [databaseUrl, adminPassword, batteryPassword].filter((value) => typeof value === 'string' && value.length >= 4)
 
   const evidence = {
     tool: 'multitable-l1-battery',
@@ -932,6 +944,14 @@ export async function runBattery({ env = process.env, options } = {}) {
 
   const sqlOne = async (text, params = []) => (await admin.client.query(text, params)).rows
   const failures = evidence.failures
+
+  // P3-1 (gate): every post-seed exit path (a failed member-group/sheet seed, an expired
+  // exemption after seeding, an unexpected throw) must still clean up — otherwise an aborted run
+  // strands stamped synthetic subjects, exactly the residue the CLEAN verdict was blind to. These
+  // are hoisted to function scope so the finally can run a best-effort cleanup for any early exit
+  // that already created rows; the happy path sets cleanupDone so it is not run twice.
+  let cleanupState = null
+  let cleanupDone = false
 
   try {
     // ---------------- Phase 0 — posture preflight -------------------------
@@ -1018,6 +1038,8 @@ export async function runBattery({ env = process.env, options } = {}) {
       codes: {},
       statusTarget: null,
     }
+    // From here on, any exit must clean up what seeding has created so far (P3-1).
+    cleanupState = { ctx, names }
 
     const permsResponse = await http.call('GET', '/api/permissions', null)
     const availableCodes = Array.isArray(permsResponse.body?.data)
@@ -1060,7 +1082,7 @@ export async function runBattery({ env = process.env, options } = {}) {
     const createUser = await http.call('POST', '/api/admin/users', {
       name: names.userName,
       email: names.email,
-      password: `Ba7tery!${stamp}A`,
+      password: batteryPassword,
       isActive: true,
     })
     ctx.userId = String(createUser.body?.data?.userId ?? createUser.body?.data?.user?.id ?? '')
@@ -1102,7 +1124,18 @@ export async function runBattery({ env = process.env, options } = {}) {
     // Sheet parent for spreadsheet_permissions. The FK target differs by migration lineage
     // (`spreadsheets` in the SQL migration, `meta_sheets` in the TS one, whichever created the
     // table first), so seed BOTH parents with the same stamped id and let the real FK bind.
-    await http.call('POST', '/api/spreadsheets', { id: ctx.sheetId, name: names.sheetId })
+    // P3-5 (gate): status-check this seed. If the sheet parent fails to create, the later
+    // spreadsheet_permissions write would fail for a FIXTURE reason and be misfiled as an
+    // O2-S2 `unmapped_5xx` — the single misdiagnosis this tool most needs to avoid. A non-2xx
+    // here is a seed failure (NOT_ARMED, exit 2), not evidence about the classifier. The
+    // direct INSERT fallback below still binds whichever parent table the FK actually needs.
+    const sheetSeed = await http.call('POST', '/api/spreadsheets', { id: ctx.sheetId, name: names.sheetId })
+    if (sheetSeed.status >= 500) {
+      log(lines, `VERDICT: NOT_ARMED - seed failed: sheet parent create returned ${sheetSeed.status} (fixture failure, not classifier evidence)`)
+      failures.push({ phase: 'seed', failure: 'seed_failed', reason: 'create sheet parent', excerpt: sheetSeed.excerpt })
+      evidence.finished_at = new Date().toISOString()
+      return { exitCode: 2, evidence, lines }
+    }
     for (const table of ['meta_sheets', 'spreadsheets']) {
       const exists = await sqlOne('SELECT to_regclass($1) AS oid', [`public.${table}`])
       if (!exists[0]?.oid) continue
@@ -1276,6 +1309,7 @@ export async function runBattery({ env = process.env, options } = {}) {
     // ---------------- Phase 5 — cleanup + residue -------------------------
     log(lines, '── phase 5 · cleanup + residue scan ──────────────────────────')
     const residue = await cleanupAndScan(admin.client, ctx, names)
+    cleanupDone = true
     evidence.residue = residue
     for (const failed of residue.delete_errors) {
       const reason = `cleanup DELETE on ${failed.relation} failed (SQLSTATE ${failed.sqlstate})`
@@ -1309,7 +1343,21 @@ export async function runBattery({ env = process.env, options } = {}) {
     evidence.finished_at = new Date().toISOString()
     return { exitCode: 1, evidence, lines }
   } finally {
+    // P3-1: release the lease FIRST (so the cleanup deletes are not self-blocked by the very
+    // triggers this battery armed), then best-effort clean any residue an early exit left behind.
     await lease.client.query('ROLLBACK').catch(() => {})
+    if (cleanupState && !cleanupDone && admin?.client) {
+      try {
+        const residue = await cleanupAndScan(admin.client, cleanupState.ctx, cleanupState.names)
+        evidence.residue = residue
+        lines.push(
+          `  cleanup (early-exit best-effort): ${residue.total} residual row(s) after delete` +
+            (residue.total ? ` — ${residue.remaining.map((r) => `${r.relation}:${r.count}`).join(', ')}` : ''),
+        )
+      } catch (cleanupError) {
+        lines.push(`  WARNING: early-exit cleanup failed (${cleanupError?.name ?? 'Error'}) — residue may remain`)
+      }
+    }
     await lease.close().catch(() => {})
     await admin.close().catch(() => {})
   }
@@ -1347,6 +1395,12 @@ async function cleanupAndScan(client, ctx, names) {
     ['user_session_revocations', 'DELETE FROM user_session_revocations WHERE user_id = $1', [ctx.userId]],
     ['user_sessions', 'DELETE FROM user_sessions WHERE user_id = $1', [ctx.userId]],
     ['user_login_aliases', 'DELETE FROM user_login_aliases WHERE user_id = $1', [ctx.userId]],
+    // P1-1 (gate): phase-1 `POST /api/admin/users` writes user_invites via invite-ledger.ts.
+    // That table has NO FK cascade from users, and its rows carry the invited email (stamped) but
+    // a server-minted id — so both the stamp axis (email) and the user-id axis reach it. Missing
+    // from the first version of this list, it accumulated one row per run and yet PHASE 5 printed
+    // CLEAN. Deleted by stamped email OR by invited_by = the battery user.
+    ['user_invites', "DELETE FROM user_invites WHERE email LIKE $1 OR invited_by = $2", [like, ctx.userId]],
     ['users', 'DELETE FROM users WHERE id = $1', [ctx.userId]],
   ]
   // A swallowed delete error is indistinguishable from a successful delete, and would only be
@@ -1378,6 +1432,9 @@ async function cleanupAndScan(client, ctx, names) {
     ['user_session_revocations', 'SELECT COUNT(*)::int AS c FROM user_session_revocations WHERE user_id = $1', [ctx.userId]],
     ['user_sessions', 'SELECT COUNT(*)::int AS c FROM user_sessions WHERE user_id = $1', [ctx.userId]],
     ['user_orgs', 'SELECT COUNT(*)::int AS c FROM user_orgs WHERE user_id = $1', [ctx.userId]],
+    // P1-1 (gate): the relation the CLEAN verdict was blind to. Scanned by the same two axes it is
+    // deleted by, so a surviving invite row now reds PHASE 5 instead of being invisible.
+    ['user_invites', 'SELECT COUNT(*)::int AS c FROM user_invites WHERE email LIKE $1 OR invited_by = $2', [like, ctx.userId]],
   ]
   const remaining = []
   const scope = []
@@ -1421,7 +1478,19 @@ export async function runCli({ argv = process.argv.slice(2), env = process.env }
   const driven = evidence.surfaces.length
   const blocked = evidence.surfaces.filter((s) => s.blocked_status === RECOVERY_CONFLICT_HTTP_STATUS && s.blocked_code === RECOVERY_CONFLICT_HTTP_CODE).length
   const cleared = evidence.surfaces.filter((s) => s.cleared_status >= 200 && s.cleared_status < 300 && s.cleared_row_verified).length
-  const summary = `VERDICT: ${evidence.verdict} - ${blocked}/${driven} surfaces blocked with ${RECOVERY_CONFLICT_HTTP_CODE}, ${cleared}/${driven} cleared after release, ${evidence.wrong_kind_controls.filter((c) => c.status >= 200 && c.status < 300 && c.row_verified).length}/${evidence.wrong_kind_controls.length} wrong-kind controls green, ${evidence.trigger_coverage.exercised_count}/${evidence.trigger_coverage.total_count} recovery-authority TRIGGERS exercised, ${NOT_DRIVEN_SITES.length} census sites NOT driven, ${evidence.failures.length} failure(s); evidence → ${parsed.options.out}`
+  // P3-4 (gate): the trigger-coverage number in the summary must reflect what ACTUALLY fired this
+  // run, not the declarative capability. A disarmed/aborted run drives 0 surfaces, so it must not
+  // print "6/9 exercised". Count the distinct triggers whose surfaces genuinely blocked with the
+  // named 409; keep the declarative capability (trigger_coverage.exercised_count = the ceiling)
+  // in the evidence JSON, but label the summary as the measured value.
+  const firedTriggers = new Set(
+    evidence.surfaces
+      .filter((s) => s.blocked_status === RECOVERY_CONFLICT_HTTP_STATUS && s.blocked_code === RECOVERY_CONFLICT_HTTP_CODE)
+      .map((s) => s.trigger)
+      .filter(Boolean),
+  )
+  evidence.trigger_coverage.measured_count = firedTriggers.size
+  const summary = `VERDICT: ${evidence.verdict} - ${blocked}/${driven} surfaces blocked with ${RECOVERY_CONFLICT_HTTP_CODE}, ${cleared}/${driven} cleared after release, ${evidence.wrong_kind_controls.filter((c) => c.status >= 200 && c.status < 300 && c.row_verified).length}/${evidence.wrong_kind_controls.length} wrong-kind controls green, ${firedTriggers.size}/${evidence.trigger_coverage.total_count} recovery-authority TRIGGERS exercised this run (declarative ceiling ${evidence.trigger_coverage.exercised_count}/${evidence.trigger_coverage.total_count}), ${NOT_DRIVEN_SITES.length} census sites NOT driven, ${evidence.failures.length} failure(s); evidence → ${parsed.options.out}`
   return { exitCode, output: [...lines, summary].join('\n'), evidence }
 }
 

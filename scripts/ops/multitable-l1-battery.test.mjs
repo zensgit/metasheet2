@@ -95,10 +95,16 @@ const MIGRATION_SOURCE = readFileSync(
  */
 function parseCensusSites(source = CENSUS_SOURCE) {
   const sites = new Set()
-  for (const match of source.matchAll(/\bsite:\s*'([^']+)'/g)) sites.add(match[1])
+  // P2-2 (gate): quote-AGNOSTIC. A single-quote-only pattern let a new census site written with
+  // double quotes or backticks slip past the anti-drift check while the guard stayed green. Match
+  // any of the three JS string delimiters, requiring the SAME delimiter to close (backreference).
+  for (const match of source.matchAll(/\bsite:\s*(['"`])((?:(?!\1).)+)\1/g)) sites.add(match[2])
+  // Exact floor, not a loose >=40: the census currently declares 48 sites; pin it so a SILENT
+  // drop (a site deleted) is caught too, not only additions. Update deliberately if the census
+  // legitimately changes size.
   assert.ok(
-    sites.size >= 40,
-    `census parse yielded only ${sites.size} site ids — the census file moved or changed shape; refusing to compare against a possibly-empty set`,
+    sites.size >= 48,
+    `census parse yielded only ${sites.size} site ids (expected >= 48) — the census file moved, changed shape, or a site was dropped; refusing to compare against a possibly-truncated set`,
   )
   return sites
 }

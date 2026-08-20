@@ -451,6 +451,9 @@ jobs:
           # users/groups (the first version of this step) would have missed all three —
           # reconciled against the battery's actual seed surface, not assumed.
           roles_count="$(residue_check roles "SELECT COUNT(*) FROM roles WHERE name LIKE 'o2bat\\_%' ESCAPE '\\';")"
+          # P1-1 (gate): user_invites is written by the battery's POST /api/admin/users seed via
+          # invite-ledger.ts and has NO FK cascade from users, so it survives a crashed run invisibly.
+          invites_count="$(residue_check user_invites "SELECT COUNT(*) FROM user_invites WHERE email LIKE 'o2bat\\_%' ESCAPE '\\';")"
           sheets_count=0
           for sheet_table in spreadsheets meta_sheets; do
             exists="$(residue_check "${sheet_table}_exists" "SELECT (to_regclass('public.${sheet_table}') IS NOT NULL)::int;")"
@@ -459,17 +462,20 @@ jobs:
               sheets_count=$((sheets_count + c))
             fi
           done
-          total=$((users_count + groups_count + roles_count + sheets_count))
+          total=$((users_count + groups_count + roles_count + sheets_count + invites_count))
 
           echo "== o2bat_% residue summary =="
           echo "users leftover: ${users_count}"
           echo "platform_member_groups leftover: ${groups_count}"
+          echo "roles leftover: ${roles_count}"
+          echo "sheets leftover: ${sheets_count}"
+          echo "user_invites leftover: ${invites_count}"
           echo "total: ${total}"
           if [[ "$total" -ne 0 ]]; then
-            echo "VERDICT: FAIL — ${total} o2bat_% synthetic subject(s) left on staging (users=${users_count}, platform_member_groups=${groups_count}) — the battery must clean up after itself; a crashed run must not silently leave synthetic users on staging"
+            echo "VERDICT: FAIL — ${total} o2bat_% synthetic subject(s) left on staging (users=${users_count}, platform_member_groups=${groups_count}, roles=${roles_count}, sheets=${sheets_count}, user_invites=${invites_count}) — the battery must clean up after itself; a crashed run must not silently leave synthetic subjects on staging"
             exit 1
           fi
-          echo "VERDICT: PASS — zero o2bat_% residue on staging (users + platform_member_groups checked)"
+          echo "VERDICT: PASS — zero o2bat_% residue on staging (users, platform_member_groups, roles, spreadsheets/meta_sheets, user_invites all checked)"
           REMOTE
 
       - name: Write step summary
@@ -516,6 +522,12 @@ jobs:
 
       - name: Fail on battery error
         if: steps.battery.outputs.rc != '0'
+        # P3-3 (gate): the battery rc and (deploy-host-derived) verdict line reach the shell via
+        # env, never interpolated directly into the script body — an interpolated `verdict_line`
+        # containing a quote or `$(...)` would otherwise be evaluated by the runner's shell.
+        env:
+          BATTERY_RC: ${{ steps.battery.outputs.rc }}
+          BATTERY_VERDICT_LINE: ${{ steps.battery.outputs.verdict_line }}
         run: |
-          echo "::error::L1 battery did not pass (rc=${{ steps.battery.outputs.rc }}, verdict='${{ steps.battery.outputs.verdict_line }}') — see the evidence artifact and step summary"
+          echo "::error::L1 battery did not pass (rc=${BATTERY_RC}, verdict='${BATTERY_VERDICT_LINE}') — see the evidence artifact and step summary"
           exit 1
