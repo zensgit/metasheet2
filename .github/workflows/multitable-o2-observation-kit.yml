@@ -20,74 +20,14 @@ name: Multitable O2 Observation Kit
 # on its own (枚举陷阱不收敛); it is why this workflow is no longer hermetic-only.
 
 on:
+  # NO pull_request path filter: this check is intended to be REQUIRED, and a path-filtered
+  # required check strands every PR that does not trigger it at "Expected — waiting for status"
+  # (the same trap already hit on ssh-hostkey-pin-contract.yml). The job is hermetic and runs in
+  # seconds, so running it on every PR is free. The expensive execution layer lives in
+  # multitable-o2-observation-kit-realdb.yml, which keeps the original path filters.
   pull_request:
-    paths:
-      - '.github/workflows/multitable-o2-observation-kit.yml'
-      - 'scripts/ops/multitable-o2-observation.sql'
-      - 'scripts/ops/multitable-o2-observation.test.mjs'
-      - 'scripts/ops/multitable-o2-canary-drill.md'
-      # Drift-guard inputs: the test pins the observation queries' literals to
-      # these sources, so the PR that changes one of them re-runs this check
-      # instead of a later, unrelated PR going red.
-      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
-      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
-      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
-      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
-      # this check on the renaming PR — not go stale-red on a later, unrelated one.
-      # A guard test pins this list to the runbook's citations mechanically.
-      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
-      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
-      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
-      - 'packages/core-backend/src/db/recovery-conflict.ts'
-      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
-      - 'packages/core-backend/src/routes/univer-meta.ts'
-      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
-      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
-      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/multitable-o2-observation-kit.yml'
-      - 'scripts/ops/multitable-o2-observation.sql'
-      - 'scripts/ops/multitable-o2-observation.test.mjs'
-      - 'scripts/ops/multitable-o2-canary-drill.md'
-      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
-      - 'packages/core-backend/src/multitable/canonical-sheet-fence.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260719120000_create_meta_recovery_token_burns.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260617120000_create_meta_records_trash.ts'
-      - 'packages/core-backend/src/db/migrations/zzzz20260715170000_add_meta_sheet_recovery_writer_state.ts'
-      # Runbook-cited evidence anchors (gate #5018 NIT-1): the self-test asserts every
-      # repo path cited by the runbook exists, so a rename of ANY of them must re-run
-      # this check on the renaming PR — not go stale-red on a later, unrelated one.
-      # A guard test pins this list to the runbook's citations mechanically.
-      - 'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md'
-      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
-      - '.github/workflows/multitable-recovery-flag-containment-check.yml'
-      - 'packages/core-backend/src/db/recovery-conflict.ts'
-      - 'packages/core-backend/src/multitable/exact-anchor-recovery-execute.ts'
-      - 'packages/core-backend/src/routes/univer-meta.ts'
-      - 'packages/core-backend/tests/unit/recovery-conflict-census.test.ts'
-      - 'packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts'
-      - 'packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
-      - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
 
 permissions:
   contents: read
@@ -105,59 +45,3 @@ jobs:
       - name: Run hermetic observation-kit tests (no DB, no hosts)
         run: node --test scripts/ops/multitable-o2-observation.test.mjs
 
-  execution-proof:
-    name: observation-kit execution proof (SQL is read-only against a real DB)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: metasheet_o2_obs_kit
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d metasheet_o2_obs_kit"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_o2_obs_kit
-      # Arms the suite's execution-layer sentinel: in THIS lane a missing DATABASE_URL
-      # must FAIL, never silently skip the read-only proof.
-      METASHEET_REAL_DB_TEST_STEP: '1'
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.16.1
-          run_install: false
-
-      - name: Use empty npmrc for pnpm
-        run: |
-          echo "" > /tmp/empty-npmrc
-          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Run DB migrations
-        env:
-          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
-          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — the observation SQL
-          # must run against the same schema shape the other real-DB lanes provision.
-          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
-        run: pnpm --filter @metasheet/core-backend db:migrate
-
-      - name: Run observation-kit tests WITH the execution layer armed
-        run: node --test scripts/ops/multitable-o2-observation.test.mjs
