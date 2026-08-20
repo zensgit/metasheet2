@@ -589,6 +589,12 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const orgId = org('runtime-punch-guard')
     const userId = `${orgId}-worker`
     const workDate = '2024-10-07'
+    // Punch route's membership-derived org resolution (self-service route) requires an
+    // active `user_orgs` row for the org supplied on the request (here via the `x-org-id`
+    // header postJson sends) before any DML — this fixture's own subject is the LATER
+    // multi-segment-shift guard, so it must clear that earlier gate the same way every
+    // other punch-driving test in this file already does via `seedActiveIdentity`.
+    await seedActiveIdentity(userId, orgId)
     const token = await mintToken(userId, orgId)
     const created = await createShiftViaApi(token, orgId, {
       name: 'Punch Split',

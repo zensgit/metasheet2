@@ -557,6 +557,12 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
   })
 
   it('suspended rollout org: live punch is refused BEFORE any source DML (positive control: legacy-state org writes)', async () => {
+    // Membership-derived punch-route org resolution (this route only) now requires an
+    // active `user_orgs` row for the org named on the request before any downstream
+    // gate (including the suspended-rollout check below) is ever reached — both users
+    // punch into an explicit `orgId`, so both need a matching active membership.
+    await insertActiveUser(controlLiveUser, controlLiveOrg)
+    await insertActiveUser(suspendedLiveUser, suspendedLiveOrg)
     await walkRolloutToSuspended(suspendedLiveOrg)
     await insertLegacyRolloutRow(controlLiveOrg)
 
