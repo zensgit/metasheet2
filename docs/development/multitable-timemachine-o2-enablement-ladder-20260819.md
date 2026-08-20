@@ -1,11 +1,17 @@
-# 多维表 Time Machine O-2 启用阶梯（enablement ladder）— PROPOSED
+# 多维表 Time Machine O-2 启用阶梯（enablement ladder）— RATIFIED
 
-> Status: **PROPOSED**（本文档不自我批准；RATIFY = owner 在承载 PR 留 exact-SHA 批注）。
-> 本文档只定义**顺序与判据**，不执行任何一步。每一级台阶都是**独立的 owner/ops 动作**，
-> 文档合入 ≠ 任何 flag/trigger 变更授权。
-> 基线：#4654 closeout（merged `12f1f8c466`，inert 落地）+ 双主机 postdeploy-full PASS
-> （prod run `31650980676`、both run `31651250987`）。当前姿态：4 flag 全 unset、
-> 9 authority triggers DISABLED、无 `meta_links.foreign_record_id` FK。
+> Status: **RATIFIED**。批准来源 = owner 在承载 PR #5014 留下的 exact-SHA 批注
+> `RATIFY 642b765a96`（本文档自身定义的 RATIFY 机制即为此）。本次仅同步文件头——
+> 批准早已成立，头部此前未跟上（ledger-sync）。
+> **批准的是顺序与判据本身，不含任何台阶执行授权**：本文档不执行任何一步，
+> 每一级台阶仍是**独立的 owner/ops 动作**，文档状态 ≠ 任何 flag/trigger 变更授权。
+> 基线：#4654 closeout（merged `12f1f8c466`，inert 落地）。
+> **主机证据（2026-08-20 刷新，取代原 08-12 的一组）**：双主机 postdeploy-full PASS，
+> run `32321464042`（prod `metasheet-backend` + `metasheet-staging-backend` 同刻同指纹：
+> 4 flag 运行态与 next-restart 均 CONTAINED、triggers 9/9 DISABLED `8c1be0b0…`、
+> functions 6/6 `14c180aa…`、`meta_links.foreign_record_id` FK 0/0）。
+> 原证据（prod run `31650980676`、both run `31651250987`，绑镜像 `12f1f8c466`）保留为历史记录，
+> 但**已不是当前镜像的证据**——L0 判据以上面这组为准。
 
 ## 0. 为什么需要阶梯
 
@@ -25,7 +31,13 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
 
 - [ ] O2-S1（注册同事务原子性）、O2-S2（40001 单一分类器 + 11 写者 census）、
       O2-S3（recovery 租约有界退避）已合 main 且随镜像部署到目标主机。
-- [ ] 目标主机 `postdeploy-full` containment PASS（当前镜像、pending migrations = 0）。
+- [x] 目标主机 `postdeploy-full` containment PASS（**当前镜像**）——run `32321464042`（2026-08-20，双主机）。
+- [ ] ⚠️ **staging 的 pending migrations ≠ 0**：2026-08-20 部署 `401fa1d880` 时，迁移对齐报告判
+      `do_not_run_full_migrate`，runner 按 bundle §3.2 停止 —— staging 容器已在新镜像上、
+      但**他线**（考勤 W7 / 审批 Lock-N 等）的迁移积压未应用。**本阶梯所依赖的三条 recovery 迁移
+      早在 2026-08-12 已应用**，故上面那条 containment PASS 成立；但 L0 原文要求的
+      「pending migrations = 0」在 staging 上**不成立**，需按
+      `docs/development/staging-migration-alignment-runbook-verification-20260519.md` 单独处置后再开 L1。
 - [ ] **census 可达性升级已闭合**（对抗门 P3-1：40001 census 目前只数 token 不辨死代码——
       `if (false && …)` 化 9 处仍全绿；trigger DISABLED 期为 P3，**L1 打开 trigger 前必须**
       把 census 升级为可达性/行为级或逐面补判别腿）。
