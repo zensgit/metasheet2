@@ -9,6 +9,7 @@ import { WorkflowDesigner, type WorkflowDefinition } from '../workflow/WorkflowD
 import { BPMNWorkflowEngine } from '../workflow/BPMNWorkflowEngine'
 import { compileBpmnPreview } from '../workflow/bpmnCompilePreview'
 import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
+import { requireBpmnRuntimeEnabled } from '../workflow/bpmnRuntimeConfig'
 import {
   appendWorkflowDraftExecution,
   canDeployWorkflowDraft,
@@ -505,6 +506,7 @@ router.get(
 router.post(
   '/templates/:id/instantiate',
   authenticate,
+  requireBpmnRuntimeEnabled, // P0-S S1: instantiate reaches the BPMN engine
   param('id').isString(),
   body('name').optional().isString(),
   body('description').optional().isString(),
@@ -1226,6 +1228,7 @@ router.post(
 router.post(
   '/workflows/:id/deploy',
   authenticate,
+  requireBpmnRuntimeEnabled, // P0-S S1: deploy reaches the BPMN engine
   param('id').isString(),
   validate,
   async (req: Request, res: Response) => {

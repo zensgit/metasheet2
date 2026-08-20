@@ -1,4 +1,9 @@
 import { createHash } from 'crypto'
+import { Logger } from '../core/logger'
+import {
+  resolveEnsureFieldsOverwriteMode,
+  classifyFieldOverwrite,
+} from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
@@ -305,26 +310,59 @@ export async function ensureSheet(
   return sheet
 }
 
+const ensureFieldsLogger = new Logger('MultitableProvisioning')
+
 export async function ensureFields(
   input: EnsureFieldsInput,
 ): Promise<MultitableProvisioningField[]> {
   const fields = input.fields ?? []
+  // P0-S S3 — destructive-reconcile guard. Default 'overwrite' = today's exact behavior
+  // (no pre-read, unchanged SQL). Only 'observe'/'preserve' incur the per-field pre-read.
+  const overwriteMode = resolveEnsureFieldsOverwriteMode()
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index
-    await input.query(
-      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-       ON CONFLICT (id) DO UPDATE SET
+    const nextProperty = JSON.stringify(buildFieldProperty(field))
+
+    let conflictClause =
+      `ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          property = EXCLUDED.property,
-         "order" = EXCLUDED."order"`,
+         "order" = EXCLUDED."order"`
+
+    if (overwriteMode !== 'overwrite') {
+      const existing = await input.query(
+        `SELECT name, type, property, "order" FROM meta_fields WHERE id = $1 AND sheet_id = $2`,
+        [field.id, input.sheetId],
+      )
+      const row = (existing.rows as any[])[0]
+      const verdict = classifyFieldOverwrite(
+        row
+          ? { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }
+          : null,
+        { name: field.name.trim(), type: field.type, property: JSON.parse(nextProperty), order },
+      )
+      if (verdict === 'would_overwrite') {
+        // values-free: field id + sheet id only, never names/values.
+        ensureFieldsLogger.warn(
+          `ensureFields destructive-reconcile: field ${field.id} on sheet ${input.sheetId} would be overwritten (mode=${overwriteMode})`,
+        )
+        // 'preserve' keeps the tenant's row untouched (add-only); 'observe' still overwrites
+        // but has now surfaced the event for audit/metrics.
+        if (overwriteMode === 'preserve') conflictClause = 'ON CONFLICT (id) DO NOTHING'
+      }
+    }
+
+    await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ${conflictClause}`,
       [
         field.id,
         input.sheetId,
         field.name.trim(),
         field.type,
-        JSON.stringify(buildFieldProperty(field)),
+        nextProperty,
         order,
       ],
     )

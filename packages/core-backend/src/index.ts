@@ -79,6 +79,7 @@ import {
   MultitableObjectScopeError,
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
+import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
@@ -1857,10 +1858,24 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              await assertPluginOwnsSheet(txQuery, {
+              // P0-S S4 — sheet-scope enforcement mode. `assertPluginOwnsSheet` throws on a
+              // DIFFERENT-owner sheet in every mode; for an UNREGISTERED sheet it returns
+              // false (test-pinned legacy tolerance). Default 'observe' logs+continues (zero
+              // functional change, adds visibility); 'enforce' rejects unregistered access
+              // (flipped per-deployment after registry backfill).
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, {
                 pluginName,
                 sheetId,
               })
+              if (!ownsSheet) {
+                const scopeMode = resolvePluginSheetScopeMode()
+                this.logger.warn(
+                  `plugin ${pluginName} accessed unregistered sheet ${sheetId} via plugin-scope (mode=${scopeMode})`,
+                )
+                if (scopeMode === 'enforce') {
+                  throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+                }
+              }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
