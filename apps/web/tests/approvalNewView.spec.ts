@@ -1751,4 +1751,75 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
     expect(submitApprovalSpy).not.toHaveBeenCalled()
   })
+
+  // stale-cache identity fix (2026-08-21, Codex #4 P2-1): `choiceConfirmedNames` used to be
+  // append-only-non-blank -- a name confirmed by an EARLIER search stuck around forever, even
+  // after a LATER search for the SAME id explicitly returned a blank name (the directory record
+  // was renamed/anonymized/deactivated between the two searches). Combined with the old
+  // `isChoiceOptionUnidentifiable` exemption for the chooser's own current selection, this let an
+  // already-selected id stay both rendered as selectable AND submittable under its stale name.
+  // This is the discriminating construction: select 'u_alpha' while it is named ('Alpha'), then
+  // re-open the SAME picker once the directory search for the SAME id now returns a blank name --
+  // the freshest answer must retract the confirmation, disable the option, and BLOCK submit.
+  it('a stale confirmed name is retracted when a LATER search reconfirms the SAME id as blank -- option disables and submit is blocked, not silently allowed on the old name', async () => {
+    await mountView()
+    const picker = chooserPicker()
+
+    // Search #1: 'u_alpha' resolves named -> selected and confirmed.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Search #2 (same node, e.g. the requester re-opens the picker): the SAME id now comes back
+    // blank -- must RETRACT the earlier confirmation, not merely skip overwriting it.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_alpha', name: '', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    const staleOption = Array.from(picker.querySelectorAll('option')).find((o) => o.value === 'u_alpha')
+    expect(staleOption, 'the retracted candidate must still render as a selectable-shaped (disabled) option, not vanish').toBeTruthy()
+    expect(staleOption!.textContent, 'must render the values-free ordinal, never the stale name').not.toContain('Alpha')
+    expect(staleOption!.disabled, 'a retracted confirmation must disable the option even though it is the chooser\'s own current selection').toBe(true)
+
+    submitButton().click()
+    await flushUi()
+
+    expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
+    expect(submitApprovalSpy, 'the stale name must never let a now-unidentifiable selection through').not.toHaveBeenCalled()
+  })
+
+  // per-node request epoch (2026-08-21, Codex #4 P2-1 ordering half): `searchChoiceCandidates`
+  // used to write `choiceOptions`/`choiceConfirmedNames` unconditionally on resolution, with no
+  // generation guard -- an OLDER in-flight search resolving AFTER a NEWER one would silently
+  // clobber the newer, already-rendered page. Holds the first search open, lets a second
+  // (immediately-resolving) search land first, THEN resolves the first -- the stale response must
+  // never apply.
+  it('an out-of-order (older) search resolution never clobbers a newer one -- the per-node epoch discards it', async () => {
+    let resolveFirst: (users: Array<{ id: string; name: string; email: string }>) => void = () => {}
+    const firstSearch = new Promise<Array<{ id: string; name: string; email: string }>>((resolve) => {
+      resolveFirst = resolve
+    })
+    searchApprovalDirectoryUsersSpy.mockReturnValueOnce(firstSearch)
+    await mountView()
+    const picker = chooserPicker()
+
+    // Older search #1 fires and is held in flight.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // Newer search #2 fires (a later re-open) and resolves immediately.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_new', name: 'New', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // NOW the older, first search resolves -- late and out of order.
+    resolveFirst([{ id: 'u_old', name: 'Old', email: '' }])
+    await flushUi()
+
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
+    expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
+    expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
+  })
 })

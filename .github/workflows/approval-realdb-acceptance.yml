@@ -251,7 +251,7 @@ jobs:
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
             echo "suite=approval-requester-choice.db.test.ts"
             echo "lock=approval-lock1-enterprise-assignees-20260817 §K2"
-            echo "gates=G-8,G-9,G-17,G-18 (+G-1/G-2 authoring, G-19 temporal arm)"
+            echo "gates=G-8,G-9,G-17,G-18,G-20 (+G-1/G-2 authoring, G-19 temporal arm; G-20 backend identifiability, Codex #4 P2-1)"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"

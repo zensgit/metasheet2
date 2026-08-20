@@ -9,7 +9,39 @@ import { describe, expect, it } from 'vitest'
  * (ApprovalNewView.vue's `choiceOptionLabel` — the requester_choice submit-time picker) that the
  * hand list had ZERO entry for at all — not even an OUT-OF-SCOPE row. A frozen list can only ever
  * re-verify sites someone remembered to type in; it structurally cannot catch a NEW site nobody
- * thought to add. That is the exact failure this rebuild closes.
+ * thought to add. This rebuild closes THAT specific failure mode — a new site is caught
+ * automatically as long as its raw-id access is textually visible on one line and matches one of
+ * the six lexical patterns below (§KNOWN EVASION documents the boundary this does NOT cover, found
+ * by a Codex #4 verification pass on 2026-08-21: a new site whose identity access goes through a
+ * helper-function call is invisible to a per-line grep no matter how automatically the tree is
+ * walked). Scope narrowed here per feedback_absolute_claim_sweep_must_be_mechanical.md — the
+ * delivered reports (approval-parity-development-report-20260818.md §6.4 row D-10) were already
+ * honest about this; this file's own docstring previously was not.
+ *
+ * § KNOWN EVASION (documented, not closed — do not read a green run here as "no raw id renders
+ * anywhere"): every PATTERN below is a single-LINE lexical grep over `.id`/`.userId`/`.key`/etc.
+ * tokens. Any render whose identity access is ONE FUNCTION CALL away from the template/attribute —
+ * i.e. a helper that takes a row and returns a string, with the `.id`/`.key` access living inside
+ * the helper body rather than inline in the mustache/attribute — is structurally invisible to a
+ * per-line grep, no matter which tree it lives in or how the six patterns are worded. Concretely
+ * (this is the exact evasion the 2026-08-21 pass mounted, confirmed reaching the live DOM in a
+ * scanned root, then removed — nothing below is checked into source):
+ *   const probeRow: { key?: string | null } = { key: 'user_probe_raw_9' }
+ *   function unsafePersonLabel(row: { key?: string | null }): string { return row.key ?? '' }
+ *   // template: {{ unsafePersonLabel(probeRow) }}
+ * None of the six PATTERNS matches any of those three lines: the mustache only contains a bare
+ * function call (no `.id`/`.key` token inside `{{ }}`, so `mustache-id` misses it), the helper body
+ * `return row.key ?? ''` puts a STRING LITERAL after `??` rather than an identifier (so
+ * `name-or-id-fallback`'s "bare `.id`-shaped expression after `||`/`??`" requirement misses it, and
+ * `key` is not even in that pattern's token alternation), and the helper signature/declaration
+ * match nothing. This is a CLASS boundary, not a one-off gap to patch with a 7th pattern — the next
+ * indirection (two calls deep, a computed property, a render function) reopens the same hole under
+ * a different shape. The real follow-up (NOT implemented by this file, and not scheduled — an
+ * owner-visible future item only) is a unified person-label rendering component every
+ * viewer-facing identity display is required to route through, paired with an AST-level (not
+ * text-grep) ban on any OTHER viewer-facing consumption of a member/role/dept id. Until that
+ * lands, this file's green is scoped to "no untriaged hit among six known lexical shapes across two
+ * trees" — never "no raw id reaches the DOM anywhere".
  *
  * TWO TIERS now coexist, and (feedback_source_text_assertions_are_not_behaviour.md) neither one is
  * a substitute for the other:

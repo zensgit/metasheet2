@@ -105,7 +105,7 @@ import {
 } from './ApprovalConditionFormula'
 import { resolveApprovalRequesterOrgRelations, ApprovalRoutingPolicyError, MAX_MANAGER_CHAIN_LEVELS, type ApprovalRequesterOrgRelations } from './ApprovalDirectoryOrg'
 import { resolveApprovalRequesterRoleIds } from './ApprovalRequesterRoles'
-import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot } from './approval-directory'
+import { fetchCuratedApprovalRoleIds, fetchCuratedApprovalMemberGroupIds, fetchMemberGroupSnapshot, resolveDirectoryUsersByIds } from './approval-directory'
 import { resolveActiveDelegationMap } from './ApprovalDelegations'
 import type {
   ApprovalAssignmentDTO,
@@ -6667,6 +6667,21 @@ export class ApprovalProductService {
    * `approval_usable = true`, a curation flag governing the `requester.role` ROUTING
    * predicate — importing it here would silently fail every choice scoped to a non-curated
    * role. K2's role scope is plain role membership.
+   *
+   * IDENTIFIABILITY (2026-08-21, Codex #4 P2-1 backend derivation of the owner-ratified 方案A
+   * ruling — resolver + 残余禁选 for flow-changing selectors): active + in-scope is necessary but
+   * not sufficient. A chosen approver whose directory row has a blank/absent display name is
+   * REJECTED here too — `APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED`, values-free (node key only,
+   * never the chosen id) — the SAME invariant `apps/web`'s requester-choice picker enforces
+   * client-side (`ApprovalNewView.vue`'s `choiceConfirmedNames`/`isChoiceOptionUnidentifiable`/
+   * `firstUnidentifiableChoiceNode`), landed as an owner-visible FE gate first. The server is the
+   * authoritative layer for that same invariant: a client that skips/bypasses the FE gate (a
+   * modified request, a future caller of this method) must not be able to freeze an assignment a
+   * requester could never have identified by name. Reuses `resolveDirectoryUsersByIds`
+   * (approval-directory.ts) — the SAME exact-id, active-only, blank-name-DROPPED resolver the
+   * participant directory's `/api/approvals/directory/resolve` route already serves to the FE —
+   * so "identifiable" means exactly what the picker's own name-confirmation call means, not a
+   * second, potentially-drifting definition of the same fact.
    */
   private async validateAndFreezeRequesterChoices(
     payload: Record<string, string[]> | undefined,
@@ -6720,6 +6735,9 @@ export class ApprovalProductService {
     const allChosenIds = new Set<string>()
     for (const ids of normalized.values()) for (const id of ids) allChosenIds.add(id)
     let activeIds = new Set<string>()
+    // Identifiability (see method doc above): a chosen id must resolve to a REAL, non-blank
+    // directory name — reuses the SAME resolver the FE's own name-confirmation call goes through.
+    let identifiedIds = new Set<string>()
     if (allChosenIds.size > 0) {
       try {
         const activeResult = await pool.query<{ id: string }>(
@@ -6730,6 +6748,19 @@ export class ApprovalProductService {
       } catch (error) {
         metricsLogger.warn(
           `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
+        )
+        throw new ServiceError(
+          'Could not verify the chosen approvers for this approval template. Please retry.',
+          503,
+          'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
+        )
+      }
+      try {
+        const identified = await resolveDirectoryUsersByIds([...allChosenIds])
+        identifiedIds = new Set(identified.map((row) => row.id))
+      } catch (error) {
+        metricsLogger.warn(
+          `Failed to resolve requester-choice candidate identifiability: ${error instanceof Error ? error.message : 'unknown error'}`,
         )
         throw new ServiceError(
           'Could not verify the chosen approvers for this approval template. Please retry.',
@@ -6776,6 +6807,16 @@ export class ApprovalProductService {
         }
         // Baseline for every scope: each chosen id is an ACTIVE local user.
         if (ids.some((id) => !activeIds.has(id))) outOfScope(source.scope.type)
+        // Identifiability baseline (see method doc): active is not enough — a blank/absent
+        // directory display name is rejected here too, values-free (node key only).
+        if (ids.some((id) => !identifiedIds.has(id))) {
+          throw new ServiceError(
+            `A chosen approver could not be confirmed by name`,
+            422,
+            'APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED',
+            { nodeKey },
+          )
+        }
         if (source.scope.type === 'members') {
           const allowed = new Set(source.scope.userIds.map((id) => id.trim()))
           if (ids.some((id) => !allowed.has(id))) outOfScope('members')

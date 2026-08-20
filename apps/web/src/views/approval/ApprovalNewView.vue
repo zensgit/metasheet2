@@ -947,16 +947,25 @@ const requesterChoiceNodes = computed<RequesterChoiceChooser[]>(() => {
 const requesterChoices = reactive<Record<string, string[]>>({})
 const choiceOptions = reactive<Record<string, ApprovalDirectoryUser[]>>({})
 const choiceSearchLoading = reactive<Record<string, boolean>>({})
-// member-display-identity (2026-08-19; requester-choice raw-id-render fix): nodeKey -> id -> real
-// name, populated SYNCHRONOUSLY from every search result (`searchChoiceCandidates` below) and
-// never pruned. `searchApprovalDirectoryUsers` already carries the freshest directory name per id
-// (same `users.name` column a separate batch-resolve call would read — see
-// `ApprovalUserPicker.vue`'s identical precedent), so this needs no extra round trip; accumulating
-// across searches (rather than replacing per page) is what lets a candidate picked from an EARLIER
-// search page stay identifiable at submit time even after a LATER search's result page doesn't
-// happen to include that id again. This is the source of truth `isChoiceOptionUnidentifiable` and
-// the submit-time gate below both read.
+// member-display-identity (2026-08-19; requester-choice raw-id-render fix; stale-cache fix
+// 2026-08-21): nodeKey -> id -> real name, kept in sync with the FRESHEST search response for
+// that id (`searchChoiceCandidates` below) — a name is written when the latest page confirms one,
+// and DELETED the moment the latest page for that id comes back blank/absent (a directory record
+// can be renamed to blank, anonymized, or deactivated between two searches; the freshest answer
+// must win, never an earlier append). Accumulating confirmed names ACROSS pages (rather than
+// replacing the whole map per page) is what lets a candidate picked from an EARLIER search page
+// stay identifiable at submit time even after a LATER search's result page doesn't happen to
+// re-include that id at all — the deletion above only fires when that id IS present in a later
+// page with a blank name, never merely because a later page omits it. This is the single source of
+// truth `isChoiceOptionUnidentifiable` and the submit-time gate below both read.
 const choiceConfirmedNames = reactive<Record<string, Record<string, string>>>({})
+// Per-node request epoch (2026-08-21, mirrors routePreviewController.ts's race-guard): a search
+// fired by an EARLIER focus/keystroke can resolve AFTER a LATER one if the network reorders
+// responses. Only the response whose captured generation still matches the node's CURRENT
+// generation may write `choiceOptions`/`choiceConfirmedNames` — an out-of-order resolution is
+// discarded outright rather than silently clobbering a newer, already-rendered result page. Not
+// `reactive`: purely an internal ordering token, never read by a template or computed.
+const choiceSearchGeneration: Record<string, number> = {}
 
 function chooserScopeLabel(chooser: RequesterChoiceChooser): string {
   if (chooser.scope.type === 'members') return '限指定成员'
@@ -977,16 +986,23 @@ function choiceOptionLabel(option: ApprovalDirectoryUser, index: number): string
 
 // Mirrors ApprovalUserPicker.vue's `isUnidentifiable`: a candidate with no resolvable name must be
 // UNSELECTABLE (never merely relabelled), so a requester can never hand approval authority to an
-// account they cannot identify by name. The chooser's OWN currently-selected ids are exempt — a
-// picker must never render its own existing selection as rejectable, and (unlike the single-select
-// ApprovalUserPicker) this chooser can be `multi`, so the exemption checks membership in the whole
-// selection array, not equality against a single modelValue.
+// account they cannot identify by name. Stale-cache fix (2026-08-21): this now reads
+// `choiceConfirmedNames` (the freshest-wins record) rather than the CURRENT render page's
+// `option.name` directly, and there is deliberately NO "currently-selected ids are exempt"
+// special case any more — that exemption was checking `option.name` against the page the option
+// happens to be rendered from, which is exactly the site a stale/renamed-to-blank directory
+// record slipped through: the id was selected while an EARLIER page still confirmed a real name,
+// a LATER page then re-confirmed it blank (deleting the entry above), and the exemption kept the
+// now-unconfirmed option enabled anyway. Reading `choiceConfirmedNames` alone already preserves
+// the one property the exemption existed for — a selection confirmed on an earlier page stays
+// selectable even when a later page's results don't happen to re-include that id at all — without
+// ever re-enabling an id the freshest page has actively retracted.
 function isChoiceOptionUnidentifiable(chooser: RequesterChoiceChooser, option: ApprovalDirectoryUser): boolean {
-  if ((requesterChoices[chooser.nodeKey] ?? []).includes(option.id)) return false
-  return !option.name?.trim()
+  return !choiceConfirmedNames[chooser.nodeKey]?.[option.id]?.trim()
 }
 
 async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string): Promise<void> {
+  const generation = (choiceSearchGeneration[chooser.nodeKey] = (choiceSearchGeneration[chooser.nodeKey] ?? 0) + 1)
   choiceSearchLoading[chooser.nodeKey] = true
   try {
     // Scope-filtered SERVER-SIDE so a members/role-scoped candidate outside the current search
@@ -997,14 +1013,18 @@ async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string
         ? { roleIds: chooser.scope.roleIds }
         : {}
     const results = await searchApprovalDirectoryUsers(q, 20, scope)
+    // Epoch guard: a later focus/keystroke on this SAME node already started a newer search
+    // while this one was in flight -- discard this response entirely (never partially apply it).
+    if (choiceSearchGeneration[chooser.nodeKey] !== generation) return
     choiceOptions[chooser.nodeKey] = results
-    // Synchronous, authoritative identifiability record for the submit-time gate (see
-    // choiceConfirmedNames' own doc above) — never pruned, so it survives a later search whose
-    // page happens not to re-include this id.
+    // Freshest-wins identifiability record for the submit-time gate (see choiceConfirmedNames'
+    // own doc above): write a real name when confirmed, DELETE any earlier confirmation the
+    // moment this same id comes back blank on the freshest page for this node.
     const confirmed = choiceConfirmedNames[chooser.nodeKey] ?? (choiceConfirmedNames[chooser.nodeKey] = {})
     for (const candidate of results) {
       const name = candidate.name?.trim()
       if (name) confirmed[candidate.id] = name
+      else delete confirmed[candidate.id]
     }
     // Also prime the shared authorized-scope resolver cache (directoryResolve.ts) with these
     // candidate ids — harmless if this component never reads it back, but keeps this picker
@@ -1013,7 +1033,9 @@ async function searchChoiceCandidates(chooser: RequesterChoiceChooser, q: string
     // id does not need its own network round trip.
     ensureUserNamesResolved(results.map((candidate) => candidate.id))
   } finally {
-    choiceSearchLoading[chooser.nodeKey] = false
+    // Only the still-current generation may clear the loading flag -- an out-of-order response's
+    // `finally` must not mask a still-in-flight newer request as "done".
+    if (choiceSearchGeneration[chooser.nodeKey] === generation) choiceSearchLoading[chooser.nodeKey] = false
   }
 }
 

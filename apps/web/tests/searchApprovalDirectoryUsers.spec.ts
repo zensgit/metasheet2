@@ -178,7 +178,10 @@ describe('directoryResolve (the shared resolver cache)', () => {
     const { __resetResolvedDirectoryNamesForTests } = await import('../src/approvals/directoryResolve')
     __resetResolvedDirectoryNamesForTests()
   })
-  afterEach(() => { vi.clearAllMocks() })
+  // BACKOFF fix (2026-08-21, Codex #4 P3): unconditional -- harmless when a test never switched
+  // to fake timers, and required for the retry-backoff tests below that do, so a real-timer test
+  // later in this file never inherits a fake-timer clock left switched on.
+  afterEach(() => { vi.clearAllMocks(); vi.useRealTimers() })
 
   async function flushMicrotasks(cycles = 8): Promise<void> {
     for (let i = 0; i < cycles; i += 1) await Promise.resolve()
@@ -248,32 +251,58 @@ describe('directoryResolve (the shared resolver cache)', () => {
   // render-driven retry) -- so retryability alone is not enough; the retry must happen WITHOUT any
   // second `ensure` call. This is the load-bearing proof: ONE `ensureUserNamesResolved` call, a
   // mock that fails once then recovers, and the name resolves anyway.
-  it('a TRANSIENT resolve() failure (network rejection) is retried IN PLACE and recovers WITHOUT a second ensure call', async () => {
+  it('a TRANSIENT resolve() failure (network rejection) is retried IN PLACE after the backoff delay and recovers WITHOUT a second ensure call', async () => {
+    vi.useFakeTimers()
     const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
     apiFetchMock.mockRejectedValueOnce(new Error('network down'))
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
 
     expect(() => ensureUserNamesResolved(['u1'])).not.toThrow()
-    // More cycles than the single-attempt tests above: TWO sequential attempts, and the second
-    // (successful) one has an extra `await response.json()` hop the reject-only path doesn't.
-    await flushMicrotasks(20)
+    // Attempt 1 fires on the microtask-debounced flush and fails; the module then awaits the
+    // first backoff delay (300ms) before attempt 2 -- advance the fake clock past it. `Async`
+    // flushes the microtask queue between/after each timer tick, so this also carries attempt 2
+    // (and its extra `await response.json()` hop) through to completion.
+    await vi.advanceTimersByTimeAsync(300)
 
-    expect(apiFetchMock, 'the bounded in-place retry must have made a second attempt on its own -- no manual re-ensure call above').toHaveBeenCalledTimes(2)
+    expect(apiFetchMock, 'the bounded in-place retry must have made a second attempt on its own, after the backoff delay -- no manual re-ensure call above').toHaveBeenCalledTimes(2)
+    expect(getResolvedUserName('u1')).toBe('Alice')
+  })
+
+  // BACKOFF fix (2026-08-21, Codex #4 P3): the strongest form of the recovery proof -- BOTH of
+  // the first two attempts fail, and the id still resolves automatically on attempt 3, entirely
+  // within the bounded backoff window (300ms + 1200ms), with no manual second `ensure` call.
+  it('a failure that persists through attempts 1 AND 2 still recovers automatically on attempt 3, entirely within the bounded backoff window', async () => {
+    vi.useFakeTimers()
+    const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockRejectedValueOnce(new Error('down 1'))
+    apiFetchMock.mockRejectedValueOnce(new Error('down 2'))
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
+
+    ensureUserNamesResolved(['u1'])
+    await vi.advanceTimersByTimeAsync(300) // attempt 1 fails, backoff, attempt 2 fires and fails
+    expect(getResolvedUserName('u1'), 'still unresolved -- only 2 of 3 attempts have run').toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(1200) // second backoff, attempt 3 fires and succeeds
+    expect(apiFetchMock, 'automatic recovery on the 3rd in-place attempt -- no second ensure call anywhere in this test').toHaveBeenCalledTimes(3)
     expect(getResolvedUserName('u1')).toBe('Alice')
   })
 
   // A 5xx (non-OK, but not 401/403) is transient the same way a network throw is -- same retry
   // contract, different failure shape (this wrapper throws ApprovalDirectoryResolveError for it,
   // not a bare rejection). This test proves the OTHER half of the contract: the in-place retry is
-  // BOUNDED (not an infinite loop against a persistently-failing endpoint), and a failure that
-  // outlasts the bound still leaves the id RETRYABLE (not a confirmed miss) for a LATER `ensure`
-  // call -- mirrors the pre-redesign test this replaces, updated for the new call count.
-  it('a TRANSIENT resolve() failure (500) that persists past the retry bound leaves the id RETRYABLE for a LATER ensure call', async () => {
+  // BOUNDED (not an infinite loop against a persistently-failing endpoint) even across the
+  // backoff delays, and a failure that outlasts the bound still leaves the id RETRYABLE (not a
+  // confirmed miss) for a LATER `ensure` call -- permanent failure stays fail-closed.
+  it('a TRANSIENT resolve() failure (500) that persists past the retry bound (across both backoff delays) leaves the id RETRYABLE for a LATER ensure call', async () => {
+    vi.useFakeTimers()
     const { ensureUserNamesResolved, getResolvedUserName } = await import('../src/approvals/directoryResolve')
     apiFetchMock.mockResolvedValue(jsonResponse({}, { status: 500, ok: false })) // every attempt fails
 
     ensureUserNamesResolved(['u1'])
-    await flushMicrotasks()
+    // Advance past BOTH backoff delays (300ms then 1200ms) so all 3 bounded attempts complete.
+    await vi.advanceTimersByTimeAsync(300)
+    await vi.advanceTimersByTimeAsync(1200)
 
     expect(getResolvedUserName('u1'), 'unresolved after every retry attempt fails -- rendering must still fall back to a placeholder').toBeNull()
     // 3 == RESOLVE_MAX_ATTEMPTS (directoryResolve.ts, not exported -- pinned here by count so a
@@ -282,6 +311,8 @@ describe('directoryResolve (the shared resolver cache)', () => {
 
     // A fresh `ensure` call later (e.g. the user re-fetching detail/history) still retries --
     // unlike the confirmed-miss case (sibling test above), where re-ensuring does NOT re-fetch.
+    // Real timers from here: attempt 1 of a fresh call never pays the backoff delay.
+    vi.useRealTimers()
     apiFetchMock.mockReset()
     apiFetchMock.mockResolvedValueOnce(jsonResponse({ users: [{ id: 'u1', name: 'Alice' }] }))
     ensureUserNamesResolved(['u1'])
@@ -336,5 +367,30 @@ describe('directoryResolve (the shared resolver cache)', () => {
     await flushMicrotasks()
     expect(apiFetchMock).toHaveBeenCalledTimes(1)
     expect(mod.getResolvedUserName('u1')).toBe('Alice')
+  })
+
+  // BACKOFF fix (2026-08-21, Codex #4 P3), cross-test timer-leak proof: the exact objection the
+  // pre-fix module comment raised against a real-timer retry -- a backoff timer left pending past
+  // one test's own boundary would fire during a LATER, unrelated test and silently inflate ITS
+  // apiFetch call count. Leaves a retry's backoff timer PENDING (never advances the clock far
+  // enough to fire it), calls the SAME reset every consuming spec's beforeEach already calls, then
+  // proves no call ever lands: the clock is advanced well past where the cancelled timer would
+  // have fired, in a FRESH fake-timers scope, with a mock that would raise the count if it fired.
+  it('__resetResolvedDirectoryNamesForTests cancels a PENDING backoff timer -- it never fires into a later test', async () => {
+    vi.useFakeTimers()
+    const mod = await import('../src/approvals/directoryResolve')
+    apiFetchMock.mockRejectedValue(new Error('down'))
+
+    mod.ensureUserNamesResolved(['u1'])
+    await vi.advanceTimersByTimeAsync(0) // let attempt 1 fail and schedule the 300ms backoff timer
+    expect(apiFetchMock, 'attempt 1 must have run before the timer this test is about to cancel gets scheduled').toHaveBeenCalledTimes(1)
+
+    // Reset WHILE the 300ms backoff timer is still pending -- this is the cancellation under test.
+    mod.__resetResolvedDirectoryNamesForTests()
+
+    // Advance well past where attempt 2 would have fired if the timer had survived the reset.
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(apiFetchMock, 'the cancelled backoff timer must never fire -- a surviving timer would have added a 2nd (or more) call here').toHaveBeenCalledTimes(1)
+    expect(mod.getResolvedUserName('u1'), 'reset also clears the cache -- nothing resolved from the abandoned attempt').toBeNull()
   })
 })

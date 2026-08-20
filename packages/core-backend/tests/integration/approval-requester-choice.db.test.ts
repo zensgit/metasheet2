@@ -26,6 +26,13 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *           same-person collision is caught by the RUNTIME 409 (arm 2, with a
  *           different-person create succeeding as the positive control);
  *  G-18     the 422 bodies carry the node key (template-authored) and NEVER the chosen person id.
+ *  G-20     IDENTIFIABILITY (2026-08-21, Codex #4 P2-1 backend derivation): active + in-scope is
+ *           not sufficient — a chosen approver whose directory row has a blank/absent display
+ *           name is rejected fail-closed (APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED, values-free),
+ *           mirroring the FE picker's own choiceConfirmedNames/isChoiceOptionUnidentifiable gate
+ *           server-side. Every OTHER fixture user below is now seeded WITH a `name` specifically
+ *           so this new baseline check does not turn every pre-existing success-path assertion in
+ *           this file into a 422 — only the dedicated UNNAMED fixture is deliberately nameless.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -37,6 +44,7 @@ const M1 = `rchoice-m1-${TS}`
 const M2 = `rchoice-m2-${TS}`
 const OTHER = `rchoice-other-${TS}` // active; outside every members list; transfer target
 const INACTIVE = `rchoice-inactive-${TS}` // users.is_active = FALSE
+const UNNAMED = `rchoice-unnamed-${TS}` // ACTIVE, in scope, but users.name IS NULL (G-20)
 const ROLE = `rchoice-role-${TS}` // seeded with approval_usable = FALSE, deliberately
 
 async function canListen(): Promise<boolean> {
@@ -191,10 +199,17 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
     // CURATION-INDEPENDENCE TRAP (§K2 verbatim): the choice-scope role is approval_usable=FALSE.
     // K2's role scope is PLAIN membership; only the requester.role ROUTING predicate is curated.
     await pool.query(`INSERT INTO roles (id, name, approval_usable) VALUES ($1, $2, false) ON CONFLICT (id) DO UPDATE SET approval_usable = false`, [ROLE, ROLE])
+    // G-20: every OTHER fixture user is seeded WITH a real `name` -- the new identifiability
+    // baseline (validateAndFreezeRequesterChoices) would otherwise 422 every pre-existing
+    // success-path assertion below, since `users.name` has no default and every one of these
+    // rows was previously created nameless.
     for (const userId of [REQ, APPROVER, CHOSEN, NON_HOLDER, M1, M2, OTHER]) {
-      await pool.query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', TRUE) ON CONFLICT (id) DO NOTHING`, [userId, `${userId}@x.test`])
+      await pool.query(`INSERT INTO users (id, email, name, password_hash, is_active) VALUES ($1, $2, $3, 'x', TRUE) ON CONFLICT (id) DO NOTHING`, [userId, `${userId}@x.test`, userId])
     }
-    await pool.query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', FALSE) ON CONFLICT (id) DO NOTHING`, [INACTIVE, `${INACTIVE}@x.test`])
+    await pool.query(`INSERT INTO users (id, email, name, password_hash, is_active) VALUES ($1, $2, $3, 'x', FALSE) ON CONFLICT (id) DO NOTHING`, [INACTIVE, `${INACTIVE}@x.test`, INACTIVE])
+    // G-20: ACTIVE, in scope for `company`, but deliberately left NAMELESS (name IS NULL) --
+    // the dedicated fixture for the identifiability baseline itself.
+    await pool.query(`INSERT INTO users (id, email, password_hash, is_active) VALUES ($1, $2, 'x', TRUE) ON CONFLICT (id) DO NOTHING`, [UNNAMED, `${UNNAMED}@x.test`])
     await pool.query(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [CHOSEN, ROLE])
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
     await server.start()
@@ -219,7 +234,7 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
         await pool.query(`DELETE FROM approval_templates WHERE id = ANY($1::uuid[])`, [tids])
       }
       await pool.query(`DELETE FROM user_roles WHERE user_id = ANY($1::varchar[])`, [[CHOSEN]])
-      await pool.query(`DELETE FROM users WHERE id = ANY($1::varchar[])`, [[REQ, APPROVER, CHOSEN, NON_HOLDER, M1, M2, OTHER, INACTIVE]])
+      await pool.query(`DELETE FROM users WHERE id = ANY($1::varchar[])`, [[REQ, APPROVER, CHOSEN, NON_HOLDER, M1, M2, OTHER, INACTIVE, UNNAMED]])
       await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE]])
     } catch {
       /* best effort */
@@ -364,6 +379,31 @@ describeIfDatabase('Lock-1 §K2 requester_choice — real-DB create/freeze/dispa
     expect(await instanceCount(tid)).toBe(0)
 
     // Positive: an arbitrary ACTIVE user (no role, no members list) is in scope for `company`.
+    const ok = await req(base, '/api/approvals', reqTok, {
+      method: 'POST',
+      body: { templateId: tid, formData: { reason: 'r' }, requesterChoices: { approval_rc: [NON_HOLDER] } },
+    })
+    expect(ok.status, await ok.clone().text()).toBe(201)
+  })
+
+  // G-20 (2026-08-21, Codex #4 P2-1 backend derivation): active + in-scope is not enough -- a
+  // chosen approver with a blank/absent directory display name (UNNAMED: is_active=TRUE, no
+  // members/role restriction to fail on) is rejected fail-closed, values-free, zero rows. The
+  // positive control (a NAMED active user, same scope, same template) proves the 422 is about
+  // identifiability specifically, not an unrelated regression in the company-scope path itself.
+  it('G-20 identifiability: company scope rejects a chosen approver with a blank/absent display name (APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED, zero rows), and accepts a named one', async () => {
+    const tid = await createPublished(`rchoice-${TS}-g20-unidentified`, COMPANY_SCOPE_GRAPH)
+    const bad = await req(base, '/api/approvals', reqTok, {
+      method: 'POST',
+      body: { templateId: tid, formData: { reason: 'r' }, requesterChoices: { approval_rc: [UNNAMED] } },
+    })
+    expect(bad.status, await bad.clone().text()).toBe(422)
+    const raw = await bad.clone().text()
+    expect(errorCode((await bad.json()) as ErrorBody)).toBe('APPROVAL_REQUESTER_CHOICE_UNIDENTIFIED')
+    expect(raw, 'values-free: the chosen (unidentifiable) id itself must never be echoed').not.toContain(UNNAMED)
+    expect(await instanceCount(tid)).toBe(0)
+
+    // Positive control: a NAMED active user, same scope, same template, succeeds.
     const ok = await req(base, '/api/approvals', reqTok, {
       method: 'POST',
       body: { templateId: tid, formData: { reason: 'r' }, requesterChoices: { approval_rc: [NON_HOLDER] } },

@@ -53,31 +53,67 @@ import { ApprovalDirectoryResolveError, resolveApprovalDirectoryUsers } from './
 export const resolvedUserNames = reactive<Record<string, string | null>>({})
 
 const RESOLVE_CHUNK = 50
-// P3-3 fix (member-display-identity gate report, 2026-08-19; retry redesign 2026-08-19): a
-// TRANSIENT failure (see the catch below) is retried IN PLACE, up to this many total attempts per
-// batch group, before flushUsers gives up on that group for THIS call. Deliberately a bounded
-// IMMEDIATE retry with NO real-time delay between attempts (no setTimeout/backoff) -- the earlier
-// draft of this fix used a real-timer-based retry, but this module is a session-lifetime
-// singleton shared across every mounted test in the same spec file, and a background real timer
-// left running past a test's own microtask-flush window would fire during a LATER, unrelated
-// test and silently pollute its apiFetch call-count assertions (a cross-test leak the timer-based
-// design could not avoid without a persistent module-level cancel handle, which reintroduces the
-// exact "did every test's beforeEach actually reset this" fragility `__resetResolvedDirectoryNamesForTests`
-// exists to prevent). An immediate retry costs nothing extra when the server is healthy (the
-// common case never enters the catch at all) and turns a genuine one-shot network blip / 5xx into
-// a self-healing resolve without ANY external trigger -- closing the gap the previous "the next
-// ensureUserNamesResolved call... re-queues and retries it" comment claimed but did not actually
-// deliver (there is no render-driven or timer-driven trigger anywhere on the consuming pages; see
-// the pages' own `watch(..., { immediate: true })` callers, which fire once on mount and again
-// only when THEIR OWN reactive deps change -- a resolve failure changes neither).
+// P3-3 fix (member-display-identity gate report, 2026-08-19; retry redesign 2026-08-19; BACKOFF
+// fix 2026-08-21, Codex #4 P3): a TRANSIENT failure (see the catch below) is retried IN PLACE, up
+// to this many total attempts per batch group, before flushUsers gives up on that group for THIS
+// call. Attempts are spaced by a small, BOUNDED, CANCELLABLE delay (RESOLVE_RETRY_DELAY_MS below)
+// rather than firing back-to-back with no real-time gap between them -- a genuinely transient
+// outage (a load-balancer restart, a brief connection-pool exhaustion) that clears within roughly
+// a second and a half now self-heals on its own, WITHOUT depending on something else noticing and
+// making a second `ensureUserNamesResolved` call -- nothing on the consuming pages does that
+// automatically (see the pages' own `watch(..., { immediate: true })` callers below, which fire
+// once on mount and again only when THEIR OWN reactive deps change; a resolve failure changes
+// neither).
+//
+// A prior revision of this comment argued for a ZERO-delay immediate retry specifically to dodge
+// a real cross-test timer leak: this module is a session-lifetime singleton shared across every
+// mounted test in the same spec file, and a background real timer left running past a test's own
+// microtask-flush window would fire during a LATER, unrelated test and silently pollute its
+// apiFetch call-count assertions. That objection is answered here, not sidestepped: every
+// `setTimeout` this module schedules is tracked in `pendingRetryTimeouts`, and
+// `__resetResolvedDirectoryNamesForTests` -- already REQUIRED in every consuming spec's
+// `beforeEach`, per its own doc below -- cancels every one of them before the next test runs, so a
+// delayed retry scheduled by one test can never fire into a LATER, unrelated one. Production code
+// never calls that reset function, so this cancellation path exists purely for test isolation and
+// changes no production behavior. Tests drive this with `vi.useFakeTimers()` +
+// `vi.advanceTimersByTimeAsync` rather than real waits.
 const RESOLVE_MAX_ATTEMPTS = 3
+// Delay BEFORE each retry attempt (attempt 1 always fires immediately -- this array holds
+// RESOLVE_MAX_ATTEMPTS - 1 entries, indexed by `attempt - 2`). Front-loaded (short, then longer)
+// so a sub-second blip recovers fast while a slightly slower one still gets a real second chance;
+// kept deliberately small (cumulative ~1.5s worst case) so a permanently-down endpoint still fails
+// closed quickly rather than holding the id "in flight" for long.
+const RESOLVE_RETRY_DELAY_MS = [300, 1200]
 const pendingUserIds = new Set<string>()
 let userFlushScheduled = false
+// Every retry-delay timer currently scheduled. Cancellation (see
+// __resetResolvedDirectoryNamesForTests) is always "clear everything outstanding", never a
+// single id, so a Set of handles is enough -- no id-keyed bookkeeping needed.
+const pendingRetryTimeouts = new Set<ReturnType<typeof setTimeout>>()
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = []
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
   return out
+}
+
+/**
+ * A cancellable delay: resolves after `ms` real (or fake-timer) milliseconds, tracking its handle
+ * in `pendingRetryTimeouts` so a test-time reset can cancel it. If cancelled before it fires, this
+ * promise simply never resolves -- the `flushUsers` call awaiting it is abandoned along with the
+ * reset, which is exactly what a test boundary should do (never let it complete into whatever the
+ * NEXT test sets up). `ms <= 0` resolves synchronously (no timer at all) so the first attempt in
+ * `flushUsers` never pays a scheduling cost.
+ */
+function delay(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve()
+  return new Promise((resolve) => {
+    const handle = setTimeout(() => {
+      pendingRetryTimeouts.delete(handle)
+      resolve()
+    }, ms)
+    pendingRetryTimeouts.add(handle)
+  })
 }
 
 async function flushUsers(): Promise<void> {
@@ -89,6 +125,9 @@ async function flushUsers(): Promise<void> {
     let resolved: Array<{ id: string; name: string }> | null = null
     let terminal = false
     for (let attempt = 1; attempt <= RESOLVE_MAX_ATTEMPTS; attempt += 1) {
+      // Backoff (2026-08-21, Codex #4 P3): every retry attempt (not the first) waits before
+      // firing, giving a transient outage real wall-clock time to clear on its own.
+      if (attempt > 1) await delay(RESOLVE_RETRY_DELAY_MS[attempt - 2])
       try {
         resolved = await resolveApprovalDirectoryUsers(group)
         break
@@ -183,12 +222,17 @@ export function joinIfAllResolved(
   return names
 }
 
-/** Test-only: clears the module-singleton cache + any queued-but-not-yet-flushed ids. Every spec
- *  that mounts a component consuming this module MUST call this in `beforeEach` — otherwise an
- *  earlier test's resolved name (or confirmed-unresolved marker) leaks into a later test and makes
- *  a discriminating negative pass for the wrong reason. */
+/** Test-only: clears the module-singleton cache + any queued-but-not-yet-flushed ids, AND cancels
+ *  every outstanding retry-backoff timer (2026-08-21 -- see `pendingRetryTimeouts`'s own doc
+ *  above). Every spec that mounts a component consuming this module MUST call this in
+ *  `beforeEach` — otherwise an earlier test's resolved name (or confirmed-unresolved marker), or a
+ *  still-pending backoff delay, leaks into a later test: a resolved name makes a discriminating
+ *  negative pass for the wrong reason, and an uncancelled timer would fire mid-way through an
+ *  unrelated later test and silently add to ITS apiFetch call count. */
 export function __resetResolvedDirectoryNamesForTests(): void {
   for (const key of Object.keys(resolvedUserNames)) delete resolvedUserNames[key]
   pendingUserIds.clear()
   userFlushScheduled = false
+  for (const handle of pendingRetryTimeouts) clearTimeout(handle)
+  pendingRetryTimeouts.clear()
 }
