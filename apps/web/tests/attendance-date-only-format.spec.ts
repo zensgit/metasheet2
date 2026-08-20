@@ -8,16 +8,19 @@ import { formatCalendarDate, isDateOnlyValue, toLocalCalendarDate } from '../src
  * of UTC. Full timestamps are unaffected and still go through the original
  * `new Date(value).toLocaleDateString()` path.
  *
- * Timezone note: vitest's worker-thread pool does not reliably apply `process.env.TZ`
- * mutations to Date/Intl at runtime — verified empirically here (mutating TZ mid-test
- * leaves the host's actual ICU default timezone unchanged inside the worker). So rather
- * than assert a specific offset-dependent literal (which would pass or fail depending on
- * the runner's real system timezone), these tests assert the TZ-INVARIANT property the
- * fix guarantees: for every date-only input, in ANY timezone, the rendered date's
- * year/month/day always equal the input's year/month/day — because construction and
- * rendering both use the same local clock, so they can never disagree. This is exactly
- * the fallback the task calls for: "asserts the formatted output equals the parts of the
- * input string for a date-only input."
+ * Timezone note (corrected per GATE-5047 P2-1): *mutating* `process.env.TZ` mid-test does
+ * not reliably re-derive Node/ICU's resolved timezone inside an already-running vitest
+ * worker (verified empirically). Setting `TZ` on a freshly spawned process's environment
+ * DOES work — Node reads it once at startup. Because this repo's CI runs on UTC-hosted
+ * runners with no `TZ` env set, and the west-of-UTC failure mode is invisible at offset 0,
+ * the TZ-invariant assertions below (true in every timezone, by construction) are NOT on
+ * their own sufficient evidence that this spec would catch a regression in CI — they would
+ * pass just as well if the fix were silently reverted to the buggy `new Date(value)` path,
+ * as long as CI keeps running at UTC. The CI-discriminating check lives in the companion
+ * spec attendance-date-only-format-tz-probe.spec.ts, which spawns real child processes
+ * with an explicit non-UTC `TZ` and asserts against BOTH the fixed module's output and an
+ * independently-computed old-path negative control — regardless of what timezone the
+ * outer `vitest run` process (i.e. the CI host) happens to be running under.
  */
 describe('formatCalendarDate (timezone-safe date-only rendering)', () => {
   it.each([
@@ -33,20 +36,14 @@ describe('formatCalendarDate (timezone-safe date-only rendering)', () => {
     expect(formatCalendarDate(input, 'en-US')).toBe(expected)
   })
 
-  it('parses date-only input from LOCAL y/m/d components, not by UTC-parsing the string (host-offset-agnostic epoch check)', () => {
-    // This is the actual bug/fix boundary: `new Date('2024-01-15')` (UTC-midnight parse)
-    // and `new Date(2024, 0, 15)` (local-midnight construction) are the SAME epoch only
-    // when the host timezone offset is exactly 0. Everywhere else — including this host,
-    // whatever it is — they differ. toLocalCalendarDate must use the local-construction
-    // epoch; reverting to the string-parse form would flip this test red on any non-UTC
-    // host (e.g. it fails on this sandbox: UTC+8).
+  it('parses date-only input from LOCAL y/m/d components (basic construction sanity check)', () => {
+    // Tautological at a UTC host (local-construction epoch === UTC-midnight epoch when
+    // offset is 0) — NOT the regression guard. That's
+    // attendance-date-only-format-tz-probe.spec.ts, which is host-TZ-independent by
+    // spawning its own child processes with an explicit non-UTC TZ.
     const parsed = toLocalCalendarDate('2024-01-15')
     expect(parsed).not.toBeNull()
     expect(parsed?.getTime()).toBe(new Date(2024, 0, 15).getTime())
-    const hostOffsetMinutes = new Date(2024, 0, 15).getTimezoneOffset()
-    if (hostOffsetMinutes !== 0) {
-      expect(parsed?.getTime()).not.toBe(Date.UTC(2024, 0, 15))
-    }
   })
 
   it('returns null from toLocalCalendarDate for non-date-only input', () => {

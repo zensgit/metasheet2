@@ -123,6 +123,13 @@
 # and the new spec are added to the path filter (dateOnlyFormat.ts already falls under the
 # existing `apps/web/src/views/attendance/**` glob, but is listed explicitly per this file's
 # two-point-wiring convention) and to the vitest run token list.
+# GATE-5047 P2-1 rework (2026-08-21): added attendance-date-only-format-tz-probe.spec.ts
+# (out-of-process TZ spawns proving the date-only fix — and a mutation reverting it — is
+# discriminating even when the outer `vitest run` process runs at UTC, this guard's actual
+# CI host) and its fixture tests/helpers/dateOnlyTzProbe.ts, both added to the path filter.
+# NOT added as a separate vitest-run token: the existing bare `attendance-date-only-format`
+# token already substring-matches the new spec's longer filename (verified —
+# `npx vitest run attendance-date-only-format --reporter=verbose` selects both files).
 # The full
 # `@metasheet/web` vitest suite still has historical/flaky failures, so wiring the whole
 # suite as a required gate now would be red on arrival. Keep expanding the `vitest run`
@@ -196,6 +203,8 @@ on:
       - 'apps/web/tests/attendanceGroupContextHostEffectivePolicyGate.spec.ts'
       - 'apps/web/src/views/attendance/dateOnlyFormat.ts'
       - 'apps/web/tests/attendance-date-only-format.spec.ts'
+      - 'apps/web/tests/attendance-date-only-format-tz-probe.spec.ts'
+      - 'apps/web/tests/helpers/dateOnlyTzProbe.ts'
       - '.github/workflows/attendance-web-guard.yml'
 
 jobs:
@@ -286,6 +295,8 @@ jobs:
               apps/web/tests/attendanceGroupContextHostEffectivePolicyGate.spec.ts|\
               apps/web/src/views/attendance/dateOnlyFormat.ts|\
               apps/web/tests/attendance-date-only-format.spec.ts|\
+              apps/web/tests/attendance-date-only-format-tz-probe.spec.ts|\
+              apps/web/tests/helpers/dateOnlyTzProbe.ts|\
               .github/workflows/attendance-web-guard.yml)
                 relevant=true
                 break
