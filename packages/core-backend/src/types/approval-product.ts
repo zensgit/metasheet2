@@ -99,8 +99,18 @@ export type FormFieldVisibilityOperator = 'eq' | 'neq' | 'in' | 'isEmpty' | 'not
  * is legal (OD-L7B-2). `required` is satisfiable on HANDLER nodes only in v1 (OD-L7B-3): publish
  * rejects it on an approval node, on a routing-driver field, and on `explanation` / `record-link` /
  * `attachment` (OD-L7B-4/OD-L7B-9).
+ *
+ * MECHANISM FIX v5 (census C-1/C-2 conversion): `NodeFieldAccess` and `NODE_FIELD_ACCESS_VALUES`
+ * used to be TWO independent hand-written literal lists — a type-level union here and a runtime Set a
+ * few lines down — which the compiler checked in only ONE direction (every Set element is a valid
+ * `NodeFieldAccess`) and never the other (every `NodeFieldAccess` member is present IN the Set); a
+ * fifth member added to the type without updating the Set literal compiled cleanly. They are now BOTH
+ * derived from the ONE tuple below, so that specific hand-sync risk is closed by construction, not
+ * just by a test: there is exactly one place to add a fifth member, and the type and the Set follow
+ * for free.
  */
-export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden' | 'required'
+const NODE_FIELD_ACCESS_MEMBERS = ['editable', 'readonly', 'hidden', 'required'] as const
+export type NodeFieldAccess = (typeof NODE_FIELD_ACCESS_MEMBERS)[number]
 
 /**
  * Lock-7B OD-L7B-10 — the ONE canonical enumeration of `NodeFieldAccess` members. Every consumer that
@@ -110,8 +120,9 @@ export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden' | 'required'
  * identical silent-drop defect for a future fifth member). Exported from the same module as the type
  * (the source of truth) so `approval-form-redaction.ts` can import it without a circular dependency on
  * `ApprovalProductService.ts` (which imports FROM approval-form-redaction.ts, not the reverse).
+ * DERIVED from `NODE_FIELD_ACCESS_MEMBERS` above (MECHANISM FIX v5), not an independent literal.
  */
-export const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden', 'required'])
+export const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(NODE_FIELD_ACCESS_MEMBERS)
 
 /**
  * Lock-7B §2.2 — the WRITABLE subset of `NodeFieldAccess`: a field marked `editable` OR `required` at

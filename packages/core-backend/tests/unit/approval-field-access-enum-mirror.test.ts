@@ -1,24 +1,51 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync, readdirSync, statSync } from 'fs'
 import { join, resolve } from 'path'
+import ts from 'typescript'
+// MECHANISM FIX v5 — the real parser for `.ts` files and the `<script>`/`<script setup>` block of
+// `.vue` files (see the DECLARATION BOUNDARIES section further down). `@vue/compiler-sfc` is the
+// SAME SFC parser `vue-tsc` itself uses to split a `.vue` file into blocks — declared as an explicit
+// devDependency of THIS package (`packages/core-backend`, which owns this test) rather than resolved
+// out of `apps/web`'s dependency tree by path, so `pnpm install --frozen-lockfile` links it
+// deterministically regardless of which workspace package runs the test.
+import { parse as parseVueSfc } from '@vue/compiler-sfc'
 
 /**
- * Lock-7 G-14 (widened by Lock-7B OD-L7B-10, docs/development/approval-lock7b-required-at-node-
- * 20260820.md §0.4/§3) — the hand-mirrored sites of the `NodeFieldAccess` access enum are asserted
- * equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2/v3/v4, further down this
- * docstring — the census ALSO scans the trees it walks for any literal co-occurrence of the same
- * four words it does not already know about (v2/v3), AND pins the exact COUNT of complete copies
- * per already-tracked file (v4), so a NEW copy landing in an already-scanned file — incomplete or a
- * brand-new complete duplicate alike — is caught rather than passing unnoticed, subject to the
+ * THE COMPILER IS THE PRIMARY GATE. THIS FILE IS A BEST-EFFORT BACKSTOP, NOT THE PRIMARY GUARANTEE.
+ *
+ * The primary guarantee that `NodeFieldAccess` cannot silently drift is `Record<NodeFieldAccess, …>`
+ * exhaustiveness (`NODE_FIELD_ACCESS_RANK` in `approval-form-redaction.ts`, `FIELD_ACCESS_LABELS` in
+ * `ApprovalGraphNodeConfigEditor.vue`) plus, as of MECHANISM FIX v5, that the union TYPE itself is now
+ * DERIVED — on both backend and FE — from a single `as const` tuple that is also the runtime value
+ * every consumer imports (`NODE_FIELD_ACCESS_VALUES`), rather than being an independently
+ * hand-written literal a human must remember to keep in sync with a second one. Add a fifth member to
+ * either tuple and `tsc`/`vue-tsc` red at every `Record<NodeFieldAccess, …>` site immediately —
+ * proven by mutation in the PR that introduced this paragraph, not asserted (add the member, run
+ * `tsc --noEmit` / `vue-tsc -b`, observe the exact error, revert byte-identically). THIS is the
+ * mechanism that actually closes the "a fifth member lands and something silently doesn't notice"
+ * class for the sites it covers.
+ *
+ * What remains is the residual the compiler CANNOT see: syntactically-valid places that spell out the
+ * CURRENT four members as their own literals rather than importing/deriving from the canonical tuple
+ * — a YAML wire enum (`packages/openapi/src/base.yml`, which cannot import a TypeScript constant), a
+ * doc-comment that happens to quote all four words, or (this file's own honestly-scoped residual list
+ * below) a stale/incomplete hand copy the AST- or regex-based scan below cannot attribute correctly.
+ * This file exists ONLY for that residual — it is a text-level backstop, best-effort by construction,
+ * never a substitute for converting a hand copy to an import wherever conversion is possible (see the
+ * carrier inventory in the PR body: every site that COULD import the canonical tuple now does; C-8
+ * (YAML) and Vue TEMPLATE markup are the two classes that structurally cannot).
+ *
+ * Below this point: the hand-mirrored sites of the `NodeFieldAccess` access enum that remain hand
+ * copies are asserted equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2/v3/v4,
+ * further down this docstring — the census ALSO scans the trees it walks for any literal co-occurrence
+ * of the same four words it does not already know about (v2/v3), AND pins the exact COUNT of complete
+ * copies per already-tracked file (v4), so a NEW copy landing in an already-scanned file — incomplete
+ * or a brand-new complete duplicate alike — is caught rather than passing unnoticed, subject to the
  * mechanism's own honestly-stated residual
- * (several concrete gaps, labelled (a)–(h) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
+ * (several concrete gaps, labelled (a)–(i) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
  * below; deliberately NOT phrased as an unqualified "any incomplete copy anywhere fails the census"
  * guarantee, and the letter RANGE rather than a transcribed count is what a future edit must keep in
- * sync — see the note at the top of that list). These are hand copies —
- * the compiler catches none of the drift for most of them; `NODE_FIELD_ACCESS_RANK` (C-3, backend)
- * and `FIELD_ACCESS_LABELS` (`ApprovalGraphNodeConfigEditor.vue`, added by v2) are the two
- * EXCEPTIONS — both are `Record<NodeFieldAccess, …>`, so TypeScript itself fails the build on a
- * missing key.
+ * sync — see the note at the top of that list).
  *
  * COUNT HISTORY (a swept finding, never a remembered figure — G-14): Lock-7 R-1 found FIVE
  * (`editable`/`readonly`/`hidden`, three members). An independent review of the Lock-7B draft (P2-1)
@@ -82,29 +109,72 @@ import { join, resolve } from 'path'
  * see residual (h)). See the full mechanism docstring immediately above `PARTIAL_CARRIER_ALLOWLIST`
  * below for the boundary derivation and the honestly-scoped residual this leaves (this is NOT an
  * unconditional "any incomplete copy anywhere fails the census" guarantee — several concrete gaps are
- * named there, letters (a)–(h)).
+ * named there, letters (a)–(i)).
+ *
+ * MECHANISM FIX v5 (2026-08-20, fourth-round requalification, finding R8) has TWO independent halves,
+ * and downgrades the file's own claim to match:
+ *
+ * HALF 1 — a REAL PARSER replaces v3's boundary regex, for `.ts` files and the `<script>`/
+ * `<script setup>` block of `.vue`. R8 proved `TS_DECLARATION_BOUNDARY_RE` fired ONLY at column 0, so
+ * a stale copy written INSIDE the same unit as a real complete carrier — a second `if` beside C-6's
+ * canonical check inside one function body, an indented `const` above it, an indented `const` in a
+ * `<script setup>` block — never crossed a boundary at all and was silently absorbed into the real
+ * carrier's completeness (three live reproductions against `approvalNodeEdit.ts` and
+ * `ApprovalGraphNodeConfigEditor.vue`, confirmed via a `PROBE_DUMP` mechanism trace, not inferred).
+ * v5 replaces the regex with the TypeScript compiler API (`ts.createSourceFile` + a full node walk)
+ * for those file types: every `ts.Statement`, at ANY nesting depth — not just top-level — is its own
+ * unit, and each literal occurrence is attributed to the SMALLEST (innermost) statement span
+ * containing it (span CONTAINMENT, not a boundary-count bucket — a flat count scheme mis-attributes
+ * an occurrence in an OUTER statement to whichever INNER statement's boundary it most recently
+ * crossed, once that inner statement has closed; a real shape in this tree,
+ * `NODE_FIELD_ACCESS_VALUES_MESSAGE`'s IIFE in `ApprovalProductService.ts`, is exactly an outer
+ * statement containing two nested ones). This is a MECHANISM change, not another pattern: it closes
+ * the declaration-boundary class for `.ts` files and Vue `<script>` blocks — real reproductions of
+ * every R8 finding now RED (see the PR body for the replay table), with all seven R7 reproductions,
+ * the twelve R1 shapes, and every teeth mutation re-verified GREEN/RED as labelled at this head. It
+ * does NOT close the class for Vue TEMPLATE markup (no parser is warranted there — see residual (h),
+ * unchanged) or for YAML (`.yml` keeps its own boundary regex unchanged — R8 found that half already
+ * TIGHT). A NEW, narrower residual is a direct consequence of moving the boundary to STATEMENT
+ * granularity: a stale copy sharing the SAME statement as a real carrier — a second, comma-joined
+ * `const` declarator on the identical `VariableStatement`, or a second array argument in the same
+ * call expression — is still absorbed, because it is textually part of ONE statement, not two. Named
+ * as residual (i) below, verified live (not hypothetical) against this file's own converted carriers.
+ *
+ * HALF 2 — CONVERSION: every hand-written member-list site that COULD import/derive from the
+ * canonical tuple instead of hand-copying it now does. `apps/web/src/approvals/approvalNodeEdit.ts`
+ * (C-6) and `apps/web/src/approvals/templateAuthoring.ts`'s `isNodeFieldAccess` (C-7) now read
+ * `NODE_FIELD_ACCESS_VALUES` instead of hand-writing the four literals a second time (own G-2-style
+ * anti-gate `describe` blocks below prove the literal shape is GONE, not merely that the new call
+ * exists). Backend `NodeFieldAccess`/`NODE_FIELD_ACCESS_VALUES` (C-1/C-2) and FE
+ * `NodeFieldAccess`/`NODE_FIELD_ACCESS_VALUES` (C-5) — each previously TWO independently hand-written
+ * literal lists the compiler checked in only ONE direction — are now BOTH derived from a single
+ * `NODE_FIELD_ACCESS_MEMBERS` tuple per side, so the type and the runtime value cannot desynchronise
+ * BY CONSTRUCTION, not merely by a test (the compiler-gate teeth proof at the top of this file's
+ * docstring is this same conversion's payoff). `approvalNodeEdit.ts` had exactly one literal cluster
+ * in the whole file, so converting it removed its ONLY carrier — the file drops out of
+ * `expectedFiles` below entirely, not merely out of `SITES`. `packages/openapi/src/base.yml` (C-8, a
+ * YAML wire enum) and Vue TEMPLATE markup are the two classes that structurally cannot import a
+ * TypeScript constant and remain allowlisted/hand-written carriers — named, not silently left as an
+ * oversight (see the carrier inventory in the PR body).
  */
 const REPO = resolve(__dirname, '../../../..')
 const MEMBERS = ['editable', 'hidden', 'readonly', 'required'] // sorted
 
-// The SEVEN LITERAL-MEMBER-LIST sites (C-1, C-2, C-3, C-5, C-6, C-7, C-8). C-4 and C-9 are handled in
-// their own describe blocks below instead of this member-equality loop: C-4 because Lock-7B
-// intentionally converted it FROM a literal list TO a mechanical enumeration call (OD-L7B-10) —
-// asserting it here would defeat the anti-appended-arm gate (G-2) — and C-9 because its message is
-// DERIVED at runtime from `NODE_FIELD_ACCESS_VALUES` (OD-L7B-10) and therefore carries no literal
-// member strings in source for a member-list extractor to find; the requirement IS the absence of a
-// hand-written literal, asserted by shape (and, behaviourally, by the actual 400 message text in
+// MECHANISM FIX v5 (compiler-primary carrier inventory) shrank this from SEVEN literal-member-list
+// sites to FOUR (C-1/C-2 collapsed into one, C-5 collapsed into one, C-6 and C-7 CONVERTED away
+// entirely — see their own anti-gate `describe` blocks below, alongside C-4's). C-3 and C-8 are
+// unchanged: C-3 was already compiler-guarded (`Record<NodeFieldAccess, number>`) and C-8 is the
+// OpenAPI wire enum, a YAML file that cannot import a TypeScript constant. C-9 is handled in its own
+// describe block below instead of this member-equality loop, because its message is DERIVED at
+// runtime from `NODE_FIELD_ACCESS_VALUES` (OD-L7B-10) and therefore carries no literal member strings
+// in source for a member-list extractor to find; the requirement IS the absence of a hand-written
+// literal, asserted by shape (and, behaviourally, by the actual 400 message text in
 // `approval-product-service.test.ts`'s P1-C describe block).
 const SITES: Array<{ file: string; label: string; extract: (src: string) => string[] }> = [
   {
     file: 'packages/core-backend/src/types/approval-product.ts',
-    label: 'backend NodeFieldAccess type (C-1)',
-    extract: (src) => membersOf(/NodeFieldAccess\s*=\s*((?:'[^']+'\s*\|?\s*)+)/, src),
-  },
-  {
-    file: 'packages/core-backend/src/types/approval-product.ts',
-    label: 'backend NODE_FIELD_ACCESS_VALUES Set (C-2)',
-    extract: (src) => membersOf(/NODE_FIELD_ACCESS_VALUES\s*=\s*new Set<NodeFieldAccess>\(\[([^\]]*)\]/, src),
+    label: 'backend NodeFieldAccess member tuple (C-1/C-2, MECHANISM FIX v5: type + Set now BOTH derived from this ONE literal)',
+    extract: (src) => membersOf(/NODE_FIELD_ACCESS_MEMBERS\s*=\s*\[([^\]]*)\]\s*as const/, src),
   },
   {
     file: 'packages/core-backend/src/services/approval-form-redaction.ts',
@@ -117,18 +187,8 @@ const SITES: Array<{ file: string; label: string; extract: (src: string) => stri
   },
   {
     file: 'apps/web/src/types/approval.ts',
-    label: 'FE NodeFieldAccess type (C-5)',
-    extract: (src) => membersOf(/NodeFieldAccess\s*=\s*((?:'[^']+'\s*\|?\s*)+)/, src),
-  },
-  {
-    file: 'apps/web/src/approvals/approvalNodeEdit.ts',
-    label: 'FE literal array (C-6)',
-    extract: (src) => membersOf(/\[([^\]]*)\]\s*as const\)\.includes\(permission\.access\)/, src),
-  },
-  {
-    file: 'apps/web/src/approvals/templateAuthoring.ts',
-    label: 'FE isNodeFieldAccess guard (C-7)',
-    extract: (src) => membersOf(/isNodeFieldAccess[\s\S]{0,220}?return ([^\n]+)/, src),
+    label: 'FE NodeFieldAccess member tuple (C-5, MECHANISM FIX v5: type + array now BOTH derived from this ONE literal)',
+    extract: (src) => membersOf(/NODE_FIELD_ACCESS_MEMBERS\s*=\s*\[([^\]]*)\]\s*as const/, src),
   },
   {
     file: 'packages/openapi/src/base.yml',
@@ -206,6 +266,42 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     // describe block ("rejects an invalid access enum before hitting the database"), which drives the
     // real normalizeNodeFieldPermissions/failValidation code path end-to-end. Duplicating an exact
     // 400-body assertion here would just re-implement that test against the same source text.
+  })
+
+  describe('C-6 — approvalNodeEdit.ts field-permission validation reads NODE_FIELD_ACCESS_VALUES, never a literal array (MECHANISM FIX v5, G-2-style anti-gate)', () => {
+    const src = read('apps/web/src/approvals/approvalNodeEdit.ts')
+
+    it('reads NODE_FIELD_ACCESS_VALUES.includes(permission.access) — the mechanical enumeration form', () => {
+      expect(src).toMatch(/NODE_FIELD_ACCESS_VALUES\.includes\(permission\.access\)/)
+    })
+
+    it('does NOT contain the retired literal array (an appended member there would still match this)', () => {
+      // The shape this site carried before MECHANISM FIX v5:
+      //   (['editable', 'readonly', 'hidden', 'required'] as const).includes(permission.access)
+      expect(src).not.toMatch(/\[\s*'editable'\s*,\s*'readonly'\s*,\s*'hidden'/)
+    })
+
+    it('imports NODE_FIELD_ACCESS_VALUES as a VALUE from the canonical FE types module', () => {
+      expect(src).toMatch(/import\s*\{[^}]*\bNODE_FIELD_ACCESS_VALUES\b[^}]*\}\s*from\s*'\.\.\/types\/approval'/)
+    })
+  })
+
+  describe('C-7 — templateAuthoring.ts isNodeFieldAccess reads NODE_FIELD_ACCESS_VALUES, never a literal disjunction (MECHANISM FIX v5, G-2-style anti-gate)', () => {
+    const src = read('apps/web/src/approvals/templateAuthoring.ts')
+
+    it('reads NODE_FIELD_ACCESS_VALUES.includes(value) — the mechanical enumeration form', () => {
+      expect(src).toMatch(/\(NODE_FIELD_ACCESS_VALUES as readonly string\[\]\)\.includes\(value\)/)
+    })
+
+    it('does NOT contain the retired literal disjunction chain (an appended `|| value === X` arm would still match this)', () => {
+      // The shape this site carried before MECHANISM FIX v5:
+      //   value === 'editable' || value === 'readonly' || value === 'hidden' || value === 'required'
+      expect(src).not.toMatch(/value === 'editable' \|\| value === 'readonly'/)
+    })
+
+    it('imports NODE_FIELD_ACCESS_VALUES as a VALUE from the canonical FE types module', () => {
+      expect(src).toMatch(/import\s*\{[^}]*\bNODE_FIELD_ACCESS_VALUES\b[^}]*\}\s*from\s*'\.\.\/types\/approval'/)
+    })
   })
 
   // --- MECHANISM v2/v3 (2026-08-20, R1 then R7 requalification fixes): shape-agnostic LITERAL
@@ -292,26 +388,46 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // window-evasion gap is the mirror case this file was always honest about: a copy whose members are
   // spread WIDER than a human would ever reasonably format them.
   //
-  // DECLARATION BOUNDARIES (MECHANISM FIX v3 / R7) — how a "unit" is derived and why the merge rule
-  // is NOT a blanket "never cross a boundary". Boundaries are found by two CHEAP, file-type-keyed
-  // structural markers, never a real parser:
-  //   - TS/JS/Vue-script: a line with NO leading whitespace (column 0) starting with `export`
-  //     followed by `const`/`let`/`var`/`type`/`interface`/`enum`/`function`/`class`, or one of those
-  //     keywords unexported. This is deliberately narrow: it fires on every real carrier's own
-  //     top-level declaration line (all nine are `export const`/`export type` at column 0) and on
-  //     every R7 stale-copy shape reported (each was itself a top-level `const`/`export const`), but
-  //     it does NOT fire inside Vue TEMPLATE markup (`<div>`, `<el-option>`, `<label>`, …), which
-  //     starts with `<`, not a keyword — so the proximity-only behaviour the cross-element/cross-tag
-  //     partial-carrier allowlist entries below rely on (FormView.vue's `hidden`+`required` pair
-  //     spanning a `<div>` and a nested `<label>`; TemplateAuthoringView.vue's linear-editor options)
-  //     is completely unaffected by v3. The COST of that choice is real, not merely theoretical, and
-  //     is named as residual (h) below rather than left as a side effect of this paragraph: v3's
-  //     per-unit gate cannot close R7-style absorption inside template markup, because a single
+  // DECLARATION BOUNDARIES (MECHANISM FIX v3 / R7, TS/JS/Vue-script HALF SUPERSEDED by MECHANISM FIX
+  // v5 / R8 below) — how a "unit" is derived and why the merge rule is NOT a blanket "never cross a
+  // boundary". A unit is found by a file-type-keyed structural marker — a REAL PARSER for `.ts` files
+  // and the `<script>`/`<script setup>` block of `.vue`, a cheap regex for everything else, and the
+  // split is deliberate, not an oversight (see the docstring at the top of this file):
+  //   - TS/JS, and the `<script>`/`<script setup>` block of `.vue` (MECHANISM FIX v5, `astStatement
+  //     UnitResolver` / `vueUnitResolver` below): every `ts.Statement` node, walked via
+  //     `ts.createSourceFile` at ANY nesting depth — not just top-level. v3's shipped mechanism used a
+  //     column-0-only regex here instead (`TS_DECLARATION_BOUNDARY_RE`, kept below ONLY as the `.vue`
+  //     SFC-parse-failure fallback); a fourth-round requalification (finding R8) proved that regime
+  //     let a stale copy written INSIDE the same unit as a real carrier — a second `if` beside C-6's
+  //     canonical check inside one function body, an indented `const` above it, an indented `const` in
+  //     a `<script setup>` block, all of which are indented and therefore invisible to a column-0
+  //     match — silently absorb into that carrier's completeness. Real AST statement boundaries exist
+  //     at EVERY nesting depth regardless of indentation, so v5 closes that class for these file types:
+  //     each literal occurrence is attributed to the SMALLEST (innermost) statement span containing
+  //     it — by CONTAINMENT, not a boundary-count bucket, because a flat count mis-attributes an
+  //     occurrence in an OUTER statement to an INNER statement's already-closed boundary (a real shape
+  //     in this tree: `NODE_FIELD_ACCESS_VALUES_MESSAGE`'s IIFE in `ApprovalProductService.ts` is one
+  //     outer statement containing two nested ones). An occurrence in no statement's span at all
+  //     (comment prose, or — for `.vue` — anything outside every script block) shares a unit id with
+  //     the nearest PRECEDING statement's end, exactly reproducing v3's template permissiveness for
+  //     the `.vue` template region (see below) while keeping a multi-word comment as ONE cluster. This
+  //     does NOT fire inside Vue TEMPLATE markup itself — no statement exists there for the parser to
+  //     find — so the proximity-only behaviour the cross-element/cross-tag partial-carrier allowlist
+  //     entries below rely on (FormView.vue's `hidden`+`required` pair spanning a `<div>` and a nested
+  //     `<label>`; TemplateAuthoringView.vue's linear-editor options) is unaffected by v5, exactly as
+  //     it was unaffected by v3. The COST of that scope choice is real, not merely theoretical, and is
+  //     named as residual (h) below rather than left as a side effect of this paragraph: this gate
+  //     cannot close R7/R8-style absorption inside template markup, because a single
   //     `<el-option value="…">` tag naturally carries exactly one tracked word and so never reaches
-  //     the 2-member threshold the gate keys off, no matter how the unit boundary is drawn there.
-  //   - YAML (`.yml`): every mapping-key line (`key:`), at ANY indentation depth, starts a new unit —
-  //     cheaper than tracking indentation levels, and sufficient because no real carrier or allowlist
-  //     entry in this repo needs two DIFFERENT YAML keys' values merged into one cluster.
+  //     the 2-member threshold the gate keys off, no matter how the unit boundary is drawn there — and
+  //     no parser is warranted for template markup at all (see the top-of-file docstring's "compiler
+  //     is the primary gate" framing: HTML/Vue template attribute values are not something `tsc` types
+  //     check either way, so there is no compiler backstop to lean on here, only this text scan).
+  //   - YAML (`.yml`): UNCHANGED by v5 — every mapping-key line (`key:`), at ANY indentation depth,
+  //     starts a new unit — cheaper than tracking indentation levels, and sufficient because no real
+  //     carrier or allowlist entry in this repo needs two DIFFERENT YAML keys' values merged into one
+  //     cluster, AND because R8's own YAML probe (a stale sibling key next to the real wire enum) reds
+  //     under the unchanged regex — this half was already tight, not merely unexamined.
   // A cluster may merge two occurrences across a boundary ONLY IF NEITHER of the two units either
   // side of that specific crossing is, on its OWN (counting only that one unit's own occurrences,
   // never the accumulating cluster), already a 2-or-more-member candidate carrier. This is a
@@ -332,12 +448,20 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // recomputes this SAME 2+-member-endpoint condition independently from the cluster's final span,
   // rather than being trusted forward from the merge loop, so a bug in the loop's own `blocked` check
   // cannot silently let a boundary-spanning, already-multi-member-endpoint cluster take the complete
-  // short-circuit. Residual (f) below names the narrower gap this weaker-than-absolute rule leaves
-  // open on its own terms.
+  // short-circuit. Residual (f) below named the narrower gap this weaker-than-absolute rule was
+  // believed to leave open — CLOSED, retroactively, by MECHANISM FIX v4's complete-cluster count pin;
+  // see (f)'s own entry for the re-verification.
   //
-  // Clustering with 2+ distinct words finds FOURTEEN files with at least one candidate cluster in
-  // the scanned trees at this window — only SEVEN of which are complete four-member NodeFieldAccess
-  // copies (the census's actual site list). Every other cluster is a real but UNRELATED or
+  // Clustering with 2+ distinct words finds THIRTEEN files with at least one candidate cluster in the
+  // scanned trees at this window (MECHANISM FIX v5: down from fourteen — converting `approvalNodeEdit
+  // .ts`'s only cluster away removed the file from this list entirely, not merely from `SITES`) — only
+  // SIX of which are complete four-member NodeFieldAccess copies (MECHANISM FIX v5: down from seven —
+  // the C-1/C-2 and C-5 tuple collapses did not remove a FILE from this count, only a redundant
+  // DECLARATION within `approval-product.ts` and `apps/web/src/types/approval.ts`, so those two files
+  // still count once each; `approvalNodeEdit.ts` dropping out is what actually shrank the file count).
+  // See `EXPECTED_COMPLETE_CLUSTER_COUNT` below for the authoritative per-file counts — not a number
+  // transcribed into prose that can silently go stale the next time a site is converted, per this
+  // file's own COUNT HISTORY discipline. Every other cluster is a real but UNRELATED or
   // DELIBERATELY-PARTIAL collision — most are the multitable `MetaFieldPermission {visible,
   // readOnly}` / after-sales `TicketFieldPolicy` / plugin `RoleFieldPolicy` systems this repo's own
   // prior audits already named as distinct from `NodeFieldAccess`, plus one JSON-Schema `required:`
@@ -357,16 +481,32 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // label map (`FIELD_ACCESS_LABELS`) that plays the same exhaustiveness role C-3's rank table plays
   // on the backend.
   //
+  // MECHANISM FIX v5 pushed the SAME conversion discipline further, this round against every
+  // remaining hand copy that COULD import/derive rather than hand-write (the carrier inventory in the
+  // PR body has the full accounting): `apps/web/src/approvals/approvalNodeEdit.ts` (C-6) and
+  // `apps/web/src/approvals/templateAuthoring.ts`'s `isNodeFieldAccess` (C-7) now read
+  // `NODE_FIELD_ACCESS_VALUES` instead of hand-writing the member list/disjunction a second time —
+  // `approvalNodeEdit.ts` had exactly one literal cluster in the whole file, so this conversion
+  // removed its ONLY carrier and the file drops out of `expectedFiles` below entirely. Backend
+  // `NodeFieldAccess`/`NODE_FIELD_ACCESS_VALUES` (C-1/C-2) and FE
+  // `NodeFieldAccess`/`NODE_FIELD_ACCESS_VALUES` (C-5) go further still: each was previously TWO
+  // independent hand-written literal lists (a type union and a runtime Set/array) that the compiler
+  // checked in only ONE direction; both sides now derive the type AND the runtime value from a SINGLE
+  // `NODE_FIELD_ACCESS_MEMBERS` tuple, so they cannot desynchronise by construction. `base.yml` (C-8,
+  // a YAML wire enum) and Vue TEMPLATE markup remain hand-written, named explicitly as the two classes
+  // that structurally cannot import a TypeScript constant, not left as an unexamined gap.
+  //
   // RESIDUAL (stated precisely, not swept under this mechanism's greater reach than v1's, and NOT
   // pinned to a transcribed count that can silently go stale — this file's own COUNT HISTORY
   // discipline at the top applies here too): this scan is NOT an unconditional guarantee that "any
-  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(h), are
+  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(i), are
   // ALL that are currently known; grep this file for the next unused letter before adding one, and
-  // update the "labelled (a)–(h)" cross-references at the top of this file (there are two) in the same
+  // update the "labelled (a)–(i)" cross-references at the top of this file (there are two) in the same
   // change. Most are inherent to literal-text scanning rather than to shape enumeration, so no amount
-  // of ADDING shape families would close them either — (f), (g) and (h) are the three exceptions, all
-  // introduced or newly surfaced by MECHANISM FIX v3 itself and named so, not folded silently into the
-  // older letters:
+  // of ADDING shape families would close them either — (f), (g), (h) and (i) are the four exceptions,
+  // introduced or newly surfaced by MECHANISM FIX v3/v4/v5 and named so, not folded silently into the
+  // older letters. (f) and (g) are RETIRED (closed) letters, kept rather than reused or deleted, per
+  // this file's own COUNT HISTORY discipline:
   //   (a) SCOPE — only `packages/core-backend/src`, `apps/web/src`, `packages/openapi/src` are
   //       walked (via the same `readdirSync`-based `walk()` as before, so a NEW file in an
   //       already-scanned tree is picked up automatically; a copy in a tree not walked at all, or in
@@ -415,23 +555,32 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       code-spans throughout) — recognising backtick required a way to tell a markdown code-span
   //       from a real backtick string literal that this text-level scan does not have, so it is left
   //       named here rather than "fixed" by re-widening the pattern and re-introducing prose noise.
-  //   (f) SINGLE-LITERAL-UNIT SPLITTING (MECHANISM FIX v3) — the boundary gate above blocks a merge
-  //       only when EITHER side of the crossing is, on its own, already a 2+-member unit; chaining
-  //       through a run of units that each carry exactly ONE tracked word is deliberately still
-  //       permitted (that permissiveness is what keeps R1's B6 const-indirection shape detected — see
-  //       the DECLARATION BOUNDARIES discussion above). A drifter who splits a stale copy into THREE
-  //       separate single-word declarations (`const A = 'editable'`; `const B = 'readonly'`;
-  //       `const C = 'hidden'`), each never independently reaching 2 members, then adds a fourth
-  //       single-word declaration holding `'required'` within the window, evades: the running cluster
-  //       accumulates all four through crossings where neither immediate endpoint is ever, by itself,
-  //       a 2+-member unit, and completes silently (own-devised probe, verified: three single-word
-  //       consts + one separate, plainly-unrelated single-word const holding 'required' — 43 passed,
-  //       no failure — see the PR body). None of the reported R7 reproductions took this shape (every
-  //       one used a single MULTI-member array/object literal for the stale part, the natural
-  //       "accidental hand copy" shape) and it requires a drifter to deliberately fragment a value
-  //       across as many single-purpose declarations as there are stale members — a materially more
-  //       contrived construction than an accidental copy-paste — but it is a real, narrower residual
-  //       of the v3 fix and is recorded rather than left implicit;
+  //   (f) SINGLE-LITERAL-UNIT SPLITTING — CLOSED, RETROACTIVELY, by MECHANISM FIX v4 (re-verified at
+  //       THIS head while writing v5's docstring pass, because the claim below turned out to be
+  //       STALE, not merely superseded — corrected here rather than silently carried forward). The
+  //       boundary gate blocks a merge only when EITHER side of the crossing is, on its own, already a
+  //       2+-member unit; chaining through a run of units that each carry exactly ONE tracked word is
+  //       deliberately still permitted (that permissiveness is what keeps R1's B6 const-indirection
+  //       shape detected — see the DECLARATION BOUNDARIES discussion above). A drifter who splits a
+  //       stale copy into THREE separate single-word declarations (`const A = 'editable'`; `const B =
+  //       'readonly'`; `const C = 'hidden'`), each never independently reaching 2 members, then adds a
+  //       fourth single-word declaration holding `'required'` within the window, WAS believed (this
+  //       file's own v3-era text) to "complete silently — 43 passed, no failure". Re-run at this head
+  //       (own-devised probe, `cp`-restored, appended to an ALREADY-`expectedFiles` file with no
+  //       existing complete cluster): the chained result IS a genuine new complete four-member
+  //       cluster (`isComplete` true, confirmed by the passing per-cluster test naming it), and
+  //       precisely BECAUSE it is complete, MECHANISM FIX v4's per-file complete-COUNT pin — which
+  //       counts every complete cluster a file holds, regardless of HOW it became complete — reds
+  //       immediately: `PluginRbacProvisioningService.ts carries 1 complete NodeFieldAccess copies,
+  //       expected 0`. v4 was designed for a DIFFERENT case (a single already-complete hand copy, N18)
+  //       and was never aimed at single-literal-unit splitting specifically, but its mechanism — a
+  //       per-file count of COMPLETE clusters, not of HOW each one was constructed — structurally
+  //       cannot distinguish "one hand-written complete literal" from "four single-word literals that
+  //       chained into a complete cluster": either way the file's complete-cluster count moves from N
+  //       to N+1, and the pin catches BOTH. There is no placement that clears the chain (needed to
+  //       keep B6-style detection alive) while ALSO staying invisible to v4's count, because becoming
+  //       COMPLETE is exactly the condition v4 keys off. Kept as a retired letter, per this file's own
+  //       COUNT HISTORY discipline, rather than deleted or reused;
   //   (g) DUPLICATE COMPLETE CARRIER — CLOSED by MECHANISM FIX v4 (see the `EXPECTED_COMPLETE_
   //       CLUSTER_COUNT` assertion immediately after the carrier-file census test below). Kept as a
   //       retired letter rather than reused or deleted, per this file's own COUNT HISTORY discipline
@@ -476,13 +625,37 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       materially larger change than the cheap regex boundaries used elsewhere in this mechanism,
   //       and was not attempted this round — recorded here rather than left implicit or covered by an
   //       unqualified claim.
+  //   (i) SAME-STATEMENT SHARING (MECHANISM FIX v5, R8) — v5's AST boundary is STATEMENT granularity,
+  //       not expression granularity: two literal clusters that are textually part of the SAME
+  //       `ts.Statement` are never separated, because a single statement is, by definition, one unit.
+  //       A stale copy comma-joined onto the REAL carrier's own declaration — a second
+  //       `VariableDeclaration` on the identical `VariableStatement`
+  //       (`export const NODE_FIELD_ACCESS_MEMBERS = [...] as const, STALE = [...]`) — shares that one
+  //       unit with the real carrier and is silently absorbed, exactly as R8's column-0 gap used to
+  //       allow across STATEMENTS. Verified LIVE against this file's own post-conversion canonical
+  //       tuple (own-devised probe, `cp`-restored: 42 passed, no failure — see the PR body), not
+  //       hypothetical. This is a real, narrower residual of choosing STATEMENT as the unit rather than
+  //       a finer (and much more invasive) EXPRESSION-level walk — a deliberately weaker granularity,
+  //       for the same reason v3 chose the weaker-than-absolute boundary rule over an unconditional
+  //       one: closing it fully would mean walking into every array/object literal and call-expression
+  //       argument list looking for a second, unrelated literal collection sharing the same enclosing
+  //       expression, which is a materially larger change than the statement-level walk implemented
+  //       this round, and was not attempted — recorded here, not swept into (f) (which is about
+  //       chaining THROUGH single-literal units across DIFFERENT statements, a distinct mechanism) or
+  //       silently left uncovered by the compiler-is-primary-gate paragraph at the top of this file
+  //       (the compiler does NOT catch this either: `NODE_FIELD_ACCESS_MEMBERS, STALE = [...]` is
+  //       perfectly valid TypeScript, and `STALE` is simply an unused, unexported local the compiler
+  //       has no reason to flag).
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
-  // R1 found), as of v3, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key carrier,
-  // and, as of v4, to a brand-new COMPLETE duplicate of an existing carrier appearing in an
-  // already-tracked file — not agnostic to file scope, file extension, spatial layout,
-  // literal-vs-symbolic encoding, allowlist anchor collisions, the specific quote/delimiter character
-  // set recognised, a copy fragmented across many single-purpose declarations, or proximity to a
-  // carrier living inside Vue TEMPLATE markup specifically.
+  // R1 found), as of v3/v5, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key
+  // carrier PROVIDED it is not textually part of the SAME STATEMENT as that carrier (i), as of v4, to
+  // a brand-new COMPLETE duplicate of an existing carrier appearing in an already-tracked file
+  // REGARDLESS of whether that duplicate arrived as one hand-written literal or as several
+  // single-word declarations that chained into completeness (f, closed retroactively) — not agnostic
+  // to file scope, file extension, spatial layout, literal-vs-symbolic encoding, allowlist anchor
+  // collisions, the specific quote/delimiter character set recognised, same-statement sharing, or
+  // proximity to a carrier living inside Vue TEMPLATE markup specifically (no parser reaches there —
+  // see (h) and the top-of-file "compiler is the primary gate" paragraph).
 
   interface CarrierCluster {
     file: string
@@ -540,27 +713,19 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     return occ
   }
 
-  // TS/JS top-level (column-0) declaration-start keywords. Deliberately does NOT match Vue TEMPLATE
-  // markup (`<div>`, `<label>`, …), which starts with `<`, not a keyword — see the MECHANISM FIX v3
-  // docstring above `clusterOccurrences` for why that is required, not an oversight.
-  const TS_DECLARATION_BOUNDARY_RE = /^(export\s+)?(const|let|var|type|interface|enum|function|class)\b/gm
   // Every YAML mapping-key line, at ANY indentation depth, starts a new declaration/mapping unit.
+  // Unchanged by MECHANISM FIX v5 — the third-round requalification (R8) found this half already
+  // TIGHT (probe Y1 reds); only the TS/JS half needed a real parser.
   const YAML_KEY_BOUNDARY_RE = /^[ \t]*[A-Za-z_][\w.-]*:/gm
-
-  /**
-   * Positions where a NEW declaration/statement-ish unit begins, per MECHANISM FIX v3 below.
-   */
-  function declarationBoundaries(file: string, src: string): number[] {
-    const re = file.endsWith('.yml') || file.endsWith('.yaml') ? YAML_KEY_BOUNDARY_RE : TS_DECLARATION_BOUNDARY_RE
-    const boundaries: number[] = []
-    re.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = re.exec(src))) boundaries.push(m.index)
-    return boundaries
-  }
+  // FALLBACK ONLY (MECHANISM FIX v5): the retired v3 column-0 regex. No longer the primary TS/JS
+  // boundary source — kept as the `.vue` SFC-parse-failure fallback below, so a file the real parser
+  // cannot handle degrades to the mechanism this file shipped with before v5 rather than to zero
+  // protection.
+  const TS_DECLARATION_BOUNDARY_RE = /^(export\s+)?(const|let|var|type|interface|enum|function|class)\b/gm
 
   // Which unit (0-indexed segment between consecutive boundaries) `pos` falls in — the count of
-  // boundary starts at-or-before `pos`.
+  // boundary starts at-or-before `pos`. Used by the YAML resolver (unchanged mechanism) and by the
+  // `.vue` SFC-parse-failure fallback below.
   function unitIndexOf(boundaries: number[], pos: number): number {
     let lo = 0
     let hi = boundaries.length
@@ -572,10 +737,132 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     return lo
   }
 
+  type UnitResolver = (pos: number) => number
+
+  function yamlUnitResolver(src: string): UnitResolver {
+    const boundaries: number[] = []
+    YAML_KEY_BOUNDARY_RE.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = YAML_KEY_BOUNDARY_RE.exec(src))) boundaries.push(m.index)
+    return (pos) => unitIndexOf(boundaries, pos)
+  }
+
+  /**
+   * MECHANISM FIX v5 (2026-08-20, requalification #3, finding R8) — the real TypeScript compiler API
+   * for `.ts` files and the `<script>`/`<script setup>` block of `.vue` files, replacing v3's
+   * column-0-only regex. See the DECLARATION BOUNDARIES docstring above `PARTIAL_CARRIER_ALLOWLIST`
+   * for the full R8 story; this is the mechanism itself.
+   *
+   * Walks EVERY `ts.Statement` node in the file, at ANY nesting depth — not just top-level. This is
+   * the actual fix: v3's regex only recognised a "new unit" at column 0, so two SIBLING statements
+   * sharing one function/block body (an `if` beside another `if`, a `const` beside another `const`,
+   * both indented inside the same function) were invisibly ONE unit, and a stale copy written as the
+   * second one silently absorbed into the first one's completeness (R8's P-A1/P-A4/P-A5). Real AST
+   * statement boundaries exist at every nesting depth regardless of indentation, so this closes that
+   * specific class for the file types a parser is warranted for.
+   *
+   * Attribution is by SPAN CONTAINMENT, not a boundary-count bucket (a flat "count of boundaries at
+   * or before this position" scheme — the v3 shape — silently mis-attributes an occurrence in an
+   * OUTER statement to whichever INNER statement's boundary happens to have been crossed most
+   * recently, once that inner statement has already closed; a real shape in this very file,
+   * `ApprovalProductService.ts`'s `NODE_FIELD_ACCESS_VALUES_MESSAGE = (() => { const parts = …; return
+   * … })()`, is exactly an outer statement with two nested statements inside it). Per occurrence, the
+   * SMALLEST (innermost) statement span containing its position is its unit id — the statement's own
+   * start offset, which is unique per statement in a file. An occurrence in no statement's span at
+   * all (comment prose — the `templateAuthoring.ts:998` doc-comment copy is a live example — or, for
+   * `.vue`, anything outside every script block) is attributed to a unit id derived from the END of
+   * the nearest PRECEDING statement (or "nothing precedes it" if none does) — ONE shared id per gap,
+   * not one id per occurrence (which would fragment a multi-word comment into single-word pieces) and
+   * not one sitewide sentinel (which would lump every comment and every template tag in a file into a
+   * single pseudo-unit and could start blocking crossings that succeed today). This keeps the
+   * `templateAuthoring.ts` doc-comment cluster intact and complete, and keeps Vue TEMPLATE markup
+   * chaining through the trailing "nothing left to declare" gap exactly as v3 always did — see residual
+   * (h): this file does NOT parse template markup with the AST at all, by design (below).
+   */
+  function astStatementUnitResolver(src: string, fileNameForParser: string): UnitResolver {
+    const sf = ts.createSourceFile(fileNameForParser, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+    const spans: Array<{ start: number; end: number }> = []
+    const visit = (node: ts.Node): void => {
+      if (ts.isStatement(node) && node.kind !== ts.SyntaxKind.NotEmittedStatement && node.kind !== ts.SyntaxKind.EmptyStatement) {
+        spans.push({ start: node.getStart(sf), end: node.getEnd() })
+      }
+      ts.forEachChild(node, visit)
+    }
+    ts.forEachChild(sf, visit)
+    return (pos) => {
+      let innermost: { start: number; end: number } | null = null
+      let precedingEnd = -1
+      for (const s of spans) {
+        if (s.start <= pos && pos < s.end) {
+          if (!innermost || s.start > innermost.start) innermost = s
+        } else if (s.end <= pos && s.end > precedingEnd) {
+          precedingEnd = s.end
+        }
+      }
+      // Real statement starts are always >= 0. Gap ids are always <= -999,999,999 (a large fixed
+      // offset minus `precedingEnd`, which is itself either a real, non-negative statement-end
+      // position or the -1 sentinel for "nothing precedes this position") — chosen so the two id
+      // spaces can never overlap (a file would need over a billion bytes of preceding content to
+      // reach zero), so equality between a statement id and a gap id is structurally impossible, and
+      // two DIFFERENT gaps (different `precedingEnd`) still resolve to two different ids.
+      return innermost ? innermost.start : -1_000_000_000 - precedingEnd
+    }
+  }
+
+  /**
+   * `.vue`: split into its script block(s) via `@vue/compiler-sfc` (the same parser `vue-tsc` uses),
+   * run `astStatementUnitResolver` on each block's own content, and offset every resulting id back to
+   * absolute file positions. TEMPLATE markup and anything outside a script block contributes NO
+   * boundaries of its own — deliberately unchanged from v3 (see residual (h) and the DECLARATION
+   * BOUNDARIES docstring above `PARTIAL_CARRIER_ALLOWLIST`): that permissiveness is what keeps
+   * FormView.vue's cross-element `hidden`+`required` pair and TemplateAuthoringView.vue's linear-editor
+   * options clustering correctly. A position outside every script block shares the trailing unit id of
+   * whichever script block most recently precedes it (mirroring the gap-fallback inside
+   * `astStatementUnitResolver`, for the identical reason); a `.vue` file with NO `<script>` block at
+   * all gets a single shared id for the whole file, matching v3's template behaviour exactly (nothing
+   * to protect, because there is no code there to protect). If `@vue/compiler-sfc` itself throws on a
+   * file it cannot parse, this falls back to the retired v3 column-0 regex over the RAW file text — at
+   * least as protective as the mechanism this file shipped with before v5, never silently zero.
+   */
+  function vueUnitResolver(absPath: string, src: string): UnitResolver {
+    let descriptor: ReturnType<typeof parseVueSfc>['descriptor']
+    try {
+      descriptor = parseVueSfc(src, { filename: absPath }).descriptor
+    } catch {
+      const boundaries: number[] = []
+      TS_DECLARATION_BOUNDARY_RE.lastIndex = 0
+      let m: RegExpExecArray | null
+      while ((m = TS_DECLARATION_BOUNDARY_RE.exec(src))) boundaries.push(m.index)
+      return (pos) => unitIndexOf(boundaries, pos)
+    }
+    const rawBlocks = [descriptor.script, descriptor.scriptSetup].filter(
+      (b): b is NonNullable<typeof b> => !!b,
+    )
+    if (rawBlocks.length === 0) return () => -1 // no <script> at all — nothing to protect (matches v3's template-only behaviour)
+    const blocks = rawBlocks
+      .map((b) => ({ offset: b.loc.start.offset, len: b.content.length, resolve: astStatementUnitResolver(b.content, absPath + '.script.ts') }))
+      .sort((a, b) => a.offset - b.offset)
+    return (pos) => {
+      for (const b of blocks) {
+        if (pos >= b.offset && pos < b.offset + b.len) return b.resolve(pos - b.offset)
+      }
+      let owner: (typeof blocks)[number] | null = null
+      for (const b of blocks) if (b.offset + b.len <= pos) owner = b
+      return owner ? owner.resolve(owner.len) : -1
+    }
+  }
+
+  function unitResolverFor(file: string, src: string): UnitResolver {
+    if (file.endsWith('.yml') || file.endsWith('.yaml')) return yamlUnitResolver(src)
+    const abs = join(REPO, file)
+    if (file.endsWith('.vue')) return vueUnitResolver(abs, src)
+    return astStatementUnitResolver(src, abs)
+  }
+
   function clusterOccurrences(file: string, src: string): CarrierCluster[] {
     const occ = rawLiteralOccurrences(src)
-    const boundaries = declarationBoundaries(file, src)
-    const withUnit = occ.map((o) => ({ ...o, unit: unitIndexOf(boundaries, o.index) }))
+    const unitOf = unitResolverFor(file, src)
+    const withUnit = occ.map((o) => ({ ...o, unit: unitOf(o.index) }))
 
     // Distinct tracked words each unit carries ON ITS OWN, ignoring every other unit — computed
     // once, from the SAME occurrence list clustering will walk. A unit that independently reaches 2
@@ -620,16 +907,19 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
       // Defense in depth, RECOMPUTED independently of the merge loop above rather than carried
       // forward from it, so a future bug in that loop's `blocked` check cannot silently re-open R7
       // by letting a boundary-spanning, ALREADY-2+-member-unit-adjacent cluster take the
-      // `isComplete` short-circuit below. True iff the cluster's final span straddles a boundary
-      // whose EITHER side is (independently, on its own occurrences) a 2+-member unit — the exact
-      // condition the merge loop's `blocked` check refuses, checked here again from the cluster's
-      // resulting span rather than trusted from construction. A cluster built entirely by chaining
-      // through single-literal units (B6's `const E =`/`const R =`/`const H =` indirection, a
-      // `switch` ladder, a YAML block list) legitimately straddles boundaries too, but never one
-      // where either side independently reaches 2 — this stays false for those, by design.
-      c.spansDeclarationBoundary = boundaries.some(
-        (b) => b > c.start && b < c.end && (isMultiMemberUnit(unitIndexOf(boundaries, b - 1)) || isMultiMemberUnit(unitIndexOf(boundaries, b))),
-      )
+      // `isComplete` short-circuit below. True iff the cluster's final span contains occurrences from
+      // MORE THAN ONE unit AND at least one of those units is (independently, on its own occurrences)
+      // a 2+-member unit — the exact condition the merge loop's `blocked` check refuses, checked here
+      // again from the cluster's resulting span and the SAME per-occurrence unit ids rather than
+      // trusted from construction. (MECHANISM FIX v5: recomputed from occurrence-level unit
+      // membership rather than by re-walking a physical boundary-position list — the TS/JS path no
+      // longer has one; a real AST statement's identity IS its start offset, not a position in an
+      // array — but the predicate is unchanged.) A cluster built entirely by chaining through
+      // single-literal units (B6's `const E =`/`const R =`/`const H =` indirection, a `switch`
+      // ladder, a YAML block list) legitimately spans multiple units too, but never one where any of
+      // them independently reaches 2 — this stays false for those, by design.
+      const unitsInSpan = new Set(withUnit.filter((o) => o.index >= c.start && o.index < c.end).map((o) => o.unit))
+      c.spansDeclarationBoundary = unitsInSpan.size > 1 && [...unitsInSpan].some((u) => isMultiMemberUnit(u))
     }
     return clusters.filter((c) => c.members.length >= 2)
   }
@@ -638,23 +928,29 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // residual (g) above until this fix) — closes DUPLICATE COMPLETE CARRIER: v3's boundary gate only
   // ever protects an INCOMPLETE unit from borrowing a neighbour's completeness; it has nothing to say
   // about a brand-new hand copy that is COMPLETE the moment it is written, because such a copy never
-  // needs to merge with anything to pass the `isComplete` short-circuit. At this head, exactly TEN
-  // complete (all-four-member, non-boundary-spanning) clusters exist across SEVEN files — every
-  // known NodeFieldAccess mirror site plus ONE incidental complete copy already living inside a
-  // doc-comment in `templateAuthoring.ts` (`FIELD_ACCESS_LABELS`'s `.vue` sibling contributes its
-  // own from MECHANISM FIX v2, `approval-product.ts` contributes two — the type alias and the Set —
-  // because they are separate declarations that do not merge across the boundary between them, same
-  // for `apps/web/src/types/approval.ts`). `EXPECTED_COMPLETE_CLUSTER_COUNT` below pins that
-  // per-file count exactly, the same exact-match discipline `SITES` and `expectedFiles` already use
-  // elsewhere in this file: a file gaining an (N+1)th complete cluster — hand-copied, not merged —
-  // reds immediately by named file, rather than silently asserting nothing until it later drifts.
+  // needs to merge with anything to pass the `isComplete` short-circuit. `EXPECTED_COMPLETE_
+  // CLUSTER_COUNT` below pins that per-file count exactly, the same exact-match discipline `SITES`
+  // and `expectedFiles` already use elsewhere in this file: a file gaining an (N+1)th complete
+  // cluster — hand-copied, not merged — reds immediately by named file, rather than silently
+  // asserting nothing until it later drifts.
+  //
+  // MECHANISM FIX v5 changed these counts via CONVERSION, not detection: `approvalNodeEdit.ts` (C-6)
+  // is gone from this table entirely — it had exactly one literal cluster in the whole file, so
+  // converting it to import `NODE_FIELD_ACCESS_VALUES` removed its only carrier, and it also drops
+  // out of `expectedFiles` below. `approval-product.ts` (backend C-1/C-2), `apps/web/src/types/
+  // approval.ts` (FE C-5), and `templateAuthoring.ts` (C-7) each go from 2 complete clusters to 1:
+  // the backend/FE pairs used to be TWO separate declarations (a type alias plus a Set/array) that
+  // each independently held all four literals; both are now DERIVED from one shared
+  // `NODE_FIELD_ACCESS_MEMBERS` tuple, so only the tuple's own declaration still carries the
+  // literals. `templateAuthoring.ts` loses its `isNodeFieldAccess` literal disjunction to the same
+  // kind of conversion, leaving only the pre-existing, UNCHANGED doc-comment copy (see MECHANISM FIX
+  // v4's own note, retained below) as that file's one complete cluster.
   const EXPECTED_COMPLETE_CLUSTER_COUNT: Record<string, number> = {
     'packages/core-backend/src/services/approval-form-redaction.ts': 1, // C-3 rank table
-    'packages/core-backend/src/types/approval-product.ts': 2, // C-1 type alias + C-2 Set (separate declarations)
-    'apps/web/src/approvals/approvalNodeEdit.ts': 1, // C-6 literal array
+    'packages/core-backend/src/types/approval-product.ts': 1, // C-1/C-2, MECHANISM FIX v5: ONE tuple, type + Set both derived
     'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue': 1, // FIELD_ACCESS_LABELS (v2)
-    'apps/web/src/approvals/templateAuthoring.ts': 2, // C-7 isNodeFieldAccess guard + a doc-comment copy of the wire shape
-    'apps/web/src/types/approval.ts': 2, // C-5 type alias + FE NODE_FIELD_ACCESS_VALUES export (v2, separate declarations)
+    'apps/web/src/approvals/templateAuthoring.ts': 1, // a doc-comment copy of the wire shape (C-7's own literal chain converted away in v5)
+    'apps/web/src/types/approval.ts': 1, // C-5, MECHANISM FIX v5: ONE tuple, type + array both derived
     'packages/openapi/src/base.yml': 1, // C-8 wire enum
   }
 
@@ -689,11 +985,24 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
         "`editability: 'editable'|'readonly'` fields on the same interface — no 'required' member.",
     },
     {
+      // MECHANISM FIX v5 (AST statement boundaries): `normalizeFieldPolicy`'s `visibility` and
+      // `editability` values are computed by TWO SEPARATE `const` statements. Pre-v5, both lived in
+      // the SAME flat column-0-less unit (the whole function body), so the lone 'hidden' from the
+      // `visibility` ternary chained straight into the 'readonly'/'editable' pair from the
+      // `editability` ternary as ONE 3-member cluster. v5 correctly recognises these as two different
+      // statements: `visibility`'s own unit carries only 'hidden' (1 distinct word, below the
+      // 2-member cluster floor — filtered out, no allowlist entry needed for it at all) and
+      // `editability`'s own unit is independently a 2-member {editable, readonly} unit, so the
+      // crossing between them is now BLOCKED (exactly the R7/R8 guarantee working as intended on a
+      // real, previously-over-merged occurrence). The member set below and the anchor were updated to
+      // match this more precise decomposition — `normalizeFieldPolicy` itself (the function name,
+      // 448 bytes away) no longer reaches the tightened window; `const editability` (44 bytes away,
+      // the exact statement whose ternary this cluster IS) is both closer and more precise.
       file: 'packages/core-backend/src/services/PluginRbacProvisioningService.ts',
-      members: ['editable', 'hidden', 'readonly'],
-      nearSymbol: 'normalizeFieldPolicy',
-      symbolWindow: 400,
-      reason: 'Normalizes the SAME unrelated RoleFieldPolicy (plugin.ts) visibility/editability pair.',
+      members: ['editable', 'readonly'],
+      nearSymbol: 'const editability',
+      symbolWindow: 100,
+      reason: "Same unrelated RoleFieldPolicy (plugin.ts) system: the `editability` ternary alone (its sibling `visibility` ternary contributes only a single 'hidden' occurrence, below the 2-member cluster floor).",
     },
     {
       file: 'apps/web/src/multitable/components/MetaSheetPermissionManager.vue',
@@ -891,7 +1200,9 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   it('carrier file census: exactly this set of files carries a 2+-member literal co-occurrence within the proximity window', () => {
     const carrierFiles = new Set(allClusters.map((c) => c.file))
     const expectedFiles = [
-      'apps/web/src/approvals/approvalNodeEdit.ts',
+      // MECHANISM FIX v5: `approvalNodeEdit.ts` (C-6) is gone from this list — converting its field-
+      // permission check to `NODE_FIELD_ACCESS_VALUES.includes(...)` removed its only literal cluster
+      // entirely, so the file no longer carries ANY 2+-member co-occurrence for `scanTree` to find.
       'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue',
       'apps/web/src/approvals/templateAuthoring.ts',
       'apps/web/src/multitable/components/MetaSheetPermissionManager.vue',

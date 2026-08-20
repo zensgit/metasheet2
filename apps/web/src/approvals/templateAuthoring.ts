@@ -24,7 +24,7 @@ import type {
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
 } from '../types/approval'
-import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+import { NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
@@ -533,8 +533,12 @@ function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldTy
   return AUTHORABLE_FIELD_TYPES.includes(value as AuthorableFieldType)
 }
 
+// MECHANISM FIX v5 (census C-7 conversion): reads the ONE canonical FE `NODE_FIELD_ACCESS_VALUES`
+// array (apps/web/src/types/approval.ts) instead of hand-writing the four-way literal disjunction —
+// a member added to/removed from the canonical array is picked up here for free, and there is no
+// longer a literal chain for the census to have to catch.
 function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {
-  return value === 'editable' || value === 'readonly' || value === 'hidden' || value === 'required'
+  return typeof value === 'string' && (NODE_FIELD_ACCESS_VALUES as readonly string[]).includes(value)
 }
 
 /**
