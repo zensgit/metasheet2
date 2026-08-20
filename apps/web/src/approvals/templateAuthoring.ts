@@ -25,7 +25,7 @@ import type {
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
 } from '../types/approval'
-import { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+import { NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
@@ -543,8 +543,12 @@ function isAuthorableFieldType(value: FormFieldType): value is AuthorableFieldTy
   return AUTHORABLE_FIELD_TYPES.includes(value as AuthorableFieldType)
 }
 
+// MECHANISM FIX v5 (census C-7 conversion): reads the ONE canonical FE `NODE_FIELD_ACCESS_VALUES`
+// array (apps/web/src/types/approval.ts) instead of hand-writing the four-way literal disjunction —
+// a member added to/removed from the canonical array is picked up here for free, and there is no
+// longer a literal chain for the census to have to catch.
 function isNodeFieldAccess(value: unknown): value is NodeFieldAccess {
-  return value === 'editable' || value === 'readonly' || value === 'hidden'
+  return typeof value === 'string' && (NODE_FIELD_ACCESS_VALUES as readonly string[]).includes(value)
 }
 
 /**
@@ -1043,7 +1047,8 @@ function hasKeyOutside(value: unknown, allowed: string[]): boolean {
 }
 
 // T1-4: a `fieldPermissions[]` entry the backend `normalizeApprovalGraph` re-emits verbatim is EXACTLY
-// `{ fieldId: <non-empty string>, access: 'editable'|'readonly'|'hidden' }`. Anything else — an extra key,
+// `{ fieldId: <non-empty string>, access: 'editable'|'readonly'|'hidden'|'required' }` (Lock-7B widens
+// the access enum). Anything else — an extra key,
 // a non-string/empty fieldId, OR an out-of-enum access value — is dropped/normalized away on save. Both the
 // linear authoring guard and the complex-drop check must treat such an entry as a backend-drop (fail-closed
 // to read-only) so hydrate/buildStepConfig never SILENTLY flattens it. Single source of truth for both.

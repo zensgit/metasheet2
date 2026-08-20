@@ -2416,7 +2416,7 @@ describe('ApprovalProductService', () => {
       await expect(service.createTemplate(
         fieldPermRequest([{ fieldId: 'secret', access: 'invisible' }]) as never,
       )).rejects.toMatchObject({
-        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].access must be editable, readonly, or hidden',
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[0].access must be editable, readonly, hidden, or required',
         statusCode: 400,
         code: 'VALIDATION_ERROR',
       })
@@ -2489,6 +2489,414 @@ describe('ApprovalProductService', () => {
       const result = await service.createTemplate(fieldPermRequest([]) as never)
       const node = result.approvalGraph.nodes.find((n) => n.key === 'approval_1')
       expect((node?.config as Record<string, unknown>).fieldPermissions).toBeUndefined()
+    })
+  })
+
+  describe('Lock-7B node-level required field tier (必填, docs/development/approval-lock7b-required-at-node-20260820.md)', () => {
+    // start -> handler_1 (fieldPermissions under test) -> approval_1 (form_field_user driver on
+    // `pick`, fieldPermissions under test for G-6) -> end. `note`/`doc`/`link` are the OD-L7B-9
+    // unwritable types; `pick` doubles as the OD-L7B-4 routing-driver field.
+    function requiredTierRequest(
+      handlerFieldPermissions: unknown,
+      approvalFieldPermissions?: unknown,
+    ) {
+      return {
+        key: 'l7b-tpl',
+        name: 'Lock-7B Template',
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: 'Amount' },
+            { id: 'secret', type: 'text', label: 'Secret' },
+            { id: 'pick', type: 'user', label: 'Pick' },
+            { id: 'note', type: 'explanation', label: 'Note', props: { text: 'note text' } },
+            { id: 'doc', type: 'attachment', label: 'Doc' },
+            { id: 'link', type: 'record-link', label: 'Link', props: { baseId: 'b1', sheetId: 's1' } },
+          ],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'handler_1',
+              type: 'handler',
+              config: { assigneeSources: [{ kind: 'static_user', userIds: ['h-1'] }], fieldPermissions: handlerFieldPermissions },
+            },
+            {
+              key: 'approval_1',
+              type: 'approval',
+              config: {
+                assigneeSources: [{ kind: 'form_field_user', fieldId: 'pick' }],
+                approvalMode: 'single',
+                emptyAssigneePolicy: 'error',
+                ...(approvalFieldPermissions !== undefined ? { fieldPermissions: approvalFieldPermissions } : {}),
+              },
+            },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'handler_1' },
+            { key: 'e2', source: 'handler_1', target: 'approval_1' },
+            { key: 'e3', source: 'approval_1', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    function mockL7bTemplateInsert() {
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('INSERT INTO approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-l7b',
+              key: String(params?.[0]),
+              name: String(params?.[1]),
+              description: null,
+              category: null,
+              visibility_scope: JSON.parse(String(params?.[4])),
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: null,
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('INSERT INTO approval_template_versions')) {
+          return {
+            rows: [{
+              id: 'ver-l7b',
+              template_id: 'tpl-l7b',
+              version: 1,
+              status: 'draft',
+              form_schema: JSON.parse(String(params?.[1])),
+              approval_graph: JSON.parse(String(params?.[2])),
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('UPDATE approval_templates')) {
+          return {
+            rows: [{
+              id: 'tpl-l7b',
+              key: 'l7b-tpl',
+              name: 'Lock-7B Template',
+              description: null,
+              category: null,
+              visibility_scope: { type: 'all', ids: [] },
+              sla_hours: null,
+              status: 'draft',
+              active_version_id: null,
+              latest_version_id: 'ver-l7b',
+              created_at: new Date('2026-08-20T00:00:00.000Z'),
+              updated_at: new Date('2026-08-20T00:00:00.000Z'),
+            }],
+            rowCount: 1,
+          }
+        }
+        { const epochResult = commonApprovalClientMockResult(statement); if (epochResult) return epochResult } throw new Error(`Unhandled query: ${statement}`)
+      })
+    }
+
+    // ── G-2 (publish admission) ─────────────────────────────────────────────────────────────────
+    it('G-2: `required` is admitted as a valid access value on a handler node and round-trips byte-stably', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'handler_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // ── G-1 (必填 × hidden unrepresentable) ──────────────────────────────────────────────────────
+    it('G-1: `required` + `hidden` for the SAME fieldId at ONE node is unrepresentable — rejected by the dedup guard, exact message', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([
+          { fieldId: 'secret', access: 'required' },
+          { fieldId: 'secret', access: 'hidden' },
+        ]) as never,
+      )).rejects.toMatchObject({
+        message: 'approvalGraph.nodes[1].config.fieldPermissions[1].fieldId is duplicated',
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-1 positive control: `required` on one field + `hidden` on a DIFFERENT field at the same node both publish', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([
+        { fieldId: 'secret', access: 'required' },
+        { fieldId: 'amount', access: 'hidden' },
+      ]) as never)
+      const node = result.approvalGraph.nodes.find((n) => n.key === 'handler_1')
+      expect((node?.config as Record<string, unknown>).fieldPermissions).toEqual([
+        { fieldId: 'secret', access: 'required' },
+        { fieldId: 'amount', access: 'hidden' },
+      ])
+    })
+
+    // ── G-6 (approval-node rejection, OD-L7B-3) ─────────────────────────────────────────────────
+    it('G-6: publish REJECTS `required` on an approval node — values-free 400, exact code + metadata', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([], [{ fieldId: 'secret', access: 'required' }]) as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_NODE_TYPE',
+        details: { nodeKey: 'approval_1', nodeType: 'approval', fieldId: 'secret' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-6 positive control: `readonly` on that SAME approval node still publishes; `required` on a HANDLER node in the same graph publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const readonlyResult = await service.createTemplate(requiredTierRequest([], [{ fieldId: 'secret', access: 'readonly' }]) as never)
+      expect((readonlyResult.approvalGraph.nodes.find((n) => n.key === 'approval_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'readonly' }])
+
+      mockL7bTemplateInsert()
+      const handlerResult = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((handlerResult.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // ── G-7 (routing-driver rejection via the SHARED helper, OD-L7B-4) ─────────────────────────
+    it('G-7: publish REJECTS `required` on a routing-driver field (form_field_user source) — values-free 400, exact code', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierRequest([{ fieldId: 'pick', access: 'required' }]) as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'pick' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 positive control: a NON-driver field marked `required` on the same node publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    it('Ordering pin (§1.2 item 2 / P3-1): a driver field marked `required` ALWAYS yields the driver-specific code, never pin 1\'s generic writable-driver message', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const error = await service.createTemplate(
+        requiredTierRequest([{ fieldId: 'pick', access: 'required' }]) as never,
+      ).catch((e) => e)
+      expect(error).toMatchObject({ code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED' })
+      // Pin 1's generic message names "editable" or "required" as an inline noun; the driver-specific
+      // rejection instead names OD-L7B-4 — asserting the ABSENCE of pin 1's marker text on this exact
+      // input is the load-bearing half of the ordering pin (both codes could plausibly fire; only one
+      // does, and it is the specific one).
+      expect(String(error.message)).toContain('OD-L7B-4')
+      expect(String(error.message)).not.toContain('OD-L7-8')
+    })
+
+    // Prior requalification finding R3 (P3): G-7 was asserted for only ONE of the three driver kinds
+    // `collectRoutingDriverFieldIds` recognises (`form_field_user` above) — a `ConditionRule.fieldId`
+    // and a condition-formula operand are the other two, and neither had its OWN test. The prior
+    // round's mitigating evidence (neutering the SHARED `form_field_user` arm reds both this file's
+    // tests and the sibling Lock-7 real-DB pin-1 tests) proves there is only ONE derivation, but does
+    // not itself exercise the other two arms — these two tests do.
+    function requiredTierConditionDriverRequest(driverKind: 'rule' | 'formula') {
+      return {
+        key: 'l7b-cond-tpl',
+        name: 'Lock-7B Condition Driver Template',
+        formSchema: {
+          fields: [
+            { id: 'amount', type: 'number', label: 'Amount' },
+            { id: 'secret', type: 'text', label: 'Secret' },
+          ],
+        },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            {
+              key: 'handler_1',
+              type: 'handler',
+              config: {
+                assigneeSources: [{ kind: 'static_user', userIds: ['h-1'] }],
+                fieldPermissions: [{ fieldId: 'amount', access: 'required' }],
+              },
+            },
+            {
+              key: 'route',
+              type: 'condition',
+              config: {
+                branches: [
+                  driverKind === 'rule'
+                    ? { edgeKey: 'edge-high', rules: [{ fieldId: 'amount', operator: 'gt', value: 100 }] }
+                    : { edgeKey: 'edge-high', rules: [], formula: { expression: '{amount} > 100' } },
+                ],
+                defaultEdgeKey: 'edge-low',
+              },
+            },
+            { key: 'high', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['a-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'low', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: ['a-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 's2h', source: 'start', target: 'handler_1' },
+            { key: 'h2r', source: 'handler_1', target: 'route' },
+            { key: 'edge-high', source: 'route', target: 'high' },
+            { key: 'edge-low', source: 'route', target: 'low' },
+            { key: 'h2e', source: 'high', target: 'end' },
+            { key: 'l2e', source: 'low', target: 'end' },
+          ],
+        },
+      }
+    }
+
+    it('G-7 (R3 fix, driver kind 2/3): publish REJECTS `required` on a field referenced by a condition branch\'s ConditionRule.fieldId', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierConditionDriverRequest('rule') as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 (R3 fix, driver kind 3/3): publish REJECTS `required` on a field referenced ONLY by a condition-formula operand', async () => {
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.createTemplate(
+        requiredTierConditionDriverRequest('formula') as never,
+      )).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+      expect(pgState.pool.connect).not.toHaveBeenCalled()
+    })
+
+    it('G-7 (R3 fix) positive control: the SAME two fixtures publish when a DIFFERENT, non-driver field (`secret`) is `required` instead of the driver `amount`', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const ruleFixture = requiredTierConditionDriverRequest('rule')
+      // `amount` stays unlisted (absent ≡ editable, OD-L7-9) — Lock-7 pin 1 / OD-L7-8(a) separately
+      // forbids an EXPLICIT writable fieldPermissions entry on any routing driver at any node
+      // (privilege-escalation guard, unrelated to G-7/OD-L7B-4), so this positive control marks the
+      // OTHER field required rather than flipping the driver's own entry to `editable`.
+      ;(ruleFixture.approvalGraph.nodes[1]!.config as { fieldPermissions: Array<{ fieldId: string; access: string }> }).fieldPermissions = [
+        { fieldId: 'secret', access: 'required' },
+      ]
+      const result = await service.createTemplate(ruleFixture as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
+    })
+
+    // Prior requalification finding R3 (P3): G-6 requires the driver rejection to fire "at every
+    // entry point that reaches the normalizer" — `validateNodeFieldPermissionsAgainstFormSchema` has
+    // five call sites (restore/create/update/publish/clone) and only `createTemplate` had a test.
+    // `publishTemplate` earns its OWN test rather than being deferred like `cloneTemplate` below: it
+    // is the one entry point that calls the shared validator with `STORED_GRAPH_CONTEXT`, not
+    // `REQUEST_VALIDATION_CONTEXT` — a materially different argument, not the "same call, same args"
+    // shape the deferral for update/clone rests on — and it is the entry point where a stored graph
+    // that predates this lock (or was crafted directly) is re-admitted to production.
+    it('G-6/G-7 (R3 fix): publish REJECTS a STORED graph carrying `required` on a routing-driver field (re-validated at publish, not just at create)', async () => {
+      const fixture = requiredTierConditionDriverRequest('rule')
+      const templateRow = {
+        id: 'tpl-g6-pub', key: 'g6-pub', name: 'G6 Publish', description: null, category: null,
+        visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'draft',
+        active_version_id: null, latest_version_id: 'ver-g6-pub',
+        created_at: new Date('2026-08-20T00:00:00.000Z'), updated_at: new Date('2026-08-20T00:00:00.000Z'),
+      }
+      const versionRow = {
+        id: 'ver-g6-pub', template_id: 'tpl-g6-pub', version: 1, status: 'draft',
+        form_schema: fixture.formSchema,
+        approval_graph: fixture.approvalGraph,
+        created_at: new Date('2026-08-20T00:00:00.000Z'), updated_at: new Date('2026-08-20T00:00:00.000Z'),
+      }
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const s = normalize(sql)
+        if (s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (s.includes('FROM approval_templates') && s.includes('FOR UPDATE')) {
+          return { rows: [templateRow], rowCount: 1 }
+        }
+        if (s.includes('FROM approval_template_versions')) {
+          return { rows: [versionRow], rowCount: 1 }
+        }
+        if (s.startsWith('UPDATE approval_published_definitions')) {
+          return { rows: [], rowCount: 0 }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      await expect(service.publishTemplate('tpl-g6-pub', {
+        policy: { allowRevoke: true },
+        actorUserId: 'admin-1',
+      } as never)).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+        details: { nodeKey: 'handler_1', fieldId: 'amount' },
+      })
+    })
+
+    // R3 disposition, publish's siblings (restore/update/clone): NOT independently tested here.
+    // `updateTemplate` and `cloneTemplate` call the exact SAME `validateNodeFieldPermissionsAgainstFormSchema`
+    // with the exact same `REQUEST_VALIDATION_CONTEXT` `createTemplate` already exercises above — not
+    // a second, independently-implemented gate, the same reasoning this file's own pre-existing NOTE
+    // (search "not a third, independently-implemented gate" above) already applies to `cloneTemplate`
+    // for the record-link gate. `restoreTemplateVersion` also calls it with `REQUEST_VALIDATION_CONTEXT`
+    // over a HISTORICAL stored graph, same shape again. This is a real, disclosed LIMIT, not a closed
+    // gap: none of these three tests would catch a future refactor that deletes the
+    // `validateNodeFieldPermissionsAgainstFormSchema` CALL from one specific entry point while leaving
+    // the function itself intact — the shared-function argument proves the CHECK'S LOGIC cannot drift
+    // between entry points, it does not prove every entry point still WIRES the check at all. Closing
+    // that residual would need an entry-point-wiring census (grep-based, of the kind this repo's own
+    // doctrine treats with suspicion — feedback_source_text_assertions_are_not_behaviour) or four more
+    // full DB-mocked behavioural tests; deferred as a P3, not silently narrowed to "covered".
+
+    // ── G-8 (unwritable-type rejection, OD-L7B-9) ───────────────────────────────────────────────
+    for (const [fieldId, fieldType] of [['note', 'explanation'], ['doc', 'attachment'], ['link', 'record-link']] as const) {
+      it(`G-8: publish REJECTS \`required\` on a ${fieldType} field — values-free 400, exact code + metadata`, async () => {
+        const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+        const service = new ApprovalProductService()
+        await expect(service.createTemplate(
+          requiredTierRequest([{ fieldId, access: 'required' }]) as never,
+        )).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_TYPE',
+          details: { nodeKey: 'handler_1', fieldId, fieldType },
+        })
+        expect(pgState.pool.connect).not.toHaveBeenCalled()
+      })
+    }
+
+    it('G-8 positive control: a `text` field marked `required` on the same node publishes', async () => {
+      mockL7bTemplateInsert()
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService()
+      const result = await service.createTemplate(requiredTierRequest([{ fieldId: 'secret', access: 'required' }]) as never)
+      expect((result.approvalGraph.nodes.find((n) => n.key === 'handler_1')?.config as Record<string, unknown>).fieldPermissions)
+        .toEqual([{ fieldId: 'secret', access: 'required' }])
     })
   })
 

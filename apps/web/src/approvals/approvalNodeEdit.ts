@@ -15,6 +15,7 @@ import type {
 import {
   APPROVAL_ROLE_CONFIGURE_SENTINEL,
   HANDLER_ASSIGNEE_SOURCE_KINDS,
+  NODE_FIELD_ACCESS_VALUES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
 } from '../types/approval'
@@ -466,7 +467,11 @@ export function validateApprovalNodeEdits(
       if (!fieldId || (fields && !fields.some((field) => field.id.trim() === fieldId))) {
         errors.push(`${nodeLabel} ${edit.nodeKey} 的字段权限引用了不存在的字段`)
       }
-      if (!(['editable', 'readonly', 'hidden'] as const).includes(permission.access)) {
+      // MECHANISM FIX v5 (census C-6 conversion): reads the ONE canonical FE
+      // `NODE_FIELD_ACCESS_VALUES` array (apps/web/src/types/approval.ts) instead of hand-copying the
+      // member list a second time here — a member added to/removed from the canonical array is picked
+      // up here for free, and there is no longer a literal list for the census to have to catch.
+      if (!NODE_FIELD_ACCESS_VALUES.includes(permission.access)) {
         errors.push(`${nodeLabel} ${edit.nodeKey} 的字段权限类型无效`)
       }
     }

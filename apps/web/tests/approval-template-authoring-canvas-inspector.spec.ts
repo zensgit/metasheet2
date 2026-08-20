@@ -1324,6 +1324,27 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(container!.querySelector('[data-testid="approval-node-field-readonly-hint"]')).toBeNull()
   })
 
+  it('Lock-7B OD-L7B-7 / G-15: the field-permissions select on an APPROVAL node renders EXACTLY three options — 必填 is ABSENT, not a disabled fourth (M7)', async () => {
+    routeParams = { id: 'tpl_l7b_absent' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const access = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
+    expect(access).not.toBeNull()
+    const options = Array.from(access.querySelectorAll('option'))
+    expect(options).toHaveLength(3)
+    expect(options.map((o) => o.getAttribute('value')).sort()).toEqual(['editable', 'hidden', 'readonly'])
+    // Not merely absent from the value list — no disabled option node exists in the DOM at all.
+    expect(access.querySelector('option[value="required"]')).toBeNull()
+  })
+
   it('D5 (P2-1): the routing-hint string is pinned by anchored exact equality (not substring), and the hint now actually renders on a complex graph via the graph-wide computed', async () => {
     // Source string pin, same anchored-equality treatment as the A-9 readonly-hint fix above — a
     // substring `.toContain` stays green if the linear copy is extended on one side only.

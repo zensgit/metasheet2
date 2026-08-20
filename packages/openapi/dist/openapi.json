@@ -6094,10 +6094,11 @@
               "enum": [
                 "editable",
                 "readonly",
-                "hidden"
+                "hidden",
+                "required"
               ]
             },
-            "description": "Lock-7 OD-L7-10 — the actor-scoped per-field access map for the viewer\nat their claimed handler seat(s): fieldId → editable | readonly |\nhidden. Present ONLY on the DETAIL read (getApproval); absent on the\nlist. A field absent from the map is editable (legacy default, OD-L7-9).\nPresentation only — enforcement is server-side (a masked field write is\nrefused regardless of what the client renders).\n"
+            "description": "Lock-7 OD-L7-10 (widened by Lock-7B OD-L7B-1) — the actor-scoped per-field\naccess map for the viewer at their claimed handler seat(s): fieldId ->\neditable | readonly | hidden | required. Present ONLY on the DETAIL read\n(getApproval); absent on the list. A field absent from the map is editable\n(legacy default, OD-L7-9). `required` is editable plus a submit-time\nobligation enforced at handler submit. Presentation only — enforcement is\nserver-side (a masked field write is refused regardless of what the client\nrenders).\n"
           },
           "currentNodeKey": {
             "type": "string",

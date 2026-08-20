@@ -72,7 +72,9 @@ function staticUser(userIds: string[]) {
   return [{ kind: 'static_user', userIds }]
 }
 
-type NodeFieldPermission = { fieldId: string; access: 'editable' | 'readonly' | 'hidden' }
+// P3-3: widened to the fourth Lock-7B member — this alias mirrors `NodeFieldAccess` for test-fixture
+// typing only (not the production type), and had gone stale at three members.
+type NodeFieldPermission = { fieldId: string; access: 'editable' | 'readonly' | 'hidden' | 'required' }
 
 // start → handler(HANDLER, fieldPermissions) → approval(FINAL) → end. The default handler roster is a
 // single seat so the handler completes on one submission.
@@ -445,7 +447,7 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
   // `length > 0 ? {...} : {}` helper silently omitted the key, so the control never exercised the
   // `length > 0` conjunct; mutation-verified below). P3-1 fixed — non-array `fieldPermissions` shapes
   // (object/string/null) are now negatives too, matching the production guard's widened predicate.
-  it('G-12 (D-1 closed, both axes): fieldPermissions — EVERY access value (editable/readonly/hidden) — on EVERY non-write-capable node type is REJECTED with a typed values-free 400; an empty array and an approval-node matrix still round-trip', async () => {
+  it('G-12 (D-1 closed, both axes): fieldPermissions — EVERY access value (editable/readonly/hidden/required) — on EVERY non-write-capable node type is REJECTED with a typed values-free 400; an empty array and an approval-node matrix still round-trip', async () => {
     // Positive control first: hidden on an APPROVAL node round-trips through save (unchanged by this slice).
     const okGraph = handlerGraph([{ fieldId: 'memo', access: 'hidden' }])
     okGraph.nodes[2]!.config = { ...okGraph.nodes[2]!.config, fieldPermissions: [{ fieldId: 'secret', access: 'hidden' }] } as never
@@ -569,10 +571,19 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
       }
     }
 
-    // 3 access values × 5 node types = 15 negatives, EVERY ONE typed + values-free.
+    // P3-3: widened to 4 access values × 5 node types = 20 negatives (was 3×5=15, stale since
+    // Lock-7B added `required`), EVERY ONE typed + values-free. `required` reaches the SAME D-1 choke
+    // as the other three: `validateNodeFieldPermissionsAgainstFormSchema`'s node-type gate
+    // (`ApprovalProductService.ts` — "field permissions apply to approval and handler nodes only") is
+    // access-value-agnostic (it rejects on the mere PRESENCE of a non-empty `fieldPermissions` key on
+    // these 5 node types, before any per-entry access value is even read), and the NEW Lock-7B
+    // required-specific checks (OD-L7B-3/4/9, `validateFieldEditEnforcementPins`) only run for
+    // `node.type === 'approval' || 'handler'` — none of `cc`/`start`/`end`/`condition`/`parallel` — so
+    // they never see these nodes at all. Confirmed against a real migrated Postgres 16, not asserted
+    // from source alone (feedback_source_text_assertions_are_not_behaviour).
     const NON_WRITE_TYPES: NonWriteType[] = ['cc', 'start', 'end', 'condition', 'parallel']
     for (const type of NON_WRITE_TYPES) {
-      for (const access of ['editable', 'readonly', 'hidden'] as const) {
+      for (const access of ['editable', 'readonly', 'hidden', 'required'] as const) {
         const { graph, nodeKey } = graphFor(type, [{ fieldId: 'memo', access }])
         const res = await createTemplate(`${KEYPFX}-g12-${type}-${access}`, graph)
         await assertRejected(res, `${type}/${access}`, nodeKey)
@@ -687,7 +698,18 @@ describeIfDatabase('Lock-7 field-edit enforcement — real-DB acceptance', () =>
       expect(msg).toContain(fieldId)
       expect(msg).toContain('OD-L7-8')
     }
-    await expectDriverPin(await createTemplate(`${KEYPFX}-g4-ffu`, ffuGraph), 'pick')
+    const ffuRes = await createTemplate(`${KEYPFX}-g4-ffu`, ffuGraph)
+    expect(ffuRes.status, await ffuRes.clone().text()).toBe(400)
+    const ffuMsg = ((await ffuRes.json()) as ErrorBody).error?.message ?? ''
+    expect(ffuMsg, 'driver-pin message for pick').toContain('routing-driver field')
+    expect(ffuMsg).toContain('pick')
+    expect(ffuMsg).toContain('OD-L7-8')
+    // P3-1: EXACT message pin for the legacy `editable` input, byte-for-byte the shipped Lock-7
+    // wording — converts what was an unasserted copy change (only `toContain('routing-driver
+    // field')` above, which survives either wording) into an asserted one.
+    expect(ffuMsg).toBe(
+      `approvalGraph node handler_h fieldPermissions marks routing-driver field pick editable; a routing driver may never be editable (Lock-7 OD-L7-8)`,
+    )
 
     // ConditionRule driver: `route_num` selects a branch. Marking it editable at the handler → driver pin.
     const ruleGraph = {

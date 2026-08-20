@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   ApprovalGraphExecutor,
   canonicalizeRecordLinkFormData,
+  isEmptyValue,
   pruneHiddenFormData,
   validateApprovalFormData,
 } from '../../src/services/ApprovalGraphExecutor'
@@ -1304,6 +1305,46 @@ describe('ApprovalGraphExecutor', () => {
     // The cyclic branch fails fast rather than hanging.
     expect(() => new ApprovalGraphExecutor(runtimeGraph, { kind: 'cyclic' }).resolveInitialState())
       .toThrowError(/cycle near/)
+  })
+})
+
+// Lock-7B §0.2 / G-11 (docs/development/approval-lock7b-required-at-node-20260820.md) — the ONE
+// type-agnostic emptiness predicate `isEmptyValue`, exported so the required-at-node handler-submit
+// check (ApprovalProductService.ts) reuses it VERBATIM rather than minting a second definition. Each
+// EMPTY arm is asserted individually (per-arm mutation target: deleting any ONE disjunct from
+// `isEmptyValue`'s source must red exactly the matching `it` below and no other EMPTY-arm test) and
+// each disclosed NON-empty hole is asserted individually too, so an arm's own positive/negative pair
+// discriminates it from every other arm.
+describe('isEmptyValue (Lock-7B §0.2 / G-11) — the create-time definition, reused verbatim at the node', () => {
+  it('EMPTY arm: the empty string', () => {
+    expect(isEmptyValue('')).toBe(true)
+  })
+  it('EMPTY arm: null', () => {
+    expect(isEmptyValue(null)).toBe(true)
+  })
+  it('EMPTY arm: undefined (the absent-key case at both create and the node)', () => {
+    expect(isEmptyValue(undefined)).toBe(true)
+  })
+  it('EMPTY arm: an empty array', () => {
+    expect(isEmptyValue([])).toBe(true)
+  })
+  it('disclosed NON-empty hole: the number 0', () => {
+    expect(isEmptyValue(0)).toBe(false)
+  })
+  it('disclosed NON-empty hole: the boolean false', () => {
+    expect(isEmptyValue(false)).toBe(false)
+  })
+  it('disclosed NON-empty hole: a whitespace-only string', () => {
+    expect(isEmptyValue('   ')).toBe(false)
+  })
+  it('disclosed NON-empty hole: an empty object {}', () => {
+    expect(isEmptyValue({})).toBe(false)
+  })
+  it('disclosed NON-empty hole: a NON-empty array', () => {
+    expect(isEmptyValue(['x'])).toBe(false)
+  })
+  it('disclosed NON-empty hole: a non-blank string', () => {
+    expect(isEmptyValue('x')).toBe(false)
   })
 })
 

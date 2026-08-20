@@ -207,3 +207,64 @@ describe('resolveFieldAccessAtNodes (Lock-7 L7-A)', () => {
     expect(fieldAccessAtNodes(null, ['n1'], 'x')).toBe('editable')
   })
 })
+
+// ── Lock-7B OD-L7B-10 — resolveFieldAccessAtNodes resolves the FOURTH member mechanically ─────────
+function graphWithFourStateMatrix(perNode: Record<string, Array<{ fieldId: string; access: 'editable' | 'readonly' | 'hidden' | 'required' }>>): RedactableRuntimeGraph {
+  return {
+    nodes: Object.entries(perNode).map(([key, fieldPermissions]) => ({ key, type: 'handler', config: { fieldPermissions } })),
+  }
+}
+
+describe('resolveFieldAccessAtNodes — Lock-7B `required` (OD-L7B-1/OD-L7B-10, G-2/G-3/G-4)', () => {
+  // ── G-2/G-3 — `required` resolves to EXACTLY `'required'`, by MAP-VALUE equality (never
+  // `!== 'editable'`, which cannot discriminate `required` from `readonly`/`hidden`) ───────────────
+  it('G-2/G-3: a stored graph carrying access:\'required\' resolves to exactly \'required\' via resolveFieldAccessAtNodes', () => {
+    const graph = graphWithFourStateMatrix({ n1: [{ fieldId: 'f', access: 'required' }] })
+    const map = resolveFieldAccessAtNodes(graph, ['n1'])
+    expect(map.get('f')).toBe('required')
+    expect(fieldAccessAtNodes(graph, ['n1'], 'f')).toBe('required')
+  })
+
+  it('G-3 discriminating negative: the SAME fixture with NO entry for the field resolves to \'editable\' (the absent-key default) — proving the positive fixture exercises the RESOLUTION path, not a vacuous pass', () => {
+    const graph = graphWithFourStateMatrix({ n1: [] })
+    expect(fieldAccessAtNodes(graph, ['n1'], 'f')).toBe('editable')
+  })
+
+  // ── G-1 — `required` × `hidden` is unrepresentable: this module never sees the combination (the
+  // dedup guard at publish is the actual gate; this asserts the READ side has no special-case for it
+  // because there is nothing to special-case) ────────────────────────────────────────────────────
+  it('`required` at one node and `hidden` at a DIFFERENT node are both preserved (OD-L7B-2 — per-node masks, independent)', () => {
+    const graph = graphWithFourStateMatrix({
+      n1: [{ fieldId: 'f', access: 'required' }],
+      n2: [{ fieldId: 'f', access: 'hidden' }],
+    })
+    expect(fieldAccessAtNodes(graph, ['n1'], 'f')).toBe('required')
+    expect(fieldAccessAtNodes(graph, ['n2'], 'f')).toBe('hidden')
+  })
+
+  // ── G-4 — rank ordering: hidden ≻ readonly ≻ required ≻ editable; multi-node byte-identity ──────
+  it('G-4: rank ordering — hidden beats required beats editable across nodes; required beats editable', () => {
+    const hiddenVsRequired = graphWithFourStateMatrix({
+      n1: [{ fieldId: 'f', access: 'hidden' }],
+      n2: [{ fieldId: 'f', access: 'required' }],
+    })
+    expect(fieldAccessAtNodes(hiddenVsRequired, ['n1', 'n2'], 'f')).toBe('hidden')
+
+    const requiredVsEditable = graphWithFourStateMatrix({
+      n1: [{ fieldId: 'f', access: 'required' }],
+      n2: [{ fieldId: 'f', access: 'editable' }],
+    })
+    expect(fieldAccessAtNodes(requiredVsEditable, ['n1', 'n2'], 'f')).toBe('required')
+
+    const readonlyVsRequired = graphWithFourStateMatrix({
+      n1: [{ fieldId: 'f', access: 'readonly' }],
+      n2: [{ fieldId: 'f', access: 'required' }],
+    })
+    expect(fieldAccessAtNodes(readonlyVsRequired, ['n1', 'n2'], 'f')).toBe('readonly')
+  })
+
+  it('G-4: `collectHiddenFieldIds` is unaffected by `required` entries — a `required`-only node hides nothing', () => {
+    const graph = graphWithFourStateMatrix({ n1: [{ fieldId: 'f', access: 'required' }] })
+    expect(collectHiddenFieldIds(graph, ['n1'])).toEqual(new Set())
+  })
+})

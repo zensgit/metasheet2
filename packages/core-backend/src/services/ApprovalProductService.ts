@@ -62,6 +62,8 @@ import {
   APPROVAL_TERMINAL_STATUSES,
   HANDLER_ASSIGNEE_SOURCE_KINDS,
   HANDLER_NODE_OPERATION_POLICY_KEYS,
+  NODE_FIELD_ACCESS_VALUES,
+  NODE_FIELD_ACCESS_WRITABLE_VALUES,
 } from '../types/approval-product'
 import {
   ApprovalGraphExecutor,
@@ -78,6 +80,8 @@ import {
   validateDetailFieldValue,
   DATE_RANGE_DATE_TYPES,
   resolveVisibilityFieldReference,
+  getVisibleFormFieldIds,
+  isEmptyValue,
 } from './ApprovalGraphExecutor'
 import { collectActiveNodeKeys, collectHiddenFieldIds, fieldAccessAtNodes, resolveFieldAccessAtNodes } from './approval-form-redaction'
 import { fieldDerivedAssigneeSourceKey, resolveApprovalAssignees, resolveFormUserValue } from './ApprovalAssigneeResolver'
@@ -640,7 +644,14 @@ export const SAME_PERSON_POLICIES = new Set<SamePersonPolicy>([
   'transfer_dept_head',
 ])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
-const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
+// Lock-7B OD-L7B-10 (C-2) — NODE_FIELD_ACCESS_VALUES now lives in ../types/approval-product (imported
+// above) so approval-form-redaction.ts (C-4) can read the SAME canonical enumeration without a
+// circular import (ApprovalProductService.ts imports FROM approval-form-redaction.ts, not the
+// reverse). C-9 — the publish-rejection message is DERIVED from that enumeration, never hand-rewritten.
+const NODE_FIELD_ACCESS_VALUES_MESSAGE = (() => {
+  const values = [...NODE_FIELD_ACCESS_VALUES]
+  return `${values.slice(0, -1).join(', ')}, or ${values[values.length - 1]}`
+})()
 // T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
 // wired `remind` (a notification), slice 2 wires `transfer` + `jump` (state mutations) — auto_* remain
 // rejected at publish and runtime-inert (terminal effects stay behind the closed gate below).
@@ -1792,7 +1803,7 @@ function normalizeNodeFieldPermissions(
       failValidation(context, `${entryPath}.fieldId is required`)
     }
     if (typeof entry.access !== 'string' || !NODE_FIELD_ACCESS_VALUES.has(entry.access as NodeFieldAccess)) {
-      failValidation(context, `${entryPath}.access must be editable, readonly, or hidden`)
+      failValidation(context, `${entryPath}.access must be ${NODE_FIELD_ACCESS_VALUES_MESSAGE}`)
     }
     const fieldId = entry.fieldId.trim()
     if (seen.has(fieldId)) {
@@ -2079,22 +2090,93 @@ function validateFieldEditEnforcementPins(
   formSchema: FormSchema,
   context: ValidationContext,
 ): void {
-  // --- Pin 1 (OD-L7-8(a) / G-4): a routing driver may not be `editable` at ANY node. ---
-  // The load-bearing pin: it closes a privilege-escalation path that opens the moment writes land.
-  // Authoring-time half — reject a driver marked EXPLICITLY `editable`. The runtime write guard in
-  // applyHandlerFieldWrites closes the DEFAULT-editable (absent-matrix) case that absent≡editable
-  // (OD-L7-9) leaves open, since an authoring-time "reject absent driver" would be a §2.1 narrowing.
   const routingDriverFieldIds = collectRoutingDriverFieldIds(approvalGraph.nodes)
+
+  // --- Lock-7B §1.2 (OD-L7B-3/OD-L7B-4/OD-L7B-9) — the three NEW `required` publish rejections. ---
+  // Publish-only by construction: this function is reached ONLY from
+  // `validateNodeFieldPermissionsAgainstFormSchema`, itself called from the five authoring entry
+  // points (restore/create/update/publish/clone) and NEVER from the dispatch re-normalize path
+  // (`asRuntimeGraph` calls `normalizeApprovalGraph` directly, not this function) — so `context` here
+  // is never `STORED_RUNTIME_CONTEXT`. The explicit guard below states that exemption at the site
+  // itself (§2.1), mirroring the S-4 D-1 choke's own `context !== STORED_RUNTIME_CONTEXT` guard,
+  // rather than relying only on the caller graph.
+  //
+  // ORDERING PIN (§1.2 item 2 / P3-1): the driver-required check below MUST run before pin 1's own
+  // (widened) test further down, so a driver field marked `required` always yields
+  // `APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED` — never pin 1's generic driver message (G-7
+  // asserts the code, and therefore asserts the order).
+  if (context !== STORED_RUNTIME_CONTEXT) {
+    const formFieldTypeById = new Map(formSchema.fields.map((field) => [field.id, field.type]))
+    for (const node of approvalGraph.nodes) {
+      if (node.type !== 'approval' && node.type !== 'handler') continue
+      const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
+      for (const permission of permissions) {
+        if (permission.access !== 'required') continue
+        // OD-L7B-3 — `required` is satisfiable on HANDLER nodes only in v1: an approval node has no
+        // field write surface (OD-L7-3), so `required` there is unsatisfiable by anyone at that node.
+        if (node.type === 'approval') {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks field ${permission.fieldId} required on an approval node; required is satisfiable on handler nodes only (Lock-7B OD-L7B-3)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_NODE_TYPE',
+            { nodeKey: node.key, nodeType: node.type, fieldId: permission.fieldId },
+          )
+        }
+        // OD-L7B-4 — a routing driver is never writable at any node (`:10482`, matrix-independent),
+        // so `required` on one is unsatisfiable. SAME shared `collectRoutingDriverFieldIds` the
+        // runtime write guard and pin 1 use (Lock-7 OD-L7-8 discipline) — one derivation, no drift.
+        if (routingDriverFieldIds.has(permission.fieldId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} required; a routing driver may never be required (Lock-7B OD-L7B-4)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_DRIVER_UNSUPPORTED',
+            { nodeKey: node.key, fieldId: permission.fieldId },
+          )
+        }
+        // OD-L7B-9 — a field type that can never hold a value at a handler node: `explanation`
+        // carries no submitted value at any time (Lock-8 A-1); `record-link`/`attachment` are
+        // refused at handler write time pending binding + authz (`:10508`) — a TEMPORARY refusal,
+        // reopened in whichever slice adds that type's handler write support.
+        const fieldType = formFieldTypeById.get(permission.fieldId)
+        if (fieldType === 'explanation' || fieldType === 'record-link' || fieldType === 'attachment') {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} fieldPermissions marks field ${permission.fieldId} (type ${fieldType}) required; that type can never hold a value at a handler node (Lock-7B OD-L7B-9)`,
+            400,
+            'APPROVAL_NODE_REQUIRED_FIELD_UNSUPPORTED_TYPE',
+            { nodeKey: node.key, fieldId: permission.fieldId, fieldType },
+          )
+        }
+      }
+    }
+  }
+
+  // --- Pin 1 (OD-L7-8(a) / G-4): a routing driver may not be `editable` OR `required` at ANY node. ---
+  // The load-bearing pin: it closes a privilege-escalation path that opens the moment writes land.
+  // Authoring-time half — reject a driver marked explicitly WRITABLE (Lock-7B §2.2 widens this from a
+  // bare `=== 'editable'` equality to set membership over the shared writable set, so a driver marked
+  // `required` cannot slip past this pin either — defense-in-depth ONLY: the actual escalation stays
+  // closed by the matrix-independent runtime driver guard at `:10482` and by the OD-L7B-4 rejection
+  // above, which — per the ordering pin — always fires FIRST for a `required` driver). The runtime
+  // write guard in applyHandlerFieldWrites closes the DEFAULT-editable (absent-matrix) case that
+  // absent≡editable (OD-L7-9) leaves open, since an authoring-time "reject absent driver" would be a
+  // §2.1 narrowing.
   if (routingDriverFieldIds.size > 0) {
     for (const node of approvalGraph.nodes) {
       if (node.type !== 'approval' && node.type !== 'handler') continue
       const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
       for (const permission of permissions) {
-        if (permission.access === 'editable' && routingDriverFieldIds.has(permission.fieldId)) {
-          failValidation(
-            context,
-            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`,
-          )
+        if (NODE_FIELD_ACCESS_WRITABLE_VALUES.has(permission.access) && routingDriverFieldIds.has(permission.fieldId)) {
+          // P3-1: §2.2 authorised widening the PREDICATE from `=== 'editable'` to writable-set
+          // membership, not rewriting the author-facing TEXT for the pre-existing `editable` case —
+          // the shipped Lock-7 wording is kept byte-for-byte for that legacy input; only a member
+          // OTHER than `editable` (i.e. `required`, defense-in-depth only — OD-L7B-4 above always
+          // fires first for a `required` driver, per the ordering pin) gets the widened "writable"
+          // phrasing, since "may never be editable" would be actively wrong for that case.
+          const message =
+            permission.access === 'editable'
+              ? `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`
+              : `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} ${permission.access}; a routing driver may never be writable (Lock-7 OD-L7-8)`
+          failValidation(context, message)
         }
       }
     }
@@ -9602,20 +9684,75 @@ export class ApprovalProductService {
         // node_activation_seq (no `bumpNodeActivationSeq` here), so `handlerNodeEpoch` and the current
         // node's quorum tally (`:6981`, Lock-3 G-12) are unchanged by the edit (G-16 companion).
         let handlerFieldWrite: { changedFieldIds: string[]; revisions: Array<{ fieldId: string; before: unknown; after: unknown }> } = { changedFieldIds: [], revisions: [] }
-        if (Object.prototype.hasOwnProperty.call(request, 'fieldWrites')) {
+        const hasFieldWrites = Object.prototype.hasOwnProperty.call(request, 'fieldWrites')
+        // Lock-7B §1.3 step 0 (OD-L7B-11) — the required-at-node candidate set is resolved from the
+        // RUNTIME graph alone (no formSchema needed yet), through the SAME `resolveFieldAccessAtNodes`
+        // the write mask / read DTO use (never a literal chain — G-3's second arm). This decides
+        // whether the frozen-schema SELECT below must run even when THIS submit carries no
+        // `fieldWrites` key at all — closing the one-key bypass (G-10c) without charging a legacy
+        // template (no `required` entry, no `fieldWrites` key) an extra read (G-13 byte-identity).
+        const requiredFieldIdsAtNode = [...resolveFieldAccessAtNodes(runtimeGraph, [currentNodeKey])]
+          .filter(([, access]) => access === 'required')
+          .map(([fieldId]) => fieldId)
+        if (hasFieldWrites || requiredFieldIdsAtNode.length > 0) {
           const schemaResult = await client.query<{ form_schema: Record<string, unknown> }>(
             `SELECT form_schema FROM approval_template_versions WHERE id = $1`,
             [instance.template_version_id],
           )
           const frozenFormSchema = schemaResult.rows[0]?.form_schema as unknown as FormSchema | undefined
           if (!frozenFormSchema) {
+            // §2.1 residual 2 / G-9b — `template_version_id` is NULLABLE (the runtime graph is read via
+            // the INDEPENDENT `published_definition_id` column), so an instance CAN carry a `required`
+            // entry with a NULL `template_version_id`. Fail-closed: a 409, never a silent discharge of
+            // the obligation (M8). Values-free — `{ nodeKey }` only.
             throw new ServiceError('Frozen form schema not found', 409, 'APPROVAL_FROZEN_SCHEMA_NOT_FOUND', { nodeKey: currentNodeKey })
           }
-          handlerFieldWrite = await this.applyHandlerFieldWrites(client, id, currentNodeKey, request.fieldWrites, {
-            runtimeGraph,
-            formSchema: frozenFormSchema,
-            frozenSnapshot: formSnapshot,
-          })
+          if (hasFieldWrites) {
+            handlerFieldWrite = await this.applyHandlerFieldWrites(client, id, currentNodeKey, request.fieldWrites, {
+              runtimeGraph,
+              formSchema: frozenFormSchema,
+              frozenSnapshot: formSnapshot,
+            })
+          }
+          // Lock-7B §1.3 step 3 (OD-L7B-5/12/13) — the required-at-node check, on the EFFECTIVE
+          // snapshot (this submit's writes merged over the frozen create snapshot). Runs BEFORE seat
+          // deactivation and the partial-handle branch below, so it fires on EVERY handle submit,
+          // including a partial 会签 one (OD-L7B-13) — the obligation binds the submit, not the node's
+          // completion.
+          if (requiredFieldIdsAtNode.length > 0) {
+            const requiredFieldIdSet = new Set(requiredFieldIdsAtNode)
+            // NIT-2 / G-9c — `applyHandlerFieldWrites` returns `{ changedFieldIds, revisions }`, no
+            // merged object (the merge itself is a server-side jsonb `||` inside its own UPDATE), so
+            // the effective snapshot is RECONSTRUCTED here rather than re-read inside this transaction.
+            const effectiveFormSnapshot: Record<string, unknown> = { ...formSnapshot }
+            for (const revision of handlerFieldWrite.revisions) {
+              effectiveFormSnapshot[revision.fieldId] = revision.after
+            }
+            // OD-L7B-12 — the UNION of pre-write and post-write visibility. A candidate invisible on
+            // BOTH is skipped (an author-configured, never-satisfied visibilityRule must not deadlock
+            // the node — G-12); a candidate visible on EITHER stays enforced, so the actor cannot
+            // discharge the obligation by writing its own driver to hide the field in the same submit
+            // (G-12b) — nor does making a previously-hidden field visible with this submit excuse it.
+            const preWriteVisibleFieldIds = getVisibleFormFieldIds(frozenFormSchema, formSnapshot)
+            const postWriteVisibleFieldIds = getVisibleFormFieldIds(frozenFormSchema, effectiveFormSnapshot)
+            // Declaration order (deterministic, mirrors pin 3's deterministic node key): the FIRST
+            // empty candidate in formSchema.fields order is the one named in the error.
+            for (const field of frozenFormSchema.fields) {
+              if (!requiredFieldIdSet.has(field.id)) continue
+              if (!preWriteVisibleFieldIds.has(field.id) && !postWriteVisibleFieldIds.has(field.id)) continue
+              // OD-L7B-5 — emptiness is `isEmptyValue` VERBATIM (holes and all, §0.2); a value already
+              // filled by the requester at create satisfies it, since the check reads the EFFECTIVE
+              // (post-write) snapshot regardless of who wrote it.
+              if (isEmptyValue(effectiveFormSnapshot[field.id])) {
+                throw new ServiceError(
+                  'Required field is empty at this node',
+                  422,
+                  'APPROVAL_HANDLER_REQUIRED_FIELD_EMPTY',
+                  { nodeKey: currentNodeKey, fieldId: field.id },
+                )
+              }
+            }
+          }
         }
         // Deactivate the actor's own seat first (会签/或签 both consume it).
         await this.deactivateActorAssignmentsAtNode(client, id, currentNodeKey, actor.userId, actorRoles)
@@ -11218,7 +11355,8 @@ export class ApprovalProductService {
     // an approver could edit a `form_field_user` / `ConditionRule` / condition-formula field and choose
     // their own downstream reviewer/branch (master §P4 exit: "cannot be bypassed by HTTP calls"). Refuse
     // a write to ANY field in the instance's FROZEN-graph driver set regardless of its access
-    // (editable/readonly/hidden/absent), values-free. Same shared collection the pin uses (no drift).
+    // (editable/readonly/hidden/required/absent), values-free. Same shared collection the pin uses
+    // (no drift).
     // The collection re-parses each condition formula, but that cannot introduce a NEW in-flight break:
     // the same dispatch already ran `asRuntimeGraph` (`:6794`) → `normalizeConditionFormulaPredicate`
     // over the identical stored formulas, so an unparseable stored formula throws THERE first, before
@@ -11239,7 +11377,11 @@ export class ApprovalProductService {
         throw new ServiceError('Field write to a routing driver is not permitted', 403, 'APPROVAL_FIELD_WRITE_DRIVER_FORBIDDEN', { nodeKey, fieldId })
       }
       const access = fieldAccessAtNodes(context.runtimeGraph, [nodeKey], fieldId)
-      if (access !== 'editable') {
+      // Lock-7B §2.2 — WRITABLE is set membership over the shared `NODE_FIELD_ACCESS_WRITABLE_VALUES`
+      // (`editable` ∪ `required`), not a bare `!== 'editable'` equality: `required` is `editable` plus
+      // a submit-time obligation (OD-L7B-1), so the handler MUST be able to fill the field the author
+      // just made mandatory, or the node would deadlock on its own obligation.
+      if (!NODE_FIELD_ACCESS_WRITABLE_VALUES.has(access)) {
         // `readonly` ⇒ non-editable; `hidden` ⇒ not even visible. Both refuse WITHOUT echoing a value.
         throw new ServiceError('Field write is not permitted at this node', 403, 'APPROVAL_FIELD_WRITE_FORBIDDEN', { nodeKey, fieldId })
       }
