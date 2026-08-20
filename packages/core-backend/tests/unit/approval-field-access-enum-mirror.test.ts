@@ -223,6 +223,58 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     })
   }
 
+  // MECHANISM FIX v5 anti-gate, same reason the SITES member-equality loop above is not enough on
+  // its own for C-1/C-2/C-5: the SITES extractor for these two files only reads
+  // `NODE_FIELD_ACCESS_MEMBERS`'s own four members — it says nothing about whether `NodeFieldAccess`
+  // (the TYPE) and `NODE_FIELD_ACCESS_VALUES` (the runtime Set/array) still DERIVE from that tuple, as
+  // opposed to a regression that reverts the type back to an independent literal union while leaving
+  // the tuple in place unused. That regression would leave the tuple's own four members intact (SITES
+  // stays green) while silently un-doing the ENTIRE point of the v5 collapse — the compiler-primary
+  // claim at the top of this file's docstring ("the type and the runtime value cannot desynchronise
+  // BY CONSTRUCTION") would become FALSE with no test catching it. Asserted here by shape (source
+  // text present/absent), the same G-2-style discipline C-4/C-6/C-7 already use, and MUTATION-VERIFIED
+  // (revert the type alias to a literal union with the tuple left intact — reds; revert the Set/array
+  // to an independent literal — reds; see the PR body).
+  describe('C-1/C-2 — backend NodeFieldAccess type + NODE_FIELD_ACCESS_VALUES are DERIVED from ONE tuple, never independent literals (MECHANISM FIX v5, G-2-style anti-gate)', () => {
+    const src = read('packages/core-backend/src/types/approval-product.ts')
+
+    it('the type is DERIVED — `(typeof NODE_FIELD_ACCESS_MEMBERS)[number]` — not an independent literal union', () => {
+      expect(src).toMatch(/export type NodeFieldAccess = \(typeof NODE_FIELD_ACCESS_MEMBERS\)\[number\]/)
+    })
+
+    it('does NOT contain the retired independent literal union (the pre-v5 shape of this type)', () => {
+      expect(src).not.toMatch(/export type NodeFieldAccess = 'editable' \| 'readonly'/)
+    })
+
+    it('the Set is DERIVED — `new Set<NodeFieldAccess>(NODE_FIELD_ACCESS_MEMBERS)` — not an independent literal array', () => {
+      expect(src).toMatch(/export const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>\(NODE_FIELD_ACCESS_MEMBERS\)/)
+    })
+
+    it('does NOT contain the retired independent literal Set (the pre-v5 shape of this declaration)', () => {
+      expect(src).not.toMatch(/new Set<NodeFieldAccess>\(\['editable'/)
+    })
+  })
+
+  describe('C-5 — FE NodeFieldAccess type + NODE_FIELD_ACCESS_VALUES are DERIVED from ONE tuple, never independent literals (MECHANISM FIX v5, G-2-style anti-gate)', () => {
+    const src = read('apps/web/src/types/approval.ts')
+
+    it('the type is DERIVED — `(typeof NODE_FIELD_ACCESS_MEMBERS)[number]` — not an independent literal union', () => {
+      expect(src).toMatch(/export type NodeFieldAccess = \(typeof NODE_FIELD_ACCESS_MEMBERS\)\[number\]/)
+    })
+
+    it('does NOT contain the retired independent literal union (the pre-v5 shape of this type)', () => {
+      expect(src).not.toMatch(/export type NodeFieldAccess = 'editable' \| 'readonly'/)
+    })
+
+    it('the array is DERIVED — `= NODE_FIELD_ACCESS_MEMBERS` — not an independent literal array', () => {
+      expect(src).toMatch(/export const NODE_FIELD_ACCESS_VALUES: readonly NodeFieldAccess\[\] = NODE_FIELD_ACCESS_MEMBERS/)
+    })
+
+    it('does NOT contain the retired independent literal array (the pre-v5 shape of this declaration)', () => {
+      expect(src).not.toMatch(/readonly NodeFieldAccess\[\] = \['editable'/)
+    })
+  })
+
   describe('C-4 — resolveFieldAccessAtNodes is a MECHANICAL enumeration, never a literal chain (G-2 anti-gate)', () => {
     const src = read('packages/core-backend/src/services/approval-form-redaction.ts')
 
