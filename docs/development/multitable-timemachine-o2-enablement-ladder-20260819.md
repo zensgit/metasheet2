@@ -29,8 +29,8 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
 
 ## 1. 前置（L0，全部满足才允许 L1）
 
-- [ ] O2-S1（注册同事务原子性）、O2-S2（40001 单一分类器 + 11 写者 census）、
-      O2-S3（recovery 租约有界退避）已合 main 且随镜像部署到目标主机。
+- [x] O2-S1（注册同事务原子性）、O2-S2（40001 单一分类器 + 11 写者 census）、
+      O2-S3（recovery 租约有界退避）已合 main 且随镜像部署到目标主机。 — 载体 #5014 `642b765a96` 已在 main，prod/staging 两侧现镜像均含之（已核）。
 - [x] 目标主机 `postdeploy-full` containment PASS（**当前镜像**）——run `32321464042`（2026-08-20，双主机）。
 - [ ] ⚠️ **staging 的 pending migrations ≠ 0**：2026-08-20 部署 `401fa1d880` 时，迁移对齐报告判
       `do_not_run_full_migrate`，runner 按 bundle §3.2 停止 —— staging 容器已在新镜像上、
@@ -38,9 +38,7 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
       早在 2026-08-12 已应用**，故上面那条 containment PASS 成立；但 L0 原文要求的
       「pending migrations = 0」在 staging 上**不成立**，需按
       `docs/development/staging-migration-alignment-runbook-verification-20260519.md` 单独处置后再开 L1。
-- [ ] **census 可达性升级已闭合**（对抗门 P3-1：40001 census 目前只数 token 不辨死代码——
-      `if (false && …)` 化 9 处仍全绿；trigger DISABLED 期为 P3，**L1 打开 trigger 前必须**
-      把 census 升级为可达性/行为级或逐面补判别腿）。
+- [x] **census 可达性升级已闭合**（对抗门 P3-1 已收口：48 站点行为腿 + 运行时执行绑定 + tag 唯一 + 一名一 tag 全落地，见 #5018/#5020）。**剩余的不是这个缺陷，而是 owner 对天花板类残留的裁量**（T2 空壳替换 / 构造式 tag / `CLASSIFIER_MODULE` 迁移——文本守卫无法证明 src 站点可达性）；该裁量是 L0 的一个独立 owner 决策项，不是编码缺口。
 - [ ] 回滚路径演练过一次：`ALTER TABLE … DISABLE TRIGGER` 全量脚本 + 单 flag 移除步骤
       （见 §5），并重跑 postdeploy-full 验证回到 inert 姿态。
 

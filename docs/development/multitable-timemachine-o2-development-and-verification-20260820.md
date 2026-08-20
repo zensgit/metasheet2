@@ -265,8 +265,7 @@ kit 交付了两层只读守卫，但 CI 里**只有第一层真的跑过**—�
    未闭合注释→fence info string→链接 title→`<style>`/`<script>`→链接目标/`<template>`)。
    它**不是执行通道**(runbook 自身不执行任何东西,管的是人的授权标注),且收敛修法需要真正的
    CommonMark 渲染,这条 hermetic 车道按设计装不了依赖。**登记为一个类别,带轮次历史。**
-3. **owner 侧**:obs-kit 未设为 required check(⇒ 连新加的残留断言在合并时也只是建议性)、
-   阶梯锁文件头仍写 PROPOSED、relay 评论的 provenance。
+3. **owner 侧**:~~obs-kit 未设为 required check~~ **（已闭合 2026-08-20：obs-kit contract 已成为第 11 条 required check）**、~~阶梯锁文件头仍写 PROPOSED~~ **（已闭合 2026-08-20:#5029 header→RATIFIED）**、relay 评论的 provenance（#4556 代贴锚，历史项，仍开）。
 
 ## 3.10 三条关于「审阅者本身」与版本盲点的记录
 
