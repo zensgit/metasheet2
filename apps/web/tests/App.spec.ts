@@ -282,13 +282,15 @@ describe('App top-bar account identity display', () => {
     // Full value must be recoverable regardless of visible truncation.
     expect(navUser?.getAttribute('title')).toBe(longEmail)
 
-    // The visible text must retain the distinguishing tail — the exact truncation shape
-    // is middleEllipsis's own contract (tests/middleEllipsis.spec.ts); here we assert the
-    // wiring: App renders whatever middleEllipsis produces for this value, not the raw
-    // (head-only-visible) string.
+    // The visible text must retain the distinguishing tail. This is an exact literal (not
+    // just endsWith/derived-from-the-function) so the assertion still discriminates if the
+    // wiring stops calling middleEllipsis at all; the truncation shape itself (default
+    // head/tail lengths) is middleEllipsis's own contract, covered exhaustively in
+    // tests/middleEllipsis.spec.ts.
+    expect(navUser?.textContent).toBe('synth-…9f2ab61c@example.com')
     expect(navUser?.textContent).toBe(middleEllipsis(longEmail))
     expect(navUser?.textContent).not.toBe(longEmail)
-    expect(navUser?.textContent?.endsWith(longEmail.slice(-10))).toBe(true)
+    expect(navUser?.textContent?.endsWith('9f2ab61c@example.com')).toBe(true)
   })
 
   it('renders a short account name unchanged, with title still present', async () => {

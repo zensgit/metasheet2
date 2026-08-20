@@ -16,14 +16,20 @@
 export interface MiddleEllipsisOptions {
   /** Characters kept at the start. Default 6. */
   headLength?: number
-  /** Characters kept at the end — the part this helper exists to preserve. Default 10. */
+  /** Characters kept at the end — the part this helper exists to preserve. Default 20. */
   tailLength?: number
   /** Below this length, the value is returned unchanged (no ellipsis inserted). */
   maxLength?: number
 }
 
+// Default tail is deliberately generous (20, not the ~10 a plain "keep a few trailing
+// chars" truncation would use): for 'synth-w4w7-9f2ab61c@example.com' — the exact shape
+// named in the design note — a tail of 10 lands mid-domain ('…xample.com'), still hiding
+// the '9f2ab61c' segment that actually distinguishes one account from another. A tail of
+// 20 captures that whole segment plus the domain ('…9f2ab61c@example.com'); only the
+// shared, non-distinguishing 'w4w7-' batch tag falls into the elided middle.
 const DEFAULT_HEAD_LENGTH = 6
-const DEFAULT_TAIL_LENGTH = 10
+const DEFAULT_TAIL_LENGTH = 20
 const ELLIPSIS = '…' // …
 
 export function middleEllipsis(value: string | null | undefined, options: MiddleEllipsisOptions = {}): string {
