@@ -9,7 +9,7 @@ import { join, resolve } from 'path'
  * docstring — the census ALSO scans the trees it walks for any literal co-occurrence of the same
  * four words it does not already know about, so a NEW copy landing in an already-scanned file is
  * caught rather than passing unnoticed, subject to the mechanism's own honestly-stated residual
- * (several concrete gaps, labelled (a)–(g) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
+ * (several concrete gaps, labelled (a)–(h) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
  * below; deliberately NOT phrased as an unqualified "any incomplete copy anywhere fails the census"
  * guarantee, and the letter RANGE rather than a transcribed count is what a future edit must keep in
  * sync — see the note at the top of that list). These are hand copies —
@@ -72,12 +72,15 @@ import { join, resolve } from 'path'
  * independent gate that proximity clustering must also clear: two occurrences may merge across a
  * declaration/statement boundary only when NEITHER of the two units either side of that boundary is,
  * on its own, already a 2+-member candidate carrier — permissive enough to keep detecting B6 (chaining
- * through single-word units is untouched), strict enough that a stale/foreign declaration which
- * already holds 2+ of the four words by itself can never borrow a neighbour's completeness. See the
- * full mechanism docstring immediately above `PARTIAL_CARRIER_ALLOWLIST` below for the boundary
- * derivation and the honestly-scoped residual this leaves (this is NOT an unconditional "any
- * incomplete copy anywhere fails the census" guarantee — several concrete gaps are named there,
- * letters (a)–(g)).
+ * through single-word units is untouched), strict enough that a stale/foreign TS/JS DECLARATION or
+ * YAML MAPPING KEY which already holds 2+ of the four words by itself can never borrow a neighbour's
+ * completeness. That guarantee is SCOPED to file types where a boundary is actually derived — it does
+ * NOT extend into Vue TEMPLATE markup (no boundary is derived there at all, deliberately, to keep
+ * cross-element proximity working for FormView.vue / TemplateAuthoringView.vue's allowlisted pairs —
+ * see residual (h)). See the full mechanism docstring immediately above `PARTIAL_CARRIER_ALLOWLIST`
+ * below for the boundary derivation and the honestly-scoped residual this leaves (this is NOT an
+ * unconditional "any incomplete copy anywhere fails the census" guarantee — several concrete gaps are
+ * named there, letters (a)–(h)).
  */
 const REPO = resolve(__dirname, '../../../..')
 const MEMBERS = ['editable', 'hidden', 'readonly', 'required'] // sorted
@@ -273,8 +276,11 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // `PARTIAL_CARRIER_ALLOWLIST`) never touch a unit that is, on its own, already a 2+-member candidate
   // carrier. A real complete carrier is exactly such a unit (all of C-1, C-2, C-3, C-5, C-6, C-7, C-8
   // and the two new FE sites place all four words inside ONE declaration, never split across a
-  // boundary) — so an adjacent stale/foreign declaration can no longer borrow its completeness,
-  // REGARDLESS of window width. What the window still governs, honestly, is ONLY how far apart two
+  // boundary) — so an adjacent stale/foreign TS/JS DECLARATION or YAML MAPPING KEY can no longer
+  // borrow its completeness, REGARDLESS of window width, WITHIN THOSE FILE TYPES. This does NOT extend
+  // into Vue TEMPLATE markup, where no boundary is derived at all (see below and residual (h)) — a
+  // stale/foreign carrier written as template attribute values, not a TS/JS declaration, is not
+  // covered by this sentence. What the window still governs, honestly, is ONLY how far apart two
   // occurrences may sit WITHIN a chain of units that never independently reach 2 members (a legitimate
   // multi-line reformat, or R1's B6 `const` indirection) — getting it too SMALL still fails CLOSED
   // there (splits into incomplete fragments that RED unless an allowlist entry excuses each); getting
@@ -296,7 +302,11 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //     starts with `<`, not a keyword — so the proximity-only behaviour the cross-element/cross-tag
   //     partial-carrier allowlist entries below rely on (FormView.vue's `hidden`+`required` pair
   //     spanning a `<div>` and a nested `<label>`; TemplateAuthoringView.vue's linear-editor options)
-  //     is completely unaffected by v3.
+  //     is completely unaffected by v3. The COST of that choice is real, not merely theoretical, and
+  //     is named as residual (h) below rather than left as a side effect of this paragraph: v3's
+  //     per-unit gate cannot close R7-style absorption inside template markup, because a single
+  //     `<el-option value="…">` tag naturally carries exactly one tracked word and so never reaches
+  //     the 2-member threshold the gate keys off, no matter how the unit boundary is drawn there.
   //   - YAML (`.yml`): every mapping-key line (`key:`), at ANY indentation depth, starts a new unit —
   //     cheaper than tracking indentation levels, and sufficient because no real carrier or allowlist
   //     entry in this repo needs two DIFFERENT YAML keys' values merged into one cluster.
@@ -348,12 +358,13 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // RESIDUAL (stated precisely, not swept under this mechanism's greater reach than v1's, and NOT
   // pinned to a transcribed count that can silently go stale — this file's own COUNT HISTORY
   // discipline at the top applies here too): this scan is NOT an unconditional guarantee that "any
-  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(g), are
+  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(h), are
   // ALL that are currently known; grep this file for the next unused letter before adding one, and
-  // update the "labelled (a)–(g)" cross-references at the top of this file (there are two) in the same
+  // update the "labelled (a)–(h)" cross-references at the top of this file (there are two) in the same
   // change. Most are inherent to literal-text scanning rather than to shape enumeration, so no amount
-  // of ADDING shape families would close them either — (f) and (g) are the two exceptions, both
-  // introduced by MECHANISM FIX v3 itself and named so, not folded silently into the older letters:
+  // of ADDING shape families would close them either — (f), (g) and (h) are the three exceptions, all
+  // introduced or newly surfaced by MECHANISM FIX v3 itself and named so, not folded silently into the
+  // older letters:
   //   (a) SCOPE — only `packages/core-backend/src`, `apps/web/src`, `packages/openapi/src` are
   //       walked (via the same `readdirSync`-based `walk()` as before, so a NEW file in an
   //       already-scanned tree is picked up automatically; a copy in a tree not walked at all, or in
@@ -430,11 +441,30 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       moment it is added, so IT will red the instant it later goes stale (the same teeth every
   //       other complete site has) — the exposure window is only "between being added complete and
   //       later drifting", not indefinite.
+  //   (h) VUE TEMPLATE MARKUP (MECHANISM FIX v3) — `declarationBoundaries` deliberately derives NO
+  //       boundaries inside Vue TEMPLATE content (see the DECLARATION BOUNDARIES discussion above):
+  //       that permissiveness is what keeps FormView.vue's `hidden`+`required` pair (a `<div>`'s class
+  //       binding and a NESTED `<label>`'s, two different elements) and TemplateAuthoringView.vue's
+  //       by-design three-option list clustering correctly. The SAME permissiveness means v3's
+  //       per-unit gate is INERT inside template markup: every individual `<el-option value="…">` (or
+  //       similar) tag naturally carries exactly ONE tracked word, so no template-markup unit can ever
+  //       independently reach the 2-member threshold the gate keys off, and R7-style absorption is
+  //       therefore UNCLOSED there. Verified live (own-devised probe, not one of the reported R7
+  //       shapes): three `<el-option value="editable|readonly|hidden">` lines plus an unrelated
+  //       `<span data-state="required">` within the window, appended to an ALREADY-listed file
+  //       (`MetaSheetPermissionManager.vue`, far from its own existing clusters) — **43 passed, no
+  //       failure**; the new complete cluster is silent, caught by neither the per-cluster test (it is
+  //       complete) nor the file-list test (the file was already expected). Closing this would need
+  //       parsing actual tag nesting (treating a parent element's subtree as the unit), a materially
+  //       larger change than the cheap regex boundaries used elsewhere in this mechanism, and was not
+  //       attempted this round — recorded here rather than left implicit or covered by an unqualified
+  //       claim.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
-  // R1 found) and, as of v3, to a stale copy's PROXIMITY to a real carrier's own declaration — not
-  // agnostic to file scope, file extension, spatial layout, literal-vs-symbolic encoding, allowlist
-  // anchor collisions, the specific quote/delimiter character set recognised, a copy fragmented across
-  // many single-purpose declarations, or a brand-new complete duplicate of an existing carrier.
+  // R1 found) and, as of v3, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key
+  // carrier — not agnostic to file scope, file extension, spatial layout, literal-vs-symbolic
+  // encoding, allowlist anchor collisions, the specific quote/delimiter character set recognised, a
+  // copy fragmented across many single-purpose declarations, a brand-new complete duplicate of an
+  // existing carrier, or proximity to a carrier living inside Vue TEMPLATE markup specifically.
 
   interface CarrierCluster {
     file: string

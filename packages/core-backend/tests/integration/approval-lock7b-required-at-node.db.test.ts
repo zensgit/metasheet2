@@ -500,11 +500,18 @@ describeIfDatabase('Lock-7B node-level required field tier (必填) — real-DB 
   // Prior requalification finding R4 (P3): the shipped test hard-coded ONE member (`required`)
   // rather than iterating the exported `NODE_FIELD_ACCESS_WRITABLE_VALUES` set the lock's own G-16
   // text names as the mandated mechanism ("by iterating the exported writable set rather than by
-  // listing members"), so a future member ADDED to that set without the write mask being extended to
-  // admit it would pass silently — nothing exercised the new member's write path. Iterating the
-  // constant closes that: adding a member to `NODE_FIELD_ACCESS_WRITABLE_VALUES` without a matching
-  // write-mask change now generates a NEW named test for that member and reds it here, rather than
-  // requiring a human to remember to hand-add a case.
+  // listing members"), so nothing exercised `editable`'s write path at all — only `required`'s.
+  // Iterating the constant closes that gap precisely: this drives a REAL end-to-end HTTP write
+  // through `applyHandlerFieldWrites` for EACH current member and asserts it is accepted, rather than
+  // trusting that the write mask's `NODE_FIELD_ACCESS_WRITABLE_VALUES.has(access)` call does what its
+  // name implies. Mutation-verified: reverting that one call to a hand-written `access !== 'required'`
+  // equality (byte-identical to the mask's OWN pre-Lock-7B shape) reds exactly this loop's `editable`
+  // case, not the `required` one — the loop catches the write mask DIVERGING from the writable set for
+  // an EXISTING member, which a bare "does the set contain N members" assertion would not. It does
+  // NOT independently prove a HYPOTHETICAL future 5th member's write path in advance, since the mask
+  // reads this SAME constant — widening the constant necessarily widens the mask in the same edit, so
+  // there is no "set grows, mask lags" failure mode to catch there; iterating still means a 5th member
+  // gets its own named test the moment one exists, rather than requiring a human to hand-add a case.
   for (const access of NODE_FIELD_ACCESS_WRITABLE_VALUES) {
     it(`G-16: fieldAccess reports \`secret\` as \`${access}\` (a NODE_FIELD_ACCESS_WRITABLE_VALUES member); a write to it is ACCEPTED (writable)`, async () => {
       const tid = await createPublished(`${KEYPFX}-g16-${access}`, handlerGraph([{ fieldId: 'secret', access }]))
