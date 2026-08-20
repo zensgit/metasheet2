@@ -706,31 +706,98 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       (the compiler does NOT catch this either: `NODE_FIELD_ACCESS_MEMBERS, STALE = [...]` is
   //       perfectly valid TypeScript, and `STALE` is simply an unused, unexported local the compiler
   //       has no reason to flag).
-  //   (j) SCRIPT-BLOCK LOCATION HEURISTIC (2026-08-20, dependency-removal change) — `.vue` file
+  //   (j) SCRIPT-BLOCK LOCATION HEURISTIC (2026-08-20, dependency-removal change; failure-mode wording
+  //       and evidence population corrected 2026-08-20, post-merge requalification) — `.vue` file
   //       `<script>`/`<script setup>` block boundaries are now located by `extractVueScriptBlocks`
   //       (below, next to `vueUnitResolver`), a minimal inline scan for a `<script` open tag and its
   //       nearest following `</script>` close tag, rather than by `@vue/compiler-sfc` (the real SFC
-  //       parser `vue-tsc` itself uses — removed as a devDependency of this package to avoid
-  //       re-pinning `pnpm-lock.yaml`; see the top-of-file comment). This is a DIFFERENT and
-  //       NARROWER gap than the one (i) and R8 before it are about: the AST attribution INSIDE a
-  //       located block — `astStatementUnitResolver`, unchanged, still the real TypeScript compiler
-  //       API, not a regex — is untouched by this change. What is now a heuristic is only FINDING the
-  //       block's byte range in the first place. A `.vue` file with an EXOTIC or MALFORMED `<script>`
-  //       tag shape this scan does not anticipate — a self-closing `<script/>` tag, an open tag whose
-  //       `>` appears inside a quoted attribute value before the tag's real close (`<script
-  //       data-x=">">`), or script CONTENT that itself contains the literal text `</script>` (inside
-  //       a string or comment) and so truncates the block early via the plain `indexOf` this scan
-  //       uses — is missed or mis-bounded by `extractVueScriptBlocks`, and the mis-scanned portion
-  //       degrades to being treated as ordinary TEMPLATE markup: NO boundaries contributed for it,
-  //       the SAME "nothing to protect" behaviour residual (h) already documents for a `.vue` file
-  //       with no `<script>` block at all — not a crash, and not silent zero protection for the
-  //       WHOLE file, only for the mis-scanned byte range. Verified (not assumed): every `.vue` file
-  //       this census currently walks (`ApprovalGraphNodeConfigEditor.vue`,
-  //       `MetaSheetPermissionManager.vue`, `AfterSalesView.vue`, `FormView.vue`,
-  //       `TemplateAuthoringView.vue`) uses a single, plain `<script setup lang="ts">` open tag with
-  //       exactly one matching `</script>` close tag and no attribute value containing `>`, so
-  //       nothing in the tree today evades this gap — recorded here rather than left implicit, per
-  //       this file's own residual-naming discipline.
+  //       parser `vue-tsc` itself uses — removed as a devDependency of this package to avoid re-pinning
+  //       `pnpm-lock.yaml`; see the top-of-file comment). This is a DIFFERENT and NARROWER gap than the
+  //       one (i) and R8 before it are about: the AST attribution INSIDE a located block —
+  //       `astStatementUnitResolver`, unchanged, still the real TypeScript compiler API, not a regex —
+  //       is untouched by this change. What is now a heuristic is only FINDING the block's byte range
+  //       in the first place. `extractVueScriptBlocks` skips a self-closing `<script/>` open tag
+  //       outright (it owns no close tag of its own to bound, and treating its `>` as an open would
+  //       swallow the NEXT real `<script>...</script>` on the page into one bogus block) and a
+  //       zero-length block the same way (a `<script src="...">` tag — no inline content — produces
+  //       one); this removes two exotic shapes from the failure list below. What remains — an open tag
+  //       whose `>` appears inside a quoted attribute value before the tag's real close (`<script
+  //       data-x=">">`), or a stray `<script` substring in TEMPLATE markup with no close tag of its own
+  //       (this scan swallows to the NEXT literal `>` anywhere after it, whatever text that `>`
+  //       actually belongs to) — is MIS-BOUNDED, not skipped: `extractVueScriptBlocks` still returns a
+  //       block for it, and that block's byte range is WRONG. The failure direction is ABSORB, not
+  //       omit; residual (h)'s "nothing to protect" template-markup behaviour does not describe either
+  //       case, and the two remaining shapes are not the SAME kind of wrong. Measured, not read off
+  //       source (own-devised probes against `@vue/compiler-sfc@3.5.24`, run outside the repo so the
+  //       lockfile is never touched): the quoted-attribute shape is a MIS-START only — an isolated
+  //       `<script data-x=">">` open tag reports one real block at `{offset:66, len:120}` (end 186);
+  //       `extractVueScriptBlocks` on the SAME input reports `{offset:54, len:132}` (end 186,
+  //       IDENTICAL) — 12 bytes earlier start, same end, the tag's own remaining bytes absorbed into
+  //       the block's content, but no distinct SECOND block swallowed. The stray-`<script`-in-template
+  //       shape is the real swallow: an isolated probe with a stray `<script mentioned without its own
+  //       closer here more text>` inside `<template>` markup, followed by a real, separate `<script
+  //       setup lang="ts">...</script>` block, makes `extractVueScriptBlocks` report ONE bogus block at
+  //       `{offset:84, len:163}` spanning the TEMPLATE tail, the real open tag, and the real script
+  //       content — and `astStatementUnitResolver` parses THAT range and DOES contribute AST boundaries
+  //       over it, at the WRONG byte offsets, the opposite of "no boundaries contributed."
+  //       `@vue/compiler-sfc` on the SAME input assigns NO block to `descriptor.script` or
+  //       `descriptor.scriptSetup` at all — a different failure, not a correct parse this heuristic
+  //       diverges from; there is no case in this file's own tree today where that comparison arises
+  //       (see the walk evidence below). Separately, script CONTENT that itself contains the literal
+  //       text `</script>` (inside a string or a `//` comment) truncates the block early via the plain
+  //       `indexOf` this scan uses — and everything AFTER the truncation point is real script code that
+  //       has LOST its protection, not "nothing to protect": planting a `const CLOSE_MARKER =
+  //       "</script>"` ahead of an indented, foreign `const LEGACY_LABELS = {editable, readonly,
+  //       hidden}` beside `ApprovalGraphNodeConfigEditor.vue`'s own `FIELD_ACCESS_LABELS` moved this
+  //       census from `1 failed | 50 passed (51)` (LEGACY_LABELS caught by name, at its own byte range)
+  //       to `50 passed (50)` — the stale copy silently absorbed into the real carrier's trailing unit,
+  //       no failing test at all (own-devised probe, `cp`-restored, sha256-verified).
+  //       `@vue/compiler-sfc` truncates at the byte-identical offset on the same input, so this is a
+  //       property of SFC script-tag parsing generally and not a regression this heuristic introduces —
+  //       only the description "nothing to protect" was wrong, not the underlying behaviour. Separately
+  //       again, a close tag written with a space before its `>` (`</script >`) is not matched by the
+  //       literal `indexOf('</script>')` this scan uses, so the open tag it belongs to finds no close
+  //       at all; if that is the ONLY open tag in the file, `extractVueScriptBlocks` returns zero
+  //       blocks and `vueUnitResolver` (below) falls back to the retired v3 column-0 regex over the RAW
+  //       file text — at least as protective as the mechanism this file shipped with before v5, never
+  //       silently zero FOR THAT CASE. That "never silently zero" guarantee is SCOPED to exactly
+  //       `rawBlocks.length === 0`; a MIS-bounded but non-empty block (the two ABSORB shapes above)
+  //       never reaches it — `rawBlocks.length >= 1` for those, and `vueUnitResolver` consumes the
+  //       bogus block as-is, so the v3 fallback does not run for the family where mis-bounding is
+  //       worst. `scanTree` (below) already defends part of this, and this residual previously did not
+  //       credit it: it blanks Vue/HTML comments (`<!-- ... -->`) length-preservingly BEFORE any
+  //       resolver sees the source (see `scanTree`'s own comment), so a `<script>` mention written
+  //       INSIDE a template HTML comment is invisible to `extractVueScriptBlocks` on the census's
+  //       actual input, even though the same text diverges against `@vue/compiler-sfc` on the raw,
+  //       un-blanked file. Verified (not assumed), against the census's OWN walk semantics rather than
+  //       a hand-picked file list: replicating `scanTree`'s `readdirSync` walk and all four of its
+  //       exclusions (`.ts`/`.vue`/`.yml` only; paths containing `__tests__` or `/tests/`, or ending
+  //       `.spec.ts`/`.test.ts`; `node_modules`/`dist`/`dist-sdk` directories anywhere;
+  //       `packages/openapi/.../dist`) reports 246 `.vue` files under the three walked roots — the
+  //       population `extractVueScriptBlocks` actually runs against on every census run, not merely the
+  //       files that happen to carry a tracked cluster. Comparing `extractVueScriptBlocks`'s block
+  //       boundaries against `@vue/compiler-sfc`'s `descriptor.script`/`descriptor.scriptSetup`
+  //       offsets, on BOTH the raw file text and the comment-blanked string `scanTree` actually feeds
+  //       the resolver, is 492 comparisons (246 files x 2 input modes), 0 mismatches — re-derivable by
+  //       script, not by re-typing a file list. SIX of the 246 do not have the single-plain-`<script
+  //       setup lang="ts">` shape a narrow reading of this gap might expect, and are named here rather
+  //       than left implicit: `ApprovalFormBuilder.vue`, `ApprovalFormPalette.vue`, and
+  //       `ApprovalFwbMappingEditor.vue` (`apps/web/src/approvals/components/`) each legitimately carry
+  //       TWO blocks (`<script lang="ts">` plus `<script setup lang="ts">` — 2 open / 2 close);
+  //       `ApprovalFormFieldInspector.vue` (same directory) has a THIRD `<script` mention that is prose
+  //       inside a `//` comment already INSIDE one of its two real blocks (3 open / 2 close);
+  //       `MetaDashboardView.vue` (`apps/web/src/multitable/components/`) has a fourth for the same
+  //       reason (4 open / 2 close); `AttendanceView.vue` (`apps/web/src/views/`) has a second `<script
+  //       setup>` mention inside a comment INSIDE its one real block (2 open / 1 close). All six still
+  //       resolve byte-identically to `@vue/compiler-sfc` — confirmed by the same 492-comparison sweep,
+  //       which includes them — because every stray `<script` mention sits AFTER the regex's
+  //       `lastIndex` has already advanced past it, consuming the real block first; none of the six is
+  //       an example of the ABSORB or TRUNCATE failure this residual describes, they are ordinary
+  //       two-block or comment-mention files the walk also happens to contain. So the CONCLUSION —
+  //       nothing in the tree today evades this gap — still holds; it was the ORIGINAL five-file
+  //       citation for that conclusion that was too narrow (the five files that happen to carry
+  //       clusters, not the 246 `extractVueScriptBlocks` actually runs against), not the conclusion
+  //       itself.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
   // R1 found), as of v3/v5, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key
   // carrier PROVIDED it is not textually part of the SAME STATEMENT as that carrier (i), as of v4, to
@@ -900,9 +967,14 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
    * found. Finds every `<script ...>` open tag via a plain regex, then the NEAREST following literal
    * `</script>` via `indexOf`, and returns each block's CONTENT byte range (`offset` = the position
    * right after the open tag's own `>`; `len` = the byte count up to, not including, the close tag).
-   * A `.vue` SFC has at most two such blocks (`<script>` and/or `<script setup>`); both are returned,
-   * in source order, for the caller to sort by offset. See residual (j) above `PARTIAL_CARRIER_
-   * ALLOWLIST` for exactly what this text-level heuristic does not handle (it is narrower than, and a
+   * A self-closing open tag (`<script/>`) is skipped outright — it owns no close tag of its own, so
+   * treating its `>` as an open would swallow the NEXT `<script>...</script>` on the page into one
+   * bogus block — and so is a block whose close tag is found with ZERO content bytes between it and
+   * the open tag (what a `<script src="...">` tag, which carries no inline content, produces): both
+   * removed 2026-08-20 (post-merge requalification) and covered by residual (j) below. A `.vue` SFC
+   * has at most two REAL blocks (`<script>` and/or `<script setup>`); both are returned, in source
+   * order, for the caller to sort by offset. See residual (j) above `PARTIAL_CARRIER_ALLOWLIST` for
+   * exactly what this text-level heuristic still does not handle (it is narrower than, and a
    * different gap from, the real parser it replaces).
    */
   function extractVueScriptBlocks(src: string): Array<{ offset: number; len: number }> {
@@ -911,8 +983,16 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     let m: RegExpExecArray | null
     while ((m = openTagRe.exec(src))) {
       const contentStart = m.index + m[0].length
+      if (/\/>$/.test(m[0])) {
+        openTagRe.lastIndex = contentStart // self-closing <script/> — owns no close tag of its own, skip (residual (j))
+        continue
+      }
       const closeIdx = src.indexOf('</script>', contentStart)
       if (closeIdx === -1) continue // no matching close tag anywhere after this open tag — skip (residual (j))
+      if (closeIdx === contentStart) {
+        openTagRe.lastIndex = closeIdx + '</script>'.length // zero-length block (e.g. <script src="...">) — skip (residual (j))
+        continue
+      }
       blocks.push({ offset: contentStart, len: closeIdx - contentStart })
       openTagRe.lastIndex = closeIdx + '</script>'.length
     }
@@ -932,10 +1012,14 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
    * block most recently precedes it (mirroring the gap-fallback inside `astStatementUnitResolver`,
    * for the identical reason); a `.vue` file with NO `<script>` block at all gets a single shared id
    * for the whole file, matching v3's template behaviour exactly (nothing to protect, because there
-   * is no code there to protect). If a literal `<script` substring exists but
-   * `extractVueScriptBlocks` cannot bound a block from it (residual (j)), this falls back to the
-   * retired v3 column-0 regex over the RAW file text — at least as protective as the mechanism this
-   * file shipped with before v5, never silently zero.
+   * is no code there to protect). If `extractVueScriptBlocks` finds NO block at all
+   * (`rawBlocks.length === 0`) despite a literal `<script` substring being present, this falls back
+   * to the retired v3 column-0 regex over the RAW file text — at least as protective as the
+   * mechanism this file shipped with before v5, never silently zero FOR THAT CASE. That guarantee is
+   * SCOPED to `rawBlocks.length === 0` and does NOT cover a MIS-bounded but non-empty block: residual
+   * (j)'s exotic-shape family produces a real `rawBlocks` entry (wrong, but non-empty) that this
+   * function consumes as-is, so the v3 fallback never runs for it — see residual (j) for what
+   * actually happens instead.
    */
   function vueUnitResolver(absPath: string, src: string): UnitResolver {
     const rawBlocks = extractVueScriptBlocks(src)
