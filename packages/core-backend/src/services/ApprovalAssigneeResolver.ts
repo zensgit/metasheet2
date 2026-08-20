@@ -3,6 +3,7 @@ import type {
   ApprovalAssigneeSource,
   ApprovalNodeConfig,
   FormSchema,
+  SamePersonPolicy,
 } from '../types/approval-product'
 import { ServiceError } from './ApprovalBridgeService'
 
@@ -32,6 +33,12 @@ export interface ResolveApprovalAssigneesOptions {
    * source resolves EMPTY and falls to the node's `emptyAssigneePolicy` (OD-L1-4(a)).
    */
   priorNodeApprovers?: Record<string, string[]>
+  /**
+   * Lock-4 F4-C (OD-L4-4(a)) — the EFFECTIVE `samePersonPolicy` at THIS node, late-bound exactly
+   * like `priorNodeApprovers`/K3 above (§2.1 purity: this resolver has no `runtimeGraph` and cannot
+   * compute it itself). Absent ⇒ no same-person substitution runs (today's behavior).
+   */
+  getEffectiveSamePersonPolicy?: (nodeKey: string) => SamePersonPolicy | undefined
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -182,14 +189,48 @@ export function resolveApprovalAssignees(
         finalId = delegatee
       }
     }
+    // Lock-4 F4-C (OD-L4-4(a)) — same-person TRANSFER substitution. Computed POST-delegation
+    // (`finalId` already reflects any delegation hop above), matching the shipped
+    // `mergeWithRequester` cascade's own post-delegation comparison (`evaluateAutoApprovalAssignment`
+    // in ApprovalProductService.ts reads the FINAL assignment). Reads ONLY the frozen
+    // `requesterSnapshot.managerId` / `.deptHeadId` — the SAME fields `direct_manager`/`dept_head`
+    // sources already read — so no live directory query runs during dispatch (gate C-2). Self-
+    // exclusion mirrors those two sources' own `!== requesterId` guard.
+    let samePersonTransfer: ApprovalAssigneeResolutionMetadata['samePersonTransfer']
+    if (assignmentType === 'user') {
+      const requesterId = normalizeId(options.requesterSnapshot?.id)
+      if (requesterId && finalId === requesterId) {
+        const policy = options.getEffectiveSamePersonPolicy?.(options.nodeKey)
+        if (policy === 'transfer_direct_manager' || policy === 'transfer_dept_head') {
+          const targetId = normalizeId(
+            policy === 'transfer_direct_manager'
+              ? options.requesterSnapshot?.managerId
+              : options.requesterSnapshot?.deptHeadId,
+          )
+          // OD-L4-5(a), RATIFIED verbatim: "the seat is simply not produced" when the transfer
+          // target is absent — `emptyAssigneePolicy` then governs. It must NEVER fall back to
+          // 'self_approve' (gate C-3), so this is an early RETURN, not a fallthrough to the
+          // unsubstituted requester seat.
+          if (!targetId || targetId === requesterId) return
+          samePersonTransfer = { from: finalId, policy }
+          finalId = targetId
+        }
+      }
+    }
     const key = `${assignmentType}:${finalId}`
     if (seen.has(key)) return
     seen.add(key)
-    // Legacy (no source) stays metadata-free UNLESS a delegation applied — then it
-    // carries `delegatedFrom` only (no `resolvedFrom`, so downstream dynamic-source
-    // discriminators still treat it as a legacy/non-dynamic assignment).
+    // Legacy (no source) stays metadata-free UNLESS a delegation or same-person transfer applied.
+    // `resolvedFrom` (from the ORIGINAL `source`, if any) is preserved unchanged by a same-person
+    // transfer — OD-L4-4(a): "the transferred seat keeps the originating resolvedFrom.kind".
     const base = source ? metadataFor(source, sourceIndex, resolvedGroupId) : undefined
-    const metadata = delegatedFrom ? { ...(base ?? {}), delegatedFrom } : base
+    const metadata = (delegatedFrom || samePersonTransfer)
+      ? {
+          ...(base ?? {}),
+          ...(delegatedFrom ? { delegatedFrom } : {}),
+          ...(samePersonTransfer ? { samePersonTransfer } : {}),
+        }
+      : base
     resolved.push({
       assignmentType,
       assigneeId: finalId,

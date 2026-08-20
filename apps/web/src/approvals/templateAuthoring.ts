@@ -1298,6 +1298,17 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // (same predicate, reused rather than duplicated).
     if (config.emptyAssigneeFallback !== undefined && emptyAssigneeFallbackHasBackendDrop(config.emptyAssigneeFallback)) return true
     if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
+    // P2-1 fix: `buildStepConfig` only AUTHORS `mergeWithRequester` — the three sibling
+    // `autoApprovalPolicy` fields (incl. `samePersonPolicy`) are preserved verbatim from
+    // `originalAutoApprovalPolicy` (:1673-1680) and re-spread on every save regardless of the
+    // 自动跳过 toggle's state. A node carrying a key `buildStepConfig`/backend's
+    // `normalizeAutoApprovalPolicy` don't jointly own (i.e. anything besides the four
+    // `BACKEND_AUTO_APPROVAL_POLICY_KEYS`) must fail closed to read-only here too — mirrors the
+    // complex path's identical check at `complexApprovalConfigHasBackendDrop` (:1067) — otherwise
+    // the shipped toggle silently self-reverts (turning it OFF never clears a persisted
+    // `samePersonPolicy` carrier such as `auto_skip`/`transfer_*`, which resynthesizes
+    // `mergeWithRequester:true` server-side on every save).
+    if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
     // The linear path preserves the object verbatim, so a shape the backend would reject or
     // re-emit differently must still fail closed to read-only (same predicate as the complex path).
     if (

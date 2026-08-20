@@ -134,6 +134,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isApprovalNodeConfig(config: unknown): config is ApprovalNodeConfig {
   if (!isRecord(config)) return false
+  // Lock-4 F4-A (OD-L4-1(a)) gate A-2 — an `auto_approve` node's assignee resolution is SKIPPED
+  // entirely (the caller short-circuits BEFORE `resolveAssignmentsForApprovalNode`), so an
+  // absent/empty `assigneeSources` and no legacy `assigneeIds` pair is a structurally VALID approval
+  // config for this one `approvalType` value ONLY — never for 'manual'/absent, which still require
+  // one via the `hasLegacyAssignees || assigneeSources` check below. Without this arm this guard
+  // would reject a legitimately-published auto_approve node before the short-circuit is ever
+  // reached, throwing "has invalid config" instead of advancing.
+  if (config.approvalType === 'auto_approve') return true
   const hasLegacyAssignees = (config.assigneeType === 'user' || config.assigneeType === 'role')
     && Array.isArray(config.assigneeIds)
   return hasLegacyAssignees || Array.isArray(config.assigneeSources)
@@ -1246,6 +1254,33 @@ export class ApprovalGraphExecutor {
         }
         const sourceStep = this.stepIndexForNode(node.key)
         const approvalMode = normalizeApprovalMode(approvalConfig.approvalMode, node.key)
+        // Lock-4 F4-A (OD-L4-1(a)) gate A-2 — an `auto_approve` node SKIPS assignee resolution
+        // entirely (RATIFIED verbatim: "Assignee resolution is SKIPPED, so an empty source list is
+        // legal here and only here") and advances immediately, mirroring the shipped
+        // `emptyAssigneePolicy:'auto-approve'` arm immediately below — same push shape, no
+        // `metadata`, so `actorIdForAutoApprovalEvent` (ApprovalProductService.ts) falls through to
+        // the shipped `system:auto-approval` sentinel and the event carries NO `originalApprover`
+        // (RATIFIED: "The event records NO originalApprover"). Placed BEFORE
+        // `resolveAssignmentsForApprovalNode` — resolving first would re-trigger the (unrelated)
+        // empty-assignee 400 this node is exempt from.
+        //
+        // ONLY site 1 (`resolveFromNode`, this walker — covers both initial resolution and the
+        // after-approve tail-call, see correction C-1 in the design brief) is edited. Site 2
+        // (`resolveBranchAdvance`, reached only from inside a `parallel` branch) is deliberately NOT
+        // touched: `validateApprovalTypePlacement` (ApprovalProductService.ts) publish-rejects any
+        // non-'manual' `approvalType` inside a parallel region (A-1), so that branch path can never
+        // carry one — the asymmetry against F4-B's "both sites" requirement is intentional, not an
+        // omission.
+        if (approvalConfig.approvalType === 'auto_approve') {
+          autoApprovalEvents.push({
+            nodeKey: node.key,
+            sourceStep,
+            approvalMode,
+            reason: 'auto-node-approve',
+          })
+          currentKey = this.firstTargetForNode(node.key)
+          continue
+        }
         const assignments = this.resolveAssignmentsForApprovalNode(node.key, approvalConfig, sourceStep)
         if (assignments.length === 0) {
           // Lock-4 §3 F4-B, gate B-1 (EXECUTOR SITE 1 of 2 — inside `resolveFromNode`, which

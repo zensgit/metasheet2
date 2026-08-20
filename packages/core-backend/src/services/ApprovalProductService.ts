@@ -5,10 +5,12 @@ import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
   ApprovalAutoApprovalReason,
+  ApprovalType,
   AutoApprovalActorMode,
   AutoApprovalMergeReason,
   AutoApprovalPolicy,
   AutoApprovalPolicySource,
+  SamePersonPolicy,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateListItemDTO,
   ApprovalTemplateVisibilityScope,
@@ -490,12 +492,14 @@ function approvalTxnHandle(client: ApprovalDbClient): TransactionalQueryable {
   }
 }
 
-type ValidationContext = {
+// EXPORTED (Lock-4 P3-A unit-test surface) so tests/unit/approval-lock4-*.test.ts can exercise the
+// pure normalizer functions below directly, without a mocked pg pool or a real DB.
+export type ValidationContext = {
   status: number
   code: string
 }
 
-const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
+export const REQUEST_VALIDATION_CONTEXT: ValidationContext = {
   status: 400,
   code: 'VALIDATION_ERROR',
 }
@@ -618,6 +622,23 @@ const APPROVAL_MODES = new Set<ApprovalMode>(['single', 'all', 'any', 'threshold
 const PARALLEL_JOIN_MODES = new Set(['all', 'any'])
 // Lock-4 §3 F4-B — 'designated' joins the enum. §1.3 four-allowlist arithmetic tracks the FE side.
 const EMPTY_ASSIGNEE_POLICIES = new Set<EmptyAssigneePolicy>(['error', 'auto-approve', 'designated'])
+// Lock-4 F4-A (OD-L4-1(a) / OD-L4-2(a)) — EXPORTED so tests/unit/approval-lock4-f4a-*.test.ts can
+// pin the exact-set membership directly. Deliberately does NOT contain 'auto_reject': §4's RATIFIED
+// text is "auto_approve only, auto_reject deferred… no inert third option" — the type union itself
+// (types/approval-product.ts `ApprovalType`) omits it too, so this Set and that union can never
+// drift apart. `normalizeApprovalType` below rejects ANY string outside this Set, which is what
+// makes 'auto_reject' "NOT reachable" at publish (OD-L4-2(a)) without declaring it anywhere.
+export const APPROVAL_TYPES = new Set<ApprovalType>(['manual', 'auto_approve'])
+// Lock-4 F4-C (OD-L4-4(a)) — EXPORTED for the same reason. `'self_approve'` is the absent-equivalent
+// default and is EXCLUDED from the §2.2 enable-predicate widening below (a node authored with
+// `samePersonPolicy: 'self_approve'` must still be able to OPT OUT of a template-level policy —
+// see `hasEnabledAutoApprovalRule`'s doc comment).
+export const SAME_PERSON_POLICIES = new Set<SamePersonPolicy>([
+  'self_approve',
+  'auto_skip',
+  'transfer_direct_manager',
+  'transfer_dept_head',
+])
 const AUTO_APPROVAL_ACTOR_MODES = new Set<AutoApprovalActorMode>(['system', 'original_approver'])
 const NODE_FIELD_ACCESS_VALUES = new Set<NodeFieldAccess>(['editable', 'readonly', 'hidden'])
 // T1-1 node-level SLA. The full effect enum is declared so an off-enum value is a hard reject; slice 1
@@ -678,6 +699,23 @@ function normalizeApprovalMode(value: unknown, context: ValidationContext, path:
     failValidation(context, `${path} must be single, all, any, or threshold`)
   }
   return value as ApprovalMode
+}
+
+// Lock-4 F4-A (OD-L4-1(a) / OD-L4-2(a)) — EXPORTED for direct unit-test exercise. Rejects ANY
+// off-`APPROVAL_TYPES` string, including 'auto_reject': that is the whole enforcement mechanism
+// behind "auto_reject… must NOT be reachable — publish rejects it" (§4's own words) — there is no
+// separate auto_reject-specific branch, because the type is never admitted to the Set in the first
+// place. Same fixed-Set-membership shape as `normalizeEmptyAssigneePolicy` immediately below.
+export function normalizeApprovalType(
+  value: unknown,
+  context: ValidationContext,
+  path: string,
+): ApprovalType | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !APPROVAL_TYPES.has(value as ApprovalType)) {
+    failValidation(context, `${path} must be manual or auto_approve`)
+  }
+  return value as ApprovalType
 }
 
 function normalizeEmptyAssigneePolicy(
@@ -760,7 +798,19 @@ function normalizeOptionalBoolean(
   return value
 }
 
-function normalizeAutoApprovalPolicy(
+// Lock-4 F4-C (OD-L4-4(a)) — EXPORTED for direct unit-test exercise. `samePersonPolicy` lives INSIDE
+// this existing object (one vocabulary, per §2.2/§2.3 four-allowlist arithmetic already listing
+// `autoApprovalPolicy`).
+//
+// 'auto_skip' synthesis (RATIFIED verbatim, AutoApprovalPolicy doc comment above): mergeWithRequester
+// "stays the persisted carrier" for 自动跳过, and the cascade arm that reads it
+// (`evaluateAutoApprovalAssignment`) is UNCHANGED — so a node authored with ONLY
+// `samePersonPolicy:'auto_skip'` must normalize to carry `mergeWithRequester: true` too, or the
+// unchanged cascade arm never fires for it and gate C-1's byte-identical claim is false.
+// `samePersonPolicy:'auto_skip'` WINS over an explicit `mergeWithRequester` in the same payload
+// (the enum is the authoritative selection); any other samePersonPolicy value (or its absence)
+// leaves `mergeWithRequester` exactly as authored.
+export function normalizeAutoApprovalPolicy(
   value: unknown,
   context: ValidationContext,
   path: string,
@@ -789,12 +839,24 @@ function normalizeAutoApprovalPolicy(
     && (typeof value.actorMode !== 'string' || !AUTO_APPROVAL_ACTOR_MODES.has(value.actorMode as AutoApprovalActorMode))) {
     failValidation(context, `${path}.actorMode must be system or original_approver`)
   }
+  let samePersonPolicy: SamePersonPolicy | undefined
+  if (value.samePersonPolicy !== undefined) {
+    if (typeof value.samePersonPolicy !== 'string' || !SAME_PERSON_POLICIES.has(value.samePersonPolicy as SamePersonPolicy)) {
+      failValidation(
+        context,
+        `${path}.samePersonPolicy must be self_approve, auto_skip, transfer_direct_manager, or transfer_dept_head`,
+      )
+    }
+    samePersonPolicy = value.samePersonPolicy as SamePersonPolicy
+  }
+  const effectiveMergeWithRequester = samePersonPolicy === 'auto_skip' ? true : mergeWithRequester
 
   return {
-    ...(mergeWithRequester !== undefined ? { mergeWithRequester } : {}),
+    ...(effectiveMergeWithRequester !== undefined ? { mergeWithRequester: effectiveMergeWithRequester } : {}),
     ...(mergeAdjacentApprover !== undefined ? { mergeAdjacentApprover } : {}),
     ...(dedupeHistoricalApprover !== undefined ? { dedupeHistoricalApprover } : {}),
     ...(value.actorMode ? { actorMode: value.actorMode as AutoApprovalActorMode } : {}),
+    ...(samePersonPolicy ? { samePersonPolicy } : {}),
   }
 }
 
@@ -2314,6 +2376,35 @@ function validateHandlerNodePlacement(approvalGraph: ApprovalGraph): void {
 }
 
 /**
+ * Lock-4 F4-A gate A-1 (OD-L4-1(a)) — "A non-`manual` node inside a parallel region is rejected in
+ * v1." Structural placement (approvalType admitted only on `type:'approval'`, forbidden elsewhere)
+ * is enforced per-node inside `normalizeApprovalGraph`'s node loop (a graph-shape-only check, no
+ * `edges` needed); THIS check needs the full graph (`collectParallelRegionNodeKeys` walks branch
+ * edges), so — same reason `validateHandlerNodePlacement` above is a separate graph-level pass and
+ * not folded into the per-node switch — it runs as its own pass, wired at every one of the FIVE
+ * `normalizeApprovalGraph` call sites that also call `validateHandlerNodePlacement` (createTemplate,
+ * updateTemplate, publishTemplate, restoreTemplateVersion, cloneTemplate). A non-`manual` node MAY
+ * still be a condition-branch TARGET (OD-L4-1(a)) — condition branches are not parallel regions, so
+ * no separate check is needed for that case.
+ */
+export function validateApprovalTypePlacement(approvalGraph: ApprovalGraph): void {
+  const parallelRegionNodeKeys = collectParallelRegionNodeKeys(approvalGraph)
+  for (const node of approvalGraph.nodes) {
+    if (node.type !== 'approval') continue
+    const approvalType = (node.config as { approvalType?: unknown }).approvalType
+    if (approvalType === undefined || approvalType === 'manual') continue
+    if (parallelRegionNodeKeys.has(node.key)) {
+      throw new ServiceError(
+        `approvalGraph node ${node.key} — a non-manual approvalType is not supported inside a parallel region in v1`,
+        400,
+        'APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED',
+        { nodeKey: node.key },
+      )
+    }
+  }
+}
+
+/**
  * Fingerprint of a DYNAMIC assignee source: equal fingerprints ⇒ the sources PROVABLY resolve to
  * the same user(s) for every request (same kind + same parameters). Static kinds return null —
  * duplicate static assignees across parallel branches are already rejected inside
@@ -2864,6 +2955,27 @@ function normalizeApprovalGraph(
       )
     }
 
+    // Lock-4 F4-A gate A-1 — `approvalType` (审批类型) is a CONFIG field admitted ONLY on
+    // `type:'approval'` (OD-L4-1(a): "on start/end/cc/condition/parallel is rejected"). Also rejected
+    // on `handler` by extension of the same reasoning (a handler carries no approval-decision
+    // concept at all — Lock-3 §1.2's `emptyAssigneePolicy`/`autoApprovalPolicy` forbidden-key
+    // precedent below). Same shape as the `nodeOperationPolicy` guard immediately above and
+    // deliberately NOT relaxed for `STORED_RUNTIME_CONTEXT`: the key is new in this slice, so no
+    // stored graph can legitimately carry it on a non-approval node — a graph that does is
+    // structurally invalid, and fail-closed is correct on every read too, not just publish. Without
+    // this explicit 400, the per-type rebuilds below would silently DROP the key on cc/parallel/
+    // condition/start/end (each rebuilds `config` from its own fixed whitelist) — the exact silent-
+    // loss class the `nodeOperationPolicy`/`fieldPermissions` guards above already close.
+    if (
+      node.type !== 'approval'
+      && (node.config as { approvalType?: unknown }).approvalType !== undefined
+    ) {
+      failValidation(
+        context,
+        `approvalGraph.nodes[${index}].config.approvalType is not supported on a ${node.type} node`,
+      )
+    }
+
     switch (node.type) {
       case 'approval':
         {
@@ -2875,7 +2987,17 @@ function normalizeApprovalGraph(
           const hasLegacyAssignees = (node.config.assigneeType === 'user' || node.config.assigneeType === 'role')
             && Array.isArray(node.config.assigneeIds)
             && node.config.assigneeIds.every((entry) => isNonEmptyString(entry))
-          if (!assigneeSources && !hasLegacyAssignees) {
+          // Lock-4 F4-A (OD-L4-1(a)) — normalized BEFORE the assignee-required check below: an
+          // `auto_approve` node's assignee resolution is SKIPPED entirely (the executor short-circuits
+          // before `resolveAssignmentsForApprovalNode` — see `ApprovalGraphExecutor.ts resolveFromNode`),
+          // so an empty/absent source list is legal HERE AND ONLY HERE. A `manual` node (absent ≡
+          // manual) still 400s on no assignees — byte-identical to today.
+          const approvalType = normalizeApprovalType(
+            node.config.approvalType,
+            context,
+            `approvalGraph.nodes[${index}].config.approvalType`,
+          )
+          if (!assigneeSources && !hasLegacyAssignees && approvalType !== 'auto_approve') {
             failValidation(context, `approvalGraph.nodes[${index}].config must define assigneeType and assigneeIds or assigneeSources`)
           }
           if (assigneeSources && (node.config.assigneeType !== undefined || node.config.assigneeIds !== undefined) && !hasLegacyAssignees) {
@@ -2974,6 +3096,9 @@ function normalizeApprovalGraph(
             ...(assigneeSources ? { assigneeSources } : {}),
             ...(approvalMode ? { approvalMode } : {}),
             ...(approvalThreshold !== undefined ? { approvalThreshold } : {}),
+            // Lock-4 F4-A allowlist 1 (§2.3) — an un-copied `approvalType` vanishes on save AND on
+            // every reload, exactly as `signaturePolicy`'s comment above states for its own key.
+            ...(approvalType ? { approvalType } : {}),
             ...(emptyAssigneePolicy ? { emptyAssigneePolicy } : {}),
             // Lock-4 §3 F4-B — allowlist 1 of 4 (§1.3). An un-copied key is silently dropped by this
             // fixed spread, vanishing on save AND on every reload (`asApprovalGraph` / `asRuntimeGraph`
@@ -3928,7 +4053,12 @@ export function applyTemplateVisibilityFilter(
   return index
 }
 
-function assertApprovalGraph(
+// EXPORTED (Lock-4 P3-A unit-test surface) — runs the FULL publish-time authoring-choke pipeline
+// (normalize + all-parallel-branch-paths) without a DB or HTTP server, so gate A-1's placement 400s
+// are directly unit-testable. Callers still need `validateApprovalTypePlacement` /
+// `validateHandlerNodePlacement` / `validateNodeTimeoutConfigs` separately for the graph-level passes
+// this function does not run (see the 5 real call sites in this file for the full chain).
+export function assertApprovalGraph(
   value: unknown,
   context: ValidationContext = REQUEST_VALIDATION_CONTEXT,
   options?: { allowParallelDuplicateAssignees?: boolean },
@@ -4115,11 +4245,31 @@ function graphAssignmentsForAudit(assignments: ApprovalGraphAssignment[]): Admin
   }))
 }
 
-function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
+// Lock-4 F4-C gate X-1 (§2.2) — EXPORTED so tests/unit/approval-lock4-f4c-*.test.ts can mutate-prove
+// each disjunction term independently (析取式判定必须逐项单删). `getEffectiveAutoApprovalPolicy` and
+// `runtimeGraphHasAutoApprovalPolicy` BOTH delegate here — a single widening covers both call sites,
+// so a discriminating X-1 fixture must trip THIS predicate specifically.
+//
+// `samePersonPolicy !== undefined && samePersonPolicy !== 'self_approve'` is the widening term.
+// 'self_approve' is EXCLUDED deliberately: `getEffectiveAutoApprovalPolicy` treats a node-level
+// `autoApprovalPolicy` key being PRESENT at all as a whole-object override of any template-level
+// policy — an all-false/absent-flags node policy today returns `null` and DISABLES the template
+// cascade at that node (the documented opt-out). Widening on mere key-presence would newly ENABLE
+// the cascade on such a node and silently break that opt-out; a node authored with EXACTLY
+// `{ samePersonPolicy: 'self_approve' }` must still be able to shadow/disable a template-level
+// `mergeWithRequester:true` at that one node.
+//
+// NOTE: `samePersonPolicy: 'auto_skip'` needs NO separate term here — `normalizeAutoApprovalPolicy`
+// already synthesizes `mergeWithRequester: true` for it, which trips the FIRST (pre-existing) term.
+// An X-1 fixture built on 'auto_skip' alone is therefore NON-discriminating (it would still pass
+// with this widening reverted) — the discriminating fixture is 'transfer_direct_manager' /
+// 'transfer_dept_head', which synthesizes no legacy flag.
+export function hasEnabledAutoApprovalRule(policy: AutoApprovalPolicy | undefined): policy is AutoApprovalPolicy {
   return Boolean(
     policy?.mergeWithRequester ||
     policy?.mergeAdjacentApprover ||
-    policy?.dedupeHistoricalApprover,
+    policy?.dedupeHistoricalApprover ||
+    (policy?.samePersonPolicy !== undefined && policy.samePersonPolicy !== 'self_approve'),
   )
 }
 
@@ -4756,6 +4906,14 @@ function buildApprovalAssignmentResolver(options: {
    * marker (the §K2 pre-choice precedent).
    */
   getPriorNodeApprovers?: () => Record<string, string[]> | undefined
+  /**
+   * Lock-4 F4-C — LATE-BOUND provider of the EFFECTIVE `samePersonPolicy` at a node, mirroring
+   * `getPriorNodeApprovers` exactly (§2.1 resolver purity: `resolveApprovalAssignees` takes no
+   * `runtimeGraph`, so it cannot itself read `getEffectiveAutoApprovalPolicy` — see C-s5 in the
+   * design brief). Callers compute this from `getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)`.
+   * Omitted on paths with no runtime graph in scope (none today — every call site below has one).
+   */
+  getEffectiveSamePersonPolicy?: (nodeKey: string) => SamePersonPolicy | undefined
 }): ApprovalGraphAssignmentResolver {
   return ({ nodeKey, sourceStep, config }) => resolveApprovalAssignees({
     nodeKey,
@@ -4765,6 +4923,7 @@ function buildApprovalAssignmentResolver(options: {
     formSnapshot: options.formSnapshot,
     requesterSnapshot: options.requesterSnapshot,
     priorNodeApprovers: options.getPriorNodeApprovers?.(),
+    getEffectiveSamePersonPolicy: options.getEffectiveSamePersonPolicy,
   })
 }
 
@@ -5292,6 +5451,7 @@ export class ApprovalProductService {
       validateNodeTimeoutConfigs(approvalGraph)
       validateEmptyAssigneeFallbackConfigs(approvalGraph)
       validateHandlerNodePlacement(approvalGraph)
+      validateApprovalTypePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
 
       const maxVersionResult = await client.query<{ max_version: string }>(
@@ -5360,6 +5520,7 @@ export class ApprovalProductService {
     validateNodeTimeoutConfigs(approvalGraph)
     validateEmptyAssigneeFallbackConfigs(approvalGraph)
     validateHandlerNodePlacement(approvalGraph)
+    validateApprovalTypePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     let client: ApprovalDbClient | null = null
@@ -5526,6 +5687,7 @@ export class ApprovalProductService {
         validateNodeTimeoutConfigs(nextApprovalGraph)
         validateEmptyAssigneeFallbackConfigs(nextApprovalGraph)
         validateHandlerNodePlacement(nextApprovalGraph)
+        validateApprovalTypePlacement(nextApprovalGraph)
         validateConditionBranchRules(nextApprovalGraph, nextFormSchema)
 
         const versionResult = await client.query<TemplateVersionRow>(
@@ -5661,6 +5823,7 @@ export class ApprovalProductService {
       validateNodeTimeoutConfigs(approvalGraph)
       validateEmptyAssigneeFallbackConfigs(approvalGraph)
       validateHandlerNodePlacement(approvalGraph)
+      validateApprovalTypePlacement(approvalGraph)
       validateConditionBranchRules(approvalGraph, formSchema)
       // Fail-fast: a starter preset's unconfigured placeholder role MUST be replaced before publish —
       // otherwise the high path stalls at runtime on an unclaimable role assignment (nobody holds the
@@ -5970,6 +6133,7 @@ export class ApprovalProductService {
     validateNodeTimeoutConfigs(approvalGraph)
     validateEmptyAssigneeFallbackConfigs(approvalGraph)
     validateHandlerNodePlacement(approvalGraph)
+    validateApprovalTypePlacement(approvalGraph)
     validateConditionBranchRules(approvalGraph, formSchema)
 
     const newName = `${source.template.name} (副本)`
@@ -7002,6 +7166,9 @@ export class ApprovalProductService {
         formSchema,
         formSnapshot: normalizedFormData,
         requesterSnapshot,
+        // Lock-4 F4-C — see buildApprovalAssignmentResolver's doc comment; identical provider shape
+        // at every assignmentResolver call site in this file.
+        getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
       }),
       requesterContext: {
         department: requesterSnapshot.directoryDepartment ?? null,
@@ -7588,6 +7755,7 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
           getPriorNodeApprovers: () => jumpPriorNodeApprovers,
+          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
@@ -8547,6 +8715,7 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
           getPriorNodeApprovers: () => timeoutPriorNodeApprovers,
+          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
         }),
         requesterContext: ((d, t, r) => ({
           department: typeof d === 'string' && d ? d : null,
@@ -8791,6 +8960,7 @@ export class ApprovalProductService {
           formSnapshot,
           requesterSnapshot,
           getPriorNodeApprovers: () => priorNodeApprovers,
+          getEffectiveSamePersonPolicy: (nodeKey) => getEffectiveAutoApprovalPolicy(runtimeGraph, nodeKey)?.policy.samePersonPolicy,
         }),
         // Re-thread the frozen directory department + title + roles at dispatch (loaded requester_snapshot record).
         requesterContext: ((d, t, r) => ({
