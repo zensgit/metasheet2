@@ -1,0 +1,521 @@
+name: Multitable L1 Battery (Staging)
+
+run-name: "Multitable L1 Battery (staging): ${{ inputs.intent }}"
+
+# Owner-gated staging runner for the Time Machine O-2 enablement ladder's L1 exercise
+# battery (docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md §2,
+# "L1 — staging ENABLE triggers"). L1 is the FIRST rung where platform writers actually
+# collide with recovery-authority serialization (9/9 triggers ENABLE on staging, the 4
+# app-side flags stay OFF). The battery (scripts/ops/multitable-l1-battery.mjs, a
+# SIBLING deliverable — NOT part of this workflow) holds an exclusive recovery-authority
+# lease and drives platform write surfaces over HTTP, asserting the writes collide with
+# named 409s (never an unmapped 500) — the observation the ladder's L1 exit criteria
+# requires (§2: "40001 发生率、S2 分类器命中... 零 unmapped 500").
+#
+# WHEN TO RUN: only at ladder rung L1 (after the L0 preconditions in §1 are met and the
+# owner has ENABLEd the 9 triggers on staging), and only on owner instruction. This
+# workflow is dispatch-only — it is NOT a required check and NOT scheduled. Running it
+# outside L1 (before triggers are enabled) is harmless but pointless (nothing to collide
+# with yet); running it against a target other than staging is not offered in v1 —
+# production L1 gets its own separate authorization/workflow later (ladder §2 "L7+").
+#
+# WHAT IT WRITES: the battery creates and deletes STAMPED SYNTHETIC subjects (prefix
+# `o2bat_`) on the staging database while it runs, to exercise the platform-authority
+# write surfaces (see the 8 tables covered by scripts/ops/multitable-recovery-schema-
+# containment.mjs: field_permissions, member_group_members, record_permissions,
+# role_permissions, spreadsheet_permissions, user_permissions, user_roles, users). This
+# is a WRITE action against a real (if disposable) environment, unlike the read-only
+# multitable-recovery-flag-containment-check.yml — hence the mandatory typed
+# acknowledgement below. The battery is expected to delete everything it created on both
+# its own success and failure exit; this workflow's `residue-check` step is the backstop
+# for a run that crashes before it can clean up (it must NOT silently leave synthetic
+# users on staging).
+#
+# GUARD RAILS (house rules this workflow follows):
+#   - `target` is a fixed `choice` — production is NOT offered in v1. Hard-restricting
+#     the choice IS the guard (a separate, independently-authorized workflow is required
+#     before this ever targets production — ladder §2 "L7+").
+#   - `intent` is a required, non-empty, single-line free-text field: the operator must
+#     say what step this run is for (e.g. "L1-open-battery-run-1"). Refused if empty/
+#     whitespace-only (house lesson from #4769: a single online chokepoint requires a
+#     mandatory, meaningful intent — see project_k3wise_first_profile_delivery.md).
+#   - `acknowledge` must EXACTLY equal the literal phrase
+#     `I-UNDERSTAND-THIS-WRITES-SYNTHETIC-DATA-TO-STAGING`. This is a write action;
+#     the phrase must be typed, not selected, and any other value refuses loudly.
+#   - SSH host identity is pinned exactly like multitable-recovery-flag-containment-
+#     check.yml: StrictHostKeyChecking=yes against a DEPLOY_KNOWN_HOSTS-derived
+#     known_hosts file, fail-closed if that secret is absent/unrecognizable. NEVER
+#     StrictHostKeyChecking=no anywhere (the repo-wide `ssh host-key pin contract`
+#     required check greps every workflow for that).
+#   - The admin password never appears as a literal `docker exec -e VAR=value` argument
+#     (that would put it in the deploy host's own `ps` output for as long as the exec
+#     runs). It is staged as a chmod-600 file on the runner, scp'd to a chmod-700 per-run
+#     directory on the deploy host, `docker cp`'d into the backend container, and only
+#     turned into the BATTERY_ADMIN_* env vars *inside* the container by a `cat`-and-
+#     export wrapper — so the value only ever exists as process environ, never as argv,
+#     on either host.
+#   - Producer failure propagates through every grep: the battery's real exit code is
+#     captured via `${PIPESTATUS[0]}` on the ssh invocation (never trusted to a
+#     downstream `grep`'s own exit status), and a captured `rc=0` that carries no
+#     `VERDICT: PASS` line is itself treated as a failure (fail-closed — an unverifiable
+#     "pass" is not a pass).
+#
+# REQUIRED SECRETS (existing repo-wide deploy secrets):
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY_B64, DEPLOY_KNOWN_HOSTS
+# REQUIRED SECRETS (NEW — the owner must create these; this workflow never invents a
+# value for either):
+#   STAGING_BATTERY_ADMIN_EMAIL, STAGING_BATTERY_ADMIN_PASSWORD — credentials for a
+#   staging-only platform admin account the battery logs in as (POST /api/auth/login,
+#   never a minted token — project convention, see feedback_prod_token_via_login_not_
+#   minting.md). This account must already exist on staging before dispatch; this
+#   workflow does not create/bootstrap it.
+#
+# CONTRACT ASSUMPTIONS ABOUT scripts/ops/multitable-l1-battery.mjs (sibling deliverable,
+# NOT built here — the sibling lane must confirm/reconcile every one of these):
+#   1. env DATABASE_URL — NOT set explicitly by this workflow. The battery runs via
+#      `docker exec` *inside* the metasheet-staging-backend container, so it inherits
+#      the container's own already-configured DATABASE_URL for free (same mechanism
+#      scripts/ops/multitable-recovery-schema-containment.mjs already relies on).
+#   2. env APP_URL — set by this workflow to the container-LOCAL backend URL
+#      `http://127.0.0.1:<PORT>` (PORT read from the container's own env, falling back
+#      to 8900 — the value baked into Dockerfile.backend / docker-compose.app.staging.yml).
+#   3. env BATTERY_ADMIN_EMAIL / BATTERY_ADMIN_PASSWORD — set by this workflow from the
+#      two staged secret files, exported inside the container (see guard rails above).
+#   4. `--out <path>` — the battery writes its evidence JSON to exactly the path given;
+#      this workflow supplies a per-run path inside the container and `docker cp`'s it
+#      back out.
+#   5. Exit code 0 = pass, nonzero = fail.
+#   6. Stdout carries at least one line beginning literally `VERDICT:`, and the pass
+#      sentinel begins literally `VERDICT: PASS`. This workflow greps that line for the
+#      step summary and additionally treats "exit 0 but no VERDICT: PASS* line" as a
+#      failure (see guard rails above) — if the real script's pass sentinel text differs,
+#      that check will need updating.
+#   7. The battery deletes every synthetic subject it created, on BOTH its own success
+#      and failure exit path, using the literal prefix `o2bat_`. This workflow's
+#      `residue-check` step scans `users.id`/`users.email`, `platform_member_groups.name`,
+#      `roles.name`, and `spreadsheets`/`meta_sheets` `id`/`name` (existence-guarded) —
+#      reconciled against the battery's actual seed surface. Original narrower note (the two free-text
+#      identity columns on the one table these 9 triggers actually gate that can carry an
+#      arbitrary stamped string — packages/core-backend/migrations/054_create_users_
+#      table.sql) and `platform_member_groups.name` (packages/core-backend/src/db/
+#      migrations/zzzz20260409154000_..., in case the battery also creates a synthetic
+#      group to exercise member_group_members). It does NOT scan the other 6
+#      permission tables directly, on the assumption their rows are FK-owned by
+#      users/platform_member_groups with ON DELETE CASCADE (true for
+#      platform_member_group_members per that migration) and so cannot outlive their
+#      parent row. If the battery stamps `o2bat_` into any OTHER table/column not FK-
+#      cascaded from users or platform_member_groups, this residue-check will not see
+#      it — the sibling lane must extend the query in that case.
+#   8. The script is baked into the deployed backend image at
+#      /app/scripts/ops/multitable-l1-battery.mjs (same `COPY scripts ./scripts`
+#      convention Dockerfile.backend already uses for every other scripts/ops/*.mjs
+#      helper invoked this way).
+#   9. The battery acquires and releases its own exclusive recovery-authority lease for
+#      the duration of one run; this workflow does not manage that lease, it only
+#      guarantees at most one dispatch of ITSELF runs at a time (concurrency group
+#      below) — it cannot defend against some independent process also holding the
+#      lease.
+#  10. This workflow invokes `docker exec <container> ...` directly (the established
+#      convention in multitable-recovery-flag-containment-check.yml), NOT literally
+#      `docker compose exec` — no compose project file is synced to this workflow, and
+#      `docker exec` by the known container_name achieves the same "run inside the
+#      container, inherit its env" goal without that extra machinery. Flagging this as a
+#      deliberate deviation from the literal wording of the build brief, for the parent
+#      to reconcile if `docker compose exec` semantics turn out to matter.
+#
+# NOT a required check. NOT scheduled. Modeled on multitable-recovery-flag-containment-
+# check.yml (host-key pinning, verdict-line discipline) and attendance-staging-window-
+# runner.yml (remote-action / artifact / step-summary shape).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which stack to run the battery against. Fixed choice only — production is not offered in v1; it gets its own separate authorization at ladder rung L7+.'
+        required: true
+        type: choice
+        options: [staging]
+        default: staging
+      intent:
+        description: 'Required: what step this run is for, e.g. "L1-open-battery-run-1". Refused if empty/whitespace-only.'
+        required: true
+        type: string
+        default: ''
+      acknowledge:
+        description: 'Type EXACTLY: I-UNDERSTAND-THIS-WRITES-SYNTHETIC-DATA-TO-STAGING (the battery creates and deletes stamped synthetic subjects on staging — this is a write action).'
+        required: true
+        type: string
+        default: ''
+
+concurrency:
+  group: multitable-l1-battery-staging
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  l1-battery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Validate inputs
+        id: validate
+        env:
+          TARGET: ${{ inputs.target }}
+          INTENT: ${{ inputs.intent }}
+          ACKNOWLEDGE: ${{ inputs.acknowledge }}
+        run: |
+          set -euo pipefail
+
+          # `choice` is a UI-only guardrail — the REST dispatch API can still send an
+          # arbitrary string — so re-validate with an exact-match case (default branch
+          # fails closed), same discipline as multitable-recovery-flag-containment-check.yml.
+          case "$TARGET" in
+            staging)
+              ;;
+            *)
+              echo "::error::unexpected target '${TARGET}' (only 'staging' is offered in v1 — production L1 requires its own separate authorization) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+          echo "target='${TARGET}'"
+
+          if [[ "$INTENT" == *$'\n'* || "$INTENT" == *$'\r'* ]]; then
+            echo "::error::intent must be a single line (no embedded newline/CR)"
+            exit 1
+          fi
+          trimmed_intent="$(printf '%s' "$INTENT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ -z "$trimmed_intent" ]]; then
+            echo "::error::intent is required and must not be empty/whitespace-only — the operator must state what step this run is for (e.g. 'L1-open-battery-run-1'); house lesson from #4769: a single online chokepoint requires a mandatory, meaningful intent."
+            exit 1
+          fi
+          if [[ ${#INTENT} -gt 200 ]]; then
+            echo "::error::intent is too long (${#INTENT} chars, max 200)"
+            exit 1
+          fi
+          if [[ ! "$INTENT" =~ ^[A-Za-z0-9][A-Za-z0-9._:/\ -]*$ ]]; then
+            echo "::error::intent contains unsupported characters — use plain ASCII letters/digits/space/._:/- only, got: '${INTENT}'"
+            exit 1
+          fi
+          echo "intent='${INTENT}'"
+
+          EXPECTED_ACK='I-UNDERSTAND-THIS-WRITES-SYNTHETIC-DATA-TO-STAGING'
+          if [[ "$ACKNOWLEDGE" != "$EXPECTED_ACK" ]]; then
+            echo "::error::acknowledge must exactly equal '${EXPECTED_ACK}' — this run WRITES stamped synthetic (o2bat_) subjects to the staging database. Refusing to proceed without the exact literal acknowledgement."
+            exit 1
+          fi
+          echo "acknowledge=confirmed"
+
+          echo "inputs OK"
+
+      - name: Set up SSH identity (pinned host key)
+        id: ssh-setup
+        env:
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+
+          # Host authentication (fail-closed): identical rationale/mechanism to
+          # multitable-recovery-flag-containment-check.yml — StrictHostKeyChecking=no
+          # would let a MITM or simply the wrong host answer, making everything
+          # downstream meaningless. Never silently fall back to no-verify.
+          if [ -z "${DEPLOY_KNOWN_HOSTS:-}" ]; then
+            echo "::error::DEPLOY_KNOWN_HOSTS required for a host-authenticated connection — refusing to fall back to no-verify"
+            exit 1
+          fi
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          if ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts; then
+            echo "::error::DEPLOY_KNOWN_HOSTS did not resolve to a recognizable known_hosts entry — refusing to fall back to no-verify"
+            exit 1
+          fi
+
+          if [ -z "${DEPLOY_SSH_KEY_B64:-}" ]; then
+            echo "::error::DEPLOY_SSH_KEY_B64 required"
+            exit 1
+          fi
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          echo "ssh identity staged"
+
+      - name: Stage battery admin credentials on the deploy host
+        id: stage-creds
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          BATTERY_ADMIN_EMAIL: ${{ secrets.STAGING_BATTERY_ADMIN_EMAIL }}
+          BATTERY_ADMIN_PASSWORD: ${{ secrets.STAGING_BATTERY_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Demote (dingtalk-lifecycle-staging-canary.yml precedent): copy into
+          # non-exported shell vars, then unset the exported names so no child process
+          # (mktemp/ssh/scp) inherits raw secret env.
+          _EMAIL="${BATTERY_ADMIN_EMAIL-}"
+          _PASSWORD="${BATTERY_ADMIN_PASSWORD-}"
+          unset BATTERY_ADMIN_EMAIL BATTERY_ADMIN_PASSWORD
+          if [[ -z "$_EMAIL" || -z "$_PASSWORD" ]]; then
+            echo "::error::STAGING_BATTERY_ADMIN_EMAIL / STAGING_BATTERY_ADMIN_PASSWORD secrets are required (the owner must set them; this workflow never invents a value) — refusing to proceed"
+            unset _EMAIL _PASSWORD
+            exit 1
+          fi
+
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i $HOME/.ssh/deploy_key"
+
+          secrets_dir="$(mktemp -d "${RUNNER_TEMP}/l1-battery-admin-creds.XXXXXX")"
+          cleanup_local_secrets() { rm -rf "$secrets_dir"; }
+          trap cleanup_local_secrets EXIT INT TERM
+          chmod 700 "$secrets_dir"
+          umask 077
+          printf '%s' "$_EMAIL" > "${secrets_dir}/email"
+          printf '%s' "$_PASSWORD" > "${secrets_dir}/password"
+          unset _EMAIL _PASSWORD
+          chmod 600 "${secrets_dir}/email" "${secrets_dir}/password"
+          [[ -s "${secrets_dir}/email" && -s "${secrets_dir}/password" ]] \
+            || { echo "::error::secret file empty after materialize" >&2; exit 1; }
+
+          remote_secrets_dir="/tmp/l1-battery-creds-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "remote_secrets_dir=${remote_secrets_dir}" >> "$GITHUB_OUTPUT"
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'set -euo pipefail; mkdir -p ${remote_secrets_dir}; chmod 700 ${remote_secrets_dir}'"
+          scp $ssh_opts "${secrets_dir}/email" "${secrets_dir}/password" \
+            "$DEPLOY_USER@$DEPLOY_HOST:${remote_secrets_dir}/"
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'set -euo pipefail; chmod 600 ${remote_secrets_dir}/email ${remote_secrets_dir}/password'"
+          echo "credentials staged on deploy host"
+
+      - name: Run L1 battery on staging
+        id: battery
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          REMOTE_SECRETS_DIR: ${{ steps.stage-creds.outputs.remote_secrets_dir }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i $HOME/.ssh/deploy_key"
+
+          if [[ -z "${REMOTE_SECRETS_DIR:-}" ]]; then
+            echo "::error::remote_secrets_dir missing (stage-creds step did not succeed)"
+            echo "rc=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          mkdir -p output/l1-battery
+          remote_output_dir="/tmp/l1-battery-out-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          run_stamp="gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+          artifact_name="multitable-l1-battery-staging-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "artifact_name=${artifact_name}" >> "$GITHUB_OUTPUT"
+
+          set +e
+          # Non-secret, single-word, space-free values only are ever passed as ssh
+          # command-line VAR=value prefixes (same discipline as multitable-recovery-flag-
+          # containment-check.yml's TARGET/MODE) — the admin credentials themselves never
+          # touch this command line; they were already scp'd to REMOTE_SECRETS_DIR above.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            REMOTE_SECRETS_DIR="$REMOTE_SECRETS_DIR" RUN_STAMP="$run_stamp" OUTPUT_DIR="$remote_output_dir" \
+            'bash -s' <<'REMOTE' 2>&1 | tee output/l1-battery/ssh.log
+          set -uo pipefail
+          CONTAINER="metasheet-staging-backend"
+
+          mkdir -p "$OUTPUT_DIR"
+
+          running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+          if ! printf '%s\n' "$running" | grep -qxF "$CONTAINER"; then
+            msg="VERDICT: FAIL — expected container '${CONTAINER}' is not running"
+            echo "$msg" > "${OUTPUT_DIR}/battery-stdout.log"
+            echo "$msg" > "${OUTPUT_DIR}/verdict.txt"
+            echo "1" > "${OUTPUT_DIR}/battery.rc"
+            exit 2
+          fi
+
+          port="$(docker exec "$CONTAINER" printenv PORT 2>/dev/null || true)"
+          port="${port:-8900}"
+          app_url="http://127.0.0.1:${port}"
+
+          email_in_container="/tmp/o2bat-creds-${RUN_STAMP}/email"
+          password_in_container="/tmp/o2bat-creds-${RUN_STAMP}/password"
+          evidence_in_container="/tmp/o2bat-evidence-${RUN_STAMP}.json"
+
+          docker exec "$CONTAINER" mkdir -p "/tmp/o2bat-creds-${RUN_STAMP}"
+          docker cp "${REMOTE_SECRETS_DIR}/email" "${CONTAINER}:${email_in_container}"
+          docker cp "${REMOTE_SECRETS_DIR}/password" "${CONTAINER}:${password_in_container}"
+
+          # The admin password is read from the copied-in file and exported INSIDE the
+          # container by this wrapper — it never appears as a literal `docker exec -e
+          # VAR=value` argument (which would sit in the deploy host's own `ps` output for
+          # as long as the exec runs). Only file PATHS (non-secret) are passed as argv.
+          docker exec "$CONTAINER" sh -c '
+            set -eu
+            export BATTERY_ADMIN_EMAIL="$(cat "$1")"
+            export BATTERY_ADMIN_PASSWORD="$(cat "$2")"
+            export APP_URL="$3"
+            exec node scripts/ops/multitable-l1-battery.mjs --out "$4"
+          ' sh "$email_in_container" "$password_in_container" "$app_url" "$evidence_in_container" \
+            > "${OUTPUT_DIR}/battery-stdout.log" 2>&1
+          battery_rc=$?
+          echo "$battery_rc" > "${OUTPUT_DIR}/battery.rc"
+
+          docker cp "${CONTAINER}:${evidence_in_container}" "${OUTPUT_DIR}/evidence.json" \
+            >> "${OUTPUT_DIR}/battery-stdout.log" 2>&1 \
+            || echo "[warn] could not copy evidence JSON out of the container (battery_rc=${battery_rc})" >> "${OUTPUT_DIR}/battery-stdout.log"
+
+          # Best-effort per-run scratch cleanup (in-container creds/evidence + the host-
+          # side creds dir). Never touches anything outside these per-run paths.
+          docker exec "$CONTAINER" rm -rf "/tmp/o2bat-creds-${RUN_STAMP}" "$evidence_in_container" >/dev/null 2>&1 || true
+          rm -rf "$REMOTE_SECRETS_DIR" >/dev/null 2>&1 || true
+
+          grep -E '^VERDICT:' "${OUTPUT_DIR}/battery-stdout.log" > "${OUTPUT_DIR}/verdict.txt" \
+            || echo "VERDICT: MISSING — battery produced no VERDICT line" > "${OUTPUT_DIR}/verdict.txt"
+
+          exit "$battery_rc"
+          REMOTE
+          rc=${PIPESTATUS[0]}
+
+          scp $ssh_opts -r "$DEPLOY_USER@$DEPLOY_HOST:${remote_output_dir}/." output/l1-battery/ 2>&1 \
+            | tee -a output/l1-battery/ssh.log
+          scp_rc=${PIPESTATUS[0]}
+
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            "bash -o pipefail -c 'rm -rf ${remote_output_dir} ${REMOTE_SECRETS_DIR}'" \
+            >> output/l1-battery/ssh.log 2>&1
+          set -e
+
+          if [[ "$rc" == "0" && "$scp_rc" != "0" ]]; then
+            rc="$scp_rc"
+            echo "[warn] battery exited 0 but evidence retrieval (scp) failed — treating as failure (unverifiable pass)" >> output/l1-battery/ssh.log
+          fi
+
+          verdict_line="$(head -1 output/l1-battery/verdict.txt 2>/dev/null || true)"
+          if [[ "$rc" == "0" && "$verdict_line" != VERDICT:\ PASS* ]]; then
+            echo "[warn] battery exited 0 but did not produce a 'VERDICT: PASS' line (got: '${verdict_line:-<none>}') — fail-closed: nothing-observed is not evidence of pass" >> output/l1-battery/ssh.log
+            rc=97
+          fi
+
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "verdict_line=${verdict_line:-<none>}" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Residue check — o2bat_% leftovers on staging
+        id: residue
+        if: always() && steps.ssh-setup.outcome == 'success'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i $HOME/.ssh/deploy_key"
+          mkdir -p output/l1-battery
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<'REMOTE' 2>&1 | tee output/l1-battery/residue-check.log
+          set -euo pipefail
+          POSTGRES_CONTAINER="metasheet-staging-postgres"
+          log() { echo "[l1-battery-residue] $*"; }
+          fail() { echo "[l1-battery-residue][error] $*" >&2; exit 1; }
+
+          running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+          printf '%s\n' "$running" | grep -qxF "$POSTGRES_CONTAINER" \
+            || fail "expected container '${POSTGRES_CONTAINER}' is not running (residue observation broken)"
+
+          pg_user="$(docker exec "$POSTGRES_CONTAINER" printenv POSTGRES_USER 2>/dev/null || true)"
+          pg_db="$(docker exec "$POSTGRES_CONTAINER" printenv POSTGRES_DB 2>/dev/null || true)"
+          [[ -n "$pg_user" ]] || fail "could not resolve POSTGRES_USER from ${POSTGRES_CONTAINER}'s own env"
+          [[ -n "$pg_db" ]] || fail "could not resolve POSTGRES_DB from ${POSTGRES_CONTAINER}'s own env"
+
+          # residue_check <name> <sql>: runs ONE read-only bare-integer count via
+          # `docker exec metasheet-staging-postgres psql -tA`. A non-integer result
+          # (bad SQL, connection drop) is a hard failure — never silently "0 residue".
+          # Diagnostics go to stderr (log/fail) so they never contaminate the captured
+          # stdout value (same pitfall documented in attendance-staging-window-runner-
+          # remote.sh's own residue_check).
+          residue_check() {
+            local name="$1" sql="$2" value
+            value="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA -c "$sql" | tr -d '[:space:]')"
+            [[ "$value" =~ ^[0-9]+$ ]] || fail "residue query '${name}' did not return a bare integer (got '${value}'); sql: ${sql}"
+            log "residue ${name}=${value}" >&2
+            printf '%s' "$value"
+          }
+
+          users_count="$(residue_check users "SELECT COUNT(*) FROM users WHERE id LIKE 'o2bat\\_%' ESCAPE '\\' OR email LIKE 'o2bat\\_%' ESCAPE '\\';")"
+          groups_count="$(residue_check platform_member_groups "SELECT COUNT(*) FROM platform_member_groups WHERE name LIKE 'o2bat\\_%' ESCAPE '\\';")"
+          # The battery also seeds stamped ROLE rows (one per driven surface, via /api/roles)
+          # and a stamped sheet parent into BOTH spreadsheet parent tables (spreadsheets +
+          # meta_sheets — it seeds whichever exists, so both are scanned here, existence-
+          # guarded the same way the battery itself guards its seeding). Scanning only
+          # users/groups (the first version of this step) would have missed all three —
+          # reconciled against the battery's actual seed surface, not assumed.
+          roles_count="$(residue_check roles "SELECT COUNT(*) FROM roles WHERE name LIKE 'o2bat\\_%' ESCAPE '\\';")"
+          sheets_count=0
+          for sheet_table in spreadsheets meta_sheets; do
+            exists="$(residue_check "${sheet_table}_exists" "SELECT (to_regclass('public.${sheet_table}') IS NOT NULL)::int;")"
+            if [[ "$exists" == "1" ]]; then
+              c="$(residue_check "$sheet_table" "SELECT COUNT(*) FROM ${sheet_table} WHERE id LIKE 'o2bat\\_%' ESCAPE '\\' OR name LIKE 'o2bat\\_%' ESCAPE '\\';")"
+              sheets_count=$((sheets_count + c))
+            fi
+          done
+          total=$((users_count + groups_count + roles_count + sheets_count))
+
+          echo "== o2bat_% residue summary =="
+          echo "users leftover: ${users_count}"
+          echo "platform_member_groups leftover: ${groups_count}"
+          echo "total: ${total}"
+          if [[ "$total" -ne 0 ]]; then
+            echo "VERDICT: FAIL — ${total} o2bat_% synthetic subject(s) left on staging (users=${users_count}, platform_member_groups=${groups_count}) — the battery must clean up after itself; a crashed run must not silently leave synthetic users on staging"
+            exit 1
+          fi
+          echo "VERDICT: PASS — zero o2bat_% residue on staging (users + platform_member_groups checked)"
+          REMOTE
+
+      - name: Write step summary
+        if: always()
+        env:
+          TARGET: ${{ inputs.target }}
+          INTENT: ${{ inputs.intent }}
+          BATTERY_RC: ${{ steps.battery.outputs.rc }}
+          ARTIFACT_NAME: ${{ steps.battery.outputs.artifact_name }}
+          RESIDUE_OUTCOME: ${{ steps.residue.outcome }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Multitable L1 Battery — staging"
+            echo ""
+            echo "- Target: \`${TARGET}\`"
+            echo "- Intent: \`${INTENT}\`"
+            echo "- Battery rc: \`${BATTERY_RC:-missing}\`"
+            echo "- Residue check: \`${RESIDUE_OUTCOME:-skipped}\`"
+            echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
+            if [[ -f output/l1-battery/verdict.txt ]]; then
+              echo ""
+              echo "### battery verdict"
+              echo '```text'
+              cat output/l1-battery/verdict.txt
+              echo '```'
+            fi
+            if [[ -f output/l1-battery/residue-check.log ]]; then
+              echo ""
+              echo "### residue-check (tail)"
+              echo '```text'
+              tail -8 output/l1-battery/residue-check.log
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.battery.outputs.artifact_name || format('multitable-l1-battery-staging-{0}-{1}', github.run_id, github.run_attempt) }}
+          retention-days: 30
+          path: output/l1-battery
+
+      - name: Fail on battery error
+        if: steps.battery.outputs.rc != '0'
+        run: |
+          echo "::error::L1 battery did not pass (rc=${{ steps.battery.outputs.rc }}, verdict='${{ steps.battery.outputs.verdict_line }}') — see the evidence artifact and step summary"
+          exit 1
