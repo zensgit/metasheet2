@@ -43,5 +43,5 @@ jobs:
         with:
           node-version: 20
       - name: Run hermetic observation-kit tests (no DB, no hosts)
-        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs
 
