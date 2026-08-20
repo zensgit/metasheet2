@@ -443,6 +443,18 @@ test('P2-4: the early-exit cleanup reports via log() and records residue on BOTH
   // P3-7: asserted against BATTERY_CODE (comments stripped) so a leftover token in a comment can
   // NOT satisfy the guard, and covering BOTH the success path AND the catch path (the catch path
   // is the silent-failure hole P3-6 existed to close).
+  //
+  // KNOWN CEILING (T2 class, gate re-gate-3 confirmed): this is a source-TEXT-presence guard, so
+  // it catches every *plausible accidental* regression (a comment decoy, a deleted failure entry,
+  // a re-silenced WARNING) but NOT two *contrived* defeats the gate constructed: a string-literal
+  // decoy (`const _decoy = "failure: 'early_exit_residue'"` — the stripper strips comments, not
+  // strings) and a reachability break (`if (false && …)` around the finally cleanup — text cannot
+  // see reachability). Same ceiling as the census-linkage guard (finding_text_linkage_cannot_prove
+  // _src_reachability). The zero-residual close is a BEHAVIOURAL test that drives run() to an
+  // early exit and asserts evidence.failures + stdout — which needs postgres AND the booted
+  // backend together, an axis no current CI lane provides. The on-head BEHAVIOUR is correct and
+  // E2E-verified (by the author and independently by the gate); this residual is guard-strength,
+  // not a live defect, and its disposition is an owner call (parallel to the census L0 ceiling).
   // success path — residue-remaining must be visible AND recorded:
   assert.match(BATTERY_CODE, /log\(lines, `  cleanup \(early-exit best-effort\)/, 'success path must report residue via log(), not lines.push')
   assert.match(BATTERY_CODE, /failure: 'early_exit_residue'/, 'a residue-remaining early exit must push an early_exit_residue failure entry')
