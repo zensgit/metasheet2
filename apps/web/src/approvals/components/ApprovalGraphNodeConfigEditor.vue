@@ -1030,13 +1030,16 @@
             :data-testid="`approval-node-field-access-${field.id}`"
             @update:model-value="(access: NodeFieldAccess) => setApprovalNodeFieldAccess(node.key, field.id, access)"
           >
-            <el-option label="可编辑" value="editable" />
-            <el-option label="只读" value="readonly" />
-            <el-option label="隐藏" value="hidden" />
-            <!-- Lock-7B OD-L7B-7 (G-15): the fourth option renders on HANDLER nodes ONLY — ABSENT
-                 (not disabled-greyed, M7) on approval nodes, since `required` is unsatisfiable there
-                 (OD-L7B-3). The linear editor (approval steps) never renders it at all. -->
-            <el-option v-if="node.type === 'handler'" label="必填" value="required" />
+            <!-- Option set derives from fieldAccessOptionsFor (script setup, Lock-7B OD-L7B-7 /
+                 G-15) rather than four hand-written <el-option>s — see that function's comment for
+                 the handler-only `required` rule. The linear editor (approval steps) never renders
+                 it at all. -->
+            <el-option
+              v-for="access in fieldAccessOptionsFor(node.type)"
+              :key="access"
+              :label="FIELD_ACCESS_LABELS[access]"
+              :value="access"
+            />
           </el-select>
           <!-- Lock-7 G-13: the readonly honesty copy is retired here in the SAME change as the linear
                editor (L0-6 one-change rule) — `只读`/`隐藏` are now enforced server-side. -->
@@ -1124,6 +1127,7 @@ import type {
   RequesterChoiceAssigneeSource,
   SupportedNodeTimeoutEffect,
 } from '../../types/approval'
+import { NODE_FIELD_ACCESS_VALUES } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
 } from '../nodeConfigEditorContext'
@@ -1322,6 +1326,21 @@ const handlerNodeOpinionRequired = api.handlerNodeOpinionRequired
 const setHandlerNodeOpinionRequired = api.setHandlerNodeOpinionRequired
 const approvalNodeFieldAccess = api.approvalNodeFieldAccess
 const setApprovalNodeFieldAccess = api.setApprovalNodeFieldAccess
+// `Record<NodeFieldAccess, string>` is compiler-guarded exhaustive (a member added to the type
+// without a label here fails the build), matching backend `NODE_FIELD_ACCESS_RANK`'s discipline.
+const FIELD_ACCESS_LABELS: Record<NodeFieldAccess, string> = {
+  editable: '可编辑',
+  readonly: '只读',
+  hidden: '隐藏',
+  required: '必填',
+}
+// Lock-7B OD-L7B-7 (G-15): `required` renders on HANDLER nodes ONLY — ABSENT (not disabled-greyed,
+// M7) on approval nodes, since `required` is unsatisfiable there (OD-L7B-3). Derives the option list
+// from the ONE canonical `NODE_FIELD_ACCESS_VALUES` array (apps/web/src/types/approval.ts) instead of
+// hand-writing the member list a second time here.
+function fieldAccessOptionsFor(nodeType: ApprovalNode['type']): readonly NodeFieldAccess[] {
+  return nodeType === 'handler' ? NODE_FIELD_ACCESS_VALUES : NODE_FIELD_ACCESS_VALUES.filter((access) => access !== 'required')
+}
 const nodeConfigSummary = api.nodeConfigSummary
 const onUserSearch = api.onUserSearch
 const formatUserLabel = api.formatUserLabel

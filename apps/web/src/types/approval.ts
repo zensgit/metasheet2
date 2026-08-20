@@ -167,6 +167,11 @@ export interface HandlerNodeConfig {
 // purposes. The canvas authoring editor offers `required` on handler nodes only (OD-L7B-7); the linear
 // editor (approval steps) never offers it. All four round-trip.
 export type NodeFieldAccess = 'editable' | 'readonly' | 'hidden' | 'required'
+// The ONE canonical FE enumeration of `NodeFieldAccess` members (mirrors backend
+// `NODE_FIELD_ACCESS_VALUES`, packages/core-backend/src/types/approval-product.ts). Authoring
+// surfaces that need to render the option set should import THIS array rather than hand-writing the
+// four literals a second time (see `ApprovalGraphNodeConfigEditor.vue`'s field-access `<el-select>`).
+export const NODE_FIELD_ACCESS_VALUES: readonly NodeFieldAccess[] = ['editable', 'readonly', 'hidden', 'required']
 export interface NodeFieldPermission {
   fieldId: string
   access: NodeFieldAccess
