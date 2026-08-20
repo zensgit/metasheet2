@@ -2506,12 +2506,12 @@ action_soak_status() {
   done
 
   # --- [Q17]/[Q18] human-tail attribution (2026-08-21) — WHERE did real-browser punches land? ---
-  # The self-service web punch sends no body.orgId and the login JWT carries no orgId claim, so
-  # getOrgId() falls through to DEFAULT_ORG_ID; tester punches can therefore sit OUTSIDE the three
-  # soak orgs while every per-org Q-read above stays flat. Q17 groups synthetic-account records by
-  # the org they were actually written under (NOT restricted to the soak orgs — that restriction is
-  # the blind spot); Q18 dumps the tester accounts' (u01) rows column-agnostically (to_jsonb) so a
-  # schema rename can't silently blank the read. Read-only; no alert semantics (disposition by hand).
+  # Real-browser self-service punches are not guaranteed to be attributed to the soak orgs the way
+  # the generator's explicit-orgId punches are, so every per-org Q-read above can stay flat while
+  # tester rows exist elsewhere. Q17 groups synthetic-account records by the org they were actually
+  # written under (NOT restricted to the soak orgs — that restriction is the blind spot); Q18 dumps
+  # the tester accounts' (u01) rows column-agnostically (to_jsonb) so a schema rename can't silently
+  # blank the read. Read-only; no alert semantics (disposition by hand, attribution notes private).
   soak_status_rows "[Q17] synthetic-account attendance_records by ACTUAL org_id, last 96h (tail attribution; rows outside the soak orgs = default-org fallthrough)" \
     "SELECT r.org_id, count(*)::int AS n, min(r.work_date)::text AS first_work_date, max(r.work_date)::text AS last_work_date FROM attendance_records r JOIN users u ON u.id = r.user_id WHERE u.username LIKE '${SOAK_USER_PREFIX}%' AND r.updated_at >= now() - interval '96 hours' GROUP BY r.org_id ORDER BY n DESC;"
   soak_status_rows "[Q18] tester (u01) attendance_records rows, last 96h, column-agnostic (to_jsonb minus ids)" \
