@@ -5,10 +5,12 @@ import { join, resolve } from 'path'
 /**
  * Lock-7 G-14 (widened by Lock-7B OD-L7B-10, docs/development/approval-lock7b-required-at-node-
  * 20260820.md §0.4/§3) — the hand-mirrored sites of the `NodeFieldAccess` access enum are asserted
- * equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2/v3, further down this
+ * equal by EXACT SET (the `SITES` loop below), and — as of MECHANISM FIX v2/v3/v4, further down this
  * docstring — the census ALSO scans the trees it walks for any literal co-occurrence of the same
- * four words it does not already know about, so a NEW copy landing in an already-scanned file is
- * caught rather than passing unnoticed, subject to the mechanism's own honestly-stated residual
+ * four words it does not already know about (v2/v3), AND pins the exact COUNT of complete copies
+ * per already-tracked file (v4), so a NEW copy landing in an already-scanned file — incomplete or a
+ * brand-new complete duplicate alike — is caught rather than passing unnoticed, subject to the
+ * mechanism's own honestly-stated residual
  * (several concrete gaps, labelled (a)–(h) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
  * below; deliberately NOT phrased as an unqualified "any incomplete copy anywhere fails the census"
  * guarantee, and the letter RANGE rather than a transcribed count is what a future edit must keep in
@@ -430,17 +432,19 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       across as many single-purpose declarations as there are stale members — a materially more
   //       contrived construction than an accidental copy-paste — but it is a real, narrower residual
   //       of the v3 fix and is recorded rather than left implicit;
-  //   (g) DUPLICATE COMPLETE CARRIER — a BRAND NEW, already-COMPLETE four-member hand copy added
-  //       inside a file that is already in `expectedFiles` contributes its own new cluster (so it IS
-  //       visible in the per-cluster test list) but that cluster is complete and therefore asserts
-  //       nothing — the census has no notion of "this file should carry exactly N complete carriers".
-  //       This is NOT an R7 cluster-merge-absorption case (nothing merges; the new copy is complete
-  //       from the moment it is written, so there is no incompleteness for a boundary gate to protect)
-  //       — it is a pre-existing, structurally different gap that MECHANISM FIX v3 does not close and
-  //       was not designed to. It is bounded: the duplicate itself becomes a tracked complete site the
-  //       moment it is added, so IT will red the instant it later goes stale (the same teeth every
-  //       other complete site has) — the exposure window is only "between being added complete and
-  //       later drifting", not indefinite.
+  //   (g) DUPLICATE COMPLETE CARRIER — CLOSED by MECHANISM FIX v4 (see the `EXPECTED_COMPLETE_
+  //       CLUSTER_COUNT` assertion immediately after the carrier-file census test below). Kept as a
+  //       retired letter rather than reused or deleted, per this file's own COUNT HISTORY discipline
+  //       at the top: a BRAND NEW, already-COMPLETE four-member hand copy added inside a file that is
+  //       already in `expectedFiles` used to contribute its own new cluster (visible in the
+  //       per-cluster test list) that was complete and therefore asserted nothing — the census had no
+  //       notion of "this file should carry exactly N complete carriers". This was NOT an R7
+  //       cluster-merge-absorption case (nothing merges; the new copy is complete from the moment it
+  //       is written, so there is no incompleteness for a boundary gate to protect) — it was a
+  //       structurally different gap that MECHANISM FIX v3's boundary gate did not close and was not
+  //       designed to. v4 closes it directly: every file that currently carries N complete clusters is
+  //       pinned to exactly N, so a brand-new complete duplicate (N+1) reds immediately instead of
+  //       waiting for it to later go stale.
   //   (h) VUE TEMPLATE MARKUP (MECHANISM FIX v3) — `declarationBoundaries` deliberately derives NO
   //       boundaries inside Vue TEMPLATE content (see the DECLARATION BOUNDARIES discussion above):
   //       that permissiveness is what keeps FormView.vue's `hidden`+`required` pair (a `<div>`'s class
@@ -460,11 +464,12 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       attempted this round — recorded here rather than left implicit or covered by an unqualified
   //       claim.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
-  // R1 found) and, as of v3, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key
-  // carrier — not agnostic to file scope, file extension, spatial layout, literal-vs-symbolic
-  // encoding, allowlist anchor collisions, the specific quote/delimiter character set recognised, a
-  // copy fragmented across many single-purpose declarations, a brand-new complete duplicate of an
-  // existing carrier, or proximity to a carrier living inside Vue TEMPLATE markup specifically.
+  // R1 found), as of v3, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key carrier,
+  // and, as of v4, to a brand-new COMPLETE duplicate of an existing carrier appearing in an
+  // already-tracked file — not agnostic to file scope, file extension, spatial layout,
+  // literal-vs-symbolic encoding, allowlist anchor collisions, the specific quote/delimiter character
+  // set recognised, a copy fragmented across many single-purpose declarations, or proximity to a
+  // carrier living inside Vue TEMPLATE markup specifically.
 
   interface CarrierCluster {
     file: string
@@ -614,6 +619,30 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
       )
     }
     return clusters.filter((c) => c.members.length >= 2)
+  }
+
+  // MECHANISM FIX v4 (2026-08-20, third-round requalification's own N18 reproduction, disclosed as
+  // residual (g) above until this fix) — closes DUPLICATE COMPLETE CARRIER: v3's boundary gate only
+  // ever protects an INCOMPLETE unit from borrowing a neighbour's completeness; it has nothing to say
+  // about a brand-new hand copy that is COMPLETE the moment it is written, because such a copy never
+  // needs to merge with anything to pass the `isComplete` short-circuit. At this head, exactly TEN
+  // complete (all-four-member, non-boundary-spanning) clusters exist across SEVEN files — every
+  // known NodeFieldAccess mirror site plus ONE incidental complete copy already living inside a
+  // doc-comment in `templateAuthoring.ts` (`FIELD_ACCESS_LABELS`'s `.vue` sibling contributes its
+  // own from MECHANISM FIX v2, `approval-product.ts` contributes two — the type alias and the Set —
+  // because they are separate declarations that do not merge across the boundary between them, same
+  // for `apps/web/src/types/approval.ts`). `EXPECTED_COMPLETE_CLUSTER_COUNT` below pins that
+  // per-file count exactly, the same exact-match discipline `SITES` and `expectedFiles` already use
+  // elsewhere in this file: a file gaining an (N+1)th complete cluster — hand-copied, not merged —
+  // reds immediately by named file, rather than silently asserting nothing until it later drifts.
+  const EXPECTED_COMPLETE_CLUSTER_COUNT: Record<string, number> = {
+    'packages/core-backend/src/services/approval-form-redaction.ts': 1, // C-3 rank table
+    'packages/core-backend/src/types/approval-product.ts': 2, // C-1 type alias + C-2 Set (separate declarations)
+    'apps/web/src/approvals/approvalNodeEdit.ts': 1, // C-6 literal array
+    'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue': 1, // FIELD_ACCESS_LABELS (v2)
+    'apps/web/src/approvals/templateAuthoring.ts': 2, // C-7 isNodeFieldAccess guard + a doc-comment copy of the wire shape
+    'apps/web/src/types/approval.ts': 2, // C-5 type alias + FE NODE_FIELD_ACCESS_VALUES export (v2, separate declarations)
+    'packages/openapi/src/base.yml': 1, // C-8 wire enum
   }
 
   // Explicit, honest exemptions for candidate clusters that are real but NOT a NodeFieldAccess copy
@@ -872,6 +901,36 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     expect(allClusters.length).toBeGreaterThanOrEqual(expectedFiles.length)
     for (const file of expectedFiles) {
       expect(allClusters.some((c) => c.file === file), `${file} contributed zero clusters`).toBe(true)
+    }
+  })
+
+  it('complete NodeFieldAccess carriers: each file holds EXACTLY its pinned count of complete four-member copies (MECHANISM FIX v4, closes residual (g) / N18)', () => {
+    // Recomputes "complete" the SAME way the per-cluster tests below do (four members, never spanning
+    // a declaration boundary) rather than importing a shared flag, so this test independently catches
+    // a bug in that computation instead of trusting it forward.
+    const completeCounts = new Map<string, number>()
+    for (const c of allClusters) {
+      if (c.members.length === MEMBERS.length && !c.spansDeclarationBoundary) {
+        completeCounts.set(c.file, (completeCounts.get(c.file) ?? 0) + 1)
+      }
+    }
+    // Every file that currently carries a complete copy must carry EXACTLY the pinned count — a
+    // brand-new hand-written complete duplicate (N18: an already-complete four-member copy added to
+    // an already-tracked file, never merging with anything, so v3's boundary gate has nothing to
+    // refuse) pushes some file's count to N+1 and reds here by name, instead of silently asserting
+    // nothing until it later drifts.
+    for (const [file, count] of completeCounts) {
+      expect(count, `${file} carries ${count} complete NodeFieldAccess copies, expected ${EXPECTED_COMPLETE_CLUSTER_COUNT[file] ?? 0}`).toBe(
+        EXPECTED_COMPLETE_CLUSTER_COUNT[file] ?? 0,
+      )
+    }
+    // And the reverse: every PINNED file must still show its expected count (a complete carrier that
+    // accidentally loses a member, or picks up a spurious boundary-spanning flag, undercounts here too
+    // — belt-and-suspenders with the per-cluster tests below, which name the specific occurrence).
+    for (const [file, expected] of Object.entries(EXPECTED_COMPLETE_CLUSTER_COUNT)) {
+      expect(completeCounts.get(file) ?? 0, `${file} expected ${expected} complete NodeFieldAccess copies, found ${completeCounts.get(file) ?? 0}`).toBe(
+        expected,
+      )
     }
   })
 
