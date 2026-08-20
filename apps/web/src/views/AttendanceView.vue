@@ -783,7 +783,7 @@
                 :data-attendance-request-focused="isFocusedAttendanceRequest(item) ? 'true' : undefined"
               >
                 <div>
-                  <strong>{{ item.work_date }}</strong> · {{ formatRequestType(item.request_type) }}
+                  <strong>{{ formatDate(item.work_date) }}</strong> · {{ formatRequestType(item.request_type) }}
                   <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
                     {{ formatStatus(item.status) }}
                   </span>

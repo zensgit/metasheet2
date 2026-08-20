@@ -93,4 +93,16 @@ describe('formatCalendarDate (timezone-safe date-only rendering)', () => {
     expect(isDateOnlyValue('2024-01-15')).toBe(true)
     expect(isDateOnlyValue('0001-01-01')).toBe(true)
   })
+
+  it('documents (does not just name) the real divergence for years below 100: the ECMAScript Date constructor two-digit-year remap (0-99 -> 1900-1999)', () => {
+    // GATE-5047 P3-3: naming an input without asserting its output makes the value look
+    // covered when it isn't. No real `work_date` producer emits a year below 100 — this is
+    // unreachable in production — but the divergence is real and worth pinning explicitly
+    // rather than leaving as an implied-but-unchecked case.
+    expect(formatCalendarDate('0001-01-01', 'en-US')).toBe('1/1/1901') // new path: local-parts construction hits the remap
+    expect(new Date('0001-01-01').toLocaleDateString('en-US')).toBe('1/1/1') // old path: ISO string parse does NOT remap
+    // No divergence once the year reaches 100 (outside the constructor's 0-99 remap window).
+    expect(formatCalendarDate('0100-01-01', 'en-US')).toBe('1/1/100')
+    expect(new Date('0100-01-01').toLocaleDateString('en-US')).toBe('1/1/100')
+  })
 })

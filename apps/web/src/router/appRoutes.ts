@@ -1,5 +1,6 @@
 import type { RouteRecordRaw } from 'vue-router'
 import { AppRouteNames, ROUTE_PATHS } from './types'
+import { ATTENDANCE_RECORDS_PATH, ATTENDANCE_RECORDS_REDIRECT_TARGET } from './attendanceRecordsRedirect'
 import { buildMultitableRoute, buildPublicMultitableFormRoute } from './multitableRoute'
 import KanbanView from '../views/KanbanView.vue'
 import CalendarView from '../views/CalendarView.vue'
@@ -116,10 +117,11 @@ export const appRoutes: RouteRecordRaw[] = [
     // Self-service tail UX fix: /attendance/records had no route (fell through to the
     // catch-all -> '/'). The Reports tab inside AttendanceExperienceView.vue is reached
     // via `tab=reports` (see normalizeTab / availableTabs there) — redirect there instead
-    // of dropping the deep link on the floor.
-    path: '/attendance/records',
+    // of dropping the deep link on the floor. Target lives in attendanceRecordsRedirect.ts
+    // (single source of truth shared with the behavior spec — GATE-5047 P3-1).
+    path: ATTENDANCE_RECORDS_PATH,
     name: 'attendance-records-redirect',
-    redirect: { path: '/attendance', query: { tab: 'reports' } }
+    redirect: ATTENDANCE_RECORDS_REDIRECT_TARGET
   },
   {
     path: ROUTE_PATHS.MULTITABLE_COMMENT_INBOX,
