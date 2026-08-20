@@ -81,7 +81,7 @@ import { setMultitableApiErrorLocaleResolver } from './multitable/api/client'
 import { resolveRouteDocumentTitle } from './router/routeTitles'
 import { useFeatureFlags } from './stores/featureFlags'
 import { clearStoredAuthState, getApiBase } from './utils/api'
-import { middleEllipsis } from './utils/middleEllipsis'
+import { truncateAccountIdentity } from './utils/accountIdentityDisplay'
 
 const route = useRoute()
 const { navItems: pluginNavItems, fetchPlugins } = usePlugins()
@@ -184,11 +184,15 @@ const accountEmail = computed(() => {
   return getAccessSnapshot().email
 })
 
-// The header keeps this narrow (nav-user's max-width); a plain end-ellipsis hides the
-// suffix that actually distinguishes long account identifiers (e.g. 'synth-w4w7-…' for
-// every synth-* account). Keep both ends visible instead — the full value is still on the
-// title attribute above.
-const accountEmailDisplay = computed(() => middleEllipsis(accountEmail.value))
+// The header keeps this narrow (nav-user's max-width / flex-shrink); a plain end-ellipsis
+// hides the suffix that actually distinguishes long account identifiers (every
+// 'synth-w4w7-<org>-u<NN>@w4w7-soak.synthetic' staging account shares the same 20-char
+// domain, so a plain trailing-N-chars truncation keeps only the domain and collapses every
+// account to the same text). truncateAccountIdentity() drops the domain for email-shaped
+// values that need truncating and keeps the identity-bearing local-part tail instead — the
+// only browser-measured candidate that survives down to the narrowest tested viewport (see
+// PR body). The full value is still on the title attribute above.
+const accountEmailDisplay = computed(() => truncateAccountIdentity(accountEmail.value))
 
 async function logout(): Promise<void> {
   const token = getToken()
@@ -311,7 +315,14 @@ html, body {
   color: #6b7280;
   font-size: 13px;
   max-width: clamp(120px, 18vw, 260px);
-  min-width: 0;
+  /* Without a floor, flex-shrink (nav-user is the only shrinkable child of nav-actions —
+     its siblings are all flex: 0 0/1 auto) can crush this to 0 px well before the
+     clamp()'s 120 px minimum is ever reached (measured: 0 px at 800/900px-narrower
+     viewports with a normal nav-link count). 14ch is browser-measured sufficient to keep
+     the truncateAccountIdentity() output ('…' + up to 12 local-part chars, 13 chars) fully
+     on screen for the self-service nav (1-link and 5-link) down to 769 px — re-measure if
+     used behind a much wider nav (e.g. the ~17-link admin nav). */
+  min-width: 14ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

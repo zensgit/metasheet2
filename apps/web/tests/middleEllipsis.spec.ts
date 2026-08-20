@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import { middleEllipsis } from '../src/utils/middleEllipsis'
 
+/**
+ * Generic head+tail truncation contract only. This function is NOT used directly for the
+ * app header's email-shaped account identity any more — a fixed-length tail measured from
+ * the end of the whole string keeps only the domain for a long-domain email (see the
+ * regression this caused, fixed in accountIdentityDisplay.ts / P1 of GATE-5047). The
+ * email-account-identity behavior (including the real 43-char/20-char-domain staging
+ * shape) is covered in tests/accountIdentityDisplay.spec.ts instead. These tests use plain
+ * non-email fixtures so nothing here implies production relevance for emails.
+ */
 describe('middleEllipsis', () => {
   it('returns short values unchanged (no ellipsis inserted)', () => {
     expect(middleEllipsis('short')).toBe('short')
@@ -19,36 +28,28 @@ describe('middleEllipsis', () => {
     expect(middleEllipsis(value)).toBe(expected)
   })
 
-  it('produces the exact expected head…tail shape for a long value (default lengths)', () => {
-    const value = 'synth-w4w7-9f2ab61c@example.com' // 31 chars
-    const expectedHead = value.slice(0, 6) // 'synth-'
-    const expectedTail = value.slice(-20) // '9f2ab61c@example.com'
+  it('produces the exact expected head…tail shape for a long generic value (default lengths)', () => {
+    const value = 'HEAD01-0123456789-0123456789-TAIL01' // 36 chars, no '@'
+    const expectedHead = value.slice(0, 6)
+    const expectedTail = value.slice(-20)
     expect(middleEllipsis(value)).toBe(`${expectedHead}…${expectedTail}`)
-    expect(middleEllipsis(value)).toBe('synth-…9f2ab61c@example.com')
   })
 
-  it('the visible result always ends with the last N characters of the input (the distinguishing suffix)', () => {
-    const value = 'synth-w4w7-9f2ab61c@example.com'
+  it('the visible result always ends with the last N characters of the input', () => {
+    const value = 'HEAD01-0123456789-0123456789-TAIL01'
     const result = middleEllipsis(value)
     expect(result.endsWith(value.slice(-20))).toBe(true)
   })
 
   it('the visible result always starts with the first N characters of the input', () => {
-    const value = 'synth-w4w7-9f2ab61c@example.com'
+    const value = 'HEAD01-0123456789-0123456789-TAIL01'
     const result = middleEllipsis(value)
     expect(result.startsWith(value.slice(0, 6))).toBe(true)
   })
 
-  it('two REALISTIC email-shaped accounts sharing the same long prefix AND domain remain distinguishable', () => {
-    // This is the named scenario, not a simplified stand-in: same 'synth-w4w7-' prefix,
-    // same '@example.com' domain, differing only in the local-part suffix — exactly the
-    // shape a plain end-ellipsis (or a too-short default tail) collapses into
-    // 'synth-…xample.com' for every account. With the default tail=20, the full
-    // distinguishing suffix survives.
-    const a = middleEllipsis('synth-w4w7-aaaaaaaa@example.com')
-    const b = middleEllipsis('synth-w4w7-bbbbbbbb@example.com')
-    expect(a).toBe('synth-…aaaaaaaa@example.com')
-    expect(b).toBe('synth-…bbbbbbbb@example.com')
+  it('two long generic values sharing the same head and a same-length differing tail remain distinguishable', () => {
+    const a = middleEllipsis('shared-head-0000000000000000000001')
+    const b = middleEllipsis('shared-head-0000000000000000000002')
     expect(a).not.toBe(b)
   })
 
