@@ -1090,6 +1090,7 @@ function assertSoakContract({ remote, workflow }) {
   for (const label of [
     '[Q1]', '[Q2]', '[Q3]', '[Q4a]', '[Q4b]', '[Q5]', '[Q6]', '[Q7]', '[Q8]',
     '[Q9]', '[Q10]', '[Q11]', '[Q12]', '[Q13]', '[Q14]', '[Q15a]', '[Q15b]', '[Q15c]', '[Q16]',
+    '[Q17]', '[Q18]',
   ]) {
     assert.ok(slices.status.includes(label), `soak-status must run the monitoring-pack ${label} read`)
   }
