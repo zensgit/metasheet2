@@ -71,6 +71,17 @@ import {
 } from './multitable-l1-battery.mjs'
 
 const BATTERY_SOURCE = readFileSync(new URL('./multitable-l1-battery.mjs', import.meta.url), 'utf8')
+// P3-7 (regate2): a comment-stripped view of the battery source. The first P2-4 guards matched
+// bare tokens (`early_exit_residue`) that a COMMENT satisfies — deleting the real code while
+// leaving the word in a comment kept the guard green. Assertions that a specific CODE line exists
+// must run against this view, not the raw source. Strips /* */ blocks and // line comments; good
+// enough for asserting a statement's presence (it is not a parser, and the battery has no comment
+// markers inside string literals on the lines these guards check — verified).
+const BATTERY_CODE = BATTERY_SOURCE
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .split('\n')
+  .map((line) => line.replace(/\/\/.*$/, ''))
+  .join('\n')
 
 const CENSUS_SOURCE = readFileSync(
   new URL('../../packages/core-backend/tests/unit/lib/recovery-census-table.ts', import.meta.url),
@@ -428,11 +439,19 @@ test('P2-4: user_invites is on BOTH the delete and scan lists, keyed by user_id 
   assert.doesNotMatch(BATTERY_SOURCE, /user_invites[^;]*invited_by = \$2/, 'invited_by is the admin caller, a dead key for the battery user')
 })
 
-test('P2-4: the early-exit cleanup reports via log() and records residue — reverting P3-6 reds here', () => {
-  // The finally-block best-effort cleanup must be visible on stdout and recorded in evidence, not
-  // silent. Reverting to lines.push / no failure entry reds this.
-  assert.match(BATTERY_SOURCE, /early_exit_residue/, 'an early-exit that leaves residue must record a failure entry')
-  assert.match(BATTERY_SOURCE, /log\(lines, `  cleanup \(early-exit best-effort\)/, 'the early-exit cleanup must report via log(), not lines.push')
+test('P2-4: the early-exit cleanup reports via log() and records residue on BOTH paths — reverting P3-6 reds here', () => {
+  // P3-7: asserted against BATTERY_CODE (comments stripped) so a leftover token in a comment can
+  // NOT satisfy the guard, and covering BOTH the success path AND the catch path (the catch path
+  // is the silent-failure hole P3-6 existed to close).
+  // success path — residue-remaining must be visible AND recorded:
+  assert.match(BATTERY_CODE, /log\(lines, `  cleanup \(early-exit best-effort\)/, 'success path must report residue via log(), not lines.push')
+  assert.match(BATTERY_CODE, /failure: 'early_exit_residue'/, 'a residue-remaining early exit must push an early_exit_residue failure entry')
+  // catch path — a cleanup that THROWS must also be visible AND recorded:
+  assert.match(BATTERY_CODE, /log\(lines, `  WARNING: early-exit cleanup failed/, 'catch path must WARN via log(), not lines.push')
+  assert.match(BATTERY_CODE, /failure: 'early_exit_cleanup_failed'/, 'a throwing early-exit cleanup must push an early_exit_cleanup_failed failure entry')
+  // and neither may be re-silenced to lines.push:
+  assert.doesNotMatch(BATTERY_CODE, /lines\.push\(`  cleanup \(early-exit best-effort\)/, 'the early-exit cleanup must not be re-silenced to lines.push')
+  assert.doesNotMatch(BATTERY_CODE, /lines\.push\(`  WARNING: early-exit cleanup failed/, 'the early-exit WARNING must not be re-silenced to lines.push')
 })
 
 // ---------------------------------------------------------------------------
