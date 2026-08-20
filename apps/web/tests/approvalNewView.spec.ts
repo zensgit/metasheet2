@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { formSchemaSignature } from '../src/approvals/formDraft'
+import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 import type { ApprovalGraph, FormField, FormSchema } from '../src/types/approval'
 import { mockPendingApproval, mockPublishedTemplate } from './helpers/approval-test-fixtures'
@@ -86,6 +87,29 @@ vi.mock('../src/composables/useAuth', () => ({
 // keeps every other export (dispatchAction, createApproval, ...) real; this suite's OTHER tests
 // never render a `user`-type field so this mock is inert for them.
 const searchApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
+// Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): the K2
+// requester_choice suite's `searchChoiceCandidates` unconditionally calls
+// `ensureUserNamesResolved`, which (through the shared `directoryResolve.ts` module singleton)
+// calls this REAL, unmocked `resolveApprovalDirectoryUsers` against a real `fetch` -- which always
+// fails under jsdom (no server). Left real, EVERY test in that describe block that fires a picker
+// search schedules a genuine `setTimeout(..., 300)` backoff retry through an unawaited
+// `flushUsers()` promise chain that is NOT tied to the test's own lifecycle -- a probe confirmed
+// the timer is not even created yet when the NEXT test's `beforeEach` runs (so
+// `__resetResolvedDirectoryNamesForTests()` alone cannot cancel it: it gets scheduled fresh,
+// mid-flight, during that next test). Mocked here to resolve immediately so the retry/backoff
+// path is never entered at all -- the fix is "never schedule the timer", not "cancel it after the
+// fact". Confirmed by reachability, checked at the granularity of what is actually mocked below
+// (`resolveApprovalDirectoryUsers`, not merely `ensureUserNamesResolved`): across all of
+// `apps/web/src`, `resolveApprovalDirectoryUsers` is called from exactly one place --
+// `directoryResolve.ts`'s own `flushUsers` -- which is reachable only through
+// `ensureUserNamesResolved`, whose only call site in `ApprovalNewView.vue` is
+// `searchChoiceCandidates` (`:1046`). No other describe block in this file mounts a component that
+// imports `ensureUserNamesResolved` (`ApprovalDetailView`/`ApprovalCenterDetailPane`/
+// `MyDelegationView`/`TemplateDetailView` are never referenced here); the `ApprovalUserPicker`
+// describe block below mounts a DIFFERENT component that only calls `searchApprovalDirectoryUsers`
+// (already mocked separately, above) and never imports `directoryResolve.ts` at all. So mocking
+// `resolveApprovalDirectoryUsers` file-wide cannot change behavior anywhere else in this file.
+const resolveApprovalDirectoryUsersSpy = vi.fn().mockResolvedValue([])
 // B2-13 — the resubmit-prefill suite mocks the source-instance fetch; every other describe block
 // in this file never sets `?fromInstance=`, so `applyResubmitPrefill` short-circuits before ever
 // calling this, leaving it unused (and unconfigured) for them.
@@ -95,6 +119,7 @@ vi.mock('../src/approvals/api', async () => {
   return {
     ...actual,
     searchApprovalDirectoryUsers: (...args: unknown[]) => searchApprovalDirectoryUsersSpy(...args),
+    resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
     getApproval: (...args: unknown[]) => getApprovalSpy(...args),
   }
 })
@@ -1586,8 +1611,22 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     submitApprovalSpy.mockResolvedValue(mockPendingApproval({ id: 'apv_rc_1' }))
     searchApprovalDirectoryUsersSpy.mockReset()
     searchApprovalDirectoryUsersSpy.mockResolvedValue([{ id: 'u_alpha', name: 'Alpha', email: 'a@x.test' }])
+    // Codex #4 fix-round (2026-08-21, directoryResolve.ts:74 false-claim finding): two separate
+    // mechanisms, two separate jobs -- neither one alone is sufficient.
+    //   1. `resolveApprovalDirectoryUsersSpy` (declared above) keeps `ensureUserNamesResolved`'s
+    //      indirect call off the real transient-retry/backoff path, so no `setTimeout(..., 300)`
+    //      is ever SCHEDULED by this suite in the first place. This is the one that actually
+    //      matters: a probe proved the timer usually does not exist yet when THIS beforeEach
+    //      runs (the unawaited `flushUsers()` chain from the previous test schedules it a couple
+    //      of milliseconds LATER, inside the next test) -- so step 2 below cannot reach it.
+    //   2. `__resetResolvedDirectoryNamesForTests()` clears the module-singleton name cache
+    //      (`resolvedUserNames`/`pendingUserIds`) and cancels any timer that IS already pending
+    //      at this exact moment -- cache-state hygiene, and the same call every other consuming
+    //      spec makes, but not what closes the leak on its own.
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
     messageWarningSpy.mockClear()
     pushSpy.mockClear()
+    __resetResolvedDirectoryNamesForTests()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -1750,5 +1789,76 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
 
     expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
     expect(submitApprovalSpy).not.toHaveBeenCalled()
+  })
+
+  // stale-cache identity fix (2026-08-21, Codex #4 P2-1): `choiceConfirmedNames` used to be
+  // append-only-non-blank -- a name confirmed by an EARLIER search stuck around forever, even
+  // after a LATER search for the SAME id explicitly returned a blank name (the directory record
+  // was renamed/anonymized/deactivated between the two searches). Combined with the old
+  // `isChoiceOptionUnidentifiable` exemption for the chooser's own current selection, this let an
+  // already-selected id stay both rendered as selectable AND submittable under its stale name.
+  // This is the discriminating construction: select 'u_alpha' while it is named ('Alpha'), then
+  // re-open the SAME picker once the directory search for the SAME id now returns a blank name --
+  // the freshest answer must retract the confirmation, disable the option, and BLOCK submit.
+  it('a stale confirmed name is retracted when a LATER search reconfirms the SAME id as blank -- option disables and submit is blocked, not silently allowed on the old name', async () => {
+    await mountView()
+    const picker = chooserPicker()
+
+    // Search #1: 'u_alpha' resolves named -> selected and confirmed.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    // Search #2 (same node, e.g. the requester re-opens the picker): the SAME id now comes back
+    // blank -- must RETRACT the earlier confirmation, not merely skip overwriting it.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_alpha', name: '', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    const staleOption = Array.from(picker.querySelectorAll('option')).find((o) => o.value === 'u_alpha')
+    expect(staleOption, 'the retracted candidate must still render as a selectable-shaped (disabled) option, not vanish').toBeTruthy()
+    expect(staleOption!.textContent, 'must render the values-free ordinal, never the stale name').not.toContain('Alpha')
+    expect(staleOption!.disabled, 'a retracted confirmation must disable the option even though it is the chooser\'s own current selection').toBe(true)
+
+    submitButton().click()
+    await flushUi()
+
+    expect(messageWarningSpy).toHaveBeenCalledWith('「自选审批人」选择的审批人暂无法确认身份，请重新选择')
+    expect(submitApprovalSpy, 'the stale name must never let a now-unidentifiable selection through').not.toHaveBeenCalled()
+  })
+
+  // per-node request epoch (2026-08-21, Codex #4 P2-1 ordering half): `searchChoiceCandidates`
+  // used to write `choiceOptions`/`choiceConfirmedNames` unconditionally on resolution, with no
+  // generation guard -- an OLDER in-flight search resolving AFTER a NEWER one would silently
+  // clobber the newer, already-rendered page. Holds the first search open, lets a second
+  // (immediately-resolving) search land first, THEN resolves the first -- the stale response must
+  // never apply.
+  it('an out-of-order (older) search resolution never clobbers a newer one -- the per-node epoch discards it', async () => {
+    let resolveFirst: (users: Array<{ id: string; name: string; email: string }>) => void = () => {}
+    const firstSearch = new Promise<Array<{ id: string; name: string; email: string }>>((resolve) => {
+      resolveFirst = resolve
+    })
+    searchApprovalDirectoryUsersSpy.mockReturnValueOnce(firstSearch)
+    await mountView()
+    const picker = chooserPicker()
+
+    // Older search #1 fires and is held in flight.
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // Newer search #2 fires (a later re-open) and resolves immediately.
+    searchApprovalDirectoryUsersSpy.mockResolvedValueOnce([{ id: 'u_new', name: 'New', email: '' }])
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+
+    // NOW the older, first search resolves -- late and out of order.
+    resolveFirst([{ id: 'u_old', name: 'Old', email: '' }])
+    await flushUi()
+
+    const values = Array.from(picker.querySelectorAll('option')).map((o) => o.value)
+    expect(values, 'the newer response must be the one that actually rendered').toContain('u_new')
+    expect(values, 'the late-arriving OLDER response must be discarded, not appended or applied').not.toContain('u_old')
   })
 })
