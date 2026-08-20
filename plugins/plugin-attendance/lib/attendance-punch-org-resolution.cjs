@@ -3,39 +3,36 @@
 // Membership-derived org resolution for POST /api/attendance/punch (self-service route).
 //
 // The route's org selection previously ran through the plugin-wide `getOrgId(req)` helper
-// (plugins/plugin-attendance/index.cjs), whose precedence is
-// `body.orgId ?? query.orgId ?? user.orgId ?? user.workspaceId ?? x-org-id ?? DEFAULT_ORG_ID`.
-// That helper trusts any caller-supplied org selector at face value — it never checks the
-// selector against the caller's actual memberships. `getOrgId` stays exactly as-is for every
-// OTHER route (many depend on its current behavior); this module adds a punch-specific
-// resolver used ONLY by POST /api/attendance/punch, applied before any rule loading / W7
-// mirror / write-boundary call so both the legacy and W4 legs inherit the resolved org.
+// (plugins/plugin-attendance/index.cjs) for every request shape. `getOrgId` stays exactly
+// as-is for every route, including this one when the request names no org — many routes
+// depend on its current behavior, and org resolution for an unscoped punch is a separate,
+// unresolved design question, out of scope here. This module adds a punch-specific check
+// used ONLY by POST /api/attendance/punch, applied before any rule loading / W7 mirror /
+// write-boundary call so both the legacy and W4 legs inherit its result.
 //
-// Rules (applied in this order):
-//   1. Load the caller's active memberships:
-//      `SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = true` — the same
-//      predicate shape as packages/core-backend/src/attendance/w4c0-authorization.ts's
-//      `requireActiveMembership` (there scoped to one org via an extra `AND org_id = $2`;
-//      here scoped to all of the caller's orgs since the route must choose one for the
-//      caller, not confirm one already chosen elsewhere).
-//   2. If the request supplies an org (body.orgId / query.orgId / x-org-id — the same three
-//      sources `getOrgId` reads, same per-value normalization: non-empty trimmed string or a
-//      finite number coerced to string), it MUST be one of the memberships from step 1, or
-//      this returns ATTENDANCE_PUNCH_ORG_NOT_PERMITTED (403) before any DML. There is no
-//      admin waiver on this self-service route.
-//   3. If the request supplies no org: exactly one active membership resolves to that org;
-//      more than one is ATTENDANCE_PUNCH_ORG_REQUIRED (400, the caller must disambiguate);
-//      zero active memberships is a residual fallback — the caller substitutes the org
-//      `getOrgId(req)` already resolves today (single-tenant callers with no `user_orgs` row
-//      keep today's behavior byte-identical; see `resolvePunchOrgIdV1`'s `legacyOrgId` param).
+// The rule: if the request supplies an org (body.orgId / query.orgId / x-org-id — the same
+// three sources `getOrgId` reads, same per-value normalization: non-empty trimmed string or
+// a finite number coerced to string), it MUST be one of the caller's active `user_orgs`
+// memberships (`SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = true` — the
+// same predicate shape as packages/core-backend/src/attendance/w4c0-authorization.ts's
+// `requireActiveMembership`, there scoped to one org via an extra `AND org_id = $2`; here
+// scoped to all of the caller's orgs since this check has to test one caller-named value
+// against the roster), or the request is refused with 403 ATTENDANCE_PUNCH_ORG_NOT_PERMITTED
+// before any DML. There is no admin waiver on this self-service route, and the comparison is
+// exact-string (case-sensitive, matching `user_orgs.org_id`'s `text` column type — a
+// case-differing twin of a real membership is not treated as a match).
+//
+// When the request supplies no org, this module does not participate at all: the route falls
+// straight back to whatever `getOrgId(req)` already resolves (passed in as `legacyOrgId`),
+// with no membership query on that path.
 //
 // Kept mostly as pure/testable pieces: `decidePunchOrgResolutionV1` takes plain data (no
-// Express req/res, no DB) so the branch logic in rules 2-3 is unit-testable without a
-// database; `resolvePunchOrgIdV1` is the thin async orchestration that loads memberships and
-// applies it. Values-free by construction: the only identifiers this ever surfaces (in its
-// return shape or in the route's error response) are org ids already present on the request
-// or already members of the caller's own roster — never a fabricated or echoed-back value
-// beyond what the caller supplied.
+// Express req/res, no DB) so the branch logic is unit-testable without a database;
+// `resolvePunchOrgIdV1` is the thin async orchestration that loads memberships (only when a
+// membership check is actually needed) and applies it. Values-free by construction: the only
+// identifiers this ever surfaces (in its return shape or in the route's error response) are
+// org ids already present on the request or already members of the caller's own roster —
+// never a fabricated or echoed-back value beyond what the caller supplied.
 
 function normalizeOrgIdentifierV1(value) {
   if (typeof value === 'string' && value.trim().length > 0) return value.trim()
@@ -47,8 +44,7 @@ function normalizeOrgIdentifierV1(value) {
  * The org selector sources this route accepts as a caller-supplied request — deliberately
  * NARROWER than `getOrgId`'s full precedence chain: `user.orgId` / `user.workspaceId` are
  * session-derived, not something the request "supplies", so they are never treated as a
- * selector to permission-check here (the zero-membership fallback still reaches them via
- * `getOrgId`, unchanged, in rule 3).
+ * selector to permission-check here.
  *
  * @param {{ body?: Record<string, unknown> | null, query?: Record<string, unknown> | null, headers?: Record<string, unknown> | null }} req
  * @returns {string | null}
@@ -80,34 +76,28 @@ function extractPunchCallerUserIdV1(req) {
 }
 
 /**
- * Pure decision core for rules 2-3 above. Takes already-extracted, already-normalized data —
- * no Express req/res, no DB — so it is unit-testable in isolation.
+ * Pure decision core for the requested-org case above. Takes already-extracted,
+ * already-normalized data — no Express req/res, no DB — so it is unit-testable in isolation.
+ * Only called when the request actually supplied an org; the no-org case never reaches this
+ * (see `resolvePunchOrgIdV1`).
  *
- * @param {{ requestedOrgId: string | null, activeMembershipOrgIds: string[] }} input
+ * Exact string comparison against the membership set — deliberately not case-insensitive,
+ * not trimmed-and-compared, not normalized in any way beyond what `normalizeOrgIdentifierV1`
+ * already did to both sides independently before this function ever sees them.
+ *
+ * @param {{ requestedOrgId: string, activeMembershipOrgIds: string[] }} input
  * @returns
  *   | { ok: true, orgId: string }
- *   | { ok: true, orgId: null, fallbackToLegacy: true }
  *   | { ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' }
- *   | { ok: false, status: 400, code: 'ATTENDANCE_PUNCH_ORG_REQUIRED' }
  */
 function decidePunchOrgResolutionV1(input) {
   const requestedOrgId = input && typeof input.requestedOrgId === 'string' ? input.requestedOrgId : null
   const memberships = Array.isArray(input && input.activeMembershipOrgIds) ? input.activeMembershipOrgIds : []
 
-  if (requestedOrgId !== null) {
-    if (memberships.includes(requestedOrgId)) {
-      return { ok: true, orgId: requestedOrgId }
-    }
-    return { ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' }
+  if (requestedOrgId !== null && memberships.includes(requestedOrgId)) {
+    return { ok: true, orgId: requestedOrgId }
   }
-
-  if (memberships.length === 0) {
-    return { ok: true, orgId: null, fallbackToLegacy: true }
-  }
-  if (memberships.length === 1) {
-    return { ok: true, orgId: memberships[0] }
-  }
-  return { ok: false, status: 400, code: 'ATTENDANCE_PUNCH_ORG_REQUIRED' }
+  return { ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' }
 }
 
 /**
@@ -126,31 +116,29 @@ async function loadActiveMembershipOrgIdsV1(db, userId) {
 }
 
 /**
- * Punch-route org resolver. Used ONLY by POST /api/attendance/punch — every other route keeps
- * calling `getOrgId(req)` unchanged.
+ * Punch-route org check. Used ONLY by POST /api/attendance/punch — every other route keeps
+ * calling `getOrgId(req)` unchanged, and so does this route whenever the request names no
+ * org at all.
  *
  * @param {{ query: (sql: string, params?: unknown[]) => Promise<unknown[]> }} db
  * @param {object} req - Express request (or an equivalent shape: `.user`, `.body`, `.query`, `.headers`)
  * @param {string} legacyOrgId - the value `getOrgId(req)` already resolves for this request;
- *   used ONLY on the zero-membership fallback leg (rule 3), so the resolver never re-derives
- *   `getOrgId`'s own precedence chain and cannot drift from it.
+ *   returned verbatim whenever the request supplies no org, so this module never re-derives
+ *   `getOrgId`'s own precedence chain and cannot drift from it. On that path no membership
+ *   query runs at all (nothing to check the caller's identity against).
  * @returns {Promise<
  *   | { ok: true, orgId: string }
  *   | { ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' }
- *   | { ok: false, status: 400, code: 'ATTENDANCE_PUNCH_ORG_REQUIRED' }
  * >}
  */
 async function resolvePunchOrgIdV1(db, req, legacyOrgId) {
-  const userId = extractPunchCallerUserIdV1(req)
   const requestedOrgId = extractRequestedPunchOrgIdV1(req)
-  const activeMembershipOrgIds = userId ? await loadActiveMembershipOrgIdsV1(db, userId) : []
-
-  const decision = decidePunchOrgResolutionV1({ requestedOrgId, activeMembershipOrgIds })
-  if (!decision.ok) return decision
-  if (decision.fallbackToLegacy) {
+  if (requestedOrgId === null) {
     return { ok: true, orgId: legacyOrgId }
   }
-  return { ok: true, orgId: decision.orgId }
+  const userId = extractPunchCallerUserIdV1(req)
+  const activeMembershipOrgIds = userId ? await loadActiveMembershipOrgIdsV1(db, userId) : []
+  return decidePunchOrgResolutionV1({ requestedOrgId, activeMembershipOrgIds })
 }
 
 module.exports = {

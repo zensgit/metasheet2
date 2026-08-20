@@ -29704,9 +29704,9 @@ module.exports = {
 
         // Membership-derived org resolution (this route only — see
         // lib/attendance-punch-org-resolution.cjs's module doc comment for the
-        // full rule set). `getOrgId(req)` is still computed here, unchanged, so
-        // it can serve as the zero-membership fallback (rule 3) without this
-        // route re-deriving that helper's own precedence chain.
+        // full rule). `getOrgId(req)` is still computed here, unchanged, so it
+        // can be returned verbatim whenever the request names no org, without
+        // this route re-deriving that helper's own precedence chain.
         const punchOrgResolution = await resolvePunchOrgIdV1(db, req, getOrgId(req))
         if (!punchOrgResolution.ok) {
           res.status(punchOrgResolution.status).json({ ok: false, error: { code: punchOrgResolution.code } })

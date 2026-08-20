@@ -4,18 +4,24 @@ import { describe, expect, it } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const {
+  resolvePunchOrgIdV1,
   decidePunchOrgResolutionV1,
   extractRequestedPunchOrgIdV1,
   extractPunchCallerUserIdV1,
   normalizeOrgIdentifierV1,
 } = require('../../../../plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs') as {
+  resolvePunchOrgIdV1: (
+    db: { query: (sql: string, params?: unknown[]) => Promise<unknown[]> },
+    req: Record<string, unknown>,
+    legacyOrgId: string,
+  ) => Promise<Record<string, unknown>>
   decidePunchOrgResolutionV1: (input: Record<string, unknown>) => Record<string, unknown>
   extractRequestedPunchOrgIdV1: (req: Record<string, unknown>) => string | null
   extractPunchCallerUserIdV1: (req: Record<string, unknown>) => string | null
   normalizeOrgIdentifierV1: (value: unknown) => string | null
 }
 
-// Pure-logic coverage for the punch route's membership-derived org resolver
+// Pure-logic coverage for the punch route's membership-derived org check
 // (plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs). This
 // file proves ONLY the decision/extraction logic in isolation, no Express
 // req/res, no database — the real-DB route-level assertions (membership
@@ -40,28 +46,34 @@ describe('attendance punch org resolution — decision core (self-service punch 
     ).toEqual({ ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' })
   })
 
-  it('resolves the sole active membership when no org is requested', () => {
+  it('treats an empty/missing membership array the same as no memberships (defensive default)', () => {
+    expect(
+      decidePunchOrgResolutionV1({ requestedOrgId: 'org-c', activeMembershipOrgIds: undefined }),
+    ).toEqual({ ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' })
+  })
+
+  it('a null requestedOrgId is refused too, defensively — the route never calls this with null (see resolvePunchOrgIdV1 below)', () => {
     expect(
       decidePunchOrgResolutionV1({ requestedOrgId: null, activeMembershipOrgIds: ['org-a'] }),
-    ).toEqual({ ok: true, orgId: 'org-a' })
+    ).toEqual({ ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' })
   })
 
-  it('requires disambiguation when no org is requested and more than one membership exists', () => {
+  it('the membership comparison is exact-string, not case-insensitive: a case-differing twin of a real membership is refused', () => {
     expect(
-      decidePunchOrgResolutionV1({ requestedOrgId: null, activeMembershipOrgIds: ['org-a', 'org-b'] }),
-    ).toEqual({ ok: false, status: 400, code: 'ATTENDANCE_PUNCH_ORG_REQUIRED' })
+      decidePunchOrgResolutionV1({ requestedOrgId: 'org-a', activeMembershipOrgIds: ['Org-A'] }),
+    ).toEqual({ ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' })
   })
 
-  it('falls back to the legacy resolver signal when no org is requested and zero memberships exist', () => {
+  it('...and the exact-case string is permitted (positive control for the case above)', () => {
     expect(
-      decidePunchOrgResolutionV1({ requestedOrgId: null, activeMembershipOrgIds: [] }),
-    ).toEqual({ ok: true, orgId: null, fallbackToLegacy: true })
+      decidePunchOrgResolutionV1({ requestedOrgId: 'Org-A', activeMembershipOrgIds: ['Org-A'] }),
+    ).toEqual({ ok: true, orgId: 'Org-A' })
   })
 
-  it('treats an empty membership array the same as no memberships (defensive default)', () => {
+  it('a whitespace-differing twin of a real membership is refused (normalization happens before this function, not inside it)', () => {
     expect(
-      decidePunchOrgResolutionV1({ requestedOrgId: null, activeMembershipOrgIds: undefined }),
-    ).toEqual({ ok: true, orgId: null, fallbackToLegacy: true })
+      decidePunchOrgResolutionV1({ requestedOrgId: 'org-a ', activeMembershipOrgIds: ['org-a'] }),
+    ).toEqual({ ok: false, status: 403, code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' })
   })
 })
 
@@ -84,7 +96,7 @@ describe('attendance punch org resolution — requested-org extraction', () => {
     ).toBe('org-c')
   })
 
-  it('returns null when nothing is supplied (leaves rule 3 to decide)', () => {
+  it('returns null when nothing is supplied', () => {
     expect(extractRequestedPunchOrgIdV1({ body: {}, query: {}, headers: {} })).toBeNull()
   })
 
@@ -140,5 +152,46 @@ describe('attendance punch org resolution — value normalization', () => {
     expect(normalizeOrgIdentifierV1(null)).toBeNull()
     expect(normalizeOrgIdentifierV1(undefined)).toBeNull()
     expect(normalizeOrgIdentifierV1({})).toBeNull()
+  })
+})
+
+describe('attendance punch org resolution — resolvePunchOrgIdV1 (the async orchestration the route calls)', () => {
+  it('when the request supplies no org, returns legacyOrgId verbatim and issues NO membership query at all', async () => {
+    const throwingDb = {
+      query: async () => {
+        throw new Error('resolvePunchOrgIdV1 must not query the database when no org was supplied')
+      },
+    }
+    const req = { user: { id: 'user-x' }, body: {}, query: {}, headers: {} }
+    await expect(resolvePunchOrgIdV1(throwingDb, req, 'legacy-org-value')).resolves.toEqual({
+      ok: true,
+      orgId: 'legacy-org-value',
+    })
+  })
+
+  it('when the request supplies an org, queries active memberships for the caller and permits an exact match', async () => {
+    const calls: Array<{ sql: string; params: unknown[] | undefined }> = []
+    const db = {
+      query: async (sql: string, params?: unknown[]) => {
+        calls.push({ sql, params })
+        return [{ org_id: 'org-a' }, { org_id: 'org-b' }]
+      },
+    }
+    const req = { user: { id: 'user-x' }, body: { orgId: 'org-a' }, query: {}, headers: {} }
+    await expect(resolvePunchOrgIdV1(db, req, 'legacy-org-value')).resolves.toEqual({ ok: true, orgId: 'org-a' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0].sql).toMatch(/user_orgs/)
+    expect(calls[0].sql).toMatch(/is_active\s*=\s*true/)
+    expect(calls[0].params).toEqual(['user-x'])
+  })
+
+  it('when the request supplies an org that is not a membership, refuses with 403 (one query, then stop — never reaches legacyOrgId)', async () => {
+    const db = { query: async () => [{ org_id: 'org-a' }] }
+    const req = { user: { id: 'user-x' }, body: { orgId: 'org-c' }, query: {}, headers: {} }
+    await expect(resolvePunchOrgIdV1(db, req, 'legacy-org-value')).resolves.toEqual({
+      ok: false,
+      status: 403,
+      code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED',
+    })
   })
 })
