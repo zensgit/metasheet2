@@ -1984,10 +1984,17 @@ function validateFieldEditEnforcementPins(
       const permissions = (node.config as { fieldPermissions?: NodeFieldPermission[] }).fieldPermissions ?? []
       for (const permission of permissions) {
         if (NODE_FIELD_ACCESS_WRITABLE_VALUES.has(permission.access) && routingDriverFieldIds.has(permission.fieldId)) {
-          failValidation(
-            context,
-            `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} ${permission.access}; a routing driver may never be writable (Lock-7 OD-L7-8)`,
-          )
+          // P3-1: §2.2 authorised widening the PREDICATE from `=== 'editable'` to writable-set
+          // membership, not rewriting the author-facing TEXT for the pre-existing `editable` case —
+          // the shipped Lock-7 wording is kept byte-for-byte for that legacy input; only a member
+          // OTHER than `editable` (i.e. `required`, defense-in-depth only — OD-L7B-4 above always
+          // fires first for a `required` driver, per the ordering pin) gets the widened "writable"
+          // phrasing, since "may never be editable" would be actively wrong for that case.
+          const message =
+            permission.access === 'editable'
+              ? `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} editable; a routing driver may never be editable (Lock-7 OD-L7-8)`
+              : `approvalGraph node ${node.key} fieldPermissions marks routing-driver field ${permission.fieldId} ${permission.access}; a routing driver may never be writable (Lock-7 OD-L7-8)`
+          failValidation(context, message)
         }
       }
     }
@@ -10591,7 +10598,8 @@ export class ApprovalProductService {
     // an approver could edit a `form_field_user` / `ConditionRule` / condition-formula field and choose
     // their own downstream reviewer/branch (master §P4 exit: "cannot be bypassed by HTTP calls"). Refuse
     // a write to ANY field in the instance's FROZEN-graph driver set regardless of its access
-    // (editable/readonly/hidden/absent), values-free. Same shared collection the pin uses (no drift).
+    // (editable/readonly/hidden/required/absent), values-free. Same shared collection the pin uses
+    // (no drift).
     // The collection re-parses each condition formula, but that cannot introduce a NEW in-flight break:
     // the same dispatch already ran `asRuntimeGraph` (`:6794`) → `normalizeConditionFormulaPredicate`
     // over the identical stored formulas, so an unparseable stored formula throws THERE first, before

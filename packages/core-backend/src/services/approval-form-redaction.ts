@@ -62,7 +62,8 @@ export interface RedactableRuntimeGraph {
 /**
  * Lock-7 L7-A / OD-L7-5 — the SINGLE derivation of "this actor's / this instance's access to a
  * field", over the given node set. Returns a `Map<fieldId, NodeFieldAccess>` holding, per field, the
- * MOST-RESTRICTIVE access across every supplied node (`hidden` ≻ `readonly` ≻ `editable`). A field
+ * MOST-RESTRICTIVE access across every supplied node (`hidden` ≻ `readonly` ≻ `required` ≻
+ * `editable`, Lock-7B §2.3 — see the rank table above). A field
  * ABSENT from the returned map ≡ `editable` (OD-L7-9, legacy default). Pure, allocation-cheap on
  * degenerate input, never throws.
  *

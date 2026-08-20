@@ -18,6 +18,23 @@ import { join, resolve } from 'path'
  * Lock-7B OD-L7B-10 replaced its literal chain with a mechanical `NODE_FIELD_ACCESS_VALUES.has(...)`
  * call, so it is asserted by SHAPE (mechanical-call present, literal-chain absent) in its own
  * `describe` block below, not by the member-equality loop the other eight share.
+ *
+ * MECHANISM FIX (2026-08-20, P2-1): an independent gate proved the file-carrier scan below was
+ * outcome-shaped, not mechanism-shaped — all six `shapePatterns` matched only ALREADY-COMPLETE
+ * four-member forms, so a hand copy carrying the STALE THREE-member list (missing `required`,
+ * precisely the drift class this census exists to prevent) was not recognised as a carrier at all and
+ * the census passed green (14/14) with the drift live in the tree; a positive control carrying a
+ * complete four-member copy correctly red. The scan is now member-count-agnostic: it recognises a
+ * carrier by the SHAPE it carries (a union / Set / guard / wire-enum built from two or more of the
+ * four access-tier words), regardless of how many of the four are present, and then asserts EVERY
+ * recognised occurrence is complete as its own named test — so an incomplete copy REDS BY NAME instead
+ * of vanishing. Two real two-member matches in the scanned trees are NOT `NodeFieldAccess` copies at
+ * all (`RoleFieldPolicy.editability` in `types/plugin.ts`, `FieldEditability` in `AfterSalesView.vue`
+ * — unrelated field-policy types that happen to share two of the four words) and one is a real,
+ * deliberate PARTIAL derivation (`NODE_FIELD_ACCESS_WRITABLE_VALUES`, Lock-7B §2.2, `editable ∪
+ * required` only); per the gate's instruction none are silently threshold-excluded — each is an
+ * explicit, symbol-anchored `PARTIAL_CARRIER_ALLOWLIST` entry near the bottom of this file, and a test
+ * asserts every entry is actually exercised so a dead exemption reds instead of rotting.
  */
 const REPO = resolve(__dirname, '../../../..')
 const MEMBERS = ['editable', 'hidden', 'readonly', 'required'] // sorted
@@ -143,24 +160,161 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
     // 400-body assertion here would just re-implement that test against the same source text.
   })
 
-  it('the NINE sites live in exactly SEVEN files — an unlisted eighth file carrying a copy fails the census', () => {
-    // Census: scan both src trees for any of the enum-carrying SHAPES (member list, Record keys,
-    // guard disjunction, wire enum, or the derived-message IIFE). The set of FILES carrying at least
-    // one such shape must equal the seven files the nine named sites live in (types/approval-
-    // product.ts hosts both C-1 and C-2; approval-form-redaction.ts hosts both C-3 and C-4) — an
-    // unlisted eighth file adds a new carrier and reds this test. C-4's mechanical-call form is
-    // DELIBERATELY excluded from this shape scan (it carries no member LIST to census — its own file
-    // is still covered via C-3's Record-keys pattern) and is asserted by its own describe block above.
-    const shapePatterns = [
-      /'editable'\s*\|\s*'readonly'\s*\|\s*'hidden'\s*\|\s*'required'/, // type union (C-1, C-5)
-      /'editable'\s*,\s*'readonly'\s*,\s*'hidden'\s*,\s*'required'/, // member array — Set/literal (C-2, C-6)
-      /=== 'editable'\s*\|\|\s*value === 'readonly'\s*\|\|\s*value === 'hidden'\s*\|\|\s*value === 'required'/, // isNodeFieldAccess guard (C-7)
-      /NODE_FIELD_ACCESS_RANK\s*:\s*Record<NodeFieldAccess,\s*number>\s*=\s*\{/, // rank table (C-3)
-      /enum:\s*\[editable,\s*readonly,\s*hidden,\s*required\]/, // OpenAPI wire enum (C-8)
-      /NODE_FIELD_ACCESS_VALUES_MESSAGE\s*=\s*\(\(\)\s*=>/, // derived publish message (C-9)
-    ]
+  // --- P2-1 fix: shape-based, member-count-agnostic carrier census (see the top-of-file docstring) ---
+
+  interface ShapeMatch {
+    snippet: string
+    members: string[]
+    index: number
+  }
+  interface ShapeFamily {
+    label: string
+    checkComplete: boolean
+    find: (src: string) => ShapeMatch[]
+  }
+
+  const WORD_ALT = MEMBERS.join('|') // 'editable|hidden|readonly|required'
+
+  function wordsIn(text: string, wordRe: RegExp): string[] {
+    const found = new Set<string>()
+    for (const m of text.matchAll(wordRe)) {
+      const w = m[1]!
+      if ((MEMBERS as string[]).includes(w)) found.add(w)
+    }
+    return [...found].sort()
+  }
+
+  function matchesOf(src: string, re: RegExp, wordRe: RegExp): ShapeMatch[] {
+    return [...src.matchAll(re)].map((m) => ({ snippet: m[0], members: wordsIn(m[0], wordRe), index: m.index ?? -1 }))
+  }
+
+  // Each family matches a run of TWO OR MORE access-tier words joined by the connector real code uses
+  // for that shape, regardless of how many of the four are present — completeness is asserted
+  // separately below, per occurrence, which is the mechanism the outcome-shaped predecessor lacked.
+  const SHAPE_FAMILIES: ShapeFamily[] = [
+    {
+      label: 'type union',
+      checkComplete: true,
+      find: (src) => matchesOf(src, new RegExp(`'(?:${WORD_ALT})'(?:\\s*\\|\\s*'(?:${WORD_ALT})')+`, 'g'), /'([a-z]+)'/g),
+    },
+    {
+      label: 'member array (Set/literal)',
+      checkComplete: true,
+      find: (src) =>
+        matchesOf(src, new RegExp(`\\[\\s*'(?:${WORD_ALT})'(?:\\s*,\\s*'(?:${WORD_ALT})')+\\s*\\]`, 'g'), /'([a-z]+)'/g),
+    },
+    {
+      label: 'guard disjunction',
+      checkComplete: true,
+      find: (src) =>
+        matchesOf(
+          src,
+          new RegExp(`[\\w.]+\\s*===\\s*'(?:${WORD_ALT})'(?:\\s*\\|\\|\\s*[\\w.]+\\s*===\\s*'(?:${WORD_ALT})')+`, 'g'),
+          /'([a-z]+)'/g,
+        ),
+    },
+    {
+      // Still name-anchored (compiler-guarded exhaustiveness already forces all four keys), unlike the
+      // other families — kept member-agnostic in form for uniformity, but it can never actually be
+      // incomplete without failing `tsc` first.
+      label: 'rank table (C-3, compiler-guarded)',
+      checkComplete: true,
+      find: (src) => {
+        const m = src.match(/NODE_FIELD_ACCESS_RANK\s*:\s*Record<NodeFieldAccess,\s*number>\s*=\s*\{([^}]*)\}/)
+        return m ? [{ snippet: m[0], members: wordsIn(m[1]!, /(\w+)\s*:\s*\d+/g), index: m.index ?? -1 }] : []
+      },
+    },
+    {
+      label: 'OpenAPI wire enum (C-8)',
+      checkComplete: true,
+      find: (src) =>
+        matchesOf(
+          src,
+          new RegExp(`enum:\\s*\\[\\s*(?:${WORD_ALT})(?:\\s*,\\s*(?:${WORD_ALT}))+\\s*\\]`, 'g'),
+          new RegExp(`(${WORD_ALT})`, 'g'),
+        ),
+    },
+    {
+      // C-9's message is DERIVED (`[...NODE_FIELD_ACCESS_VALUES]`) and never carries a literal member
+      // list — that absence IS its correctness (OD-L7B-10) — so it contributes to carrier-FILE
+      // detection but is excluded from the per-occurrence completeness check, not from detection.
+      label: 'derived publish message (C-9, carries no member list by design)',
+      checkComplete: false,
+      find: (src) => {
+        const m = src.match(/NODE_FIELD_ACCESS_VALUES_MESSAGE\s*=\s*\(\(\)\s*=>/)
+        return m ? [{ snippet: m[0], members: [], index: m.index ?? -1 }] : []
+      },
+    },
+  ]
+
+  // Explicit, honest exemptions (G-14 / P2-1 — "if a file legitimately carries a subset, it needs an
+  // explicit commented exemption entry, not silent invisibility"). `nearSymbol` must appear within
+  // `symbolWindow` bytes of the match, so an entry cannot excuse an UNRELATED occurrence that happens
+  // to land in the same file with the same member set but away from the symbol it is pinned to.
+  const PARTIAL_CARRIER_ALLOWLIST: Array<{
+    file: string
+    members: string[]
+    nearSymbol: string
+    symbolWindow: number
+    reason: string
+  }> = [
+    {
+      file: 'packages/core-backend/src/types/approval-product.ts',
+      members: ['editable', 'required'],
+      nearSymbol: 'NODE_FIELD_ACCESS_WRITABLE_VALUES',
+      symbolWindow: 200,
+      reason:
+        'Lock-7B §2.2 DERIVED writable subset (editable ∪ required only, by design) — not a hand ' +
+        'mirror of the full enum; this file is already a complete carrier via C-1/C-2 above.',
+    },
+    {
+      file: 'packages/core-backend/src/types/plugin.ts',
+      members: ['editable', 'readonly'],
+      nearSymbol: 'RoleFieldPolicy',
+      symbolWindow: 200,
+      reason:
+        "Unrelated plugin RBAC field-policy editability — no 'hidden'/'required' member; visibility " +
+        "('hidden'/'visible') is a separate field on the same interface.",
+    },
+    {
+      file: 'apps/web/src/views/AfterSalesView.vue',
+      members: ['editable', 'readonly'],
+      nearSymbol: 'FieldEditability',
+      symbolWindow: 200,
+      reason:
+        "Unrelated after-sales ticket field policy — visibility ('hidden'/'visible') is a separate " +
+        'sibling type on the same interface, not part of this union.',
+    },
+  ]
+  const allowlistHits = new Set<number>()
+
+  function exemption(file: string, src: string, match: ShapeMatch): boolean {
+    const sortedMembers = [...match.members].sort()
+    for (let i = 0; i < PARTIAL_CARRIER_ALLOWLIST.length; i++) {
+      const entry = PARTIAL_CARRIER_ALLOWLIST[i]!
+      if (entry.file !== file) continue
+      if (JSON.stringify([...entry.members].sort()) !== JSON.stringify(sortedMembers)) continue
+      const start = Math.max(0, match.index - entry.symbolWindow)
+      const end = match.index + match.snippet.length + entry.symbolWindow
+      if (!src.slice(start, end).includes(entry.nearSymbol)) continue
+      allowlistHits.add(i)
+      return true
+    }
+    return false
+  }
+
+  interface Occurrence {
+    file: string
+    label: string
+    snippet: string
+    members: string[]
+    index: number
+    checkComplete: boolean
+  }
+
+  function scanTree(): Occurrence[] {
     const roots = ['packages/core-backend/src', 'apps/web/src', 'packages/openapi/src']
-    const carriers = new Set<string>()
+    const occurrences: Occurrence[] = []
     for (const root of roots) {
       for (const abs of walk(join(REPO, root))) {
         if (!abs.endsWith('.ts') && !abs.endsWith('.vue') && !abs.endsWith('.yml')) continue
@@ -168,15 +322,65 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
         // openapi dist/dist-sdk are GENERATED artifacts (§0.4 "Declared scope") — regenerated by CI
         // (G-14b), deliberately outside this hand-copy census.
         if (abs.includes(`${join(REPO, 'packages/openapi')}/dist`)) continue
+        const file = abs.slice(REPO.length + 1)
         const src = readFileSync(abs, 'utf8')
-        if (shapePatterns.some((re) => re.test(src))) carriers.add(abs.slice(REPO.length + 1))
+        for (const family of SHAPE_FAMILIES) {
+          for (const match of family.find(src)) {
+            if (exemption(file, src, match)) continue
+            occurrences.push({
+              file,
+              label: family.label,
+              snippet: match.snippet,
+              members: match.members,
+              index: match.index,
+              checkComplete: family.checkComplete,
+            })
+          }
+        }
       }
     }
-    // C-9 lives in ApprovalProductService.ts but is asserted by its own describe block above (its
-    // message is derived, not a literal list), so it is not one of the SITES member-list entries —
-    // named here explicitly rather than left implicit.
+    return occurrences
+  }
+
+  // Computed ONCE at collection time (mirrors the `SITES` pattern above), so both the file-list test
+  // and the dynamically-generated per-occurrence completeness tests below share one tree walk.
+  const occurrences = scanTree()
+
+  it('the NINE sites live in exactly SEVEN files — an unlisted eighth file carrying a copy fails the census', () => {
+    // Carrier detection is SHAPE-based and member-count-agnostic: a file counts as a carrier the
+    // moment it holds ANY recognised union/Set/guard/Record/wire-enum/derived-message shape, complete
+    // or not — an incomplete one still adds a NEW carrier file here (this is exactly what the
+    // predecessor missed), and is separately asserted incomplete below.
+    const carriers = new Set(occurrences.map((o) => o.file))
     const expectedFiles = [...new Set([...SITES.map((s) => s.file), 'packages/core-backend/src/services/ApprovalProductService.ts'])].sort()
     expect([...carriers].sort()).toEqual(expectedFiles)
+    // Floor, so a regression that narrows the shape patterns back down to "match nothing" cannot pass
+    // by shrinking BOTH `carriers` and `expectedFiles` to empty at once (an empty scan is not evidence
+    // of absence — feedback_empty_read_is_not_absence): every expected file must have contributed at
+    // least one occurrence, and the total occurrence count must be at least the number of expected
+    // files (types/approval-product.ts alone contributes two — C-1 and C-2 — so this is a true floor,
+    // not a tautology).
+    expect(occurrences.length).toBeGreaterThanOrEqual(expectedFiles.length)
+    for (const file of expectedFiles) {
+      expect(occurrences.some((o) => o.file === file), `${file} contributed zero occurrences`).toBe(true)
+    }
+  })
+
+  for (const occ of occurrences.filter((o) => o.checkComplete)) {
+    it(`${occ.file} :: ${occ.label} @${occ.index} carries EXACTLY the four ratified members (\`${occ.snippet.slice(0, 70).replace(/\s+/g, ' ')}\`)`, () => {
+      // This is the test that did not exist before the fix: dropping (or never having carried) a
+      // member from THIS occurrence reds this distinct, dynamically-named test, naming both the file
+      // and the byte offset — a stale hand copy is recognised BY its incomplete member set now,
+      // instead of being invisible to the scan that found it.
+      expect([...occ.members].sort(), `${occ.file}@${occ.index} (${occ.label})`).toEqual(MEMBERS)
+    })
+  }
+
+  it('every PARTIAL_CARRIER_ALLOWLIST entry is exercised — a dead exemption reds instead of rotting silently', () => {
+    for (let i = 0; i < PARTIAL_CARRIER_ALLOWLIST.length; i++) {
+      const entry = PARTIAL_CARRIER_ALLOWLIST[i]!
+      expect(allowlistHits.has(i), `allowlist entry for ${entry.file} (${entry.nearSymbol}) matched nothing this run`).toBe(true)
+    }
   })
 })
 

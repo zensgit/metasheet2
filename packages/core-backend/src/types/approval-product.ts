@@ -900,7 +900,8 @@ export interface ApprovalActionRequest {
   /**
    * Lock-3 §3 / Lock-7 L7-C — the field-write channel for a handler `handle` submission. Lock-7 P4-B
    * lands the write: a plain object `{ fieldId: value }` is applied under the actor's single-node mask
-   * (`editable` writes; `readonly`/`hidden`/unknown/detail-sub-column refuse values-free), validated
+   * (`editable`/`required` write, Lock-7B §2.2; `readonly`/`hidden`/unknown/detail-sub-column refuse
+   * values-free), validated
    * against the FROZEN version schema, then UPDATEs `form_snapshot` in place inside the handle
    * transaction plus append-only revision rows (OD-L7-6). `{}` is an accepted zero-write no-op;
    * `null` / a non-object is a values-free 400 `APPROVAL_FIELD_WRITE_PAYLOAD_INVALID`. Meaningful only
