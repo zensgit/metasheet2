@@ -298,9 +298,9 @@ describeDb('POST /api/attendance/punch — membership-derived org check', () => 
     const unscoped = await punchNullOperationId(userD2)
     expect(unscoped.status).toBe(200)
     const unscopedOrgIds = await recordOrgIdsFor(userD2)
-    expect(unscopedOrgIds).toHaveLength(1)
-    expect(unscopedOrgIds[0]).not.toBe(orgA)
-    expect(unscopedOrgIds[0]).not.toBe(orgB)
+    // Pin today's resolution exactly (gate round-2 P3-3): a constant-org mutation
+    // must red here, not only "some write happened".
+    expect(unscopedOrgIds).toEqual(['default'])
 
     const scoped = await punchNullOperationId(userD2, orgB)
     expect(scoped.status).toBe(200)
@@ -330,7 +330,7 @@ describeDb('POST /api/attendance/punch — membership-derived org check', () => 
     const res = await punchNullOperationId(userE2)
     expect(res.status).toBe(200)
     const orgIds = await recordOrgIdsFor(userE2)
-    expect(orgIds).toHaveLength(1)
+    expect(orgIds).toEqual(['default'])
   })
 
   it('(f) member of a mixed-case org id: the lowercase twin (not a member) -> 403; the exact-case string -> 200 (positive control)', async () => {
