@@ -3,12 +3,19 @@ import { readFileSync, readdirSync, statSync } from 'fs'
 import { join, resolve } from 'path'
 import ts from 'typescript'
 // MECHANISM FIX v5 — the real parser for `.ts` files and the `<script>`/`<script setup>` block of
-// `.vue` files (see the DECLARATION BOUNDARIES section further down). `@vue/compiler-sfc` is the
-// SAME SFC parser `vue-tsc` itself uses to split a `.vue` file into blocks — declared as an explicit
-// devDependency of THIS package (`packages/core-backend`, which owns this test) rather than resolved
-// out of `apps/web`'s dependency tree by path, so `pnpm install --frozen-lockfile` links it
-// deterministically regardless of which workspace package runs the test.
-import { parse as parseVueSfc } from '@vue/compiler-sfc'
+// `.vue` files (see the DECLARATION BOUNDARIES section further down). For `.ts` files this is the
+// TypeScript compiler API (`ts.createSourceFile`, imported above) — unchanged. For the `.vue` half,
+// the `<script>`/`<script setup>` block's byte range is located by a minimal inline tag scan,
+// `extractVueScriptBlocks` (below, next to `vueUnitResolver`), NOT by depending on
+// `@vue/compiler-sfc` (the same SFC parser `vue-tsc` itself uses): this package
+// (`packages/core-backend`, which owns this test) otherwise has no reason to depend on the Vue SFC
+// toolchain, and adding it as a devDependency re-pins `pnpm-lock.yaml` — itself digest-pinned by
+// sealed-export package provenance (`sealed-export-package-provenance.cjs`), a governance artifact
+// this test file does not own and must not silently re-seal. Once a block's byte range is located,
+// its content is fed through the SAME `astStatementUnitResolver` (below) used for `.ts` files —
+// the real-AST attribution win described throughout this file is unchanged; only how the `.vue`
+// script block's boundaries are FOUND is now a text-level heuristic instead of a real SFC parse.
+// See residual (j), below the other lettered gaps, for exactly what that heuristic does not handle.
 
 /**
  * THE COMPILER IS THE PRIMARY GATE. THIS FILE IS A BEST-EFFORT BACKSTOP, NOT THE PRIMARY GUARANTEE.
@@ -42,7 +49,7 @@ import { parse as parseVueSfc } from '@vue/compiler-sfc'
  * copies per already-tracked file (v4), so a NEW copy landing in an already-scanned file — incomplete
  * or a brand-new complete duplicate alike — is caught rather than passing unnoticed, subject to the
  * mechanism's own honestly-stated residual
- * (several concrete gaps, labelled (a)–(i) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
+ * (several concrete gaps, labelled (a)–(j) — see the letters just above `PARTIAL_CARRIER_ALLOWLIST`
  * below; deliberately NOT phrased as an unqualified "any incomplete copy anywhere fails the census"
  * guarantee, and the letter RANGE rather than a transcribed count is what a future edit must keep in
  * sync — see the note at the top of that list).
@@ -109,7 +116,7 @@ import { parse as parseVueSfc } from '@vue/compiler-sfc'
  * see residual (h)). See the full mechanism docstring immediately above `PARTIAL_CARRIER_ALLOWLIST`
  * below for the boundary derivation and the honestly-scoped residual this leaves (this is NOT an
  * unconditional "any incomplete copy anywhere fails the census" guarantee — several concrete gaps are
- * named there, letters (a)–(i)).
+ * named there, letters (a)–(j)).
  *
  * MECHANISM FIX v5 (2026-08-20, fourth-round requalification, finding R8) has TWO independent halves,
  * and downgrades the file's own claim to match:
@@ -551,13 +558,14 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   // RESIDUAL (stated precisely, not swept under this mechanism's greater reach than v1's, and NOT
   // pinned to a transcribed count that can silently go stale — this file's own COUNT HISTORY
   // discipline at the top applies here too): this scan is NOT an unconditional guarantee that "any
-  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(i), are
+  // file anywhere carrying an incomplete copy fails the census". The gaps below, labelled (a)–(j), are
   // ALL that are currently known; grep this file for the next unused letter before adding one, and
-  // update the "labelled (a)–(i)" cross-references at the top of this file (there are two) in the same
+  // update the "labelled (a)–(j)" cross-references at the top of this file (there are two) in the same
   // change. Most are inherent to literal-text scanning rather than to shape enumeration, so no amount
-  // of ADDING shape families would close them either — (f), (g), (h) and (i) are the four exceptions,
-  // introduced or newly surfaced by MECHANISM FIX v3/v4/v5 and named so, not folded silently into the
-  // older letters. (f) and (g) are RETIRED (closed) letters, kept rather than reused or deleted, per
+  // of ADDING shape families would close them either — (f), (g), (h), (i) and (j) are the five
+  // exceptions, introduced or newly surfaced by MECHANISM FIX v3/v4/v5 or by this dependency-removal
+  // change ((j)), and named so, not folded silently into the older letters. (f) and (g) are RETIRED
+  // (closed) letters, kept rather than reused or deleted, per
   // this file's own COUNT HISTORY discipline:
   //   (a) SCOPE — only `packages/core-backend/src`, `apps/web/src`, `packages/openapi/src` are
   //       walked (via the same `readdirSync`-based `walk()` as before, so a NEW file in an
@@ -698,6 +706,31 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   //       (the compiler does NOT catch this either: `NODE_FIELD_ACCESS_MEMBERS, STALE = [...]` is
   //       perfectly valid TypeScript, and `STALE` is simply an unused, unexported local the compiler
   //       has no reason to flag).
+  //   (j) SCRIPT-BLOCK LOCATION HEURISTIC (2026-08-20, dependency-removal change) — `.vue` file
+  //       `<script>`/`<script setup>` block boundaries are now located by `extractVueScriptBlocks`
+  //       (below, next to `vueUnitResolver`), a minimal inline scan for a `<script` open tag and its
+  //       nearest following `</script>` close tag, rather than by `@vue/compiler-sfc` (the real SFC
+  //       parser `vue-tsc` itself uses — removed as a devDependency of this package to avoid
+  //       re-pinning `pnpm-lock.yaml`; see the top-of-file comment). This is a DIFFERENT and
+  //       NARROWER gap than the one (i) and R8 before it are about: the AST attribution INSIDE a
+  //       located block — `astStatementUnitResolver`, unchanged, still the real TypeScript compiler
+  //       API, not a regex — is untouched by this change. What is now a heuristic is only FINDING the
+  //       block's byte range in the first place. A `.vue` file with an EXOTIC or MALFORMED `<script>`
+  //       tag shape this scan does not anticipate — a self-closing `<script/>` tag, an open tag whose
+  //       `>` appears inside a quoted attribute value before the tag's real close (`<script
+  //       data-x=">">`), or script CONTENT that itself contains the literal text `</script>` (inside
+  //       a string or comment) and so truncates the block early via the plain `indexOf` this scan
+  //       uses — is missed or mis-bounded by `extractVueScriptBlocks`, and the mis-scanned portion
+  //       degrades to being treated as ordinary TEMPLATE markup: NO boundaries contributed for it,
+  //       the SAME "nothing to protect" behaviour residual (h) already documents for a `.vue` file
+  //       with no `<script>` block at all — not a crash, and not silent zero protection for the
+  //       WHOLE file, only for the mis-scanned byte range. Verified (not assumed): every `.vue` file
+  //       this census currently walks (`ApprovalGraphNodeConfigEditor.vue`,
+  //       `MetaSheetPermissionManager.vue`, `AfterSalesView.vue`, `FormView.vue`,
+  //       `TemplateAuthoringView.vue`) uses a single, plain `<script setup lang="ts">` open tag with
+  //       exactly one matching `</script>` close tag and no attribute value containing `>`, so
+  //       nothing in the tree today evades this gap — recorded here rather than left implicit, per
+  //       this file's own residual-naming discipline.
   // These are the honest scope of "shape-agnostic": agnostic to CONNECTOR syntax (the failure class
   // R1 found), as of v3/v5, to a stale copy's PROXIMITY to a real TS/JS-declaration or YAML-key
   // carrier PROVIDED it is not textually part of the SAME STATEMENT as that carrier (i), as of v4, to
@@ -862,37 +895,63 @@ describe('NodeFieldAccess enum mirror (Lock-7 G-14 / Lock-7B OD-L7B-10)', () => 
   }
 
   /**
-   * `.vue`: split into its script block(s) via `@vue/compiler-sfc` (the same parser `vue-tsc` uses),
-   * run `astStatementUnitResolver` on each block's own content, and offset every resulting id back to
-   * absolute file positions. TEMPLATE markup and anything outside a script block contributes NO
-   * boundaries of its own — deliberately unchanged from v3 (see residual (h) and the DECLARATION
-   * BOUNDARIES docstring above `PARTIAL_CARRIER_ALLOWLIST`): that permissiveness is what keeps
-   * FormView.vue's cross-element `hidden`+`required` pair and TemplateAuthoringView.vue's linear-editor
-   * options clustering correctly. A position outside every script block shares the trailing unit id of
-   * whichever script block most recently precedes it (mirroring the gap-fallback inside
-   * `astStatementUnitResolver`, for the identical reason); a `.vue` file with NO `<script>` block at
-   * all gets a single shared id for the whole file, matching v3's template behaviour exactly (nothing
-   * to protect, because there is no code there to protect). If `@vue/compiler-sfc` itself throws on a
-   * file it cannot parse, this falls back to the retired v3 column-0 regex over the RAW file text — at
-   * least as protective as the mechanism this file shipped with before v5, never silently zero.
+   * Minimal inline `<script>`/`<script setup>` block locator (residual (j), dependency-removal
+   * change) — replaces `@vue/compiler-sfc` as the way a `.vue` file's script block byte range is
+   * found. Finds every `<script ...>` open tag via a plain regex, then the NEAREST following literal
+   * `</script>` via `indexOf`, and returns each block's CONTENT byte range (`offset` = the position
+   * right after the open tag's own `>`; `len` = the byte count up to, not including, the close tag).
+   * A `.vue` SFC has at most two such blocks (`<script>` and/or `<script setup>`); both are returned,
+   * in source order, for the caller to sort by offset. See residual (j) above `PARTIAL_CARRIER_
+   * ALLOWLIST` for exactly what this text-level heuristic does not handle (it is narrower than, and a
+   * different gap from, the real parser it replaces).
+   */
+  function extractVueScriptBlocks(src: string): Array<{ offset: number; len: number }> {
+    const blocks: Array<{ offset: number; len: number }> = []
+    const openTagRe = /<script\b[^>]*>/g
+    let m: RegExpExecArray | null
+    while ((m = openTagRe.exec(src))) {
+      const contentStart = m.index + m[0].length
+      const closeIdx = src.indexOf('</script>', contentStart)
+      if (closeIdx === -1) continue // no matching close tag anywhere after this open tag — skip (residual (j))
+      blocks.push({ offset: contentStart, len: closeIdx - contentStart })
+      openTagRe.lastIndex = closeIdx + '</script>'.length
+    }
+    return blocks
+  }
+
+  /**
+   * `.vue`: split into its script block(s) via `extractVueScriptBlocks` (above — NOT
+   * `@vue/compiler-sfc` as of the dependency-removal change described at the top of this file; see
+   * residual (j) for what that inline locator does not handle), run `astStatementUnitResolver` on
+   * each block's own content, and offset every resulting id back to absolute file positions. TEMPLATE
+   * markup and anything outside a script block contributes NO boundaries of its own — deliberately
+   * unchanged from v3 (see residual (h) and the DECLARATION BOUNDARIES docstring above
+   * `PARTIAL_CARRIER_ALLOWLIST`): that permissiveness is what keeps FormView.vue's cross-element
+   * `hidden`+`required` pair and TemplateAuthoringView.vue's linear-editor options clustering
+   * correctly. A position outside every script block shares the trailing unit id of whichever script
+   * block most recently precedes it (mirroring the gap-fallback inside `astStatementUnitResolver`,
+   * for the identical reason); a `.vue` file with NO `<script>` block at all gets a single shared id
+   * for the whole file, matching v3's template behaviour exactly (nothing to protect, because there
+   * is no code there to protect). If a literal `<script` substring exists but
+   * `extractVueScriptBlocks` cannot bound a block from it (residual (j)), this falls back to the
+   * retired v3 column-0 regex over the RAW file text — at least as protective as the mechanism this
+   * file shipped with before v5, never silently zero.
    */
   function vueUnitResolver(absPath: string, src: string): UnitResolver {
-    let descriptor: ReturnType<typeof parseVueSfc>['descriptor']
-    try {
-      descriptor = parseVueSfc(src, { filename: absPath }).descriptor
-    } catch {
+    const rawBlocks = extractVueScriptBlocks(src)
+    if (rawBlocks.length === 0) {
+      if (!src.includes('<script')) return () => -1 // no <script> at all — nothing to protect (matches v3's template-only behaviour)
+      // a literal `<script` substring exists but this scan could not bound a block from it (residual
+      // (j)) — degrade to the retired v3 column-0 regex over the RAW file text rather than silently
+      // dropping to zero protection
       const boundaries: number[] = []
       TS_DECLARATION_BOUNDARY_RE.lastIndex = 0
       let m: RegExpExecArray | null
       while ((m = TS_DECLARATION_BOUNDARY_RE.exec(src))) boundaries.push(m.index)
       return (pos) => unitIndexOf(boundaries, pos)
     }
-    const rawBlocks = [descriptor.script, descriptor.scriptSetup].filter(
-      (b): b is NonNullable<typeof b> => !!b,
-    )
-    if (rawBlocks.length === 0) return () => -1 // no <script> at all — nothing to protect (matches v3's template-only behaviour)
     const blocks = rawBlocks
-      .map((b) => ({ offset: b.loc.start.offset, len: b.content.length, resolve: astStatementUnitResolver(b.content, absPath + '.script.ts') }))
+      .map((b) => ({ offset: b.offset, len: b.len, resolve: astStatementUnitResolver(src.slice(b.offset, b.offset + b.len), absPath + '.script.ts') }))
       .sort((a, b) => a.offset - b.offset)
     return (pos) => {
       for (const b of blocks) {
