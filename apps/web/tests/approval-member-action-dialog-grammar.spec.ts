@@ -18,15 +18,17 @@ import { createApp, defineComponent, h, ref, type App as VueApp } from 'vue'
  *      `actionDialogError` ref (same slot approve/reject/comment already used) instead of a toast —
  *      and every dialog's own `open*` resets that ref, so a stale error from one verb's dialog can
  *      never bleed into a freshly-opened OTHER dialog (no existing test covered that reset).
- *   4. Best-effort focus-on-open of each dialog's primary NATIVE control (the two
- *      `ApprovalUserPicker`-backed dialogs — transfer / add-sign — are excluded; see the source
- *      comment on `actionDialogCommentRef` in ApprovalDetailView.vue for why).
  *
- * C7 (scout brief) applies here as much as it does to the shipped code: this vitest lane stubs
- * `ElDialog`/`ElInput`/`ElSelect`, so real focus-TRAP, focus-RETURN, and ESC-dismissal are NOT
- * verified by anything in this file — only "the component calls `.focus()` on its primary control's
- * ref after opening" is asserted, via a stub that exposes a spyable `focus` method. Real-browser
- * a11y evidence is out of scope for this slice (P5-C-3, per the scout brief).
+ * A fourth item — best-effort focus-on-open of each dialog's primary control — shipped in an
+ * earlier revision of this slice and was RETRACTED (adversarial-gate finding P2-1 on PR #5030):
+ * the real `<el-dialog>`'s own `ElFocusTrap` unconditionally re-takes focus to the dialog
+ * container on mount (`focus-trap/src/focus-trap.mjs` `startTrap()`), so the helper's single
+ * `nextTick` `.focus()` call never survived to become the resting `document.activeElement` in
+ * production — it was provably inert. The green tests for it existed only because this file's
+ * `ElDialog` stub does not implement a focus trap; a real-`ElDialog` probe showed the same code
+ * with the trap present produced an identical outcome to the code deleted. Real focus management
+ * for these dialogs (if ever built) is out of scope here — C7 in the scout brief already deferred
+ * it to a real-browser harness (P5-C-3).
  */
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
@@ -163,29 +165,21 @@ const ElDialog = defineComponent({
   },
 })
 
-// Exposes a `focus()` that forwards to the REAL underlying DOM node's `.focus()` — so "the
-// component moved focus into the dialog's primary control on open" is checked the same way a
-// real browser test would (`document.activeElement === thatNode`), not merely "a spy fired". Per
-// the scout's C7 this is the one half of focus management this jsdom lane CAN verify; real
-// focus-TRAP / focus-RETURN / ESC-dismissal are Element Plus's own native `<el-dialog>` behavior
-// and are not re-implemented or re-verified here.
-function makeFocusable(tag: 'input' | 'select', extra: (props: any, emit: any) => Record<string, unknown>) {
+function makeFieldStub(tag: 'input' | 'select', extra: (props: any, emit: any) => Record<string, unknown>) {
   return defineComponent({
     props: { modelValue: [String, Number, null] as never, placeholder: String, rows: Number, type: String },
     emits: ['update:modelValue'],
-    setup(props, { emit, expose, slots }) {
-      const el = ref<HTMLElement | null>(null)
-      expose({ focus: () => el.value?.focus() })
-      return () => h(tag, { ref: el, ...extra(props, emit) }, tag === 'select' ? (slots.default ? slots.default() : []) : undefined)
+    setup(props, { emit, slots }) {
+      return () => h(tag, extra(props, emit), tag === 'select' ? (slots.default ? slots.default() : []) : undefined)
     },
   })
 }
-const ElInput = makeFocusable('input', (props, emit) => ({
+const ElInput = makeFieldStub('input', (props, emit) => ({
   value: props.modelValue,
   placeholder: props.placeholder,
   onInput: (e: Event) => emit('update:modelValue', (e.target as HTMLInputElement).value),
 }))
-const ElSelect = makeFocusable('select', (props, emit) => ({
+const ElSelect = makeFieldStub('select', (props, emit) => ({
   'data-el-select': 'true',
   value: props.modelValue ?? '',
   onChange: (e: Event) => emit('update:modelValue', (e.target as HTMLSelectElement).value),
@@ -430,54 +424,6 @@ describe('P5-C-1 — member-action dialog grammar', () => {
         expect(freshDialog.querySelector('[data-testid="approval-action-dialog-error"]'), `${dialog} must not show the stale error`).toBeNull()
       })
     }
-  })
-
-  // ---------------------------------------------------------------------------------------------
-  // 4. Focus-on-open for the dialogs whose primary control is a plain Element Plus input/select
-  //    rendered directly in ApprovalDetailView.vue (transfer/add-sign are excluded — see the
-  //    doc comment on `actionDialogCommentRef` in the source for why).
-  // ---------------------------------------------------------------------------------------------
-  describe('focus-on-open (mutation-testable half only — see C7 in the file header)', () => {
-    // `document.activeElement === thatNode` is the same check a real-browser test would make —
-    // the stub's exposed `focus()` forwards to the real DOM node's `.focus()` (see `makeFocusable`
-    // above), so this is genuine behavioral proof, not "a spy fired". Mutation: delete either the
-    // `ref="…"` binding or its `focusPrimaryControl(...)` call in `ApprovalDetailView.vue` and the
-    // matching case here reds.
-    it('opening the comment dialog focuses its textarea', async () => {
-      mockActiveApproval.value = baseInstance({ nodeOperations: { ...ALL_ALLOWED } })
-      await mountView()
-      ;(q(container!, 'approval-comment-button') as HTMLButtonElement).click()
-      await flushUi()
-      const input = q(container!, 'approval-comment-dialog')!.querySelector('input')
-      expect(document.activeElement).toBe(input)
-    })
-
-    it('opening the return dialog focuses its target-node select', async () => {
-      mockActiveApproval.value = baseInstance({ nodeOperations: { ...ALL_ALLOWED } })
-      await mountView()
-      ;(q(container!, 'approval-return-button') as HTMLButtonElement).click()
-      await flushUi()
-      const select = q(container!, 'approval-return-dialog')!.querySelector('[data-el-select]')
-      expect(document.activeElement).toBe(select)
-    })
-
-    it('opening the reduce-sign dialog focuses its target select', async () => {
-      mockActiveApproval.value = baseInstance({ nodeOperations: { ...ALL_ALLOWED } })
-      await mountView()
-      ;(q(container!, 'approval-reduce-sign-button') as HTMLButtonElement).click()
-      await flushUi()
-      const select = q(container!, 'approval-reduce-sign-dialog')!.querySelector('[data-el-select]')
-      expect(document.activeElement).toBe(select)
-    })
-
-    it('opening the approve dialog focuses its comment textarea', async () => {
-      mockActiveApproval.value = baseInstance({ nodeOperations: { ...ALL_ALLOWED } })
-      await mountView()
-      ;(q(container!, 'approval-approve-button') as HTMLButtonElement).click()
-      await flushUi()
-      const input = q(container!, 'approval-action-dialog')!.querySelector('input')
-      expect(document.activeElement).toBe(input)
-    })
   })
 })
 

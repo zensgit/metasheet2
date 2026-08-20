@@ -652,7 +652,6 @@
             </el-tag>
           </div>
           <el-input
-            ref="actionDialogCommentRef"
             v-model="actionComment"
             type="textarea"
             :rows="3"
@@ -823,7 +822,6 @@
       <el-form>
         <el-form-item label="减签人">
           <el-select
-            ref="reduceSignSelectRef"
             v-model="reduceSignUserId"
             filterable
             placeholder="选择要移除的加签人"
@@ -897,7 +895,6 @@
             </el-tag>
           </div>
           <el-input
-            ref="commentDialogInputRef"
             v-model="actionComment"
             type="textarea"
             :rows="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentRows"
@@ -940,7 +937,6 @@
       <el-form>
         <el-form-item label="退回至节点">
           <el-select
-            ref="returnSelectRef"
             v-model="returnTargetNodeKey"
             placeholder="选择退回目标节点"
             aria-label="选择退回目标节点"
@@ -981,7 +977,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, nextTick, type Ref } from 'vue'
+import { ref, computed, onMounted, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -1545,30 +1541,6 @@ const addSignUserLabels = ref<Record<string, string>>({})
 const reduceSignDialogVisible = ref(false)
 const reduceSignUserId = ref('')
 
-// P5-C-1 — focus-on-open for the dialogs whose primary control is a plain Element Plus
-// input/select rendered directly in THIS view (both expose a public `focus()` method). The two
-// `ApprovalUserPicker`-backed dialogs (transfer / add-sign) are deliberately excluded: the picker
-// is a `<script setup>` SFC that does not `defineExpose` a `focus` method today, so a ref to it
-// would resolve to nothing callable — giving it one is real scope (a picker-level change under
-// C5), not dialog chrome, so it is left for a follow-on rather than faked here.
-const actionDialogCommentRef = ref<{ focus?: () => void } | null>(null)
-const commentDialogInputRef = ref<{ focus?: () => void } | null>(null)
-const reduceSignSelectRef = ref<{ focus?: () => void } | null>(null)
-const returnSelectRef = ref<{ focus?: () => void } | null>(null)
-
-/**
- * Best-effort focus-on-open for a dialog's primary control. `nextTick` is enough here because
- * none of these dialogs lazy-mount their body on open (Element Plus renders dialog content
- * unconditionally and toggles visibility via its own transition/overlay) — the target element
- * already exists by the time `open*` runs. C7 (scout brief): real focus-TRAP / focus-RETURN /
- * ESC-dismissal are Element Plus's own `<el-dialog>` behavior and have no real-browser harness in
- * this repo to verify against — this helper only owns the "move focus into the dialog's primary
- * field on open" half, which the guarded call below keeps genuinely mutation-testable.
- */
-function focusPrimaryControl(target: Ref<{ focus?: () => void } | null>): void {
-  void nextTick(() => target.value?.focus?.())
-}
-
 // P1-B 减签 picker — only previously add-signed (`metadata.addSign === true`),
 // still-active, user-typed assignments at the CURRENT node are reducible.
 // Requester-original / template-resolved / role rows are never listed (mirrors
@@ -1973,7 +1945,6 @@ function openActionDialog(action: 'approve' | 'reject') {
   actionComment.value = ''
   actionDialogError.value = null
   actionDialogVisible.value = true
-  focusPrimaryControl(actionDialogCommentRef)
 }
 
 function openTransferDialog() {
@@ -1990,7 +1961,6 @@ function openReturnDialog() {
   actionComment.value = ''
   actionDialogError.value = null
   returnDialogVisible.value = true
-  focusPrimaryControl(returnSelectRef)
 }
 
 function openCommentDialog() {
@@ -2000,7 +1970,6 @@ function openCommentDialog() {
   actionComment.value = ''
   actionDialogError.value = null
   commentDialogVisible.value = true
-  focusPrimaryControl(commentDialogInputRef)
 }
 
 // T3-1 v0 (ballot Q7): the mobile surface reuses the SAME version-less unified
@@ -2186,7 +2155,6 @@ function openReduceSignDialog() {
   actionComment.value = ''
   actionDialogError.value = null
   reduceSignDialogVisible.value = true
-  focusPrimaryControl(reduceSignSelectRef)
 }
 
 async function submitReduceSign() {
