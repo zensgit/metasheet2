@@ -113,6 +113,15 @@ export const appRoutes: RouteRecordRaw[] = [
     meta: { title: 'Group Rules', titleZh: '班组规则', requiresAuth: true, requiredFeature: 'attendanceAdmin' }
   },
   {
+    // Self-service tail UX fix: /attendance/records had no route (fell through to the
+    // catch-all -> '/'). The Reports tab inside AttendanceExperienceView.vue is reached
+    // via `tab=reports` (see normalizeTab / availableTabs there) — redirect there instead
+    // of dropping the deep link on the floor.
+    path: '/attendance/records',
+    name: 'attendance-records-redirect',
+    redirect: { path: '/attendance', query: { tab: 'reports' } }
+  },
+  {
     path: ROUTE_PATHS.MULTITABLE_COMMENT_INBOX,
     name: AppRouteNames.MULTITABLE_COMMENT_INBOX,
     component: MultitableCommentInboxView,
