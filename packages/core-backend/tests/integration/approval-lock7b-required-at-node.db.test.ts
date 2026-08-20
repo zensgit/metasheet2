@@ -4,6 +4,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { ApprovalProductService } from '../../src/services/ApprovalProductService'
 import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { NODE_FIELD_ACCESS_WRITABLE_VALUES } from '../../src/types/approval-product'
 
 /**
  * Lock-7B (docs/development/approval-lock7b-required-at-node-20260820.md) — node-level `required`
@@ -495,17 +496,39 @@ describeIfDatabase('Lock-7B node-level required field tier (必填) — real-DB 
 
   // ── G-16 — the DTO's writable-set promise, behaviourally: every member the DTO reports WRITABLE
   //           at this seat is accepted by the write mask at the same node ───────────────────────
-  it('G-16: fieldAccess reports `secret` as `required`; a write to it is ACCEPTED (writable), matching the editable∪required promise', async () => {
-    const tid = await createPublished(`${KEYPFX}-g16`, handlerGraph([{ fieldId: 'secret', access: 'required' }]))
+  //
+  // Prior requalification finding R4 (P3): the shipped test hard-coded ONE member (`required`)
+  // rather than iterating the exported `NODE_FIELD_ACCESS_WRITABLE_VALUES` set the lock's own G-16
+  // text names as the mandated mechanism ("by iterating the exported writable set rather than by
+  // listing members"), so a future member ADDED to that set without the write mask being extended to
+  // admit it would pass silently — nothing exercised the new member's write path. Iterating the
+  // constant closes that: adding a member to `NODE_FIELD_ACCESS_WRITABLE_VALUES` without a matching
+  // write-mask change now generates a NEW named test for that member and reds it here, rather than
+  // requiring a human to remember to hand-add a case.
+  for (const access of NODE_FIELD_ACCESS_WRITABLE_VALUES) {
+    it(`G-16: fieldAccess reports \`secret\` as \`${access}\` (a NODE_FIELD_ACCESS_WRITABLE_VALUES member); a write to it is ACCEPTED (writable)`, async () => {
+      const tid = await createPublished(`${KEYPFX}-g16-${access}`, handlerGraph([{ fieldId: 'secret', access }]))
+      const iid = await createInstance(tid, { reason: 'r' })
+
+      const detail = await req(base, `/api/approvals/${iid}`, handlerTok)
+      expect(detail.status).toBe(200)
+      const detailBody = (await detail.json()) as { fieldAccess?: Record<string, string> | null }
+      expect(detailBody.fieldAccess?.secret).toBe(access)
+
+      const write = await act(iid, handlerTok, { action: 'handle', fieldWrites: { secret: `writable-per-dto-${access}` } })
+      expect(write.status, await write.clone().text()).toBe(200)
+      expect((await instanceRow(iid)).form_snapshot?.secret).toBe(`writable-per-dto-${access}`)
+    })
+  }
+
+  // Negative control for the loop above, so "every member passes" is not confusable with "the write
+  // mask accepts everything regardless of access" — `readonly` (NOT in the writable set) must still
+  // be refused at the SAME node shape the loop just proved accepts `editable`/`required`.
+  it('G-16 negative control: `readonly` (not in NODE_FIELD_ACCESS_WRITABLE_VALUES) is REFUSED at the same node shape', async () => {
+    const tid = await createPublished(`${KEYPFX}-g16-readonly-control`, handlerGraph([{ fieldId: 'secret', access: 'readonly' }]))
     const iid = await createInstance(tid, { reason: 'r' })
-
-    const detail = await req(base, `/api/approvals/${iid}`, handlerTok)
-    expect(detail.status).toBe(200)
-    const detailBody = (await detail.json()) as { fieldAccess?: Record<string, string> | null }
-    expect(detailBody.fieldAccess?.secret).toBe('required')
-
-    const write = await act(iid, handlerTok, { action: 'handle', fieldWrites: { secret: 'writable-per-dto' } })
-    expect(write.status, await write.clone().text()).toBe(200)
-    expect((await instanceRow(iid)).form_snapshot?.secret).toBe('writable-per-dto')
+    const write = await act(iid, handlerTok, { action: 'handle', fieldWrites: { secret: 'should-not-write' } })
+    expect(write.status).toBe(403)
+    expect((await instanceRow(iid)).form_snapshot?.secret).toBeUndefined()
   })
 })
