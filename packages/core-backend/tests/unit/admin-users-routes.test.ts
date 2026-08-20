@@ -136,6 +136,13 @@ vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 import { adminUsersRouter } from '../../src/routes/admin-users'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('admin-users-routes.test.ts')
 
 function createMockResponse() {
   return {
@@ -1742,6 +1749,7 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).error.code).toBe('RECOVERY_AUTHORITY_BUSY')
     expect((response.body as Record<string, any>).error.details).toEqual({ retryable: true })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:delegated-role-action')
   })
 
   it('blocks delegated role access when no department scope is configured', async () => {
@@ -2622,6 +2630,8 @@ describe('admin-users routes', () => {
     // Not the unclassified fallback this route used to return for every error.
     expect((response.body as Record<string, any>).error.code).not.toBe('ROLE_ASSIGN_FAILED')
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:role-assign')
+    census.record('admin-users:busy-delegation')
   })
 
   it('assigns platform admin and syncs legacy admin columns', async () => {
@@ -4365,6 +4375,7 @@ describe('admin-users remaining recovery-authority-busy writer sites', () => {
 
     expectRetryable409(response)
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:member-group-action')
   })
 
   it('[recovery-census:admin-users:create-user] create user: busy lease on the users INSERT → retryable 409', async () => {
@@ -4388,6 +4399,7 @@ describe('admin-users remaining recovery-authority-busy writer sites', () => {
     })
 
     expectRetryable409(response)
+    census.record('admin-users:create-user')
   })
 
   it('create user: a non-40001 insert failure keeps the ORIGINAL USER_CREATE_FAILED 500 (control)', async () => {
@@ -4431,6 +4443,7 @@ describe('admin-users remaining recovery-authority-busy writer sites', () => {
 
     expectRetryable409(response)
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:role-unassign')
   })
 
   it('[recovery-census:admin-users:status] status update: busy lease inside the access-graph lock transaction → retryable 409', async () => {
@@ -4449,6 +4462,7 @@ describe('admin-users remaining recovery-authority-busy writer sites', () => {
 
     expectRetryable409(response)
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
+    census.record('admin-users:status')
   })
 })
 })

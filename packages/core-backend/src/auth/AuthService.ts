@@ -15,7 +15,6 @@ import { supportsAttendanceSelfService } from '../config/product-mode'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
-  LoginAliasClaimError,
   assertAliasCutoverAllowed,
   claimNonEmptyLoginAliasesOrThrow,
   findUserIdByLoginAlias,
@@ -99,10 +98,18 @@ function delay(ms: number): Promise<void> {
  * users email unique index (user_permissions/user_roles both insert with
  * ON CONFLICT DO NOTHING, and the id is a fresh randomUUID). NOT a general-purpose
  * duplicate detector — scoped to register()'s write set only.
+ *
+ * Duck-typed on `.code` rather than a bare `instanceof LoginAliasClaimError` (gate #5018
+ * NIT-3, lesson 判据本身也要被攻击): under a duplicated module instance `instanceof`
+ * silently fails and a genuine ALIAS_CONFLICT would rethrow → generic 500 instead of the
+ * truthful 409. `'ALIAS_CONFLICT'` is produced only by LoginAliasClaimError on this
+ * write set (Postgres errors carry SQLSTATE codes), so the duck-type does not widen the
+ * criterion; `'ALIAS_WRITE_FAILED'` still falls through to rethrow.
  */
 function isDuplicateIdentityConflict(error: unknown): boolean {
-  if (error instanceof LoginAliasClaimError) return error.code === 'ALIAS_CONFLICT'
-  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
+  if (typeof error !== 'object' || error === null) return false
+  const code = (error as { code?: unknown }).code
+  return code === 'ALIAS_CONFLICT' || code === '23505'
 }
 
 /**

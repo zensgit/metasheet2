@@ -87,6 +87,13 @@ import {
   bindDingTalkIdentityToUser,
   unbindSelfManagedDingTalkIdentity,
 } from '../../src/auth/dingtalk-oauth'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
+// site as its LAST statement, and the file-level afterAll installed here asserts the
+// EXECUTED set equals this file's registered set exactly. A skipped/focused-out/deleted
+// leg therefore reds this file instead of silently leaving a dead call site green.
+const census = censusFile('recovery-conflict-surfaces-services.test.ts')
 
 function markerError(): Error & { code: string } {
   return Object.assign(new Error(RECOVERY_AUTHORITY_BUSY_MARKER), { code: '40001' })
@@ -137,6 +144,7 @@ describe('applyInviteAcceptanceWrites (auth/invite-accept-writes.ts)', () => {
   it('[recovery-census:invite-accept-writes:apply] marker 40001 at the users write seam → named retryable RecoveryConflictError', async () => {
     installRejectingTransaction(markerError())
     expectNamedConflict(await caughtFrom(applyInviteAcceptanceWrites(input)))
+    census.record('invite-accept-writes:apply')
   })
 
   it('non-40001 error → the SAME object rethrows (byte-identical path)', async () => {
@@ -152,6 +160,7 @@ describe('activatePendingUser (auth/user-activate.ts)', () => {
   it('[recovery-census:user-activate:activate] marker 40001 at the users write seam → named retryable RecoveryConflictError', async () => {
     installRejectingTransaction(markerError())
     expectNamedConflict(await caughtFrom(activatePendingUser(input)))
+    census.record('user-activate:activate')
   })
 
   it('non-40001 error → the SAME object rethrows (ACTIVATE_* semantics untouched)', async () => {
@@ -176,6 +185,7 @@ describe('applyDirectoryDeprovisionCandidate (directory/deprovision-ledger.ts)',
   it('[recovery-census:deprovision-ledger:apply] marker 40001 from the caller-supplied client → named retryable RecoveryConflictError', async () => {
     const client = { query: vi.fn().mockRejectedValue(markerError()) }
     expectNamedConflict(await caughtFrom(applyDirectoryDeprovisionCandidate(client, input)))
+    census.record('deprovision-ledger:apply')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -193,6 +203,7 @@ describe('deprovision evidence writers (directory/deprovision-evidence-api.ts)',
       mode: 'rehire',
       adminUserId: 'admin-1',
     })))
+    census.record('deprovision-evidence:restore')
   })
 
   it('restoreDeprovisionEvent: non-40001 error → the SAME object rethrows', async () => {
@@ -213,6 +224,7 @@ describe('deprovision evidence writers (directory/deprovision-evidence-api.ts)',
       confirm: true,
       note: 'compensating orphan deny row',
     })))
+    census.record('deprovision-evidence:compensate')
   })
 
   it('compensateSupersededDenyGrant: coded refusals still surface UNCHANGED (fail-closed intact)', async () => {
@@ -234,6 +246,7 @@ describe('unbindDirectoryAccount (directory/directory-sync.ts)', () => {
       '22222222-2222-4222-8222-222222222222',
       { adminUserId: 'admin-1' },
     )))
+    census.record('directory-sync:unbind')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -260,6 +273,7 @@ describe('createProvisionedUser (auth/dingtalk-oauth.ts JIT users INSERT)', () =
     expectNamedConflict(await caughtFrom(
       __dingtalkOAuthInternalsForTests.createProvisionedUser(dtUser as never),
     ))
+    census.record('dingtalk-oauth:provision')
   })
 
   it('non-40001 error → the SAME object rethrows (fail-closed mappings untouched)', async () => {
@@ -299,6 +313,7 @@ describe('bindDingTalkIdentityToUser (auth/dingtalk-oauth.ts self/admin bind)', 
     stubOauthEnv()
     installRejectingTransaction(markerError())
     expectNamedConflict(await caughtFrom(bindDingTalkIdentityToUser(input as never)))
+    census.record('dingtalk-oauth:bind-identity')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -315,6 +330,7 @@ describe('unbindSelfManagedDingTalkIdentity (auth/dingtalk-oauth.ts)', () => {
   it('[recovery-census:dingtalk-oauth:self-unbind] marker 40001 under the access-graph mutex → named retryable RecoveryConflictError', async () => {
     installRejectingTransaction(markerError())
     expectNamedConflict(await caughtFrom(unbindSelfManagedDingTalkIdentity(input)))
+    census.record('dingtalk-oauth:self-unbind')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -371,6 +387,7 @@ describe('bindDirectoryAccount (directory/directory-sync.ts manual bind)', () =>
       localUserRef: 'user-1',
       adminUserId: 'admin-1',
     })))
+    census.record('directory-sync:bind')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -419,6 +436,7 @@ describe('admitDirectoryAccountUser (directory/directory-sync.ts manual admissio
       name: 'New User',
       email: 'new@example.com',
     })))
+    census.record('directory-sync:admit')
   })
 
   it('non-40001 error → the SAME object rethrows', async () => {
@@ -504,6 +522,7 @@ describe('syncDirectoryIntegration (directory/directory-sync.ts local-apply tran
     expectNamedConflict(await caughtFrom(
       syncDirectoryIntegration('dir-1', 'admin-1', 'scheduler'),
     ))
+    census.record('directory-sync:sync-local-apply')
   })
 
   it('non-40001 apply failure → the SAME object rethrows (run-failure semantics unchanged)', async () => {
