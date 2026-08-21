@@ -970,13 +970,6 @@ export default defineConfig({
       // real `user_orgs` membership rows — meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-punch-org-resolution.db.test.ts',
-      // SHADOW audit of the same route's org resolution (env
-      // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1). Boots real MetaSheetServer instances (one
-      // per env posture) with the real plugin and drives the real punch route against real
-      // `user_orgs` membership rows and the real `attendance_org_resolution_shadow` table —
-      // meaningless without real PostgreSQL.
-      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
-      'tests/integration/attendance-org-resolution-shadow.db.test.ts',
       // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
       // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
       // values against real CHECK constraints and deferred triggers, walks the
@@ -1397,6 +1390,16 @@ export default defineConfig({
       // WHOLE FILE into the `Run BPMN startProcess poller-disabled zero-residue` step in
       // plugin-tests.yml.
       'tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
+      // Recovery-authority schema drift A-vs-B floor: proves the hand-maintained constants in
+      // scripts/ops/multitable-recovery-schema-containment.mjs still equal what the REAL
+      // migrations (zzzz20260721121000_add_recovery_authority_locks.ts +
+      // zzzz20260728120000_correct_recovery_authority_locks.ts) install, plus the subject_type
+      // CHECK domain on record_permissions/field_permissions the helper does not fingerprint.
+      // DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green it, and
+      // wired as a WHOLE FILE into the `Run multitable real-DB integration` step in
+      // plugin-tests.yml (the same required test (20.x) DB-whitelisted step the sibling
+      // multitable-recovery-authority-*-realdb.test.ts files already run in).
+      'tests/integration/recovery-schema-drift.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
