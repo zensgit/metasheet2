@@ -591,7 +591,14 @@ export class MetaSheetServer {
           resolveFieldIds: async ({ projectId, objectId, fieldIds }) => {
             return resolveProvisionedObjectFieldIds(projectId, objectId, fieldIds)
           },
-          ensureObject: async ({ projectId, baseId, descriptor }) => {
+          // `overwriteMode` must be destructured and forwarded explicitly: this
+          // hook is the FALLBACK that plugin-scope's ensureObject takes when no
+          // ensureObjectInScope hook is registered (multitable/plugin-scope.ts —
+          // the scoped branch spreads ...input, and index.ts's scoped hook does
+          // forward it). Dropping it here silently downgraded a caller's explicit
+          // opt-in to the fail-closed default, i.e. an advertised API option
+          // (types/plugin.ts EnsureObjectInput) was inert on this path.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -606,6 +613,7 @@ export class MetaSheetServer {
                 projectId,
                 baseId,
                 descriptor,
+                overwriteMode,
               })
             })
           },
