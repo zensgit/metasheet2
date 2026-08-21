@@ -150,6 +150,10 @@ attachment-scoped, so the function moves to a new `approval-instance-readability
 `approval-attachment-runtime.ts` becomes an importer, not the owner. Fail-closed: any thrown error from
 any lookup denies, and the caller maps the denial to its surface's shape (OD-S1-11).
 
+The signature carries **no roles and no org parameter** on purpose: both are derived inside the
+predicate, from the DB, per **OD-S1-17** (§2.2a). A signature that accepted them would let each call site
+choose its own notion of "the viewer's roles" — which is precisely how C-1, C-2 and C-3 came to disagree.
+
 - *Rejected — (b) keep it in `approval-attachment-runtime.ts`*: the module name would then lie about the
   predicate's scope, and Lock-9's citation of it as an attachment predicate would keep reading true when
   it is not. Naming is part of the contract.
@@ -326,8 +330,9 @@ NULL gate (G-S1-3) is admitted **only paired with** G-S1-4 (a PLM-mirrored insta
 its legitimate approver); a slice that ships G-S1-3 green without G-S1-4 has proven nothing.
 
 **(f) [R] — the caller does not supply the org.** The predicate takes `(db, viewerId, instanceId)` and
-derives both sides server-side: the instance's org from the row, the viewer's from their session
-principal. A body- or query-supplied `org_id` is a cross-tenant forgery — the same rule the attachment
+derives both sides server-side: the instance's org from the row, the viewer's per **OD-S1-17(b)**
+(§2.2a — from `user_orgs`, with `req.authenticatedTenantId` as the only authoritative request-scoped
+field). A body- or query-supplied `org_id` is a cross-tenant forgery — the same rule the attachment
 routes already enforce (`routes/approval-attachments.ts:43-48`, cited by Lock-9 at its `:186-187`).
 
 **OD-S1-10 [R] — the attachment-EXISTS org pin is REMOVED and REPLACED by the instance org pin.**
@@ -342,6 +347,71 @@ its own requester. Two consequences must be stated rather than discovered:
   C-1's two shipped consumers this widening is unobservable: both require an attachment row to reach the
   check (`approval-attachment-storage.ts:275`, `routes/approval-attachments.ts:406`). G-S1-1 proves the
   widening at the predicate level and G-S1-2 proves the non-observability at the route level.
+
+### 2.2a Derived inputs — where "the viewer's roles" and "the viewer's org" come from
+
+**OD-S1-17 [R] — both derived inputs are resolved SERVER-SIDE FROM THE DATABASE, from the same sources
+OD-S1-8 already committed to; neither is taken from a token claim or a header.**
+
+OD-S1-1 fixes the signature at `(db, viewerId, instanceId)`, but OD-S1-4 and OD-S1-7 both match against
+the viewer's **roles**, and OD-S1-9(f) says the viewer's **org** is derived from their session principal.
+Leaving those two derivations unstated would not be a gap in detail — it would silently reopen, inside
+the predicate, the exact token-trust channel OD-S1-8(b) rejects, because the three constructs this lock
+unifies already disagree about both.
+
+**(a) Roles — DB-backed.** The canonical derivation is the one C-1 already uses:
+`viewerRoles` (`approval-attachment-runtime.ts:177-191`) — `users.role` for an **active** user (`:179`,
+`WHERE id = $1 AND is_active = TRUE`) unioned with `user_roles` joined to `roles`, contributing both
+`role_id` and `name` (`:181-188`). Rejected: C-2's JWT roles (`approval-metrics.ts:187-192`) and C-3's
+`resolveApprovalActorRoles(req)` (`routes/approvals.ts:151-159`, `req.user.role` + `req.user.roles`),
+both of which trust claims carried in the token. Taking either would produce a predicate whose admin arm
+reads the DB (OD-S1-8) while its role arm reads the token — one function, two trust models, and the
+weaker one wins because the arms are OR-ed.
+
+Note the asymmetry inside C-1's own helper, kept deliberately: `users.is_active = TRUE` gates only the
+`users.role` column, not the `user_roles` rows. This lock does not change that; it is recorded so a later
+reader does not "fix" it as an oversight.
+
+**(b) Org — DB-backed, from `user_orgs`; the authoritative request-scoped field is
+`req.authenticatedTenantId`, never `req.user.tenantId`.** These are two different fields with two
+different trust levels, and the distinction is the whole ruling. `req.authenticatedTenantId`
+(`packages/core-backend/src/auth/jwt-middleware.ts:101-104`) is set **only** from a value the verified
+token itself carries. `req.user.tenantId` is a separate, more permissive field maintained a few lines
+below it (`:106-108`) — the two are not interchangeable, and a surface that reads the second one is not
+reading the authenticated tenant. The same distinction was already settled once on another line, where
+the authoritative org field was locked to `req.authenticatedTenantId` with a `403 ORG_CONTEXT_REQUIRED`
+on absence; this lock takes the same posture rather than re-deriving it.
+
+The currently-shipped approval org resolver (`approval-attachment-runtime.ts:470-475`) reads
+`req.user.tenantId` and, when it is empty, returns the literal `'default'`. Both halves are refused here:
+the field for the reason above, and the fallback because it is the DEFAULT_ORG_ID hole of OD-S1-9(a)
+reappearing one layer up — refusing a DB default while a resolver silently substitutes the same literal
+buys nothing (`feedback_failclosed_doors_cover_for_each_other`: door-level exclusivity is not word-level
+exclusivity). **Per the disclosure doctrine, the reachability analysis of the shipped resolver — which
+deployments and token vintages can reach which arm — is held in the private line inventory and is
+deliberately not written out here** (`feedback_no_public_vuln_disclosure_on_prs`); this document records
+only the design ruling it produces, which is what the implementer needs.
+
+Ruled, therefore: the org in play is resolved server-side from `user_orgs`
+(`zzzz20260114110000_create_user_orgs_table.ts`); a viewer with **no active `user_orgs` row** is denied,
+never defaulted; where a request-scoped org is needed, the field is `req.authenticatedTenantId` and its
+absence is a refusal, not a fallback.
+
+**(c) OWNER DECISION REQUIRED — multi-org viewers.** `user_orgs` has PRIMARY KEY `(user_id, org_id)`
+(`zzzz20260114110000:20-27`), so one user may hold rows in several orgs and "the viewer's org" has no
+single answer. Until this is ruled, G-S1-10 (cross-org denial) is either sound or vacuous depending on a
+choice this document has not made — which is why it is a §5.1 blocking row and not a paragraph of
+caveats. Arms: **(c-i)** the predicate admits if the instance's org is in ANY of the viewer's active
+orgs (union semantics — simplest, and weakest); **(c-ii)** the request carries an explicit active-org
+context resolved from `req.authenticatedTenantId`, and a viewer with no membership in THAT org is denied
+even if they are a member elsewhere (exact-org semantics — the posture the attendance line settled on
+after a wildcard finding); **(c-iii)** single-org deployments only in v1, with a startup assert that
+refuses to boot the consumers if any user holds more than one active `user_orgs` row.
+
+- *Rejected — (d) leave the derivations to the implementing slice*: the implementer would reach for the
+  nearest existing helper, and the two nearest are the JWT ones. "We would not write it that way" is not
+  the test; `feedback_changing_the_convention_is_not_changing_the_invariant` — the test is whether the
+  wrong wiring is now refused.
 
 ### 2.3 Denial shape
 
@@ -426,7 +496,7 @@ See §2.11.
 | Construct | Action | Behaviour delta on migration | Gate |
 |---|---|---|---|
 | C-1 `isInstanceParticipant` | **replaced by** `canReadApprovalInstance`; call sites `approval-attachment-storage.ts:275` and `routes/approval-attachments.ts:406` re-point; the `orgId` parameter leaves the signature (the predicate derives it) | widens on zero-attachment instances (F-1 fixed); unobservable at the two shipped routes | G-S1-1, G-S1-2 |
-| C-2 metrics ACL | **replaced**; the inline SQL at `approval-metrics.ts:193-215` deleted, `isAdminActor` (`:32-42`) deleted or reduced to non-authorization use | **widens** by the CC arm (OD-S1-7, absent from C-2); **narrows** by the DB-backed admin arm (OD-S1-8) and by the org pin (C-2 has none) | G-S1-7 |
+| C-2 metrics ACL | **replaced**; the inline SQL at `approval-metrics.ts:193-215` deleted, and `isAdminActor` (`:32-42`) **deleted outright** — it is called from exactly one site, `:175`, verified by grep at the baseline | **widens** by the CC arm (OD-S1-7, absent from C-2); **narrows** three ways — the DB-backed admin arm (OD-S1-8), **DB-backed roles (OD-S1-17(a)): a JWT-only role claim with no `user_roles`/`users.role` row stops matching a role-typed seat**, and the org pin (C-2 has none) | G-S1-7 |
 | C-3 `listApprovals` tabs | **kept as a feed filter**; not rewritten in this slice | none | G-S1-8 (subset direction only) |
 | C-4 pending / pending-count | **kept as a feed filter** | none | G-S1-8 |
 | C-5 `GET /api/approvals/:id` | **gains** S1 (it had nothing) | **narrows**: non-participant `approvals:read` holders go 200 -> 404 | OD-S1-12, G-S1-5 |
@@ -483,7 +553,7 @@ the observed outcome.
 | G-S1-4 | **PLM-mirrored instance is still readable by its legitimate approver** — the gate that keeps G-S1-3 from being vacuous | a `plm:`-prefixed instance with a real user-typed seat: that user === `true`, and `GET /api/approvals/:id` + `/history` both 200 | a principal holding `plm:source-owned` **as a permission code** and nothing else === `false` (proves OD-S1-5's exclusion is load-bearing, per F-2) |
 | G-S1-5 | **Detail/history pairing** — for one identity and one instance the two routes return the SAME admission outcome | participant: detail 200 **and** history 200 | non-participant: detail 404 **and** history 404, asserted **as a pair inside one test** so a one-sided adoption cannot pass. Mutation: remove S1 from `approval-history.ts` only -> this gate reds while every single-route gate stays green |
 | G-S1-6 | **`policy_denied` cannot be self-minted** (the OD-S1-6 coupling). Mechanical, not a spot check: iterate the exported `ACTION_POLICY_KEYS` (`types/approval-product.ts:374-384`) and assert that every key with a **non-null** policy value is subject to the `APPROVAL_ASSIGNMENT_REQUIRED` gate | a seat-holder refused by node policy writes a `policy_denied` row and still reads the instance | a non-participant attempting each seat-gate-exempt verb writes **no** `approval_records` row (asserted by row count on that instance before and after) and remains `false`. Mutation: flip `ACTION_POLICY_KEYS.revoke` to a non-null key -> the enumeration must red |
-| G-S1-7 | **Metrics migration deltas, both directions** | a CC-only viewer, previously denied by C-2, now reads instance metrics (the declared widening) | a principal with `role: 'admin'` **in the JWT only** and no matching `users` row is now **denied**, asserted as an equality on the 403 body — and the SAME principal WITH a `users` row is allowed, so the test discriminates the DB read from the claim |
+| G-S1-7 | **Metrics migration deltas, all four directions** — one gate, because they are one substitution | a CC-only viewer, previously denied by C-2, now reads instance metrics (the declared widening) | **three negatives, each paired with its own positive so the test discriminates the DB read from the claim rather than merely failing**: (i) a principal with `role: 'admin'` **in the JWT only** and no matching `users` row is **denied**, while the SAME principal WITH the `users` row is allowed; (ii) a principal whose **role claim exists only in the JWT** and who holds a role-typed seat by that name is **denied** (OD-S1-17(a)), while the same principal with the matching `user_roles` row is allowed; (iii) a principal whose org is **not** established by `req.authenticatedTenantId` plus an active `user_orgs` row is **denied** (OD-S1-17(b)) — including the case where only the more permissive request-scoped field carries a value — while the same principal with the active `user_orgs` row is allowed. Each asserted as an equality on the observed status/body, never as "not the other error" |
 | G-S1-8 | **Feed ⊆ admission** (OD-S1-2). Over a fixture spanning all five tabs and several identities, every `(viewer, instanceId)` pair returned by `listApprovals` satisfies `canReadApprovalInstance` | a participant's tabs return their instances unchanged (no silently-empty inbox) | a constructed row the tab SQL returns but S1 denies makes the gate red — this negative must be **constructed and observed red**, because the known-wider external-source arm (§5.2 (i)) means the gate is expected to fail until that residual is ruled. Shipping it green without having seen it red is `feedback_ineffective_mutation_looks_like_a_useless_test` |
 | G-S1-9 | **Mention-notify seam defaults CLOSED** (OD-S1-15) | with the checker wired, a participant mentioned on an instance receives the notification | constructing the service **without** calling the setter notifies **nobody** — asserted as zero deliveries, not as "no error thrown". Mutation: change the field initializer to `async () => true` (mirroring `CommentService.ts:186`) -> this gate must red |
 | G-S1-10 | **Cross-org denial** | requester reads their own instance | the same principal id, present as a stale seat on **another org's** instance, is denied on that instance across all six migrated surfaces (detail, history, metrics, download, refs, comments) — enumerated, not sampled |
@@ -520,6 +590,7 @@ does not write into this section.)*
 |---|---|---|---|
 | OD-S1-9(c) | Backfill/anchor for bridge + PLM instances (`template_id IS NULL`, non-platform `source_system`): (c-i) named platform org / (c-ii) nullable-for-bridge with CHECK / (c-iii) exclude bridge rows from S1's consumers in v1 | `upsertPlmMirror` (`ApprovalBridgeService.ts:1106-1195`) stamps no org and derives none; `plm:` ids carry no tenant. There is no repository fact to read | the migration, and therefore every consumer |
 | OD-S1-12 | Ratify the detail-route contract narrowing (200 -> 404 for non-participant `approvals:read` holders) | it is a public behaviour change; the house rule is ratify-first | consumer (b) |
+| OD-S1-17(c) | Multi-org viewers: (c-i) union over the viewer's active orgs / (c-ii) exact-org from `req.authenticatedTenantId` with denial outside it / (c-iii) single-org-only in v1 with a boot assert | `user_orgs` PK is `(user_id, org_id)` (`zzzz20260114110000:20-27`), so "the viewer's org" has no single answer for a multi-org user. Until it is ruled, **G-S1-10 is either sound or vacuous** | the org half of the predicate, and G-S1-10's meaning |
 | OD-S1-8(d) | Keep or drop the admin bypass arm | product judgement about the admin surfaces (`/jump`, `/admin/reassign`), not a code fact | the predicate's arm list |
 | §5.2 (i) | The external-source feed arm (below) | it is shipped product behaviour, not a bug with an obvious fix | G-S1-8 can be written but is expected red until ruled |
 
@@ -573,6 +644,12 @@ property the runtime does not enforce"). Discharged as follows:
   vulnerability, and neither is described as safe.
 - OD-S1-6 is admitted **conditionally on a gate** (G-S1-6) rather than on a comment, because an invariant
   asserted only in prose is a hidden bug.
+- OD-S1-17 rules two derivations that are **not** what the shipped approval surfaces do today (roles from
+  the DB rather than token claims; org from `user_orgs` with `req.authenticatedTenantId` as the only
+  authoritative request-scoped field, rather than the more permissive field plus a `'default'` fallback).
+  Those are stated as the ruling this lock makes, not as behaviour that is in place — and the
+  reachability analysis of the shipped resolver is held in the private line inventory per the
+  disclosure doctrine, not published here.
 
 **M11 — evidence language is scoped** (`:247-250`). Discharged as follows:
 
