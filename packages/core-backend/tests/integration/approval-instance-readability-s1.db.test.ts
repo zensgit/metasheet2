@@ -608,6 +608,81 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
   })
 
   // ---------------------------------------------------------------------------------------------
+  // NEW-1 (P3, S1 requal) — the P1-1 fix (org conjunct must not reference `org_id` in the SQL
+  // STRING at all while the pin is OFF) shipped with no gate distinguishing it from the original
+  // defective form. Mechanically proven ungated by the requal: reintroducing the OLD conjoined
+  // SQL verbatim (`AND ($4::boolean = FALSE OR i.org_id = ANY($5::text[]))`, unconditionally
+  // present regardless of `pinEnabled`) left the full 40-test battery at `Tests 40 passed (40)` —
+  // nothing in the suite, in either config, told the fixed form apart from the reintroduced defect.
+  //
+  // This is that gate. It reproduces the P1-1 deploy-window probe as a PERMANENT regression test,
+  // not a one-off manual mutation: inside a dedicated client's transaction (rolled back at the
+  // end, so no other connection in this serial-only integration run ever observes the drop —
+  // Postgres DDL is transactional and MVCC-isolated), DROP the `org_id` column outright and assert
+  // the requester (arm 1) and a DB-backed admin (arm 5) are STILL admitted with the pin at its
+  // shipped default (OFF). Under the fixed code this passes because the org conjunct — and the
+  // column reference itself — is never assembled into the query text when `pinEnabled` is false.
+  // Under the OLD/M13-reintroduced form, Postgres resolves `i.org_id` at PARSE time regardless of
+  // the `$N::boolean = FALSE` runtime short-circuit, so the query throws `column i.org_id does not
+  // exist`, the predicate's fail-closed `catch` denies, and this test reds — exactly the class the
+  // P1-1 fix exists to close.
+  // ---------------------------------------------------------------------------------------------
+  describe('NEW-1: P1-1 regression gate — a DROPPED org_id column must not deny anyone while the pin is OFF', () => {
+    it('the requester and a DB-backed admin are STILL admitted after DROP COLUMN org_id, pin at its shipped default (OFF)', async () => {
+      delete process.env.APPROVAL_S1_ORG_PIN_ENABLED
+      expect(isOrgPinEnabled()).toBe(false) // this probe is only meaningful at the shipped default
+
+      const requesterId = freshId('s1-p11-requester')
+      const adminId = freshId('s1-p11-admin')
+      const instanceId = await seedInstance(requesterId)
+      createdUserIds.push(adminId)
+      await pool().query(
+        `INSERT INTO users (id, email, name, password_hash, role, is_admin, is_active)
+         VALUES ($1, $1||'@example.test', $1, 'x', 'admin', TRUE, TRUE)`,
+        [adminId],
+      )
+
+      const client = await pool().getInternalPool().connect()
+      try {
+        await client.query('BEGIN')
+        await client.query('ALTER TABLE approval_instances DROP COLUMN org_id')
+        // canReadApprovalInstance only needs `.query()` (the `Queryable` interface) — passing the
+        // SAME transactional client makes the predicate see the uncommitted DROP. Each probe runs
+        // inside its OWN SAVEPOINT (nested inside the outer transaction, AFTER the DROP): under the
+        // M13-reintroduced defect the predicate's query throws mid-probe, which leaves the pg
+        // transaction "aborted, commands ignored until end of transaction block" for every query
+        // that follows on this SAME client — without the savepoint, the second probe's `false`
+        // would be attributable to that cascade, not independently to the dropped column.
+        // `ROLLBACK TO SAVEPOINT` clears the abort while leaving the DROP (established BEFORE the
+        // savepoint) intact, so both assertions stay independently discriminating.
+        await client.query('SAVEPOINT probe_requester')
+        const requesterReadable = await canReadApprovalInstance(client, requesterId, instanceId)
+        await client.query('ROLLBACK TO SAVEPOINT probe_requester')
+        await client.query('SAVEPOINT probe_admin')
+        const adminReadable = await canReadApprovalInstance(client, adminId, instanceId)
+        await client.query('ROLLBACK TO SAVEPOINT probe_admin')
+        expect(
+          requesterReadable,
+          'P1-1 regressed: with the org pin OFF, a missing org_id column must not deny the requester (the fix must never reference org_id in the SQL string unless pinEnabled)',
+        ).toBe(true)
+        expect(
+          adminReadable,
+          'P1-1 regressed: with the org pin OFF, a missing org_id column must not deny a DB-backed admin either',
+        ).toBe(true)
+      } finally {
+        // Always rollback — the column drop must never be visible outside this one transaction.
+        await client.query('ROLLBACK').catch(() => {})
+        client.release()
+      }
+
+      // Post-rollback control: the column is back, and the SAME two identities still read fine —
+      // proves the rollback actually restored the schema rather than merely not-erroring.
+      await expect(canReadApprovalInstance(pool(), requesterId, instanceId)).resolves.toBe(true)
+      await expect(canReadApprovalInstance(pool(), adminId, instanceId)).resolves.toBe(true)
+    })
+  })
+
+  // ---------------------------------------------------------------------------------------------
   // G-S1-12 PARTIAL — the migrated org_id column has no DB default. The NOT NULL / CHECK half is
   // Phase 3 and is NOT this migration (see zzzz20260821100000's docblock) — labelled PARTIAL, not
   // asserted as the full gate.
