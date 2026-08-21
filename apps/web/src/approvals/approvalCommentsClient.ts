@@ -41,18 +41,34 @@
  *    `offset=0` alone to read the server's reported `page.total` (S2 has no descending-order or
  *    cursor-from-tail option; ASC is the only order it serves). If `total` fits within
  *    `APPROVAL_COMMENT_LIST_MAX_PAGES * PAGE_SIZE` (10 × 200 = 2000), that first page's rows are
- *    kept and paging continues forward from `offset=200` exactly as before — the common case costs
- *    no extra request. If `total` EXCEEDS capacity, the discovery page's (oldest) rows are
- *    discarded and paging restarts from `offset = total - capacity`, walking forward to the end —
- *    i.e. this client keeps the NEWEST `capacity` comments, not the oldest, because that is what
- *    the wrapper's truncation notice ("仅显示最近的评论") actually promises the reader. (Gate
- *    finding P2-1, 2026-08-22: the previous version paged forward from 0 unconditionally and kept
- *    whichever comments happened to load first — the OLDEST — while the notice claimed the
- *    opposite. One extra HTTP request in this rare edge case is the accepted cost of the fix.)
- *    Hitting the cap sets the `truncated` ref (an EXTRA property on the returned client, beyond
- *    the 7-method floor — see the interface's own doc: "a floor, not a ceiling") so the wrapper
- *    can show the truncation notice. Reset at the START of every `listComments` call so a stale
- *    notice never survives a later, short load.
+ *    kept and paging continues forward from `offset=200`, terminating on a short/empty page (this
+ *    branch has NO `collected.length >= total` early-exit, unlike the pre-P2-1 code — so a total
+ *    that lands on an EXACT multiple of the page size costs one extra zero-row request compared
+ *    to before, e.g. total=400 now fetches offset={0,200,400} instead of {0,200}; accepted cost,
+ *    not a correctness issue — gate finding N-4(b), 2026-08-22). If `total` EXCEEDS capacity, the
+ *    discovery page's (oldest) rows are discarded and paging restarts from
+ *    `offset = total - capacity`, walking forward to the end — i.e. this client keeps the NEWEST
+ *    `capacity` comments, not the oldest, because that is what the wrapper's truncation notice
+ *    ("仅显示最近的评论") actually promises the reader. (Gate finding P2-1, 2026-08-22: the
+ *    previous version paged forward from 0 unconditionally and kept whichever comments happened to
+ *    load first — the OLDEST — while the notice claimed the opposite. One extra HTTP request in
+ *    this rare edge case is the accepted cost of the fix.)
+ *    `truncated` (an EXTRA property on the returned client, beyond the 7-method floor — see the
+ *    interface's own doc: "a floor, not a ceiling") drives the wrapper's truncation notice. It is
+ *    set whenever at least one row was collected AND fewer rows were collected than the discovery
+ *    page's own reported `total` — unconditionally in the `> capacity` branch, and (as of gate
+ *    finding N-2, 2026-08-22) also in the `<= capacity` branch, for a server whose EFFECTIVE page
+ *    size (route cap AND service `clampLimit`, see NIT-1/N-2 below) is smaller than what this
+ *    client requests, which can short-circuit that branch's loop on a short page well before
+ *    `total` rows are collected. The `collected.length > 0` half of that check exists so a
+ *    genuinely EMPTY first page (the pre-existing "terminate on a zero-length page even if `total`
+ *    claims more remain" safety net, which does not trust `total` alone) never flips `truncated`
+ *    true over zero rendered comments. Neither branch covers a `page.total` value that itself
+ *    understates the live row count at the moment this client stops paging — S2's `total` is a
+ *    same-filter `COUNT(*)` (`approval-comment-service.ts:367-385`), so that can only happen under
+ *    a concurrent-create race, not as a steady-state server bug (gate finding N-4(a), 2026-08-22:
+ *    that race is the one case this doc does NOT claim `truncated` catches). Reset at the START of
+ *    every `listComments` call so a stale notice never survives a later, short load.
  *
  *  - Author display names: S2's `ApprovalCommentView` carries NO `authorName` at all (unlike
  *    multitable's comment rows, which are directory-enriched server-side). This client leaves
@@ -222,6 +238,17 @@ export function createApprovalCommentsClient(getInstanceId: () => string): Appro
           if (raw.length < APPROVAL_COMMENT_LIST_PAGE_SIZE) break
           offset += APPROVAL_COMMENT_LIST_PAGE_SIZE
         }
+        // The server's OWN effective page size (route cap AND service `clampLimit` — see
+        // NIT-1/N-2) can be smaller than what this client requests, which short-circuits the loop
+        // above on a short page well before `first.total` rows have been collected. Flag it
+        // exactly like the `> capacity` branch does, so the wrapper's truncation notice fires
+        // instead of silently dropping the tail (gate PROBE-P1c, 2026-08-22: server serving
+        // 100-row pages with `page.total = 500` used to leave `truncated` false after 1 fetch).
+        // `collected.length > 0` guards the OTHER short-page case just above — a genuinely EMPTY
+        // first page (the "terminate on a zero-length page even if `total` claims more remain"
+        // test below) must not flip `truncated` to true, or the notice would render over an empty
+        // list, asserting loss of comments that were never even fetched once.
+        if (collected.length > 0 && collected.length < first.total) truncated.value = true
       } else {
         // More comments exist than this client will ever hold — keep the NEWEST `capacity` of
         // them (see header note / gate P2-1), discarding the discovery page's (oldest) rows.

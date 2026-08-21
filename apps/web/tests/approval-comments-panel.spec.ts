@@ -256,7 +256,20 @@ describe('ApprovalCommentsPanel — mention candidates fetched once per instance
 describe('ApprovalCommentsPanel — delete flow re-hydrates the tombstone (approach (a))', () => {
   it('after a successful delete, re-lists so the tombstone (not a stripped row) is what is shown', async () => {
     listCommentsMock
-      .mockResolvedValueOnce({ comments: [comment({ id: 'c1', authorId: 'u1', content: 'before delete' })] })
+      .mockResolvedValueOnce({
+        comments: [
+          comment({ id: 'c1', authorId: 'u1', content: 'before delete' }),
+          // Bystander, untouched by the delete (gate N-3, 2026-08-22): the original fixture's
+          // `not.toContain('before delete')` assertion was satisfied by the SECOND mock response's
+          // own `content: ''`, not by any property of the component — a mutated `loadComments`
+          // that MERGES instead of REPLACING `comments.value` still passed, because
+          // `applyDeletedComment`'s own local filter (triggered by `deleteComment(c1)`) had
+          // already dropped c1's stale row before the merge ever ran. `c2` is never passed to
+          // `deleteComment`, so that local filter cannot be the reason it disappears — it can only
+          // survive in the DOM if `loadComments` merges rather than replaces wholesale.
+          comment({ id: 'c2', authorId: 'u2', content: 'bystander content' }),
+        ],
+      })
       .mockResolvedValueOnce({ comments: [comment({ id: 'c1', authorId: 'u1', deleted: true, content: '' })] })
     deleteCommentMock.mockResolvedValue(undefined)
     const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
@@ -271,9 +284,22 @@ describe('ApprovalCommentsPanel — delete flow re-hydrates the tombstone (appro
     expect(deleteCommentMock).toHaveBeenCalledWith('c1')
     expect(listCommentsMock).toHaveBeenCalledTimes(2)
     expect(container.textContent).toContain('This comment was deleted')
+    // Gate N-3: the re-list's second response omits `c2` entirely — if it still rendered, the
+    // composable merged instead of replacing. This assertion reds under a SINGLE fault (a merge
+    // regression alone, with nothing else broken) — confirmed directly by mutating `loadComments`
+    // (useMultitableComments.ts:35) to merge instead of replace: THIS assertion reds by itself,
+    // before the `before delete` assertion below is ever reached. That is the gap this line
+    // closes: the requal's round-1 mutation ledger (MUT-I green, MUT-I2 green, MUT-I3 red) found
+    // that, on the PRE-this-fix test body, a merge fault alone passed because `deleteComment`'s own
+    // local optimistic removal of c1 (applyDeletedComment) already emptied it out before the merge
+    // ran — c2 is untouched by that local removal, so it cannot hide a merge fault the way c1 did.
+    expect(container.textContent).not.toContain('bystander content')
     // Gate NIT-2: pin that the placeholder REPLACES the old body rather than merely being
     // rendered alongside it (the re-list's second `listCommentsMock` resolution returns the
-    // tombstone row with `content: ''`, not the original 'before delete' text).
+    // tombstone row with `content: ''`, not the original 'before delete' text). Retained as a
+    // secondary, redundant check — the kit's own deleted-row masking (gate PROBE-C) is the
+    // deeper reason this specific string never appears, and by this point in the test the
+    // assertion above has already covered the merge-vs-replace property on its own.
     expect(container.textContent).not.toContain('before delete')
   })
 })

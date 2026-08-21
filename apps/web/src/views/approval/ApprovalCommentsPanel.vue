@@ -130,13 +130,17 @@ watch(
  * candidate side additionally skipped numbers whenever an earlier candidate was already `seen`.
  * `memberIdentity` below is the single source of both this map and the suggestions list, with ONE
  * counter incremented once per distinct entry — author or candidate, resolved/named or not — in
- * the fixed order "authors, then candidates", so numbers are unique and gapless across the WHOLE
- * dropdown. Incrementing per-ENTRY rather than only when a fallback fires preserves this map's
- * original semantics for the thread list ("N = first-seen order among THIS list's distinct
- * authors", unaffected by how many of them happen to be resolved) — only the candidate half's
- * numbering changed, to continue that same counter instead of restarting it. Mirrors
- * ApprovalDetailView.vue's `reducibleAssignees` ordinal convention (same repo-shipped spelling,
- * `成员 ${ordinal}`).
+ * the fixed order "authors, then candidates", so numbers are UNIQUE across the WHOLE dropdown (no
+ * two distinct people ever collide on the same `成员 N`). They are NOT gapless: a resolved author
+ * or a named candidate still consumes an ordinal without ever rendering it (the fallback is
+ * `getResolvedUserName(...) || 成员 ${ordinal}` / `candidate.name.trim() || 成员 ${ordinal}`), so
+ * `成员 1` will not appear at all if the first entry in fixed order happens to be resolved/named
+ * (gate finding N-4(c), 2026-08-22). Incrementing per-ENTRY rather than only when a fallback fires
+ * preserves this map's original semantics for the thread list ("N = first-seen order among THIS
+ * list's distinct authors", unaffected by how many of them happen to be resolved) — only the
+ * candidate half's numbering changed, to continue that same counter instead of restarting it.
+ * Mirrors ApprovalDetailView.vue's `reducibleAssignees` ordinal convention (same repo-shipped
+ * spelling, `成员 ${ordinal}`).
  */
 const memberIdentity = computed<{
   authorNames: Record<string, string>

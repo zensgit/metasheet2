@@ -349,7 +349,7 @@
 # existing token in this file and attendance-web-guard.yml for substring collision in either
 # direction — none found.
 # S3b (2026-08-22, approval comments tab): `approval-comments-client` (tests/approval-comments-
-# client.spec.ts, 19 tests — the CommentsApiClient adapter mapping S2's /api/approvals/:id/
+# client.spec.ts, 20 tests — the CommentsApiClient adapter mapping S2's /api/approvals/:id/
 # comments* onto the shared kit's interface, incl. pagination/truncation/ordering and the three
 # unsupported-capability throws) and `approval-comments-panel` (tests/approval-comments-panel.
 # spec.ts, 12 tests — the mounted 全文评论 tab wrapper: reactions/resolve absence, tombstone
@@ -366,6 +366,12 @@
 # test — the REAL P2-2 regression guard, mounting ApprovalDetailView.vue itself and reddening if
 # its `:key="route.params.id"` is removed. File-level token wiring (this script + approval-web-
 # guard.yml) is unchanged — no new spec files.
+# Fix round 2 (requal N-1/N-2/N-3/N-4, 2026-08-22): client's 19 became 20 — one test pinning the
+# `<= capacity` branch's own `truncated` flag fix (N-2/PROBE-P1c); the truncation-window test
+# rewritten in place (offset-keyed mock, id assertions moved above the call-count assertion — N-1)
+# did not add a test. Panel's count is unchanged at 12 — N-3's fix (a bystander-comment assertion
+# discriminating a merge-vs-replace regression on its own) extended an EXISTING test body, adding
+# no new `it(...)`. File-level token wiring is unchanged — still no new spec files.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
