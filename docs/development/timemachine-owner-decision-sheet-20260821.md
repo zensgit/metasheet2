@@ -13,7 +13,12 @@
 
 > 一页看全:两条线(O-2 启用加固 + 阶梯加速)的**开发已全部落 main 并验证**;下面全是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
-> 全程状态:4 flag OFF、9 trigger DISABLED(指纹 `8c1be0b0…`/`14c180aa…`,双主机 run `32321464042` 2026-08-20 PASS)。
+> 全程状态:4 flag OFF、9 trigger DISABLED(指纹 triggers `8c1be0b0…` / functions `14c180aa…`,双主机 run
+> `32321464042` 2026-08-20 PASS——**这是 pre-fix 点内观测,保留为历史证据**)。
+> **前瞻(2026-08-21)**:migration `zzzz20260821120000_recovery_authority_functions_fix_search_path`(CVE-2018-1058 型
+> shadow 根治:helper 调用 schema-qualified + 固定 `SET search_path`,并把 proconfig 纳入指纹)部署后,
+> **functions 指纹改为 `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498`,triggers `8c1be0b0…` 不变**
+> (不发 trigger DDL,9/9 仍 DISABLED,行为不变);详见 enablement-ladder 文首「指纹变更公告」。
 
 ## A. 现在就能拍、且解锁最多的
 

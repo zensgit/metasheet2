@@ -804,12 +804,15 @@ export function evaluatePosture(rows = [], expected = EXPECTED_AUTHORITY_TRIGGER
     }
   }
 
-  // SHADOW FUNCTIONS (AUTHORITY_FUNCTION_SHADOW_QUERY). The `public` rows above can all match the
-  // census exactly while a same-named function in ANOTHER schema is what actually runs: the trigger
-  // functions call the lease helpers by bare name with no `SET search_path`, and the default
-  // search_path is `"$user", public`. Verified behaviourally: with such a shadow, an EXCLUSIVE
-  // lease stops refusing the write. Any authority-named function outside `public` is therefore
-  // NOT_ARMED — fail-closed, and unobserved is not verified.
+  // SHADOW FUNCTIONS (AUTHORITY_FUNCTION_SHADOW_QUERY). Historically the trigger functions called the
+  // lease helpers by bare name with no `SET search_path`, so a same-named function in ANOTHER schema
+  // (earlier on the default `"$user", public` path) could run INSTEAD of the real one and make an
+  // EXCLUSIVE lease stop refusing the write. That root cause is now fixed at the source by
+  // zzzz20260821120000 (schema-qualified `public.metasheet_try_recovery_authority_*` calls + a fixed
+  // `SET search_path = pg_catalog, public`), so a shadow can no longer win the resolution. This census
+  // is kept as DEFENSE-IN-DEPTH: an authority-named function outside `public` is still anomalous
+  // (it should not exist; its presence signals tampering), so we still fail-closed on it — and
+  // unobserved is not verified.
   const shadowOffenders = []
   if (shadowFunctionRows === null || shadowFunctionRows === undefined) {
     shadowOffenders.push(
@@ -819,8 +822,8 @@ export function evaluatePosture(rows = [], expected = EXPECTED_AUTHORITY_TRIGGER
     for (const row of shadowFunctionRows) {
       const canonical = canonicalFunction(row)
       shadowOffenders.push(
-        `${canonical.schemaName}.${canonical.functionName}(${canonical.identityArguments}) shadows the public authority function of the same name; ` +
-          'the authority triggers resolve it by bare name with no SET search_path, so this definition can run INSTEAD of the verified one',
+        `${canonical.schemaName}.${canonical.functionName}(${canonical.identityArguments}) is an authority-named function outside public; ` +
+          'the shipped trigger functions resolve the helpers via schema-qualified public.* with a fixed SET search_path so it cannot win resolution, but its presence is anomalous (it should not exist) and is refused as a tampering signal',
       )
     }
   }

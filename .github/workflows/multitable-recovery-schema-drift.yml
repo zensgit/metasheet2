@@ -39,9 +39,11 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/recovery-schema-drift.db.test.ts'
+      - 'packages/core-backend/tests/integration/recovery-authority-search-path.db.test.ts'
       - 'scripts/ops/multitable-recovery-schema-containment.mjs'
       - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260821120000_recovery_authority_functions_fix_search_path.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260411140100_create_field_permissions.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260413100000_create_record_permissions.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260418143000_allow_member_group_multitable_permission_subjects.ts'
@@ -108,4 +110,14 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/recovery-schema-drift.db.test.ts
+          --reporter=verbose
+
+      - name: Run recovery-authority search-path shadow counterexample (whole file)
+        # The load-bearing behavioral proof that zzzz20260821120000 defeats the CVE-2018-1058-shaped
+        # shadow: reproduces the shadow on the real migrated DB (OLD exploitable, SHIPPED defended) and
+        # runs the four-cell mutation matrix. WHOLE FILE + verbose for the same anti-skip reason above.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/recovery-authority-search-path.db.test.ts
           --reporter=verbose
