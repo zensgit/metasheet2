@@ -291,17 +291,25 @@ describe('Attendance admin anchor navigation', () => {
     routedApp.mount(container!)
     await flushUi()
 
-    const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
-    expect(link).toBeTruthy()
-    link!.click()
+    // This app instance is local to this test (the outer `app`/`afterEach` unmount the shared
+    // one, which stays null here) — unmount it ourselves, and in a `finally` so a failed
+    // assertion below can't leak a mounted app into the rest of this file's 30+ other tests
+    // (the exact "flake attributed to the last active suite" shape documented elsewhere in this
+    // repo's institutional memory).
+    try {
+      const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+      expect(link).toBeTruthy()
+      link!.click()
 
-    // vue-router's navigation resolves over more microtask ticks than a fixed flushUi() loop
-    // reliably covers (documented pitfall from this PR's own earlier router-link investigation)
-    // — poll until settled rather than assuming a fixed tick count catches it.
-    await vi.waitFor(() => {
-      expect(router.currentRoute.value.fullPath).toBe('/attendance?tab=overview&section=attendance-overview-requests')
-    })
-    routedApp.unmount()
+      // vue-router's navigation resolves over more microtask ticks than a fixed flushUi() loop
+      // reliably covers (documented pitfall from this PR's own earlier router-link investigation)
+      // — poll until settled rather than assuming a fixed tick count catches it.
+      await vi.waitFor(() => {
+        expect(router.currentRoute.value.fullPath).toBe('/attendance?tab=overview&section=attendance-overview-requests')
+      })
+    } finally {
+      routedApp.unmount()
+    }
   })
 
   it('creates an attendance group from the detail pane and selects it for people management', async () => {
