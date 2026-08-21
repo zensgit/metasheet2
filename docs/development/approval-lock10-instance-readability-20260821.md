@@ -799,7 +799,7 @@ the way Lock-9's OD count was.
 | OD-S1-4 | Arm 2 SEAT (user- or role-typed), **`approval_assignments.is_active`-INSENSITIVE** — membership is monotonic. Rejected: (b) require an active seat, (c) mirror C-3's status-dependent form | RATIFIED |
 | OD-S1-5 | `source_queue` **EXCLUDED** — it matches permission codes, not user ids (F-2), and the act path already refuses the seat. Rejected: (b) admit it scoped to `source_system='plm'`, (c) admit it and rename the semantics. **Its PLM consequence is ruled by OD-S1-18, not left implicit** | RATIFIED |
 | OD-S1-6 | Arm 3 PAST ACTOR including `policy_denied` rows — admitted **only together with gate G-S1-6**; if G-S1-6 cannot be written, the arm excludes `policy_denied`. Rejected: (b) exclude unconditionally, (c) include it on a comment | RATIFIED |
-| OD-S1-7 | Arm 4 CC TARGET (user- or role-typed) | RATIFIED **as a predicate arm**; its metrics-route effect is a widening — see §5.1 |
+| OD-S1-7 | Arm 4 CC TARGET (user- or role-typed) | RATIFIED **as a predicate arm**; its metrics-route effect is a widening — see §5.1 → **widening CONFIRMED 2026-08-21 (§5.1.1)** |
 | OD-S1-8 | Arm 5 ADMIN BYPASS, **DB-backed only** (`users.is_active` + `is_admin`/`role='admin'`); C-2's JWT-claims admin rejected as the canonical form. Rejected: (b) union of DB and JWT admin, (c) no admin arm | RATIFIED |
 | OD-S1-8(d) | Keep or drop the admin arm entirely | OWNER-CONFIRM (§5.1) |
 | OD-S1-9(a) | `org_id text NOT NULL`, **no DB DEFAULT**, non-blank CHECK, `zzzz`-ordered; `approval_attachments` is the precedent, the attendance `DEFAULT 'default'` family the anti-precedent | RATIFIED |
@@ -807,24 +807,25 @@ the way Lock-9's OD count was.
 | OD-S1-9(c) | **(c-iii) — PLM mirrors scoped out of S1's consumers in v1.** (c-i) named platform org and (c-ii) nullable-for-bridge are **REJECTED as outages, not trade-offs**, with the reasons recorded in §2.2(c) | SESSION DESIGN AUTHORITY (drafted as an owner menu; ruled here because two of three arms were outages the owner would have been choosing blind between) |
 | OD-S1-9(e) | NULL `org_id` ⇒ **false for everyone including admins**; unreachable on the PLM path by construction under (c-iii) | RATIFIED |
 | OD-S1-9(f) | The caller never supplies the org; both sides are derived server-side | RATIFIED |
-| OD-S1-10 | The attachment-EXISTS org pin (`approval-attachment-runtime.ts:219-222`) is **removed** and replaced by an instance-level org pin — the fix for F-1 | RATIFIED **as a design ruling**; implementation BLOCKED on §5.1 `L9-AMEND` |
+| OD-S1-10 | The attachment-EXISTS org pin (`approval-attachment-runtime.ts:219-222`) is **removed** and replaced by an instance-level org pin — the fix for F-1 | RATIFIED **as a design ruling**; implementation BLOCKED on §5.1 `L9-AMEND` → **UNBLOCKED 2026-08-21** (L9-AMEND ruled arm (a), §5.1.1; amendment executed in Lock-9 §4.1) |
 | OD-S1-11 | Each consumer keeps its own denial shape; **detail and history deny with `404 APPROVAL_NOT_FOUND`**, metrics keeps `403 FORBIDDEN`. Rejected: (b) 403 everywhere, (c) 404 everywhere | RATIFIED |
-| OD-S1-12 | The detail/history narrowing (200 → 404 for non-participant `approvals:read` holders) is a **public contract change**, **platform ids only** | OWNER-CONFIRM (§5.1) — explicitly NOT inferred from 「按建议执行」 |
+| OD-S1-12 | The detail/history narrowing (200 → 404 for non-participant `approvals:read` holders) is a **public contract change**, **platform ids only** | OWNER-CONFIRM (§5.1) — explicitly NOT inferred from 「按建议执行」 → **CONFIRMED 2026-08-21 by the second by-reference reply (§5.1.1)** |
 | OD-S1-13 | Detail + history adopt S1 in the **same slice** (three paired `Promise.all` FE sites). The draft's "instance-keyed, not mirror-keyed, which avoids that specific trap" is **WITHDRAWN** as unfounded; G-S1-5 now pins the never-refreshed-mirror case | RATIFIED, with the withdrawal recorded |
 | OD-S1-14 | Comments read **and** write both gate on S1 — D3's "participant union" is defined by S1 and nothing else; tombstones read under the same gate. Rejected: (b) a separate `canWriteApprovalComment` | RATIFIED (D3/D2(b1) are owner-decided inputs per §0(d)) |
 | OD-S1-15 | @-mention candidacy **and** the notification seam are participant-scoped, and the seam initializes `async () => false` — the inverse of `CommentService.ts:186` | RATIFIED (D5 is an owner-decided input) |
-| OD-S1-16 | Lock-9's consumers call `canReadApprovalInstance`; `isInstanceParticipant` ceases to exist; no fourth predicate is minted | RATIFIED **as a design ruling**; implementation BLOCKED on §5.1 `L9-AMEND` |
+| OD-S1-16 | Lock-9's consumers call `canReadApprovalInstance`; `isInstanceParticipant` ceases to exist; no fourth predicate is minted | RATIFIED **as a design ruling**; implementation BLOCKED on §5.1 `L9-AMEND` → **UNBLOCKED 2026-08-21** (L9-AMEND ruled arm (a), §5.1.1; amendment executed in Lock-9 §4.1) |
 | OD-S1-17(a) | Viewer **roles** derived from the DB (`users.role` for an active user ∪ `user_roles`⋈`roles`), never from token claims | RATIFIED |
 | OD-S1-17(b) | Viewer **org** derived from `user_orgs`; the only authoritative request-scoped field is `req.authenticatedTenantId`; no `'default'` fallback. Rejected: (d) leave the derivations to the implementing slice | RATIFIED |
-| OD-S1-17(c) | Multi-org viewers — union / exact-org / single-org-with-boot-assert | OWNER-CONFIRM (§5.1); also blocks the migration's class 3 |
+| OD-S1-17(c) | Multi-org viewers — union / exact-org / single-org-with-boot-assert | OWNER-CONFIRM (§5.1); also blocks the migration's class 3 → **RULED (c-i) 2026-08-21 (§5.1.1)** |
 | OD-S1-18 | **PLM mirrors (`plm:` ids) are scoped OUT of S1's consumers in v1**; `org_id` NULLABLE for `plm:` rows only via `CHECK (org_id IS NOT NULL OR id LIKE 'plm:%')`; the C-5 permission-only posture persists there and is declared as residual §5.2 (iii); the exit is a bridge-side membership fact, not authorized here. Rejected: (e) admit `source_queue` scoped to PLM, (f) adopt S1 anyway and declare the outage | SESSION DESIGN AUTHORITY (created by the independent review; never put to the owner) |
 
 ### What this ratification explicitly does NOT do
 
 - It does **not** amend Lock-9. OD-L9-13(a) and G-4 remain as the owner ratified them; §5.1 `L9-AMEND`
   carries the conflict, and OD-S1-10/OD-S1-16 cannot be implemented until it is answered.
+  *(Answered 2026-08-21: arm (a) — §5.1.1; the amendment is executed in Lock-9 §4.1, a later commit than this ratification.)*
 - It does **not** authorize the OD-S1-12 narrowing, the OD-S1-7/C-2 metrics widening, OD-S1-17(c), or
-  OD-S1-8(d).
+  OD-S1-8(d). *(All four RULED 2026-08-21 by the second by-reference reply — §5.1.1.)*
 - It does **not** close C-5 for `plm:` ids (§5.2 (iii)).
 - It reports **no verification of any kind**: §3 specifies gates; none has been run.
 
@@ -851,6 +852,40 @@ arms; the review established that two of the three are outages rather than trade
 offering the menu would have asked the owner to choose blind. It is RULED (c-iii) by the executing session
 as design authority, with the rejected arms and their consequences recorded in §2.2(c) so the ruling is
 reversible on inspection rather than on trust.
+
+### 5.1.1 RESOLUTION (2026-08-21) — five of the six §5.1 rows RULED, by the second by-reference reply
+
+**Provenance.** After ratification the executing session presented the owner a six-item recommendation
+list; the owner replied 「按建议执行」 (2026-08-21). This is the **second** by-reference reply of that
+date — distinct from the one §0 cites, which answered a different list — and per §0's own rule it reaches
+exactly the enumerated items and nothing else. The list was authored by the executing session; the
+owner's authored contribution is those four characters. The referenced list, verbatim:
+
+> (1) L9-AMEND→建议 (a);(2) OD-S1-12→建议确认 404 收窄;(3) OD-S1-7→建议确认 metrics 放宽;
+> (4) OD-S1-17→建议 (c-i) 多 org 并集;(5) OD-S1-8(d)→建议保留 admin bypass;
+> (6) HISTORY-TIMELINE→建议 (i) history 排除指针行。
+
+| §5.1 row | Ruling | Effect |
+|---|---|---|
+| **L9-AMEND** | **arm (a)** | The owner-level amendment of Lock-9 OD-L9-13(a) and gate G-4 is now AUTHORIZED and is **executed in this same commit** — see Lock-9 §4.1, which names `canReadApprovalInstance` and re-points G-4's mutation target. Unblocks OD-S1-10, OD-S1-16, and the C-1 migration |
+| OD-S1-12 | **CONFIRMED** | the detail/history 200→404 narrowing for non-participant `approvals:read` holders is authorized, **platform ids only** (the OD-S1-18 `plm:` carve-out is unchanged); consumer (b) may land |
+| OD-S1-7 / C-2 | **CONFIRMED** | the metrics-ACL widening is authorized: after migration a CC target reads the instance metrics C-2 denies them today; the metrics consumer may land |
+| OD-S1-17(c) | **arm (c-i)** | the org half of the predicate is a **union over the viewer's ACTIVE org memberships**; G-S1-10 is **SOUND** under this ruling. Migration consequence: §2.2(b) class 3's identifying test ("resolves to exactly one **active** org membership") is now well-defined — a multi-org requester **fails** class 3 and falls through the ordered table under the unchanged FAIL-LOUD/terminal-ABORT discipline; note that under (c-i) ANY backfilled org the requester actually belongs to preserves that requester's readability, which lowers the stakes of the class-3 migration-time-vs-creation-time limit already declared there |
+| OD-S1-8(d) | **KEEP** | the DB-backed admin bypass stays in the predicate's arm list as ratified in OD-S1-8 |
+
+Item (6) of the referenced list is not a §5.1 row: HISTORY-TIMELINE is the S2 brief's escalation (the
+comment audit-pointer row would land in the shipped `/history` timeline). Its ruling — arm (i): the
+history reader excludes pointer rows (`metadata->>'commentId' IS NULL`) applied to **both** the count and
+the page query with the same literal, the exact `approval-history.ts:90-100` `policy_denied` pattern — is
+recorded in the parity execution ledger §3 for the S2 lock to cite; it authorizes nothing outside S2.
+
+**NOT covered by this reply:** the §5.1 table's last row (the three §5.2 (i)(i-b)(i-c) feed branches) was
+not in the referenced list — the session had stated, in the same thread, that it required no owner answer
+and would be treated as declared residuals. It remains **OPEN**; G-S1-8 stays expected-red as ratified.
+
+**What this resolution does NOT change:** every SESSION-DESIGN-AUTHORITY and RATIFIED item stands exactly
+as ratified; no gate is weakened; no verification claim is added — §3's gates still specify acceptance
+and none has been run at the time of this edit.
 
 ### 5.2 Declared residuals — NOT closed by this document
 
