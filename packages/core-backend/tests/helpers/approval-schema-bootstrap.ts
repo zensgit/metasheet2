@@ -2,15 +2,23 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump adds Lock-10 (S1) OD-S1-9(a)'s `approval_instances.org_id`
+// idempotent DDL. The current bump adds fix-round gate P2-1's `approval_cmt_tombstone_mentions_cleared`
+// CHECK (mirrors `approval_cmt_tombstone_body_cleared`'s treatment for the `mentions` column) —
+// matches the production migration zzzz20260822120000_create_approval_comments.ts. Without this
+// bump an already-bootstrapped test DB keeps the PRE-fix schema (the marker check below short-
+// circuits the whole DDL body), so the new CHECK would silently not apply in CI.
+// The previous bump added Lock-10 (S2)'s `approval_comments` table (D2(b1) mutable
+// comment storage + tombstone) — matches the production migration
+// zzzz20260822120000_create_approval_comments.ts.
+// The previous bump added Lock-10 (S1) OD-S1-9(a)'s `approval_instances.org_id`
 // column PLUS the non-blank-when-present CHECK (`approval_instance_org_nonblank`) — nullable, NO
 // DEFAULT (Phase 1 only; matches the production migration
 // zzzz20260821100000_add_approval_instance_org_id.ts). The Phase-3 presence CHECK
 // (`approval_instance_org_present`, OD-S1-18(b)) is a separate, later migration, not landed here.
-// The previous bump added Lock-5's `policy_denied` action to the approval_records CHECK so the
+// The bump before that added Lock-5's `policy_denied` action to the approval_records CHECK so the
 // per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
 // migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260821-s1-instance-org-id-nonblank-check'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s2-fixround-mentions-cleared-check'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -246,6 +254,33 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
       )
     `)
     await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_reads_user_read_at ON approval_reads(user_id, read_at DESC)`)
+
+    // Lock-10 (S2) D2(b1) — mutable approval_comments table + tombstone. Idempotent convergence
+    // matches the production migration zzzz20260822120000_create_approval_comments.ts.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS approval_comments (
+        id           text PRIMARY KEY,
+        instance_id  text NOT NULL REFERENCES approval_instances(id) ON DELETE CASCADE,
+        parent_id    text REFERENCES approval_comments(id) ON DELETE CASCADE,
+        author_id    text NOT NULL,
+        body         text,
+        mentions     jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at   timestamptz NOT NULL DEFAULT now(),
+        updated_at   timestamptz NOT NULL DEFAULT now(),
+        edited_at    timestamptz,
+        deleted_at   timestamptz
+      )
+    `)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_author_nonblank`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_author_nonblank CHECK (author_id ~ '[!-~]')`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_tombstone_body_cleared`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_tombstone_body_cleared CHECK ((deleted_at IS NULL AND body IS NOT NULL) OR (deleted_at IS NOT NULL AND body IS NULL))`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_tombstone_mentions_cleared`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_tombstone_mentions_cleared CHECK ((deleted_at IS NULL) OR (deleted_at IS NOT NULL AND mentions = '[]'::jsonb))`)
+    await client.query(`ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_no_self_parent`)
+    await client.query(`ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_no_self_parent CHECK (parent_id IS NULL OR parent_id <> id)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_comments_instance_created ON approval_comments (instance_id, created_at)`)
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_approval_comments_parent ON approval_comments (parent_id) WHERE parent_id IS NOT NULL`)
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_templates (

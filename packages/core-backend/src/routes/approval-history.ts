@@ -146,8 +146,18 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       // unfiltered predicate — would silently shift `total` and therefore the page boundaries. The
       // exclusion is applied to BOTH the count and the page query, with the same literal, so the two
       // can never disagree.
+      //
+      // Lock-10 (S2) HISTORY-TIMELINE arm (i) (owner-ruled 2026-08-21, ledger `:91` / Lock-10
+      // §5.1.1 closing paragraph): this reader ALSO excludes the comment audit-pointer rows S2's
+      // dual-write inserts (`action:'comment'`, `metadata:{commentId}`, `comment` column ALWAYS
+      // NULL) — `metadata->>'commentId' IS NULL` on BOTH queries, same literal, no bound parameter.
+      // The DISCRIMINATOR IS THE METADATA KEY, NEVER `action <> 'comment'` — the legacy act-path
+      // comment row (body in the `comment` column, `metadata:{nodeKey}`, no `commentId`) is shipped
+      // member-visible history and MUST stay in the timeline; `action <> 'comment'` would silently
+      // hide it too. `metadata` is nullable (no `NOT NULL` in the migrations/bootstrap); a NULL
+      // `metadata` correctly stays INCLUDED because `NULL->>'commentId' IS NULL` is TRUE.
       const countRes = await pool.query(
-        'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
+        "SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2 AND metadata->>'commentId' IS NULL",
         [id, APPROVAL_POLICY_DENIED_ACTION],
       )
       const total = Number(countRes.rows[0]?.c || 0)
@@ -167,6 +177,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
          FROM approval_records
          WHERE instance_id = $1
            AND action <> $4
+           AND metadata->>'commentId' IS NULL
          ORDER BY occurred_at DESC
          LIMIT $2 OFFSET $3`,
         [id, pageSize, offset, APPROVAL_POLICY_DENIED_ACTION],
