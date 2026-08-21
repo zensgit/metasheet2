@@ -63,6 +63,14 @@ describe('approval history routing', () => {
 
   it('uses the canonical paginated approval history handler at the mounted route', async () => {
     pgState.pool.query
+      // Lock-10 (S1): canReadApprovalInstance runs BEFORE the history query, and its own
+      // implementation issues three queries when the org pin is off (default) — two inside
+      // viewerRoles (users.role, then user_roles ⋈ roles), then the admission SELECT itself.
+      // The first two contents are irrelevant here; the third must return a matching row so the
+      // fixture's admin-role principal is admitted (matches the pre-S1 200 this test asserts).
+      .mockResolvedValueOnce({ rows: [] }) // viewerRoles: users.role
+      .mockResolvedValueOnce({ rows: [] }) // viewerRoles: user_roles ⋈ roles
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // canReadApprovalInstance admission SELECT
       .mockResolvedValueOnce({ rows: [{ c: 2 }] })
       .mockResolvedValueOnce({
         rows: [
