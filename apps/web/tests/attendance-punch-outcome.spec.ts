@@ -225,6 +225,11 @@ describe('Attendance punch outcome clarity (mount)', () => {
     const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
     let punchPosted = false
     let requestsCallsAfterPunch = 0
+    // Refresh identity (P3-5 gate hardening, 2026-08-21): a G1 pendingApproval
+    // punch writes no attendance fact — refreshAll()'s full overview data set
+    // (summary/records) must NOT be touched, only the requests list. Pins
+    // WHICH refresh function ran, not just "some refresh happened".
+    let summaryOrRecordsCallsAfterPunch = 0
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.url
       if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
@@ -242,6 +247,9 @@ describe('Attendance punch outcome clarity (mount)', () => {
       if (url.includes('/api/attendance/requests?') && punchPosted) {
         requestsCallsAfterPunch += 1
       }
+      if (punchPosted && (url.includes('/api/attendance/summary?') || url.includes('/api/attendance/records?'))) {
+        summaryOrRecordsCallsAfterPunch += 1
+      }
       if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
       return defaultImpl(input, init)
     })
@@ -257,6 +265,9 @@ describe('Attendance punch outcome clarity (mount)', () => {
     expect(pageText).toContain('Outdoor punch submitted for approval; it will count once approved.')
     expect(pageText.toLowerCase()).not.toContain('check in recorded')
     expect(requestsCallsAfterPunch).toBeGreaterThan(0)
+    // The G1 branch calls loadRequests() only — refreshAll()'s full overview
+    // set must stay untouched (a silent identity swap would light this up).
+    expect(summaryOrRecordsCallsAfterPunch).toBe(0)
   })
 
   it('G2: OUTDOOR_NOTE_REQUIRED shows an inline note input; retry POSTs the exact payload then succeeds', async () => {
@@ -748,6 +759,98 @@ describe('Attendance punch outcome clarity (mount)', () => {
     deferredRefresh.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
     await flushUi(10)
 
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
+  })
+
+  // Refresh identity (P3-5 gate hardening, 2026-08-21): every other spec here proves "some
+  // refresh happened" via the indicator or a never-resolving mock, but none of them pin WHICH
+  // refresh function ran. A silent swap of refreshAll() -> loadRequests() in the non-G1 branch
+  // (e.g. an accidental copy/paste) would still show the "Updating..." indicator and still keep
+  // this whole file green. This test pins the actual URL set instead.
+  it('refresh identity: a normal (non-G1) punch refresh hits the full overview data set (summary + records + requests), not just the requests list', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    const callsAfterPunch: string[] = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        // Record the URL, then never resolve — every task refreshAll() kicks off has already
+        // fired (and been recorded) by the time flushUi() below returns, without racing which
+        // task happens to settle first.
+        callsAfterPunch.push(url)
+        return new Promise<Response>(() => {})
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(10)
+
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/summary?'))).toBe(true)
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/records?'))).toBe(true)
+    expect(callsAfterPunch.some(url => url.includes('/api/attendance/requests?'))).toBe(true)
+  })
+
+  // P3-4 (optional gate hardening, 2026-08-21): refreshingAfterPunchCount is a counter, not a
+  // boolean, specifically so two overlapping post-punch refreshes don't let the earlier one's
+  // completion clear the indicator while the later one is still running. This constructs that
+  // overlap directly instead of asserting on the counter's internal value.
+  it('counter semantics: two overlapping post-punch refreshes keep the indicator visible until BOTH settle', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let phase: 'before' | 'afterFirstPunch' | 'afterSecondPunch' = 'before'
+    const deferredA = createDeferred<Response>()
+    const deferredB = createDeferred<Response>()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        const nextEventType = phase === 'before' ? 'check_in' : 'check_out'
+        if (phase === 'before') phase = 'afterFirstPunch'
+        else if (phase === 'afterFirstPunch') phase = 'afterSecondPunch'
+        return jsonResponse(200, { ok: true, data: { id: `event-${nextEventType}`, eventType: nextEventType } })
+      }
+      if (phase === 'afterFirstPunch') return deferredA.promise
+      if (phase === 'afterSecondPunch') return deferredB.promise
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // Punch #1 (Check In): its POST resolves immediately; its refreshAll() tasks all hang on
+    // deferredA. Indicator now on (count 0 -> 1).
+    findButton(container!, 'Check In').click()
+    await flushUi(6)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Punch #2 (Check Out), fired while punch #1's refresh is still pending — reachable because
+    // `punching` only covered punch #1's own POST, which already settled. Its own POST resolves
+    // immediately (matched by the punch-endpoint branch before the phase check); its refreshAll()
+    // tasks all hang on deferredB. Indicator stays on (count 1 -> 2).
+    findButton(container!, 'Check Out').click()
+    await flushUi(6)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Settle ONLY punch #1's refresh (count 2 -> 1). A plain boolean would clear here, since
+    // punch #1's own `runPostPunchRefresh` call would set it false in its own `finally`
+    // regardless of punch #2's refresh still running — the discriminating assertion.
+    deferredA.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(8)
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // Settle punch #2's refresh too (count 1 -> 0) — only now does the indicator clear.
+    deferredB.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(8)
     expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
   })
 })
