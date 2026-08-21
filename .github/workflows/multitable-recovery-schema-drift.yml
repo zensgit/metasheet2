@@ -1,0 +1,112 @@
+name: Multitable recovery-schema drift (A-vs-B)
+
+# WHY A STANDALONE LANE (not plugin-tests.yml):
+# plugin-tests.yml is an s6a sha256-pinned provenance input and is kept byte-identical to main —
+# editing it forces an s6a re-pin and a merge-serialisation race (see the seven approval-realdb-*.yml
+# lanes' headers, the in-repo precedent this file is modeled on). So this real-DB check gets its own
+# lane instead.
+#
+# WHAT IT GUARDS (the A-vs-B floor): the battery posture check and the containment helper judge the
+# live recovery schema against HAND-MAINTAINED CONSTANTS in scripts/ops/multitable-recovery-schema-
+# containment.mjs. Nothing else in CI proves those constants still equal what the REAL migrations
+# install. recovery-schema-drift.db.test.ts runs the real migrations and asserts the actual installed
+# triggers/functions (identity + body fingerprints) equal the constants, plus the subject_type CHECK
+# domain on record_permissions/field_permissions that the helper does not fingerprint.
+#
+# TWO-POINT WIRING (the other half): recovery-schema-drift.db.test.ts is excluded from the no-DB
+# default vitest config (packages/core-backend/vitest.config.ts) in the same change that adds it, so
+# the hermetic `test (18.x/20.x)` job cannot collect-and-skip-green it; this lane is where it actually
+# runs against a real DB. EXPECT_DB=1 arms the anti-skip-green sentinel: a run here with a missing/
+# broken DATABASE_URL goes RED, never silently reports the suite as skipped.
+#
+# NOTE FOR OWNER: this lane is NOT yet a required status context. To make the A-vs-B floor gate merges
+# (the whole point of the hardening), add "multitable-recovery-schema-drift" to branch protection's
+# required checks. Until then it runs and reports but does not block — same status as the seven
+# approval-realdb-*.yml lanes.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/tests/integration/recovery-schema-drift.db.test.ts'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260411140100_create_field_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260413100000_create_record_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260418143000_allow_member_group_multitable_permission_subjects.ts'
+      - '.github/workflows/multitable-recovery-schema-drift.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/recovery-schema-drift.db.test.ts'
+      - 'scripts/ops/multitable-recovery-schema-containment.mjs'
+      - 'packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260411140100_create_field_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260413100000_create_record_permissions.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260418143000_allow_member_group_multitable_permission_subjects.ts'
+      - '.github/workflows/multitable-recovery-schema-drift.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  recovery-schema-drift:
+    name: recovery-schema-drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_recovery_drift
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_recovery_drift"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_recovery_drift
+      METASHEET_REAL_DB_TEST_STEP: '1'
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run recovery-schema drift A-vs-B guard (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and hide
+        # a regression; verbose prints every collected test so an empty collection shows in the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/recovery-schema-drift.db.test.ts
+          --reporter=verbose
