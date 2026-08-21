@@ -8,7 +8,7 @@
  * a pre-mocked service returned a fixture. A source scan additionally pins that the component
  * introduces no fetch path of its own.
  *
- * The four contracts under test:
+ * The five contracts under test:
  *   1. VISIBILITY — hidden without the route's own `integration:read`-tier permission; hidden on a
  *      sheet that is not integration-fed; retracted entirely when the route answers 403.
  *   2. LAZY — mounting (i.e. opening a record) fires NO request; only the first expand does, and
@@ -17,6 +17,13 @@
  *      everything else in `attrs` does NOT (negative control).
  *   4. STATES — empty (incl. a hand-created row with no key: empty WITHOUT a request) and a quiet
  *      inline error that stays retryable.
+ *   5. RACE — switching the bound record while a load is in flight never lets the old row's late
+ *      response win: the panel's activeLoadVersion guard (mirroring
+ *      useMultitableCommentPresence's activeLoadVersion — see multitable-comment-presence.spec.ts
+ *      "ignores stale loads after scope changes") discards any resolution whose token no longer
+ *      matches the live one, and pipeline identity (pipelineId/runId, already whitelisted fields on
+ *      the response) renders per-entry so two pipelines touching the same rowId stay visually
+ *      distinct instead of reading as one merged line.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -38,6 +45,19 @@ async function flushUi(cycles = 4): Promise<void> {
     await Promise.resolve()
     await nextTick()
   }
+}
+
+// Mirrors multitable-comment-presence.spec.ts's createDeferred — lets a test control exactly when a
+// mocked apiFetch call settles, so an "old row's slow response lands after the new row's fast one"
+// race can be reproduced deterministically instead of relying on incidental microtask ordering.
+function createDeferred<T = unknown>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 function readSrc(rel: string): string {
@@ -96,6 +116,21 @@ function mount(props: Record<string, unknown>): HTMLDivElement {
   app.mount(container)
   mounts.push({ app, container })
   return container
+}
+
+// Same shape as the "resets to collapsed and re-queries" test's inline setup, factored out for the
+// race tests below: a reactive `current` ref so a test can swap the bound record mid-flight, the way
+// the record inspector swaps `record` when the drawer navigates.
+function mountReactive(initial: MetaRecord, fields: MetaField[] = INTEGRATION_FED_FIELDS): { container: HTMLDivElement; current: ReturnType<typeof ref<MetaRecord>> } {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const current = ref<MetaRecord>(initial)
+  const app = createApp({
+    setup: () => () => h(MetaRecordProvenancePanel, { record: current.value, fields }),
+  })
+  app.mount(container)
+  mounts.push({ app, container })
+  return { container, current }
 }
 
 function grantIntegrationRead(): void {
@@ -267,6 +302,66 @@ describe('MetaRecordProvenancePanel — render', () => {
     expect(text).not.toContain('rev-7')
   })
 
+  // Codex review claim B: "provenance 跨 pipeline 混线" (cross-pipeline mixing). Verified against the
+  // wire: the response's pipelineId/runId (plugins/plugin-integration-core/lib/pipelines.cjs
+  // rowToProvenanceEntry, sourced from integration_runs.pipeline_id — never null, since it is the
+  // run's own FK, not something parsed out of the free-form event JSON) are typed fields on
+  // IntegrationProvenanceTimelineEntry that the panel ALREADY renders per-entry (template lines
+  // rendering entry.pipelineId / shortRunId(entry.runId)) — this was already exercised for a single
+  // pipeline above. The one gap was test coverage for the actual collision scenario the claim
+  // describes: one rowId, two DIFFERENT pipelines (only possible when the idempotency key's inputs —
+  // source/target system + object + source id — collide across pipelines; see the "NOT derivable
+  // from a landed row" note in utils/record-provenance.ts). This asserts that case renders two
+  // visually distinct pipeline/run labels rather than one merged line, so no whitelist or template
+  // change was needed — the existing rendering already satisfies the claim.
+  it('labels each entry with its own pipeline/run identity so two pipelines sharing a rowId stay distinct', async () => {
+    grantIntegrationRead()
+    apiFetchMock.mockResolvedValue(okEnvelope([
+      entry({
+        runId: 'run_one_aaaaaaaaaaaa',
+        pipelineId: 'k3-to-beiliao',
+        eventIndex: 0,
+        eventType: 'target_write_succeeded',
+        runStatus: 'succeeded',
+      }),
+      entry({
+        runId: 'run_two_bbbbbbbbbbbb',
+        pipelineId: 'erp-sync-nightly',
+        eventIndex: 1,
+        eventType: 'target_write_succeeded',
+        runStatus: 'succeeded',
+        runCreatedAt: '2026-05-28T03:00:00.000Z',
+        attrs: {
+          decision: 'add',
+          // Not in the whitelist — the identity labeling above must not loosen this.
+          targetKind: 'erp-adapter-v2',
+        },
+      }),
+    ]))
+    const container = mount({ record: record({ fld_key: ROW_KEY }), fields: INTEGRATION_FED_FIELDS })
+    await flushUi()
+    toggle(container).click()
+    await flushUi()
+
+    const entries = container.querySelectorAll('[data-test="record-provenance-entry"]')
+    expect(entries.length).toBe(2)
+    // Each entry carries its OWN pipeline label, not a single shared one for the section.
+    expect(entries[0]?.textContent).toContain('k3-to-beiliao')
+    expect(entries[0]?.textContent).not.toContain('erp-sync-nightly')
+    expect(entries[1]?.textContent).toContain('erp-sync-nightly')
+    expect(entries[1]?.textContent).not.toContain('k3-to-beiliao')
+    // And its own run label, shortened — the two are distinct, not one merged identity.
+    expect(entries[0]?.textContent).toContain('run_one_aaaa')
+    expect(entries[1]?.textContent).toContain('run_two_bbbb')
+    expect(entries[0]?.textContent).not.toContain('run_two_bbbb')
+    expect(entries[1]?.textContent).not.toContain('run_one_aaaa')
+    expect(entries[0]?.textContent).not.toBe(entries[1]?.textContent)
+    // Values-free whitelist is untouched by this identity labeling: the allowed attrs key renders...
+    expect(entries[1]?.textContent).toContain('add')
+    // ...and the non-whitelisted one does not, even on the entry carrying the new pipeline label.
+    expect(container.textContent).not.toContain('erp-adapter-v2')
+  })
+
   it('renders the Chinese section label and event vocabulary under the zh locale', async () => {
     grantIntegrationRead()
     useLocale().setLocale('zh-CN')
@@ -361,6 +456,92 @@ describe('MetaRecordProvenancePanel — empty and error states', () => {
     await flushUi()
     expect(apiFetchMock).toHaveBeenCalledTimes(2)
     expect(String(apiFetchMock.mock.calls[1]?.[0] ?? '')).toContain('rowId=idem_other')
+  })
+})
+
+describe('MetaRecordProvenancePanel — stale-response race (Codex review)', () => {
+  it('discards a slow row-A response that lands after a fast row-B response (deferred-promise race)', async () => {
+    grantIntegrationRead()
+    const rowAKey = ROW_KEY
+    const rowBKey = 'idem_row_b_fast'
+    const rowALoad = createDeferred<Response>()
+    apiFetchMock
+      .mockImplementationOnce(() => rowALoad.promise) // row A's expand: slow, stays pending
+      .mockResolvedValueOnce(okEnvelope([ // row B's expand: fast, resolves before A
+        entry({ runId: 'run_bbbbbbbbbbbbbbbb', pipelineId: 'k3-to-beiliao', eventType: 'target_write_succeeded' }),
+      ]))
+
+    const { container, current } = mountReactive(record({ fld_key: rowAKey }, 'rec_a'))
+    await flushUi()
+
+    // Expand row A: the request fires and hangs (rowALoad is not yet resolved).
+    toggle(container).click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('[data-test="record-provenance-loading"]')).not.toBeNull()
+
+    // Switch to row B while A is still in flight — this is the record-switch race window.
+    current.value = record({ fld_key: rowBKey }, 'rec_b')
+    await flushUi()
+    expect(toggle(container).getAttribute('aria-expanded')).toBe('false')
+
+    // Expand row B: its request fires and resolves immediately.
+    toggle(container).click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    expect(container.querySelectorAll('[data-test="record-provenance-entry"]').length).toBe(1)
+    expect(container.textContent).toContain('run_bbbbbbbb')
+
+    // NOW row A's slow response finally lands, carrying different data than row B's.
+    rowALoad.resolve(okEnvelope([
+      entry({ runId: 'run_aaaaaaaaaaaaaaaa', pipelineId: 'stale-pipeline', eventType: 'target_write_failed' }),
+    ]))
+    await flushUi()
+
+    // Row A's late resolution must be discarded outright: the panel still shows exactly row B's
+    // single entry, never two entries and never row A's content.
+    expect(container.querySelectorAll('[data-test="record-provenance-entry"]').length).toBe(1)
+    expect(container.textContent).toContain('run_bbbbbbbb')
+    expect(container.textContent).not.toContain('run_aaaaaaaa')
+    expect(container.textContent).not.toContain('stale-pipeline')
+    expect(container.querySelector('[data-test="record-provenance-loading"]')).toBeNull()
+    expect(container.querySelector('[data-test="record-provenance-error"]')).toBeNull()
+  })
+
+  it('resets loading state to the new row on a mid-flight switch, and a late stale settle cannot revert it', async () => {
+    grantIntegrationRead()
+    const rowALoad = createDeferred<Response>()
+    apiFetchMock
+      .mockImplementationOnce(() => rowALoad.promise) // row A: slow, stays pending
+      .mockResolvedValueOnce(okEnvelope([])) // row B: fast, empty timeline
+
+    const { container, current } = mountReactive(record({ fld_key: ROW_KEY }, 'rec_a'))
+    await flushUi()
+
+    toggle(container).click()
+    await flushUi()
+    expect(container.querySelector('[data-test="record-provenance-loading"]')).not.toBeNull()
+
+    // Mid-flight switch: the loading hint for row A must disappear immediately (section collapses),
+    // not linger until row A's request eventually settles.
+    current.value = record({ fld_key: 'idem_row_b_loading' }, 'rec_b')
+    await flushUi()
+    expect(container.querySelector('[data-test="record-provenance-body"]')).toBeNull()
+
+    toggle(container).click()
+    await flushUi()
+    // Row B's own (fast, empty) load has already finished — no lingering loading state.
+    expect(container.querySelector('[data-test="record-provenance-loading"]')).toBeNull()
+    expect(container.querySelector('[data-test="record-provenance-empty"]')).not.toBeNull()
+
+    // Row A's stale response settles last. It must not flip loading back on, and must not replace
+    // row B's correct (empty) state with row A's payload.
+    rowALoad.resolve(okEnvelope([entry({ runId: 'run_stale_after_switch' })]))
+    await flushUi()
+
+    expect(container.querySelector('[data-test="record-provenance-loading"]')).toBeNull()
+    expect(container.querySelector('[data-test="record-provenance-empty"]')).not.toBeNull()
+    expect(container.querySelectorAll('[data-test="record-provenance-entry"]').length).toBe(0)
   })
 })
 

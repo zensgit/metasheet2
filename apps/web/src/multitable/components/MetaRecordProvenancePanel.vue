@@ -99,7 +99,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, useId, watch } from 'vue'
+import { computed, onUnmounted, ref, useId, watch } from 'vue'
 import type { MetaField, MetaFieldPermission, MetaRecord } from '../types'
 import { useLocale } from '../../composables/useLocale'
 import { useAuth } from '../../composables/useAuth'
@@ -164,8 +164,21 @@ const sectionVisible = computed(() => Boolean(
 
 const rowId = computed(() => resolveProvenanceRowId(props.record, props.fields, props.fieldPermissions))
 
-// Record navigation inside the drawer must not show the previous row's lineage.
+// Stale-response guard (mirrors useMultitableCommentPresence's activeLoadVersion): a plain closure
+// counter, not a ref — bumping it must never itself trigger a render. Every load captures the
+// counter's value at start; a load whose captured value no longer matches the live counter when its
+// await settles was superseded by a rowId change (or the component unmounting) and must not touch
+// state, however late it lands. This is what actually prevents the record-switch race: two
+// in-flight loads can resolve in either order, and only the one still matching activeLoadVersion may
+// write.
+let activeLoadVersion = 0
+
+// Record navigation inside the drawer must not show the previous row's lineage. Bumping the version
+// here (not just resetting the ref state) is what discards a slow in-flight load for the row being
+// left — without this, that load's `finally`/`catch` could still land after this reset and repaint
+// the panel with the old row's data over the new row's blank state.
 watch(() => props.record?.id, () => {
+  activeLoadVersion += 1
   expanded.value = false
   loading.value = false
   loaded.value = false
@@ -173,9 +186,16 @@ watch(() => props.record?.id, () => {
   entries.value = []
 })
 
+// Also invalidate on unmount: a fetch can outlive the component (drawer closed mid-request), and a
+// resolution after unmount must not write into refs no one is reading anymore.
+onUnmounted(() => {
+  activeLoadVersion += 1
+})
+
 async function loadTimeline(): Promise<void> {
   if (loaded.value || loading.value) return
   const key = rowId.value
+  const loadVersion = ++activeLoadVersion
   // A hand-created row on an integration-fed sheet has no key: that is the empty state, not a query.
   if (!key) {
     entries.value = []
@@ -185,9 +205,15 @@ async function loadTimeline(): Promise<void> {
   loading.value = true
   loadFailed.value = false
   try {
-    entries.value = await listIntegrationProvenanceByRow({ ...getDefaultIntegrationScope(), rowId: key })
+    // listIntegrationProvenanceByRow (services/integration/workbench.ts) takes no AbortSignal — it
+    // forwards no options to apiFetch at all, so there is nothing to abort. The generation guard
+    // below is what actually protects the panel; it does not depend on cancelling the request.
+    const result = await listIntegrationProvenanceByRow({ ...getDefaultIntegrationScope(), rowId: key })
+    if (loadVersion !== activeLoadVersion) return // stale: a newer row (or unmount) superseded this load
+    entries.value = result
     loaded.value = true
   } catch (error) {
+    if (loadVersion !== activeLoadVersion) return // stale: don't surface a superseded load's error either
     if (isProvenanceAccessDeniedError(error)) {
       accessDenied.value = true
       expanded.value = false
@@ -195,7 +221,9 @@ async function loadTimeline(): Promise<void> {
       loadFailed.value = true
     }
   } finally {
-    loading.value = false
+    if (loadVersion === activeLoadVersion) {
+      loading.value = false
+    }
   }
 }
 
