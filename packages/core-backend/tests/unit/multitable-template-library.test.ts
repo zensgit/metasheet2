@@ -123,6 +123,19 @@ function createQuery(seed?: { bases?: MultitableTemplateBase[] }): {
       return { rows: [], rowCount: 1 }
     }
 
+    // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+    // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+    // this branch the fake would fall through to the `Unhandled SQL` throw below.
+    if (
+      normalized.includes('FROM meta_fields') &&
+      normalized.includes('WHERE id = $1 AND sheet_id = $2')
+    ) {
+      const [fieldId, ownerSheetId] = params as [string, string]
+      return {
+        rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+      }
+    }
+
     if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
       const [sheetId, ids] = params as [string, string[]]
       const idSet = new Set(ids)
