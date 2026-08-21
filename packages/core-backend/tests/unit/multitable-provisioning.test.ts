@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_BASE_ID,
   createSheet,
+  ensureFields,
   ensureLegacyBase,
   ensureObject,
   ensureView,
@@ -813,5 +814,94 @@ describe('ensureObject destructive-reconcile guard (P0-S S3 fail-closed default)
     expect(result.skippedExistingFieldIds).toHaveLength(1)
     // the pre-existing row kept its ORIGINAL name despite the differing descriptor
     expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+  })
+})
+
+/**
+ * P0-S S3 — the pre-read must ride the CALLER'S client, not an ambient pool.
+ *
+ * Every real caller hands `ensureFields` a transaction-bound `query`: the template
+ * installer runs base + sheets + fields + views inside ONE `pool.transaction(...)`
+ * (`src/routes/univer-meta.ts:6925` -> `src/multitable/template-library.ts:622`), and the
+ * plugin path does the same through `ensureObjectInScope` (`src/index.ts:1796`).
+ *
+ * So the guard's per-field pre-read has to travel on `input.query`. If it were ever
+ * refactored onto a pool connection the guard would silently invert: a pool read cannot
+ * see rows the caller's own uncommitted transaction just wrote, so an existing field would
+ * classify as `create` and be overwritten anyway — the exact hazard S3 exists to close.
+ * These tests pin the routing so that refactor fails loudly instead.
+ */
+describe('ensureFields pre-read rides the caller-supplied query fn (P0-S S3)', () => {
+  const SHEET_ID = 'sheet_tx_scoped'
+
+  afterEach(() => {
+    delete process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV]
+  })
+
+  /** A fake standing in for one transaction client, recording every statement it receives. */
+  async function seedTransactionClient() {
+    const store = createQuery()
+    const seen: string[] = []
+    const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
+      seen.push(String(sql).replace(/\s+/g, ' ').trim())
+      return store.query(sql, params)
+    }
+
+    await createSheet({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      name: 'Tx Scoped',
+      description: null,
+    })
+    seen.length = 0 // only ensureFields traffic from here on
+
+    return { ...store, txQuery, seen }
+  }
+
+  it('issues one pre-read per field on the caller client, and a first install only creates', async () => {
+    const { txQuery, seen, fields } = await seedTransactionClient()
+
+    const installed = await ensureFields({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      fields: [
+        { id: 'f_code', name: 'Code', type: 'string' },
+        { id: 'f_note', name: 'Note', type: 'string' },
+      ],
+    })
+
+    expect(installed).toHaveLength(2)
+
+    const preReads = seen.filter(
+      (sql) => sql.includes('FROM meta_fields') && sql.includes('WHERE id = $1 AND sheet_id = $2'),
+    )
+    expect(preReads).toHaveLength(2)
+    // 2 pre-reads + 2 upserts + the final read-back: NOTHING escaped to another connection
+    expect(seen).toHaveLength(5)
+    // and a first install is a plain create — the guard never refuses provisioning
+    expect(fields.map((field) => field.name)).toEqual(['Code', 'Note'])
+  })
+
+  it('sees rows written through the SAME client, so the guard still catches a rename', async () => {
+    const { txQuery, fields } = await seedTransactionClient()
+
+    await ensureFields({
+      query: txQuery,
+      sheetId: SHEET_ID,
+      fields: [{ id: 'f_code', name: 'Code', type: 'string' }],
+    })
+    const before = fields.map((field) => ({ ...field }))
+
+    // A pool-scoped pre-read could not observe the row written just above, would classify
+    // it 'create' and overwrite it. Reading through the caller's client, the rename is caught.
+    await expect(
+      ensureFields({
+        query: txQuery,
+        sheetId: SHEET_ID,
+        fields: [{ id: 'f_code', name: 'Code Renamed', type: 'string' }],
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+
+    expect(fields).toEqual(before)
   })
 })
