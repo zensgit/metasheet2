@@ -3953,10 +3953,14 @@ export function assignmentMatchesActor(
  * reproduce the parallel-branch resolution, so it may be NARROWER than dispatchAction's real
  * authorization inside an active parallel region (a genuine acting approver mid-parallel-branch
  * could see this fail-fast refuse an upload dispatchAction would actually allow). This is an
- * accepted, disclosed gap: the upload route exists only to reject obviously-wrong uploads early: a
- * false negative here costs the caller a retry at commit time; a false positive is impossible
- * (returns false, never true, for anyone dispatchAction would refuse) because a non-current-node
- * assignment is real regardless of which branch the actor is in.
+ * accepted, disclosed gap: the upload route exists only to reject obviously-wrong uploads early. A
+ * false negative here costs the caller a retry at commit time. A false positive is NOT categorically
+ * ruled out: this query matches ANY active assignment at `current_node_key`, including one whose
+ * OWN parallel branch has already completed (dispatchAction's branch resolution would refuse that
+ * actor); this helper would still fail-fast-allow them. That gap is accepted because bind time is
+ * the ONE authority (G-5) — a fail-fast false positive here costs nothing beyond a wasted upload
+ * that the bind-time gate then genuinely refuses. It never grants upload to a principal with NO
+ * active assignment at the stored current node at all.
  */
 export async function actorHasActiveSeatAtInstance(
   db: Queryable,
@@ -9167,6 +9171,22 @@ export class ApprovalProductService {
           'Field writes are only permitted on a handler submission',
           400,
           'APPROVAL_FIELD_WRITE_ACTION_NOT_ALLOWED',
+          { nodeKey: currentNodeKey },
+        )
+      }
+
+      // Lock-9 OD-L9-10(a) §5.4: `attachmentIds` v1 ships the `comment` rider ONLY (`handle`/
+      // `approve` are DEFERRED — see the PR body). Mirrors the fieldWrites precedent immediately
+      // above: on any OTHER action a present `attachmentIds` key is a values-free 400, fail-closed,
+      // never a silent accept-and-ignore. Runs UNCONDITIONALLY (not flag-gated) — this refuses a
+      // MISPLACED rider regardless of APPROVAL_ATTACHMENTS_ENABLED; the flag gates whether the
+      // `comment` branch's bind runs, not whether an out-of-place rider is rejected. Detected by key
+      // PRESENCE, same discipline as fieldWrites.
+      if (request.action !== 'comment' && Object.prototype.hasOwnProperty.call(request, 'attachmentIds')) {
+        throw new ServiceError(
+          'Attachment ids are only permitted on a comment action (v1 scope)',
+          400,
+          'APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED',
           { nodeKey: currentNodeKey },
         )
       }

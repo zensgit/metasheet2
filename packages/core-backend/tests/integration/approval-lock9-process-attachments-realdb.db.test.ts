@@ -249,6 +249,55 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
   })
 
   // ===============================================================================================
+  // §5.4 action-scope guard — `attachmentIds` v1 ships the `comment` rider ONLY. Mirrors the
+  // shipped `fieldWrites`-on-wrong-action precedent (APS ~:9165): a present `attachmentIds` key on
+  // any OTHER action is a values-free 400, UNCONDITIONALLY (not flag-gated) — never a silent
+  // accept-and-ignore on `approve`/`reject`/`handle`/etc. (caught in review: the route forwards the
+  // key for every verb, so without this guard it would vanish silently under EITHER flag posture).
+  // ===============================================================================================
+  describe('§5.4 action-scope guard: attachmentIds only valid on comment', () => {
+    it('flag ON: action=approve with attachmentIds present is refused 400, unconditionally — not silently dropped', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'approve', attachmentIds: ['att_whatever'] },
+      })
+      expect(res.status, await res.clone().text()).toBe(400)
+      const body = (await res.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+      // positive control: the SAME approve action WITHOUT attachmentIds succeeds normally.
+      const ok = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'approve' } })
+      expect(ok.status, await ok.clone().text()).toBe(200)
+    })
+
+    it('flag OFF: the SAME guard still fires (unconditional, not flag-gated)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      let res: Response
+      try {
+        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+          method: 'POST',
+          body: { action: 'reject', attachmentIds: ['att_whatever'] },
+        })
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      expect(res.status, await res.clone().text()).toBe(400)
+      const body = (await res.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+    })
+  })
+
+  // ===============================================================================================
   // G-1 — process binding never touches form_snapshot; contrasted with a real handle+fieldWrites
   // change on a SIBLING template in the same suite (proving the isolation is process-selected).
   // ===============================================================================================
@@ -287,7 +336,23 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
   // asserted ABSENT after a full flow. Direct-SQL CHECK probe (mirrors the manual psql verification).
   // ===============================================================================================
   describe('G-2: bind_kind discriminator + CHECK', () => {
-    it('a process row with field_id IS NOT NULL never exists after a real upload+bind flow', async () => {
+    it('a process row with field_id IS NOT NULL never exists after a real upload+bind flow (self-contained, not order-dependent on a sibling test)', async () => {
+      // Self-contained: runs its OWN upload+bind rather than relying on an earlier describe block
+      // having already created one — a filtered run (`-t "G-2"`) must not make this vacuously true.
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      expect(up1.status, await up1.clone().text()).toBe(201)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      const bind = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+      expect(bind.status, await bind.clone().text()).toBe(200)
+
+      const thisRow = (await pool().query('SELECT field_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(thisRow.field_id).toBeNull()
       const n = await pool().query(`SELECT count(*)::int AS n FROM approval_attachments WHERE bind_kind='process' AND field_id IS NOT NULL`)
       expect(n.rows[0].n).toBe(0)
     })
@@ -768,14 +833,18 @@ describe(process.env.DATABASE_URL ? 'G-14: migration relaxation + ordering + rol
     await adminPool.end()
   }
 
-  maybeIt('ordering: the new migration filename IS the lexicographic maximum of the migrations directory', async () => {
+  maybeIt('ordering: this migration sorts after EVERY OTHER file currently in the migrations directory', async () => {
+    // Asserted as a RELATIVE property (mine > every other file), not a hardcoded "IS the max" —
+    // a hardcoded max would false-red on any unrelated PR that lands a later-dated migration first,
+    // which is not this slice's ordering claim to make (D-1: re-read the directory at test time).
     const { readdirSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
     const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'db', 'migrations')
-    const files = readdirSync(dir).filter((f) => f.endsWith('.ts') || f.endsWith('.sql'))
-    const max = [...files].sort().at(-1)
-    expect(max).toBe('zzzz20260822130000_approval_attachments_process_binding.ts')
+    const mine = 'zzzz20260822130000_approval_attachments_process_binding.ts'
+    const files = readdirSync(dir).filter((f) => (f.endsWith('.ts') || f.endsWith('.sql')) && f !== mine)
+    expect(files.length).toBeGreaterThan(100) // scan negative control — the directory really was read
+    expect(files.every((f) => f < mine)).toBe(true)
   })
 
   maybeIt('deploy precondition: BEFORE this migration, a bind_kind=process/field_id=NULL write hard-fails on NOT NULL', async () => {

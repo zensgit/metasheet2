@@ -40,6 +40,17 @@ export class ApprovalProcessAttachmentBindError extends Error {
  * is). Counts the uploader's own STILL-STAGED (`unbound`, `bind_kind='process'`) rows for this
  * staged instance, so an uploader cannot accumulate more than an action could ever bind. Values-
  * free: throws carry no filename/uploader/size (OD-L9-12).
+ *
+ * DISCLOSED SHAPE NOTE (caught in review): this scope is per STAGED INSTANCE (cumulative across
+ * every never-bound upload against that instance, however old), while the bind-time check below is
+ * per ACTION (scoped to only the ids named in one `bindProcessAttachmentsOnAction` call) — two
+ * different meanings of "per action" under the OD-L9-8 budget name, which do not compose. Concrete
+ * consequence: an approver who stages 5 files, binds 3 via one comment, and then wants to stage 3
+ * MORE for a second comment on the same instance hits this upload-time 413 immediately — the 2
+ * abandoned unbound rows from the first round still count here until the uploader DELETEs them or
+ * the 168h TTL sweep reclaims them. This is not a security hole (bind-time is the authority,
+ * OD-L9-7), but it is a real shape gap against OD-L9-8's "the process-scoped SHAPE is what is
+ * locked" — recorded here and in the PR body rather than left silently mismatched.
  */
 export async function assertProcessUploadBudget(
   trx: Queryable,
