@@ -10,14 +10,19 @@ name: Migration parity — production postgres image (advisory)
 #
 # WHY THIS LANE EXISTS (2026-08-21): a PG15-alpine arm run for an unrelated task surfaced a
 # latent CI-blind divergence. postgres:15-alpine's pg_collation table has NO libc en_US.utf8
-# entry — only C/POSIX and ICU collations are present on that image (musl libc does not ship
+# entry (verified: collprovider='c' rows are exactly C / POSIX / ucs_basic, plus one 'default'
+# pseudo-entry — everything else, 900+ rows, is collprovider='i' ICU; musl libc does not ship
 # glibc's locale data, and Alpine's postgres build does not compile a libc-locale provider in).
 # Every EXISTING CI arm that runs migrations does so against a DIFFERENT postgres build than
 # production:
-#   - plugin-tests.yml / observability-*.yml / safety-guard-e2e.yml: ankane/setup-postgres
-#     (Debian glibc, PG14) — see plugin-tests.yml's "Start Postgres" step.
-#   - migration-replay.yml: ankane/setup-postgres, postgres-version: 15 — still Debian glibc,
-#     NOT the alpine/musl build; the major version number matching does not make it image-parity.
+#   - plugin-tests.yml: ankane/setup-postgres, postgres-version: 14 — Debian glibc (see its
+#     "Start Postgres" step).
+#   - observability-strict.yml / observability-e2e.yml / safety-guard-e2e.yml:
+#     quay.io/enterprisedb/postgresql:15 as a `services:` container — RHEL 8.10 / glibc 2.28,
+#     NOT Debian and NOT the ankane/setup-postgres runner-native install; still glibc, still not
+#     the alpine/musl build.
+#   - migration-replay.yml: ankane/setup-postgres, postgres-version: 15 — Debian glibc, NOT the
+#     alpine/musl build; the major version number matching does not make it image-parity.
 #   - approval-realdb-*.yml (this repo's real-DB acceptance lanes): postgres:16 (Debian glibc
 #     Docker image) as a `services:` container.
 # A migration that wrote `COLLATE "en_US.utf8"` on any text column would PASS every one of the
