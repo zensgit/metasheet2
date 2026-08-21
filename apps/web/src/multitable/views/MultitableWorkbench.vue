@@ -4327,6 +4327,10 @@ watch(
   },
 )
 
+// Cleared on unmount so an idle-deferred callback scheduled during mount can
+// never fire into a torn-down workbench (or eat a later test's mocked fetch).
+let workbenchAlive = true
+
 onMounted(async () => {
   window.addEventListener('beforeunload', onBeforeUnload)
   syncRailViewportState() // UI-P2-2c: establish narrow/wide state at mount. Runs in onMounted (AFTER the
@@ -4395,14 +4399,20 @@ onMounted(async () => {
       viewId: workbench.activeViewId.value ?? '',
     })
     // Ambient comment unread badge: idle-deferred so it never adds a round
-    // trip to the sheet-open critical path.
+    // trip to the sheet-open critical path. Defensive: this runs OUTSIDE the
+    // mount try/catch (idle callback), so a mocked/non-promise return must not
+    // become an unhandled error.
     scheduleIdle(() => {
-      void commentInboxState.refreshUnreadCount().catch(() => undefined)
+      if (!workbenchAlive) return
+      try {
+        void Promise.resolve(commentInboxState.refreshUnreadCount()).catch(() => undefined)
+      } catch { /* ambient badge is best-effort */ }
     })
   }
 })
 
 onBeforeUnmount(() => {
+  workbenchAlive = false
   window.removeEventListener('beforeunload', onBeforeUnload)
   window.removeEventListener('resize', syncRailViewportState)
   stopDialogMetaRefresh()
