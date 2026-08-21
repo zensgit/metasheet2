@@ -110,14 +110,23 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   if (!(await checkTableExists(db, 'approval_attachments'))) return
 
   // Pre-flight FAIL LOUD (OD-S1-9(b)): an instance whose bound attachments disagree on org_id
-  // would silently re-tenant the instance if one value were picked arbitrarily.
+  // would silently re-tenant the instance if one value were picked arbitrarily. Scoped (P3-3, S1
+  // requal) to EXACTLY the population the backfill UPDATE below would actually touch — an INNER
+  // JOIN to `approval_instances` (excludes attachment rows orphaned from a deleted/nonexistent
+  // instance, which the UPDATE's own join would silently skip anyway) AND `i.org_id IS NULL`
+  // (excludes instances some other path already populated — the UPDATE's own `WHERE i.org_id IS
+  // NULL` guard would no-op on those). Without this scoping, a conflict on a row the backfill would
+  // never touch aborted the WHOLE migration — and per P1-1's ordering, it would abort it AFTER the
+  // new image is already live and denying every approval read.
   const conflicts = await sql<{ instance_id: string }>`
-    SELECT instance_id
-      FROM approval_attachments
-     WHERE instance_id IS NOT NULL
-     GROUP BY instance_id
-    HAVING COUNT(DISTINCT org_id) > 1
-     ORDER BY instance_id
+    SELECT a.instance_id
+      FROM approval_attachments a
+      JOIN approval_instances i ON i.id = a.instance_id
+     WHERE a.instance_id IS NOT NULL
+       AND i.org_id IS NULL
+     GROUP BY a.instance_id
+    HAVING COUNT(DISTINCT a.org_id) > 1
+     ORDER BY a.instance_id
   `.execute(db)
   if (conflicts.rows.length > 0) {
     const ids = conflicts.rows.map((row) => row.instance_id).join(', ')
