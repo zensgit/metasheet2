@@ -409,6 +409,7 @@ const functionRowsFixture = (overrides = {}) =>
     language: fn.language,
     security_definer: fn.securityDefiner,
     volatility: fn.volatility,
+    config: fn.config,
     body: fn.body,
     ...(overrides[fn.functionName] ?? {}),
   }))
@@ -732,12 +733,15 @@ test('P2: UNOBSERVED authority functions are NOT armed — the function check is
 })
 
 test('P2: an authority function SHADOWED from another schema is NOT armed', () => {
-  // Round-three escape, found by attacking the round-two fix. Every `public` row matches the census
-  // exactly — nine canonical triggers, six correct function fingerprints — yet the definition that
-  // RUNS is a same-signature function in another schema: the authority triggers call the lease
-  // helpers by bare name and carry no `SET search_path`, and the default path is `"$user", public`.
-  // Verified behaviourally on a real database: with a `postgres.metasheet_try_recovery_authority_user`
-  // present, an EXCLUSIVE lease no longer refuses the write while preflight read ARMED 9/9 + 6/6.
+  // Round-three escape, found by attacking the round-two fix. HISTORICALLY this was live-exploitable:
+  // every `public` row matched the census exactly — nine canonical triggers, six correct function
+  // fingerprints — yet the definition that RAN was a same-signature function in another schema,
+  // because the trigger functions called the lease helpers by bare name with no `SET search_path`
+  // (default path `"$user", public`); with a `postgres.metasheet_try_recovery_authority_user` present
+  // an EXCLUSIVE lease no longer refused the write. That root cause is now FIXED at the source by
+  // zzzz20260821120000 (schema-qualified calls + fixed search_path), so such a shadow can no longer
+  // win resolution. The census stays as DEFENSE-IN-DEPTH and this preflight still fail-closes on any
+  // authority-named function outside `public` (it should not exist; its presence signals tampering).
   const posture = evaluate(postureRows('O'), {
     shadowFunctionRows: [
       {

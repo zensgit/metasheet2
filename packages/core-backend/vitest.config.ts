@@ -1408,6 +1408,15 @@ export default defineConfig({
       // see the seven approval-realdb-*.yml lanes' headers). That lane
       // multitable-recovery-authority-*-realdb.test.ts files already run in).
       'tests/integration/recovery-schema-drift.db.test.ts',
+      // Recovery-authority search-path shadow counterexample + mutation matrix: reproduces the
+      // CVE-2018-1058-shaped shadow on a real migrated DB and proves zzzz20260821120000 defeats it
+      // (schema-qualified calls + fixed SET search_path, each independently sufficient). Needs real
+      // Postgres (two connections, a held exclusive lease, a shadow schema, a non-transactional
+      // call-counter). DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green
+      // it, and wired as a WHOLE FILE into the SAME standalone
+      // .github/workflows/multitable-recovery-schema-drift.yml lane as the drift guard above (NOT
+      // plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main).
+      'tests/integration/recovery-authority-search-path.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

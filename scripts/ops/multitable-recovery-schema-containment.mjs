@@ -216,7 +216,7 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    IF NOT metasheet_try_recovery_authority_user(authority_user_id, FALSE) THEN
+    IF NOT public.metasheet_try_recovery_authority_user(authority_user_id, FALSE) THEN
       RAISE EXCEPTION USING
         ERRCODE = '40001',
         MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
@@ -240,7 +240,7 @@ BEGIN
      WHERE candidate IS NOT NULL AND btrim(candidate) <> ''
      ORDER BY 1
   LOOP
-    IF NOT metasheet_try_recovery_authority_role(affected_role_id, FALSE) THEN
+    IF NOT public.metasheet_try_recovery_authority_role(affected_role_id, FALSE) THEN
       RAISE EXCEPTION USING
         ERRCODE = '40001',
         MESSAGE = 'METASHEET_RECOVERY_AUTHORITY_BUSY';
@@ -277,11 +277,11 @@ BEGIN
        btrim(subject_id)
   LOOP
     IF affected_subject_type = 'user' THEN
-      acquired := metasheet_try_recovery_authority_user(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_user(affected_subject_id, FALSE);
     ELSIF affected_subject_type = 'role' THEN
-      acquired := metasheet_try_recovery_authority_role(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_role(affected_subject_id, FALSE);
     ELSE
-      acquired := metasheet_try_recovery_authority_group(affected_subject_id, FALSE);
+      acquired := public.metasheet_try_recovery_authority_group(affected_subject_id, FALSE);
     END IF;
     IF NOT acquired THEN
       RAISE EXCEPTION USING
@@ -303,6 +303,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_GROUP_BODY,
   },
   {
@@ -313,6 +317,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_ROLE_BODY,
   },
   {
@@ -323,6 +331,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: TRY_LOCK_USER_BODY,
   },
   {
@@ -333,6 +345,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: SUBJECT_TRIGGER_BODY,
   },
   {
@@ -343,6 +359,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: USER_TRIGGER_BODY,
   },
   {
@@ -353,6 +373,10 @@ const EXPECTED_AUTHORITY_FUNCTIONS = [
     language: 'plpgsql',
     securityDefiner: false,
     volatility: 'v',
+    // Fixed search_path landed by zzzz20260821120000_recovery_authority_functions_fix_search_path.ts
+    // (belt half of the shadow root-fix). Read verbatim from pg_proc.proconfig on a freshly migrated
+    // DB, NOT hand-written — the internal comma is a value delimiter pg chose, not an array separator.
+    config: ['search_path=pg_catalog, public'],
     body: ROLE_PERMISSION_TRIGGER_BODY,
   },
 ]
@@ -391,6 +415,10 @@ function canonicalFunction(row) {
     language: String(row.language ?? ''),
     securityDefiner: Boolean(row.securityDefiner ?? row.security_definer),
     volatility: String(row.volatility ?? ''),
+    // The per-function SET list (pg_proc.proconfig). node-postgres parses the text[] into a JS
+    // array of `name=value` strings, e.g. ['search_path=pg_catalog, public']; NULL (no SET) becomes
+    // []. Part of the fingerprint so the fixed search_path hardening cannot silently drift out.
+    config: [...(row.config ?? row.proconfig ?? [])].map(String),
     body: normalizeWhitespace(row.body),
   }
 }
@@ -455,6 +483,15 @@ const AUTHORITY_TRIGGER_SNAPSHOT_QUERY = `SELECT
  * The authority-function catalogue SELECT — the SINGLE query of record for the function body
  * fingerprint (`$1` = authority function names). Shared with the L1 battery for the same reason
  * as the trigger query above.
+ *
+ * `proconfig` (the per-function `SET` list, e.g. `{"search_path=pg_catalog, public"}`) is part of
+ * the identity for the same reason `body` is. The CVE-2018-1058-shaped shadowing hole is defeated by
+ * TWO independently-sufficient hardenings landed in
+ * `zzzz20260821120000_recovery_authority_functions_fix_search_path.ts`: (a) schema-qualified helper
+ * calls — visible in `prosrc`/`body` above — and (b) a fixed `SET search_path = pg_catalog, public`,
+ * which lives in `proconfig`, NOT in `prosrc`. Without this column the search_path half of the fix
+ * would ship UNVERIFIED — a drift no gate could observe, the very shape of the finding being fixed.
+ * Fingerprinting `proconfig` makes a silent removal of the fixed search_path fail this check.
  */
 const AUTHORITY_FUNCTION_SNAPSHOT_QUERY = `SELECT
          ns.nspname AS schema_name,
@@ -464,6 +501,7 @@ const AUTHORITY_FUNCTION_SNAPSHOT_QUERY = `SELECT
          lang.lanname AS language,
          proc.prosecdef AS security_definer,
          proc.provolatile AS volatility,
+         proc.proconfig AS config,
          proc.prosrc AS body
        FROM pg_catalog.pg_proc proc
        JOIN pg_catalog.pg_namespace ns ON ns.oid = proc.pronamespace
@@ -476,19 +514,24 @@ const AUTHORITY_FUNCTION_SNAPSHOT_QUERY = `SELECT
  * SHADOW-FUNCTION census (`$1` = authority function names). Returns every authority-named function
  * that lives OUTSIDE `public`, in any other schema.
  *
- * Why this is a posture question and not housekeeping: the authority trigger functions call the
- * lease helpers by BARE NAME and carry no `SET search_path`, so resolution follows the CALLER's
- * search_path — whose default is `"$user", public`. A same-signature helper in a schema named after
- * the connecting role therefore wins over the real one in `public` (the CVE-2018-1058 shape).
- * Verified behaviourally on a real database: with such a shadow present, an EXCLUSIVE
- * recovery-authority lease no longer refuses the platform write, while every `public` catalogue row
- * — all nine triggers, all six function fingerprints — still matches the census exactly.
+ * HISTORY / current status: this census was originally the ONLY defense against a
+ * CVE-2018-1058-shaped shadow — before `zzzz20260821120000_recovery_authority_functions_fix_search_path`,
+ * the trigger functions called the lease helpers by BARE NAME with no `SET search_path`, so a
+ * same-signature helper in a schema earlier on the caller's search_path (`"$user", public` by
+ * default) could win over the real one in `public` and make an EXCLUSIVE lease stop refusing the
+ * write. That root cause is now FIXED at the source: the trigger functions call
+ * `public.metasheet_try_recovery_authority_*` (schema-qualified) AND every authority function carries
+ * a fixed `SET search_path = pg_catalog, public` (both independently sufficient; proven behaviourally
+ * in `recovery-authority-search-path.db.test.ts`). A shadow planted in another schema therefore can
+ * no longer win the resolution.
  *
- * `AUTHORITY_FUNCTION_SNAPSHOT_QUERY` is schema-filtered to `public` and so cannot see this; that
- * filter is deliberate (its rows are compared field-by-field against the `public` census). This is
- * the complementary observation, kept separate so the containment module's own verdict shape is
- * unchanged. NOTE: the root cause is the migration's functions lacking `SET search_path` — this
- * query lets a reader REFUSE such a database, it does not harden it.
+ * This census is retained as DEFENSE-IN-DEPTH: an authority-named function outside `public` is still
+ * anomalous and worth surfacing (it should not exist, and its presence signals tampering), so the
+ * reader may still REFUSE such a database — but it is no longer load-bearing for the shadow defeat,
+ * which the migration owns. `AUTHORITY_FUNCTION_SNAPSHOT_QUERY` is schema-filtered to `public` and so
+ * cannot see this; that filter is deliberate (its rows are compared field-by-field against the
+ * `public` census). This is the complementary observation, kept separate so the containment module's
+ * own verdict shape is unchanged.
  */
 const AUTHORITY_FUNCTION_SHADOW_QUERY = `SELECT
          ns.nspname AS schema_name,
