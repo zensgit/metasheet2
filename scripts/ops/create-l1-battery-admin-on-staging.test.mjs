@@ -1,0 +1,658 @@
+#!/usr/bin/env node
+
+import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+// ---------------------------------------------------------------------------
+// Guards for scripts/ops/create-l1-battery-admin-on-staging.sh (owner-review
+// P1+P2 fix, 2026-08-21).
+//
+// P1: the ad-hoc predecessor `docker cp`'d the admin password INTO the backend
+//     container (/tmp/l1pw.$$), where it survives a stop/kill in the writable
+//     layer, and its cleanup ran ONLY on success (`&& rm -f`). The shipped
+//     script must ingest the password on STDIN only (no container write) and
+//     scrub the host password file with an unconditional trap.
+// P2: the predecessor promoted with THREE autocommit statements. Migration 054
+//     seeds roles as ('admin','管理员'), so its `WHERE NOT EXISTS ... name='admin'`
+//     guard fired a PK violation on roles.id AFTER `UPDATE users SET role='admin'`
+//     had already committed and BEFORE the user_roles insert — leaving a fake
+//     admin (role column set, no RBAC membership). The shipped script must
+//     promote in ONE transaction that ends with an assertion (exactly one user +
+//     exactly one user_roles admin membership) and rolls back on any shortfall.
+//
+// LAYERS:
+//   1. STRUCTURAL (hermetic): parse the script text. The load-bearing predicates
+//      are shared with the mutation tests so the two can never diverge into
+//      different definitions of the same guard.
+//   2. MUTATION-PROVE (hermetic): apply each defect to a COPY of the script text
+//      in memory and assert the matching structural gate flips red — the file on
+//      disk is never touched (satisfies "never restore with git checkout --": we
+//      mutate strings, not the file).
+//   3. GOLDEN (real Docker, OPT-IN via L1_ADMIN_DOCKER_GOLDENS=1): run the SHIPPED
+//      script end-to-end against a mock backend container + a real Postgres, and
+//      prove with `docker diff` that the ingestion writes NOTHING into the
+//      container, reproduce the OLD `docker cp`-in leak to show the golden has
+//      teeth, and confirm a stopped container yields no credential. Kept opt-in
+//      (LOUD skip when unset) so it never runs in a required hermetic lane and a
+//      docker hiccup can never red a required check.
+// ---------------------------------------------------------------------------
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const scriptPath = join(__dirname, 'create-l1-battery-admin-on-staging.sh')
+const scriptText = readFileSync(scriptPath, 'utf8')
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+// Several gates must look at what the script DOES, not what its header comment
+// SAYS — the header deliberately quotes the removed `docker cp … l1pw` lines and
+// names `psql -1` / BEGIN in prose so a reader sees what the bug was. A naive
+// whole-text grep would red on the explanation of the fix.
+function stripShellComments(text) {
+  return text
+    .split('\n')
+    .filter((l) => !l.trimStart().startsWith('#'))
+    .join('\n')
+}
+const executable = stripShellComments(scriptText)
+
+// A command is in COMMAND position (a real invocation, not a word inside an echo
+// string) when what precedes it on the line ends at a command boundary.
+const CMD_POSITION_RE = /(?:^|[;&|(){}!]|\$\(|\b(?:if|then|else|elif|do|while|until)\b)\s*$/
+
+function invocationsOf(text, cmd) {
+  const out = []
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    if (line.startsWith('#')) continue
+    for (let idx = line.indexOf(cmd); idx >= 0; idx = line.indexOf(cmd, idx + 1)) {
+      // reject `docker exec` matching inside `docker execute`-like words / mid-token
+      const before = line.slice(0, idx)
+      const after = line.slice(idx + cmd.length, idx + cmd.length + 1)
+      if (CMD_POSITION_RE.test(before) && (after === '' || /\s/.test(after))) {
+        out.push(line.slice(idx))
+        break
+      }
+    }
+  }
+  return out
+}
+
+// ---- docker cp census (class, not one path literal) -----------------------
+// The predecessor's defect was a `docker cp` with a CONTAINER-PREFIXED
+// DESTINATION. Enumerate every `docker cp` invocation and require that no
+// operand at a destination position is container-prefixed. Positional-invariant
+// so a flag-shifted `docker cp -a SRC CONTAINER:DST` cannot slip past.
+function dockerCpOperands(line) {
+  const after = line.slice(line.indexOf('docker cp') + 'docker cp'.length)
+  const own = after.split('|')[0].split(';')[0]
+  return own
+    .trim()
+    .split(/\s+/)
+    .filter((t) => t !== '' && t !== '\\')
+    .filter((t) => !t.startsWith('>') && !t.startsWith('2>') && !t.startsWith('&>'))
+    .filter((t) => t === '-' || !t.startsWith('-'))
+}
+function containerPrefixedOperandIndexes(line) {
+  return dockerCpOperands(line)
+    .map((tok, i) => (/(\$\{?(?:BACKEND|PGC|CONTAINER|POSTGRES_CONTAINER|BACKEND_CONTAINER)\}?):/.test(tok) ? i : -1))
+    .filter((i) => i >= 0)
+}
+function noContainerPrefixedCpDestination(text) {
+  return invocationsOf(text, 'docker cp').every((line) => containerPrefixedOperandIndexes(line).every((i) => i === 0))
+}
+
+// ---- docker exec argv secret census ---------------------------------------
+// No `docker exec` invocation may carry the password (the PW_B64 variable) or a
+// `-e …PASSWORD…` env token as an argv — the secret must reach the container on
+// STDIN only. The password variable name is the one thing that must never appear
+// after `docker exec`.
+function dockerExecArgvCarriesSecret(line) {
+  // strip a trailing `<<'SQL'`/redirection tail — heredoc BODY is not argv
+  const argv = line.replace(/<<'?\w+'?.*$/, '')
+  if (/\bPW_B64\b/.test(argv)) return true
+  if (/-e\s+\S*PASSWORD/i.test(argv)) return true
+  if (/-e\s+\S*PW_B64/.test(argv)) return true
+  return false
+}
+function noDockerExecCarriesSecret(text) {
+  return invocationsOf(text, 'docker exec').every((line) => !dockerExecArgvCarriesSecret(line))
+}
+
+// ---- stdin ingestion present ----------------------------------------------
+function stdinIngestionPresent(text) {
+  // the password is base64-framed in a shell var and piped to `docker exec -i`
+  const framesToVar = /PW_B64="\$\(base64 < "\$PWFILE" \| tr -d '\\n'\)"/.test(text)
+  const pipedOnStdin = /printf '%s' "\$PW_B64" \| docker exec -i "\$BACKEND" node -e "\$NODE_PROG"/.test(text)
+  const readsStdin = /process\.stdin\.on\("end"/.test(text) && /Buffer\.from\(buf\.trim\(\), "base64"\)/.test(text)
+  return framesToVar && pipedOnStdin && readsStdin
+}
+
+// ---- trap scrubs the host secret ------------------------------------------
+function trapScrubsHostSecret(text) {
+  const trapLine = text.split('\n').find((l) => /^\s*trap\s+cleanup\b/.test(l))
+  if (!trapLine) return false
+  const hasExit = /\bEXIT\b/.test(trapLine)
+  const hasInt = /\bINT\b/.test(trapLine)
+  const hasTerm = /\bTERM\b/.test(trapLine)
+  // cleanup must actually rm the password file, not merely be declared.
+  const cleanupRemoves = /cleanup\(\)\s*\{[\s\S]*?rm -f -- "\$PWFILE"[\s\S]*?\}/.test(text)
+  return hasExit && hasInt && hasTerm && cleanupRemoves
+}
+
+// ---- single-transaction promotion with post-assert ------------------------
+// The atomicity arm is a disjunction (psql -1 OR an explicit BEGIN;…COMMIT;).
+// It must NOT be satisfied by the plpgsql DO block's own `BEGIN`/`END` (no
+// semicolon), which is why the explicit-tx arm requires `BEGIN;` with a
+// semicolon. Comments are stripped first so the header's prose mention of
+// `psql -1` / BEGIN cannot keep this green after the `-1` is mutated away.
+function promotionIsSingleTransaction(execText) {
+  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v em=/.test(l))
+  const hasPsql1 = Boolean(psqlLine && /(?:^|\s)-1(?:\s|$)/.test(psqlLine))
+  const hasExplicitTx = /\bBEGIN\s*;/.test(execText) && /\bCOMMIT\s*;/.test(execText)
+  return hasPsql1 || hasExplicitTx
+}
+function promotionHasErrorStop(execText) {
+  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v em=/.test(l))
+  return Boolean(psqlLine && /ON_ERROR_STOP=1/.test(psqlLine))
+}
+function promotionAssertsExactlyOne(execText) {
+  const raises = /RAISE EXCEPTION 'promotion assertion failed/.test(execText)
+  const guardsCounts = /IF u_count <> 1 OR m_count <> 1 THEN/.test(execText)
+  const countsUsersByEmail = /SELECT count\(\*\) INTO u_count FROM users WHERE email = em/.test(execText)
+  // the membership count must be the EXACT RBAC read path: user_roles.role_id='admin'
+  const countsAdminMembership = /FROM user_roles ur JOIN users u ON u\.id = ur\.user_id\s*\n\s*WHERE u\.email = em AND ur\.role_id = 'admin'/.test(
+    execText,
+  )
+  return raises && guardsCounts && countsUsersByEmail && countsAdminMembership
+}
+
+// ---- email normalized ONCE and used consistently everywhere ---------------
+// The backend's register handler stores sanitizeEmail(email) =
+// trim().toLowerCase().slice(0,255). If register wrote a normalized email but the
+// promotion read a raw one, `WHERE email = :'em'` would find zero rows → rollback →
+// an account created but never promoted. So $EMAIL must be normalized (trim +
+// lowercase) up front and the SAME $EMAIL must feed register, `-v em=`, and login.
+function emailNormalizedAndConsistent(text) {
+  const normalizes = /EMAIL="\$\(printf '%s' "\$EMAIL_RAW"[\s\S]*?tr '\[:upper:\]' '\[:lower:\]'[\s\S]*?\)"/.test(text)
+  const registerUsesEmail = /register "\$EMAIL"/.test(text)
+  const promoteUsesEmail = /-v em="\$EMAIL"/.test(text)
+  const loginUsesEmail = /login "\$EMAIL"/.test(text)
+  // the RAW value must never reach a downstream register/login/psql site
+  const rawNotDownstream =
+    !/(?:register|login) "\$EMAIL_RAW"/.test(text) && !/-v em="\$EMAIL_RAW"/.test(text)
+  return normalizes && registerUsesEmail && promoteUsesEmail && loginUsesEmail && rawNotDownstream
+}
+
+// ---------------------------------------------------------------------------
+// 1. STRUCTURAL GUARDS (against the real file)
+// ---------------------------------------------------------------------------
+
+test('structural: script is set -euo pipefail (fail-closed)', () => {
+  assert.match(scriptText, /^set -euo pipefail$/m)
+})
+
+test('structural: NO docker cp anywhere writes into a container (the class, not one path literal)', () => {
+  const cps = invocationsOf(scriptText, 'docker cp')
+  // The strongest possible form: the shipped script contains ZERO `docker cp`.
+  assert.equal(cps.length, 0, `the shipped script must contain no docker cp at all: ${JSON.stringify(cps)}`)
+  assert.equal(noContainerPrefixedCpDestination(scriptText), true)
+  // Positive control on the census itself (attack your own criterion): a
+  // synthetic container-destination copy MUST be rejected, incl. a flag-shifted one.
+  assert.equal(
+    noContainerPrefixedCpDestination('docker cp "$PWFILE" "$BACKEND:/tmp/l1pw"'),
+    false,
+    'the census must reject a docker cp INTO the container',
+  )
+  assert.equal(
+    noContainerPrefixedCpDestination('docker cp -a "$PWFILE" "$BACKEND:/tmp/l1pw"'),
+    false,
+    'the census must reject a flag-shifted docker cp INTO the container',
+  )
+  assert.equal(
+    noContainerPrefixedCpDestination('docker cp "$BACKEND:/tmp/evidence.json" "$OUT/evidence.json"'),
+    true,
+    'sanity: a container-prefixed SOURCE (copy OUT) must still be allowed',
+  )
+})
+
+test('structural: no docker exec invocation carries the password on argv (stdin-only)', () => {
+  const execs = invocationsOf(scriptText, 'docker exec')
+  assert.ok(execs.length >= 3, `sanity: the script must actually invoke docker exec: ${execs.length}`)
+  assert.equal(noDockerExecCarriesSecret(scriptText), true)
+  // Positive control: an env-var ingestion of the password MUST be rejected.
+  assert.equal(
+    noDockerExecCarriesSecret('docker exec -e ADMIN_PASSWORD="$PW" "$BACKEND" node x.js'),
+    false,
+    'the census must reject `docker exec -e …PASSWORD…`',
+  )
+  assert.equal(
+    noDockerExecCarriesSecret('printf %s "$PW_B64" | docker exec -i "$BACKEND" node -e "$PW_B64"'),
+    false,
+    'the census must reject the password variable appearing as an argv token',
+  )
+})
+
+test('structural: credentials are ingested on STDIN (base64 var → docker exec -i, container reads process.stdin)', () => {
+  assert.equal(stdinIngestionPresent(scriptText), true)
+})
+
+test('structural: an unconditional trap on EXIT/INT/TERM scrubs the host password file', () => {
+  assert.equal(trapScrubsHostSecret(scriptText), true)
+  // HUP is additionally covered (SSH drop), belt-and-suspenders.
+  const trapLine = scriptText.split('\n').find((l) => /^\s*trap\s+cleanup\b/.test(l))
+  assert.match(trapLine, /\bHUP\b/, 'the trap should also cover HUP (SSH drop)')
+})
+
+test('structural: promotion is ONE transaction (psql -1) with ON_ERROR_STOP and an exactly-one assertion on the real RBAC read path', () => {
+  assert.equal(promotionIsSingleTransaction(executable), true, 'promotion must be a single transaction (psql -1 / BEGIN;…COMMIT;)')
+  assert.equal(promotionHasErrorStop(executable), true, 'promotion must set ON_ERROR_STOP=1')
+  assert.equal(
+    promotionAssertsExactlyOne(executable),
+    true,
+    'promotion must end asserting exactly one user + exactly one user_roles admin membership',
+  )
+  // The promotion inserts are idempotent (safe re-run).
+  assert.match(executable, /INSERT INTO roles \(id, name\) VALUES \('admin', 'admin'\) ON CONFLICT \(id\) DO NOTHING;/)
+  assert.match(executable, /INSERT INTO user_roles[\s\S]*?ON CONFLICT \(user_id, role_id\) DO NOTHING;/)
+})
+
+test('structural: the email is normalized (trim+lowercase) once and the SAME $EMAIL feeds register, promotion, and login', () => {
+  assert.equal(emailNormalizedAndConsistent(scriptText), true)
+})
+
+test('structural: login verification hits the real endpoint and requires success:true', () => {
+  assert.match(scriptText, /docker exec -i "\$BACKEND" node -e "\$NODE_PROG" login "\$EMAIL"/)
+  assert.match(scriptText, /"\/api\/auth\/login"/)
+  assert.match(scriptText, /r\.statusCode >= 200 && r\.statusCode < 300 && \/"success"\\s\*:\\s\*true\/\.test\(d\)/)
+})
+
+test('structural: the header documents the stdin-only + trap + single-tx design and the P1 it fixes', () => {
+  const header = scriptText.slice(0, scriptText.indexOf('set -euo pipefail'))
+  assert.match(header, /stdin-only ingestion/i)
+  assert.match(header, /WRITABLE LAYER/)
+  assert.match(header, /trap .*EXIT INT TERM HUP/)
+  assert.match(header, /single (transaction|atomic)|one atomic/i)
+  assert.match(header, /USAGE/)
+})
+
+// ---------------------------------------------------------------------------
+// 2. MUTATION-PROVE (in-memory string mutations; file on disk untouched)
+// ---------------------------------------------------------------------------
+
+test('mutation: reintroducing a `docker cp` of the secret INTO the container reds the docker-cp census', () => {
+  // sanity: pristine passes
+  assert.equal(noContainerPrefixedCpDestination(scriptText), true)
+  const mutated = scriptText.replace(
+    'PW_B64="$(base64 < "$PWFILE" | tr -d \'\\n\')"',
+    'docker cp "$PWFILE" "$BACKEND:/tmp/l1pw.$$"\nPW_B64="$(base64 < "$PWFILE" | tr -d \'\\n\')"',
+  )
+  assert.notEqual(mutated, scriptText, 'mutation must actually change the text')
+  assert.equal(noContainerPrefixedCpDestination(mutated), false, 'a reintroduced docker cp INTO the container must red the census')
+})
+
+test('mutation: a flag-shifted `docker cp -a … CONTAINER:…` still reds the census', () => {
+  const mutated = scriptText.replace(
+    'PW_B64="$(base64 < "$PWFILE" | tr -d \'\\n\')"',
+    'docker cp -a "$PWFILE" "$BACKEND:/tmp/l1pw"\nPW_B64="$(base64 < "$PWFILE" | tr -d \'\\n\')"',
+  )
+  assert.notEqual(mutated, scriptText)
+  assert.equal(noContainerPrefixedCpDestination(mutated), false)
+})
+
+test('mutation: passing the password as `docker exec -e …PASSWORD` reds the argv-secret census', () => {
+  assert.equal(noDockerExecCarriesSecret(scriptText), true)
+  const mutated = scriptText.replace(
+    'docker exec -i "$BACKEND" node -e "$NODE_PROG" register "$EMAIL"',
+    'docker exec -i -e ADMIN_PASSWORD="$PW_B64" "$BACKEND" node -e "$NODE_PROG" register "$EMAIL"',
+  )
+  assert.notEqual(mutated, scriptText)
+  assert.equal(noDockerExecCarriesSecret(mutated), false)
+})
+
+test('mutation: making the promotion non-transactional (drop `-1`) reds the single-transaction gate', () => {
+  // sanity: pristine passes
+  assert.equal(promotionIsSingleTransaction(executable), true)
+  const mutatedText = scriptText.replace(
+    'psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v em="$EMAIL"',
+    'psql -U "$PGU" -d "$PGD" -v ON_ERROR_STOP=1 -v em="$EMAIL"',
+  )
+  assert.notEqual(mutatedText, scriptText, 'mutation must actually remove the -1')
+  const mutatedExec = stripShellComments(mutatedText)
+  // The DO block still contains a plpgsql `BEGIN`/`END`; the gate must NOT be
+  // fooled by it (that is the 枚举陷阱 the disjunction-with-semicolon avoids).
+  assert.match(mutatedExec, /^\s*BEGIN$/m, 'sanity: the plpgsql BEGIN is still present after the mutation')
+  assert.equal(
+    promotionIsSingleTransaction(mutatedExec),
+    false,
+    'without -1 (and no explicit BEGIN;…COMMIT;) the promotion is no longer a single transaction — the plpgsql BEGIN must not keep it green',
+  )
+})
+
+test('mutation: dropping the trim+lowercase normalization (register raw email) reds the email-consistency gate', () => {
+  assert.equal(emailNormalizedAndConsistent(scriptText), true)
+  const mutated = scriptText.replace(
+    /EMAIL="\$\(printf '%s' "\$EMAIL_RAW"[\s\S]*?\)"/,
+    'EMAIL="$EMAIL_RAW"',
+  )
+  assert.notEqual(mutated, scriptText, 'mutation must actually drop the normalization')
+  assert.equal(
+    emailNormalizedAndConsistent(mutated),
+    false,
+    'without trim+lowercase, register would store sanitizeEmail(email) while the promotion reads the raw casing',
+  )
+})
+
+test('mutation: deleting the exactly-one RAISE assertion reds the post-assert gate', () => {
+  assert.equal(promotionAssertsExactlyOne(executable), true)
+  const mutatedText = scriptText.replace(
+    /IF u_count <> 1 OR m_count <> 1 THEN\n\s*RAISE EXCEPTION 'promotion assertion failed[\s\S]*?END IF;/,
+    '-- assertion removed by mutation',
+  )
+  assert.notEqual(mutatedText, scriptText, 'mutation must actually remove the assertion')
+  assert.equal(promotionAssertsExactlyOne(stripShellComments(mutatedText)), false)
+})
+
+// ---------------------------------------------------------------------------
+// 3. GOLDEN — real Docker, OPT-IN. End-to-end run of the SHIPPED script against
+//    a mock backend container + a real Postgres, plus the leak reproduction.
+// ---------------------------------------------------------------------------
+
+function goldenSkipReason() {
+  if (process.env.L1_ADMIN_DOCKER_GOLDENS !== '1') {
+    return 'L1_ADMIN_DOCKER_GOLDENS != 1 (real-Docker goldens are opt-in; they never run in a required hermetic lane)'
+  }
+  const probe = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8' })
+  if (probe.error) return `docker-unreachable: CLI not usable: ${probe.error.message}`
+  if (probe.status !== 0) return `docker-unreachable: daemon not reachable (exit ${probe.status}): ${(probe.stderr || '').trim()}`
+  // A usable node base image (for the mock backend) and postgres image must exist.
+  const nodeImg = spawnSync('docker', ['image', 'inspect', 'node:20-alpine'], { encoding: 'utf8' })
+  if (nodeImg.status !== 0) {
+    const pull = spawnSync('docker', ['pull', '-q', 'node:20-alpine'], { encoding: 'utf8' })
+    if (pull.status !== 0) return `no-usable-base-image: node:20-alpine not present and not pullable: ${(pull.stderr || '').trim()}`
+  }
+  const pgImg = spawnSync('docker', ['image', 'inspect', 'postgres:15-alpine'], { encoding: 'utf8' })
+  if (pgImg.status !== 0) {
+    const pull = spawnSync('docker', ['pull', '-q', 'postgres:15-alpine'], { encoding: 'utf8' })
+    if (pull.status !== 0) return `no-usable-base-image: postgres:15-alpine not present and not pullable: ${(pull.stderr || '').trim()}`
+  }
+  return null
+}
+
+const GOLDEN_SKIP = goldenSkipReason()
+if (GOLDEN_SKIP) {
+  console.error(
+    `[golden] REAL-DOCKER GOLDEN SKIPPED — ${GOLDEN_SKIP}. The structural + mutation cases above still ran; the real-container proof did NOT.`,
+  )
+}
+
+function d(args, opts = {}) {
+  return spawnSync('docker', args, { encoding: 'utf8', ...opts })
+}
+
+// The mock backend: a long-running HTTP server implementing the exact
+// register/login contract (201/{success:true}, 409 "already exists", 200 on
+// matching password), backed by an in-memory Map. Runs as the container's main
+// process so `docker exec … node -e` (the shipped ingestion) reaches it on
+// 127.0.0.1:$PORT. Deliberately holds NO filesystem state — so any file that
+// `docker diff` reports after the shipped run would be the ingestion leaking.
+const MOCK_BACKEND_SERVER = `
+const http = require('http');
+const users = new Map();
+function readBody(req, cb){ let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{ cb(JSON.parse(b||'{}')); }catch(e){ cb({}); } }); }
+http.createServer((req,res)=>{
+  if(req.url==='/api/auth/register' && req.method==='POST'){
+    readBody(req,(o)=>{
+      if(users.has(o.email)){ res.writeHead(409,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:false,error:'User with this email already exists'})); return; }
+      users.set(o.email,o.password); res.writeHead(201,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true}));
+    });
+  } else if(req.url==='/api/auth/login' && req.method==='POST'){
+    readBody(req,(o)=>{
+      const id=o.identifier||o.email;
+      if(users.has(id) && users.get(id)===o.password){ res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true,data:{token:'t'}})); }
+      else { res.writeHead(401,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:false,error:'Invalid account or password'})); }
+    });
+  } else { res.writeHead(404); res.end('{}'); }
+}).listen(Number(process.env.PORT||8900),'127.0.0.1',()=>{ console.error('mock backend up'); });
+`
+
+const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user');
+CREATE TABLE IF NOT EXISTS roles (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL REFERENCES roles(id) ON DELETE CASCADE, PRIMARY KEY (user_id, role_id));
+-- migration 054 seeds roles exactly like this ('admin','管理员') — the P2 trap:
+INSERT INTO roles (id, name) VALUES ('admin','管理员'),('user','普通用户') ON CONFLICT (id) DO NOTHING;
+`
+
+function withGoldenStack(fn, { backendMode = 'mock' } = {}) {
+  const id = `${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+  const backend = `l1admin-backend-${id}`
+  const pg = `l1admin-pg-${id}`
+  d(['rm', '-f', backend, pg])
+  // Postgres
+  let r = d(['run', '-d', '--name', pg, '-e', 'POSTGRES_USER=ms', '-e', 'POSTGRES_PASSWORD=ms', '-e', 'POSTGRES_DB=metasheet', 'postgres:15-alpine'])
+  assert.equal(r.status, 0, `postgres must start: ${r.stderr}`)
+  // Backend: either the long-running mock HTTP server (PORT=8900), or a 'noserver'
+  // container that has `node`/`sh` (so `docker exec` works and the ingestion runs)
+  // but NOTHING listening on 8900 — so register's node one-liner gets ECONNREFUSED
+  // and the script exits non-zero AFTER ingestion, exercising the trap on a failure.
+  if (backendMode === 'noserver') {
+    r = d(['run', '-d', '--name', backend, '-e', 'PORT=8900', 'node:20-alpine', 'sleep', '3600'])
+  } else {
+    r = d(['run', '-d', '--name', backend, '-e', 'PORT=8900', 'node:20-alpine', 'node', '-e', MOCK_BACKEND_SERVER])
+  }
+  assert.equal(r.status, 0, `backend must start: ${r.stderr}`)
+  try {
+    // wait for pg readiness
+    let ready = false
+    for (let i = 0; i < 40; i++) {
+      const pr = d(['exec', pg, 'pg_isready', '-U', 'ms', '-d', 'metasheet'])
+      if (pr.status === 0) { ready = true; break }
+      spawnSync('sleep', ['0.5'])
+    }
+    assert.ok(ready, 'postgres must become ready')
+    // schema + seed
+    const sr = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], { input: SCHEMA_SQL })
+    assert.equal(sr.status, 0, `schema load must succeed: ${sr.stderr}`)
+    // the freshly-registered user is created by the script's register step, so we
+    // do NOT pre-seed it here — but the mock backend register writes only to its
+    // in-memory Map, not to postgres, so seed the users row the promotion needs.
+    // (In production the real backend's register writes the users row itself.)
+    const ur = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], {
+      input: `INSERT INTO users (id,email,name,password_hash,role) VALUES ('u-l1','l1-battery-admin@example.com','l1 battery admin','x','user') ON CONFLICT (id) DO NOTHING;`,
+    })
+    assert.equal(ur.status, 0, `user seed must succeed: ${ur.stderr}`)
+    fn({ backend, pg })
+  } finally {
+    d(['rm', '-f', backend, pg])
+  }
+}
+
+function makePwFile(password) {
+  const dir = mkdtempSync(join(tmpdir(), 'l1admin-pw-'))
+  const f = join(dir, 'pw')
+  writeFileSync(f, password) // exact bytes, no trailing newline
+  chmodSync(f, 0o600)
+  return { dir, f }
+}
+
+function runScript(pwFile, backend, pg, extraEnv = {}) {
+  return spawnSync('bash', [scriptPath, pwFile], {
+    encoding: 'utf8',
+    env: {
+      PATH: process.env.PATH,
+      BACKEND_CONTAINER: backend,
+      POSTGRES_CONTAINER: pg,
+      ...extraEnv,
+    },
+  })
+}
+
+// diff paths added under /tmp by the container (the leak surface), baseline-relative.
+function tmpDiffAdds(container) {
+  const r = d(['diff', container])
+  const lines = (r.stdout || '').split('\n').filter(Boolean)
+  return lines.filter((l) => /^A\s|\/tmp/.test(l))
+}
+
+test(
+  'golden (real Docker): the SHIPPED script promotes to a real 1/1 admin and its stdin ingestion writes NOTHING into the backend container',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    withGoldenStack(({ backend, pg }) => {
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+      try {
+        const before = tmpDiffAdds(backend)
+        const r = runScript(f, backend, pg)
+        assert.equal(r.status, 0, `shipped script must succeed; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+        assert.match(r.stdout, /DONE — l1-battery-admin@example\.com exists, is an RBAC admin, and logs in/)
+
+        // (P1) baseline-relative docker diff: the ingestion added NOTHING under /tmp.
+        const after = tmpDiffAdds(backend)
+        const delta = after.filter((l) => !before.includes(l))
+        assert.deepEqual(delta, [], `stdin ingestion must not write into the container; docker diff delta:\n${delta.join('\n')}`)
+
+        // (P1) the host password file was scrubbed by the trap.
+        assert.equal(existsSync(f), false, 'the trap must scrub the host password file on exit')
+
+        // (P2) the DB ends in the exact RBAC read-path state: 1 user, 1 admin membership.
+        const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+        })
+        assert.equal(check.stdout.trim(), '1|1', `DB must be exactly 1 user / 1 admin membership, got: ${check.stdout.trim()}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+test(
+  'golden (real Docker): on a FAILURE exit (backend server down mid-run) the host password file is STILL scrubbed and nothing was written into the container',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    // The exact P1 scenario: register fails (no server), so the old success-only
+    // `&& rm` would have stranded the password. This is the assertion that retires
+    // the P1 on the failure path — the success-path scrub is not enough on its own.
+    withGoldenStack(
+      ({ backend, pg }) => {
+        const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+        try {
+          const before = tmpDiffAdds(backend)
+          const r = runScript(f, backend, pg)
+          assert.notEqual(r.status, 0, `register against a backend with no listening server must fail; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+          // THE point: the trap fired on a non-zero exit and removed the host secret.
+          assert.equal(existsSync(f), false, 'the trap MUST scrub the host password file even on a failure exit (retires the P1 host-stranding)')
+          // And the stdin ingestion still wrote nothing into the container on this path.
+          const after = tmpDiffAdds(backend)
+          const delta = after.filter((l) => !before.includes(l))
+          assert.deepEqual(delta, [], `even on the failure path the ingestion must write nothing into the container; delta:\n${delta.join('\n')}`)
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      },
+      { backendMode: 'noserver' },
+    )
+  },
+)
+
+test(
+  'golden (real Docker): a non-canonical BATTERY_ADMIN_EMAIL (uppercase) is normalized so register/promote/login agree — still exit 0 and 1/1 on the LOWERCASE row',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    // The seeded users row is lowercase (mirroring what the real backend's register,
+    // via sanitizeEmail, would store). If the script promoted by the RAW uppercase
+    // email it would match zero rows → RAISE → rollback → non-zero. Passing here
+    // proves the trim+lowercase normalization makes the three sites agree.
+    withGoldenStack(({ backend, pg }) => {
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+      try {
+        const r = runScript(f, backend, pg, { BATTERY_ADMIN_EMAIL: 'L1-Battery-Admin@Example.COM' })
+        assert.equal(r.status, 0, `normalized uppercase override must succeed; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+        const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+        })
+        assert.equal(
+          check.stdout.trim(),
+          '1|1',
+          'promotion must target the normalized lowercase email the backend stored — a raw-uppercase promotion would find 0 rows and roll back',
+        )
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+test(
+  'golden (real Docker): re-running the SHIPPED script is idempotent (still exit 0, still 1/1)',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    withGoldenStack(({ backend, pg }) => {
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+      const { dir: dir2, f: f2 } = makePwFile('S3cure-Passw0rd!battery')
+      try {
+        assert.equal(runScript(f, backend, pg).status, 0)
+        const r2 = runScript(f2, backend, pg)
+        assert.equal(r2.status, 0, `re-run must succeed; stdout:\n${r2.stdout}\nstderr:\n${r2.stderr}`)
+        assert.match(r2.stdout, /register: status=409 ALREADY_EXISTS\(idempotent\)/)
+        const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+          input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
+        })
+        assert.equal(check.stdout.trim(), '1|1')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+        rmSync(dir2, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+test(
+  'golden (real Docker): after the SHIPPED run, a STOPPED backend container yields no credential via docker cp; and the OLD docker-cp-in leak IS recoverable (teeth)',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    withGoldenStack(({ backend, pg }) => {
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery')
+      const hostCreds = mkdtempSync(join(tmpdir(), 'l1admin-leak-'))
+      try {
+        // Run the shipped (clean) script.
+        assert.equal(runScript(f, backend, pg).status, 0)
+
+        // THE OLD LEAK, reproduced: docker cp the password INTO the container the way
+        // the predecessor did — then stop the container and read it back out.
+        writeFileSync(join(hostCreds, 'password'), 's3cr3t-99')
+        const cpIn = d(['cp', join(hostCreds, 'password'), `${backend}:/tmp/l1pw-leak`])
+        assert.equal(cpIn.status, 0, `the OLD ingestion (docker cp INTO the container) must succeed for this reproduction: ${cpIn.stderr}`)
+
+        // docker diff now SHOWS the leaked file (proves the diff assertion above has teeth).
+        const diffAfterLeak = d(['diff', backend]).stdout || ''
+        assert.match(diffAfterLeak, /\/tmp\/l1pw-leak/, 'docker diff must show a docker cp-in leak — otherwise the clean-path diff assertion is vacuous')
+
+        // Stop the container; it is now absent from docker ps and docker exec refuses…
+        assert.equal(d(['stop', backend]).status, 0)
+        const ps = d(['ps', '--format', '{{.Names}}'])
+        assert.ok(!ps.stdout.split('\n').some((n) => n.trim() === backend), 'a stopped container is absent from docker ps')
+        assert.notEqual(d(['exec', backend, 'true']).status, 0, 'docker exec must refuse a stopped container')
+
+        // …yet the leaked credential is STILL recoverable from its writable layer.
+        const recovered = spawnSync('bash', ['-c', `docker cp '${backend}:/tmp/l1pw-leak' - | tar -xO`], { encoding: 'utf8' })
+        assert.equal(recovered.status, 0, 'reading the OLD leak back out of a stopped container must succeed — that is the vulnerability')
+        assert.equal(recovered.stdout, 's3cr3t-99', 'the docker cp-in credential survives in the writable layer of a stopped container')
+
+        // But the SHIPPED script's own ingestion left NO credential path to recover.
+        const cleanProbe = spawnSync('bash', ['-c', `docker cp '${backend}:/tmp/l1pw' - 2>/dev/null | tar -tf - 2>/dev/null`], { encoding: 'utf8' })
+        assert.notEqual(cleanProbe.stdout.trim(), 'l1pw', 'the shipped stdin-only ingestion must leave no /tmp/l1pw credential in the container')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+        rmSync(hostCreds, { recursive: true, force: true })
+      }
+    })
+  },
+)

@@ -334,7 +334,9 @@ import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
-import MetaCommentsPanel from './MetaCommentsPanel.vue'
+// S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
+// imported directly here rather than through the old-path re-export shim.
+import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
 import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,

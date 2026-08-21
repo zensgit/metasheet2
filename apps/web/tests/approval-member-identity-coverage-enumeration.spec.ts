@@ -40,7 +40,7 @@ import { describe, expect, it } from 'vitest'
  * owner-visible future item only) is a unified person-label rendering component every
  * viewer-facing identity display is required to route through, paired with an AST-level (not
  * text-grep) ban on any OTHER viewer-facing consumption of a member/role/dept id. Until that
- * lands, this file's green is scoped to "no untriaged hit among six known lexical shapes across two
+ * lands, this file's green is scoped to "no untriaged hit among six known lexical shapes across three
  * trees" — never "no raw id reaches the DOM anywhere".
  *
  * TWO TIERS now coexist, and (feedback_source_text_assertions_are_not_behaviour.md) neither one is
@@ -196,7 +196,16 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
 // TIER B — the mechanical pattern census.
 // ---------------------------------------------------------------------------
 
-const SCAN_ROOTS = ['src/approvals', 'src/views/approval']
+// S3a fix-round (2026-08-21, gate finding P3-1): apps/web/src/shared/comments/ (the S3a shared
+// comments FE kit -- MetaCommentsPanel/MetaCommentComposer/MetaCommentReactions + the
+// useMultitableComments composable) is added as a THIRD scan root. It carries no approval
+// consumer yet (S3a is kit-only), but it is the exact surface a future approval-native consumer
+// mounts, and its own mention/author label fallbacks are already the class this census exists to
+// catch -- deferring coverage until that consumer lands would repeat the class of gap the census
+// was rebuilt to close (see the TWO TIERS docstring above): a new site nobody remembered to add.
+// See the S3a gate report / multitable-w2-unified-record-inspector-design-lock-20260714.md §7 S4
+// follow-up note for the disposition of every hit this root produces (ALLOWLIST group below).
+const SCAN_ROOTS = ['src/approvals', 'src/views/approval', 'src/shared/comments']
 
 /** Recursively lists every non-test .ts/.vue file under `dir` (repo-relative), sorted. */
 function listSourceFiles(dir: string): string[] {
@@ -434,6 +443,44 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/quickPhrases.ts', '${KEY_PREFIX}${userId}:${action}'],
     ['src/approvals/recentTemplates.ts', '${KEY_PREFIX}${userId}'],
   ]),
+
+  // ---- shared/comments kit (S3a, 2026-08-21) -- SCAN_ROOTS extension, gate finding P3-1 ----
+  // The kit's only consumer at this head is multitable (via the src/multitable/components/
+  // MetaCommentsPanel.vue re-export shim); multitable's own comment UI legitimately shows real
+  // author/mention names sourced from its own directory data, so a raw-id FALLBACK here is
+  // pre-existing, verbatim-carried-over behavior (identical code lives at
+  // src/multitable/components/MetaCommentsPanel.vue on main today; S3a moved it, introduced
+  // nothing new). There is no approval-side consumer of shared/comments yet, so nothing
+  // approval-facing is exposed at this head. GATE FOR THE NEXT SLICE: no approval consumer of
+  // shared/comments may be wired without first revisiting this disposition -- either fix these
+  // three renders (MetaCommentsPanel.vue:378, :384, :385) to a values-free ordinal, or add an
+  // approval-specific upstream guard, before an approval surface mounts this kit. NOTE: only
+  // :378 is presently caught by a live PATTERN (name-or-id-fallback); :384's `.authorId` token
+  // and :385's ternary are outside every current regex's alternation/shape (the census's own
+  // "KNOWN EVASION" boundary documented at the top of this file) -- their entries below are
+  // pre-emptive triage, not something scanForViolations currently consults. Do not read their
+  // presence here as "the census also enforces these two" -- it does not, yet.
+  ...group('OUT-OF-SCOPE', 'mention-candidate label / comment-author label+subtitle fallback to the raw id when displayName/authorName is absent (or, for the subtitle, rendered alongside a differing name) -- legitimate on the kit\'s only current (multitable) consumer, which has a real directory-backed name producer; no approval consumer exists yet -- see the gate-for-next-slice note above this group', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: candidate.displayName?.trim() || candidate.userId.trim(),'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId : undefined,'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'mention-suggestion autocomplete FILTER comparison (query substring match against label/id) -- a boolean predicate, never rendered to the DOM', [
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'return suggestion.label.toLowerCase().includes(query) || suggestion.id.toLowerCase().includes(query)'],
+  ]),
+  ...group('OUT-OF-SCOPE', '@mention TOKEN serialization (`@[label](id)` wire format embedded in comment content, matched by a RegExp) -- the id is round-tripped through the content string as an encoding detail, never displayed as text', [
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const tokenMentionRegex = new RegExp(`@\\\\[${escapeRegex(mention.label)}\\\\]\\\\(${escapeRegex(mention.id)}\\\\)`)'],
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const token = `@[${mention.label}](${mention.id})`'],
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const tokenRegex = new RegExp(`@\\\\[${escapeRegex(mention.label)}\\\\]\\\\(${escapeRegex(mention.id)}\\\\)`)'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'thread/reply id used only as a lookup key or comparison operand inside a mustache -- the mustache renders a derived STATE LABEL or COUNT (l(...)/formatReplyCount(...)), never the id itself', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ formatReplyCount(getReplyCount(thread.id)) }}</span>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ editingCommentId === thread.id ? l('comment.editing') : l('comment.edit') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ deletingIds.includes(thread.id) ? l('comment.deleting') : l('comment.delete') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ resolvingIds.includes(thread.id) ? l('comment.resolving') : l('comment.resolve') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ editingCommentId === reply.id ? l('comment.editing') : l('comment.edit') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ deletingIds.includes(reply.id) ? l('comment.deleting') : l('comment.delete') }}</button>"],
+  ]),
 ]
 
 describe('member-display-identity coverage enumeration — TIER A (named regression guards)', () => {
@@ -478,16 +525,21 @@ describe('member-display-identity coverage enumeration — TIER A (named regress
 })
 
 describe('member-display-identity coverage enumeration — TIER B (mechanical pattern census)', () => {
-  it('the readdirSync-derived scan actually found files under both scan roots (a path typo scanning nothing must not pass green)', () => {
+  it('the readdirSync-derived scan actually found files under all three scan roots (a path typo scanning nothing must not pass green)', () => {
     expect(SCANNED_FILES.length).toBeGreaterThan(50)
     const basenames = new Set(SCANNED_FILES.map((f) => f.split('/').pop()))
     expect(basenames.has('ApprovalNewView.vue')).toBe(true)
     expect(basenames.has('ApprovalDetailView.vue')).toBe(true)
     expect(basenames.has('directoryResolve.ts')).toBe(true)
     expect(basenames.has('ApprovalUserPicker.vue')).toBe(true)
-    // Sanity: both roots actually contributed files, not just one.
+    // S3a fix-round (2026-08-21, P3-1): a third basename check for the shared/comments root, so
+    // a typo'd/reverted SCAN_ROOTS entry for that root is caught here too, not just silently
+    // scanning zero files.
+    expect(basenames.has('MetaCommentsPanel.vue')).toBe(true)
+    // Sanity: all three roots actually contributed files, not just one or two.
     expect(SCANNED_FILES.some((f) => f.startsWith('src/approvals/'))).toBe(true)
     expect(SCANNED_FILES.some((f) => f.startsWith('src/views/approval/'))).toBe(true)
+    expect(SCANNED_FILES.some((f) => f.startsWith('src/shared/comments/'))).toBe(true)
   })
 
   it('each pattern still matches its named positive-control line (a rotted pattern silently matching nothing must fail HERE, not pass green -- this is the exact class of bug that made the census\'s own initial POSIX-ERE `\\b` grep silently match zero)', () => {
@@ -508,7 +560,7 @@ describe('member-display-identity coverage enumeration — TIER B (mechanical pa
     }
   })
 
-  it('every raw-id-render pattern occurrence across BOTH scanned trees has an explicit ALLOWLIST triage entry -- an untriaged hit (new, or a deleted allowlist entry) fails here', () => {
+  it('every raw-id-render pattern occurrence across ALL THREE scanned trees has an explicit ALLOWLIST triage entry -- an untriaged hit (new, or a deleted allowlist entry) fails here', () => {
     const violations: string[] = []
     for (const file of SCANNED_FILES) {
       const content = readSrc(file)
@@ -530,8 +582,8 @@ describe('member-display-identity coverage enumeration — TIER B (mechanical pa
   })
 
   // Scope-leak sweep (census §B pattern 8): no member-identity resolver/type reference should
-  // exist ANYWHERE in apps/web/src outside the two scanned trees, other than the shared type defs.
-  it('scope-leak sweep: no member-identity resolver/type reference exists outside the two scanned trees (except the allowlisted shared type defs)', () => {
+  // exist ANYWHERE in apps/web/src outside the three scanned trees, other than the shared type defs.
+  it('scope-leak sweep: no member-identity resolver/type reference exists outside the three scanned trees (except the allowlisted shared type defs)', () => {
     const SWEEP_ALLOWLIST = new Set(['src/types/approval.ts'])
     const SWEEP_PATTERN = /getResolvedUserName|ApprovalDirectoryUser|assigneeId/
     const allFiles = listSourceFiles('src')

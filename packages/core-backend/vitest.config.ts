@@ -1402,6 +1402,26 @@ export default defineConfig({
       // WHOLE FILE into the `Run BPMN startProcess poller-disabled zero-residue` step in
       // plugin-tests.yml.
       'tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
+      // Recovery-authority schema drift A-vs-B floor: proves the hand-maintained constants in
+      // scripts/ops/multitable-recovery-schema-containment.mjs still equal what the REAL
+      // migrations (zzzz20260721121000_add_recovery_authority_locks.ts +
+      // zzzz20260728120000_correct_recovery_authority_locks.ts) install, plus the subject_type
+      // CHECK domain on record_permissions/field_permissions the helper does not fingerprint.
+      // DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green it, and
+      // wired as a WHOLE FILE into the standalone .github/workflows/multitable-recovery-schema-drift.yml
+      // lane (NOT plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main;
+      // see the seven approval-realdb-*.yml lanes' headers). That lane
+      // multitable-recovery-authority-*-realdb.test.ts files already run in).
+      'tests/integration/recovery-schema-drift.db.test.ts',
+      // Recovery-authority search-path shadow counterexample + mutation matrix: reproduces the
+      // CVE-2018-1058-shaped shadow on a real migrated DB and proves zzzz20260821120000 defeats it
+      // (schema-qualified calls + fixed SET search_path, each independently sufficient). Needs real
+      // Postgres (two connections, a held exclusive lease, a shadow schema, a non-transactional
+      // call-counter). DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green
+      // it, and wired as a WHOLE FILE into the SAME standalone
+      // .github/workflows/multitable-recovery-schema-drift.yml lane as the drift guard above (NOT
+      // plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main).
+      'tests/integration/recovery-authority-search-path.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],
