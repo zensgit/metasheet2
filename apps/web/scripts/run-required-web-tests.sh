@@ -348,6 +348,7 @@ npx vitest run \
   approval-form-authoring-history \
   approval-version-dual-canvas \
   approval-flow-canvas-a11y \
+  approval-flow-canvas-summary-tooltip \
   approval-canvas-inspector-a11y \
   approval-form-palette-focus \
   approval-form-inline-editor-extract \

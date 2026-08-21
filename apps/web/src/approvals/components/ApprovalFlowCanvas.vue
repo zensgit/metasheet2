@@ -238,23 +238,60 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
               >
                 {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
               </div>
-              <div
-                class="template-authoring__canvas-node-selector"
-                role="button"
-                tabindex="0"
-                :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
-                :aria-pressed="selectedCanvasNode === pos.key"
-                data-testid="approval-canvas-node-select"
-                @click.stop="emit('select-node', pos.key)"
-                @keydown.enter.stop.prevent="emit('select-node', pos.key)"
-                @keydown.space.stop.prevent="emit('select-node', pos.key)"
-                @keydown="emit('node-keydown', $event, pos.key)"
+              <!-- FS-1 fix — the W4 approval-canvas closeout's single FAIL
+                   (docs/development/approval-remaining-dev-verification-report-20260820.md §5.1;
+                   NOT the same finding as "FAIL-1" in
+                   approval-parity-verification-report-20260818.md, which names the unrelated
+                   approval-inspector-keyboard.spec.ts harness rot, already fixed). RATIFIED
+                   criterion violated:
+                   approval-canvas-v2-interaction-design-lock-20260721.md:366 ("Long labels" row,
+                   scope explicitly includes "Node cards"): "Truncate with ellipsis at component
+                   limits (§14); full text on hover/focus tooltip, in the inspector, and in
+                   accessible names." THREE legs — this fixes ONLY the FIRST (hover/focus
+                   tooltip), which is the one §5.1 scopes the FAIL to. The "in the inspector" leg
+                   is a separate, unverified claim about ApprovalCanvasNodeInspector.vue (§5.1:
+                   "looks satisfied... not click-through-verified"), out of scope here. The "in
+                   accessible names" leg is FS-7 — a DIFFERENT defect (the parent `role="button"`
+                   div's own `aria-label` overrides the whole subtree's accessible name per
+                   standard accname computation, so the summary text is never exposed via the
+                   accessible NAME at all) — §5.1 explicitly requires FS-7 stay a SEPARATE slice,
+                   never merged with this one. This fix does not touch `aria-label` and does not
+                   close FS-7.
+                   The summary line below is CSS-ellipsis-truncated
+                   (.template-authoring__canvas-node-summary) but carried NO way to recover the
+                   full text — not on hover, not on keyboard focus. el-tooltip wraps the SAME
+                   focusable selector div (no extra DOM node, no extra tab stop — ElOnlyChild
+                   clones the trigger attrs onto this exact element) with `trigger="['hover',
+                   'focus']"`: Element Plus's default trigger is 'hover' ONLY (verified against
+                   trigger2.mjs — the onFocus/onBlur handlers it wires are gated by
+                   `whenTrigger(trigger, 'focus', …)`, so a bare `<el-tooltip>` would silently
+                   stay hover-only and miss the a11y half, which is the point of this fix), so
+                   'focus' must be listed explicitly. Content is the SAME `canvasNodeSummary(...)`
+                   string already rendered inline — values-free (no raw ids), never re-derived. -->
+              <el-tooltip
+                :content="canvasNodeSummary(pos.key)"
+                placement="top"
+                :trigger="['hover', 'focus']"
+                popper-class="template-authoring__canvas-node-summary-tooltip"
               >
-                <span class="template-authoring__canvas-node-summary">
-                  {{ canvasNodeSummary(pos.key) }}
-                </span>
-                <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
-              </div>
+                <div
+                  class="template-authoring__canvas-node-selector"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
+                  :aria-pressed="selectedCanvasNode === pos.key"
+                  data-testid="approval-canvas-node-select"
+                  @click.stop="emit('select-node', pos.key)"
+                  @keydown.enter.stop.prevent="emit('select-node', pos.key)"
+                  @keydown.space.stop.prevent="emit('select-node', pos.key)"
+                  @keydown="emit('node-keydown', $event, pos.key)"
+                >
+                  <span class="template-authoring__canvas-node-summary">
+                    {{ canvasNodeSummary(pos.key) }}
+                  </span>
+                  <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
+                </div>
+              </el-tooltip>
             </div>
             <div
               v-for="line in canvasEdgeLines"
