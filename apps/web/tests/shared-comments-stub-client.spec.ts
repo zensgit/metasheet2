@@ -13,9 +13,18 @@
  * composable's method bodies are unchanged (byte-identical) from that pre-move file. The one thing
  * THIS file exists to prove is the seam itself: a plain object satisfying CommentsApiClient's 7
  * methods is sufficient, nothing more is reached for internally.
+ *
+ * S3a fix-round (2026-08-21, gate finding P2-1): this file previously carried a second copy of
+ * the RATIFIED HI-1 "zero new data paths" source-scan (design-lock multitable-w2-unified-record-
+ * inspector-design-lock-20260714.md §7 S4), re-anchored here at the moved component's real path.
+ * That was a second-narrower-artifact: the frozen guard's own describe block in
+ * multitable-comments-panel.spec.ts names the lock, and this file's copy reproduced only the
+ * (already-vacuous) static scan + string-literal positive control while dropping the
+ * fetch-monkeypatch mount test, which is the half that actually matters. The fix is to repoint
+ * the FROZEN spec's own readSrc at the new path instead (bookkeeping repair, not a contract
+ * change — see that file's HI-1 block) rather than fork a second copy here. HI-1 coverage lives
+ * ONLY in multitable-comments-panel.spec.ts now; this file stays scoped to the stub-client seam.
  */
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { useLocale } from '../src/composables/useLocale'
 import { useMultitableComments } from '../src/shared/comments/composables/useMultitableComments'
@@ -138,47 +147,5 @@ describe('useMultitableComments against a minimal stub CommentsApiClient (non-mu
     await state.loadComments({ containerId: 'container-1', targetId: 'target-1' })
 
     expect(state.error.value).toBe('加载评论失败')
-  })
-})
-
-/**
- * HI-1 re-anchor (design-lock docs/development/multitable-w2-unified-record-inspector-design-
- * lock-20260714.md §7 S4, "zero new data paths"): multitable-comments-panel.spec.ts's own HI-1
- * source-scan block (`describe('HI-1: zero new data paths')`) is FROZEN and reads
- * `src/multitable/components/MetaCommentsPanel.vue` — which, after this S3a move, is a 3-line
- * re-export shim. Its three `not.toMatch` assertions still pass, but only because the shim
- * cannot contain a fetch/client./apiClient. call at all — the guard is now vacuous AT THE OLD
- * PATH. This block re-anchors the same source-scan (+ the same positive-control fixtures, so
- * this re-anchor cannot itself go vacuous) against the REAL file at its new home, without
- * touching the frozen spec.
- */
-describe('HI-1 re-anchor: zero new data paths, at the real (post-move) file', () => {
-  function readSrc(rel: string): string {
-    return readFileSync(join(__dirname, '..', rel), 'utf8')
-  }
-
-  it('source scan: no client./fetch(/api. call appears anywhere in the moved MetaCommentsPanel.vue', () => {
-    const src = readSrc('src/shared/comments/components/MetaCommentsPanel.vue')
-    expect(src).not.toMatch(/[^.]\bfetch\(/)
-    expect(src).not.toMatch(/(?<!api)client\.\w+\(/)
-    expect(src).not.toMatch(/\bapiClient\.\w+\(/)
-  })
-
-  it('positive control: the source-scan regexes actually fire on a constructed violation (proves the re-anchor is not vacuous)', () => {
-    const fixtureWithFetch = "const x = fetch('/api/multitable/comments')"
-    const fixtureWithClient = 'await client.deleteComment(id)'
-    const fixtureWithApiClient = 'await apiClient.addComment(payload)'
-    expect(fixtureWithFetch).toMatch(/[^.]\bfetch\(/)
-    expect(fixtureWithClient).toMatch(/(?<!api)client\.\w+\(/)
-    expect(fixtureWithApiClient).toMatch(/\bapiClient\.\w+\(/)
-  })
-
-  it('sentinel: confirms the OLD-path guard in multitable-comments-panel.spec.ts is now scanning a re-export shim, not this component', () => {
-    const shimSrc = readSrc('src/multitable/components/MetaCommentsPanel.vue')
-    // The shim is short and re-exports the real component; it must NOT itself contain the
-    // template/style markup that lives in the real file (proves the two paths hold different
-    // content today, which is exactly why the old-path scan needed this re-anchor).
-    expect(shimSrc).not.toContain('meta-comments-drawer__thread')
-    expect(shimSrc.length).toBeLessThan(2000)
   })
 })
