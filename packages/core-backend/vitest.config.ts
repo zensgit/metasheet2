@@ -1245,6 +1245,13 @@ export default defineConfig({
       // WHOLE FILE into the standalone .github/workflows/approval-realdb-comments.yml lane, which
       // arms EXPECT_DB=1.
       'tests/integration/approval-comments.db.test.ts',
+      // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
+      // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-
+      // scoped caps, GC reuse, and the flag-OFF byte-for-byte no-op (G-12), real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-lock9-process-attachments.yml lane, which arms
+      // EXPECT_DB=1.
+      'tests/integration/approval-lock9-process-attachments-realdb.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
