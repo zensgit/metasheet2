@@ -49853,9 +49853,17 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        // Self-service reads the caller's OWN org, pinned from the authenticated token — a ?orgId param / header cannot
-        // point /me at another org (getOrgId is only a fallback for a token that carries no org).
-        const orgId = req.user?.orgId ?? req.user?.workspaceId ?? getOrgId(req)
+        // Self-service reads the caller's OWN org, resolved with NO request-supplied source: getAuthenticatedOrgId
+        // only reads req.user.orgId / req.user.workspaceId / the token-derived req.authenticatedTenantId — it never
+        // consults body/query/header, so a ?orgId param or an x-org-id header is silently ignored (not rejected)
+        // and cannot point /me at another org, in EITHER branch below (token-claim or the 'default' fallback).
+        // This is a real behavior correction for a caller whose session has exactly one active org membership:
+        // AuthService.resolveSessionTenantId mints that org as the session's tenantId at login, which lands on
+        // req.authenticatedTenantId — a value the prior expression never read, so that caller previously read
+        // the (for them, empty) 'default' org instead of the org their own balance lots are written under (an
+        // admin balance write there is itself membership-gated: USER_NOT_IN_ORG otherwise). A caller with no
+        // resolvable org claim (zero memberships, or an ambiguous 2+) is unaffected — 'default' as before.
+        const orgId = getAuthenticatedOrgId(req) ?? DEFAULT_ORG_ID
         const leaveTypeCode = parsed.data.leaveTypeCode ?? 'annual'
         const eventLimit = parsed.data.eventLimit ?? 50
         try {
