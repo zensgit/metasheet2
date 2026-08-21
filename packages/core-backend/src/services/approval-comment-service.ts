@@ -270,6 +270,15 @@ async function loadOwnCommentOrThrow(
 // ------------------------------------------------------------------------------------------------
 // R6/R5 — parentId validation: same instance (R6), one-level threading (R5). Reply-TO-a-tombstone
 // is ALLOWED (R3) — a tombstone is comment data and a thread must survive its parent's deletion.
+//
+// Fix-round (gate P3-4): "unknown id" and "real id, wrong instance" collapse to the SAME message
+// (mirrors `loadOwnCommentOrThrow`'s R16 collapse two functions above). Before this fix a caller
+// who already held a comment id from a DIFFERENT instance they also participate in could
+// distinguish "this id exists somewhere" from "this id doesn't exist at all" by the wording alone
+// — a one-bit oracle over an id space the caller already holds a member of, not a new read
+// primitive, but values-free denial shapes are this file's own stated convention (OD-L7-7) and the
+// two branches cost nothing to unify. The one-level-threading branch stays separate: it discloses
+// nothing about any OTHER instance, only that the caller's OWN chosen parent already has a parent.
 // ------------------------------------------------------------------------------------------------
 async function resolveParentOrThrow(
   db: Queryable,
@@ -281,11 +290,8 @@ async function resolveParentOrThrow(
     [parentId],
   )
   const parent = result.rows[0] as { instance_id?: string; parent_id?: string | null } | undefined
-  if (!parent) {
-    throw new ApprovalCommentValidationError('parentId does not reference an existing comment')
-  }
-  if (parent.instance_id !== instanceId) {
-    throw new ApprovalCommentValidationError('parentId must reference a comment on the same instance')
+  if (!parent || parent.instance_id !== instanceId) {
+    throw new ApprovalCommentValidationError('parentId does not reference a valid comment on this instance')
   }
   if (parent.parent_id) {
     throw new ApprovalCommentValidationError('replies to replies are not supported (one level only)')
@@ -438,17 +444,36 @@ export async function deleteApprovalComment(
   // (C-15's explicit anti-pattern gate).
   await loadOwnCommentOrThrow(db, input.commentId, input.instanceId, input.actorId)
 
-  // R9: tombstone clears body -> NULL and mentions -> '[]'; keeps author_id, created_at,
-  // parent_id, and the row itself. `deleted_at` is stamped; `updated_at` moves (it is a mutation);
-  // `edited_at` is deliberately NOT touched (a delete is not an edit).
+  // R9 / fix-round (gate P3-3): tombstone clears body -> NULL and mentions -> '[]'; keeps
+  // author_id, created_at, parent_id, and the row itself. `deleted_at` is stamped; `updated_at`
+  // moves (it is a mutation); `edited_at` is deliberately NOT touched (a delete is not an edit).
+  // The `WHERE ... AND deleted_at IS NULL` guard makes DELETE IDEMPOTENT: re-deleting an
+  // already-tombstoned comment (author retries, or a same-instant concurrent second DELETE) is
+  // still ALLOWED (200, unchanged from the un-guarded behavior above) but no longer moves
+  // `deleted_at` forward or mints a second pointer row's worth of write activity with nothing to
+  // show for it — before this fix a repeat DELETE silently rewrote the tombstone timestamp on
+  // every call.
   const result = await db.query(
     `UPDATE approval_comments
         SET body = NULL, mentions = '[]'::jsonb, deleted_at = now(), updated_at = now()
-      WHERE id = $1
+      WHERE id = $1 AND deleted_at IS NULL
       RETURNING id, instance_id, parent_id, author_id, body, mentions, created_at, updated_at, edited_at, deleted_at`,
     [input.commentId],
   )
-  const row = result.rows[0] as unknown as ApprovalCommentRow
+  let row = result.rows[0] as unknown as ApprovalCommentRow | undefined
+  if (!row) {
+    // Already tombstoned (or, between the two statements above, hard-deleted via the instance's
+    // `ON DELETE CASCADE`) — re-read and return the CURRENT row as a no-op rather than throwing a
+    // spurious error for a state the caller's own request already achieves. A row that vanished
+    // entirely (the CASCADE case) is a genuine 404, not swallowed into a fake success.
+    const reread = await db.query(
+      `SELECT id, instance_id, parent_id, author_id, body, mentions, created_at, updated_at, edited_at, deleted_at
+         FROM approval_comments WHERE id = $1`,
+      [input.commentId],
+    )
+    row = reread.rows[0] as unknown as ApprovalCommentRow | undefined
+    if (!row) throw new ApprovalCommentRecordNotFoundError()
+  }
   return { comment: toView(row) }
 }
 

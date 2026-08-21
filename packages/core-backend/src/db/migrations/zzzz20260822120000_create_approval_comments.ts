@@ -22,6 +22,16 @@
  *    delete would satisfy the prose while defeating the intent — the CHECK makes "a tombstone that
  *    still has a body" unrepresentable at the DB layer, not merely disallowed by a service branch.
  *
+ *  - Fix-round (S2 gate P2-1): `approval_cmt_tombstone_mentions_cleared` is the SAME mechanical
+ *    treatment applied to `mentions` — a tombstone with a non-empty `mentions` array is now
+ *    equally unrepresentable at the DB layer. Named SEPARATELY from
+ *    `approval_cmt_tombstone_body_cleared` (not folded in) so a constraint-violation error names
+ *    which arm broke. Before this fix, deleting the service's `mentions = '[]'::jsonb,` UPDATE
+ *    clause was undetected by any of the 45 gates — `toView` masks the field on every read path
+ *    and the one DB re-read that SELECTs `mentions` (C-4/C-5,
+ *    `tests/integration/approval-comments.db.test.ts`) never asserted on it. Both are now fixed:
+ *    the CHECK enforces storage, the test asserts behavior.
+ *
  *  - Real FK with `ON DELETE CASCADE`, UNLIKE `meta_comments`
  *    (`zzzz20260326134000_create_meta_comments.ts`), which has no FK at all — that was a
  *    deliberate application-layer-cascade choice for multitable comments. Approval satellites
@@ -66,6 +76,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       deleted_at   timestamptz,
       CONSTRAINT approval_cmt_tombstone_body_cleared
         CHECK ((deleted_at IS NULL AND body IS NOT NULL) OR (deleted_at IS NOT NULL AND body IS NULL)),
+      CONSTRAINT approval_cmt_tombstone_mentions_cleared
+        CHECK ((deleted_at IS NULL) OR (deleted_at IS NOT NULL AND mentions = '[]'::jsonb)),
       CONSTRAINT approval_cmt_no_self_parent CHECK (parent_id IS NULL OR parent_id <> id)
     )
   `.execute(db)

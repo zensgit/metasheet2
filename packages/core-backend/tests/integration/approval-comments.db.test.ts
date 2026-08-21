@@ -380,8 +380,14 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       const instanceId = await seedInstance(requesterId)
       const requesterToken = await participantToken(requesterId)
       const bodyText = `tombstone-marker-${freshId('x')}`
+      // Fix-round (gate P2-1): the comment MUST carry a non-empty `mentions` value going in, or a
+      // storage-level assertion that `mentions` is `[]` after delete has zero discriminating power
+      // — an empty-to-begin-with column stays `[]` whether or not the tombstone UPDATE's mentions
+      // clause runs at all. `mentions: []` on the DEFAULT column is exactly the false-negative the
+      // original mutation (deleting `mentions = '[]'::jsonb,`) hid behind.
+      const secretMentionId = freshId('c4-secret-mentioned')
 
-      const created = await commentsPost(instanceId, requesterToken, { body: bodyText })
+      const created = await commentsPost(instanceId, requesterToken, { body: bodyText, mentions: [secretMentionId] })
       const createdJson = (await created.json()) as { data: { comment: { id: string; createdAt: string; authorId: string } } }
       const commentId = createdJson.data.comment.id
       const originalCreatedAt = createdJson.data.comment.createdAt
@@ -395,6 +401,11 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       )
       expect(pointerAfterCreate.rows.length).toBe(1)
       expect((pointerAfterCreate.rows[0] as { comment: string | null }).comment).toBeNull()
+
+      // Positive control (fix-round, gate P2-1): the mention DID land in storage pre-delete — the
+      // post-delete `[]` assertion below only means something because this is non-empty here.
+      const mentionsBeforeDelete = await pool().query(`SELECT mentions FROM approval_comments WHERE id = $1`, [commentId])
+      expect((mentionsBeforeDelete.rows[0] as { mentions: unknown }).mentions).toEqual([secretMentionId])
 
       const deleteRes = await commentsDelete(instanceId, commentId, requesterToken)
       expect(deleteRes.status, await deleteRes.clone().text()).toBe(200)
@@ -412,6 +423,11 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(row.author_id).toBe(originalAuthorId)
       expect(new Date(row.created_at).toISOString()).toBe(originalCreatedAt)
       expect(row.body).toBeNull()
+      // Fix-round (gate P2-1): the STORED column, not just the API-view projection which `toView`
+      // masks unconditionally on `deleted_at`. Before this fix, deleting the service's `mentions =
+      // '[]'::jsonb,` UPDATE clause left 45/45 green because this was the only DB re-read of
+      // `mentions` and nothing asserted on it.
+      expect(row.mentions).toEqual([])
 
       const idCount = await pool().query(`SELECT COUNT(*)::int AS n FROM approval_comments WHERE id = $1`, [commentId])
       expect((idCount.rows[0] as { n: number }).n).toBe(1) // tombstone, not delete
@@ -436,6 +452,38 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       )
       expect(pointerAfterDelete.rows.length).toBe(1)
       expect((pointerAfterDelete.rows[0] as { comment: string | null }).comment).toBeNull()
+    })
+
+    // Fix-round (gate P3-3): a repeat DELETE on an already-tombstoned comment must be a true
+    // no-op — same 200, same `deletedAt`, no second pointer row. Before this fix the second call
+    // silently moved `deleted_at` forward on every retry.
+    it('P3-3: a second DELETE on an already-tombstoned comment is idempotent — same deletedAt, pointer count stays 1', async () => {
+      const requesterId = freshId('p33-requester')
+      const instanceId = await seedInstance(requesterId)
+      const requesterToken = await participantToken(requesterId)
+
+      const created = await commentsPost(instanceId, requesterToken, { body: 'p3-3 idempotent delete' })
+      const createdJson = (await created.json()) as { data: { comment: { id: string } } }
+      const commentId = createdJson.data.comment.id
+
+      const firstDelete = await commentsDelete(instanceId, commentId, requesterToken)
+      expect(firstDelete.status).toBe(200)
+      const firstJson = (await firstDelete.json()) as { data: { comment: { deletedAt: string | null } } }
+      const firstDeletedAt = firstJson.data.comment.deletedAt
+      expect(firstDeletedAt).not.toBeNull()
+
+      const secondDelete = await commentsDelete(instanceId, commentId, requesterToken)
+      expect(secondDelete.status).toBe(200)
+      const secondJson = (await secondDelete.json()) as { data: { comment: { deletedAt: string | null } } }
+      // The discriminating assertion: NOT merely "still deleted", but the EXACT SAME timestamp —
+      // proves `deleted_at` was not rewritten by the second call.
+      expect(secondJson.data.comment.deletedAt).toBe(firstDeletedAt)
+
+      const pointerCount = await pool().query(
+        `SELECT COUNT(*)::int AS n FROM approval_records WHERE instance_id = $1 AND action = 'comment' AND metadata->>'commentId' = $2`,
+        [instanceId, commentId],
+      )
+      expect((pointerCount.rows[0] as { n: number }).n).toBe(1)
     })
   })
 
@@ -549,6 +597,33 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(tooDeep.status).toBe(400)
       const tooDeepJson = await tooDeep.json()
       expect((tooDeepJson as { error: { code: string } }).error.code).toBe('VALIDATION_ERROR')
+    })
+
+    // Fix-round (gate P3-4): a REAL parentId on another instance and a FABRICATED parentId must
+    // deny with the IDENTICAL message — before this fix the two branches read differently
+    // ("does not reference an existing comment" vs. "must reference a comment on the same
+    // instance"), letting a caller who already holds an id learn whether it exists on SOME
+    // instance even when denied on this one.
+    it('P3-4: foreign-instance parentId and a fabricated parentId deny with the SAME message', async () => {
+      const requesterId = freshId('p34-requester')
+      const instanceA = await seedInstance(requesterId)
+      const instanceB = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+
+      const parentInA = await commentsPost(instanceA, token, { body: 'parent in A' })
+      const parentInAJson = (await parentInA.json()) as { data: { comment: { id: string } } }
+
+      const foreignReal = await commentsPost(instanceB, token, { body: 'graft', parentId: parentInAJson.data.comment.id })
+      expect(foreignReal.status).toBe(400)
+      const foreignRealJson = (await foreignReal.json()) as { error: { code: string; message: string } }
+
+      const fabricated = await commentsPost(instanceB, token, { body: 'graft', parentId: `acmt_${freshId('nonexistent')}` })
+      expect(fabricated.status).toBe(400)
+      const fabricatedJson = (await fabricated.json()) as { error: { code: string; message: string } }
+
+      expect(foreignRealJson.error.code).toBe('VALIDATION_ERROR')
+      expect(fabricatedJson.error.code).toBe('VALIDATION_ERROR')
+      expect(foreignRealJson.error.message).toBe(fabricatedJson.error.message)
     })
   })
 
