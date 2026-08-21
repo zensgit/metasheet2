@@ -1,18 +1,22 @@
-// Navigability audit fix 1 (2026-08-22): AttendanceExperienceView.vue's `activeView === null`
-// fallback ("Capability not available") previously rendered a bare heading with no reason, no
-// retry, and no way back — and never mentioned that the gating feature flag can be turned on
-// locally via the existing, already-sanctioned `isFeatureOverrideAllowed()` override path
-// (src/stores/featureFlags.ts). This module is the pure tab -> gating-flag -> display-name
-// lookup the enriched empty state renders from; kept out of the `<script setup>` SFC because a
-// Vue SFC's `<script setup>` block cannot export a plain function for direct unit testing.
+// Navigability audit fix 1 (2026-08-22; retargeted 2026-08-22 per independent review GATE-5086):
+// AttendanceExperienceView.vue's original `activeView === null` template fallback ("Capability
+// not available") rendered a bare heading with no reason, no retry, and no way back — and never
+// mentioned that the gating feature flag can be turned on locally via the existing,
+// already-sanctioned `isFeatureOverrideAllowed()` override path (src/stores/featureFlags.ts).
+// This module is the pure tab -> gating-flag -> display-name lookup that enriched fallback
+// rendered from; kept out of the `<script setup>` SFC because a Vue SFC's `<script setup>` block
+// cannot export a plain function for direct unit testing.
 //
-// Reachability note (see PR body): `AttendanceExperienceView.vue`'s own `ensureTabAllowed()` /
-// `watch(availableTabs, …)` safety net normalizes `activeTab` back to `overview` before a tab
-// whose gating flag is off can ever be reactively rendered, in every path this module's tests and
-// `attendance-experience-entrypoints.spec.ts` can drive. This lookup make the fallback's CONTENT
-// correct and complete for the tabs that COULD reach it (defensive hardening for that invariant
-// ever breaking, or for less-guarded embeddings this audit did not enumerate) — it does not itself
-// change when the fallback is reached.
+// GATE-5086 proved that original `activeView === null` branch structurally unreachable (6-case
+// probe + full static trace: `ensureTabAllowed()` / `watch(availableTabs, …)` normalize
+// `activeTab` before it can ever diverge from `activeView`'s own gating checks) and found the
+// REAL reachable defect one level up: `syncFromRoute()` silently bounces a deep link to a denied
+// tab (e.g. `/attendance?tab=admin` with `attendanceAdmin` OFF) to Overview without correcting the
+// URL or saying why. AttendanceExperienceView.vue now drives this module's lookup + copy builder
+// from THAT trigger — a `deniedCapabilityTab` ref set only when `syncFromRoute()` observes exactly
+// this denial — and renders the result as a dismissible banner on the Overview page the user
+// actually lands on, instead of on the original unreachable branch (which is now a bare,
+// capability-agnostic safety net kept only for a future regression in the invariant above).
 
 /** The three tabs whose `activeView` case can resolve to `null` when their gating flag is off.
  *  `overview`/`reports` are never gated and never reach this branch. */

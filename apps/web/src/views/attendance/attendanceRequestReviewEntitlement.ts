@@ -1,8 +1,18 @@
 // Navigability audit fix 2 (2026-08-22): AttendanceView.vue's approve/reject affordance on the
 // "Recent requests" list was previously rendered ONLY for the single row matching
 // `props.initialRequestId` (the deep-link focus id the approval center's `?requestId=` query
-// produces) — the task home's own "Pending approvals" entry carries no `requestId`, so a viewer
-// arriving from it saw a request list with no way to act on anything.
+// produces) — the task home's own "My requests" entry (labeled "Pending approvals" before
+// GATE-5086's P3-5 relabel) carries no `requestId`, so a viewer arriving from it saw a request
+// list with no way to act on anything.
+//
+// IMPORTANT correction (GATE-5086, P2-1): that task-home entry sends `userId:
+// normalizedUserId()`, empty by default, so the server scopes the returned list to the
+// REQUESTER's own rows — the entry's own destination list is never populated with a foreign
+// `user_id` in the first place. The predicate below fixes the general case (any row this list
+// legitimately received, e.g. via an approver's target-user lookup) correctly and safely; it
+// does not, by itself, make approve/reject appear on that specific default task-home path,
+// because the server never returns a foreign-owned row to it. See AttendanceView.vue's
+// `adminTaskHomeGroups` comment and the PR body's Fix 2 section for the full disclosure.
 //
 // This module is the pure entitlement predicate the row-level approve/reject `v-if` reads. Kept
 // out of AttendanceView.vue's `<script setup>` because a `<script setup>` block cannot export a

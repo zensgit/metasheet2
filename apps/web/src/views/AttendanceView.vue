@@ -15215,12 +15215,21 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
         key: 'pending-attendance-approvals',
         // Navigability audit fix 2: `tab=overview` made explicit (was implicit-via-absence) —
         // Fix 3 gives Overview an explicit, linkable `?tab=overview`, and this link should not
-        // rely on "no tab param" happening to default there. Destination note: this list is
-        // scoped to a single target user (self by default; GET /api/attendance/requests has no
-        // "all pending requests across the org" query) — see
-        // attendanceRequestReviewEntitlement.ts's header comment. Building an org-wide queue is a
-        // backend/business-logic feature, out of scope for this navigation-only fix.
-        label: tr('Pending approvals', '待处理审批'),
+        // rely on "no tab param" happening to default there.
+        //
+        // Label corrected per independent review GATE-5086 (P2-1/P3-5): this link's destination
+        // (`loadRequests()`) sends `userId: normalizedUserId()`, which is empty by default — the
+        // server (GET /api/attendance/requests) then scopes to the REQUESTER's own rows, i.e.
+        // this admin's own attendance requests, not a queue of requests awaiting their review.
+        // The destination section already labels itself honestly ("Recent requests" /
+        // "最近申请", `:783`) — this task-home shortcut previously did not, calling itself
+        // "Pending approvals" and implying an org-wide review queue that no backend query
+        // provides (see attendanceRequestReviewEntitlement.ts's header comment). `key` is left
+        // unchanged (it is not user-facing) to avoid rippling into every test/data-attribute
+        // that targets this action by id. Building a real org-wide "requests awaiting my
+        // approval" queue is a backend/business-logic feature, out of scope for this
+        // navigation-only fix.
+        label: tr('My requests', '我的申请'),
         href: '/attendance?tab=overview&section=attendance-overview-requests',
         primary: true,
       },
@@ -15366,8 +15375,9 @@ function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
 }
 
-// Navigability audit fix 4: AttendanceAdminTaskHome's linkActions ("Pending approvals",
-// "Anomalies") used to be plain `<a href>` anchors that forced a full SPA page reload. That
+// Navigability audit fix 4: AttendanceAdminTaskHome's linkActions ("My requests" — relabeled
+// from "Pending approvals" per GATE-5086 P3-5, see adminTaskHomeGroups above — "Anomalies") used
+// to be plain `<a href>` anchors that forced a full SPA page reload. That
 // component stays router-agnostic (charter §6.2: "does not… hold route/admin state") and now
 // only emits the href; this handler performs the actual client-side navigation.
 function onAdminTaskHomeNavigate(href: string): void {
@@ -16718,8 +16728,9 @@ function isFocusedAttendanceRequest(item: AttendanceRequest): boolean {
 }
 
 // Navigability audit fix 2: previously gated ONLY on `isFocusedAttendanceRequest` — a viewer who
-// reached this list any other way (e.g. the task home's "Pending approvals" entry, which carries
-// no `?requestId=`) never saw approve/reject on any row. `canReviewAttendanceRequestRow` (pure,
+// reached this list any other way (e.g. the task home's "My requests" entry — labeled "Pending
+// approvals" before GATE-5086's P3-5 relabel — which carries no `?requestId=`) never saw
+// approve/reject on any row. `canReviewAttendanceRequestRow` (pure,
 // unit-tested in attendanceRequestReviewEntitlement.spec.ts) keeps the deep-link-focus case
 // working unconditionally and additionally allows any OTHER pending row this list already proved
 // the viewer has read access to (owner id differs from the viewer's own id) — see that module's

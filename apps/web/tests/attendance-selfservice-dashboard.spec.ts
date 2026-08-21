@@ -1124,10 +1124,21 @@ describe('Attendance self-service dashboard', () => {
     )).toBe(false)
   })
 
-  it('shows approve/reject for a pending request owned by someone else, with no requestId deep link (fix 2)', async () => {
-    // Task-home "Pending approvals" (AttendanceView.vue's adminTaskHomeGroups) carries no
-    // `?requestId=` — only the approval center's deep link does. Before fix 2 this row would
-    // render with NO way to act on it at all.
+  it('shows approve/reject for a pending request owned by someone else, once the server actually returns one (fix 2)', async () => {
+    // IMPORTANT (corrected per independent review GATE-5086, P2-1): this fixture exercises
+    // `canReviewAttendanceRequestRow`'s entitlement predicate directly by mocking
+    // `/api/attendance/requests?` to return a foreign-owned row, regardless of what `userId`
+    // query param the request actually carried. It does NOT reproduce the task-home "Pending
+    // approvals" link's real path. That path calls `loadRequests()` with
+    // `userId: normalizedUserId()`, which is empty/self by default — so `targetUserId ===
+    // requesterId` server-side (index.cjs's `/api/attendance/requests` route) and the server
+    // returns ONLY the viewer's own rows, so `canReviewAttendanceRequestRow` still shows NO
+    // approve/reject buttons on the task-home path today — that gap is real and undisclosed by
+    // this test alone; it is tracked in the PR body's Fix 2 section, not fixed by this PR. What
+    // this fixture DOES represent: an approver has typed another user's id into the target-user
+    // box and the server's `canAccessOtherUsers` check has legitimately let a foreign-owned row
+    // through — a real path that was equally broken before this fix, and the one fix 2 actually
+    // repairs.
     const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url

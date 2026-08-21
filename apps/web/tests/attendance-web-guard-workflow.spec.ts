@@ -42,4 +42,34 @@ describe('attendance web guard workflow contract', () => {
       expect(workflow).toContain(` ${spec}`)
     }
   })
+
+  // GATE-5086 (P3-8): mutation M9 dropped `attendanceFeatureOverride` from this workflow's
+  // targeted `vitest run` list and this file's OTHER contract tests all stayed green — none of
+  // them enumerate the fix-1/fix-2 navigability-audit tokens specifically, only the
+  // group-context-route family above. Mirrors that test's shape for the three tokens a silent
+  // drop would otherwise leave uncovered.
+  //
+  // NOTE: unlike the group-context-route test above, this one does NOT use a bare
+  // `workflow.toContain(' ${spec}')` check on the whole file — these three token names also
+  // appear, with a leading space, in this workflow's own explanatory prose comment near the top
+  // ("... specs land here: attendanceCapabilityUnavailable.spec.ts ..."), which would make that
+  // check pass even with the token deleted from the run list (confirmed: re-running mutation M9
+  // against a `toContain`-only version of this test left it GREEN). Scope the check to the
+  // extracted "Run attendance web guard specs (targeted)" step body instead, with a whitespace
+  // boundary so it cannot match as a substring of a different token in either direction.
+  it('keeps the fix 1/fix 2 navigability-audit specs in the classifier and targeted run list', () => {
+    expect(workflow.match(/apps\/web\/src\/stores\/featureFlags\.ts/g)).toHaveLength(2)
+    const stepStart = workflow.indexOf('      - name: Run attendance web guard specs (targeted)')
+    const nextStepStart = workflow.indexOf('\n      - name:', stepStart + 1)
+    const targetedStep = workflow.slice(stepStart, nextStepStart === -1 ? undefined : nextStepStart)
+    expect(stepStart).toBeGreaterThan(-1)
+    for (const spec of [
+      'attendanceCapabilityUnavailable',
+      'attendanceRequestReviewEntitlement',
+      'attendanceFeatureOverride',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedStep).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
 })

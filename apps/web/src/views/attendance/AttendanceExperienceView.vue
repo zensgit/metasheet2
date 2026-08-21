@@ -40,44 +40,76 @@
       </template>
     </AttendanceGroupContextHost>
 
-    <component
-      v-else-if="activeView"
-      :is="activeView.component"
-      :key="activeView.key"
-      v-bind="activeView.props"
-    />
-    <section v-else class="attendance-shell__desktop-hint" data-attendance-capability-unavailable>
-      <h3>{{ unavailableCapabilityCopy.heading }}</h3>
-      <p>{{ unavailableCapabilityCopy.detail }}</p>
-      <div class="attendance-shell__capability-actions">
-        <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
-          {{ t.backToOverview }}
-        </button>
-        <button
-          class="attendance-shell__btn"
-          type="button"
-          data-attendance-capability-retry
-          @click="retryCapabilityProbe"
-        >
-          {{ t.retryCapabilityProbe }}
-        </button>
-      </div>
-      <template v-if="unavailableCapabilityOverrideAllowed">
-        <p class="attendance-shell__capability-state" data-attendance-capability-override-state>
-          {{ t.capabilityCurrentStateOff }}
+    <template v-else-if="activeView">
+      <!-- Navigability audit fix 1, retargeted per GATE-5086 (independent review, 2026-08-22):
+           the enriched explanation below used to live in this branch's own `v-else` (rendered
+           when `activeView` resolves to null). That branch is provably unreachable — every
+           `activeTab` assignment routes through `ensureTabAllowed()`, which excludes exactly the
+           tabs `activeView`'s switch would reject, so `activeView` can never observe a denied
+           tab. The REACHABLE defect the audit actually found is here: `syncFromRoute()` bounces a
+           deep link to a disabled tab (e.g. `/attendance?tab=admin` with `attendanceAdmin` OFF)
+           back to Overview while the address bar keeps the denied tab's `?tab=` and nothing
+           explains why. This banner is driven by `deniedCapabilityTab` — set only by that bounce
+           — and renders on the Overview page it actually lands you on. -->
+      <section
+        v-if="deniedCapabilityCopy"
+        class="attendance-shell__desktop-hint attendance-shell__capability-banner"
+        data-attendance-tab-unavailable-banner
+      >
+        <h3>{{ deniedCapabilityCopy.heading }}</h3>
+        <p>{{ deniedCapabilityCopy.detail }}</p>
+        <div class="attendance-shell__capability-actions">
+          <button
+            class="attendance-shell__btn"
+            type="button"
+            data-attendance-capability-back-to-overview
+            @click="dismissDeniedCapabilityBanner"
+          >
+            {{ t.backToOverview }}
+          </button>
+          <button
+            class="attendance-shell__btn"
+            type="button"
+            data-attendance-capability-retry
+            @click="retryCapabilityProbe"
+          >
+            {{ t.retryCapabilityProbe }}
+          </button>
+        </div>
+        <template v-if="unavailableCapabilityOverrideAllowed">
+          <p class="attendance-shell__capability-state" data-attendance-capability-override-state>
+            {{ t.capabilityCurrentStateOff }}
+          </p>
+          <button
+            class="attendance-shell__btn attendance-shell__btn--primary"
+            type="button"
+            data-attendance-capability-enable-locally
+            @click="enableUnavailableCapabilityLocally"
+          >
+            {{ t.enableCapabilityLocally }}
+          </button>
+        </template>
+        <p v-else class="attendance-shell__capability-contact" data-attendance-capability-contact-admin>
+          {{ t.contactAdministrator }}
         </p>
-        <button
-          class="attendance-shell__btn attendance-shell__btn--primary"
-          type="button"
-          data-attendance-capability-enable-locally
-          @click="enableUnavailableCapabilityLocally"
-        >
-          {{ t.enableCapabilityLocally }}
-        </button>
-      </template>
-      <p v-else class="attendance-shell__capability-contact" data-attendance-capability-contact-admin>
-        {{ t.contactAdministrator }}
-      </p>
+      </section>
+      <component
+        :is="activeView.component"
+        :key="activeView.key"
+        v-bind="activeView.props"
+      />
+    </template>
+    <!-- Kept ONLY as a generic safety net for a future regression in the ensureTabAllowed
+         invariant documented above — NOT a claim this is reachable today (GATE-5086 proved it
+         is not, with a 6-case probe covering every state the original audit named), and
+         deliberately NOT re-using the capability-specific retry/override UI above, which needs
+         a known denied tab this branch has no way to identify. -->
+    <section v-else class="attendance-shell__desktop-hint" data-attendance-shell-unexpected-empty>
+      <h3>{{ t.capabilityUnavailable }}</h3>
+      <p>{{ t.capabilityHint }}</p>
+      <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
+        {{ t.backToOverview }}
+      </button>
     </section>
   </div>
 </template>
@@ -319,32 +351,57 @@ const activeView = computed(() => {
   return null
 })
 
-// Navigability audit fix 1: the "Capability not available" fallback below names which capability
-// is unavailable instead of a bare unexplained empty state. `activeTab.value` is one of
-// admin/import/workflow whenever this branch renders (overview/reports never return null above).
-const unavailableCapabilityInfo = computed(() => resolveAttendanceCapabilityInfo(activeTab.value))
-const unavailableCapabilityCopy = computed(() => {
-  const info = unavailableCapabilityInfo.value
-  if (!info) return { heading: t.value.capabilityUnavailable, detail: t.value.capabilityHint }
+// Navigability audit fix 1 (retargeted per GATE-5086): `deniedCapabilityTab` is set by
+// `syncFromRoute()` below ONLY when a route query asked for a tab this account cannot currently
+// reach — never by the plain "no tab requested" steady state and never for overview/reports
+// (which are never gated, see `resolveAttendanceCapabilityInfo`). It is the single source of
+// truth for whether the Overview banner renders and, if so, which capability it names.
+const deniedCapabilityTab = ref<AttendanceTab | null>(null)
+const deniedCapabilityInfo = computed(() => (
+  deniedCapabilityTab.value ? resolveAttendanceCapabilityInfo(deniedCapabilityTab.value) : null
+))
+const deniedCapabilityCopy = computed(() => {
+  const info = deniedCapabilityInfo.value
+  if (!info) return null
   return buildAttendanceCapabilityUnavailableCopy(info, isZh.value)
 })
 // isFeatureOverrideAllowed() is a pure env/DEV-mode predicate (no reactive dependency), read once
 // per render — this is the SAME gate parseOverrideFeatures() already enforces, just surfaced here
-// rather than requiring hand-edited localStorage. When false, the fallback shows an
+// rather than requiring hand-edited localStorage. When false, the banner shows an
 // "ask your administrator" line instead of an override control (never a new privilege).
 const unavailableCapabilityOverrideAllowed = isFeatureOverrideAllowed()
 
+function dismissDeniedCapabilityBanner(): void {
+  deniedCapabilityTab.value = null
+}
+
 async function retryCapabilityProbe(): Promise<void> {
+  const requestedTab = deniedCapabilityTab.value
   await loadProductFeatures(true)
-  syncFromRoute()
+  if (requestedTab && ensureTabAllowed(requestedTab) === requestedTab) {
+    // The gating flag resolved on since the banner appeared (e.g. an admin enabled it
+    // org-wide) — take the user to the tab they originally asked for instead of leaving them
+    // to notice the banner is now stale and re-click it themselves.
+    await selectTab(requestedTab)
+  }
+  // Still denied: deliberately do NOT call syncFromRoute() here — the URL was already corrected
+  // to the allowed tab when the denial first fired, so re-syncing from route.query.tab would read
+  // back 'overview' and silently clear deniedCapabilityTab, making the banner vanish with no
+  // feedback that the retry failed. Leave it exactly as-is so the banner (and the fact nothing
+  // changed) persists.
 }
 
 async function enableUnavailableCapabilityLocally(): Promise<void> {
-  const info = unavailableCapabilityInfo.value
-  if (!info) return
+  const info = deniedCapabilityInfo.value
+  const requestedTab = deniedCapabilityTab.value
+  if (!info || !requestedTab) return
   setLocalFeatureOverride(info.flagKey, true)
   await loadProductFeatures(true)
-  syncFromRoute()
+  if (ensureTabAllowed(requestedTab) === requestedTab) {
+    await selectTab(requestedTab)
+  }
+  // Same reasoning as retryCapabilityProbe(): no syncFromRoute() fallback on failure, so the
+  // banner does not silently disappear if the local override somehow didn't take.
 }
 
 function updateMobileState(): void {
@@ -374,6 +431,18 @@ function ensureTabAllowed(nextTab: AttendanceTab): AttendanceTab {
   return 'overview'
 }
 
+// Set immediately before the `router.replace()` call inside syncFromRoute()'s denial branch, to
+// the CORRECTED tab it just wrote into the query. A real (and this suite's mocked) route is
+// reactive, so that replace() synchronously mutates `route.query`, which re-triggers the
+// `watch(() => [route.path, …, route.query.tab, …])` watcher below on the next flush — a SECOND
+// syncFromRoute() call that observes the already-corrected, no-longer-denied query and would
+// otherwise immediately null out the `deniedCapabilityTab` ref this same pass just set, making
+// the banner flash and vanish before it can ever render. This flag lets that one expected
+// settle-back pass recognize itself and skip clearing; any OTHER pass (a genuinely different
+// navigation that happens to also land on the same tab) still clears normally, because this flag
+// is consumed (reset to null) the first time it is checked.
+let pendingDenialCorrectionSettleTab: AttendanceTab | null = null
+
 function syncFromRoute(): void {
   if (groupRoutePathActive.value) {
     if (!routeGroupContext.value) {
@@ -383,11 +452,42 @@ function syncFromRoute(): void {
       })
       return
     }
+    // Group-context routes are a separate, path-based navigation surface (not the `?tab=` query
+    // this fix targets) — out of scope for the denial banner; see PR body for why.
+    deniedCapabilityTab.value = null
     activeTab.value = ensureTabAllowed('admin')
     return
   }
   const queryTab = normalizeTab(route.query.tab)
-  activeTab.value = ensureTabAllowed(queryTab)
+  const allowedTab = ensureTabAllowed(queryTab)
+  if (allowedTab !== queryTab) {
+    // Navigability audit fix 1 (retargeted per GATE-5086): the deep link named a real capability
+    // (`queryTab` is only ever admin/import/workflow here — `normalizeTab()` already maps any
+    // other string to 'overview', and 'overview'/'reports' are never gated, so `allowedTab` can
+    // only diverge from `queryTab` when the account cannot currently reach it) this account
+    // cannot currently reach. Correct the URL so it stops silently claiming a tab the user isn't
+    // on (the bug GATE-5086 found: this used to bounce to Overview with the address bar still
+    // reading the denied tab's `?tab=`), and remember which capability was denied so the banner
+    // in the template above can name it.
+    deniedCapabilityTab.value = queryTab
+    activeTab.value = allowedTab
+    pendingDenialCorrectionSettleTab = allowedTab
+    const query: LocationQueryRaw = { ...route.query, tab: allowedTab }
+    delete query.section
+    delete query.requestId
+    void router.replace({ query })
+    return
+  }
+  if (pendingDenialCorrectionSettleTab !== null && queryTab === pendingDenialCorrectionSettleTab) {
+    // This IS that expected settle-back pass — the denial we just recorded is still current
+    // and intentional. Consume the flag and leave `deniedCapabilityTab` alone.
+    pendingDenialCorrectionSettleTab = null
+    activeTab.value = allowedTab
+    return
+  }
+  pendingDenialCorrectionSettleTab = null
+  deniedCapabilityTab.value = null
+  activeTab.value = allowedTab
 }
 
 async function selectTab(tab: AttendanceTab): Promise<void> {
@@ -399,6 +499,9 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
     return
   }
   activeTab.value = nextTab
+  // Any intentional tab navigation (including the banner's own "back to overview"/retry/enable
+  // buttons routing through here) supersedes a stale denial notice.
+  deniedCapabilityTab.value = null
 
   // Navigability audit fix 3: merge onto the existing query instead of replacing it outright —
   // the prior `{}` (overview) / `{ tab }` (everything else) replacement dropped every OTHER query
@@ -452,6 +555,17 @@ watch(() => [route.path, route.name, route.query.tab, route.query.surface, route
   syncFromRoute()
 })
 
+// KNOWN GAP, disclosed rather than silently shipped (same family as GATE-5086's P3-3): this
+// watcher only re-CLAMPS `activeTab` when it stops being allowed; it never un-clamps back toward
+// a tab that just became newly available. If `attendanceAdmin`/`workflow` flips ON sometime AFTER
+// the denial banner appeared (e.g. some other in-app trigger calls `loadProductFeatures(true)`,
+// not the banner's own Retry button, which DOES resync explicitly), the tab strip gains the entry
+// back but `deniedCapabilityTab` is untouched by this watcher — the banner can keep claiming a
+// capability "is not available" after it has, in fact, become available, until the user clicks
+// Retry, dismiss, or any tab. Not fixed here: doing so would require this watcher to know about
+// `deniedCapabilityTab` (a reactive dependency this otherwise-simple watcher does not have today)
+// and re-run the same URL-correction/selectTab dance syncFromRoute() does on its own trigger —
+// scope creep beyond the reachable bounce this fix targets.
 watch(availableTabs, () => {
   if (!featuresReady.value) return
   activeTab.value = ensureTabAllowed(activeTab.value)
