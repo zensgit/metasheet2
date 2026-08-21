@@ -2562,6 +2562,28 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
 
   r.get('/api/approvals/:id', authenticate, rbacGuard('approvals', 'read'), async (req: Request, res: Response) => {
     try {
+      // Lock-10 (S1) OD-S1-1/OD-S1-12/OD-S1-18 — per-instance admission, AFTER rbacGuard
+      // (`approvals:read` gates the resource-shape 403; this gates the INSTANCE, and denies with
+      // the SAME values-free 404 as "not found" — no existence oracle, OD-S1-11). `plm:` ids are
+      // NEVER routed through the predicate (OD-S1-18(a)): platform posture only.
+      // P3-1 (S1 requal): this check runs BEFORE `bridgeService.getApproval(...)` builds the full
+      // DTO (assignments, runtime graph, field-access map, node operations, a
+      // `approval_template_versions` query, `projectRecordLinkFormSnapshotForViewer`) — running it
+      // after left a non-participant's probe of another tenant's EXISTING instance id executing
+      // that whole pipeline, so any non-`ServiceError` throw in it surfaced as `500` instead of the
+      // intended `404`, an existence oracle (500 vs 404) plus a timing oracle (query-count
+      // difference) over another tenant's data. A nonexistent id still short-circuits to the same
+      // values-free 404 it always did — S1 now denies it one step earlier, with no query at all.
+      if (!isPlmApprovalId(req.params.id)) {
+        const viewerId = resolveApprovalActorId(req)
+        const readable = viewerId && pool ? await canReadApprovalInstance(pool, viewerId, req.params.id) : false
+        if (!readable) {
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
+        }
+      }
+
       const bridgeService = getBridgeService(options)
       // FWB-0 Layer 2 P1-1: pass viewer identity so record-link fields are projected/redacted
       // server-side (raw stored record ids never leave the API for unauthorized viewers).
@@ -2577,20 +2599,6 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
         )
-      }
-
-      // Lock-10 (S1) OD-S1-1/OD-S1-12/OD-S1-18 — per-instance admission, AFTER rbacGuard
-      // (`approvals:read` gates the resource-shape 403; this gates the INSTANCE, and denies with
-      // the SAME values-free 404 as "not found" — no existence oracle, OD-S1-11). `plm:` ids are
-      // NEVER routed through the predicate (OD-S1-18(a)): platform posture only.
-      if (!isPlmApprovalId(req.params.id)) {
-        const viewerId = resolveApprovalActorId(req)
-        const readable = viewerId && pool ? await canReadApprovalInstance(pool, viewerId, req.params.id) : false
-        if (!readable) {
-          return res.status(404).json(
-            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
-          )
-        }
       }
 
       res.json(approval)
