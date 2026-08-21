@@ -353,6 +353,12 @@ export function commentsRouter(injector?: Injector): Router {
   // at the global gate first) — exactly what the #3365 allowlist⟺guard
   // tripwire rejects; widening the allowlist instead is an auth-boundary
   // change needing its own design review.
+  // Bounds (Codex review): the id set must not become an unbounded PostgreSQL
+  // IN list. The grid's visible page is at most a few hundred rows; 5000 ids /
+  // 128 chars per id is generous headroom. Over-limit -> 400 before the
+  // service is ever reached. Applies to GET and POST alike (shared schema).
+  const SUMMARY_MAX_ROW_IDS = 5000
+  const SUMMARY_MAX_ROW_ID_LENGTH = 128
   const handleCommentSummary = async (
     req: Request,
     res: Response,
@@ -361,8 +367,8 @@ export function commentsRouter(injector?: Injector): Router {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
-      rowIds: z.array(z.string().min(1)).optional(),
-      targetIds: z.array(z.string().min(1)).optional(),
+      rowIds: z.array(z.string().min(1).max(SUMMARY_MAX_ROW_ID_LENGTH)).max(SUMMARY_MAX_ROW_IDS).optional(),
+      targetIds: z.array(z.string().min(1).max(SUMMARY_MAX_ROW_ID_LENGTH)).max(SUMMARY_MAX_ROW_IDS).optional(),
     })
     const parsed = schema.safeParse(raw)
     if (!parsed.success) {
