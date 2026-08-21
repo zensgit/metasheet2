@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, existsSync, writeFileSync, rmSync, readdirSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -902,28 +902,38 @@ function assertSoakContract({ remote, workflow }) {
   const mktempIdx = slices.rotate.indexOf('mktemp "${SOAK_PERSIST_DIR}/.credentials.XXXXXX"')
   assert.notEqual(mktempIdx, -1, 'rotation must write the new credentials file via a same-dir mktemp candidate (atomic replace)')
   assert.ok(credGuardIdx < mktempIdx, 'the missing-file guard must run BEFORE any credentials-file write')
+  // NIT-1 (post-gate #5063 F-round): .prev is created with the SAME umask-077 idiom the
+  // first-mint path uses (0600 from birth), not cp -p + a separate chmod.
   assert.ok(
-    slices.rotate.includes('cp -p "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev"'),
-    'rotation must preserve the pre-rotation credentials file as .prev before replacing it (recoverable botched rotation)',
-  )
-  assert.ok(
-    slices.rotate.includes('chmod 0600 "${SOAK_CREDENTIALS_FILE}.prev"'),
-    'the .prev recovery copy must be 0600 (host-only), same as the live credentials file',
+    slices.rotate.includes('( umask 077 && cp "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev" )'),
+    'rotation must preserve the pre-rotation credentials file as .prev (umask-077 idiom, 0600 from birth) before replacing it (recoverable botched rotation)',
   )
   assert.match(
     slices.rotate,
     /mv -f "\$cred_tmp" "\$SOAK_CREDENTIALS_FILE"/,
     'the credentials file replace must be an atomic same-dir rename',
   )
+  // F4 (post-gate #5063): the recovery message on a nonzero DB-step exit must NOT assert
+  // "nothing committed" as fact (a transport failure can occur AFTER a real COMMIT) — it
+  // must tell the operator how to check (ROTATE_RESULT + COMMIT both present) before ever
+  // touching .prev.
   assert.ok(
-    slices.rotate.includes('restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} to recover the pre-rotation state'),
-    'a failed DB UPDATE after the file swap must point the operator at the .prev recovery path (this is what makes .prev meaningful)',
+    slices.rotate.includes('does NOT prove nothing committed'),
+    'the DB-step failure message must not overclaim that nothing committed',
   )
-  // The credentials swap must run BEFORE the DB UPDATE (only then is a failed UPDATE a
+  assert.ok(
+    slices.rotate.includes("check soak-seed-rotate.txt for 'ROTATE_RESULT ...' followed by 'COMMIT'"),
+    'the DB-step failure message must tell the operator how to verify commit status before restoring .prev',
+  )
+  assert.ok(
+    slices.rotate.includes('must NOT be restored'),
+    'the DB-step failure message must warn against restoring .prev when the DB may already be rotated',
+  )
+  // The credentials swap must run BEFORE the DB step (only then is a failed DB step a
   // "botched rotation" the .prev file can recover from — see the recovery message above).
   const credSwapIdx = slices.rotate.indexOf('mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"')
   const updateIdx = slices.rotate.indexOf('UPDATE users')
-  assert.ok(credSwapIdx < updateIdx, 'the credentials-file swap must happen BEFORE the DB UPDATE')
+  assert.ok(credSwapIdx < updateIdx, 'the credentials-file swap must happen BEFORE the DB step')
   // #4931-class C9 pin: the psql -v COMPOSITION is what scopes the UPDATE, not just the
   // WHERE-clause text — a bare "%" here would rewrite every staging password_hash while
   // every other assertion in this block stays green.
@@ -933,11 +943,86 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.match(
     slices.rotate,
-    /UPDATE users\n {3}SET password_hash = :'pw_hash'\n {1}WHERE username LIKE :'user_prefix';/,
+    /UPDATE users SET password_hash = v_pw_hash WHERE username LIKE v_user_prefix;/,
     'the rotate SQL must be exactly this prefix-scoped UPDATE (no other column, no other WHERE)',
   )
   assert.doesNotMatch(slices.rotate, /INSERT\s+INTO/i, 'rotation must never INSERT — it only re-hashes existing rows')
   assert.doesNotMatch(slices.rotate, /attendance_shifts|attendance_group|SOAK_W4C5_CLI|SOAK_W7_CLI/, 'rotation must never touch shift/group config or the posture CLIs')
+
+  // F1 (post-gate #5063): psql -e (echo-queries) prints the interpolated bcrypt hash into
+  // OUTPUT_DIR — a world-downloadable CI artifact. The rotate psql invocation must carry
+  // NEITHER -e (the leak) NOR -q (verified empirically: -q silences the RAISE NOTICE the
+  // row-count parse below depends on, so that "fix" would break rotation silently while
+  // staying green). Anchored to the invocation's own two-line call site, not slice-wide.
+  const rotatePsqlCallIdx = slices.rotate.indexOf('docker exec -i "$POSTGRES_CONTAINER" psql')
+  assert.notEqual(rotatePsqlCallIdx, -1, 'expected the rotate psql invocation')
+  const rotatePsqlCall = slices.rotate.slice(rotatePsqlCallIdx, slices.rotate.indexOf('\n', slices.rotate.indexOf('\n', rotatePsqlCallIdx) + 1) + 1)
+  assert.doesNotMatch(rotatePsqlCall, /\s-e\s/, 'the rotate psql invocation must NEVER carry -e (echoes the interpolated bcrypt hash into the OUTPUT_DIR artifact)')
+  assert.doesNotMatch(rotatePsqlCall, /\s-q\s/, 'the rotate psql invocation must NEVER carry -q (silences the RAISE NOTICE the row-count parse depends on)')
+  // psql client-side `:'var'` substitution does not reach inside a `DO $$ ... $$` body —
+  // verified empirically against a real postgres:16 (a naive :'user_prefix' there is a
+  // syntax error, not merely untested). The SQL must route values through a transaction-
+  // local GUC (set_config/current_setting) instead, and must suppress the SELECT
+  // set_config(...) result printout via \gset (a bare SELECT would itself echo the hash).
+  assert.doesNotMatch(slices.rotate, /:'user_prefix'[\s\S]{0,40}\$\$/, 'no :\'user_prefix\' token may appear inside a dollar-quoted DO body (psql will not substitute it there)')
+  assert.ok(slices.rotate.includes("set_config('rotate.pw_hash', :'pw_hash', true)"), 'the hash must be routed into the DO block via a transaction-local set_config, substituted OUTSIDE any dollar-quoted body')
+  assert.match(slices.rotate, /SELECT set_config\('rotate\.pw_hash', :'pw_hash', true\) AS _discard \\gset/, 'the set_config call for the hash must suppress its own result printout via \\gset (a bare SELECT echoes the hash)')
+  assert.ok(slices.rotate.includes("current_setting('rotate.pw_hash')"), 'the DO block must read the hash back via current_setting, not a psql : token')
+
+  // F2 (post-gate #5063): a rotation that matches ZERO family rows must never report
+  // result=ok — the DB genuinely was not touched (an UPDATE matching 0 rows changes
+  // nothing), so this auto-restores .prev rather than leaving a credentials file that
+  // matches no DB user.
+  assert.ok(
+    slices.rotate.includes('(( rotated_users > 0 ))'),
+    'rotation must require rotated_users > 0, not just "is it a number" (a 0-row match must not report result=ok)',
+  )
+  const zeroGuardIdx = slices.rotate.indexOf('(( rotated_users > 0 ))')
+  const zeroRestoreIdx = slices.rotate.indexOf('mv -f "${SOAK_CREDENTIALS_FILE}.prev" "$SOAK_CREDENTIALS_FILE"')
+  assert.notEqual(zeroRestoreIdx, -1, 'the 0-row path must restore .prev onto the credentials file')
+  assert.ok(zeroGuardIdx < zeroRestoreIdx, 'the >0 guard must gate the .prev restore (not the other way round)')
+  assert.ok(
+    slices.rotate.includes("matched 0 users for username LIKE '${SOAK_USER_PREFIX}%'"),
+    'the 0-row failure message must name the exact predicate that matched nothing',
+  )
+  assert.ok(
+    slices.rotate.includes('restored the pre-rotation credentials file'),
+    'the 0-row failure message must state what was restored',
+  )
+
+  // F3 (post-gate #5063): blast-radius, inside the SAME transaction, before COMMIT — a
+  // ceiling sanity (999, defense-in-depth, explicitly NOT a derived family-size bound —
+  // the family accumulates across dispatches with no hard cap), the UPDATE's row count
+  // must equal a pre-count on the same predicate, and the UPDATE must not have left
+  // NOTHING un-matched (the mis-composed "%" case, on top of the static C9 pin above).
+  assert.ok(slices.rotate.includes('family_count > 999'), 'rotation must refuse a family bigger than the 999 sanity ceiling')
+  assert.ok(slices.rotate.includes('999 sanity ceiling'), 'the ceiling refusal must be self-documenting')
+  assert.ok(slices.rotate.includes('NOT a derived bound'), 'the ceiling must be documented as defense-in-depth, not a tight family-size bound (the family accumulates across dispatches)')
+  assert.ok(slices.rotate.includes('GET DIAGNOSTICS updated_count = ROW_COUNT'), 'rotation must read the ACTUAL UPDATE row count via GET DIAGNOSTICS, not assume it equals the pre-count')
+  assert.ok(slices.rotate.includes('updated_count <> family_count'), 'rotation must refuse if the UPDATE touched a different count than the family pre-count (concurrent-write guard)')
+  assert.ok(slices.rotate.includes('username NOT LIKE v_user_prefix'), 'rotation must verify the UPDATE left at least one row un-matched')
+  assert.ok(slices.rotate.includes('updated_count > 0 AND untouched_count = 0'), 'the "touched everything" refusal must only fire when rows were actually touched (an empty-family run must not false-positive)')
+  // These three checks must all run BEFORE the COMMIT that would persist the UPDATE.
+  const ceilingIdx = slices.rotate.indexOf('family_count > 999')
+  const doUpdateIdx = slices.rotate.indexOf('UPDATE users SET password_hash')
+  const blastRadiusIdx = slices.rotate.indexOf('updated_count > 0 AND untouched_count = 0')
+  const commitIdx = slices.rotate.indexOf('\nCOMMIT;')
+  assert.ok(ceilingIdx < doUpdateIdx, 'the ceiling check must run BEFORE the UPDATE')
+  assert.ok(doUpdateIdx < blastRadiusIdx && blastRadiusIdx < commitIdx, 'the blast-radius checks must run AFTER the UPDATE but BEFORE COMMIT')
+
+  // NIT-2 (post-gate #5063): the owner_ref/entrypoint_inventory_ref asymmetry (refused
+  // for users_per_org/tz/w7_target, but NOT for these two) must be documented, not silent.
+  assert.ok(
+    slices.rotate.includes('owner_ref / entrypoint_inventory_ref asymmetry'),
+    'the asymmetry with the users_per_org/tz/w7_target refusal must be documented in the function header',
+  )
+  // F5 (post-gate #5063): the single-generation .prev limitation must be documented (the
+  // owner-facing choice was to document it, given F2's auto-restore removes the common
+  // repeat-failure trigger, rather than add a second .prev2 generation).
+  assert.ok(
+    slices.rotate.includes('SINGLE generation'),
+    'the .prev single-generation limitation must be documented in the function header',
+  )
   assert.match(slices.rotate, /\\set ON_ERROR_STOP on\nBEGIN;/, 'the rotate UPDATE must run inside a stop-on-error transaction')
   assert.ok(slices.rotate.includes('rotated_users=${rotated_users}'), 'the summary must record the rotated-user count')
   assert.ok(slices.rotate.includes('echo "rotated=1"'), 'the summary must record rotated=1')
@@ -1744,6 +1829,82 @@ test('MUTATION (rotate C9): unscoping the rotate UPDATEʼs user_prefix to "%" tu
   )
 })
 
+test('MUTATION (gate #5063 F1): adding -e back to the rotate psql invocation turns the soak contract red (it would echo the interpolated bcrypt hash into OUTPUT_DIR)', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = 'docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" \\\n    -v pw_hash="$new_hash"'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(
+    anchor,
+    'docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" -e \\\n    -v pw_hash="$new_hash"',
+  )
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /must NEVER carry -e/,
+  )
+})
+
+test('MUTATION (gate #5063 F1): switching the rotate psql invocation to -q turns the soak contract red (the obvious-looking "fix" that silently breaks rotation)', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = 'docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" \\\n    -v pw_hash="$new_hash"'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(
+    anchor,
+    'docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" -q \\\n    -v pw_hash="$new_hash"',
+  )
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /must NEVER carry -q/,
+  )
+})
+
+test('MUTATION (gate #5063 F2): removing the rotated_users > 0 guard turns the soak contract red (the gate\'s M4 gap)', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = '(( rotated_users > 0 )) \\'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(anchor, 'true \\')
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rotation must require rotated_users > 0/,
+  )
+})
+
+test('MUTATION (gate #5063 F3): removing the pre-COMMIT blast-radius check turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = "  IF updated_count > 0 AND untouched_count = 0 THEN\n    RAISE EXCEPTION 'rotate_password blast-radius check failed: the UPDATE touched % row(s) and left NOTHING un-matched (0 rows are NOT LIKE %) - refusing what looks like a full-table rewrite', updated_count, v_user_prefix;\n  END IF;\n\n"
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(anchor, '')
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /the "touched everything" refusal must only fire when rows were actually touched/,
+  )
+})
+
+test('MUTATION (gate #5063 F3): removing the family-count ceiling check turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = "  IF family_count > 999 THEN\n    RAISE EXCEPTION 'rotate_password refuses: % users match username LIKE % - exceeds the 999 sanity ceiling (defense-in-depth, not the real family size)', family_count, v_user_prefix;\n  END IF;\n\n"
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(anchor, '')
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rotation must refuse a family bigger than the 999 sanity ceiling/,
+  )
+})
+
 test('MUTATION: deleting the rotate missing-credentials-file guard turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
   const slices = extractSoakSlices(original)
@@ -1802,11 +1963,11 @@ test('MUTATION: printing the plaintext password into OUTPUT_DIR turns the soak c
 test('MUTATION: an INSERT slipped into the rotate SQL turns the soak contract red', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
   const slices = extractSoakSlices(original)
-  const anchor = "UPDATE users\n   SET password_hash = :'pw_hash'\n WHERE username LIKE :'user_prefix';"
+  const anchor = 'UPDATE users SET password_hash = v_pw_hash WHERE username LIKE v_user_prefix;'
   assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
   const mutatedRotate = slices.rotate.replace(
     anchor,
-    `INSERT INTO users (id) VALUES (gen_random_uuid());\n${anchor}`,
+    `INSERT INTO users (id) VALUES (gen_random_uuid());\n  ${anchor}`,
   )
   const mutated = original.replace(slices.rotate, () => mutatedRotate)
   assert.notEqual(mutated, original, 'mutation must change the file')
@@ -1828,12 +1989,12 @@ test('MUTATION: dropping rotated=1 from the rotate summary turns the soak contra
   )
 })
 
-test('MUTATION: reordering the DB UPDATE before the credentials-file swap turns the soak contract red (would make .prev meaningless)', () => {
+test('MUTATION: reordering the DB step before the credentials-file swap turns the soak contract red (would make .prev meaningless)', () => {
   const original = readFileSync(REMOTE_SH, 'utf8')
   const slices = extractSoakSlices(original)
   // Swap the two ordering anchors so the UPDATE textually precedes the mv -f swap.
   const swapAnchor = 'mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"'
-  const updateAnchor = "UPDATE users\n   SET password_hash = :'pw_hash'\n WHERE username LIKE :'user_prefix';"
+  const updateAnchor = 'UPDATE users SET password_hash = v_pw_hash WHERE username LIKE v_user_prefix;'
   assert.ok(slices.rotate.includes(swapAnchor) && slices.rotate.includes(updateAnchor), 'mutation anchors must hit the rotate slice')
   const swapIdx = slices.rotate.indexOf(swapAnchor)
   const updateIdx = slices.rotate.indexOf(updateAnchor)
@@ -1846,7 +2007,7 @@ test('MUTATION: reordering the DB UPDATE before the credentials-file swap turns 
   assert.notEqual(mutated, original, 'mutation must change the file')
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
-    /the credentials-file swap must happen BEFORE the DB UPDATE/,
+    /the credentials-file swap must happen BEFORE the DB step/,
   )
 })
 
@@ -2305,6 +2466,92 @@ test('rotate_password EXECUTABLE: an EXISTING credentials file clears the missin
   // previous test).
   assert.notEqual(r.status, 0, 'expected a nonzero exit (docker/psql unavailable in this test env)')
   assert.doesNotMatch(r.stderr, /nothing to rotate/, 'the missing-credentials-file guard must NOT be what failed this run')
+})
+
+test('rotate_password EXECUTABLE (gate #5063 F2, 0-row path): a rotation matching ZERO family rows auto-restores .prev and fails — never reports result=ok', () => {
+  // Drives the REAL soak_seed_rotate_password end-to-end with a FAKE `docker` on PATH
+  // (no real postgres/backend container involved), whose canned output mirrors exactly
+  // what the real SQL prints for family_count=0 (verified against a real postgres:16
+  // separately — see the PR body). This proves the F2 fix behaviourally, not just
+  // textually: the credentials file really gets restored to the pre-rotation password.
+  const dir = mkdtempSync(join(tmpdir(), 'soak-rotate-f2-'))
+  const persistDir = join(dir, 'persist')
+  mkdirSync(persistDir, { recursive: true })
+  const credFile = join(persistDir, 'credentials.env')
+  const outputDir = join(dir, 'output')
+  mkdirSync(outputDir, { recursive: true })
+  const oldPassword = 'OLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLDOLD'
+  writeFileSync(credFile, `SOAK_SYNTH_PASSWORD=${oldPassword}\n`, { mode: 0o600 })
+
+  const fakeBinDir = join(dir, 'bin')
+  mkdirSync(fakeBinDir, { recursive: true })
+  const fakeDocker = join(fakeBinDir, 'docker')
+  writeFileSync(fakeDocker, `#!/bin/bash
+argv="$*"
+if [[ "$argv" == *"metasheet-staging-backend"*"node"* ]]; then
+  cat >/dev/null
+  echo '$2b$10$fakefakefakefakefakefakefakefakefakefakefakefakef'
+  exit 0
+fi
+if [[ "$argv" == *"metasheet-staging-postgres"*"psql"* ]]; then
+  cat >/dev/null
+  echo "BEGIN"
+  echo "NOTICE:  ROTATE_RESULT family_count=0 updated_count=0"
+  echo "DO"
+  echo "COMMIT"
+  exit 0
+fi
+echo "fake docker: unhandled invocation: $argv" >&2
+exit 1
+`)
+  chmodSync(fakeDocker, 0o755)
+
+  const rotateFns = extractRunnerFunctions([
+    'soak_seed_rotate_password',
+    'soak_mint_password',
+    'soak_hash_password_in_backend',
+    'soak_resolve_pg',
+  ])
+  const failLine = extractRunnerLine('fail')
+  const logLine = extractRunnerLine('log')
+  const optsRe = extractRunnerVar('SOAK_OPTS_RE')
+  const optValueRe = extractRunnerVar('SOAK_OPT_VALUE_RE')
+  const noticeRe = extractRunnerVar('SOAK_ROTATE_NOTICE_RE')
+  const script = `#!/bin/bash
+set -u
+${failLine}
+${logLine}
+${optsRe}
+${optValueRe}
+${noticeRe}
+SOAK_USER_PREFIX="synth-w4w7-"
+BACKEND_CONTAINER="metasheet-staging-backend"
+POSTGRES_CONTAINER="metasheet-staging-postgres"
+SOAK_PG_USER="postgres"
+SOAK_PG_DB="metasheet"
+resolve_postgres_creds() { echo "postgres metasheet"; }
+snapshot_staging_ps() { :; }
+${rotateFns}
+soak_seed_rotate_password
+`
+  const scriptFile = join(dir, 'run.sh')
+  writeFileSync(scriptFile, script)
+  const r = spawnSync('bash', [scriptFile], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}`, SOAK_CREDENTIALS_FILE: credFile, SOAK_PERSIST_DIR: persistDir, OUTPUT_DIR: outputDir },
+  })
+  assert.notEqual(r.status, 0, `expected a nonzero exit on a 0-row rotation; stdout: ${r.stdout}; stderr: ${r.stderr}`)
+  assert.match(r.stderr, /matched 0 users for username LIKE 'synth-w4w7-%'/, 'must name the specific 0-row reason')
+  assert.match(r.stderr, /restored the pre-rotation credentials file/, 'must state that .prev was restored')
+  // The restore is `mv -f .prev credentials.env` — mv CONSUMES its source, so .prev is
+  // gone afterward (the main file IS the recovered state; nothing is left to restore
+  // FROM anymore). Absence of .prev here is itself part of proving the real `mv` ran,
+  // not a copy that would have left both files behind.
+  assert.ok(!existsSync(`${credFile}.prev`), '.prev must have been consumed by the restore mv (not merely copied)')
+  const restored = readFileSync(credFile, 'utf8')
+  assert.match(restored, new RegExp(oldPassword), 'the credentials file must be restored to the pre-rotation password, not left holding the new one')
+  const summaryPath = join(outputDir, 'summary.txt')
+  assert.ok(!existsSync(summaryPath), 'a 0-row rotation must never reach the result=ok summary write')
 })
 
 for (const badValue of ['false', '1', 'TRUE', 'yes']) {

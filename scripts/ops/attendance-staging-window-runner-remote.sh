@@ -188,6 +188,10 @@ SOAK_GENERATOR_SCRIPT="attendance-w4w7-soak-load-generator.mjs"
 SOAK_UUID_RE='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
 # Manifest reference pattern — mirrors REF_PATTERN in both transition-CLI libs.
 SOAK_REF_RE='^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+# soak_seed_rotate_password's RAISE NOTICE result line (no GNU-vs-BSD `\+` trap: bash's own
+# `=~` is POSIX ERE on every platform, and the grep pre-filter below uses `-E` for the same
+# reason — neither depends on the host sed/grep BRE dialect).
+SOAK_ROTATE_NOTICE_RE='ROTATE_RESULT family_count=([0-9]+) updated_count=([0-9]+)'
 # The DEPLOYED image's own CLI copies — deliberately /app paths, NOT host-synced copies:
 # the CLI and the transition boundary it drives must come from the same build.
 SOAK_W4C5_CLI="/app/scripts/ops/attendance-w4c5-rollout-transition.ts"
@@ -1690,11 +1694,24 @@ soak_seed_rotate_password() {
   # host-only synthetic-user password and its DB hash for the EXISTING closed synthetic
   # family (username LIKE '${SOAK_USER_PREFIX}%'). Never inserts, never walks posture,
   # never touches shift/group/schedule config, never remints a retired family.
-  # action_soak_seed dispatches here BEFORE soak_require_orgs / owner_ref /
-  # entrypoint_inventory_ref are ever read, so soak_orgs / owner_ref /
-  # entrypoint_inventory_ref are unused by this act (soak_orgs stays a REQUIRED workflow
-  # input for action=soak-seed regardless — this act just never reads it; owner_ref /
-  # entrypoint_inventory_ref may still be supplied on the dispatch but are ignored here).
+  # action_soak_seed dispatches here BEFORE soak_require_orgs is ever called, so soak_orgs
+  # is unused by this act (it stays a REQUIRED workflow input for action=soak-seed
+  # regardless — this act just never reads it).
+  #
+  # owner_ref / entrypoint_inventory_ref asymmetry (deliberate, NOT a bug): unlike
+  # users_per_org/tz/w7_target — which action_soak_seed REFUSES when present alongside
+  # rotate_password=true, because they would otherwise silently take no effect and mislead
+  # the operator — owner_ref/entrypoint_inventory_ref are pure attestation REFERENCES with
+  # no behavioural effect of their own anywhere in this act (they only gate the transition
+  # manifests on the non-rotate path, which this act never reaches). There is nothing for
+  # them to silently "not take effect" — so they are allowed to ride along unused rather
+  # than refused. This was the original design-lock's explicit choice, not an oversight.
+  #
+  # .prev is a SINGLE generation (see the atomic-replace block below): two consecutive
+  # FAILED rotations can lose the recoverable password (documented rather than solved with
+  # a second generation, because the far more common failure mode — matching zero family
+  # rows — is handled below by auto-restoring .prev itself, which removes the repeat-
+  # failure trigger in practice).
   [[ -f "$SOAK_CREDENTIALS_FILE" ]] \
     || fail "rotate_password=true but no credentials file exists at ${SOAK_CREDENTIALS_FILE} — nothing to rotate (run action=soak-seed once, without rotate_password, first)"
   soak_resolve_pg
@@ -1704,38 +1721,102 @@ soak_seed_rotate_password() {
   new_hash="$(soak_hash_password_in_backend "$new_password")"
 
   # --- atomic credentials-file replace (tmp+mv, same dir; previous copy kept as .prev,
-  # 0600, so a rotation that fails partway is recoverable: mv the .prev copy back onto
-  # SOAK_CREDENTIALS_FILE to restore the host file to match the DB's still-unrotated hash) --
+  # 0600 from birth via the SAME umask idiom the first-mint path uses, so a rotation that
+  # fails partway is recoverable: mv the .prev copy back onto SOAK_CREDENTIALS_FILE to
+  # restore the host file to match the DB's still-unrotated hash) ------------------------
   local cred_tmp
   cred_tmp="$(mktemp "${SOAK_PERSIST_DIR}/.credentials.XXXXXX")"
   chmod 0600 "$cred_tmp"
   printf 'SOAK_SYNTH_PASSWORD=%s\n' "$new_password" > "$cred_tmp"
-  cp -p "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev" \
+  ( umask 077 && cp "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev" ) \
     || { rm -f "$cred_tmp"; fail "failed to preserve the pre-rotation credentials file as ${SOAK_CREDENTIALS_FILE}.prev — refusing to rotate without a recovery copy"; }
-  chmod 0600 "${SOAK_CREDENTIALS_FILE}.prev"
   mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"
   log "soak-seed rotate_password: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, atomic replace; previous copy kept at ${SOAK_CREDENTIALS_FILE}.prev for one-generation recovery)"
 
   # --- re-hash ONLY the existing synthetic family; no inserts, no posture walk, no
-  # group/shift/schedule seeding, no remint of retired families --------------------------
+  # group/shift/schedule seeding, no remint of retired families. Blast-radius, inside the
+  # SAME transaction, BEFORE COMMIT: (1) refuse a family bigger than a generous 999-row
+  # sanity ceiling (defense-in-depth against a mis-composed prefix — NOT a derived bound:
+  # the family accumulates across dispatches with no hard cap, so a tight ceiling would
+  # false-alarm on a legitimate multi-triple family); (2) the UPDATE's own row count must
+  # equal the family's pre-count (refuses on a concurrent write between the two); (3) the
+  # UPDATE must not have left NOTHING un-matched (the degenerate "touched every row" case a
+  # mis-composed -v user_prefix="%" would produce — the C9 static pin already forbids that
+  # composition; this is a runtime backstop for anything else that could widen it). KNOWN
+  # trade-off, verified against a real postgres, not assumed: a staging users table that
+  # happens to contain ONLY synth-w4w7-* rows and nothing else would also refuse here (it
+  # cannot be told apart from a mis-composed prefix from row counts alone) — acceptable per
+  # the reviewed design (a cheap invariant, not a completeness guarantee; staging always
+  # carries non-synthetic accounts in practice). NO `-e` on the psql invocation below
+  # (echo-queries would print the interpolated bcrypt hash into this world-downloadable
+  # OUTPUT_DIR artifact) — the result is read from an explicit RAISE NOTICE line instead of
+  # psql's own command-tag text. -----------------------------------------------------------
   local rotate_sql="${OUTPUT_DIR}/soak-seed-rotate.sql"
   cat > "$rotate_sql" <<'SQL'
 \set ON_ERROR_STOP on
 BEGIN;
-UPDATE users
-   SET password_hash = :'pw_hash'
- WHERE username LIKE :'user_prefix';
+-- psql's `:'var'` client-side substitution does NOT reach inside a `DO $$ ... $$` body
+-- (dollar-quoted strings are opaque to it — verified empirically against a real postgres:16,
+-- not assumed: a naive `:'user_prefix'` reference inside the DO block below is a silent
+-- syntax error psql would report, not a hash leak, but IS a shipped-broken rotation). Route
+-- both values through a transaction-local GUC instead: `set_config(..., true)` scopes it to
+-- THIS transaction only (reset at COMMIT/ROLLBACK), and `\gset` into a throwaway column name
+-- suppresses psql's normal result-table PRINTOUT — `SELECT set_config(...)` bare would
+-- otherwise echo the value (including the bcrypt hash) to this same OUTPUT_DIR-bound file,
+-- recreating exactly the class of leak the missing `-e` flag (see below) fixes.
+SELECT set_config('rotate.user_prefix', :'user_prefix', true) AS _discard \gset
+SELECT set_config('rotate.pw_hash', :'pw_hash', true) AS _discard \gset
+DO $$
+DECLARE
+  v_user_prefix text := current_setting('rotate.user_prefix');
+  v_pw_hash text := current_setting('rotate.pw_hash');
+  family_count integer;
+  updated_count integer;
+  untouched_count integer;
+BEGIN
+  SELECT count(*) INTO family_count FROM users WHERE username LIKE v_user_prefix;
+  IF family_count > 999 THEN
+    RAISE EXCEPTION 'rotate_password refuses: % users match username LIKE % - exceeds the 999 sanity ceiling (defense-in-depth, not the real family size)', family_count, v_user_prefix;
+  END IF;
+
+  UPDATE users SET password_hash = v_pw_hash WHERE username LIKE v_user_prefix;
+  GET DIAGNOSTICS updated_count = ROW_COUNT;
+
+  IF updated_count <> family_count THEN
+    RAISE EXCEPTION 'rotate_password blast-radius mismatch: UPDATE touched % row(s) but the pre-count was % for username LIKE % (possible concurrent write) - refusing', updated_count, family_count, v_user_prefix;
+  END IF;
+
+  SELECT count(*) INTO untouched_count FROM users WHERE username NOT LIKE v_user_prefix;
+  IF updated_count > 0 AND untouched_count = 0 THEN
+    RAISE EXCEPTION 'rotate_password blast-radius check failed: the UPDATE touched % row(s) and left NOTHING un-matched (0 rows are NOT LIKE %) - refusing what looks like a full-table rewrite', updated_count, v_user_prefix;
+  END IF;
+
+  RAISE NOTICE 'ROTATE_RESULT family_count=% updated_count=%', family_count, updated_count;
+END $$;
 COMMIT;
 SQL
-  docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" -e \
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" \
     -v pw_hash="$new_hash" -v user_prefix="${SOAK_USER_PREFIX}%" \
     < "$rotate_sql" > "${OUTPUT_DIR}/soak-seed-rotate.txt" 2>&1 \
-    || fail "rotate_password UPDATE failed against the staging DB (transactional — nothing committed); the credentials file was already rotated — restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} to recover the pre-rotation state, then retry; see soak-seed-rotate.txt"
+    || fail "rotate_password DB step returned a nonzero exit — this does NOT prove nothing committed (a transport/stream failure can occur AFTER a successful COMMIT): check soak-seed-rotate.txt for 'ROTATE_RESULT ...' followed by 'COMMIT' — if both are present the DB WAS rotated and ${SOAK_CREDENTIALS_FILE}.prev must NOT be restored (investigate instead); only restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} if they are absent. ${SOAK_CREDENTIALS_FILE}.prev is retained either way for that decision; see soak-seed-rotate.txt"
 
-  local rotated_users
-  rotated_users="$(sed -n 's/^UPDATE \([0-9]\+\)$/\1/p' "${OUTPUT_DIR}/soak-seed-rotate.txt" | tail -n1)"
-  [[ "$rotated_users" =~ ^[0-9]+$ ]] \
-    || fail "could not read the UPDATE row count from soak-seed-rotate.txt (psql output shape changed?)"
+  local notice_line rotated_users
+  notice_line="$(grep -E 'ROTATE_RESULT family_count=[0-9]+ updated_count=[0-9]+' "${OUTPUT_DIR}/soak-seed-rotate.txt" | tail -n1)"
+  if [[ "$notice_line" =~ $SOAK_ROTATE_NOTICE_RE ]]; then
+    rotated_users="${BASH_REMATCH[2]}"
+  else
+    fail "could not read the rotation result from soak-seed-rotate.txt (psql/PL/pgSQL output shape changed?)"
+  fi
+
+  # A rotation matching ZERO family rows must never report result=ok: the credentials file
+  # would hold a password matching nothing (and the DB genuinely was NOT touched — an
+  # UPDATE matching 0 rows changes nothing), so auto-restore .prev (nothing was committed
+  # for this specific failure mode, so restoring is always safe here) rather than leaving
+  # host state that silently breaks the next action=soak-run.
+  (( rotated_users > 0 )) \
+    || { mv -f "${SOAK_CREDENTIALS_FILE}.prev" "$SOAK_CREDENTIALS_FILE" \
+           || fail "rotate_password matched 0 users for username LIKE '${SOAK_USER_PREFIX}%', AND restoring ${SOAK_CREDENTIALS_FILE}.prev also failed — the credentials file may now hold a password matching nothing; restore it by hand from ${SOAK_CREDENTIALS_FILE}.prev"; \
+         fail "rotate_password matched 0 users for username LIKE '${SOAK_USER_PREFIX}%' — the synthetic family does not exist in this DB (nothing was rotated in the DB); restored the pre-rotation credentials file from ${SOAK_CREDENTIALS_FILE}.prev, so ${SOAK_CREDENTIALS_FILE} is unchanged from before this run"; }
 
   snapshot_staging_ps
   {
