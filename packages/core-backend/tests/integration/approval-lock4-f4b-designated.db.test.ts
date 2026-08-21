@@ -515,6 +515,12 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     expect(body.error.code).toBe('APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED')
   })
 
+  // Mutation-coverage note: this test is DELIBERATELY insensitive to the B-3 site-1 mutation
+  // (neutering resolveFromNode's `emptyAssigneePolicy === 'designated'` arm) — the tampered graph
+  // below has its `emptyAssigneeFallback` key stripped entirely, so `resolveDesignatedFallbackAssignments`
+  // returns `[]` on either side of that mutation and the terminal throw fires either way. It IS
+  // sensitive to `resolveDesignatedFallbackAssignments`'s own fail-closed return (verified: mutating
+  // that arm to dispatch a fake assignee instead of `[]` reds this test, restored via sha256).
   it(
     'Gate 3 dispatch-time fail-closed on a PERSISTED-BUT-INVALID graph (bypassing the authoring choke — models a legacy row from before this choke shipped, or a direct DB write): ' +
       'designated resolving to an EMPTY set terminates at APPROVAL_ASSIGNEE_EMPTY with { nodeKey } only, never a silent nobody, never a second fallback hop, and creates NOTHING in the DB',
