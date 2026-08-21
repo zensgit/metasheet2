@@ -7,6 +7,11 @@ name: Approval real-DB acceptance (S1 instance readability)
 #   - tests/integration/approval-instance-readability-s1-consumers.db.test.ts — CONSUMER adoption:
 #     detail/history pairing + the plm: spy-zero (G-S1-4, G-S1-5), and the metrics ACL substitution
 #     (G-S1-7).
+#   - tests/integration/approval-p1c-field-permissions.api.test.ts — a THIRD S1 consumer: added
+#     after this lane's `paths:` omission let a fourth non-participant-observer collision
+#     (`p1c-observer`/`p1c-admin`, minted JWT-only by that suite's own `authToken` helper) reach
+#     the required `test (20.x)` lane undetected. Runs here now so a future S1 admission-shape
+#     change is caught before it reaches the required lane, not after.
 # The org pin ships DEFAULT OFF (APPROVAL_S1_ORG_PIN_ENABLED unset) — G-S1-3/G-S1-10 force it on
 # in-process around single assertions; nothing in this lane flips the shipped default.
 # G-S1-8 (feed⊆admission) is NOT in either suite — RECORDED-PENDING per Lock-10 §5.1.1, expected
@@ -41,6 +46,7 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1-consumers.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-p1c-field-permissions.api.test.ts'
       - 'packages/core-backend/tests/unit/approval-instance-readability-plm-id-agreement.test.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
       - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
@@ -60,6 +66,7 @@ on:
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1.db.test.ts'
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1-consumers.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-p1c-field-permissions.api.test.ts'
       - 'packages/core-backend/tests/unit/approval-instance-readability-plm-id-agreement.test.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
       - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
@@ -134,7 +141,7 @@ jobs:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: pnpm --filter @metasheet/core-backend db:migrate
 
-      - name: Run S1 instance-readability real-DB acceptance (whole files, both suites)
+      - name: Run S1 instance-readability real-DB acceptance (whole files, all three suites)
         # WHOLE FILES, --reporter=verbose: a name filter matching zero tests would exit green and
         # hide regressions; verbose prints every collected test so an empty collection shows in
         # the log.
@@ -143,13 +150,14 @@ jobs:
           --config vitest.integration.config.ts run
           tests/integration/approval-instance-readability-s1.db.test.ts
           tests/integration/approval-instance-readability-s1-consumers.db.test.ts
+          tests/integration/approval-p1c-field-permissions.api.test.ts
           --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-instance-readability-s1.db.test.ts,approval-instance-readability-s1-consumers.db.test.ts"
+            echo "suites=approval-instance-readability-s1.db.test.ts,approval-instance-readability-s1-consumers.db.test.ts,approval-p1c-field-permissions.api.test.ts"
             echo "scope=Lock-10 (S1) canReadApprovalInstance all 5 arms + org pin (default OFF); detail/history/metrics consumer adoption"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
