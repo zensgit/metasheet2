@@ -94,6 +94,17 @@ export default defineConfig({
       // reason as the F4-A file immediately above; wired into the SAME
       // .github/workflows/approval-realdb-lock4-p3a.yml lane.
       'tests/integration/approval-lock4-f4c-same-person.db.test.ts',
+      // Lock-4 F4-B (designated empty-assignee fallback, 审批人为空时) real-DB acceptance — gates
+      // B-1 (both executor sites: resolveFromNode initial/re-entry, and resolveBranchAdvance via a
+      // parallel branch's second node), the Gate-2 'error' negative controls on each identical
+      // fixture, Gate 3 (the authoring choke, which fires at CREATE — one of its five entry points
+      // — not merely publish, plus a post-publish persisted-graph tamper that proves dispatch-time
+      // fail-closed), and Gate 4 (legacy-graph byte-identical deep-equal).
+      // DB-independent logic lives in tests/unit/approval-p3a-f4b-designated-fallback{,-normalize}
+      // .test.ts (not excluded — runs in the no-DB job). Excluded here so `describeIfDatabase`
+      // cannot skip-green this file; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-f4b-designated.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-lock4-f4b-designated.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
