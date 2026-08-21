@@ -37,6 +37,11 @@
 //                                          the warn is what creates migration pressure.
 //   - sheet with NO ownership metadata   -> nothing is protected, payloads are
 //                                          byte-identical to the pre-guard adapter.
+//
+// Preview (dry-run) shares the SAME projection and the SAME key predicate as apply, but
+// never throws: it ANNOTATES what apply would refuse (`blockedKeyFields`) and books no run
+// counters (`shield.project`, not `shield.strip`). A preview that showed a payload apply
+// would strip is its own kind of lie, so `project`/`strip` are one function, not two.
 // ---------------------------------------------------------------------------
 
 const OWNERSHIP_PROPERTY_NAMESPACES = Object.freeze(['stockPreparation', 'stockPreparationMvp'])
@@ -99,6 +104,7 @@ function resolveFieldsReader(context) {
 const INACTIVE_SHIELD = Object.freeze({
   active: false,
   isProtected() { return false },
+  project(payload) { return { data: payload, stripped: 0, skip: false } },
   strip(payload) { return { data: payload, stripped: 0, skip: false } },
 })
 
@@ -194,39 +200,63 @@ function createMultitableOwnershipGuard({ context, logger, fieldsReader } = {}) 
     })
     await state.queue
 
+    // THE projection. Both the write path (`strip`) and the read-only dry-run preview
+    // (`project`) go through this one function, which is what makes preview and apply agree
+    // byte-for-byte by construction rather than by two implementations happening to match.
+    // Pure: no counters, no I/O. `skip` is true only when stripping is what emptied the
+    // payload - an already-empty payload keeps its pre-guard behavior.
+    function projectPayload(payload) {
+      if (!isPlainObject(payload)) return { data: payload, stripped: 0, skip: false }
+      const kept = {}
+      let stripped = 0
+      for (const [field, value] of Object.entries(payload)) {
+        if (state.protectedFields.has(field)) {
+          stripped += 1
+          continue
+        }
+        kept[field] = value
+      }
+      if (stripped === 0) return { data: payload, stripped: 0, skip: false }
+      return { data: kept, stripped, skip: Object.keys(kept).length === 0 }
+    }
+
     return {
       active: true,
       isProtected(field) {
         return state.protectedFields.has(field)
       },
-      // Returns the payload to WRITE. `skip` is true only when stripping is what emptied the
-      // payload - an already-empty payload keeps its pre-guard behavior.
+      // Preview-side projection: identical output to `strip`, but it does NOT move the run
+      // counters. A preview writes nothing, so counting its rows as stripped work would
+      // inflate the apply summary whenever both run on the same adapter instance.
+      project: projectPayload,
+      // Returns the payload to WRITE, and books the values-free run counters.
       strip(payload) {
-        if (!isPlainObject(payload)) return { data: payload, stripped: 0, skip: false }
-        const kept = {}
-        let stripped = 0
-        for (const [field, value] of Object.entries(payload)) {
-          if (state.protectedFields.has(field)) {
-            stripped += 1
-            continue
-          }
-          kept[field] = value
-        }
-        if (stripped === 0) return { data: payload, stripped: 0, skip: false }
-        protectedFieldsStripped += stripped
-        const skip = Object.keys(kept).length === 0
-        if (skip) rowsSkippedEmptyAfterStrip += 1
-        return { data: kept, stripped, skip }
+        const projected = projectPayload(payload)
+        if (projected.stripped === 0) return projected
+        protectedFieldsStripped += projected.stripped
+        if (projected.skip) rowsSkippedEmptyAfterStrip += 1
+        return projected
       },
     }
+  }
+
+  // THE key-writability predicate, shared by the refusal (every write entry) and by the
+  // read-only preview, which must be able to SAY that apply would refuse without itself
+  // throwing. Returns logical field NAMES only - values-free.
+  function blockedKeyFields(shield, keyFields = []) {
+    if (!shield || shield.active !== true) return []
+    return (Array.isArray(keyFields) ? keyFields : []).filter((field) => shield.isProtected(field))
   }
 
   // A protected KEY field cannot simply be stripped: the create path would then write a row
   // with no key, and the next refresh would look it up, miss, and create a duplicate. That is
   // a target misconfiguration, so it fails the whole operation closed instead.
+  //
+  // MUST be called on EVERY write entry point - adapter upsert(), and the C6 raw write-source
+  // insertRows()/updateRows(). A create path that only strips is precisely the keyless-row +
+  // duplicate-on-next-refresh bug this refusal exists to prevent.
   function assertKeyFieldsWritable(shield, objectId, keyFields = []) {
-    if (!shield || shield.active !== true) return
-    const blocked = keyFields.filter((field) => shield.isProtected(field))
+    const blocked = blockedKeyFields(shield, keyFields)
     if (blocked.length === 0) return
     throw new MultitableOwnershipGuardError(
       'metasheet:multitable upsert key field is owned by a human and cannot be written',
@@ -237,6 +267,7 @@ function createMultitableOwnershipGuard({ context, logger, fieldsReader } = {}) 
   return {
     forObject,
     assertKeyFieldsWritable,
+    blockedKeyFields,
     // Values-free run summary: counts plus one boolean, no field values of any kind.
     summary() {
       return {

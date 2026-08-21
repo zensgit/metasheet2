@@ -437,10 +437,10 @@ async function testBulkWriteSourcePathsAreGuarded() {
     rowsSkippedEmptyAfterStrip: 0,
   })
 
-  // fully-stripped bulk rows are skipped, never written, and never looked up
+  // fully-stripped bulk rows (protected, but NOT a key) are skipped, never written
   const humanOnly = createContext({ existing: [], fields: { humanNote: humanOwned } })
   const humanOnlySource = createMetaSheetMultitableWriteSource({
-    system: createSystem({ keyFields: ['humanNote'], fieldIds: ['humanNote'] }),
+    system: createSystem({ keyFields: [], fieldIds: ['humanNote'] }),
     context: humanOnly.context,
   })
   const inserted = await humanOnlySource.insertRows('mt', 'stock_prep_landing', [{ humanNote: 'clobber' }], {}, 'owner')
@@ -481,6 +481,221 @@ async function testProtectedKeyFieldRefuses() {
 }
 
 // --------------------------------------------------------------------------
+// 12. REVIEW (claim A): the BULK CREATE path refuses a protected key too
+//
+// insertRows previously only STRIPPED. A protected key therefore fell out of the payload
+// and the row was inserted with no key; the next refresh's lookupByKey missed it and
+// inserted a duplicate, and the divergence compounded every run. The refusal now lives on
+// every write entry, keyed off the same predicate.
+// --------------------------------------------------------------------------
+async function testBulkCreateProtectedKeyRefuses() {
+  const harness = createContext({ existing: [], fields: { code: humanOwned, quantity: plmOwned } })
+  const source = createMetaSheetMultitableWriteSource({
+    system: createSystem({ keyFields: ['code'], fieldIds: ['code', 'quantity'] }),
+    context: harness.context,
+  })
+  await assert.rejects(
+    () => source.insertRows('mt', 'stock_prep_landing', [{ code: 'MAT-001', quantity: 1 }], {}, 'owner'),
+    (error) => {
+      assert.ok(error instanceof MultitableOwnershipGuardError, 'bulk create refuses with the SAME typed error as the row path')
+      assert.equal(error.code, OWNERSHIP_GUARD_PROTECTED_KEY_FIELD)
+      assert.deepEqual(error.details.fields, ['code'], 'logical field NAMES only')
+      assert.equal(JSON.stringify(error.details).includes('MAT-001'), false, 'the refusal is values-free')
+      return true
+    },
+  )
+  assert.equal(writeCalls(harness.calls).length, 0, 'no keyless row was created')
+  assert.equal(harness.rows.length, 0)
+
+  // the planner POLICY key set is guarded exactly like the object-config key set
+  const viaPolicy = createContext({ existing: [], fields: { code: humanOwned, quantity: plmOwned } })
+  const policySource = createMetaSheetMultitableWriteSource({
+    system: createSystem({ keyFields: [], fieldIds: ['code', 'quantity'] }),
+    context: viaPolicy.context,
+  })
+  await assert.rejects(
+    () => policySource.insertRows('mt', 'stock_prep_landing', [{ code: 'MAT-002', quantity: 2 }], { keyFields: ['code'] }, 'owner'),
+    (error) => error.code === OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  )
+  assert.equal(writeCalls(viaPolicy.calls).length, 0)
+
+  // a protected NON-key is still just stripped: the refusal is scoped to keys, so an
+  // ownership-tagged sheet keeps ingesting rows instead of failing the whole pipeline.
+  const nonKey = createContext({ existing: [], fields: { code: plmOwned, humanNote: humanOwned } })
+  const nonKeySource = createMetaSheetMultitableWriteSource({
+    system: createSystem({ keyFields: ['code'], fieldIds: ['code', 'quantity', 'humanNote'] }),
+    context: nonKey.context,
+  })
+  const created = await nonKeySource.insertRows(
+    'mt', 'stock_prep_landing', [{ code: 'MAT-003', quantity: 3, humanNote: 'clobber' }], {}, 'owner',
+  )
+  assert.equal(created.data.length, 1, 'the row IS created')
+  assert.deepEqual(nonKey.calls.find(([name]) => name === 'createRecord')[1].data, { code: 'MAT-003', quantity: 3 })
+  assert.equal(nonKey.rows[0].data.code, 'MAT-003', 'and it carries its key')
+  assert.equal(JSON.stringify(nonKey.calls).includes('clobber'), false)
+
+  // PATCH semantics, pinned: a protected key refuses on the bulk update path AND on the
+  // single-row upsert path. Never a stripped, keyless patch, and never a per-row error the
+  // caller could read as partial success - the whole batch stops before any write.
+  const seedRow = () => [{ id: 'rec_k', sheetId: SHEET_ID, version: 1, data: { code: 'MAT-001', quantity: 1 } }]
+  const patchHarness = createContext({ existing: seedRow(), fields: { code: humanOwned, quantity: plmOwned } })
+  const patchSource = createMetaSheetMultitableWriteSource({
+    system: createSystem({ keyFields: ['code'], fieldIds: ['code', 'quantity'] }),
+    context: patchHarness.context,
+  })
+  await assert.rejects(
+    () => patchSource.updateRows('mt', 'stock_prep_landing', [{ code: 'MAT-001', quantity: 9 }], { keyFields: ['code'] }, 'owner'),
+    (error) => error.code === OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  )
+  assert.equal(writeCalls(patchHarness.calls).length, 0)
+  assert.equal(patchHarness.rows[0].data.quantity, 1)
+
+  const rowPathHarness = createContext({ existing: seedRow(), fields: { code: humanOwned, quantity: plmOwned } })
+  const rowPathAdapter = createMetaSheetMultitableTargetAdapter({
+    system: createSystem({ keyFields: ['code'], fieldIds: ['code', 'quantity'] }),
+    context: rowPathHarness.context,
+  })
+  await assert.rejects(
+    () => rowPathAdapter.upsert({ object: 'stock_prep_landing', records: [{ code: 'MAT-001', quantity: 9 }] }),
+    (error) => error.code === OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  )
+  assert.equal(writeCalls(rowPathHarness.calls).length, 0, 'bulk and row paths agree on the patch refusal')
+}
+
+// --------------------------------------------------------------------------
+// 13. REVIEW (claim B): the dry-run preview applies the SAME projection apply does
+//
+// The preview was deliberately unguarded so a read-only call could never throw the
+// fail-closed refusal. The cost was a preview showing human-owned columns apply would
+// strip - the operator approved a payload that was never going to be written. It now shares
+// apply's projection and ANNOTATES what apply would refuse/skip instead of throwing.
+// --------------------------------------------------------------------------
+async function testPreviewAppliesTheApplyProjection() {
+  const seed = () => [{ id: 'rec_p', sheetId: SHEET_ID, version: 1, data: { code: 'MAT-001', quantity: 1, humanNote: 'mine' } }]
+  const records = [
+    { code: 'MAT-001', quantity: 9, humanNote: 'PIPELINE CLOBBER' }, // existing -> patch
+    { code: 'MAT-002', quantity: 4, humanNote: 'PIPELINE CLOBBER' }, // new -> create
+  ]
+  const fields = { code: plmOwned, quantity: plmOwned, humanNote: humanOwned }
+
+  const previewHarness = createContext({ existing: seed(), fields })
+  const previewAdapter = createMetaSheetMultitableTargetAdapter({ system: createSystem(), context: previewHarness.context })
+  const preview = await previewAdapter.previewUpsert({ object: 'stock_prep_landing', records })
+
+  const applyHarness = createContext({ existing: seed(), fields })
+  const applyAdapter = createMetaSheetMultitableTargetAdapter({ system: createSystem(), context: applyHarness.context })
+  const applied = await applyAdapter.upsert({ object: 'stock_prep_landing', records })
+  assert.equal(applied.written, 2)
+
+  // THE consistency invariant: same reader, same records -> byte-identical payloads.
+  const appliedPayloads = writeCalls(applyHarness.calls).map(([, input]) => input.changes || input.data)
+  assert.equal(
+    JSON.stringify(preview.records.map((record) => record.body)),
+    JSON.stringify(appliedPayloads),
+    'preview and apply agree byte-for-byte on the stripped payload',
+  )
+  assert.equal(JSON.stringify(preview).includes('PIPELINE CLOBBER'), false, 'the preview no longer shows a column apply would strip')
+  assert.equal(writeCalls(previewHarness.calls).length, 0, 'a preview still writes nothing')
+  assert.deepEqual(preview.ownershipGuard, { guardActive: true, protectedFieldsStripped: 2 })
+  assert.deepEqual(preview.wouldRefuse, [])
+  assert.deepEqual(preview.wouldSkip, [])
+
+  // preview + apply on ONE adapter instance: one metadata read, and the dry run does not
+  // inflate the apply run summary (project books no counters, strip does).
+  const shared = createContext({ existing: seed(), fields })
+  const sharedAdapter = createMetaSheetMultitableTargetAdapter({ system: createSystem(), context: shared.context })
+  await sharedAdapter.previewUpsert({ object: 'stock_prep_landing', records })
+  const sharedApplied = await sharedAdapter.upsert({ object: 'stock_prep_landing', records })
+  assert.equal(shared.calls.filter(([name]) => name === 'readObjectFieldsContent').length, 1, 'preview reuses the per-run cache')
+  assert.deepEqual(sharedApplied.metadata.ownershipGuard, {
+    guardActive: true,
+    protectedFieldsStripped: 2,
+    rowsSkippedEmptyAfterStrip: 0,
+  }, 'the dry-run preview did not inflate the apply run summary')
+
+  // a protected KEY: apply refuses the whole batch, and the preview SAYS SO rather than throwing
+  const keyed = createContext({ existing: [], fields: { code: humanOwned, quantity: plmOwned } })
+  const keyedAdapter = createMetaSheetMultitableTargetAdapter({
+    system: createSystem({ keyFields: ['code'], fieldIds: ['code', 'quantity'] }),
+    context: keyed.context,
+  })
+  const keyedPreview = await keyedAdapter.previewUpsert({
+    object: 'stock_prep_landing',
+    records: [{ code: 'MAT-001', quantity: 1 }, { code: 'MAT-002', quantity: 2 }],
+  })
+  assert.deepEqual(keyedPreview.wouldRefuse, [
+    { rowIndex: 0, code: OWNERSHIP_GUARD_PROTECTED_KEY_FIELD, fields: ['code'] },
+    { rowIndex: 1, code: OWNERSHIP_GUARD_PROTECTED_KEY_FIELD, fields: ['code'] },
+  ], 'apply refuses the batch before the row loop, so every row is marked')
+  assert.equal(writeCalls(keyed.calls).length, 0)
+  await assert.rejects(
+    () => keyedAdapter.upsert({ object: 'stock_prep_landing', records: [{ code: 'MAT-001', quantity: 1 }] }),
+    (error) => error.code === OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+    'the preview annotation and the apply refusal carry the same code',
+  )
+
+  // a row apply would SKIP is marked with apply's OWN skip reason
+  const allProtected = createContext({ existing: [], fields: { humanNote: humanOwned, quantity: humanOwned } })
+  const skipAdapter = createMetaSheetMultitableTargetAdapter({
+    system: createSystem({ keyFields: [], fieldIds: ['humanNote', 'quantity'] }),
+    context: allProtected.context,
+  })
+  const skipPreview = await skipAdapter.previewUpsert({
+    object: 'stock_prep_landing',
+    records: [{ humanNote: 'clobber', quantity: 1 }],
+  })
+  assert.deepEqual(skipPreview.records[0].body, {})
+  assert.deepEqual(skipPreview.wouldSkip, [{ rowIndex: 0, reason: 'ownership_guard_empty_payload' }])
+  const skipApplied = await skipAdapter.upsert({
+    object: 'stock_prep_landing',
+    records: [{ humanNote: 'clobber', quantity: 1 }],
+  })
+  assert.equal(skipApplied.skipped, 1)
+  assert.equal(skipApplied.results[0].reason, skipPreview.wouldSkip[0].reason, 'preview reuses apply\'s skip vocabulary')
+
+  // metadata read FAILS -> annotated, NOT thrown. Refusing the preview would deny the
+  // operator the one view that explains why apply is about to refuse.
+  const failing = createContext({ existing: [], readFields: () => { throw new Error('meta_fields read failed for host db-01 user svc_pipeline') } })
+  const failingAdapter = createMetaSheetMultitableTargetAdapter({ system: createSystem(), context: failing.context })
+  const failedPreview = await failingAdapter.previewUpsert({
+    object: 'stock_prep_landing',
+    records: [{ code: 'MAT-001', quantity: 1, humanNote: 'x' }],
+  })
+  assert.deepEqual(failedPreview.ownershipGuard, {
+    guardActive: false,
+    protectedFieldsStripped: 0,
+    unverified: true,
+    reason: 'fields_read_failed',
+  })
+  assert.equal(JSON.stringify(failedPreview).includes('db-01'), false, 'the annotation is values-free')
+  assert.equal(writeCalls(failing.calls).length, 0)
+  // ...and APPLY on the very same instance still refuses fail-closed. Preview annotating is
+  // not a downgrade of the write posture.
+  await assert.rejects(
+    () => failingAdapter.upsert({ object: 'stock_prep_landing', records: [{ code: 'MAT-001', quantity: 1 }] }),
+    (error) => error instanceof MultitableOwnershipGuardError && error.code === OWNERSHIP_GUARD_UNVERIFIED,
+  )
+
+  // reader ABSENT -> passthrough + the same once-per-run warn as apply's legacy posture
+  const legacy = createContext({ existing: [], fields: null })
+  const legacyAdapter = createMetaSheetMultitableTargetAdapter({ system: createSystem(), context: legacy.context })
+  const legacyPreview = await legacyAdapter.previewUpsert({
+    object: 'stock_prep_landing',
+    records: [{ code: 'MAT-1', quantity: 1, humanNote: 'kept' }],
+  })
+  assert.deepEqual(
+    legacyPreview.records[0].body,
+    { code: 'MAT-1', quantity: 1, humanNote: 'kept' },
+    'a legacy construction previews exactly what it would write',
+  )
+  assert.deepEqual(legacyPreview.ownershipGuard, { guardActive: false, protectedFieldsStripped: 0 })
+  assert.deepEqual(legacyPreview.wouldRefuse, [])
+  assert.equal(legacy.warnings.length, 1)
+  assert.match(legacy.warnings[0], /ownership guard inactive: no fields reader/)
+  assert.equal(legacy.warnings[0].includes(SHEET_ID), false, 'the warning is values-free')
+}
+
+// --------------------------------------------------------------------------
 // 11. guard module surface, exercised without the adapter
 // --------------------------------------------------------------------------
 async function testGuardModuleSurface() {
@@ -508,10 +723,28 @@ async function testGuardModuleSurface() {
   const alreadyEmpty = shield.strip({})
   assert.equal(alreadyEmpty.skip, false, 'a payload that was ALREADY empty keeps its pre-guard behavior')
 
+  // project() is the SAME projection strip() applies, minus the run counters - that shared
+  // function is what makes the dry-run preview and apply agree by construction.
+  const projected = shield.project({ code: 'A', humanNote: 'x' })
+  assert.deepEqual(projected.data, { code: 'A' })
+  assert.equal(projected.stripped, 1)
+  assert.deepEqual(guard.summary().protectedFieldsStripped, 0, 'project books nothing')
+
   const stripped = shield.strip({ code: 'A', humanNote: 'x' })
   assert.deepEqual(stripped.data, { code: 'A' })
   assert.equal(stripped.stripped, 1)
   assert.equal(stripped.skip, false)
+  assert.equal(JSON.stringify(stripped.data), JSON.stringify(projected.data), 'strip and project are byte-identical')
+
+  // blockedKeyFields is the predicate assertKeyFieldsWritable refuses on, exposed as a query
+  assert.deepEqual(guard.blockedKeyFields(shield, ['code', 'humanNote']), ['humanNote'])
+  assert.deepEqual(guard.blockedKeyFields(shield, ['code']), [])
+  assert.deepEqual(guard.blockedKeyFields(null, ['humanNote']), [], 'an inactive shield blocks nothing')
+  assert.throws(
+    () => guard.assertKeyFieldsWritable(shield, 'obj', ['humanNote']),
+    (error) => error.code === OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  )
+  guard.assertKeyFieldsWritable(shield, 'obj', ['code'])
 
   // asking again for an already-inspected field set issues no second read
   await guard.forObject(objectConfig, ['code', 'humanNote'])
@@ -558,6 +791,8 @@ async function main() {
   await testFieldMetadataReadIsCachedPerRun()
   await testBulkWriteSourcePathsAreGuarded()
   await testProtectedKeyFieldRefuses()
+  await testBulkCreateProtectedKeyRefuses()
+  await testPreviewAppliesTheApplyProjection()
   await testGuardModuleSurface()
   console.log('✓ multitable-ownership-guard: generic target adapter ownership write-guard tests passed')
 }

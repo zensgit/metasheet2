@@ -18,6 +18,7 @@ const {
 } = require('../contracts.cjs')
 const {
   MultitableOwnershipGuardError,
+  OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
   createMultitableOwnershipGuard,
 } = require('./multitable-ownership-guard.cjs')
 
@@ -238,6 +239,16 @@ function resolvedKeyFields(request, objectConfig) {
   return request.keyFields.filter((field) => shouldWriteField(field, objectConfig))
 }
 
+// The C6 raw write-source is driven by a planner POLICY rather than an upsert request, so it
+// resolves its key fields from the policy first. Shared by insertRows and updateRows so both
+// hand the ownership guard the SAME key set - a create path guarding a different key set than
+// the update path would be a hole the guard cannot see.
+function writeSourceKeyFields(policy, objectConfig) {
+  return policy && Array.isArray(policy.keyFields) && policy.keyFields.length > 0
+    ? policy.keyFields
+    : objectConfig.keyFields
+}
+
 function keyForRecord(record, keyFields) {
   if (keyFields.length === 0) return null
   return keyFields.map((field) => `${field}=${String(record[field] ?? '')}`).join('|')
@@ -393,19 +404,70 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
 
     read: unsupportedAdapterOperation(normalizedSystem.kind, 'read'),
 
+    // REVIEW: the dry-run preview used to skip the ownership guard entirely so a read-only
+    // call could never hit the fail-closed refusal. The cost was a preview that showed
+    // human-owned columns apply would strip - the operator approved a payload that was never
+    // going to be written. It now applies the SAME projection apply does (one shared
+    // `shield.project`) and ANNOTATES instead of throwing:
+    //   - a row apply would REFUSE (protected key)  -> wouldRefuse[], payload still shown
+    //   - a row apply would SKIP (empty after strip) -> wouldSkip[], mirroring apply's own
+    //     'ownership_guard_empty_payload' skip reason
+    //   - the metadata read FAILING                  -> ownershipGuard.guardActive:false plus a
+    //     values-free reason, NOT a throw: refusing a preview would deny the operator the one
+    //     view that shows why apply is about to refuse.
+    // Reader absent stays passthrough + the same once-per-run warn as apply's legacy posture.
+    // Preview books no run counters (project, not strip) so a dry run cannot inflate the
+    // apply summary when both run on one adapter instance.
     async previewUpsert(input = {}) {
       const request = normalizeUpsertRequest(input)
       const objectConfig = getObjectConfig(objects, request.object)
       const keyFields = resolvedKeyFields(request, objectConfig)
-      return {
-        records: request.records.map((record, index) => ({
+
+      let shield = null
+      let unverifiedReason = null
+      try {
+        shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(request.records, objectConfig))
+      } catch (error) {
+        if (!(error instanceof MultitableOwnershipGuardError)) throw error
+        shield = null
+        unverifiedReason = (error.details && error.details.reason) || 'fields_read_failed'
+      }
+
+      const blockedKeys = shield ? ownershipGuard.blockedKeyFields(shield, keyFields) : []
+      const wouldRefuse = []
+      const wouldSkip = []
+      let protectedFieldsStripped = 0
+
+      const records = request.records.map((record, index) => {
+        const logicalBody = projectRecordForWrite(record, objectConfig)
+        const projected = shield ? shield.project(logicalBody) : { data: logicalBody, stripped: 0, skip: false }
+        protectedFieldsStripped += projected.stripped
+        if (blockedKeys.length > 0) {
+          wouldRefuse.push({ rowIndex: index, code: OWNERSHIP_GUARD_PROTECTED_KEY_FIELD, fields: blockedKeys })
+        } else if (projected.skip) {
+          wouldSkip.push({ rowIndex: index, reason: 'ownership_guard_empty_payload' })
+        }
+        return {
           index,
           operation: objectConfig.mode === 'append' || keyFields.length === 0 ? 'create' : 'upsert',
           method: 'MULTITABLE',
           path: `/multitable/${objectConfig.sheetId}`,
-          body: projectRecordForWrite(record, objectConfig),
+          body: projected.data,
           query: {},
-        })),
+        }
+      })
+
+      return {
+        records,
+        // Values-free preview annotation: counts, one boolean, logical field NAMES, and a
+        // fixed reason vocabulary. Never a cell value or a host detail.
+        ownershipGuard: {
+          guardActive: Boolean(shield && shield.active === true),
+          protectedFieldsStripped,
+          ...(unverifiedReason ? { unverified: true, reason: unverifiedReason } : {}),
+        },
+        wouldRefuse,
+        wouldSkip,
       }
     },
 
@@ -604,6 +666,11 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       const objectConfig = getObjectConfig(objects, object)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
+      // REVIEW (C6): the CREATE path needs this refusal even more than the update path does.
+      // Stripping a protected KEY here would insert a row with no key; the next refresh's
+      // lookupByKey would miss it and insert a duplicate, and the divergence compounds every
+      // run. Same predicate, same typed refusal, same key resolution as updateRows.
+      ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, writeSourceKeyFields(policy, objectConfig))
       const created = []
       for (const row of rows) {
         const logicalRow = projectRecordForWrite(row, objectConfig)
@@ -618,9 +685,7 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
-      const keyFields = policy && Array.isArray(policy.keyFields) && policy.keyFields.length > 0
-        ? policy.keyFields
-        : objectConfig.keyFields
+      const keyFields = writeSourceKeyFields(policy, objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
       ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, keyFields)
       let rowCount = 0
@@ -717,9 +782,10 @@ module.exports = {
   METASHEET_MULTITABLE_ADAPTER_METADATA,
   MULTITABLE_WRITE_TARGET_KIND,
   MULTITABLE_WRITE_PROFILE,
-  // Re-exported so a caller can catch the ownership refusal by type without reaching into
-  // the guard module directly.
+  // Re-exported so a caller can catch the ownership refusal by type - and match a preview's
+  // wouldRefuse[].code against the same constant - without reaching into the guard module.
   MultitableOwnershipGuardError,
+  OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
   createMetaSheetMultitableWriteSource,
   deriveMultitablePlannerTargetConfig,
   createMetaSheetMultitableTargetAdapter,
@@ -733,5 +799,6 @@ module.exports = {
     mapRecordFieldsForWrite,
     resolveProvisionedFieldIdMap,
     resolvedKeyFields,
+    writeSourceKeyFields,
   },
 }
