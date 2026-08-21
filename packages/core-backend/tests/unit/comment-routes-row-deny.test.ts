@@ -156,6 +156,43 @@ describe('comments routes row-deny gate', () => {
     )
   })
 
+  it('rejects an over-limit or over-length summary id set before the service is reached (Codex bound)', async () => {
+    const commentService = buildCommentService()
+    pinned.setApp(buildApp(commentService))
+
+    // 5001 ids -> 400, service never called (bound is 5000).
+    const tooMany = Array.from({ length: 5001 }, (_unused, index) => `row-${index}`)
+    const overCount = await request(pinned.url())
+      .post('/api/comments/summary')
+      .send({ spreadsheetId: 'sheet-1', rowIds: tooMany })
+    expect(overCount.status).toBe(400)
+
+    // A single 129-char id -> 400 (per-id length bound is 128).
+    const overLength = await request(pinned.url())
+      .post('/api/comments/summary')
+      .send({ spreadsheetId: 'sheet-1', rowIds: ['x'.repeat(129)] })
+    expect(overLength.status).toBe(400)
+
+    // The GET variant shares the schema, so it is bounded identically. It is
+    // probed with the per-id length bound rather than the count bound: 5001 ids
+    // in a query string exceed Node's URL/header limit and the socket resets
+    // before any route runs (ECONNRESET) — which is precisely why the id set
+    // moved into a POST body in the first place.
+    const overLengthGet = await request(pinned.url())
+      .get('/api/comments/summary')
+      .query({ spreadsheetId: 'sheet-1', rowIds: 'x'.repeat(129) })
+    expect(overLengthGet.status).toBe(400)
+
+    expect(commentService.getCommentPresenceSummary).not.toHaveBeenCalled()
+
+    // Exactly 5000 well-formed ids still passes through.
+    const atLimit = await request(pinned.url())
+      .post('/api/comments/summary')
+      .send({ spreadsheetId: 'sheet-1', rowIds: Array.from({ length: 5000 }, (_unused, index) => `row-${index}`) })
+    expect(atLimit.status).toBe(200)
+    expect(commentService.getCommentPresenceSummary).toHaveBeenCalledTimes(1)
+  })
+
   it('passes denied-row exclusions to mark-read paths', async () => {
     const commentService = buildCommentService()
     commentService.markAllCommentsRead.mockResolvedValue(2)
