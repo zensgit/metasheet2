@@ -65,7 +65,7 @@ ancestry claim is made about any document this file does not cite by SHA or PR n
 - `approval-lock9-handler-process-attachments-20260819.md` — **RATIFIED 2026-08-21, ON MAIN** (PR #5011,
   squash `f01045f2e9`, merged 2026-08-21; **not** an ancestor of this document's anchor baseline). Its
   ratified OD-L9-13(a) reuses `isInstanceParticipant` **UNCHANGED**, and its ratified gate G-4 is
-  "Participant predicate reused unchanged" (`:398`, `:501-503`, `:631-638`). OD-S1-10 removes the org pin
+  "Participant predicate reused unchanged" (`:401`, `:504-506`, `:636-643`). OD-S1-10 removes the org pin
   that OD-L9-13(a)'s rationale rests on and OD-S1-16 removes the function G-4 names, so this lock does
   **not** merely make a Lock-9 sentence stale — it requires an **amendment of ratified normative text**.
   §2.11 rules the interaction and §5.1 carries it as a blocking owner decision.
@@ -687,10 +687,10 @@ of them was offered *as evidence of scoping discipline* — the failure mode
 
 More importantly the **classification** was wrong, not just the status. What Lock-9 carries is not a
 rationale sentence but **ratified normative text**:
-- **OD-L9-13(a)**, RATIFIED AS AMENDED (`:501-503`, `:631-640`): "reuse `isInstanceParticipant`
+- **OD-L9-13(a)**, RATIFIED AS AMENDED (`:504-506`, `:636-645`): "reuse `isInstanceParticipant`
   **UNCHANGED** — no fourth participant predicate is minted (Lock-7 §L7-A / D-4) — its org-pin EXISTS
   clause being self-satisfied by the bound process row itself";
-- ratified gate **G-4** (`:398`): "Participant predicate reused **unchanged**", whose negative is
+- ratified gate **G-4** (`:401`): "Participant predicate reused **unchanged**", whose negative is
   "mutating `isInstanceParticipant` reds the process-download test too".
 
 OD-S1-10 deletes the org pin those rest on, and OD-S1-16 deletes the function G-4 names. That is an
@@ -707,7 +707,7 @@ Rulings:
    what OD-L9-13(a) ratified**, because "UNCHANGED" is the operative word of that arm, so ruling (1)
    binds only once §5.1's Lock-9 amendment row is answered.
 2. **The affected Lock-9 text, enumerated so the amendment can be scoped**: OD-L9-13(a)'s "UNCHANGED" and
-   its org-pin self-satisfaction clause; the matching §L9-C bullet (`:213-220`); and gate G-4 (`:398`),
+   its org-pin self-satisfaction clause; the matching §L9-C bullet (`:205-223`); and gate G-4 (`:401`),
    whose named mutation target ceases to exist. The *conclusions* survive and get stronger — an
    instance-level org pin cannot be defeated by attachment binding state at all, and Lock-9's own
    ratification-time scope clause (which confines arm (a) to attachment surfaces **because** of the
@@ -840,7 +840,7 @@ commit as this record.
 
 | # | Decision | Why it cannot be derived | Blocks |
 |---|---|---|---|
-| **L9-AMEND** | **Amend RATIFIED Lock-9 OD-L9-13(a) ("reuse `isInstanceParticipant` UNCHANGED", `:501-503`, `:631-640`) and RATIFIED gate G-4 ("Participant predicate reused unchanged", `:398`)**, which OD-S1-10 and OD-S1-16 contradict. Arms: (a) amend both to name `canReadApprovalInstance` and re-point G-4's mutation target; (b) hold OD-S1-10/OD-S1-16 until Lock-9's attachment slices land and amend afterwards; (c) leave Lock-9 as ratified and give S1 a different home, keeping `isInstanceParticipant` alive — which reopens D-4 | Lock-9 was ratified by the owner on 2026-08-21 under the **same** by-reference authorization this lock cites. An executing session may not amend ratified normative text **that the ratified document did not delegate** — see §5.3 for the delegation test that distinguishes this row from the Lock-7 annotations this same commit does make — and "one sentence goes stale" was a mis-classification of a text conflict as a bookkeeping edit (review P1-3) | OD-S1-10, OD-S1-16, and therefore the C-1 migration |
+| **L9-AMEND** | **Amend RATIFIED Lock-9 OD-L9-13(a) ("reuse `isInstanceParticipant` UNCHANGED", `:504-506`, `:636-645`) and RATIFIED gate G-4 ("Participant predicate reused unchanged", `:401`)**, which OD-S1-10 and OD-S1-16 contradict. Arms: (a) amend both to name `canReadApprovalInstance` and re-point G-4's mutation target; (b) hold OD-S1-10/OD-S1-16 until Lock-9's attachment slices land and amend afterwards; (c) leave Lock-9 as ratified and give S1 a different home, keeping `isInstanceParticipant` alive — which reopens D-4 | Lock-9 was ratified by the owner on 2026-08-21 under the **same** by-reference authorization this lock cites. An executing session may not amend ratified normative text **that the ratified document did not delegate** — see §5.3 for the delegation test that distinguishes this row from the Lock-7 annotations this same commit does make — and "one sentence goes stale" was a mis-classification of a text conflict as a bookkeeping edit (review P1-3) | OD-S1-10, OD-S1-16, and therefore the C-1 migration |
 | OD-S1-12 | Confirm the detail-route contract narrowing (200 -> 404 for non-participant `approvals:read` holders, **platform ids only** per OD-S1-18) | it is a public behaviour change; the house rule is ratify-first, and §0's 「按建议执行」 answered a list that did not contain it | consumer (b) |
 | OD-S1-7 / C-2 | Confirm the metrics-ACL **widening**: after migration a CC target reads another user's instance metrics where C-2 denies them today (review P2-3, promoted here) | it grants new read access on a shipped surface. **The review's stated rationale is rebutted** — under `feedback_tests_freeze_change_not_approve_it` the criterion is "does an existing client break today", and a widening breaks none, so it is NOT the same class as OD-S1-12's narrowing. It is escalated anyway on a different and sufficient ground: an ACL widening is a security-relevant grant, and the executing session's by-reference authorization does not reach grants | the metrics consumer only; the rest of S1 may proceed |
 | OD-S1-17(c) | Multi-org viewers: (c-i) union over the viewer's active orgs / (c-ii) exact-org from `req.authenticatedTenantId` with denial outside it / (c-iii) single-org-only in v1 with a boot assert | `user_orgs` PK is `(user_id, org_id)` (`zzzz20260114110000:20-27`), so "the viewer's org" has no single answer for a multi-org user. Until it is ruled, **G-S1-10 is either sound or vacuous** | the org half of the predicate, G-S1-10's meaning, **and the migration** — §2.2(b) class 3 ("resolves to exactly one org membership") is undefined until it is ruled, and `zzzz20260114110000:34-40` backfills every active user into `'default'`, so multi-org rows are the expected shape (review P2-5) |
