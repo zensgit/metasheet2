@@ -1230,6 +1230,15 @@ export default defineConfig({
       // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
       // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
       'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
+      // Lock-10 (S1) instance readability — canReadApprovalInstance, all 5 arms + org pin (G-S1-1,
+      // G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial), real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-instance-readability-s1.yml lane, which arms
+      // EXPECT_DB=1.
+      'tests/integration/approval-instance-readability-s1.db.test.ts',
+      // Lock-10 (S1) CONSUMER adoption — detail/history/metrics routes (G-S1-4, G-S1-5, G-S1-7),
+      // real DB. Same two-point wiring as its sibling above, same standalone workflow lane.
+      'tests/integration/approval-instance-readability-s1-consumers.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.

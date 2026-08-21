@@ -81,7 +81,9 @@ describe('approval admin jump migration and bootstrap sync', () => {
 
     // Later schema additions may advance the bootstrap marker; keep this pin synchronized so the
     // reassign CHECK and the latest idempotent DDL are both replayed on reused test databases.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260818-node-operation-policy-denied-action'")
+    // Lock-10 (S1) OD-S1-9(a) bumped this to add `approval_instances.org_id` plus its non-blank
+    // CHECK (nullable, no default, Phase 1 only — see zzzz20260821100000_add_approval_instance_org_id.ts).
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260821-s1-instance-org-id-nonblank-check'")
     // ANCHORED on the FULL member list, not the old floating fragment. The previous substring
     // (`'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'`) still passed with BOTH `handle`
     // and `policy_denied` missing from the bootstrap — an unanchored pin over load-bearing DDL, the

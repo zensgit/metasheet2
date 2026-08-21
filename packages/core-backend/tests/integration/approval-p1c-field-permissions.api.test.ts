@@ -227,8 +227,28 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     )
     expect(created.currentNodeKey).toBe('approval_1')
 
+    // Lock-10 (S1) OD-S1-12: detail now gates per-INSTANCE participation before this
+    // field-level redaction is even reachable — a bystander with no relationship to the
+    // instance gets 404 (values-free), never 200 with a redacted field (P1c). This test's
+    // actual subject is the SEPARATE, node-level field-permission redaction layer, which
+    // requires a real subject to observe at all. `p1c-observer` and `p1c-admin` are minted
+    // as JWT-only claims (no matching `users` row) by `authToken` and are not otherwise
+    // related to this instance, so both are made CC targets (arm 4 — real S1 participation,
+    // OD-S1-7) while remaining WITHOUT any assignment/seat — preserving the original
+    // "an observer/admin with no assignment" scenario the comment below describes, now
+    // honestly satisfying the newly-added per-instance gate too.
+    const pool = poolManager.get()
+    for (const bystanderId of ['p1c-observer', 'p1c-admin']) {
+      await pool.query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+         VALUES ($1, 'cc', $2, 'Requester', 'pending', 1, $3::jsonb)`,
+        [created.id, 'p1c-requester', JSON.stringify({ targetType: 'user', targetId: bystanderId })],
+      )
+    }
+
     // DETAIL: while AT approval_1 the hidden field is absent for active approver,
-    // requester, AND an observer/admin with no assignment — but `reason` stays.
+    // requester, AND an observer/admin with no assignment (but CC'd — real S1 participants
+    // via arm 4) — but `reason` stays.
     for (const token of [manager1Token, requesterToken, observerToken, adminToken]) {
       const detail = await jsonRequest(baseUrl, `/api/approvals/${created.id}`, token)
       expect(detail.status).toBe(200)
@@ -249,7 +269,6 @@ describeIfDatabase('Approval P1-C node field permissions (hidden subset) API', (
     expect(listRow?.formSnapshot).toHaveProperty('reason', 'trip')
 
     // The DB form_snapshot is intact (redaction is echo-only, not a write).
-    const pool = poolManager.get()
     const stored = await pool.query<{ form_snapshot: JsonRecord }>(
       'SELECT form_snapshot FROM approval_instances WHERE id = $1',
       [created.id],

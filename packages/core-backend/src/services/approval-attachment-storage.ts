@@ -227,10 +227,14 @@ export interface AttachmentRowForAuth {
 
 export interface DownloadAuthChecks {
   /**
-   * Is the viewer a participant (initiator/approver/cc/admin) of the instance, PINNED to the
-   * attachment's org? Cross-org stale relations must fail closed as not_participant.
+   * Is the viewer a participant (requester/seat/past-actor/cc/admin) of the instance? Backed by
+   * the ONE Lock-10 (S1) predicate, `canReadApprovalInstance` (OD-S1-16 — `isInstanceParticipant`
+   * as a separate implementation no longer exists). No `orgId` parameter: the predicate derives
+   * org server-side and does not take a caller-supplied value (OD-S1-9(f)) — the ROW's org is
+   * still pinned, but by gate 0 above (`viewerOrgId !== row.orgId`), a mechanism this interface
+   * does not carry.
    */
-  isInstanceParticipant(viewerId: string, instanceId: string, orgId: string): Promise<boolean>
+  isInstanceParticipant(viewerId: string, instanceId: string): Promise<boolean>
   /**
    * Does the instance's ACTIVE node(s) mark `fieldId` as `access:'hidden'`? (§4.2 gate 2 / G7.)
    * The production wiring MUST back this with the SAME `collectHiddenFieldIds(...)` the snapshot
@@ -272,7 +276,7 @@ export async function authorizeAttachmentDownload(
   } else {
     denyCode = 'not_participant'
     try {
-      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId, row.orgId)
+      authorized = await checks.isInstanceParticipant(viewerId, row.instanceId)
     } catch {
       authorized = false // fail-closed
     }

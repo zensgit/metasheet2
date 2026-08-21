@@ -2,11 +2,15 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump adds Lock-5's `policy_denied` action to the approval_records CHECK
-// so the per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the
-// production migration zzzz20260818090000_add_policy_denied_action_to_approval_records). The previous
-// bump added Lock-3's `handle` (zzzz20260817120000_add_handle_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260818-node-operation-policy-denied-action'
+// idempotent DDL. The current bump adds Lock-10 (S1) OD-S1-9(a)'s `approval_instances.org_id`
+// column PLUS the non-blank-when-present CHECK (`approval_instance_org_nonblank`) — nullable, NO
+// DEFAULT (Phase 1 only; matches the production migration
+// zzzz20260821100000_add_approval_instance_org_id.ts). The Phase-3 presence CHECK
+// (`approval_instance_org_present`, OD-S1-18(b)) is a separate, later migration, not landed here.
+// The previous bump added Lock-5's `policy_denied` action to the approval_records CHECK so the
+// per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
+// migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260821-s1-instance-org-id-nonblank-check'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -113,6 +117,13 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS form_snapshot JSONB`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS current_node_key TEXT`)
     await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS node_activation_seq INTEGER NOT NULL DEFAULT 0`)
+    // Lock-10 (S1) OD-S1-9(a): nullable, NO DEFAULT, non-blank-when-present CHECK — Phase 1 only
+    // (matches production migration zzzz20260821100000_add_approval_instance_org_id.ts).
+    // Deliberately not backfilled here; the G-S1-12 partial gate only asserts the column exists
+    // with a NULL default. No Phase-3 presence CHECK yet (OD-S1-18(b) — a separate migration).
+    await client.query(`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id TEXT`)
+    await client.query(`ALTER TABLE approval_instances DROP CONSTRAINT IF EXISTS approval_instance_org_nonblank`)
+    await client.query(`ALTER TABLE approval_instances ADD CONSTRAINT approval_instance_org_nonblank CHECK (org_id ~ '[!-~]')`)
     await client.query(`
       UPDATE approval_instances
       SET source_system = COALESCE(source_system, 'platform'),
