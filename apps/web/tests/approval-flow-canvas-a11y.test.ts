@@ -1,10 +1,24 @@
 /**
  * Wave-2 PR4 — ApprovalFlowCanvas edge-insert / node-card a11y lock.
  * Pure structural source-scan (G5-C style): no jsdom mount of the full canvas tree.
+ *
+ * FS-7 (2026-08-21) adds a SECOND, MOUNTED tier at the bottom of this file — see the
+ * "node card accessible names (accname, mounted DOM)" describe block. It is a deliberately
+ * DIFFERENT problem from the tooltip work elsewhere in the closeout line (do not fuse them,
+ * feedback_misclassified_gap_called_a_ceiling.md) and a deliberately DIFFERENT tier from the
+ * source-scan tests above it (feedback_source_text_assertions_are_not_behaviour.md): the source
+ * scan above already pins that `:aria-label="`编辑${graphNodeLabel(pos.key)}节点`"` is the literal
+ * text TemplateAuthoringView.vue's real `graphNodeLabel`/`nodeTypeLabel` wire into; the block below
+ * proves what that WIRING actually PRODUCES once compiled and mounted — a real DOM read, not a
+ * regex over source text.
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createApp, nextTick, type App } from 'vue'
+import ApprovalFlowCanvas from '../src/approvals/components/ApprovalFlowCanvas.vue'
+import { computeLayout } from '../src/approvals/graphLayout'
+import type { ApprovalGraph, ApprovalNode, ApprovalNodeType } from '../src/types/approval'
 
 const CANVAS_SRC = readFileSync(
   join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
@@ -328,5 +342,272 @@ describe('ApprovalFlowCanvas toolbar buttons — Element Plus default ring overr
     expect(rule).not.toBeNull()
     expect(rule![1]).toMatch(/--el-button-outline-color:\s*var\(--el-color-primary\)/)
     expect(rule![1]).not.toMatch(/--el-color-primary-light-5/)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FS-7 — canvas node card accessible names (accname), MOUNTED DOM tier.
+//
+// WHAT WAS "UNVERIFIED": the closeout flagged the node card's accessible name (what a screen
+// reader announces on Tab focus) as unverified — the ONLY prior coverage was the source-scan
+// above (a regex over `.vue` file text), which pins the WIRING ("this literal expression is
+// bound to :aria-label") but never renders anything or reads a real DOM attribute. This block
+// mounts ApprovalFlowCanvas.vue for real (jsdom, via `createApp` — the same pattern used by
+// DirectoryDeprovisionEvidencePanel.spec.ts / directoryManagementView.spec.ts elsewhere in this
+// repo, not @vue/test-utils, which this repo does not depend on) and reads attributes/text off
+// the actual rendered nodes.
+//
+// UNIT BOUNDARY: ApprovalFlowCanvas.vue's own docstring calls it "pure presentation — parent owns
+// draft/history and all topology/command mutations." `graphNodeLabel` / `nodeTypeLabel` /
+// `canvasNodeSummary` arrive as PROP FUNCTIONS from TemplateAuthoringView.vue, which is not
+// exported (private `<script setup>` locals) and so cannot be imported here. This block therefore
+// mounts the child in isolation and supplies fixture functions that MIRROR the real one-liners
+// byte-for-byte (`node.name?.trim() || nodeTypeLabel(node.type)`) — this proves "does this
+// component's own template correctly turn a `graphNodeLabel` contract into a per-node accname",
+// which combined with the source-scan above ("TemplateAuthoringView wires its REAL
+// `graphNodeLabel` — not some other computation — into this exact prop") closes the loop without
+// needing the full parent view's heavier router/store/API mock harness.
+//
+// ACCNAME ALGORITHM, JSDOM-APPROXIMATED (`computeAccName` below): aria-labelledby text → aria-label
+// → visible text content (aria-hidden and inline display:none/visibility:hidden subtrees excluded).
+// HONEST BOUNDARY: this is NOT the full WAI-ARIA Accessible Name and Description Computation 1.2
+// algorithm — it does not resolve `<label for>`/native-control value fallback (not applicable to
+// these `role="button"` divs), CSS `::before`/`::after` generated content, the `title` attribute
+// last-resort fallback, or `<slot>` distribution edge cases. jsdom also does not compute real
+// paint-time visibility (e.g. an ancestor with `display:none` set via a class + real stylesheet,
+// as opposed to an inline `style` attribute, is invisible to the `visibility`/`display` checks
+// below). A verdict that depends on any of those needs a real browser harness (Chromium/Playwright)
+// — same boundary this repo already documents for CSS in general (feedback_css_verify_in_real_
+// browser_not_jsdom.md). Within that boundary, this is what jsdom + these two `getAttribute` reads
+// + a filtered `textContent` walk can prove, and it is sufficient here because EVERY node-card
+// accname in the shipped markup is carried by `aria-label` alone (no `aria-labelledby`, no native
+// label) — verified structurally by the source-scan block above.
+describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM — FS-7)', () => {
+  const NODE_TYPES: ApprovalNodeType[] = ['start', 'approval', 'cc', 'condition', 'parallel', 'handler', 'end']
+
+  // Mirrors TemplateAuthoringView.vue's real NODE_TYPE_LABELS / nodeTypeLabel (line ~1892) —
+  // byte-identical values, kept here only because the real map is a private script-setup const.
+  const NODE_TYPE_LABELS: Record<ApprovalNodeType, string> = {
+    start: '发起',
+    approval: '审批',
+    cc: '抄送',
+    condition: '条件分支',
+    parallel: '并行分支',
+    handler: '办理',
+    end: '结束',
+  }
+  function nodeTypeLabel(type: string): string {
+    return NODE_TYPE_LABELS[type as ApprovalNodeType] ?? type
+  }
+  // Mirrors TemplateAuthoringView.vue's real `graphNodeLabel` (line ~2193) byte-for-byte:
+  // `node.name?.trim() || nodeTypeLabel(node.type)`.
+  function graphNodeLabel(graph: ApprovalGraph, key: string): string {
+    const node = graph.nodes.find((candidate) => candidate.key === key)
+    if (!node) return '流程节点'
+    return node.name?.trim() || nodeTypeLabel(node.type)
+  }
+
+  function buildGraph(names: Partial<Record<ApprovalNodeType, string>>): ApprovalGraph {
+    // `config: {}` for every node — not config-VALID per any node type's real schema, only
+    // config-SHAPED enough to satisfy the type. Fine here: accname computation never reads
+    // `node.config` (only `node.name`/`node.type`), so an empty stub is not a fixture gap.
+    const nodes: ApprovalNode[] = NODE_TYPES.map((type) => ({
+      key: `n_${type}`,
+      type,
+      name: names[type],
+      config: {} as ApprovalNode['config'],
+    }))
+    const edges = NODE_TYPES.slice(0, -1).map((type, index) => ({
+      key: `e_${index}`,
+      source: `n_${type}`,
+      target: `n_${NODE_TYPES[index + 1]}`,
+    }))
+    return { nodes, edges }
+  }
+
+  // Author-given names, one distinct string per type, none of which is a substring of the node's
+  // own raw key (`n_approval` etc.) or of any OTHER type's name — so "contains the node's own
+  // name" and "does not leak the raw key" are both non-vacuous per type.
+  const NAMED: Record<ApprovalNodeType, string> = {
+    start: '发起环节',
+    approval: '总经理审批',
+    cc: '知会人事',
+    condition: '金额分支',
+    parallel: '会签并行',
+    handler: '资料办理',
+    end: '流程结束',
+  }
+
+  /** Walks `el`'s subtree, excluding aria-hidden and inline-hidden branches — the jsdom-approximated "visible text content" leg of computeAccName. */
+  function visibleTextContent(el: Element): string {
+    let out = ''
+    el.childNodes.forEach((child) => {
+      if (child.nodeType === 3 /* Node.TEXT_NODE */) {
+        out += child.textContent ?? ''
+        return
+      }
+      if (child.nodeType !== 1 /* Node.ELEMENT_NODE */) return
+      const childEl = child as HTMLElement
+      if (childEl.getAttribute('aria-hidden') === 'true') return
+      if (childEl.style && (childEl.style.display === 'none' || childEl.style.visibility === 'hidden')) return
+      out += visibleTextContent(childEl)
+    })
+    return out
+  }
+
+  /** jsdom-approximated AccName: aria-labelledby text -> aria-label -> filtered text content. See the file-level doc comment above for the honest boundary. */
+  function computeAccName(el: Element): string {
+    const labelledBy = el.getAttribute('aria-labelledby')
+    if (labelledBy) {
+      const text = labelledBy
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((id) => document.getElementById(id))
+        .filter((node): node is HTMLElement => node !== null)
+        .map((node) => visibleTextContent(node).trim())
+        .filter(Boolean)
+        .join(' ')
+      if (text.trim()) return text.trim()
+    }
+    const ariaLabel = el.getAttribute('aria-label')
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim()
+    return visibleTextContent(el).replace(/\s+/g, ' ').trim()
+  }
+
+  async function mountFixture(names: Partial<Record<ApprovalNodeType, string>>) {
+    const graph = buildGraph(names)
+    const layout = computeLayout(graph)
+    const byKey = new Map(graph.nodes.map((node) => [node.key, node]))
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app: App = createApp(ApprovalFlowCanvas, {
+      readOnly: false,
+      canvasValidity: [],
+      canUndo: false,
+      canRedo: false,
+      canvasZoomLabel: '100%',
+      canvasStageCss: {},
+      canvasSurfaceCss: {},
+      canvasLayout: layout,
+      canvasEdgeLines: [],
+      canvasMoveTargetLines: [],
+      selectedCanvasNode: null,
+      movingCanvasNode: null,
+      edgeInsertMenuEdgeKey: null,
+      canvasMinimap: { offsetX: 0, offsetY: 0, scale: 1, viewport: { x: 0, y: 0, width: 10, height: 10 } },
+      nodeWidth: 264,
+      nodeHeight: 76,
+      minimapWidth: 200,
+      minimapHeight: 120,
+      graphNodeLabel: (key: string) => graphNodeLabel(graph, key),
+      // Deliberately EMPTY (not the real canvasNodeCardSummary, which never returns '') — an
+      // adversarial fixture so the visible card text carries NO fallback content of its own.
+      // CONFIRMED during development, not just inferred: re-ran the CC mutation below (§ mutation
+      // evidence) against a non-empty summary stub ('点击配置') — with :aria-label stripped for
+      // `cc`, the raw textContent fallback came back "点击配置›" (non-empty), so a bare
+      // "non-empty accname" assertion would have passed VACUOUSLY under the very mutation it
+      // exists to catch (only the separate "contains the node's own name" leg still caught it).
+      // '' removes that vacuous-pass path so the non-empty assertion is load-bearing on its own.
+      canvasNodeSummary: () => '',
+      nodeTypeLabel,
+      canvasNodeByKey: (key: string) => byKey.get(key),
+      canMoveCanvasNode: () => false,
+      canInsertParallelOnEdge: () => false,
+      canInsertHandlerOnEdge: () => false,
+      canvasMoveTargetLabel: () => '',
+    })
+    app.mount(container)
+    await nextTick()
+    const accNameByType = new Map<ApprovalNodeType, string>()
+    const ariaLabelByType = new Map<ApprovalNodeType, string | null>()
+    for (const type of NODE_TYPES) {
+      const key = `n_${type}`
+      const selector = container.querySelector(
+        `[data-canvas-node="${key}"] [data-testid="approval-canvas-node-select"]`,
+      )
+      if (!selector) throw new Error(`no node-select control rendered for ${key}`)
+      accNameByType.set(type, computeAccName(selector))
+      ariaLabelByType.set(type, selector.getAttribute('aria-label'))
+    }
+    return { app, container, accNameByType, ariaLabelByType }
+  }
+
+  let named: Awaited<ReturnType<typeof mountFixture>>
+  let unnamed: Awaited<ReturnType<typeof mountFixture>>
+
+  beforeAll(async () => {
+    named = await mountFixture(NAMED)
+    unnamed = await mountFixture({})
+  })
+
+  afterAll(() => {
+    named.app.unmount()
+    named.container.remove()
+    unnamed.app.unmount()
+    unnamed.container.remove()
+  })
+
+  it('the computeAccName helper prefers aria-label over visible text content, and excludes aria-hidden text (proves the exclusion branch actually fires)', () => {
+    const withLabel = document.createElement('div')
+    withLabel.setAttribute('aria-label', '标签文本')
+    withLabel.textContent = '被忽略的内容'
+    expect(computeAccName(withLabel)).toBe('标签文本')
+
+    const withoutLabel = document.createElement('div')
+    const visible = document.createElement('span')
+    visible.textContent = '可见文本'
+    const hidden = document.createElement('span')
+    hidden.setAttribute('aria-hidden', 'true')
+    hidden.textContent = '隐藏文本'
+    withoutLabel.appendChild(visible)
+    withoutLabel.appendChild(hidden)
+    // Sanity: the hidden text is really there in the DOM (so exclusion below is a real subtraction,
+    // not a fixture that never contained it in the first place).
+    expect(withoutLabel.textContent).toContain('隐藏文本')
+    expect(computeAccName(withoutLabel)).toBe('可见文本')
+    expect(computeAccName(withoutLabel)).not.toContain('隐藏文本')
+
+    const withLabelledBy = document.createElement('div')
+    const labelSource = document.createElement('span')
+    labelSource.id = 'accname-test-labelledby-src'
+    labelSource.textContent = 'labelledby文本'
+    document.body.appendChild(labelSource)
+    withLabelledBy.setAttribute('aria-labelledby', 'accname-test-labelledby-src')
+    withLabelledBy.setAttribute('aria-label', '被labelledby盖过的文本')
+    expect(computeAccName(withLabelledBy)).toBe('labelledby文本')
+    labelSource.remove()
+  })
+
+  for (const type of NODE_TYPES) {
+    it(`${type} node card: named-graph accname is non-empty, contains the node's own name, and never leaks the raw key (values-free)`, () => {
+      const key = `n_${type}`
+      const accName = named.accNameByType.get(type)!
+      expect(accName.length).toBeGreaterThan(0)
+      expect(accName).toContain(NAMED[type])
+      expect(accName).not.toContain(key)
+    })
+
+    it(`${type} node card: unnamed-graph accname falls back to the exact type label ("编辑${NODE_TYPE_LABELS[type]}节点")`, () => {
+      const accName = unnamed.accNameByType.get(type)!
+      expect(accName).toBe(`编辑${NODE_TYPE_LABELS[type]}节点`)
+    })
+  }
+
+  it('the seven unnamed-graph fallback accnames are mutually distinct (type-distinguishing even with no author-given name)', () => {
+    const values = NODE_TYPES.map((type) => unnamed.accNameByType.get(type)!)
+    expect(values.every((v) => v.length > 0)).toBe(true)
+    expect(new Set(values).size).toBe(NODE_TYPES.length)
+  })
+
+  it('the seven named-graph accnames are mutually distinct', () => {
+    const values = NODE_TYPES.map((type) => named.accNameByType.get(type)!)
+    expect(new Set(values).size).toBe(NODE_TYPES.length)
+  })
+
+  it('every node-card accname is carried by the aria-label attribute alone (matches the source-scan-pinned wiring, not a coincidental text-content match)', () => {
+    for (const type of NODE_TYPES) {
+      expect(named.ariaLabelByType.get(type)).toBeTruthy()
+      expect(named.ariaLabelByType.get(type)).toBe(named.accNameByType.get(type))
+    }
   })
 })
