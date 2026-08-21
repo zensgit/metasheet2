@@ -491,6 +491,24 @@ const ALLOWLIST: AllowlistEntry[] = [
   // -- it does not, yet. The P3-A importer tripwire (below, TIER B) is the SEPARATE mechanism
   // that would have caught a THIRD approval consumer mounting this kit without an equivalent
   // guard -- it is keyed on the IMPORTING file, not on these three lines.
+  //
+  // SCOPE CORRECTION (gate finding P3-3, fix round, 2026-08-22): the `authorId`-not-in-alternation
+  // blind spot documented above is NOT limited to these three kit-internal lines -- it equally
+  // blinds `name-or-id-fallback` to `ApprovalCommentsPanel.vue`'s OWN `|| c.authorId` fallback
+  // (`authorName: authorDisplayName.value[c.authorId] || c.authorId,`), in the very file this
+  // slice's approval-specific upstream guard lives in, where `authorId` is the PRIMARY identity
+  // token (not an edge case). Proven by paired mutation: `|| rawAny.id` reds the pattern,
+  // `|| rawAny.authorId` on the identical line does not (see approvalCommentsClient.spec.ts's own
+  // "server/client page-size coupling" sibling census note for the mutation-testing convention;
+  // the mutation itself lives in this PR's gate report, not checked into source). That specific
+  // fallback is verified UNREACHABLE today (`getResolvedUserName` returns `null`, never the id --
+  // `directoryResolve.ts`'s tri-state contract), and the real behavioural specs
+  // (`approval-comments-panel.spec.ts`'s "never renders a raw author id" + "MENTION DROPDOWN"
+  // tests) catch a live regression on both render surfaces regardless of this text-scan gap -- so
+  // this is a residual-disclosure correction, not a new open leak. Widening the regex's
+  // alternation to include `authorId` is deliberately NOT done here: `name-or-id-fallback` scans
+  // ALL THREE trees (multitable + approval + shared/comments), so widening it is a blast-radius
+  // decision for whoever owns this census, not a fix-round-scoped edit.
   ...group('OUT-OF-SCOPE', 'mention-candidate label / comment-author label+subtitle fallback to the raw id when displayName/authorName is absent (or, for the subtitle, rendered alongside a differing name) -- legitimate, byte-identical multitable behavior (a real directory-backed name producer); the approval consumer (S3b) discharges the census gate via its OWN upstream guard instead of touching this shared file -- see the group note above and the TIER A entry it names', [
     ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: candidate.displayName?.trim() || candidate.userId.trim(),'],
     ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,'],
@@ -699,7 +717,7 @@ const SHARED_COMMENTS_APPROVAL_CONSUMERS: SharedCommentsApprovalConsumer[] = [
   },
   {
     file: 'src/views/approval/ApprovalCommentsPanel.vue',
-    guard: 'TWO surfaces, both covered. THREAD LIST: authorDisplayName computed -- `getResolvedUserName(c.authorId) || \\`成员 ${ordinal}\\`` -- unconditionally overwrites `authorName` on every comment BEFORE it reaches the kit (TIER A entry "ApprovalCommentsPanel.vue -- comment author display name" above). MENTION DROPDOWN (a SEPARATE kit render path, post-push adversarial-review finding): setting `authorName` above arms the kit\'s OWN `defaultMentionSuggestions` :385 subtitle leak (renders raw `authorId` whenever `authorName` differs from it, which is now always) and :378\'s candidate-label leak (blank `name` falls back to raw `userId`) -- discharged by NOT feeding `mentionCandidates` to the kit at all and supplying our own values-free `mentionSuggestionsForPanel` (ordinal fallback, `subtitle: undefined`) covering every author + candidate id, which supersedes the kit\'s internal derivation. See `approval-comments-panel.spec.ts`\'s dedicated dropdown-opening test.',
+    guard: 'TWO surfaces, both covered. THREAD LIST: authorDisplayName computed -- `getResolvedUserName(c.authorId) || \\`成员 ${ordinal}\\`` -- unconditionally overwrites `authorName` on every comment BEFORE it reaches the kit (TIER A entry "ApprovalCommentsPanel.vue -- comment author display name" above). MENTION DROPDOWN (a SEPARATE kit render path, post-push adversarial-review finding): setting `authorName` above arms the kit\'s OWN `defaultMentionSuggestions` :385 subtitle leak (renders raw `authorId` whenever `authorName` differs from it, which is now always) and :378\'s candidate-label leak (blank `name` falls back to raw `userId`) -- discharged by NOT feeding `mentionCandidates` to the kit at all and supplying our own values-free `mentionSuggestionsForPanel` (via the shared `memberIdentity` computed, ONE ordinal counter across both halves -- gate finding P3-1, 2026-08-22) covering every author + candidate id, which supersedes the kit\'s internal derivation. Author entries carry `subtitle: undefined`; candidate entries carry `subtitle: candidate.email || undefined` -- a real S2 field (`ApprovalMentionCandidate.email`), not a raw-id fallback, so still values-free, just not universally `undefined` (corrected, gate finding P3-2 -- the prior wording here claimed `subtitle: undefined` for both halves, which was true only of the author half). See `approval-comments-panel.spec.ts`\'s dedicated dropdown-opening test.',
     reason: 'S3b 全文评论 tab wrapper -- mounts MetaCommentsPanel.vue and useMultitableComments from shared/comments.',
   },
 ]

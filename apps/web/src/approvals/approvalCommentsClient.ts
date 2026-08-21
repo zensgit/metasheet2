@@ -18,6 +18,12 @@
  *    every URL, including those two, never `params.containerId`: during a route param change
  *    (下一条 → / deep link) the two sources could transiently disagree, and a request built from a
  *    stale `params.containerId` would write into the WRONG approval instance. One source of truth.
+ *    (This closes the hazard in the WRITE direction only. The READ-settle direction — an
+ *    in-flight `listComments` for the OLD instance resolving after navigation — is closed
+ *    separately, at the mount site: `ApprovalDetailView.vue` keys the panel on
+ *    `route.params.id`, so a stale response lands in an orphaned, unrendered composable instance
+ *    instead of overwriting the new instance's state. See that file's own note, gate finding
+ *    P2-2, 2026-08-22.)
  *
  *  - Capabilities S2 does not expose (reactions, resolve) are surfaced as ABSENT, never stubbed
  *    with fabricated success: `resolveComment`/`addReaction`/`removeReaction` throw
@@ -31,13 +37,22 @@
  *    each fully-paginated list to newest-first before returning, so the initial hydrated list and
  *    the post-create local state agree on order.
  *
- *  - Pagination: `listComments` takes no paging params on the shared interface, so this client
- *    loops (`limit=200`, `offset += 200`) until a page returns fewer than `limit` rows or
- *    `APPROVAL_COMMENT_LIST_MAX_PAGES` (10 → 2000 comments) is reached. Hitting the cap sets the
- *    `truncated` ref (an EXTRA property on the returned client, beyond the 7-method floor — see
- *    the interface's own doc: "a floor, not a ceiling") so the wrapper can show a truncation
- *    notice instead of silently dropping the tail. Reset at the START of every `listComments`
- *    call so a stale notice never survives a later, short load.
+ *  - Pagination: `listComments` takes no paging params on the shared interface. It first fetches
+ *    `offset=0` alone to read the server's reported `page.total` (S2 has no descending-order or
+ *    cursor-from-tail option; ASC is the only order it serves). If `total` fits within
+ *    `APPROVAL_COMMENT_LIST_MAX_PAGES * PAGE_SIZE` (10 × 200 = 2000), that first page's rows are
+ *    kept and paging continues forward from `offset=200` exactly as before — the common case costs
+ *    no extra request. If `total` EXCEEDS capacity, the discovery page's (oldest) rows are
+ *    discarded and paging restarts from `offset = total - capacity`, walking forward to the end —
+ *    i.e. this client keeps the NEWEST `capacity` comments, not the oldest, because that is what
+ *    the wrapper's truncation notice ("仅显示最近的评论") actually promises the reader. (Gate
+ *    finding P2-1, 2026-08-22: the previous version paged forward from 0 unconditionally and kept
+ *    whichever comments happened to load first — the OLDEST — while the notice claimed the
+ *    opposite. One extra HTTP request in this rare edge case is the accepted cost of the fix.)
+ *    Hitting the cap sets the `truncated` ref (an EXTRA property on the returned client, beyond
+ *    the 7-method floor — see the interface's own doc: "a floor, not a ceiling") so the wrapper
+ *    can show the truncation notice. Reset at the START of every `listComments` call so a stale
+ *    notice never survives a later, short load.
  *
  *  - Author display names: S2's `ApprovalCommentView` carries NO `authorName` at all (unlike
  *    multitable's comment rows, which are directory-enriched server-side). This client leaves
@@ -176,23 +191,50 @@ export function createApprovalCommentsClient(getInstanceId: () => string): Appro
     async listComments(_params: CommentsTarget): Promise<{ comments: MultitableComment[] }> {
       const instanceId = getInstanceId()
       truncated.value = false
-      const collected: MultitableComment[] = []
-      let offset = 0
-      for (let page = 0; page < APPROVAL_COMMENT_LIST_MAX_PAGES; page += 1) {
+      const capacity = APPROVAL_COMMENT_LIST_PAGE_SIZE * APPROVAL_COMMENT_LIST_MAX_PAGES
+
+      async function fetchPage(offset: number): Promise<{ raw: RawApprovalCommentView[]; total: number }> {
         const res = await apiFetch(
           `/api/approvals/${encodeURIComponent(instanceId)}/comments?limit=${APPROVAL_COMMENT_LIST_PAGE_SIZE}&offset=${offset}`,
         )
         const data = await parseApprovalCommentEnvelope<{ comments?: unknown; page?: { total?: unknown } }>(res)
-        const rawComments = Array.isArray(data.comments) ? (data.comments as RawApprovalCommentView[]) : []
-        for (const raw of rawComments) collected.push(toMultitableComment(raw, instanceId))
-        const total = typeof data.page?.total === 'number' ? data.page!.total : collected.length
-        // Terminate on a short/empty page (never rely on `total` alone — it can move under
-        // concurrent creates) OR once we've collected at least as many rows as the server
-        // reported at fetch time.
-        if (rawComments.length < APPROVAL_COMMENT_LIST_PAGE_SIZE || collected.length >= total) break
-        offset += APPROVAL_COMMENT_LIST_PAGE_SIZE
-        if (page === APPROVAL_COMMENT_LIST_MAX_PAGES - 1) truncated.value = true
+        const raw = Array.isArray(data.comments) ? (data.comments as RawApprovalCommentView[]) : []
+        const total = typeof data.page?.total === 'number' ? data.page!.total : raw.length
+        return { raw, total }
       }
+
+      // Discovery page — also reused directly as the first page of the "everything fits" path,
+      // so the common (untruncated) case never pays for a wasted request.
+      const first = await fetchPage(0)
+      const collected: MultitableComment[] = []
+      let offset: number
+
+      if (first.total <= capacity) {
+        for (const raw of first.raw) collected.push(toMultitableComment(raw, instanceId))
+        offset = APPROVAL_COMMENT_LIST_PAGE_SIZE
+        let pagesFetched = 1
+        // Terminate on a short/empty page (never rely on `total` alone — it can move under
+        // concurrent creates) OR once the max-pages budget for THIS branch is spent.
+        while (first.raw.length === APPROVAL_COMMENT_LIST_PAGE_SIZE && pagesFetched < APPROVAL_COMMENT_LIST_MAX_PAGES) {
+          const { raw } = await fetchPage(offset)
+          for (const r of raw) collected.push(toMultitableComment(r, instanceId))
+          pagesFetched += 1
+          if (raw.length < APPROVAL_COMMENT_LIST_PAGE_SIZE) break
+          offset += APPROVAL_COMMENT_LIST_PAGE_SIZE
+        }
+      } else {
+        // More comments exist than this client will ever hold — keep the NEWEST `capacity` of
+        // them (see header note / gate P2-1), discarding the discovery page's (oldest) rows.
+        truncated.value = true
+        offset = Math.max(0, first.total - capacity)
+        for (let page = 0; page < APPROVAL_COMMENT_LIST_MAX_PAGES; page += 1) {
+          const { raw } = await fetchPage(offset)
+          for (const r of raw) collected.push(toMultitableComment(r, instanceId))
+          if (raw.length < APPROVAL_COMMENT_LIST_PAGE_SIZE) break
+          offset += APPROVAL_COMMENT_LIST_PAGE_SIZE
+        }
+      }
+
       // S2 is oldest-first; the shared composable unshifts new comments onto the front — reverse
       // here so the hydrated list and post-create local state agree (see header note).
       collected.reverse()

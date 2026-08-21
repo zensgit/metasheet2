@@ -482,11 +482,24 @@
              three-item child of a 2-column `grid-auto-flow: row` (sparse, non-dense) grid placed
              BETWEEN them would instead push the timeline into the form's own column on a second
              row, since a later full-span item cannot backfill an earlier skipped cell under
-             sparse packing. -->
+             sparse packing.
+
+             `:key="route.params.id"` (gate finding P2-2, 2026-08-22): a 下一条 / deep-link
+             navigation changes `route.params.id` in place without unmounting this element. Without
+             the key, the SAME `ApprovalCommentsPanel` instance survived that navigation and its
+             `watch(() => props.instanceId, activate)` re-activated in place; if the OLD instance's
+             in-flight `listComments`/mention-candidates fetch settled AFTER the new instance's,
+             the stale response overwrote the composable's `comments.value` with the WRONG
+             instance's data (constructed race, confirmed: DOM showed instance A's comments while
+             `route.params.id` was already B). Keying on the route param forces a full
+             unmount+remount on every instance change, so a slower, now-orphaned fetch resolves
+             into a composable/`comments` ref nothing renders — the race is structurally
+             unreachable rather than patched with a generation counter. -->
         <div v-if="!isMobileLayout" ref="commentsSectionRef" class="approval-detail__comments" data-testid="approval-detail-comments-section">
           <h2>全文评论</h2>
           <ApprovalCommentsPanel
             v-if="commentsActivated"
+            :key="(route.params.id as string)"
             :instance-id="(route.params.id as string)"
             :current-user-id="currentUserId"
           />

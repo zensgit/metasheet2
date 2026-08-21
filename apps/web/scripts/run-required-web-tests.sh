@@ -349,15 +349,23 @@
 # existing token in this file and attendance-web-guard.yml for substring collision in either
 # direction — none found.
 # S3b (2026-08-22, approval comments tab): `approval-comments-client` (tests/approval-comments-
-# client.spec.ts, 17 tests — the CommentsApiClient adapter mapping S2's /api/approvals/:id/
+# client.spec.ts, 19 tests — the CommentsApiClient adapter mapping S2's /api/approvals/:id/
 # comments* onto the shared kit's interface, incl. pagination/truncation/ordering and the three
 # unsupported-capability throws) and `approval-comments-panel` (tests/approval-comments-panel.
-# spec.ts, 9 tests — the mounted 全文评论 tab wrapper: reactions/resolve absence, tombstone
+# spec.ts, 12 tests — the mounted 全文评论 tab wrapper: reactions/resolve absence, tombstone
 # rendering, one-level threading, the member-display-identity guard, mention-candidate fetch,
 # delete re-hydration). Both bare basename tokens; each verified to match exactly one file
 # (`npx vitest run approval-comments-client --reporter=verbose` → "Test Files 1 passed", same for
 # approval-comments-panel) and checked for collision against the full token list in this script
 # and both approval-web-guard.yml / multitable-web-guard.yml.
+# Fix round (gate P2-1/P2-2/P3-1/P3-2/NIT-1/NIT-2/NIT-3, 2026-08-22): client's 17 became 19 (one
+# test pinning the truncation-direction fix P2-1, one a page-size-coupling drift guard NIT-1);
+# panel's 10 (the comment here originally said 9 — that was wrong, NIT-3) became 12 (one
+# mechanism-documentation test for P2-2, one for the previously-untested truncation notice).
+# `approval-detail-record-table.spec.ts` (already wired, unaffected by this comment) also gained 1
+# test — the REAL P2-2 regression guard, mounting ApprovalDetailView.vue itself and reddening if
+# its `:key="route.params.id"` is removed. File-level token wiring (this script + approval-web-
+# guard.yml) is unchanged — no new spec files.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).

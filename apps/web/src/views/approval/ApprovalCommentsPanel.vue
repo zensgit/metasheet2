@@ -120,21 +120,57 @@ watch(
   { immediate: true },
 )
 
-/** Resolved name, or a values-free `成员 N` ordinal (N = first-seen order among THIS list's
- *  distinct authors) — NEVER the raw id. Mirrors ApprovalDetailView.vue's `reducibleAssignees`
- *  ordinal convention (same repo-shipped spelling, `成员 ${ordinal}`). */
-const authorDisplayName = computed<Record<string, string>>(() => {
+/**
+ * Resolved name, or a values-free `成员 N` ordinal — NEVER the raw id. `N` is drawn from ONE
+ * counter shared with `mentionSuggestionsForPanel`'s candidate half below (gate finding P3-1,
+ * 2026-08-22): the two used to number independently — this map's `ordinal` counting only among
+ * its own distinct authors starting at 1, the candidate loop counting its own raw array index
+ * starting at 1 — so an unresolved author and an unrelated blank-named candidate could BOTH
+ * render as `成员 1` in the same @mention dropdown (two different people, one label), and the
+ * candidate side additionally skipped numbers whenever an earlier candidate was already `seen`.
+ * `memberIdentity` below is the single source of both this map and the suggestions list, with ONE
+ * counter incremented once per distinct entry — author or candidate, resolved/named or not — in
+ * the fixed order "authors, then candidates", so numbers are unique and gapless across the WHOLE
+ * dropdown. Incrementing per-ENTRY rather than only when a fallback fires preserves this map's
+ * original semantics for the thread list ("N = first-seen order among THIS list's distinct
+ * authors", unaffected by how many of them happen to be resolved) — only the candidate half's
+ * numbering changed, to continue that same counter instead of restarting it. Mirrors
+ * ApprovalDetailView.vue's `reducibleAssignees` ordinal convention (same repo-shipped spelling,
+ * `成员 ${ordinal}`).
+ */
+const memberIdentity = computed<{
+  authorNames: Record<string, string>
+  suggestions: MetaCommentMentionSuggestion[]
+}>(() => {
   const seen = new Set<string>()
-  const out: Record<string, string> = {}
+  const authorNames: Record<string, string> = {}
+  const suggestions: MetaCommentMentionSuggestion[] = []
   let ordinal = 0
+
   for (const c of comments.comments.value) {
     if (!c.authorId || seen.has(c.authorId)) continue
     seen.add(c.authorId)
     ordinal += 1
-    out[c.authorId] = getResolvedUserName(c.authorId) || `成员 ${ordinal}`
+    const label = getResolvedUserName(c.authorId) || `成员 ${ordinal}`
+    authorNames[c.authorId] = label
+    suggestions.push({ id: c.authorId, label, subtitle: undefined })
   }
-  return out
+
+  for (const candidate of mentionCandidates.value) {
+    if (!candidate.id || seen.has(candidate.id)) continue
+    seen.add(candidate.id)
+    ordinal += 1
+    const label = candidate.name.trim() || `成员 ${ordinal}`
+    // The subtitle IS a real S2 field when present (`ApprovalMentionCandidate.email`), not a
+    // raw-id fallback — see P3-2 / the census triage row for this file, which now describes this
+    // branch accurately instead of claiming `subtitle: undefined` for both halves.
+    suggestions.push({ id: candidate.id, label, subtitle: candidate.email || undefined })
+  }
+
+  return { authorNames, suggestions }
 })
+
+const authorDisplayName = computed<Record<string, string>>(() => memberIdentity.value.authorNames)
 
 const commentsForPanel = computed(() => comments.comments.value.map((c) => ({
   ...c,
@@ -164,26 +200,12 @@ const commentsForPanel = computed(() => comments.comments.value.map((c) => ({
  * dedupes by id keeping the FIRST occurrence — but this file no longer depends on that ordering
  * for correctness, since `defaultMentionSuggestions`'s OWN candidate-derived half is now fed
  * nothing (empty `mentionCandidates` prop) and its author-derived half, while still computed
- * internally by the kit, is entirely SUPERSEDED by our id-identical, subtitle:undefined entries
- * below before it ever reaches the dropdown.
+ * internally by the kit, is entirely SUPERSEDED by our id-identical entries below before it ever
+ * reaches the dropdown. (Update, gate finding P3-1: those entries are built by the shared
+ * `memberIdentity` computed above, not independently here, so the author half and the candidate
+ * half draw ordinals from one counter — see that computed's own doc.)
  */
-const mentionSuggestionsForPanel = computed<MetaCommentMentionSuggestion[]>(() => {
-  const seen = new Set<string>()
-  const out: MetaCommentMentionSuggestion[] = []
-  for (const c of comments.comments.value) {
-    if (!c.authorId || seen.has(c.authorId)) continue
-    seen.add(c.authorId)
-    out.push({ id: c.authorId, label: authorDisplayName.value[c.authorId] || c.authorId, subtitle: undefined })
-  }
-  mentionCandidates.value.forEach((candidate, index) => {
-    if (!candidate.id || seen.has(candidate.id)) return
-    seen.add(candidate.id)
-    // Same values-free-ordinal discipline as authorDisplayName above — never the raw id.
-    const label = candidate.name.trim() || `成员 ${index + 1}`
-    out.push({ id: candidate.id, label, subtitle: candidate.email || undefined })
-  })
-  return out
-})
+const mentionSuggestionsForPanel = computed<MetaCommentMentionSuggestion[]>(() => memberIdentity.value.suggestions)
 
 // -----------------------------------------------------------------------------------------------
 // mention token extraction for edit prefill (draft already carries `@[Label](id)` tokens

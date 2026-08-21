@@ -134,10 +134,49 @@ describe('createApprovalCommentsClient — listComments', () => {
     expect(comments).toHaveLength(0)
   })
 
-  it('caps at 10 pages (2000 comments) and sets `truncated` — reset to false at the start of the NEXT call', async () => {
-    const fullPage = () => Array.from({ length: 200 }, (_, i) => commentView({ id: `acmt_${Math.random()}_${i}` }))
+  it('when truncation is unavoidable, keeps the NEWEST 2000 (not the oldest) and sets `truncated` — reset to false at the start of the NEXT call (gate P2-1)', async () => {
+    // Server total 2200, ASC order id_0 (oldest) .. id_2199 (newest). Capacity is 2000, so the
+    // correct tail window is id_200..id_2199 — id_0..id_199 (the oldest 200) must be dropped, not
+    // the newest 200, because that is what the wrapper's "仅显示最近的评论" notice promises.
+    const total = 2200
+    const pageAt = (offset: number) =>
+      Array.from({ length: 200 }, (_, i) => commentView({ id: `id_${offset + i}`, createdAt: `2026-08-22T00:00:${String(offset + i).padStart(4, '0').slice(-2)}.000Z` }))
+
+    // Discovery page (offset=0) — its rows are discarded once `total` proves truncation is
+    // required; only `page.total` is consulted.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: pageAt(0), page: { total, limit: 200, offset: 0 } } }))
+    // Tail pages: offset = total - capacity = 200, stepping by 200 up to 2000 (10 pages -> 2000 rows).
+    for (let o = 200; o < 2200; o += 200) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: pageAt(o), page: { total, limit: 200, offset: o } } }))
+    }
+    const client = createApprovalCommentsClient(() => 'apv_1')
+
+    const { comments } = await client.listComments({ containerId: 'apv_1', targetId: 'apv_1' })
+
+    // 1 discovery request + 10 tail-window requests.
+    expect(apiFetchMock).toHaveBeenCalledTimes(11)
+    expect(comments).toHaveLength(2000)
+    expect(client.truncated.value).toBe(true)
+    const ids = comments.map((c) => c.id)
+    // Newest-first after the reverse: id_2199 leads, id_200 trails.
+    expect(ids[0]).toBe('id_2199')
+    expect(ids[ids.length - 1]).toBe('id_200')
+    // The oldest 200 (id_0..id_199) were dropped, not the newest.
+    expect(ids).not.toContain('id_0')
+    expect(ids).not.toContain('id_199')
+    expect(ids).toContain('id_200')
+    expect(ids).toContain('id_2199')
+
+    // A later short/empty load must not carry the stale truncation flag forward.
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: [], page: { total: 0, limit: 200, offset: 0 } } }))
+    await client.listComments({ containerId: 'apv_1', targetId: 'apv_1' })
+    expect(client.truncated.value).toBe(false)
+  })
+
+  it('does not truncate when total fits exactly at capacity (2000) — no wasted discovery-only request', async () => {
+    const fullPage = (offset: number) => Array.from({ length: 200 }, (_, i) => commentView({ id: `acmt_${offset + i}` }))
     for (let p = 0; p < 10; p += 1) {
-      apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: fullPage(), page: { total: 100000, limit: 200, offset: p * 200 } } }))
+      apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: fullPage(p * 200), page: { total: 2000, limit: 200, offset: p * 200 } } }))
     }
     const client = createApprovalCommentsClient(() => 'apv_1')
 
@@ -145,11 +184,6 @@ describe('createApprovalCommentsClient — listComments', () => {
 
     expect(apiFetchMock).toHaveBeenCalledTimes(10)
     expect(comments).toHaveLength(2000)
-    expect(client.truncated.value).toBe(true)
-
-    // A later short/empty load must not carry the stale truncation flag forward.
-    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, data: { comments: [], page: { total: 0, limit: 200, offset: 0 } } }))
-    await client.listComments({ containerId: 'apv_1', targetId: 'apv_1' })
     expect(client.truncated.value).toBe(false)
   })
 
@@ -262,5 +296,43 @@ describe('fetchApprovalCommentMentionCandidates', () => {
     const result = await fetchApprovalCommentMentionCandidates('apv_1')
 
     expect(result).toEqual([{ id: 'user_3', name: 'Carol', email: '' }])
+  })
+})
+
+describe('server/client page-size coupling (gate NIT-1)', () => {
+  // `APPROVAL_COMMENT_LIST_PAGE_SIZE` (this file, private) must not exceed the server's own
+  // `MAX_APPROVAL_COMMENT_PAGE_SIZE` (routes/approval-comments.ts). If the server cap ever drops
+  // below what this client requests, `clampLimit` silently serves a SHORTER page than asked for —
+  // this client's short-page break fires on page 1 (never consulting `page.total`), silently
+  // dropping the tail with NO truncation notice (measured in the gate report: 400 of 500 comments
+  // lost, `truncated` stayed `false`). This is a mechanical text-scan drift guard, not a runtime
+  // import (the constant is not exported, and a cross-package runtime import from `apps/web`'s
+  // vitest environment into `packages/core-backend` is not how this repo wires such couplings) —
+  // it fails loudly the moment either literal changes without the other, which is the actual
+  // failure mode this NIT describes.
+  //
+  // KNOWN LIMITATION (checked, not assumed): `.github/workflows/approval-web-guard.yml`'s `paths:`
+  // blocks list only `apps/web/**` files — `packages/core-backend/**` is NOT among them (verified
+  // by grep against this repo's current workflow, 2026-08-22). A backend-only PR that lowers
+  // `MAX_APPROVAL_COMMENT_PAGE_SIZE` therefore never triggers THIS guard at all — it is
+  // green-by-not-running for that specific change shape, not green-by-passing. Closing that
+  // requires either a backend-side assertion (this file has no standing to add one) or adding
+  // `packages/core-backend/**` to the FE guard's paths (its own blast radius — every backend PR
+  // would start running the full FE test battery — and is an owner-scope tradeoff, not decided
+  // here). This test DOES catch the drift on any PR that touches BOTH files, or any FE-side PR
+  // (since `approval-comments-client.spec.ts` is itself in the guard's own path list).
+  it('the client page size does not exceed the server MAX_APPROVAL_COMMENT_PAGE_SIZE', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const routeSrc = readFileSync(
+      join(__dirname, '../../../packages/core-backend/src/routes/approval-comments.ts'),
+      'utf8',
+    )
+    const match = routeSrc.match(/MAX_APPROVAL_COMMENT_PAGE_SIZE\s*=\s*(\d+)/)
+    expect(match, 'MAX_APPROVAL_COMMENT_PAGE_SIZE not found in approval-comments.ts — update this guard\'s regex if the constant was renamed').toBeTruthy()
+    const serverMax = Number(match![1])
+    // Kept as a literal (not an import) — see this describe block's own note.
+    const CLIENT_PAGE_SIZE = 200
+    expect(CLIENT_PAGE_SIZE).toBeLessThanOrEqual(serverMax)
   })
 })
