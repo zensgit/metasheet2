@@ -1,10 +1,41 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import { load as loadYaml } from 'js-yaml'
 import { describe, expect, it } from 'vitest'
 
 const workflowPath = resolve(process.cwd(), '../../.github/workflows/attendance-web-guard.yml')
 const workflow = readFileSync(workflowPath, 'utf8')
+
+const TARGETED_STEP_NAME = 'Run attendance web guard specs (targeted)'
+
+/**
+ * The `run:` command of the targeted step, obtained by PARSING the workflow rather than slicing it.
+ *
+ * History (GATE-5086): a text-based version of this check was defeated at three successive levels —
+ * whole-file `toContain` (the token also appears in the workflow's own prose comment), then the
+ * step block (a `#` comment inside the step satisfied it), then the step block with `#` stripped
+ * (trailing YAML after the last step landed in the unbounded slice). Narrowing a fourth time would
+ * invite a fifth. The parser already knows where a scalar ends and what a comment is, so ask it:
+ * `run` is exactly the text the runner executes, with no comments and no neighbouring YAML.
+ */
+function targetedRunCommand(source: string): string {
+  const doc = loadYaml(source) as {
+    jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>
+  }
+  const steps = Object.values(doc?.jobs ?? {}).flatMap((job) => job?.steps ?? [])
+  const matches = steps.filter((step) => step?.name === TARGETED_STEP_NAME)
+  if (matches.length !== 1) {
+    throw new Error(
+      `expected exactly one "${TARGETED_STEP_NAME}" step, found ${matches.length}`,
+    )
+  }
+  const run = matches[0]?.run
+  if (typeof run !== 'string' || run.trim().length === 0) {
+    throw new Error(`"${TARGETED_STEP_NAME}" step has no run command`)
+  }
+  return run
+}
 
 describe('attendance web guard workflow contract', () => {
   it('creates one stable check for every pull request', () => {
@@ -59,22 +90,7 @@ describe('attendance web guard workflow contract', () => {
   // boundary so it cannot match as a substring of a different token in either direction.
   it('keeps the fix 1/fix 2 navigability-audit specs in the classifier and targeted run list', () => {
     expect(workflow.match(/apps\/web\/src\/stores\/featureFlags\.ts/g)).toHaveLength(2)
-    const stepStart = workflow.indexOf('      - name: Run attendance web guard specs (targeted)')
-    const nextStepStart = workflow.indexOf('\n      - name:', stepStart + 1)
-    const targetedStep = workflow.slice(stepStart, nextStepStart === -1 ? undefined : nextStepStart)
-    expect(stepStart).toBeGreaterThan(-1)
-    // GATE-5086 round-2 P3-R1: scoping to the STEP is still not enough — a YAML comment placed
-    // INSIDE this same step satisfies a step-wide match (mutation MR6b: drop the token from the
-    // `run:` command AND add `# <token> runs in the required web-tests lane instead` inside the
-    // step → the step-scoped check stayed GREEN). Narrow once more to the `run:` scalar and strip
-    // comments from it, so only text vitest actually receives can satisfy the assertion.
-    const runStart = targetedStep.indexOf('\n        run: ')
-    expect(runStart).toBeGreaterThan(-1)
-    const targetedRun = targetedStep
-      .slice(runStart)
-      .split('\n')
-      .map((line) => line.replace(/#.*$/, ''))
-      .join('\n')
+    const targetedRun = targetedRunCommand(workflow)
     for (const spec of [
       'attendanceCapabilityUnavailable',
       'attendanceRequestReviewEntitlement',
