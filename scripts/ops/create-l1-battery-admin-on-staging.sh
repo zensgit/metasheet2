@@ -15,8 +15,34 @@
 # for an ad-hoc scratchpad helper that reproduced two owner-CONFIRMED defects.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS SCRIPT EXISTS — the two defects it fixes (owner review, 2026-08-21)
+# WHY THIS SCRIPT EXISTS — the defects it fixes (owner reviews, 2026-08-21)
 # ---------------------------------------------------------------------------
+#
+# P1-ESC — PRIVILEGE ESCALATION via PROMOTE-BEFORE-LOGIN (owner review 4).
+#   The predecessor ordered the steps: register (accept 409 ALREADY_EXISTS as OK)
+#   → RBAC promotion → login-verify. Because the promotion ran BEFORE the password
+#   was ever verified, an attacker who PRE-REGISTERED l1-battery-admin@example.com
+#   with THEIR OWN password was handed admin: register returned 409, the script
+#   promoted the pre-empted account, and only THEN did login fail (401) and the
+#   script exit 1 — but `UPDATE users SET role='admin'` and the user_roles admin
+#   membership were ALREADY COMMITTED. Reproduced on real Postgres:
+#       register: 409 ALREADY_EXISTS / promotion asserted OK / login: 401 FAILED
+#       script_rc=1 / db_state = attacker-user | role=admin | memberships=1
+#   A failed script still left the attacker a durable RBAC admin.
+#
+#   FIX — verify the identity BEFORE granting it: LOGIN-FIRST, promote by id.
+#   The order is now register → LOGIN → promote:
+#     1. Register is a mere precondition (409 already-exists is fine ONLY as a
+#        precondition — it NEVER triggers a grant; it proves nothing about whose
+#        password controls the account).
+#     2. LOGIN with the INTENDED password. It must return success:true; we capture
+#        the SERVER-AUTHORITATIVE data.user.id. If login fails (wrong password ⇒
+#        the email is pre-empted by someone whose password we do not control, or
+#        our own register failed) the script ABORTS non-zero with ZERO database
+#        writes — it never reaches the promotion.
+#     3. Promote BY that verified data.user.id (not by an email lookup), in the one
+#        atomic transaction below. The net invariant: NO code path grants admin to
+#        an account we did not just authenticate.
 #
 # P1 — CREDENTIAL LEAK INTO THE CONTAINER (and stranded host secret).
 #   The old helper did:
@@ -210,9 +236,28 @@ process.stdin.on("end", () => {
             (created ? " CREATED" : dup ? " ALREADY_EXISTS(idempotent)" : " FAILED"));
           process.exit(ok ? 0 : 1);
         } else {
-          const ok = r.statusCode >= 200 && r.statusCode < 300 && /"success"\s*:\s*true/.test(d);
-          console.log("login verify: status=" + r.statusCode + (ok ? " OK" : " FAILED"));
-          process.exit(ok ? 0 : 1);
+          // Login-FIRST identity verification. We must (a) authenticate with the
+          // INTENDED password and (b) capture the server-authoritative user id so
+          // the promotion can target EXACTLY the account we just proved we control.
+          // A 409 on register does NOT prove control — the email may be pre-empted
+          // by an attacker whose password we do not have. Only a success:true login
+          // does. Diagnostics go to STDERR; the ONLY thing written to STDOUT is the
+          // verified id (USERID=<id>), so the caller can capture it cleanly.
+          let parsed = null;
+          try { parsed = JSON.parse(d); } catch (e) { parsed = null; }
+          const authed = r.statusCode >= 200 && r.statusCode < 300 && parsed && parsed.success === true;
+          if (!authed) {
+            console.error("login verify: status=" + r.statusCode + " FAILED — the intended password does not authenticate this email; refusing to promote");
+            process.exit(1);
+          }
+          const uid = parsed.data && parsed.data.user ? parsed.data.user.id : undefined;
+          if (!uid || typeof uid !== "string") {
+            console.error("login verify: status=" + r.statusCode + " OK but server returned no data.user.id — refusing to promote");
+            process.exit(1);
+          }
+          console.error("login verify: status=" + r.statusCode + " OK (server user id captured)");
+          process.stdout.write("USERID=" + uid + "\n");
+          process.exit(0);
         }
       });
     }
@@ -225,18 +270,53 @@ NODEJS
 )"
 
 # ---- 1) register (idempotent), password on STDIN --------------------------
+# Register is ONLY a precondition: a 2xx means we created the account, a 409
+# ALREADY_EXISTS means the email is already taken — by us on a prior run, OR by
+# someone else. Register alone therefore proves NOTHING about whose password
+# controls the account, so it MUST NOT gate the promotion. Identity is verified
+# by the login step below, never here.
 echo "[create-l1-admin] step 1/3: register via /api/auth/register (stdin credential)"
 if ! printf '%s' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" register "$EMAIL"; then
   echo "ERROR: register step failed — see status above" >&2
   exit 1
 fi
 
-# ---- 2) atomic, asserted, idempotent promotion ----------------------------
-# Single transaction (psql -1) with ON_ERROR_STOP; email arrives as the NON-secret
-# psql variable :'em' (safely quoted by psql). The quoted heredoc (<<'SQL') keeps
-# the `$$` DO-block delimiters and `:'em'` literal for psql — the shell must not
-# touch them. The closing assertion rolls the whole thing back on any shortfall.
-echo "[create-l1-admin] step 2/3: atomic RBAC promotion (single transaction, asserted)"
+# ---- 2) login FIRST — verify the identity BEFORE granting it --------------
+# P1 (owner review 2026-08-21): the promotion MUST run only AFTER we have proven,
+# with the INTENDED password, that we control this account. If we promoted on the
+# strength of register's 409 (as the predecessor did), an attacker who PRE-EMPTED
+# the email with THEIR OWN password would be granted admin, and only THEN would
+# login fail — the admin grant already committed (reproduced on real Postgres:
+# attacker row left role='admin' with a user_roles admin membership despite the
+# script exiting non-zero). So we log in HERE, capture the SERVER-AUTHORITATIVE
+# data.user.id, and in step 3 promote ONLY that verified id. A login failure
+# (wrong password ⇒ the email is controlled by someone else, or our own register
+# failed) ABORTS with ZERO database writes — we NEVER promote an account whose
+# password we do not control. `if ! LOGIN_OUT="$(...pipeline...)"` propagates the
+# pipeline's non-zero status under `set -o pipefail`, so a 401 aborts before any psql.
+echo "[create-l1-admin] step 2/3: login-first identity verification via /api/auth/login (stdin credential)"
+if ! LOGIN_OUT="$(printf '%s' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL")"; then
+  echo "ERROR: login verification failed — the intended password does not authenticate '${EMAIL}'; refusing to promote (ZERO database writes)" >&2
+  exit 1
+fi
+# Extract the server-verified user id (the ONLY thing the login step writes to
+# stdout). Empty ⇒ login "succeeded" without an id we can key the grant on ⇒ abort.
+USER_ID="$(printf '%s\n' "$LOGIN_OUT" | sed -n 's/^USERID=//p' | head -n1)"
+if [[ -z "$USER_ID" ]]; then
+  echo "ERROR: login verification returned no server user id — refusing to promote (ZERO database writes)" >&2
+  exit 1
+fi
+
+# ---- 3) atomic, asserted, idempotent promotion BY VERIFIED ID -------------
+# Single transaction (psql -1) with ON_ERROR_STOP. The grant is keyed on the
+# server-verified :'uid' captured above — NOT an email lookup — so we can only ever
+# promote the exact account whose password we just authenticated. The NON-secret
+# email :'em' is still passed so the assertion can additionally confirm the
+# verified id belongs to the intended email (catches a login returning another
+# account's id). The quoted heredoc (<<'SQL') keeps the `$$` DO-block delimiters
+# and `:'uid'`/`:'em'` literal for psql. The closing assertion rolls the whole
+# thing back on any shortfall.
+echo "[create-l1-admin] step 3/3: atomic RBAC promotion by verified id (single transaction, asserted)"
 PGU="$(docker exec "$PGC" printenv POSTGRES_USER 2>/dev/null || true)"
 if [[ -z "$PGU" ]]; then
   echo "ERROR: could not resolve POSTGRES_USER from container '$PGC'" >&2
@@ -247,30 +327,33 @@ if [[ -z "$PGD" ]]; then
   echo "ERROR: could not resolve POSTGRES_DB from container '$PGC'" >&2
   exit 1
 fi
-if ! docker exec -i "$PGC" psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v em="$EMAIL" <<'SQL'
-UPDATE users SET role = 'admin' WHERE email = :'em';
+if ! docker exec -i "$PGC" psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v uid="$USER_ID" -v em="$EMAIL" <<'SQL'
+UPDATE users SET role = 'admin' WHERE id = :'uid';
 INSERT INTO roles (id, name) VALUES ('admin', 'admin') ON CONFLICT (id) DO NOTHING;
 INSERT INTO user_roles (user_id, role_id)
-  SELECT u.id, 'admin' FROM users u WHERE u.email = :'em'
+  SELECT u.id, 'admin' FROM users u WHERE u.id = :'uid'
   ON CONFLICT (user_id, role_id) DO NOTHING;
--- Stash the (non-secret) email in a transaction-local GUC so the assertion block
--- can read it without psql variable interpolation inside the dollar-quoted body.
+-- Stash the (non-secret) verified id + email in transaction-local GUCs so the
+-- assertion block can read them without psql variable interpolation inside the
+-- dollar-quoted body.
+SELECT set_config('l1battery.uid', :'uid', true);
 SELECT set_config('l1battery.email', :'em', true);
 DO $$
 DECLARE
   u_count int;
   m_count int;
+  e_count int;
+  uid text := current_setting('l1battery.uid', true);
   em text := current_setting('l1battery.email', true);
 BEGIN
-  SELECT count(*) INTO u_count FROM users WHERE email = em;
-  SELECT count(*) INTO m_count
-    FROM user_roles ur JOIN users u ON u.id = ur.user_id
-    WHERE u.email = em AND ur.role_id = 'admin';
-  IF u_count <> 1 OR m_count <> 1 THEN
-    RAISE EXCEPTION 'promotion assertion failed: users=% admin_memberships=% (expected exactly 1 and 1) for email %',
-      u_count, m_count, em;
+  SELECT count(*) INTO u_count FROM users WHERE id = uid;
+  SELECT count(*) INTO m_count FROM user_roles WHERE user_id = uid AND role_id = 'admin';
+  SELECT count(*) INTO e_count FROM users WHERE id = uid AND email = em;
+  IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN
+    RAISE EXCEPTION 'promotion assertion failed: users=% admin_memberships=% email_match=% (expected 1/1/1) for id %',
+      u_count, m_count, e_count, uid;
   END IF;
-  RAISE NOTICE 'promotion asserted OK: users=% admin_memberships=% for email %', u_count, m_count, em;
+  RAISE NOTICE 'promotion asserted OK: users=% admin_memberships=% for id % (email %)', u_count, m_count, uid, em;
 END $$;
 SQL
 then
@@ -278,11 +361,4 @@ then
   exit 1
 fi
 
-# ---- 3) login verification (must be success:true), password on STDIN ------
-echo "[create-l1-admin] step 3/3: verify via /api/auth/login (stdin credential)"
-if ! printf '%s' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL"; then
-  echo "ERROR: login verification failed — the account is not usable with this password" >&2
-  exit 1
-fi
-
-echo "[create-l1-admin] DONE — ${EMAIL} exists, is an RBAC admin, and logs in. Host password file scrubbed on exit."
+echo "[create-l1-admin] DONE — ${EMAIL} exists (server-verified id ${USER_ID}), authenticated with the intended password, and is an RBAC admin. Host password file scrubbed on exit."

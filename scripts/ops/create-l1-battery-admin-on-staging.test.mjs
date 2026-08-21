@@ -45,6 +45,9 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const scriptPath = join(__dirname, 'create-l1-battery-admin-on-staging.sh')
 const scriptText = readFileSync(scriptPath, 'utf8')
+// This harness's own path — the P3 readiness gate is a property of THIS file, so a
+// couple of gates read it back to prove the target-db-query readiness contract.
+const selfPath = fileURLToPath(import.meta.url)
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -152,25 +155,78 @@ function trapScrubsHostSecret(text) {
 // semicolon), which is why the explicit-tx arm requires `BEGIN;` with a
 // semicolon. Comments are stripped first so the header's prose mention of
 // `psql -1` / BEGIN cannot keep this green after the `-1` is mutated away.
+// The promotion psql is located by its unique `-v uid=` marker (the verified-id
+// grant) — NOT any psql — so schema/seed psql calls or a future added psql can
+// never shift what these gates read.
 function promotionIsSingleTransaction(execText) {
-  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v em=/.test(l))
+  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v uid=/.test(l))
   const hasPsql1 = Boolean(psqlLine && /(?:^|\s)-1(?:\s|$)/.test(psqlLine))
   const hasExplicitTx = /\bBEGIN\s*;/.test(execText) && /\bCOMMIT\s*;/.test(execText)
   return hasPsql1 || hasExplicitTx
 }
 function promotionHasErrorStop(execText) {
-  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v em=/.test(l))
+  const psqlLine = execText.split('\n').find((l) => /\bpsql\b/.test(l) && /-v uid=/.test(l))
   return Boolean(psqlLine && /ON_ERROR_STOP=1/.test(psqlLine))
 }
 function promotionAssertsExactlyOne(execText) {
   const raises = /RAISE EXCEPTION 'promotion assertion failed/.test(execText)
-  const guardsCounts = /IF u_count <> 1 OR m_count <> 1 THEN/.test(execText)
-  const countsUsersByEmail = /SELECT count\(\*\) INTO u_count FROM users WHERE email = em/.test(execText)
+  const guardsCounts = /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN/.test(execText)
+  // The grant is keyed on the server-verified id, so the assertion counts BY id.
+  const countsUsersById = /SELECT count\(\*\) INTO u_count FROM users WHERE id = uid/.test(execText)
   // the membership count must be the EXACT RBAC read path: user_roles.role_id='admin'
-  const countsAdminMembership = /FROM user_roles ur JOIN users u ON u\.id = ur\.user_id\s*\n\s*WHERE u\.email = em AND ur\.role_id = 'admin'/.test(
+  const countsAdminMembership = /SELECT count\(\*\) INTO m_count FROM user_roles WHERE user_id = uid AND role_id = 'admin'/.test(
     execText,
   )
-  return raises && guardsCounts && countsUsersByEmail && countsAdminMembership
+  // and the verified id must belong to the INTENDED email (catches a login that
+  // returned some OTHER account's id).
+  const countsEmailMatch = /SELECT count\(\*\) INTO e_count FROM users WHERE id = uid AND email = em/.test(execText)
+  return raises && guardsCounts && countsUsersById && countsAdminMembership && countsEmailMatch
+}
+
+// ---- P1 (privilege escalation): login-FIRST + promote-by-verified-id -------
+// The promotion must run only AFTER a successful login, and must be keyed on the
+// id that login returned — not an email lookup. This is a DATA-FLOW invariant, so
+// two independent predicates enforce it: (a) the login step textually precedes the
+// promotion psql, and (b) the promotion's -v uid= value is the variable populated
+// from the login capture, guarded by a non-empty check before the psql runs.
+function loginBeforePromotion(execText) {
+  const lines = execText.split('\n')
+  const loginIdx = lines.findIndex((l) => /docker exec -i "\$BACKEND" node -e "\$NODE_PROG" login "\$EMAIL"/.test(l))
+  const promoteIdx = lines.findIndex((l) => /\bpsql\b/.test(l) && /-v uid=/.test(l))
+  return loginIdx >= 0 && promoteIdx >= 0 && loginIdx < promoteIdx
+}
+function promotesByVerifiedLoginId(execText) {
+  const lines = execText.split('\n')
+  // (1) the login invocation is CAPTURED into LOGIN_OUT (not run bare / for effect)
+  const capturesLogin =
+    /LOGIN_OUT="\$\(printf '%s' "\$PW_B64" \| docker exec -i "\$BACKEND" node -e "\$NODE_PROG" login "\$EMAIL"\)"/.test(execText)
+  // (2) USER_ID is derived from THAT captured login output (the USERID= line)
+  const derivesUserId = /USER_ID="\$\(printf[^\n]*"\$LOGIN_OUT"[^\n]*USERID=/.test(execText)
+  // (3) the promotion is keyed on that captured id (both the psql -v and the SQL)
+  const psqlUidIdx = lines.findIndex((l) => /\bpsql\b/.test(l) && /-v uid="\$USER_ID"/.test(l))
+  const promotesByUid = psqlUidIdx >= 0 && /UPDATE users SET role = 'admin' WHERE id = :'uid';/.test(execText)
+  // (4) a non-empty guard aborts if no id was captured — and it must run BEFORE the
+  // promotion, not merely exist. An index comparison closes the escape hatch of a
+  // guard relocated AFTER the psql (which would leave the grant ungated).
+  const guardIdx = lines.findIndex((l) => /if \[\[ -z "\$USER_ID" \]\]; then/.test(l))
+  const guardsEmptyBeforePromotion = guardIdx >= 0 && psqlUidIdx >= 0 && guardIdx < psqlUidIdx
+  return capturesLogin && derivesUserId && promotesByUid && guardsEmptyBeforePromotion
+}
+
+// ---- P3: this harness's own real-Docker readiness gate --------------------
+// The readiness helper (waitForTargetDbQueryable) must gate on a `SELECT 1` query
+// against the TARGET db, NOT on `pg_isready` (which returns success before the DB
+// is queryable → the golden flakes). Operates on passed-in text so the mutation
+// test can prove reverting to pg_isready reds this check.
+function readinessQueriesTargetDb(harnessText) {
+  // Anchor on the helper's DEFINITION signature (name + "(pg," — the comma marks the
+  // definition, not the zero-arg "(pg)" call site). The regex-literal form below uses
+  // an escaped paren, so it does NOT textually match itself; this comment deliberately
+  // avoids writing the bare signature so the census reads the real helper body, not this line.
+  const m = harnessText.match(/waitForTargetDbQueryable\(pg,[\s\S]*?\n}/)
+  if (!m) return false
+  const body = m[0]
+  return /'psql'/.test(body) && /'SELECT 1'/.test(body) && !/pg_isready/.test(body)
 }
 
 // ---- email normalized ONCE and used consistently everywhere ---------------
@@ -256,30 +312,67 @@ test('structural: promotion is ONE transaction (psql -1) with ON_ERROR_STOP and 
   assert.equal(
     promotionAssertsExactlyOne(executable),
     true,
-    'promotion must end asserting exactly one user + exactly one user_roles admin membership',
+    'promotion must end asserting exactly one user (by id) + exactly one user_roles admin membership + the id belongs to the intended email',
   )
-  // The promotion inserts are idempotent (safe re-run).
+  // The promotion inserts are idempotent (safe re-run) and keyed on the verified id.
   assert.match(executable, /INSERT INTO roles \(id, name\) VALUES \('admin', 'admin'\) ON CONFLICT \(id\) DO NOTHING;/)
-  assert.match(executable, /INSERT INTO user_roles[\s\S]*?ON CONFLICT \(user_id, role_id\) DO NOTHING;/)
+  assert.match(executable, /INSERT INTO user_roles[\s\S]*?SELECT u\.id, 'admin' FROM users u WHERE u\.id = :'uid'[\s\S]*?ON CONFLICT \(user_id, role_id\) DO NOTHING;/)
 })
 
 test('structural: the email is normalized (trim+lowercase) once and the SAME $EMAIL feeds register, promotion, and login', () => {
   assert.equal(emailNormalizedAndConsistent(scriptText), true)
 })
 
-test('structural: login verification hits the real endpoint and requires success:true', () => {
-  assert.match(scriptText, /docker exec -i "\$BACKEND" node -e "\$NODE_PROG" login "\$EMAIL"/)
-  assert.match(scriptText, /"\/api\/auth\/login"/)
-  assert.match(scriptText, /r\.statusCode >= 200 && r\.statusCode < 300 && \/"success"\\s\*:\\s\*true\/\.test\(d\)/)
+test('structural: P1 — login runs BEFORE promotion, and the promotion is keyed on the server-verified login id (data-flow, not just position)', () => {
+  assert.equal(loginBeforePromotion(executable), true, 'the login step must textually precede the promotion psql')
+  assert.equal(
+    promotesByVerifiedLoginId(executable),
+    true,
+    'the promotion must be keyed on $USER_ID captured from the login step, guarded by a non-empty check',
+  )
+  // Positive control on the ORDER criterion itself (attack your own criterion): a
+  // synthetic script whose login line sits AFTER the promotion psql MUST red.
+  const inverted = [
+    'docker exec -i "$PGC" psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v uid="$USER_ID" -v em="$EMAIL"',
+    'LOGIN_OUT="$(printf \'%s\' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL")"',
+  ].join('\n')
+  assert.equal(loginBeforePromotion(inverted), false, 'the order criterion must reject login-after-promotion')
 })
 
-test('structural: the header documents the stdin-only + trap + single-tx design and the P1 it fixes', () => {
+test('structural: login verification hits the real endpoint, requires success:true, and captures the server data.user.id', () => {
+  assert.match(scriptText, /docker exec -i "\$BACKEND" node -e "\$NODE_PROG" login "\$EMAIL"/)
+  assert.match(scriptText, /"\/api\/auth\/login"/)
+  // login authenticates (success:true) …
+  assert.match(scriptText, /const authed = r\.statusCode >= 200 && r\.statusCode < 300 && parsed && parsed\.success === true/)
+  // … captures the server-authoritative user id …
+  assert.match(scriptText, /const uid = parsed\.data && parsed\.data\.user \? parsed\.data\.user\.id : undefined/)
+  // … refuses to proceed without it, and emits ONLY the id on stdout for the caller.
+  assert.match(scriptText, /refusing to promote/)
+  assert.match(scriptText, /process\.stdout\.write\("USERID=" \+ uid \+ "\\n"\)/)
+})
+
+test('structural: the header documents the stdin-only + trap + single-tx design and BOTH P1s (leak + privilege escalation)', () => {
   const header = scriptText.slice(0, scriptText.indexOf('set -euo pipefail'))
   assert.match(header, /stdin-only ingestion/i)
   assert.match(header, /WRITABLE LAYER/)
   assert.match(header, /trap .*EXIT INT TERM HUP/)
   assert.match(header, /single (transaction|atomic)|one atomic/i)
   assert.match(header, /USAGE/)
+  // the privilege-escalation fix must be documented: login-first, promote by id.
+  assert.match(header, /PRIVILEGE ESCALATION/i)
+  assert.match(header, /LOGIN-FIRST/i)
+  assert.match(header, /promote (only )?by (that )?(verified )?id/i)
+})
+
+test('structural (harness P3): the real-Docker readiness gate queries the TARGET db (SELECT 1), not pg_isready', () => {
+  const selfText = readFileSync(selfPath, 'utf8')
+  assert.equal(
+    readinessQueriesTargetDb(selfText),
+    true,
+    'waitForTargetDbQueryable must gate on a psql SELECT 1 against the target db (not pg_isready)',
+  )
+  // the golden stack must actually USE that gate (not an inlined pg_isready loop)
+  assert.match(selfText, /waitForTargetDbQueryable\(pg\)/)
 })
 
 // ---------------------------------------------------------------------------
@@ -320,8 +413,8 @@ test('mutation: making the promotion non-transactional (drop `-1`) reds the sing
   // sanity: pristine passes
   assert.equal(promotionIsSingleTransaction(executable), true)
   const mutatedText = scriptText.replace(
-    'psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v em="$EMAIL"',
-    'psql -U "$PGU" -d "$PGD" -v ON_ERROR_STOP=1 -v em="$EMAIL"',
+    'psql -U "$PGU" -d "$PGD" -1 -v ON_ERROR_STOP=1 -v uid="$USER_ID" -v em="$EMAIL"',
+    'psql -U "$PGU" -d "$PGD" -v ON_ERROR_STOP=1 -v uid="$USER_ID" -v em="$EMAIL"',
   )
   assert.notEqual(mutatedText, scriptText, 'mutation must actually remove the -1')
   const mutatedExec = stripShellComments(mutatedText)
@@ -352,11 +445,83 @@ test('mutation: dropping the trim+lowercase normalization (register raw email) r
 test('mutation: deleting the exactly-one RAISE assertion reds the post-assert gate', () => {
   assert.equal(promotionAssertsExactlyOne(executable), true)
   const mutatedText = scriptText.replace(
-    /IF u_count <> 1 OR m_count <> 1 THEN\n\s*RAISE EXCEPTION 'promotion assertion failed[\s\S]*?END IF;/,
+    /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN\n\s*RAISE EXCEPTION 'promotion assertion failed[\s\S]*?END IF;/,
     '-- assertion removed by mutation',
   )
   assert.notEqual(mutatedText, scriptText, 'mutation must actually remove the assertion')
   assert.equal(promotionAssertsExactlyOne(stripShellComments(mutatedText)), false)
+})
+
+test('mutation: P1 — reverting the promotion to an email lookup (not the verified id) reds the promote-by-verified-id gate', () => {
+  // sanity: pristine passes
+  assert.equal(promotesByVerifiedLoginId(executable), true)
+  // The exact defect class: grant the account that MATCHES THE EMAIL rather than the
+  // one whose password we just authenticated. An attacker who pre-empted the email
+  // would be the one holding it → they get promoted.
+  const mutatedText = scriptText
+    .replace('-v uid="$USER_ID" -v em="$EMAIL"', '-v em="$EMAIL"')
+    .replace("UPDATE users SET role = 'admin' WHERE id = :'uid';", "UPDATE users SET role = 'admin' WHERE email = :'em';")
+  assert.notEqual(mutatedText, scriptText, 'mutation must actually revert to the email lookup')
+  assert.equal(
+    promotesByVerifiedLoginId(stripShellComments(mutatedText)),
+    false,
+    'a promotion keyed on the email (not the verified login id) must red the data-flow gate',
+  )
+})
+
+test('mutation: P1 — running the login step for effect only (dropping the id capture + non-empty guard) reds the data-flow gate', () => {
+  assert.equal(promotesByVerifiedLoginId(executable), true)
+  // Simulate the predecessor's "login is just a check" shape: the capture into
+  // LOGIN_OUT and the USER_ID derivation/guard are gone, so nothing keys the grant
+  // on an authenticated id.
+  const mutatedText = scriptText
+    .replace(
+      'if ! LOGIN_OUT="$(printf \'%s\' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL")"; then',
+      'if ! printf \'%s\' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL"; then',
+    )
+  assert.notEqual(mutatedText, scriptText, 'mutation must actually drop the capture')
+  assert.equal(
+    promotesByVerifiedLoginId(stripShellComments(mutatedText)),
+    false,
+    'without capturing LOGIN_OUT the promotion cannot be keyed on the verified id — the gate must red',
+  )
+})
+
+test('mutation: P1 — relocating the empty-id guard to AFTER the promotion reds the ordering conjunct (guard must PRECEDE the grant)', () => {
+  assert.equal(promotesByVerifiedLoginId(executable), true)
+  const guardBlock =
+    'if [[ -z "$USER_ID" ]]; then\n' +
+    '  echo "ERROR: login verification returned no server user id — refusing to promote (ZERO database writes)" >&2\n' +
+    '  exit 1\n' +
+    'fi'
+  assert.ok(scriptText.includes(guardBlock), 'sanity: the empty-id guard block exists verbatim')
+  // Remove the guard from its (pre-promotion) position and re-append it at the very
+  // end — AFTER the promotion. Every other conjunct still holds; only the ordering breaks.
+  const mutatedText = scriptText.replace(guardBlock + '\n', '') + '\n' + guardBlock + '\n'
+  assert.notEqual(mutatedText, scriptText, 'mutation must relocate the guard')
+  const mutatedExec = stripShellComments(mutatedText)
+  assert.match(mutatedExec, /if \[\[ -z "\$USER_ID" \]\]; then/, 'sanity: the guard is still present (just moved)')
+  assert.equal(
+    promotesByVerifiedLoginId(mutatedExec),
+    false,
+    'a guard that runs AFTER the promotion cannot protect it — the ordering conjunct must red',
+  )
+})
+
+test('mutation (harness P3): reverting the readiness gate to pg_isready reds the target-db-query structural check', () => {
+  const selfText = readFileSync(selfPath, 'utf8')
+  // sanity: pristine passes
+  assert.equal(readinessQueriesTargetDb(selfText), true)
+  const mutated = selfText.replace(
+    "const q = d(['exec', '-i', pg, 'psql', '-U', user, '-d', db, '-tA', '-c', 'SELECT 1'])\n    if (q.status === 0 && q.stdout.trim() === '1') return",
+    "const q = d(['exec', pg, 'pg_isready', '-U', user, '-d', db])\n    if (q.status === 0) return",
+  )
+  assert.notEqual(mutated, selfText, 'mutation must actually swap SELECT 1 for pg_isready')
+  assert.equal(
+    readinessQueriesTargetDb(mutated),
+    false,
+    'a pg_isready readiness gate (no target-db SELECT 1) must red the structural check — that is the P3 race',
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -402,25 +567,40 @@ function d(args, opts = {}) {
 // process so `docker exec … node -e` (the shipped ingestion) reaches it on
 // 127.0.0.1:$PORT. Deliberately holds NO filesystem state — so any file that
 // `docker diff` reports after the shipped run would be the ingestion leaking.
+// The server-authoritative user id the mock returns on register/login. It is the
+// SAME deterministic function used to seed the postgres users row (mockUserId
+// below), so the id the shipped script captures at login reconciles EXACTLY with
+// the row the promotion targets — mirroring production, where the real backend's
+// register writes the row and login returns that same id. Faithful to the real
+// login response shape: { success:true, data:{ user:{ id, ... }, token } }.
 const MOCK_BACKEND_SERVER = `
 const http = require('http');
 const users = new Map();
+function uid(email){ return 'u-' + Buffer.from(String(email)).toString('hex'); }
 function readBody(req, cb){ let b=''; req.on('data',c=>b+=c); req.on('end',()=>{ try{ cb(JSON.parse(b||'{}')); }catch(e){ cb({}); } }); }
 http.createServer((req,res)=>{
   if(req.url==='/api/auth/register' && req.method==='POST'){
     readBody(req,(o)=>{
       if(users.has(o.email)){ res.writeHead(409,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:false,error:'User with this email already exists'})); return; }
-      users.set(o.email,o.password); res.writeHead(201,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true}));
+      users.set(o.email,o.password); res.writeHead(201,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true,data:{user:{id:uid(o.email),email:o.email}}}));
     });
   } else if(req.url==='/api/auth/login' && req.method==='POST'){
     readBody(req,(o)=>{
       const id=o.identifier||o.email;
-      if(users.has(id) && users.get(id)===o.password){ res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true,data:{token:'t'}})); }
+      if(users.has(id) && users.get(id)===o.password){ res.writeHead(200,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:true,data:{token:'t',user:{id:uid(id),email:id}}})); }
       else { res.writeHead(401,{'Content-Type':'application/json'}); res.end(JSON.stringify({success:false,error:'Invalid account or password'})); }
     });
   } else { res.writeHead(404); res.end('{}'); }
 }).listen(Number(process.env.PORT||8900),'127.0.0.1',()=>{ console.error('mock backend up'); });
 `
+
+// Deterministic server-authoritative id, replicated byte-for-byte from the mock
+// backend's uid() above. The golden seeds the postgres users row with THIS id so
+// the shipped script's login-captured data.user.id keys the promotion onto exactly
+// that row (as production does: register writes the row, login returns its id).
+function mockUserId(email) {
+  return 'u-' + Buffer.from(String(email)).toString('hex')
+}
 
 const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user');
@@ -429,6 +609,24 @@ CREATE TABLE IF NOT EXISTS user_roles (user_id TEXT NOT NULL, role_id TEXT NOT N
 -- migration 054 seeds roles exactly like this ('admin','管理员') — the P2 trap:
 INSERT INTO roles (id, name) VALUES ('admin','管理员'),('user','普通用户') ON CONFLICT (id) DO NOTHING;
 `
+
+// P3 — readiness must mean "the TARGET database accepts a query", not "the server
+// port is up". `pg_isready` returns success as soon as the postmaster answers the
+// startup packet, which on the official postgres image can happen BEFORE the target
+// database is created and queryable (the entrypoint runs init on a throwaway server,
+// then restarts). A `pg_isready` gate followed by an immediate connect to the target
+// db therefore flakes (owner saw 19/20 fail on the PR run, pass on rerun). Gate on
+// `SELECT 1` against the TARGET db with a bounded retry, and fail LOUDLY on timeout.
+function waitForTargetDbQueryable(pg, { user = 'ms', db = 'metasheet', tries = 60, delayMs = 500 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    const q = d(['exec', '-i', pg, 'psql', '-U', user, '-d', db, '-tA', '-c', 'SELECT 1'])
+    if (q.status === 0 && q.stdout.trim() === '1') return
+    spawnSync('sleep', [String(delayMs / 1000)])
+  }
+  assert.fail(
+    `target database ${db} never accepted a SELECT 1 within ${tries} tries (~${(tries * delayMs) / 1000}s) — readiness gate exhausted; this means the target DB was never queryable, not merely that the server port was up`,
+  )
+}
 
 function withGoldenStack(fn, { backendMode = 'mock' } = {}) {
   const id = `${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
@@ -449,23 +647,19 @@ function withGoldenStack(fn, { backendMode = 'mock' } = {}) {
   }
   assert.equal(r.status, 0, `backend must start: ${r.stderr}`)
   try {
-    // wait for pg readiness
-    let ready = false
-    for (let i = 0; i < 40; i++) {
-      const pr = d(['exec', pg, 'pg_isready', '-U', 'ms', '-d', 'metasheet'])
-      if (pr.status === 0) { ready = true; break }
-      spawnSync('sleep', ['0.5'])
-    }
-    assert.ok(ready, 'postgres must become ready')
+    // wait for the TARGET db to actually accept a query (P3 fix — not pg_isready)
+    waitForTargetDbQueryable(pg)
     // schema + seed
     const sr = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], { input: SCHEMA_SQL })
     assert.equal(sr.status, 0, `schema load must succeed: ${sr.stderr}`)
     // the freshly-registered user is created by the script's register step, so we
     // do NOT pre-seed it here — but the mock backend register writes only to its
     // in-memory Map, not to postgres, so seed the users row the promotion needs.
-    // (In production the real backend's register writes the users row itself.)
+    // (In production the real backend's register writes the users row itself.) The
+    // id is the SAME server-authoritative id the mock login returns (mockUserId),
+    // so the login-first flow's promote-by-verified-id keys onto exactly this row.
     const ur = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], {
-      input: `INSERT INTO users (id,email,name,password_hash,role) VALUES ('u-l1','l1-battery-admin@example.com','l1 battery admin','x','user') ON CONFLICT (id) DO NOTHING;`,
+      input: `INSERT INTO users (id,email,name,password_hash,role) VALUES ('${mockUserId('l1-battery-admin@example.com')}','l1-battery-admin@example.com','l1 battery admin','x','user') ON CONFLICT (id) DO NOTHING;`,
     })
     assert.equal(ur.status, 0, `user seed must succeed: ${ur.stderr}`)
     fn({ backend, pg })
@@ -501,6 +695,29 @@ function tmpDiffAdds(container) {
   return lines.filter((l) => /^A\s|\/tmp/.test(l))
 }
 
+// Simulate an attacker PRE-EMPTING the target email: POST /api/auth/register to the
+// mock backend with a password WE DO NOT CONTROL, so the account exists but only the
+// attacker's password authenticates it. Runs inside the backend container against
+// 127.0.0.1:8900 (the same server the shipped ingestion talks to).
+function preRegisterAttacker(backend, email, password) {
+  const prog = `
+const http=require('http');
+const body=JSON.stringify({email:${JSON.stringify(email)},password:${JSON.stringify(password)},name:'attacker'});
+const req=http.request({host:'127.0.0.1',port:Number(process.env.PORT||8900),path:'/api/auth/register',method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(body)}},(r)=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>{ if(r.statusCode>=200&&r.statusCode<300){process.exit(0);} console.error('attacker pre-register status='+r.statusCode); process.exit(1); })});
+req.on('error',(e)=>{console.error('attacker pre-register error '+e);process.exit(1)});
+req.write(body);req.end();
+`
+  return d(['exec', '-i', backend, 'node', '-e', prog])
+}
+
+// Read the current (role, admin-membership-count) for the account, keyed on email.
+function readAccountState(pg, email) {
+  const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+    input: `SELECT (SELECT role FROM users WHERE email='${email}') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='${email}' AND ur.role_id='admin');`,
+  })
+  return check.stdout.trim()
+}
+
 test(
   'golden (real Docker): the SHIPPED script promotes to a real 1/1 admin and its stdin ingestion writes NOTHING into the backend container',
   { skip: GOLDEN_SKIP ?? false },
@@ -511,7 +728,7 @@ test(
         const before = tmpDiffAdds(backend)
         const r = runScript(f, backend, pg)
         assert.equal(r.status, 0, `shipped script must succeed; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
-        assert.match(r.stdout, /DONE — l1-battery-admin@example\.com exists, is an RBAC admin, and logs in/)
+        assert.match(r.stdout, /DONE — l1-battery-admin@example\.com exists .*is an RBAC admin/)
 
         // (P1) baseline-relative docker diff: the ingestion added NOTHING under /tmp.
         const after = tmpDiffAdds(backend)
@@ -526,6 +743,58 @@ test(
           input: `SELECT (SELECT count(*) FROM users WHERE email='l1-battery-admin@example.com') , (SELECT count(*) FROM user_roles ur JOIN users u ON u.id=ur.user_id WHERE u.email='l1-battery-admin@example.com' AND ur.role_id='admin');`,
         })
         assert.equal(check.stdout.trim(), '1|1', `DB must be exactly 1 user / 1 admin membership, got: ${check.stdout.trim()}`)
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  },
+)
+
+test(
+  'golden (real Docker): P1 — a PRE-EMPTED email + WRONG password exits non-zero and leaves users.role + user_roles ZERO-changed (no admin grant)',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    // THE P1 privilege-escalation golden. An attacker pre-registers the target email
+    // with THEIR OWN password; the operator then runs the script with the INTENDED
+    // (different) password. Under the fixed login-first flow, register's 409 does NOT
+    // trigger a grant — login is attempted with the intended password, FAILS (401),
+    // and the script aborts BEFORE any psql runs. The attacker's account must be left
+    // exactly as it was: role='user', ZERO user_roles admin membership. (Under the
+    // predecessor's promote-before-login order this golden reds: the promotion would
+    // have committed role='admin' + a membership despite the non-zero exit.)
+    withGoldenStack(({ backend, pg }) => {
+      const EMAIL = 'l1-battery-admin@example.com'
+      const { dir, f } = makePwFile('S3cure-Passw0rd!battery') // the INTENDED password
+      try {
+        // Attacker pre-empts the email with a password we do NOT control.
+        const pre = preRegisterAttacker(backend, EMAIL, 'attacker-controlled-pw')
+        assert.equal(pre.status, 0, `attacker pre-registration must succeed for this repro: ${pre.stderr}`)
+
+        // BEFORE: the seeded row is a plain user with no admin membership.
+        const before = readAccountState(pg, EMAIL)
+        assert.equal(before, 'user|0', `precondition: attacker account must start role=user, 0 admin memberships, got: ${before}`)
+
+        // Operator runs the script with the intended (different) password.
+        const r = runScript(f, backend, pg)
+
+        // AFTER — the CORE P1 invariant, asserted FIRST so a promote-before-login
+        // regression reds precisely HERE (role='admin', memberships=1) rather than on
+        // some incidental message check: role + user_roles must be ZERO-changed.
+        const after = readAccountState(pg, EMAIL)
+        assert.equal(
+          after,
+          'user|0',
+          `P1: a failed/refused run must leave the pre-empted account ZERO-changed (role=user, 0 admin memberships), got: ${after} — a non-'user|0' here means the promotion committed BEFORE login gated it`,
+        )
+        assert.equal(after, before, 'P1: the account state must be byte-identical before and after a refused promotion')
+
+        // It MUST also exit non-zero, having aborted BEFORE the promotion (login-first).
+        assert.notEqual(r.status, 0, `script must exit non-zero on a pre-empted email; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
+        assert.doesNotMatch(r.stdout, /atomic RBAC promotion/, 'the promotion step must NOT run when login fails')
+        assert.match(r.stderr, /refusing to promote|ZERO database writes/i)
+
+        // The host password file was still scrubbed on this failure exit.
+        assert.equal(existsSync(f), false, 'the trap must scrub the host password file even on the pre-emption abort')
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
