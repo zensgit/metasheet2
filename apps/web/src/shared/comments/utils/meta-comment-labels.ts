@@ -52,6 +52,9 @@ export type MetaCommentLabelKey =
   | 'comment.errorMarkRead'
   | 'comment.errorLoadMentionSummary'
   | 'comment.errorLoadPresence'
+  // S3b (approval comments tab): placeholder text rendered in place of a tombstone's cleared
+  // body. Additive — no existing key removed or renamed.
+  | 'comment.deletedPlaceholder'
 
 const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string }> = {
   'comment.title': { en: 'Comments', zh: '评论' },
@@ -100,6 +103,7 @@ const META_COMMENT_LABELS: Record<MetaCommentLabelKey, { en: string; zh: string 
   'comment.errorMarkRead': { en: 'Failed to mark comment as read', zh: '标记评论已读失败' },
   'comment.errorLoadMentionSummary': { en: 'Failed to load mention summary', zh: '加载提及摘要失败' },
   'comment.errorLoadPresence': { en: 'Failed to load comment presence', zh: '加载评论状态失败' },
+  'comment.deletedPlaceholder': { en: 'This comment was deleted', zh: '该评论已删除' },
 }
 
 export function commentLabel(key: MetaCommentLabelKey, isZh: boolean): string {

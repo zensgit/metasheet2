@@ -101,6 +101,18 @@ on:
       - 'apps/web/tests/searchApprovalDirectoryUsers.spec.ts'
       - 'apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts'
       - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
+      # S3b (2026-08-22, approval comments tab): the 全文评论 tab wraps the S3a shared comments kit
+      # onto the S2 approval-comments endpoints. An approval surface now imports shared/comments,
+      # so that whole tree is added here too — a kit-only change (enableReactions prop, tombstone
+      # gating, deleted/editedAt carry) would otherwise silently break the approval tab without
+      # this guard ever re-running.
+      - 'apps/web/src/shared/comments/**'
+      - 'apps/web/src/approvals/approvalCommentsClient.ts'
+      - 'apps/web/src/views/approval/ApprovalCommentsPanel.vue'
+      - 'apps/web/tests/approval-comments-client.spec.ts'
+      - 'apps/web/tests/approval-comments-panel.spec.ts'
+      - 'apps/web/tests/multitable-comments-panel.spec.ts'
+      - 'apps/web/tests/shared-comments-stub-client.spec.ts'
       - 'apps/web/tests/approvalUserPicker.spec.ts'
       - 'apps/web/src/approvals/prefillFromSnapshot.ts'
       - 'apps/web/src/types/approval.ts'
@@ -386,6 +398,18 @@ on:
       - 'apps/web/tests/searchApprovalDirectoryUsers.spec.ts'
       - 'apps/web/tests/approval-member-identity-coverage-enumeration.spec.ts'
       - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
+      # S3b (2026-08-22, approval comments tab): the 全文评论 tab wraps the S3a shared comments kit
+      # onto the S2 approval-comments endpoints. An approval surface now imports shared/comments,
+      # so that whole tree is added here too — a kit-only change (enableReactions prop, tombstone
+      # gating, deleted/editedAt carry) would otherwise silently break the approval tab without
+      # this guard ever re-running.
+      - 'apps/web/src/shared/comments/**'
+      - 'apps/web/src/approvals/approvalCommentsClient.ts'
+      - 'apps/web/src/views/approval/ApprovalCommentsPanel.vue'
+      - 'apps/web/tests/approval-comments-client.spec.ts'
+      - 'apps/web/tests/approval-comments-panel.spec.ts'
+      - 'apps/web/tests/multitable-comments-panel.spec.ts'
+      - 'apps/web/tests/shared-comments-stub-client.spec.ts'
       - 'apps/web/tests/approvalUserPicker.spec.ts'
       - 'apps/web/src/approvals/prefillFromSnapshot.ts'
       - 'apps/web/src/types/approval.ts'
@@ -725,4 +749,10 @@ jobs:
         # files and asserts zero static style= attributes and zero hex/rgb() literals inside
         # <style> blocks (var() references + transparent/inherit/currentColor/none allowed);
         # had no gate before this wiring.
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions --reporter=dot
+        # S3b (2026-08-22, approval comments tab): `shared-comments-stub-client` and
+        # `multitable-comments-panel` are added here for the FIRST time — neither was in this
+        # guard before, so a shared/comments kit edit (enableReactions/deleted-tombstone gating/
+        # normalize whitelist) could previously break the approval 全文评论 tab silently, with
+        # nothing in THIS lane re-running. `approval-comments-client`/`approval-comments-panel`
+        # are the new S3b-specific specs (the adapter + the mounted tab wrapper).
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel --reporter=dot

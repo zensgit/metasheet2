@@ -84,7 +84,9 @@ describe('approval admin jump migration and bootstrap sync', () => {
     // Lock-10 (S1) OD-S1-9(a) bumped this to add `approval_instances.org_id` plus its non-blank
     // CHECK (nullable, no default, Phase 1 only — see zzzz20260821100000_add_approval_instance_org_id.ts).
     // Fix-round (S2 gate P2-1) bumped it again to add `approval_cmt_tombstone_mentions_cleared`.
-    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s2-fixround-mentions-cleared-check'")
+    // S3b (P3-6 carried-hardening item) bumped it again to NAME the `approval_comments.instance_id`
+    // FK as `approval_cmt_instance_fk` (was unnamed) — see the P3-6 parity test below.
+    expect(source).toContain("APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s3b-p36-named-instance-fk'")
     // ANCHORED on the FULL member list, not the old floating fragment. The previous substring
     // (`'remind', 'jump', 'add_sign', 'reduce_sign', 'reassign'`) still passed with BOTH `handle`
     // and `policy_denied` missing from the bootstrap — an unanchored pin over load-bearing DDL, the
@@ -166,7 +168,142 @@ describe('approval admin jump migration and bootstrap sync', () => {
     expect(() => parseMigrationActionArray('no such array', 'ACTIONS_WITH_POLICY_DENIED')).toThrow()
     expect(() => parseBootstrapCheckMembers('no such check')).toThrow()
   })
+})
 
+/**
+ * S3b — P3-6 carried-hardening item. Migration ↔ bootstrap constraint-name parity for
+ * `approval_comments` (Lock-10 S2, zzzz20260822120000_create_approval_comments.ts), extending the
+ * D-1 pattern above to a SECOND table. Both sources use the identical `CONSTRAINT <name> …`
+ * grammar (unlike the action-CHECK pair above, whose two sources use genuinely different SQL
+ * shapes — an inline array literal vs. a `CHECK (action IN (...))` clause), so ONE structural
+ * parser suffices for both files here, not two.
+ *
+ * SOURCE-TEXT CAVEAT (load-bearing, do not drop this sentence — see
+ * feedback_source_text_assertions_are_not_behaviour.md): this is a parity claim about the two
+ * DDL TEXTS, not about what a running database actually has. The bootstrap's `CREATE TABLE IF NOT
+ * EXISTS` means an ALREADY-bootstrapped test DB keeps whatever FK name it materialized under an
+ * OLDER bootstrap version — including Postgres's auto-generated
+ * `approval_comments_instance_id_fkey`, from before this bump named it — and the name never
+ * converges there. Only a virgin (never-before-bootstrapped) DB gets the named constraint this
+ * test pins.
+ */
+describe('P3-6: approval_comments migration and bootstrap constraint-name parity', () => {
+  const APPROVAL_COMMENT_MIGRATION = path.join(MIGRATIONS_DIR, 'zzzz20260822120000_create_approval_comments.ts')
+
+  /** The ONE place the full constraint set is written down; both sources are compared against
+   *  this, so neither can drift alone. */
+  const EXPECTED_APPROVAL_COMMENT_CONSTRAINTS = [
+    'approval_cmt_instance_fk',
+    'approval_cmt_parent_fk',
+    'approval_cmt_author_nonblank',
+    'approval_cmt_tombstone_body_cleared',
+    'approval_cmt_tombstone_mentions_cleared',
+    'approval_cmt_no_self_parent',
+  ]
+
+  /** `approval_cmt_parent_fk` is DELIBERATELY migration-only — the bootstrap's own `parent_id`
+   *  FK stays unnamed (see approval-schema-bootstrap.ts's own note on this). A naive
+   *  set-equality would red on this ONE member forever, so it is excluded here BY NAME with the
+   *  reason stated, never silently dropped from EXPECTED_APPROVAL_COMMENT_CONSTRAINTS itself. */
+  const BOOTSTRAP_ONLY_EXCLUDED = new Set(['approval_cmt_parent_fk'])
+
+  /** Structural extractor: every `CONSTRAINT <name>` occurrence NOT part of a `DROP CONSTRAINT
+   *  IF EXISTS <name>` line (the bootstrap's own drop-then-add idempotency idiom, which would
+   *  otherwise be mis-parsed — `CONSTRAINT IF` — and re-add the SAME name as a false duplicate
+   *  the Set would then silently absorb, or worse, corrupt the capture). THROWS when zero names
+   *  are found — same D-1 discipline as parseMigrationActionArray/parseBootstrapCheckMembers
+   *  above: an empty read must never be mistaken for "no constraints", which is exactly the
+   *  failure mode a renamed/deleted anchor would otherwise hide. */
+  function parseNamedConstraints(source: string): string[] {
+    const names = new Set<string>()
+    for (const line of source.split('\n')) {
+      if (/DROP\s+CONSTRAINT/i.test(line)) continue
+      const match = line.match(/\bCONSTRAINT\s+(\w+)/)
+      if (match) names.add(match[1])
+    }
+    if (names.size === 0) throw new Error('APPROVAL_COMMENT_CONSTRAINT_NAMES_MISSING')
+    return [...names]
+  }
+
+  function collapseWhitespace(source: string): string {
+    return source.replace(/\s+/g, ' ')
+  }
+
+  /**
+   * The bootstrap file materializes the ENTIRE approval schema (templates, instances,
+   * delegations, …), not just `approval_comments` — a whole-file `CONSTRAINT` scan picks up
+   * every OTHER table's named constraints too (`approval_records_action_check`,
+   * `chk_approval_delegations_*`, …), which a naive comparison against
+   * EXPECTED_APPROVAL_COMMENT_CONSTRAINTS would never match. Scope to the contiguous
+   * `approval_comments` DDL block — its own `CREATE TABLE` through (but excluding) the NEXT
+   * `CREATE TABLE IF NOT EXISTS` for a different table — before parsing. THROWS if the start
+   * marker is missing (same "never silently read as empty/absent" discipline as the parser
+   * itself). The migration file needs no such scoping — it declares nothing but this one table.
+   */
+  function extractApprovalCommentsBootstrapBlock(source: string): string {
+    const startMarker = 'CREATE TABLE IF NOT EXISTS approval_comments ('
+    const startIdx = source.indexOf(startMarker)
+    if (startIdx < 0) throw new Error('APPROVAL_COMMENTS_BOOTSTRAP_BLOCK_START_MISSING')
+    const searchFrom = startIdx + startMarker.length
+    const nextTableIdx = source.indexOf('CREATE TABLE IF NOT EXISTS', searchFrom)
+    return source.slice(startIdx, nextTableIdx >= 0 ? nextTableIdx : source.length)
+  }
+
+  it('positive control: both sources are non-empty and contain the constraint grammar this parser targets', async () => {
+    const migrationSource = await fs.readFile(APPROVAL_COMMENT_MIGRATION, 'utf8')
+    const bootstrapSource = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
+    expect(migrationSource).toContain('CONSTRAINT approval_cmt_instance_fk')
+    expect(bootstrapSource).toContain('CONSTRAINT approval_cmt_instance_fk')
+  })
+
+  it('the migration declares EXACTLY the expected 6-member constraint set', async () => {
+    const migrationSource = await fs.readFile(APPROVAL_COMMENT_MIGRATION, 'utf8')
+    const migrationConstraints = parseNamedConstraints(migrationSource)
+    expect(new Set(migrationConstraints)).toEqual(new Set(EXPECTED_APPROVAL_COMMENT_CONSTRAINTS))
+  })
+
+  it('the bootstrap declares the expected set MINUS the migration-only parent FK — both directions', async () => {
+    const bootstrapSource = await fs.readFile(BOOTSTRAP_PATH, 'utf8')
+    const bootstrapConstraints = parseNamedConstraints(extractApprovalCommentsBootstrapBlock(bootstrapSource))
+    const expectedBootstrapSet = new Set(
+      EXPECTED_APPROVAL_COMMENT_CONSTRAINTS.filter((name) => !BOOTSTRAP_ONLY_EXCLUDED.has(name)),
+    )
+    expect(new Set(bootstrapConstraints)).toEqual(expectedBootstrapSet)
+    expect(bootstrapConstraints).not.toContain('approval_cmt_parent_fk')
+    expect(bootstrapConstraints).toContain('approval_cmt_tombstone_mentions_cleared')
+  })
+
+  it('approval_cmt_instance_fk is adjacent to `REFERENCES approval_instances(id) ON DELETE CASCADE` in BOTH sources', async () => {
+    const migrationSource = collapseWhitespace(await fs.readFile(APPROVAL_COMMENT_MIGRATION, 'utf8'))
+    const bootstrapSource = collapseWhitespace(extractApprovalCommentsBootstrapBlock(await fs.readFile(BOOTSTRAP_PATH, 'utf8')))
+    const needle = 'CONSTRAINT approval_cmt_instance_fk REFERENCES approval_instances(id) ON DELETE CASCADE'
+    expect(migrationSource).toContain(needle)
+    expect(bootstrapSource).toContain(needle)
+  })
+
+  it('negative control: a dropped constraint is detected by the set comparison, and the parser THROWS on a totally missing anchor', () => {
+    const migrationLike = EXPECTED_APPROVAL_COMMENT_CONSTRAINTS
+      .filter((name) => name !== 'approval_cmt_no_self_parent')
+      .map((name) => `        CONSTRAINT ${name} CHECK (true)`)
+      .join('\n')
+    const parsed = parseNamedConstraints(migrationLike)
+    expect(parsed).not.toContain('approval_cmt_no_self_parent')
+    expect(new Set(parsed)).not.toEqual(new Set(EXPECTED_APPROVAL_COMMENT_CONSTRAINTS))
+
+    // The bootstrap's own DROP/ADD idempotency idiom must not be mis-parsed as a duplicate or
+    // phantom "IF" name — feeding a DROP-only line yields the SAME (correct) result as the
+    // matching ADD line alone.
+    const dropThenAdd = [
+      'ALTER TABLE approval_comments DROP CONSTRAINT IF EXISTS approval_cmt_author_nonblank',
+      "ALTER TABLE approval_comments ADD CONSTRAINT approval_cmt_author_nonblank CHECK (author_id ~ '[!-~]')",
+    ].join('\n')
+    expect(parseNamedConstraints(dropThenAdd)).toEqual(['approval_cmt_author_nonblank'])
+
+    expect(() => parseNamedConstraints('no constraints anywhere in this source')).toThrow()
+  })
+})
+
+describe('approval admin jump migration and bootstrap sync (continued)', () => {
   it('does not mutate immutable historical approval action migrations', async () => {
     const sources = await Promise.all(
       HISTORICAL_ACTION_MIGRATIONS.map(async (fileName) => ({

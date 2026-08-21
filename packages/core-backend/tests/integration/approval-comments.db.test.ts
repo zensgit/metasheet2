@@ -471,6 +471,14 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       const firstJson = (await firstDelete.json()) as { data: { comment: { deletedAt: string | null } } }
       const firstDeletedAt = firstJson.data.comment.deletedAt
       expect(firstDeletedAt).not.toBeNull()
+      // P3-3 precision fix (S3b carried-hardening item): the API-level `deletedAt` above goes
+      // through `toIso` -> `new Date(v).toISOString()`, i.e. MILLISECOND precision, while
+      // Postgres `now()` is MICROSECOND — a sub-millisecond rewrite of `deleted_at` (e.g. the
+      // idempotency guard failing open and re-running the UPDATE with a fresh `now()` a few
+      // microseconds later) would round-trip through `toIso` to the SAME string and pass the
+      // API-level assertion vacuously. Read the raw column at full DB precision alongside it.
+      const firstRawDeletedAt = await pool().query(`SELECT deleted_at::text AS d FROM approval_comments WHERE id = $1`, [commentId])
+      const firstRaw = (firstRawDeletedAt.rows[0] as { d: string }).d
 
       const secondDelete = await commentsDelete(instanceId, commentId, requesterToken)
       expect(secondDelete.status).toBe(200)
@@ -478,12 +486,51 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       // The discriminating assertion: NOT merely "still deleted", but the EXACT SAME timestamp —
       // proves `deleted_at` was not rewritten by the second call.
       expect(secondJson.data.comment.deletedAt).toBe(firstDeletedAt)
+      const secondRawDeletedAt = await pool().query(`SELECT deleted_at::text AS d FROM approval_comments WHERE id = $1`, [commentId])
+      const secondRaw = (secondRawDeletedAt.rows[0] as { d: string }).d
+      // Microsecond-precision gate: exact string equality of the two `::text` reads, the tier
+      // the millisecond-rounded API assertion above cannot see through.
+      expect(secondRaw).toBe(firstRaw)
 
       const pointerCount = await pool().query(
         `SELECT COUNT(*)::int AS n FROM approval_records WHERE instance_id = $1 AND action = 'comment' AND metadata->>'commentId' = $2`,
         [instanceId, commentId],
       )
       expect((pointerCount.rows[0] as { n: number }).n).toBe(1)
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // P3-6 (S3b carried-hardening item) — the `approval_cmt_instance_fk ... ON DELETE CASCADE`
+  // constraint (migration + bootstrap parity pinned in approval-admin-jump-migration.test.ts) is
+  // otherwise NEVER exercised: this suite's own `afterAll` deletes `approval_comments` BEFORE
+  // `approval_instances` (see the top of this describe block), so the cascade path never actually
+  // fires in the real gate battery. One behavioural gate is enough — the self-referencing
+  // `parent_id` FK also cascades, but that arm is unreachable while the service only ever
+  // TOMBSTONES a comment with replies (C-15) and never hard-deletes one, so a second test for it
+  // would be exercising dead code, not a real path.
+  // -----------------------------------------------------------------------------------------------
+  describe('P3-6: DELETE FROM approval_instances cascades to approval_comments', () => {
+    it('a root + reply seeded through the real API (with their own approval_records pointer rows) are both gone after the instance is deleted', async () => {
+      const requesterId = freshId('cascade-requester')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+
+      const rootRes = await commentsPost(instanceId, token, { body: 'cascade root' })
+      expect(rootRes.status, await rootRes.clone().text()).toBe(201)
+      const rootJson = (await rootRes.json()) as { data: { comment: { id: string } } }
+      const replyRes = await commentsPost(instanceId, token, { body: 'cascade reply', parentId: rootJson.data.comment.id })
+      expect(replyRes.status, await replyRes.clone().text()).toBe(201)
+
+      const before = await pool().query(`SELECT COUNT(*)::int AS n FROM approval_comments WHERE instance_id = $1`, [instanceId])
+      expect((before.rows[0] as { n: number }).n).toBe(2)
+
+      // Raw DELETE (not the service, not this suite's own afterAll cleanup helper) — proves the
+      // DATABASE-LEVEL cascade, not application-layer cleanup ordering.
+      await pool().query(`DELETE FROM approval_instances WHERE id = $1`, [instanceId])
+
+      const after = await pool().query(`SELECT COUNT(*)::int AS n FROM approval_comments WHERE instance_id = $1`, [instanceId])
+      expect((after.rows[0] as { n: number }).n).toBe(0)
     })
   })
 
@@ -604,20 +651,33 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
     // ("does not reference an existing comment" vs. "must reference a comment on the same
     // instance"), letting a caller who already holds an id learn whether it exists on SOME
     // instance even when denied on this one.
+    //
+    // S3b fixture fix (P3-4 NIT, carried-hardening item): `instanceA` and `instanceB` MUST be
+    // seeded with DIFFERENT requesters. With the SAME requester (the original fixture), `token`
+    // can already list/read instanceA's comments directly — the test then proves message
+    // EQUALITY but reproduces no actual oracle, since the caller was never denied access to A in
+    // the first place. The named scenario (service `:274-281`) is specifically about a caller
+    // LEARNING an id exists on an instance they cannot read. `viewerToken` below participates
+    // only in instanceB; the real parent comment is posted into instanceA by A's OWN requester.
     it('P3-4: foreign-instance parentId and a fabricated parentId deny with the SAME message', async () => {
-      const requesterId = freshId('p34-requester')
-      const instanceA = await seedInstance(requesterId)
-      const instanceB = await seedInstance(requesterId)
-      const token = await participantToken(requesterId)
+      const requesterAId = freshId('p34-requester-a')
+      const requesterBId = freshId('p34-requester-b')
+      const instanceA = await seedInstance(requesterAId)
+      const instanceB = await seedInstance(requesterBId)
+      const requesterAToken = await participantToken(requesterAId)
+      const viewerToken = await participantToken(requesterBId)
 
-      const parentInA = await commentsPost(instanceA, token, { body: 'parent in A' })
+      // Posted by A's OWN requester — requesterB (viewerToken) cannot read instanceA at all, so
+      // this could not have been posted through viewerToken's own token.
+      const parentInA = await commentsPost(instanceA, requesterAToken, { body: 'parent in A' })
+      expect(parentInA.status, await parentInA.clone().text()).toBe(201)
       const parentInAJson = (await parentInA.json()) as { data: { comment: { id: string } } }
 
-      const foreignReal = await commentsPost(instanceB, token, { body: 'graft', parentId: parentInAJson.data.comment.id })
+      const foreignReal = await commentsPost(instanceB, viewerToken, { body: 'graft', parentId: parentInAJson.data.comment.id })
       expect(foreignReal.status).toBe(400)
       const foreignRealJson = (await foreignReal.json()) as { error: { code: string; message: string } }
 
-      const fabricated = await commentsPost(instanceB, token, { body: 'graft', parentId: `acmt_${freshId('nonexistent')}` })
+      const fabricated = await commentsPost(instanceB, viewerToken, { body: 'graft', parentId: `acmt_${freshId('nonexistent')}` })
       expect(fabricated.status).toBe(400)
       const fabricatedJson = (await fabricated.json()) as { error: { code: string; message: string } }
 
