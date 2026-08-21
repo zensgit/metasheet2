@@ -37,9 +37,18 @@
  *     `roles:delete` cascade fires the *user* trigger as well, so holding every lease at once
  *     would let a user-lease 409 masquerade as a role-lease 409. The battery therefore holds
  *     exactly one lease at a time — the kind that surface's mapping names.
- *  3. **Fail-not-skip preflight (phase 0)** — a run against a DB whose triggers are not 9/9
- *     ENABLED exits NON-ZERO with `VERDICT: NOT_ARMED`. A battery that "passed" on a disarmed
- *     database would be the purest form of green-against-nothing.
+ *  3. **Fail-not-skip preflight (phase 0)** — a run against a DB whose nine triggers are not 9/9
+ *     CANONICAL and ENABLED exits NON-ZERO with `VERDICT: NOT_ARMED`. A battery that "passed" on a
+ *     disarmed database would be the purest form of green-against-nothing. "Canonical" is the
+ *     operative word (P2, owner-constructed escape): the preflight once keyed on `trigger_name`
+ *     and read only `tgenabled`, so a trigger of the RIGHT NAME on the WRONG TABLE certified
+ *     `ARMED - 9/9` while an authority table carried no trigger at all. The preflight now compares
+ *     every field `multitable-recovery-schema-containment.mjs` canonicalizes — schema, table,
+ *     name, function schema+name, event type, argument bytes, UPDATE-OF columns — plus the six
+ *     authority FUNCTION body fingerprints, against that module's single expected census, with the
+ *     one deliberate difference that at L1 the expectation on `tgenabled` is "fires" (O/A) rather
+ *     than the factory-inert 'D'. Both catalogue queries are IMPORTED from that module, so the
+ *     battery cannot observe a narrower schema surface than the census pins.
  *
  * LEASE MECHANICS (derived from the migration, not re-invented)
  * ------------------------------------------------------------
@@ -81,7 +90,17 @@ import { writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
 
-import { EXPECTED_AUTHORITY_TRIGGERS } from './multitable-recovery-schema-containment.mjs'
+import {
+  AUTHORITY_FUNCTION_NAMES,
+  AUTHORITY_FUNCTION_SHADOW_QUERY,
+  AUTHORITY_FUNCTION_SNAPSHOT_QUERY,
+  AUTHORITY_TRIGGER_FUNCTIONS,
+  AUTHORITY_TRIGGER_SNAPSHOT_QUERY,
+  EXPECTED_AUTHORITY_FUNCTIONS,
+  EXPECTED_AUTHORITY_TRIGGERS,
+  canonicalFunction,
+  canonicalTrigger,
+} from './multitable-recovery-schema-containment.mjs'
 
 const requireFromBackend = createRequire(
   new URL('../../packages/core-backend/package.json', import.meta.url),
@@ -606,47 +625,247 @@ export function parseCliArgs(argv = []) {
 }
 
 /**
- * Posture judgement over pg_trigger rows.
- *
- * FAIL-NOT-SKIP: anything short of "all expected triggers present AND firing" is NOT_ARMED with a
- * NON-ZERO exit. A battery that skipped (exit 0) on a disarmed database would report the strongest
- * possible evidence — a clean run — for the weakest possible posture.
- *
- * @param {Array<{ trigger_name: string, enabled: string|null }>} rows
+ * A canonical row with `enabled` neutralised — the trigger's IDENTITY, i.e. everything the
+ * containment census pins about it except the fire/inert state. Both sides of the posture
+ * comparison go through this, so the compared field set is exactly whatever
+ * `canonicalTrigger` publishes: the battery can never carry a narrower list than the census
+ * (a field added to the containment canonicalizer is compared here for free).
  */
-export function evaluatePosture(rows = [], expected = EXPECTED_AUTHORITY_TRIGGERS) {
-  const byName = new Map(rows.map((row) => [String(row.trigger_name), String(row.enabled ?? '')]))
+function triggerIdentity(row) {
+  return { ...canonicalTrigger(row), enabled: null }
+}
+
+/** A value guaranteed to render differently from `expected` in a diagnostic. */
+function describeField(value) {
+  return JSON.stringify(value)
+}
+
+/**
+ * Posture judgement over the SHARED authority-trigger/function catalogue rows
+ * (`AUTHORITY_TRIGGER_SNAPSHOT_QUERY` / `AUTHORITY_FUNCTION_SNAPSHOT_QUERY`).
+ *
+ * WHAT "ARMED" MEANS — CANONICAL IDENTITY, NOT A NAME (P2, owner-constructed escape):
+ * this check once keyed on `trigger_name` alone and read only `tgenabled`, so a trigger of the
+ * RIGHT NAME on the WRONG TABLE certified `ARMED - 9/9` while an authority table (e.g. `user_roles`)
+ * carried no trigger at all — a false-ARMED that silently voids every downstream 409 claim. Each
+ * expected trigger must now match its census row on EVERY canonical field — schema, table, name,
+ * function schema+name, event type (`tgtype`), argument bytes, and UPDATE-OF columns — with the
+ * ONE deliberate difference from the containment module: at L1 the expectation on `tgenabled` is
+ * "fires" (∈ {O,A}), not the factory-inert 'D'. Every other field is compared against the very
+ * same expected census `multitable-recovery-schema-containment.mjs` publishes.
+ *
+ * The six authority FUNCTION bodies are checked too: a trigger that is canonically perfect but
+ * fires a `CREATE OR REPLACE`d, neutered function body is the same false-ARMED wearing a different
+ * hat. Function fingerprints are enabled-state-independent, so this borrows the containment
+ * expectations verbatim. Function rows are REQUIRED: `functionRows: null` is NOT_ARMED
+ * (fail-closed — an unobserved function set must never read as a verified one).
+ *
+ * FAIL-NOT-SKIP: anything short of the above is NOT_ARMED with a NON-ZERO exit. A battery that
+ * skipped (exit 0) on a disarmed database would report the strongest possible evidence — a clean
+ * run — for the weakest possible posture.
+ *
+ * @param {Array<object>} rows                     pg_trigger catalogue rows (shared query)
+ * @param {Array<object>} expected                 expected canonical triggers (census of record)
+ * @param {{ functionRows?: Array<object>|null, expectedFunctions?: Array<object> }} options
+ */
+export function evaluatePosture(rows = [], expected = EXPECTED_AUTHORITY_TRIGGERS, options = {}) {
+  const {
+    functionRows = null,
+    expectedFunctions = EXPECTED_AUTHORITY_FUNCTIONS,
+    shadowFunctionRows = null,
+  } = options
+  const observed = rows.map((row) => canonicalTrigger(row))
+  const expectedNames = new Set(expected.map((trigger) => String(trigger.triggerName)))
+  const claimed = new Set()
   const fingerprint = {}
   const offenders = []
+  const unexpectedTriggers = []
   let armedCount = 0
-  for (const trigger of expected) {
-    const enabled = byName.has(trigger.triggerName) ? byName.get(trigger.triggerName) : null
-    fingerprint[trigger.triggerName] = enabled
-    if (enabled === null) {
-      offenders.push(`${trigger.tableName}.${trigger.triggerName} (absent)`)
-    } else if (ENABLED_TRIGGER_STATES.has(enabled)) {
-      armedCount += 1
+
+  for (const expectation of expected) {
+    const want = triggerIdentity(expectation)
+    const site = `${want.schemaName}.${want.tableName}.${want.triggerName}`
+    const index = observed.findIndex(
+      (row, position) =>
+        !claimed.has(position) &&
+        row.schemaName === want.schemaName &&
+        row.tableName === want.tableName &&
+        row.triggerName === want.triggerName,
+    )
+
+    if (index === -1) {
+      // The owner's escape: the expected (schema, table, name) site is empty, but a trigger of
+      // that NAME sits somewhere else. Name it as a TABLE divergence, not a bare "absent" —
+      // "absent" would understate a planted impostor.
+      const impostorIndex = observed.findIndex(
+        (row, position) => !claimed.has(position) && row.triggerName === want.triggerName,
+      )
+      if (impostorIndex === -1) {
+        fingerprint[want.triggerName] = null
+        offenders.push(`${site} (absent)`)
+      } else {
+        claimed.add(impostorIndex)
+        const impostor = observed[impostorIndex]
+        fingerprint[want.triggerName] = {
+          observed_on: `${impostor.schemaName}.${impostor.tableName}`,
+          enabled: impostor.enabled,
+        }
+        offenders.push(
+          `${site} (WRONG TABLE: ${want.schemaName}.${want.tableName} carries no trigger of this name; ` +
+            `a trigger named ${want.triggerName} exists on ${impostor.schemaName}.${impostor.tableName} instead — ` +
+            'the authority table is UNPROTECTED)',
+        )
+      }
+      continue
+    }
+
+    claimed.add(index)
+    const got = observed[index]
+    fingerprint[want.triggerName] = {
+      observed_on: `${got.schemaName}.${got.tableName}`,
+      enabled: got.enabled,
+    }
+    const gotIdentity = { ...got, enabled: null }
+    // Field set derived from the canonical row itself — never a second hand-written list.
+    const divergent = Object.keys(want).filter(
+      (field) => JSON.stringify(gotIdentity[field]) !== JSON.stringify(want[field]),
+    )
+    if (divergent.length > 0) {
+      offenders.push(
+        `${site} (canonical identity diverges — ${divergent
+          .map((field) => `${field}=${describeField(gotIdentity[field])} expected ${describeField(want[field])}`)
+          .join('; ')})`,
+      )
+      continue
+    }
+    if (!ENABLED_TRIGGER_STATES.has(got.enabled)) {
+      offenders.push(`${site} (tgenabled='${got.enabled}')`)
+      continue
+    }
+    armedCount += 1
+  }
+
+  // Leftovers. A leftover that COLLIDES with an expected trigger name is the escape signature and
+  // is fatal; any other authority-function-bearing trigger the shared query surfaced is recorded
+  // as drift for the evidence file but is NOT a posture refusal — set-equality drift is
+  // multitable-recovery-schema-containment.mjs's job, and widening the battery into a second
+  // containment check would fail-closed a genuinely armed staging host over an unrelated artefact.
+  for (const [position, row] of observed.entries()) {
+    if (claimed.has(position)) continue
+    const site = `${row.schemaName}.${row.tableName}.${row.triggerName}`
+    if (expectedNames.has(row.triggerName)) {
+      offenders.push(
+        `${site} (NAME COLLISION: an extra trigger carries the authority name ${row.triggerName} on a table the census does not name)`,
+      )
     } else {
-      offenders.push(`${trigger.tableName}.${trigger.triggerName} (tgenabled='${enabled}')`)
+      unexpectedTriggers.push(site)
     }
   }
+
+  // Function bodies. Same canonicalization, same expectations, no enabled-state dependence.
+  const functionOffenders = []
+  const unexpectedFunctions = []
+  if (functionRows === null || functionRows === undefined) {
+    functionOffenders.push(
+      'authority function bodies were NOT observed — the preflight is fail-closed and cannot certify ARMED without them',
+    )
+  } else {
+    const observedFunctions = functionRows.map((row) => canonicalFunction(row))
+    const claimedFunctions = new Set()
+    for (const expectation of expectedFunctions) {
+      const want = canonicalFunction(expectation)
+      const site = `${want.schemaName}.${want.functionName}(${want.identityArguments})`
+      const index = observedFunctions.findIndex(
+        (row, position) =>
+          !claimedFunctions.has(position) &&
+          row.schemaName === want.schemaName &&
+          row.functionName === want.functionName &&
+          row.identityArguments === want.identityArguments,
+      )
+      if (index === -1) {
+        functionOffenders.push(`${site} (absent)`)
+        continue
+      }
+      claimedFunctions.add(index)
+      const got = observedFunctions[index]
+      const divergent = Object.keys(want).filter(
+        (field) => JSON.stringify(got[field]) !== JSON.stringify(want[field]),
+      )
+      if (divergent.length > 0) {
+        // The body itself is never echoed (discretion): the diverging FIELD NAMES are the evidence.
+        functionOffenders.push(
+          `${site} (fingerprint diverges — field(s) [${divergent.join(', ')}] do not match the expected authority definition)`,
+        )
+      }
+    }
+    for (const [position, row] of observedFunctions.entries()) {
+      if (claimedFunctions.has(position)) continue
+      unexpectedFunctions.push(`${row.schemaName}.${row.functionName}(${row.identityArguments})`)
+    }
+  }
+
+  // SHADOW FUNCTIONS (AUTHORITY_FUNCTION_SHADOW_QUERY). The `public` rows above can all match the
+  // census exactly while a same-named function in ANOTHER schema is what actually runs: the trigger
+  // functions call the lease helpers by bare name with no `SET search_path`, and the default
+  // search_path is `"$user", public`. Verified behaviourally: with such a shadow, an EXCLUSIVE
+  // lease stops refusing the write. Any authority-named function outside `public` is therefore
+  // NOT_ARMED — fail-closed, and unobserved is not verified.
+  const shadowOffenders = []
+  if (shadowFunctionRows === null || shadowFunctionRows === undefined) {
+    shadowOffenders.push(
+      'schemas outside public were NOT searched for authority-named functions — the preflight is fail-closed and cannot certify ARMED without that observation',
+    )
+  } else {
+    for (const row of shadowFunctionRows) {
+      const canonical = canonicalFunction(row)
+      shadowOffenders.push(
+        `${canonical.schemaName}.${canonical.functionName}(${canonical.identityArguments}) shadows the public authority function of the same name; ` +
+          'the authority triggers resolve it by bare name with no SET search_path, so this definition can run INSTEAD of the verified one',
+      )
+    }
+  }
+
   return {
-    armed: offenders.length === 0 && armedCount === expected.length,
+    armed:
+      offenders.length === 0 &&
+      functionOffenders.length === 0 &&
+      shadowOffenders.length === 0 &&
+      armedCount === expected.length,
     armedCount,
     expectedCount: expected.length,
     offenders,
+    functionOffenders,
+    shadowOffenders,
+    unexpectedTriggers,
+    unexpectedFunctions,
     fingerprint,
   }
 }
 
-/** The NOT_ARMED report (exit 2) for a posture that is not 9/9 armed. */
+/** The NOT_ARMED report (exit 2) for a posture that is not canonically 9/9 armed. */
 export function notArmedReport(posture) {
+  const functionOffenders = posture.functionOffenders ?? []
+  const shadowOffenders = posture.shadowOffenders ?? []
+  // A canonically perfect 9/9 trigger set whose FUNCTION definitions are unverified (drifted body,
+  // or shadowed from another schema) is still NOT_ARMED, and the headline must say why — "only 9/9
+  // triggers are installed AND ENABLED" would read as a contradiction and invite the reader to
+  // dismiss it.
+  const functionProblems = functionOffenders.length + shadowOffenders.length
+  const headline =
+    posture.armedCount === posture.expectedCount &&
+    posture.offenders.length === 0 &&
+    functionProblems > 0
+      ? `VERDICT: NOT_ARMED - ${posture.armedCount}/${posture.expectedCount} recovery-authority triggers are canonical and ENABLED, but ${functionProblems} authority FUNCTION problem(s) mean the definition that would actually run is unverified; contention cannot be constructed and a pass must not be reported`
+      : `VERDICT: NOT_ARMED - only ${posture.armedCount}/${posture.expectedCount} recovery-authority triggers are CANONICALLY installed AND ENABLED; the battery cannot construct contention and must not report a pass`
   return {
     exitCode: 2,
     output: [
-      `VERDICT: NOT_ARMED - only ${posture.armedCount}/${posture.expectedCount} recovery-authority triggers are ENABLED; the battery cannot construct contention and must not report a pass`,
+      headline,
       ...posture.offenders.map((offender) => `  not armed: ${offender}`),
-      '  remedy: this database is not at ladder L1 posture. Arm it with',
+      ...functionOffenders.map((offender) => `  not armed: authority function ${offender}`),
+      ...shadowOffenders.map((offender) => `  not armed: SHADOWED authority function — ${offender}`),
+      '  remedy: this database is not at ladder L1 posture. A trigger/function whose canonical identity',
+      '          diverges is a SCHEMA defect, not a switch: re-run the recovery-authority migration, then arm with',
       '          `node scripts/ops/multitable-recovery-authority-triggers.mjs enable` (owner-gated on real hosts).',
     ].join('\n'),
   }
@@ -769,15 +988,12 @@ export function buildNames(stamp) {
 // Runtime
 // ---------------------------------------------------------------------------
 
-const POSTURE_QUERY = `
-  SELECT cls.relname AS table_name, trg.tgname AS trigger_name, trg.tgenabled AS enabled
-  FROM pg_catalog.pg_trigger trg
-  JOIN pg_catalog.pg_class cls ON cls.oid = trg.tgrelid
-  JOIN pg_catalog.pg_namespace ns ON ns.oid = cls.relnamespace
-  WHERE NOT trg.tgisinternal
-    AND ns.nspname = 'public'
-    AND trg.tgname = ANY($1::text[])
-`
+// The posture preflight reads the SAME catalogue queries the containment census reads — there is
+// no second, narrower field list anywhere in this battery. The battery's only divergence from
+// containment is the EXPECTATION on tgenabled (see evaluatePosture), never the observation.
+const POSTURE_TRIGGER_QUERY = AUTHORITY_TRIGGER_SNAPSHOT_QUERY
+const POSTURE_FUNCTION_QUERY = AUTHORITY_FUNCTION_SNAPSHOT_QUERY
+const POSTURE_FUNCTION_SHADOW_QUERY = AUTHORITY_FUNCTION_SHADOW_QUERY
 
 function resolvePath(surface, ctx) {
   return typeof surface.path === 'function' ? surface.path(ctx) : surface.path
@@ -956,14 +1172,32 @@ export async function runBattery({ env = process.env, options } = {}) {
   try {
     // ---------------- Phase 0 — posture preflight -------------------------
     log(lines, '── phase 0 · posture preflight ────────────────────────────────')
-    const postureRows = (await admin.client.query(POSTURE_QUERY, [
+    const postureRows = (await admin.client.query(POSTURE_TRIGGER_QUERY, [
       EXPECTED_AUTHORITY_TRIGGERS.map((trigger) => trigger.triggerName),
+      AUTHORITY_TRIGGER_FUNCTIONS,
     ])).rows
-    const posture = evaluatePosture(postureRows)
+    const postureFunctionRows = (await admin.client.query(POSTURE_FUNCTION_QUERY, [
+      AUTHORITY_FUNCTION_NAMES,
+    ])).rows
+    const postureShadowRows = (await admin.client.query(POSTURE_FUNCTION_SHADOW_QUERY, [
+      AUTHORITY_FUNCTION_NAMES,
+    ])).rows
+    const posture = evaluatePosture(postureRows, EXPECTED_AUTHORITY_TRIGGERS, {
+      functionRows: postureFunctionRows,
+      shadowFunctionRows: postureShadowRows,
+    })
     evidence.posture = {
       triggers_armed: posture.armedCount,
       triggers_expected: posture.expectedCount,
+      // Keyed by trigger name, VALUED by the table the trigger was actually observed on plus its
+      // tgenabled letter. A bare name→letter map made the escape invisible in the evidence file
+      // itself: it read `trg_user_roles_...: "O"` while user_roles carried no trigger.
       trigger_fingerprint: posture.fingerprint,
+      trigger_identity_offenders: posture.offenders,
+      authority_function_offenders: posture.functionOffenders,
+      shadowed_authority_functions: posture.shadowOffenders,
+      unexpected_authority_triggers: posture.unexpectedTriggers,
+      unexpected_authority_functions: posture.unexpectedFunctions,
       // The battery is deliberately FLAG-AGNOSTIC. L1 is "triggers ENABLED, all four recovery
       // flags OFF"; the battery requires no flag in any state and asserts nothing about them.
       // They are recorded only so the evidence names the posture the run observed.
@@ -982,7 +1216,10 @@ export async function runBattery({ env = process.env, options } = {}) {
       evidence.finished_at = new Date().toISOString()
       return { exitCode: report.exitCode, evidence, lines }
     }
-    log(lines, `PHASE 0 VERDICT: ARMED - ${posture.armedCount}/${posture.expectedCount} recovery-authority triggers ENABLED`)
+    log(
+      lines,
+      `PHASE 0 VERDICT: ARMED - ${posture.armedCount}/${posture.expectedCount} recovery-authority triggers match the expected canonical identity (schema, table, name, function, event, args, WHEN clause, update columns) AND are ENABLED; ${EXPECTED_AUTHORITY_FUNCTIONS.length}/${EXPECTED_AUTHORITY_FUNCTIONS.length} authority function bodies match their expected fingerprint and none is shadowed from another schema`,
+    )
 
     // Login through the REAL login endpoint. A token is never minted locally
     // (生产token走login不铸币): the battery only ever carries what the app issued it.

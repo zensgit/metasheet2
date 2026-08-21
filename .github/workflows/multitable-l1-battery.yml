@@ -54,6 +54,19 @@ run-name: "Multitable L1 Battery (staging): ${{ inputs.intent }}"
 #     turned into the BATTERY_ADMIN_* env vars *inside* the container by a `cat`-and-
 #     export wrapper — so the value only ever exists as process environ, never as argv,
 #     on either host.
+#   - Credential lifecycle (staged → used → scrubbed): the email/password files above are
+#     STAGED on the deploy host (stage-creds) and in the container (battery step's `docker
+#     cp`), then USED for exactly one run. Cleanup does NOT rely solely on the battery
+#     step's own best-effort in-script `rm -rf` (lines inside its REMOTE heredoc, kept as
+#     defense in depth) — that path is skipped entirely by a cancelled run, an SSH drop, a
+#     runner kill, or any remote-script failure before those lines run. A dedicated,
+#     always()-gated `scrub-creds` step (id: scrub-creds, placed after residue-check) is
+#     the actual backstop: it removes the CURRENT run's host + in-container secrets dirs
+#     unconditionally, additionally SWEEPS both locations for STALE (>24h) secrets dirs
+#     left by any earlier crashed run, verifies afterward that nothing remains, and — unlike
+#     the battery step — is NOT continue-on-error: a scrub failure (verification finds
+#     residue, or removal errors) FAILS THE JOB. A host with stranded admin credentials is
+#     worse than a red job.
 #   - Producer failure propagates through every grep: the battery's real exit code is
 #     captured via `${PIPESTATUS[0]}` on the ssh invocation (never trusted to a
 #     downstream `grep`'s own exit status), and a captured `rc=0` that carries no
@@ -478,6 +491,128 @@ jobs:
           echo "VERDICT: PASS — zero o2bat_% residue on staging (users, platform_member_groups, roles, spreadsheets/meta_sheets, user_invites all checked)"
           REMOTE
 
+      - name: Scrub credentials on deploy host
+        id: scrub-creds
+        # Deliberately NOT continue-on-error: a host with stranded admin credentials is
+        # worse than a red job. The battery step above IS continue-on-error so residue-
+        # check and THIS step always get their turn even when the battery itself fails;
+        # scrub has no downstream step to defer to, so a scrub failure fails the job.
+        if: always() && steps.ssh-setup.outcome == 'success' && steps.stage-creds.outcome != 'skipped'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          REMOTE_SECRETS_DIR: ${{ steps.stage-creds.outputs.remote_secrets_dir }}
+        run: |
+          set -euo pipefail
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i $HOME/.ssh/deploy_key"
+          mkdir -p output/l1-battery
+
+          # RUN_STAMP mirrors the battery step's own construction exactly (gh<run>a<attempt>)
+          # so this step targets the SAME in-container path the battery step staged into.
+          run_stamp="gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+
+          # REMOTE_SECRETS_DIR / RUN_STAMP reach the remote shell via `VAR=value` ssh
+          # command-line prefixes only (non-secret, single-word values) — never inline-
+          # interpolated into the heredoc body itself, same env-passing discipline the
+          # "Fail on battery error" step below uses for BATTERY_RC/BATTERY_VERDICT_LINE.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" \
+            REMOTE_SECRETS_DIR="${REMOTE_SECRETS_DIR:-}" RUN_STAMP="$run_stamp" \
+            'bash -s' <<'REMOTE' 2>&1 | tee output/l1-battery/scrub.log
+          set -uo pipefail
+          CONTAINER="metasheet-staging-backend"
+          fail=0
+          log() { echo "[scrub] $*"; }
+
+          # ---- current run: host-side secrets dir ----------------------------------
+          if [[ -n "${REMOTE_SECRETS_DIR:-}" ]]; then
+            log "removing current-run host secrets dir: ${REMOTE_SECRETS_DIR}"
+            rm -rf "${REMOTE_SECRETS_DIR}"
+          else
+            log "no current-run REMOTE_SECRETS_DIR (stage-creds did not reach the point of creating one) — nothing to remove on host for this run"
+          fi
+
+          # ---- current run: in-container secrets dir -------------------------------
+          running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+          container_up=0
+          if printf '%s\n' "$running" | grep -qxF "$CONTAINER"; then
+            container_up=1
+            container_creds_dir="/tmp/o2bat-creds-${RUN_STAMP}"
+            log "removing current-run in-container secrets dir: ${container_creds_dir}"
+            docker exec "$CONTAINER" rm -rf "$container_creds_dir" >/dev/null 2>&1 || true
+          else
+            log "container '${CONTAINER}' is not running — nothing to scrub inside a dead container"
+          fi
+
+          # ---- stale sweep (>24h) — host --------------------------------------------
+          log "stale host secrets-dir sweep (l1-battery-creds-*, older than 24h)"
+          find /tmp -maxdepth 1 -name 'l1-battery-creds-*' -type d -mmin +1440 -print | while IFS= read -r d; do
+            log "removing stale host dir: ${d}"
+          done
+          find /tmp -maxdepth 1 -name 'l1-battery-creds-*' -type d -mmin +1440 -exec rm -rf {} +
+
+          # ---- stale sweep (>24h) — container ----------------------------------------
+          if [[ "$container_up" == "1" ]]; then
+            log "stale in-container secrets-dir sweep (o2bat-creds-*, older than 24h)"
+            docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 -print" 2>/dev/null | while IFS= read -r d; do
+              log "removing stale in-container dir: ${d}"
+            done
+            docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 -exec rm -rf {} +" >/dev/null 2>&1 || true
+          fi
+
+          # ---- verify-after-scrub ----------------------------------------------------
+          if [[ -n "${REMOTE_SECRETS_DIR:-}" ]] && [[ -d "${REMOTE_SECRETS_DIR}" ]]; then
+            log "VERIFY-FAIL: host secrets dir still present after rm -rf: ${REMOTE_SECRETS_DIR}"
+            fail=1
+          fi
+          if [[ "$container_up" == "1" ]]; then
+            container_creds_dir="/tmp/o2bat-creds-${RUN_STAMP}"
+            # Positive-result assertion, not error-absence: a `docker exec ... test -d`
+            # that fails for ANY reason (daemon flake, container died mid-scrub, exec
+            # denied) would otherwise be indistinguishable from "directory absent" and
+            # silently PASS an unverified container. Require the exec to affirmatively
+            # print ABSENT; anything else (including a docker-exec failure, which yields
+            # an empty verify_out) is treated as verification failure, not success.
+            verify_out="$(docker exec "$CONTAINER" sh -c 'if [ -d "$1" ]; then echo PRESENT; else echo ABSENT; fi' sh "$container_creds_dir" 2>/dev/null || true)"
+            if [[ "$verify_out" != "ABSENT" ]]; then
+              log "VERIFY-FAIL: in-container secrets dir verification did not return ABSENT (got '${verify_out:-<empty>}'): ${container_creds_dir}"
+              fail=1
+            fi
+          fi
+
+          # NIT (gate): the >24h stale sweep above uses `-exec rm` under `set -uo pipefail`
+          # (host) and `|| true` (container), so a failed sweep would leave stale credential
+          # dirs AND still report PASS — a false-green on credential hygiene. Assert no stale
+          # (>24h) dir REMAINS after the sweep; any remainder fails the job.
+          host_stale_left="$(find /tmp -maxdepth 1 -name 'l1-battery-creds-*' -type d -mmin +1440 2>/dev/null | wc -l | tr -d '[:space:]')"
+          if [[ "${host_stale_left:-0}" != "0" ]]; then
+            log "VERIFY-FAIL: ${host_stale_left} stale (>24h) host credential dir(s) remain after sweep"
+            fail=1
+          fi
+          if [[ "$container_up" == "1" ]]; then
+            # Positive-result assertion (same discipline as the current-run verify): the exec
+            # must affirmatively print an integer count; a docker-exec failure yields empty and
+            # is treated as a verification failure, not a silent pass.
+            cstale_out="$(docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 2>/dev/null | wc -l | tr -d '[:space:]'" 2>/dev/null || true)"
+            if [[ ! "$cstale_out" =~ ^[0-9]+$ ]]; then
+              log "VERIFY-FAIL: in-container stale-sweep verification did not return a count (got '${cstale_out:-<empty>}')"
+              fail=1
+            elif [[ "$cstale_out" != "0" ]]; then
+              log "VERIFY-FAIL: ${cstale_out} stale (>24h) in-container credential dir(s) remain after sweep"
+              fail=1
+            fi
+          fi
+
+          if [[ "$fail" != "0" ]]; then
+            log "VERDICT: FAIL — credential residue remains after scrub; a stranded credential file is worse than a red job"
+            exit 1
+          fi
+          if [[ "$container_up" == "1" ]]; then
+            log "VERDICT: PASS — current-run credentials scrubbed on host and in container; stale (>24h) sweep verified: none remain"
+          else
+            log "VERDICT: PASS — current-run credentials scrubbed on host (container not running); stale (>24h) host sweep verified: none remain"
+          fi
+          REMOTE
+
       - name: Write step summary
         if: always()
         env:
@@ -486,6 +621,7 @@ jobs:
           BATTERY_RC: ${{ steps.battery.outputs.rc }}
           ARTIFACT_NAME: ${{ steps.battery.outputs.artifact_name }}
           RESIDUE_OUTCOME: ${{ steps.residue.outcome }}
+          SCRUB_OUTCOME: ${{ steps.scrub-creds.outcome }}
         run: |
           set -euo pipefail
           {
@@ -495,6 +631,7 @@ jobs:
             echo "- Intent: \`${INTENT}\`"
             echo "- Battery rc: \`${BATTERY_RC:-missing}\`"
             echo "- Residue check: \`${RESIDUE_OUTCOME:-skipped}\`"
+            echo "- Credential scrub: \`${SCRUB_OUTCOME:-skipped}\`"
             echo "- Artifact: \`${ARTIFACT_NAME:-missing}\`"
             if [[ -f output/l1-battery/verdict.txt ]]; then
               echo ""
@@ -508,6 +645,13 @@ jobs:
               echo "### residue-check (tail)"
               echo '```text'
               tail -8 output/l1-battery/residue-check.log
+              echo '```'
+            fi
+            if [[ -f output/l1-battery/scrub.log ]]; then
+              echo ""
+              echo "### credential scrub (tail)"
+              echo '```text'
+              tail -8 output/l1-battery/scrub.log
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
