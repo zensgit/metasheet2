@@ -7,10 +7,28 @@
  * DIFFERENT problem from the tooltip work elsewhere in the closeout line (do not fuse them,
  * feedback_misclassified_gap_called_a_ceiling.md) and a deliberately DIFFERENT tier from the
  * source-scan tests above it (feedback_source_text_assertions_are_not_behaviour.md): the source
- * scan above already pins that `:aria-label="`编辑${graphNodeLabel(pos.key)}节点`"` is the literal
- * text TemplateAuthoringView.vue's real `graphNodeLabel`/`nodeTypeLabel` wire into; the block below
- * proves what that WIRING actually PRODUCES once compiled and mounted — a real DOM read, not a
- * regex over source text.
+ * scan above pins that `:aria-label="canvasNodeAccName(pos.key)"` is the literal text
+ * TemplateAuthoringView.vue's real `nodeTypeLabel`/`canvasNodeByKey` wire into (via the
+ * corresponding component-local `canvasNodeAccName` helper — see that function's own doc comment
+ * in ApprovalFlowCanvas.vue); the block below proves what that WIRING actually PRODUCES once
+ * compiled and mounted — a real DOM read, not a regex over source text.
+ *
+ * FS-7 FIX-ROUND (2026-08-21, gate P2-1): the original `canvasNodeAccName` predecessor was a bare
+ * `编辑${graphNodeLabel(pos.key)}节点` template literal, and `graphNodeLabel` = `node.name?.trim()
+ * || nodeTypeLabel(node.type)` — the type label appeared ONLY on the unnamed `||` fallback. As
+ * soon as an author named a node (the normal production case), the accname lost all type
+ * information, even though the visible `.template-authoring__canvas-node-kind` bar is a
+ * non-contributing SIBLING of this `role="button"` selector (nothing an accname computation reads
+ * for THIS element). Mutation-proven at the gate (all seven differently-typed nodes given one
+ * shared name -> all seven accnames collapsed to one identical string; see
+ * "same-name / different-type graph" below for the now-permanent regression test). Fixed by
+ * composing BOTH type and name in the accname unconditionally when a name exists
+ * (`编辑<type>节点「<name>」`, the house 「」-quoting idiom for named entities — see
+ * `graphLayout.ts`'s `节点「${node.name}」`), falling back to the byte-identical prior string when
+ * unnamed AND the node is found. (The node-not-found branch is structurally unreachable in
+ * production — see `canvasNodeAccName`'s own doc comment in ApprovalFlowCanvas.vue — and
+ * deliberately does NOT reproduce the old `graphNodeLabel`'s generic `'流程节点'` placeholder there;
+ * this test suite only exercises found nodes, so that branch is untested here by design.)
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -53,14 +71,30 @@ describe('ApprovalFlowCanvas a11y (structural)', () => {
     )
   })
 
-  it('node selector exposes display-name accessible name and keyboard activation', () => {
+  it('node selector exposes a type-and-name accessible name and keyboard activation', () => {
     expect(CANVAS_SRC).toMatch(/role="button"/)
     expect(CANVAS_SRC).toMatch(/tabindex="0"/)
-    // Accessible name derived from graphNodeLabel (display name), not raw node key alone
-    expect(CANVAS_SRC).toMatch(/:aria-label="`编辑\$\{graphNodeLabel\(pos\.key\)\}节点`"/)
+    // Accessible name derived from canvasNodeAccName (type + display name), not raw node key alone,
+    // and not the old graphNodeLabel-only literal (P2-1 fix-round: must red on a regression back to
+    // the type-dropping predecessor, not just accept ANY aria-label binding here).
+    expect(CANVAS_SRC).toMatch(/:aria-label="canvasNodeAccName\(pos\.key\)"/)
+    expect(CANVAS_SRC).not.toMatch(/:aria-label="`编辑\$\{graphNodeLabel\(pos\.key\)\}节点`"/)
     expect(CANVAS_SRC).toMatch(/@keydown\.enter/)
     expect(CANVAS_SRC).toMatch(/@keydown\.space/)
     expect(CANVAS_SRC).toMatch(/:aria-pressed="selectedCanvasNode === pos\.key"/)
+  })
+
+  it('canvasNodeAccName composes BOTH the type label and the name when a name exists, and falls back to the type-only string when it does not', () => {
+    // Source-scan half of the P2-1 fix: pins the FUNCTION BODY shape (not just the binding site
+    // above) — a future edit that keeps the `:aria-label="canvasNodeAccName(pos.key)"` binding but
+    // guts the function back to name-only would slip past the binding-site pin alone.
+    const fnMatch = CANVAS_SRC.match(/function canvasNodeAccName\(nodeKey: string\): string \{[\s\S]*?\n\}/)
+    expect(fnMatch).not.toBeNull()
+    const fnBody = fnMatch![0]
+    expect(fnBody).toMatch(/nodeTypeLabel\(/)
+    expect(fnBody).toMatch(/\.name\?\.trim\(\)/)
+    // The named branch must interpolate BOTH typeLabel and name into one string, not choose one.
+    expect(fnBody).toMatch(/`编辑\$\{typeLabel\}节点「\$\{name\}」`/)
   })
 
   it('edge-insert menu items use business-language aria-labels (no edge keys)', () => {
@@ -358,15 +392,23 @@ describe('ApprovalFlowCanvas toolbar buttons — Element Plus default ring overr
 // the actual rendered nodes.
 //
 // UNIT BOUNDARY: ApprovalFlowCanvas.vue's own docstring calls it "pure presentation — parent owns
-// draft/history and all topology/command mutations." `graphNodeLabel` / `nodeTypeLabel` /
+// draft/history and all topology/command mutations." `nodeTypeLabel` / `canvasNodeByKey` /
 // `canvasNodeSummary` arrive as PROP FUNCTIONS from TemplateAuthoringView.vue, which is not
 // exported (private `<script setup>` locals) and so cannot be imported here. This block therefore
 // mounts the child in isolation and supplies fixture functions that MIRROR the real one-liners
-// byte-for-byte (`node.name?.trim() || nodeTypeLabel(node.type)`) — this proves "does this
-// component's own template correctly turn a `graphNodeLabel` contract into a per-node accname",
-// which combined with the source-scan above ("TemplateAuthoringView wires its REAL
-// `graphNodeLabel` — not some other computation — into this exact prop") closes the loop without
-// needing the full parent view's heavier router/store/API mock harness.
+// byte-for-byte — this proves "does this component's own `canvasNodeAccName` helper correctly turn
+// a `nodeTypeLabel` + `canvasNodeByKey(...)?.name` contract into a per-node accname", which
+// combined with the source-scan above ("TemplateAuthoringView wires its REAL `nodeTypeLabel` /
+// `canvasNodeByKey` — not some other computation — into these exact props") closes the loop
+// without needing the full parent view's heavier router/store/API mock harness.
+//
+// P2-1 FIX-ROUND NOTE: `canvasNodeAccName` (the production composition function this tier
+// exercises) reads `canvasNodeByKey(...)?.name` and `nodeTypeLabel(...)` directly — it no longer
+// calls the `graphNodeLabel` prop at all (that prop is still required by ApprovalFlowCanvas's
+// interface and still supplied below, but is dead weight for accname purposes post-fix; see the
+// comment on the fixture's `graphNodeLabel` binding). `NAMED`/`NODE_TYPE_LABELS` below remain the
+// source of the EXPECTED strings in every assertion; the mirror functions were never what made
+// those assertions correct.
 //
 // ACCNAME ALGORITHM, JSDOM-APPROXIMATED (`computeAccName` below): aria-labelledby text → aria-label
 // → visible text content (aria-hidden and inline display:none/visibility:hidden subtrees excluded).
@@ -428,14 +470,25 @@ describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM �
   // Author-given names, one distinct string per type, none of which is a substring of the node's
   // own raw key (`n_approval` etc.) or of any OTHER type's name — so "contains the node's own
   // name" and "does not leak the raw key" are both non-vacuous per type.
+  //
+  // P2-1 fix-round: ALSO, none of these is a substring of its OWN type's label
+  // (`NODE_TYPE_LABELS[type]`) — attacked-and-fixed against exactly this criterion
+  // (feedback_attack_your_own_criterion.md): the ORIGINAL names here (`'发起环节'`, `'总经理审批'`,
+  // `'资料办理'`, `'流程结束'`) each happened to CONTAIN their own type label as a trailing
+  // substring (`发起环节` ⊃ `发起`, `总经理审批` ⊃ `审批`, `资料办理` ⊃ `办理`, `流程结束` ⊃ `结束`)
+  // — reproduced empirically: mutating `canvasNodeAccName`'s named branch back to name-ONLY (no
+  // type label at all, the pre-fix shape) still left 4 of the 7 "ALSO carries the type label"
+  // assertions green, because the type label text was present by COINCIDENCE of the name's own
+  // wording, not because the composition actually emitted it. Renamed those four so the
+  // "ALSO carries the type label" assertion is a real, non-vacuous mechanism check for every type.
   const NAMED: Record<ApprovalNodeType, string> = {
-    start: '发起环节',
-    approval: '总经理审批',
+    start: '入口登记',
+    approval: '部门确认',
     cc: '知会人事',
     condition: '金额分支',
     parallel: '会签并行',
-    handler: '资料办理',
-    end: '流程结束',
+    handler: '现场处置',
+    end: '归档确认',
   }
 
   /** Walks `el`'s subtree, excluding aria-hidden and inline-hidden branches — the jsdom-approximated "visible text content" leg of computeAccName. */
@@ -499,6 +552,11 @@ describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM �
       nodeHeight: 76,
       minimapWidth: 200,
       minimapHeight: 120,
+      // Required by ApprovalFlowCanvas's prop interface, but P2-1 fix-round: the component's own
+      // accname computation (`canvasNodeAccName`) now reads `canvasNodeByKey(...)?.name` and
+      // `nodeTypeLabel(...)` directly and no longer calls this prop at all — kept here only to
+      // satisfy the required-prop type and because OTHER surfaces of this component may still use
+      // it in the future; it is not exercised by any accname assertion below.
       graphNodeLabel: (key: string) => graphNodeLabel(graph, key),
       // Deliberately EMPTY (not the real canvasNodeCardSummary, which never returns '') — an
       // adversarial fixture so the visible card text carries NO fallback content of its own.
@@ -578,8 +636,17 @@ describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM �
     labelSource.remove()
   })
 
+  it('fixture sanity: no NAMED[type] value contains its own type label as a substring (so the "ALSO carries the type label" checks below cannot pass vacuously off the name text alone)', () => {
+    for (const type of NODE_TYPES) {
+      expect(NAMED[type]).not.toContain(NODE_TYPE_LABELS[type])
+    }
+  })
+
   for (const type of NODE_TYPES) {
-    it(`${type} node card: named-graph accname is non-empty, contains the node's own name, and never leaks the raw key (values-free)`, () => {
+    // P2-1 fix-round: split into two INDEPENDENT `it()`s (not two `expect()`s in one) so a
+    // strip-one-mechanism mutation — dropping the type half of the composition, or dropping the
+    // name half — reds ONLY the one assertion whose mechanism it broke, not both, and not neither.
+    it(`${type} node card: named-graph accname contains the node's own name, and never leaks the raw key (values-free)`, () => {
       const key = `n_${type}`
       const accName = named.accNameByType.get(type)!
       expect(accName.length).toBeGreaterThan(0)
@@ -587,7 +654,24 @@ describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM �
       expect(accName).not.toContain(key)
     })
 
-    it(`${type} node card: unnamed-graph accname falls back to the exact type label ("编辑${NODE_TYPE_LABELS[type]}节点")`, () => {
+    // P2-1 fix-round: the type label must survive onto the NAMED branch too — before the fix,
+    // `graphNodeLabel(pos.key)` alone (`node.name?.trim() || nodeTypeLabel(node.type)`) meant the
+    // type only ever appeared on the unnamed `||` fallback, so this assertion is the one that would
+    // have caught the original defect directly (independent of the distinctness checks below).
+    it(`${type} node card: named-graph accname ALSO carries the type label (not just the name)`, () => {
+      const accName = named.accNameByType.get(type)!
+      expect(accName).toContain(NODE_TYPE_LABELS[type])
+    })
+
+    // Exact-shape pin, both mechanisms in one composed string — the two `it()`s above stay the
+    // discriminating mutation probes; this one pins the actual house-idiom format
+    // (`编辑<type>节点「<name>」`) so a reordering/reformatting regression is caught too.
+    it(`${type} node card: named-graph accname matches the exact composed format 编辑<type>节点「<name>」`, () => {
+      const accName = named.accNameByType.get(type)!
+      expect(accName).toBe(`编辑${NODE_TYPE_LABELS[type]}节点「${NAMED[type]}」`)
+    })
+
+    it(`${type} node card: unnamed-graph accname falls back to the exact type label ("编辑${NODE_TYPE_LABELS[type]}节点") — unchanged by the P2-1 fix`, () => {
       const accName = unnamed.accNameByType.get(type)!
       expect(accName).toBe(`编辑${NODE_TYPE_LABELS[type]}节点`)
     })
@@ -599,9 +683,43 @@ describe('ApprovalFlowCanvas node card accessible names (accname, mounted DOM �
     expect(new Set(values).size).toBe(NODE_TYPES.length)
   })
 
-  it('the seven named-graph accnames are mutually distinct', () => {
+  // Fixture-driven, NOT the load-bearing mechanism check (gate P3-1/P2-1 caveat, stated honestly
+  // rather than left implicit): this only passes because the NAMED fixture happens to supply seven
+  // distinct author-given names. The next test below is the mechanism-bearing one — same name,
+  // different types — and is what would actually have caught the original P2-1 defect (pre-fix, it
+  // reproduced as "expected 1 to be 7": all seven cards collapsed onto the identical accname
+  // `编辑复核节点` once the type half was dropped from the composition).
+  it('the seven named-graph accnames are mutually distinct (fixture-driven leg — see the same-name test below for the mechanism-bearing leg)', () => {
     const values = NODE_TYPES.map((type) => named.accNameByType.get(type)!)
     expect(new Set(values).size).toBe(NODE_TYPES.length)
+  })
+
+  // P2-1 fix-round mechanism test — the permanent regression form of the gate's mutation probe A.
+  // Pre-fix reproduction (gate report, restored sha256-identical): setting every node's name to the
+  // SAME string collapsed all seven accnames to one identical value ("expected 1 to be 7") while
+  // every per-type named/unnamed assertion above stayed green — proving those per-type assertions
+  // alone are not sufficient to catch a type-dropping regression when the fixture's names are
+  // already mutually distinct. This test removes that blind spot directly: distinctness here can
+  // ONLY come from the type label, because the name is deliberately held constant across all seven.
+  it('same-name / different-type graph still yields seven mutually distinct accnames — type is the sole discriminator when names collide (permanent regression test for gate P2-1)', async () => {
+    const SHARED_NAME = '复核'
+    const sameNameGraph: Partial<Record<ApprovalNodeType, string>> = {}
+    for (const type of NODE_TYPES) sameNameGraph[type] = SHARED_NAME
+    const mounted = await mountFixture(sameNameGraph)
+    try {
+      const values = NODE_TYPES.map((type) => mounted.accNameByType.get(type)!)
+      expect(values.every((v) => v.length > 0)).toBe(true)
+      expect(new Set(values).size).toBe(NODE_TYPES.length)
+      for (const type of NODE_TYPES) {
+        const accName = mounted.accNameByType.get(type)!
+        expect(accName).toContain(SHARED_NAME)
+        expect(accName).toContain(NODE_TYPE_LABELS[type])
+        expect(accName).toBe(`编辑${NODE_TYPE_LABELS[type]}节点「${SHARED_NAME}」`)
+      }
+    } finally {
+      mounted.app.unmount()
+      mounted.container.remove()
+    }
   })
 
   it('every node-card accname is carried by the aria-label attribute alone (matches the source-scan-pinned wiring, not a coincidental text-content match)', () => {
