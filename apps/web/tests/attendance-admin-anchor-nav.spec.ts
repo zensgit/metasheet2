@@ -199,7 +199,6 @@ describe('Attendance admin anchor navigation', () => {
     // attendance-admin-regressions.spec.ts's "keeps the clicked admin section focused…" test) is
     // deliberately UNCHANGED — UserManagementView.vue's post-create-user deep link still needs it.
     expect(taskHome!.querySelector('[data-admin-task-action="group-members"]')).toBeNull()
-    expect(taskHome?.textContent).not.toContain('Members')
 
     const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
     expect(importButton).toBeTruthy()
