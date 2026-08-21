@@ -322,42 +322,56 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       expect(ok.status, await ok.clone().text()).toBe(200)
     })
 
-    it('flag OFF: a rejecting action carrying attachmentIds succeeds unchanged (byte-for-byte no-op, G-12/§L9-D) — the SAME payload 400s once the flag is ON', async () => {
-      const adminToken = await authToken(`l9-admin-${RUN}`)
-      const requesterToken = await authToken(REQUESTER)
-      const approverToken = await authToken(APPROVER)
-      const templateId = await publishPlainTemplate(adminToken)
-      // Two independent instances, one dispatch each: `reject` finalizes an instance, so the OFF
-      // and ON legs cannot share one (the second dispatch would 404/409 on an already-decided
-      // instance, not discriminate on the guard at all).
-      const iidOff = await createInstance(requesterToken, templateId)
-      const iidOn = await createInstance(requesterToken, templateId)
-      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
-      let offRes: Response
-      try {
-        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
-        offRes = await jsonRequest(`/api/approvals/${iidOff}/actions`, approverToken, {
-          method: 'POST',
-          body: { action: 'reject', comment: 'off flag rejection', attachmentIds: ['att_whatever'] },
-        })
-      } finally {
-        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
-      }
-      expect(offRes.status, await offRes.clone().text()).toBe(200)
+    it.each(['reject', 'approve'] as const)(
+      'flag OFF: %s carrying attachmentIds succeeds unchanged (byte-for-byte no-op, G-12/§L9-D) — the SAME payload 400s once the flag is ON',
+      async (action) => {
+        const adminToken = await authToken(`l9-admin-${RUN}`)
+        const requesterToken = await authToken(REQUESTER)
+        const approverToken = await authToken(APPROVER)
+        const templateId = await publishPlainTemplate(adminToken)
+        // Two independent instances, one dispatch each: approve/reject both finalize an instance,
+        // so the OFF and ON legs cannot share one (the second dispatch would 404/409 on an
+        // already-decided instance, not discriminate on the guard at all).
+        const iidOff = await createInstance(requesterToken, templateId)
+        const iidOn = await createInstance(requesterToken, templateId)
+        const commentBody = action === 'reject' ? { comment: 'off flag rejection' } : {}
+        const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+        let offRes: Response
+        try {
+          delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+          offRes = await jsonRequest(`/api/approvals/${iidOff}/actions`, approverToken, {
+            method: 'POST',
+            body: { action, ...commentBody, attachmentIds: ['att_whatever'] },
+          })
+        } finally {
+          process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+        }
+        expect(offRes.status, await offRes.clone().text()).toBe(200)
 
-      const onRes = await jsonRequest(`/api/approvals/${iidOn}/actions`, approverToken, {
-        method: 'POST',
-        body: { action: 'reject', comment: 'on flag rejection', attachmentIds: ['att_whatever'] },
-      })
-      expect(onRes.status, await onRes.clone().text()).toBe(400)
-      const onBody = (await onRes.json()) as { error?: { code?: string } }
-      expect(onBody.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
-    })
+        const onCommentBody = action === 'reject' ? { comment: 'on flag rejection' } : {}
+        const onRes = await jsonRequest(`/api/approvals/${iidOn}/actions`, approverToken, {
+          method: 'POST',
+          body: { action, ...onCommentBody, attachmentIds: ['att_whatever'] },
+        })
+        expect(onRes.status, await onRes.clone().text()).toBe(400)
+        const onBody = (await onRes.json()) as { error?: { code?: string } }
+        expect(onBody.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+      },
+    )
   })
 
   // ===============================================================================================
-  // G-1 — process binding never touches form_snapshot; contrasted with a real handle+fieldWrites
-  // change on a SIBLING template in the same suite (proving the isolation is process-selected).
+  // G-1 — process binding never touches form_snapshot.
+  //
+  // P3-3 (gate-audit recording, corrected): this describe block does NOT contain a positive control
+  // proving the isolation is process-SELECTED (e.g. a sibling `handle`+`fieldWrites` action on the
+  // same or a twin instance, asserted to actually change `form_snapshot`, contrasted with the
+  // process action below that doesn't). An earlier version of this comment claimed such a control
+  // existed; it did not (`grep fieldWrites` over this file turns up comments only). The test below
+  // is a real negative assertion (process binding leaves the snapshot byte-identical + zero revision
+  // rows) but has no positive twin in this file demonstrating that a NON-process action on the same
+  // harness WOULD move those fields. Adding that positive control is owner-disposition work, not
+  // fixed in this round.
   // ===============================================================================================
   describe('G-1: process binding is form_snapshot-isolated', () => {
     it('a comment action with attachmentIds leaves form_snapshot byte-identical and writes ZERO field-revision rows', async () => {
@@ -700,7 +714,16 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       expect(bind.status, await bind.clone().text()).toBe(200)
     })
 
-    it('upload-time fail-fast: exceeding maxFilesPerAction (5) staged files for one instance/uploader is refused 413, count unaffected by coexisting huge form bytes', async () => {
+    // NOTE (P3-1, gate-audit recording): this asserts the SEQUENTIAL path only — each upload is
+    // awaited before the next fires, so `assertProcessUploadBudget`'s count is accurate at every
+    // check point and the 6th genuinely observes 5 already-staged files. It does NOT demonstrate a
+    // hard cap: the check is read-then-write with no lock, so N concurrent uploads racing the SAME
+    // budget can each observe a pre-upload count under the limit and each pass (TOCTOU-bypassable).
+    // That is the ratified position for this family, not a gap unique to this route — the shipped
+    // form-attachment route has no upload-time budget at all, and the reconciler's own docblock
+    // states parallel uploads can each pass the upload-time check. Bind-time re-check (G-5/G-6) is
+    // the authority; this upload-time leg is fail-fast-only, same status as `actorHasActiveSeatAtInstance`.
+    it('upload-time fail-fast (sequential only): the 6th of 6 SEQUENTIAL uploads for one instance/uploader is refused 413 once 5 are already staged; count unaffected by coexisting huge form bytes', async () => {
       const adminToken = await authToken(`l9-admin-${RUN}`)
       const requesterToken = await authToken(REQUESTER)
       const approverToken = await authToken(APPROVER)
