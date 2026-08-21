@@ -183,6 +183,32 @@ function promotionAssertsExactlyOne(execText) {
   return raises && guardsCounts && countsUsersById && countsAdminMembership && countsEmailMatch
 }
 
+// ---- P2-A (gate review 4): each conjunct of the 1/1/1 assertion is load-bearing ----
+// The gate neutered `e_count := 1;` (a constant assignment BEFORE the IF) and the whole suite
+// stayed green — the structural guard only matched the IF *text*, not the value feeding it. Close
+// that: (1) no count var may be assigned a constant (the exact mutation), and (2) each is assigned
+// by its correctly-SCOPED SELECT count, so neutering a conjunct's *computation* also reds here.
+// This runs in the hermetic obs-kit contract (required) lane — a regression to any arm is CI-caught.
+test('P2-A: no promotion count var is constant-assigned, and each is scoped correctly', () => {
+  const execText = scriptText
+  // (1) the gate's mutation shape — a constant assignment to any count var — is forbidden.
+  for (const v of ['u_count', 'm_count', 'e_count']) {
+    assert.doesNotMatch(
+      execText,
+      new RegExp(`\\b${v}\\s*:=\\s*\\d`),
+      `${v} must be computed by a SELECT count, never constant-assigned (this is exactly the gate-4 mutation that bypassed the assertion)`,
+    )
+  }
+  // (2) each conjunct's count is scoped to the verified id, and additionally: m_count to the admin
+  //     membership (the arm that catches the original fake-admin), e_count to the intended email.
+  assert.match(execText, /SELECT count\(\*\) INTO u_count FROM users WHERE id = uid;/, 'u_count: users by verified id')
+  assert.match(execText, /SELECT count\(\*\) INTO m_count FROM user_roles WHERE user_id = uid AND role_id = 'admin';/, "m_count: admin membership by id (the fake-admin arm)")
+  assert.match(execText, /SELECT count\(\*\) INTO e_count FROM users WHERE id = uid AND email = em;/, 'e_count: id-belongs-to-email')
+  // and the IF still guards all three as a conjunction that RAISEs.
+  assert.match(execText, /IF u_count <> 1 OR m_count <> 1 OR e_count <> 1 THEN/)
+  assert.match(execText, /RAISE EXCEPTION 'promotion assertion failed/)
+})
+
 // ---- P1 (privilege escalation): login-FIRST + promote-by-verified-id -------
 // The promotion must run only AFTER a successful login, and must be keyed on the
 // id that login returned — not an email lookup. This is a DATA-FLOW invariant, so
