@@ -1,12 +1,18 @@
 name: Approval real-DB acceptance (S1 instance readability)
 
-# EVIDENCE LANE for the Lock-10 (S1) canReadApprovalInstance real-DB acceptance suite
-# (tests/integration/approval-instance-readability-s1.db.test.ts) — arms 1 (requester), 2 (seat,
-# is_active-insensitive), 3 (past actor incl. policy_denied), 4 (CC target), the org_id column's
-# no-default posture (G-S1-12 partial), and the plm: defensive guard. No admin arm, no org pin, no
-# route/feed adoption — see the suite's own docblock for the exact §5.1 owner-confirm rows this
-# slice does not touch. Ephemeral first-party PostgreSQL container; no customer source, no
-# deployment, no flag change.
+# EVIDENCE LANE for the Lock-10 (S1) canReadApprovalInstance real-DB acceptance suites:
+#   - tests/integration/approval-instance-readability-s1.db.test.ts — the pure predicate, all FIVE
+#     arms (requester, seat is_active-insensitive, past actor incl. policy_denied, CC target,
+#     DB-backed admin) + the org pin (G-S1-1, G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial).
+#   - tests/integration/approval-instance-readability-s1-consumers.db.test.ts — CONSUMER adoption:
+#     detail/history pairing + the plm: spy-zero (G-S1-4, G-S1-5), and the metrics ACL substitution
+#     (G-S1-7).
+# The org pin ships DEFAULT OFF (APPROVAL_S1_ORG_PIN_ENABLED unset) — G-S1-3/G-S1-10 force it on
+# in-process around single assertions; nothing in this lane flips the shipped default.
+# G-S1-8 (feed⊆admission) is NOT in either suite — RECORDED-PENDING per Lock-10 §5.1.1, expected
+# red until the three named feed residuals are ruled; landing it here would be exactly the
+# "shipped green without having seen it red" hazard the gate table itself warns against.
+# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
@@ -34,8 +40,13 @@ on:
     # The `paths` filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-instance-readability-s1-consumers.db.test.ts'
       - 'packages/core-backend/tests/unit/approval-instance-readability-plm-id-agreement.test.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approval-metrics.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/routes/approval-history.ts'
@@ -48,8 +59,13 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-readability-s1.db.test.ts'
+      - 'packages/core-backend/tests/integration/approval-instance-readability-s1-consumers.db.test.ts'
       - 'packages/core-backend/tests/unit/approval-instance-readability-plm-id-agreement.test.ts'
       - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approval-metrics.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/src/routes/approvals.ts'
       - 'packages/core-backend/src/routes/approval-history.ts'
@@ -118,22 +134,23 @@ jobs:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: pnpm --filter @metasheet/core-backend db:migrate
 
-      - name: Run S1 instance-readability real-DB acceptance (whole file)
-        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+      - name: Run S1 instance-readability real-DB acceptance (whole files, both suites)
+        # WHOLE FILES, --reporter=verbose: a name filter matching zero tests would exit green and
         # hide regressions; verbose prints every collected test so an empty collection shows in
         # the log.
         run: >-
           pnpm --filter @metasheet/core-backend exec vitest
           --config vitest.integration.config.ts run
           tests/integration/approval-instance-readability-s1.db.test.ts
+          tests/integration/approval-instance-readability-s1-consumers.db.test.ts
           --reporter=verbose
 
       - name: Values-free evidence (this job)
         run: |
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
-            echo "suites=approval-instance-readability-s1.db.test.ts"
-            echo "scope=Lock-10 (S1) canReadApprovalInstance arms 1-4, no admin arm, no org pin, no route adoption"
+            echo "suites=approval-instance-readability-s1.db.test.ts,approval-instance-readability-s1-consumers.db.test.ts"
+            echo "scope=Lock-10 (S1) canReadApprovalInstance all 5 arms + org pin (default OFF); detail/history/metrics consumer adoption"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"

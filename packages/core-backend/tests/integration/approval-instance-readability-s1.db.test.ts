@@ -463,7 +463,19 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
       )
       expect((records.rows as Array<{ action: string }>).some((r) => r.action === APPROVAL_POLICY_DENIED_ACTION)).toBe(true)
 
-      // The refused seat-holder STILL reads the instance — arm 3 admits via the policy_denied row.
+      // MUTATION-EFFECTIVENESS FIX: a refusal never removes the assignment (the choke rolls back
+      // everything except the denial row), so `seatId` is STILL arm-2-admitted here regardless of
+      // arm 3 — asserting readability at this point would be true even with policy_denied EXCLUDED,
+      // making the "arm 3 admits it" claim untested (feedback_ineffective_mutation_looks_like_a_
+      // useless_test). Isolate arm 3 as the ONLY surviving reason: delete the seat row (simulates
+      // a later reassignment/removal — the audit trail's policy_denied row is what remains), then
+      // assert readability. This is what actually reds when the policy_denied exclusion is reverted.
+      await pool().query(`DELETE FROM approval_assignments WHERE instance_id = $1 AND assignee_id = $2`, [instanceId, seatId])
+      const seatCheck = await pool().query(`SELECT 1 FROM approval_assignments WHERE instance_id = $1 AND assignee_id = $2`, [instanceId, seatId])
+      expect(seatCheck.rows.length, 'precondition: no assignment row must remain for this actor').toBe(0)
+
+      // The refused actor, now with NO seat at all, STILL reads the instance — arm 3 admits via
+      // the (real-dispatch-written) policy_denied row, and ONLY arm 3.
       await expect(canReadApprovalInstance(pool(), seatId, instanceId)).resolves.toBe(true)
     })
 
