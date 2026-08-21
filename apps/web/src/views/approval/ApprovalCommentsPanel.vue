@@ -48,7 +48,7 @@
       :updating-ids="comments.updatingIds.value"
       :deleting-ids="comments.deletingIds.value"
       :current-user-id="currentUserId"
-      :mention-candidates="mentionCandidatesForPanel"
+      :mention-suggestions="mentionSuggestionsForPanel"
       :composer-initial-mentions="composerInitialMentions"
       @submit="handleSubmit"
       @reply="handleReplyStart"
@@ -64,7 +64,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import MetaCommentsPanel, { type MentionCandidateInput } from '../../shared/comments/components/MetaCommentsPanel.vue'
+import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
 import { useMultitableComments } from '../../shared/comments/composables/useMultitableComments'
 import type { MetaCommentMentionSuggestion } from '../../shared/comments/types'
 import {
@@ -145,13 +145,45 @@ const commentsForPanel = computed(() => comments.comments.value.map((c) => ({
   authorName: authorDisplayName.value[c.authorId] || c.authorId,
 })))
 
-const mentionCandidatesForPanel = computed<MentionCandidateInput[]>(() => (
-  mentionCandidates.value.map((candidate) => ({
-    userId: candidate.id,
-    displayName: candidate.name.trim(),
-    secondaryLabel: candidate.email || null,
-  }))
-))
+/**
+ * Adversarial-review finding (2026-08-22, post-push): setting `authorName` above closes the
+ * THREAD LIST's raw-id fallback (kit :384), but it simultaneously ARMS a SECOND one in the kit's
+ * OWN `defaultMentionSuggestions` (only reachable from the composer's @mention DROPDOWN, a
+ * separate render surface `commentsForPanel`'s own test never opened): kit :385 sets
+ * `subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId :
+ * undefined` — since this wrapper's `authorName` is ALWAYS set and ALWAYS differs from
+ * `authorId`, that condition is unconditionally true, so the dropdown would show the RAW author
+ * id as every suggestion's subtitle. Kit :378 has the SAME class of leak for
+ * `props.mentionCandidates` whose `displayName` is blank/whitespace (falls back to
+ * `candidate.userId`).
+ *
+ * Fix: do NOT feed `mentionCandidates` to the kit at all (removes :378's leak surface entirely —
+ * no reliance on internal dedup ordering to suppress it) and supply OUR OWN, already values-free
+ * `mention-suggestions` covering every author + candidate id. The kit's `mentionSuggestions`
+ * computed prepends `props.mentionSuggestions` before its own `defaultMentionSuggestions` and
+ * dedupes by id keeping the FIRST occurrence — but this file no longer depends on that ordering
+ * for correctness, since `defaultMentionSuggestions`'s OWN candidate-derived half is now fed
+ * nothing (empty `mentionCandidates` prop) and its author-derived half, while still computed
+ * internally by the kit, is entirely SUPERSEDED by our id-identical, subtitle:undefined entries
+ * below before it ever reaches the dropdown.
+ */
+const mentionSuggestionsForPanel = computed<MetaCommentMentionSuggestion[]>(() => {
+  const seen = new Set<string>()
+  const out: MetaCommentMentionSuggestion[] = []
+  for (const c of comments.comments.value) {
+    if (!c.authorId || seen.has(c.authorId)) continue
+    seen.add(c.authorId)
+    out.push({ id: c.authorId, label: authorDisplayName.value[c.authorId] || c.authorId, subtitle: undefined })
+  }
+  mentionCandidates.value.forEach((candidate, index) => {
+    if (!candidate.id || seen.has(candidate.id)) return
+    seen.add(candidate.id)
+    // Same values-free-ordinal discipline as authorDisplayName above — never the raw id.
+    const label = candidate.name.trim() || `成员 ${index + 1}`
+    out.push({ id: candidate.id, label, subtitle: candidate.email || undefined })
+  })
+  return out
+})
 
 // -----------------------------------------------------------------------------------------------
 // mention token extraction for edit prefill (draft already carries `@[Label](id)` tokens

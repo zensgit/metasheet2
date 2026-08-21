@@ -249,3 +249,46 @@ describe('ApprovalCommentsPanel — delete flow re-hydrates the tombstone (appro
     expect(container.textContent).toContain('This comment was deleted')
   })
 })
+
+describe('ApprovalCommentsPanel — member-display-identity guard covers the MENTION DROPDOWN too (not just the thread list)', () => {
+  // The kit's own mention-suggestion dropdown (MetaCommentComposer.vue) is a SEPARATE render
+  // surface from the thread list, only mounted once the composer's `showSuggestions` computed
+  // goes true (draft ends in `@...`). It has TWO of its own raw-id fallback paths the earlier
+  // "never renders a raw author id" test above never exercises (it never opens the dropdown):
+  //   - kit :378 `defaultMentionSuggestions`'s candidate label: falls back to the raw
+  //     `candidate.userId` when `displayName` is blank/whitespace.
+  //   - kit :385 `defaultMentionSuggestions`'s author-derived `subtitle`: renders the raw
+  //     `comment.authorId` WHENEVER `authorName` is set and differs from `authorId` — which is
+  //     ALWAYS true here, because this wrapper's own identity guard always sets a resolved-or-
+  //     ordinal `authorName`. Setting authorName (the fix for :384/the thread list) is exactly
+  //     what ARMS :385's fallback for the mention dropdown. The wrapper must therefore supply its
+  //     OWN `:mention-suggestions` (id-keyed dedup priority over the kit's own
+  //     defaultMentionSuggestions — see MetaCommentsPanel.vue's `mentionSuggestions` computed)
+  //     rather than relying on `:mention-candidates` + the kit's internal derivation alone.
+  it('opening the @mention dropdown never shows a raw author id or a raw candidate id — a blank-named candidate gets a 成员 N ordinal, an unresolved author gets one too', async () => {
+    mentionCandidatesMock.mockResolvedValue([
+      { id: 'raw_candidate_id_marker_5521', name: '   ', email: 'blank-name@x.io' },
+      { id: 'raw_candidate_id_marker_6633', name: 'Real Candidate Name', email: '' },
+    ])
+    listCommentsMock.mockResolvedValue({
+      comments: [comment({ id: 'c1', authorId: 'raw_author_id_marker_4471', content: 'root' })],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'someone_else' })
+    await flushUi()
+
+    const textarea = container.querySelector('textarea')!
+    textarea.value = '@'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const dropdown = container.querySelector('[role="listbox"]')
+    expect(dropdown, 'the mention dropdown did not open — the test would pass vacuously without this').toBeTruthy()
+    const dropdownText = dropdown!.textContent ?? ''
+
+    expect(dropdownText).not.toContain('raw_author_id_marker_4471')
+    expect(dropdownText).not.toContain('raw_candidate_id_marker_5521')
+    // The blank-name candidate gets an ordinal (position among mention CANDIDATES, 1-indexed).
+    expect(dropdownText).toContain('成员 1')
+    expect(dropdownText).toContain('Real Candidate Name')
+  })
+})

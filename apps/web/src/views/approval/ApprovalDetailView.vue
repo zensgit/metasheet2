@@ -220,20 +220,6 @@
           <el-empty v-else description="暂无表单数据" :image-size="80" />
         </div>
 
-        <!-- 全文评论 (S3b): the shared comments kit, wired to the S2 approval-comments endpoints.
-             Its own sibling section (not gated by activeDetailTab, same "anchor-style nav scrolls
-             an always-rendered region" convention as 审批详情/审批记录 below) so the scroll ref
-             target exists on first click; the PANEL ITSELF only mounts (and only then makes its
-             first fetch) once `commentsActivated` flips true — see scrollToDetailSection. -->
-        <div v-if="!isMobileLayout" ref="commentsSectionRef" class="approval-detail__comments" data-testid="approval-detail-comments-section">
-          <h2>全文评论</h2>
-          <ApprovalCommentsPanel
-            v-if="commentsActivated"
-            :instance-id="(route.params.id as string)"
-            :current-user-id="currentUserId"
-          />
-        </div>
-
         <!-- Right: history timeline -->
         <div ref="timelineSectionRef" class="approval-detail__timeline">
           <!-- UI-6 (master §4 UI-6 / P5): anchor-style section nav — chrome only, no new
@@ -484,6 +470,26 @@
               </span>
             </div>
           </div>
+        </div>
+
+        <!-- 全文评论 (S3b): the shared comments kit, wired to the S2 approval-comments endpoints.
+             Own sibling section, FULL-WIDTH (grid-column 1/-1, see the stylesheet below) below the
+             two-column 审批详情/审批记录 row — same "anchor-style nav scrolls an always-rendered
+             region" convention as those two, so the scroll ref target exists on first click; the
+             PANEL ITSELF only mounts (and only then makes its first fetch) once
+             `commentsActivated` flips true — see scrollToDetailSection. Placed AFTER, not
+             between, `.approval-detail__form`/`.approval-detail__timeline` in DOM order — a
+             three-item child of a 2-column `grid-auto-flow: row` (sparse, non-dense) grid placed
+             BETWEEN them would instead push the timeline into the form's own column on a second
+             row, since a later full-span item cannot backfill an earlier skipped cell under
+             sparse packing. -->
+        <div v-if="!isMobileLayout" ref="commentsSectionRef" class="approval-detail__comments" data-testid="approval-detail-comments-section">
+          <h2>全文评论</h2>
+          <ApprovalCommentsPanel
+            v-if="commentsActivated"
+            :instance-id="(route.params.id as string)"
+            :current-user-id="currentUserId"
+          />
         </div>
       </div>
 
@@ -2439,13 +2445,21 @@ watch(
 }
 
 .approval-detail__form,
-.approval-detail__timeline {
+.approval-detail__timeline,
+.approval-detail__comments {
   min-width: 0;
   padding: var(--ms-space-5);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
   box-shadow: var(--ms-shadow-card);
+}
+
+/* S3b: full-width row below the 审批详情/审批记录 two-column row — see the template comment on
+   this section for why it is a THIRD, full-span grid child rather than living between the other
+   two (sparse `grid-auto-flow: row` cannot backfill an earlier skipped cell for a later item). */
+.approval-detail__comments {
+  grid-column: 1 / -1;
 }
 
 .approval-detail__actor-avatar {
@@ -2464,7 +2478,8 @@ watch(
 }
 
 .approval-detail__form h2,
-.approval-detail__timeline h2 {
+.approval-detail__timeline h2,
+.approval-detail__comments h2 {
   margin: 0 0 var(--ms-space-4);
   color: var(--ms-text-1);
   font-size: var(--ms-font-size-section-title);
