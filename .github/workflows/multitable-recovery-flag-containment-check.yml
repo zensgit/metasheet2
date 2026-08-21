@@ -170,7 +170,7 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE"
-          SCHEMA_HELPER_SHA256="d8e8669a0e027480edd32703fa6b014e9e23124d4ef28293fab3d428c505dd00"
+          SCHEMA_HELPER_SHA256="47050f8c93c3d70b699242f183a01e31b61c196dd617bb8d401dcece4b21b4da"
           SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           fail=0
           checked=0
