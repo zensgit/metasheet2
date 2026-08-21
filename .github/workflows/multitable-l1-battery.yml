@@ -49,24 +49,42 @@ run-name: "Multitable L1 Battery (staging): ${{ inputs.intent }}"
 #     required check greps every workflow for that).
 #   - The admin password never appears as a literal `docker exec -e VAR=value` argument
 #     (that would put it in the deploy host's own `ps` output for as long as the exec
-#     runs). It is staged as a chmod-600 file on the runner, scp'd to a chmod-700 per-run
-#     directory on the deploy host, `docker cp`'d into the backend container, and only
-#     turned into the BATTERY_ADMIN_* env vars *inside* the container by a `cat`-and-
-#     export wrapper — so the value only ever exists as process environ, never as argv,
-#     on either host.
-#   - Credential lifecycle (staged → used → scrubbed): the email/password files above are
-#     STAGED on the deploy host (stage-creds) and in the container (battery step's `docker
-#     cp`), then USED for exactly one run. Cleanup does NOT rely solely on the battery
-#     step's own best-effort in-script `rm -rf` (lines inside its REMOTE heredoc, kept as
-#     defense in depth) — that path is skipped entirely by a cancelled run, an SSH drop, a
-#     runner kill, or any remote-script failure before those lines run. A dedicated,
-#     always()-gated `scrub-creds` step (id: scrub-creds, placed after residue-check) is
-#     the actual backstop: it removes the CURRENT run's host + in-container secrets dirs
-#     unconditionally, additionally SWEEPS both locations for STALE (>24h) secrets dirs
-#     left by any earlier crashed run, verifies afterward that nothing remains, and — unlike
-#     the battery step — is NOT continue-on-error: a scrub failure (verification finds
-#     residue, or removal errors) FAILS THE JOB. A host with stranded admin credentials is
-#     worse than a red job.
+#     runs), and — owner-review P1, 2026-08-21 — it is never written into the backend
+#     container either. It is staged as a chmod-600 file on the runner, scp'd to a
+#     chmod-700 per-run directory on the deploy host, and from there PIPED ON STDIN to
+#     `docker exec -i` as a two-line `KEY=<base64>` blob that the container-side wrapper
+#     reads with `read`, decodes, and exports as BATTERY_ADMIN_* IN-PROCESS. The blob is
+#     assembled with redirections only, so the value exists as a file only on the two
+#     hosts (both scrubbed), and inside the container only as process environ — never as
+#     argv, and never as a container file.
+#   - NO SECRET IS EVER `docker cp`'d INTO THE CONTAINER. This is the P1 the owner found
+#     and proved with real Docker: the previous implementation copied the email/password
+#     into `/tmp/o2bat-creds-<stamp>/` inside the container, which puts them in the
+#     container's WRITABLE LAYER, where they OUTLIVE the run. A stopped container is
+#     absent from `docker ps` — so the scrub step below skipped its in-container branch
+#     and still printed `VERDICT: PASS` — yet
+#     `docker cp <stopped-container>:/tmp/o2bat-creds-<stamp>/password -` still returns
+#     the password bytes. Stdin-only ingestion removes the persistence at its source:
+#     there is no in-container credential for a stopped or killed container to strand.
+#     The only `docker cp` left in this workflow copies the (non-secret) evidence JSON
+#     OUT of the container; a container-prefixed cp DESTINATION is a contract violation.
+#   - Credential lifecycle (staged → used → scrubbed): the email/password files are
+#     STAGED on the runner and on the deploy host (stage-creds) only — never in the
+#     container — then USED for exactly one run. Cleanup does NOT rely solely on the
+#     battery step's own best-effort in-script `rm -rf` (lines inside its REMOTE heredoc,
+#     kept as defense in depth) — that path is skipped entirely by a cancelled run, an SSH
+#     drop, a runner kill, or any remote-script failure before those lines run. A
+#     dedicated, always()-gated `scrub-creds` step (id: scrub-creds, placed after
+#     residue-check) is the actual backstop: it removes the CURRENT run's host secrets dir
+#     unconditionally, SWEEPS the host for STALE (>24h) secrets dirs left by any earlier
+#     crashed run, and PROVES — state-independently — that no in-container credential path
+#     exists. That in-container proof is deliberately NOT gated on `docker ps`: it uses
+#     `docker cp`, which reads a STOPPED container's writable layer (where `docker exec`
+#     refuses), behind a `/etc/hostname` positive control and a docker-daemon liveness
+#     control, so an unreachable daemon or an unusable probe FAILS instead of masquerading
+#     as "absent". Unlike the battery step, this step is NOT continue-on-error: a scrub
+#     failure (verification finds residue, removal errors, or absence cannot be PROVEN)
+#     FAILS THE JOB. A host with stranded admin credentials is worse than a red job.
 #   - Producer failure propagates through every grep: the battery's real exit code is
 #     captured via `${PIPESTATUS[0]}` on the ssh invocation (never trusted to a
 #     downstream `grep`'s own exit status), and a captured `rc=0` that carries no
@@ -93,7 +111,10 @@ run-name: "Multitable L1 Battery (staging): ${{ inputs.intent }}"
 #      `http://127.0.0.1:<PORT>` (PORT read from the container's own env, falling back
 #      to 8900 — the value baked into Dockerfile.backend / docker-compose.app.staging.yml).
 #   3. env BATTERY_ADMIN_EMAIL / BATTERY_ADMIN_PASSWORD — set by this workflow from the
-#      two staged secret files, exported inside the container (see guard rails above).
+#      two staged secret files, which are piped to `docker exec -i` on STDIN and exported
+#      by a container-side wrapper IN-PROCESS (see guard rails above). The battery itself
+#      is unchanged: it still reads `env.BATTERY_ADMIN_EMAIL` / `env.BATTERY_ADMIN_PASSWORD`
+#      and knows nothing about how they got there. Its own stdin is `/dev/null`.
 #   4. `--out <path>` — the battery writes its evidence JSON to exactly the path given;
 #      this workflow supplies a per-run path inside the container and `docker cp`'s it
 #      back out.
@@ -353,26 +374,101 @@ jobs:
           port="${port:-8900}"
           app_url="http://127.0.0.1:${port}"
 
-          email_in_container="/tmp/o2bat-creds-${RUN_STAMP}/email"
-          password_in_container="/tmp/o2bat-creds-${RUN_STAMP}/password"
           evidence_in_container="/tmp/o2bat-evidence-${RUN_STAMP}.json"
 
-          docker exec "$CONTAINER" mkdir -p "/tmp/o2bat-creds-${RUN_STAMP}"
-          docker cp "${REMOTE_SECRETS_DIR}/email" "${CONTAINER}:${email_in_container}"
-          docker cp "${REMOTE_SECRETS_DIR}/password" "${CONTAINER}:${password_in_container}"
+          # ---- credential ingestion: STDIN ONLY, never the container filesystem ------
+          # Owner-review P1 (2026-08-21). This used to be:
+          #     docker exec "$CONTAINER" mkdir -p "/tmp/o2bat-creds-${RUN_STAMP}"
+          #     docker cp "${REMOTE_SECRETS_DIR}/email"    "${CONTAINER}:.../email"
+          #     docker cp "${REMOTE_SECRETS_DIR}/password" "${CONTAINER}:.../password"
+          # which writes the staging admin password into the container's WRITABLE LAYER,
+          # where it outlives the process. Proven with real Docker: after `docker stop`
+          # the container is absent from `docker ps` (so the scrub step's gate skipped it
+          # and still printed VERDICT: PASS) and `docker exec` refuses — yet
+          # `docker cp <stopped>:/tmp/o2bat-creds-<stamp>/password -` still returns the
+          # password bytes. So the copy is gone: nothing is written into the container.
+          #
+          # The two values are piped to `docker exec -i` on STDIN as a two-line
+          # `KEY=<base64>` blob and become process environ IN-PROCESS inside the
+          # container. base64 is an ENCODING, not a protection — it is there so each
+          # value occupies exactly one line and survives byte-exact (a password may
+          # contain spaces, quotes, tabs, or newlines). The protection is that the bytes
+          # never touch a container filesystem and never appear in an argv: the blob is
+          # assembled with redirections and shell builtins only, so no secret is ever a
+          # command-line argument on the deploy host either.
+          if [[ ! -s "${REMOTE_SECRETS_DIR}/email" || ! -s "${REMOTE_SECRETS_DIR}/password" ]]; then
+            msg="VERDICT: FAIL — staged credential file missing or empty on the deploy host (${REMOTE_SECRETS_DIR}) — refusing to run the battery with an empty credential"
+            echo "$msg" > "${OUTPUT_DIR}/battery-stdout.log"
+            echo "$msg" > "${OUTPUT_DIR}/verdict.txt"
+            echo "1" > "${OUTPUT_DIR}/battery.rc"
+            exit 2
+          fi
 
-          # The admin password is read from the copied-in file and exported INSIDE the
-          # container by this wrapper — it never appears as a literal `docker exec -e
-          # VAR=value` argument (which would sit in the deploy host's own `ps` output for
-          # as long as the exec runs). Only file PATHS (non-secret) are passed as argv.
-          docker exec "$CONTAINER" sh -c '
+          {
+            printf 'BATTERY_ADMIN_EMAIL_B64='
+            base64 < "${REMOTE_SECRETS_DIR}/email" | tr -d '\n'
+            printf '\nBATTERY_ADMIN_PASSWORD_B64='
+            base64 < "${REMOTE_SECRETS_DIR}/password" | tr -d '\n'
+            printf '\n'
+          } | docker exec -i "$CONTAINER" sh -c '
             set -eu
-            export BATTERY_ADMIN_EMAIL="$(cat "$1")"
-            export BATTERY_ADMIN_PASSWORD="$(cat "$2")"
-            export APP_URL="$3"
-            exec node scripts/ops/multitable-l1-battery.mjs --out "$4"
-          ' sh "$email_in_container" "$password_in_container" "$app_url" "$evidence_in_container" \
+            # Credentials arrive on STDIN as exactly two KEY=<base64> lines. They are
+            # decoded into shell variables and exported here, in this process — never
+            # written to any file, so a stopped or killed container has no in-container
+            # credential to strand. Only non-secret values (APP_URL, the evidence path)
+            # are passed as argv.
+            # Each `read` is checked explicitly. Left bare, a short stream would abort
+            # under `set -e` with a bare exit 1 and NO message — fail-closed, but not
+            # diagnosable, which on a credential path is its own cost.
+            if ! IFS= read -r line_email; then
+              echo "battery wrapper: credential stream ended before the email line" >&2
+              exit 90
+            fi
+            if ! IFS= read -r line_password; then
+              echo "battery wrapper: credential stream ended before the password line" >&2
+              exit 90
+            fi
+            case "$line_email" in
+              BATTERY_ADMIN_EMAIL_B64=*) ;;
+              *) echo "battery wrapper: malformed credential stream (email line)" >&2; exit 90 ;;
+            esac
+            case "$line_password" in
+              BATTERY_ADMIN_PASSWORD_B64=*) ;;
+              *) echo "battery wrapper: malformed credential stream (password line)" >&2; exit 90 ;;
+            esac
+            e_b64="${line_email#BATTERY_ADMIN_EMAIL_B64=}"
+            p_b64="${line_password#BATTERY_ADMIN_PASSWORD_B64=}"
+            # The trailing X is appended INSIDE the substitution and stripped right after,
+            # so a value that legitimately ends in a newline survives byte-exact; command
+            # substitution on its own eats every trailing newline.
+            # The `|| true` is load-bearing: `set -e` is inherited by the command
+            # substitution subshell, so without it a failing `base64 -d` kills the subshell
+            # BEFORE `printf X`, and the whole wrapper dies with a bare exit 1 and no
+            # message. With it, a decode failure yields an empty value and falls through to
+            # the explicit, diagnosable refusal below.
+            BATTERY_ADMIN_EMAIL="$(printf %s "$e_b64" | base64 -d 2>/dev/null || true; printf X)"
+            BATTERY_ADMIN_EMAIL="${BATTERY_ADMIN_EMAIL%X}"
+            BATTERY_ADMIN_PASSWORD="$(printf %s "$p_b64" | base64 -d 2>/dev/null || true; printf X)"
+            BATTERY_ADMIN_PASSWORD="${BATTERY_ADMIN_PASSWORD%X}"
+            # Fail-closed. A missing base64 binary or a corrupt blob yields an EMPTY
+            # value, and an empty credential must never be handed to the battery as if it
+            # were real (the battery would report NOT_ARMED, or worse, attempt a login
+            # with an empty password). The runner already asserted both staged files
+            # non-empty, so empty here means the transport broke.
+            if [ -z "$BATTERY_ADMIN_EMAIL" ] || [ -z "$BATTERY_ADMIN_PASSWORD" ]; then
+              echo "battery wrapper: credential decode produced an empty value - refusing to run" >&2
+              exit 91
+            fi
+            unset line_email line_password e_b64 p_b64
+            export BATTERY_ADMIN_EMAIL BATTERY_ADMIN_PASSWORD
+            export APP_URL="$1"
+            # </dev/null: the battery must take its credentials from the environ this
+            # wrapper just set, and must never be able to read the credential stream.
+            exec node scripts/ops/multitable-l1-battery.mjs --out "$2" </dev/null
+          ' sh "$app_url" "$evidence_in_container" \
             > "${OUTPUT_DIR}/battery-stdout.log" 2>&1
+          # `set -o pipefail` is in force, so this is the rightmost non-zero status in the
+          # pipeline: a broken blob assembly on the host side cannot be reported as a pass.
           battery_rc=$?
           echo "$battery_rc" > "${OUTPUT_DIR}/battery.rc"
 
@@ -380,9 +476,13 @@ jobs:
             >> "${OUTPUT_DIR}/battery-stdout.log" 2>&1 \
             || echo "[warn] could not copy evidence JSON out of the container (battery_rc=${battery_rc})" >> "${OUTPUT_DIR}/battery-stdout.log"
 
-          # Best-effort per-run scratch cleanup (in-container creds/evidence + the host-
-          # side creds dir). Never touches anything outside these per-run paths.
-          docker exec "$CONTAINER" rm -rf "/tmp/o2bat-creds-${RUN_STAMP}" "$evidence_in_container" >/dev/null 2>&1 || true
+          # Best-effort per-run scratch cleanup. There is no in-container CREDENTIAL dir
+          # to remove any more (stdin-only ingestion never creates one); the only
+          # in-container per-run artifact left is the evidence JSON, which carries no
+          # credential — the battery redacts DATABASE_URL, the admin password and the
+          # synthetic password from it, and the same file is deliberately published as
+          # this run's CI artifact. Never touches anything outside these per-run paths.
+          docker exec "$CONTAINER" rm -f "$evidence_in_container" >/dev/null 2>&1 || true
           rm -rf "$REMOTE_SECRETS_DIR" >/dev/null 2>&1 || true
 
           grep -E '^VERDICT:' "${OUTPUT_DIR}/battery-stdout.log" > "${OUTPUT_DIR}/verdict.txt" \
@@ -531,16 +631,83 @@ jobs:
             log "no current-run REMOTE_SECRETS_DIR (stage-creds did not reach the point of creating one) — nothing to remove on host for this run"
           fi
 
-          # ---- current run: in-container secrets dir -------------------------------
-          running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
-          container_up=0
-          if printf '%s\n' "$running" | grep -qxF "$CONTAINER"; then
-            container_up=1
-            container_creds_dir="/tmp/o2bat-creds-${RUN_STAMP}"
-            log "removing current-run in-container secrets dir: ${container_creds_dir}"
-            docker exec "$CONTAINER" rm -rf "$container_creds_dir" >/dev/null 2>&1 || true
+          # ---- docker daemon liveness: the control for EVERY claim below -------------
+          # Every "no in-container credential" statement below is a POSITIVE claim. A
+          # docker command that fails for an unrelated reason (daemon down, socket
+          # permissions, binary missing) must never be readable as "absent" — that is the
+          # same error-absence shape the ABSENT/PRESENT probe already fail-closes on. So
+          # probe the daemon FIRST; if it is unreachable, FAIL rather than assert absence.
+          docker_ok=0
+          if docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+            docker_ok=1
           else
-            log "container '${CONTAINER}' is not running — nothing to scrub inside a dead container"
+            log "VERIFY-FAIL: docker daemon is unreachable on the deploy host — in-container credential absence CANNOT be asserted"
+            fail=1
+          fi
+
+          # ---- current run: in-container credential residue (STATE-INDEPENDENT) ------
+          # Owner-review P1 (2026-08-21). This branch used to be gated on `docker ps`:
+          # if the container was not RUNNING it logged "nothing to scrub inside a dead
+          # container" and the step still printed VERDICT: PASS. That was false. A
+          # stopped container is absent from `docker ps`, but its WRITABLE LAYER is
+          # intact, and the previous ingestion had `docker cp`'d the admin password into
+          # it — proven with real Docker:
+          #     docker cp <stopped-container>:/tmp/o2bat-creds-<stamp>/password -
+          # still returns the password bytes while `docker exec` refuses.
+          # The battery step no longer copies any credential in (stdin-only ingestion),
+          # so NO /tmp/o2bat-creds-* path may exist. The check below PROVES that, using
+          # `docker cp` — which reads a non-running container's writable layer — so it is
+          # valid for a stopped/created/exited container, not just a running one.
+          container_present=0
+          container_state=""
+          if [[ "$docker_ok" == "1" ]]; then
+            if docker inspect --type container "$CONTAINER" >/dev/null 2>&1; then
+              container_present=1
+              container_state="$(docker inspect --type container -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null || true)"
+              if [[ -z "$container_state" ]]; then
+                log "VERIFY-FAIL: container '${CONTAINER}' exists but its state probe returned nothing — cannot assert anything about its writable layer"
+                fail=1
+              else
+                log "container '${CONTAINER}' state=${container_state}"
+              fi
+            else
+              # The daemon IS reachable and reports no such container. Removing a
+              # container destroys its writable layer with it, so no in-container
+              # credential can survive. That is a positive fact discriminated by the
+              # daemon control above, not an unverified assumption.
+              log "container '${CONTAINER}' does not exist (docker daemon reachable, no such container) — its writable layer was destroyed with it; no in-container credential can persist"
+            fi
+          fi
+
+          container_up=0
+          if [[ "$container_state" == "running" ]]; then
+            container_up=1
+          fi
+
+          if [[ "$container_present" == "1" ]]; then
+            container_creds_dir="/tmp/o2bat-creds-${RUN_STAMP}"
+            # Positive control FIRST: prove `docker cp` can read THIS container in ITS
+            # CURRENT state, using a path Docker guarantees exists. Without it, a daemon
+            # or permission flake would make the absence probe below fail and look
+            # exactly like "the credential path is absent".
+            if docker cp "${CONTAINER}:/etc/hostname" - >/dev/null 2>&1; then
+              log "docker cp probe usable against '${CONTAINER}' (state=${container_state}) — control path /etc/hostname read back from its writable layer"
+              if docker cp "${CONTAINER}:${container_creds_dir}" - >/dev/null 2>&1; then
+                log "VERIFY-FAIL: in-container credential path EXISTS in the writable layer: ${container_creds_dir} — stdin-only ingestion must never create one"
+                fail=1
+                if [[ "$container_up" == "1" ]]; then
+                  docker exec "$CONTAINER" rm -rf "$container_creds_dir" >/dev/null 2>&1 || true
+                  log "removal attempted via docker exec (container is running); the job still FAILS so the regression is not hidden by a successful cleanup"
+                else
+                  log "container is ${container_state} (not running) — the path cannot be removed without starting it; failing rather than reporting PASS"
+                fi
+              else
+                log "in-container credential path absent, PROVEN by positive-controlled docker cp (valid for a non-running container too): ${container_creds_dir}"
+              fi
+            else
+              log "VERIFY-FAIL: docker cp cannot read container '${CONTAINER}' (state=${container_state}) even for a control path that must exist — the in-container residue probe is unusable, so absence CANNOT be asserted"
+              fail=1
+            fi
           fi
 
           # ---- stale sweep (>24h) — host --------------------------------------------
@@ -550,7 +717,17 @@ jobs:
           done
           find /tmp -maxdepth 1 -name 'l1-battery-creds-*' -type d -mmin +1440 -exec rm -rf {} +
 
-          # ---- stale sweep (>24h) — container ----------------------------------------
+          # ---- stale sweep (>24h) — container, RUNNING only --------------------------
+          # NAMED ASYMMETRY (deliberate, for the record): for a RUNNING container this
+          # sweeps and verifies only dirs older than 24h — unchanged from before the P1
+          # fix — whereas the non-running branch below fails on ANY o2bat-creds-* path.
+          # The reason is what each state can DO about a find: a running container can be
+          # cleaned (and a <24h dir may belong to a still-live sibling run), while a
+          # non-running one cannot be cleaned at all, so its only honest options are
+          # "provably none" or FAIL. A regression that recreated the in-container copy
+          # would carry THIS run's stamp and is caught by the current-run probe above in
+          # either state; what this asymmetry leaves uncaught is only a <24h path from a
+          # pre-fix run in a RUNNING container, which the next sweep removes.
           if [[ "$container_up" == "1" ]]; then
             log "stale in-container secrets-dir sweep (o2bat-creds-*, older than 24h)"
             docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 -print" 2>/dev/null | while IFS= read -r d; do
@@ -559,25 +736,50 @@ jobs:
             docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 -exec rm -rf {} +" >/dev/null 2>&1 || true
           fi
 
+          # ---- legacy residue — container PRESENT but NOT RUNNING --------------------
+          # `docker exec` cannot reach a non-running container and `docker cp` cannot
+          # delete, so for this state the only honest outcomes are "provably none" or
+          # FAIL — never the old "nothing to scrub inside a dead container" skip. A
+          # pre-fix run (or any future regression) could have left an o2bat-creds-*
+          # directory in a container that is now stopped, and that directory is still
+          # readable out of the writable layer. Enumerating it means streaming the
+          # container /tmp as a tar and listing the member names. That stream is
+          # unbounded in principle; this branch only runs when the container is NOT
+          # running, and a backend container /tmp holds scratch, not payloads. The whole
+          # stream is consumed (no early exit) so `docker cp` never takes an EPIPE that
+          # would be indistinguishable from a real failure.
+          if [[ "$container_present" == "1" && "$container_up" != "1" ]]; then
+            # `awk` always prints an integer and always exits 0, so the VALUE is a
+            # positive result; `pipefail` (set at the top) separately carries a
+            # docker-cp/tar failure into cenum_rc. `grep -c` was rejected here on
+            # purpose: it exits 1 on zero matches, which would make "no residue" and
+            # "the probe itself failed" indistinguishable.
+            # The counter collapses each match to its TOP-LEVEL credential path and
+            # counts DISTINCT ones, so a directory holding N files still counts as one
+            # stranded credential path (a member-line count would report N+1 and make
+            # the number meaningless).
+            cenum_out="$(docker cp "${CONTAINER}:/tmp" - 2>/dev/null | tar -tf - 2>/dev/null | awk '{ if (match($0, /^(\.\/)?tmp\/o2bat-creds-[^\/]*/)) { seen[substr($0, RSTART, RLENGTH)] = 1 } } END { n = 0; for (k in seen) n++; print n+0 }')"
+            cenum_rc=$?
+            if [[ "$cenum_rc" != "0" ]] || ! [[ "${cenum_out:-}" =~ ^[0-9]+$ ]]; then
+              log "VERIFY-FAIL: could not enumerate in-container credential paths in non-running container '${CONTAINER}' (rc=${cenum_rc}, out='${cenum_out:-<empty>}') — absence CANNOT be asserted"
+              fail=1
+            elif [[ "$cenum_out" != "0" ]]; then
+              log "VERIFY-FAIL: ${cenum_out} in-container credential path(s) exist in non-running container '${CONTAINER}' and cannot be removed without starting it — an operator must start it and remove /tmp/o2bat-creds-*"
+              fail=1
+            else
+              log "no o2bat-creds-* path exists anywhere in non-running container '${CONTAINER}' /tmp — enumerated from its writable layer via docker cp + tar"
+            fi
+          fi
+
           # ---- verify-after-scrub ----------------------------------------------------
           if [[ -n "${REMOTE_SECRETS_DIR:-}" ]] && [[ -d "${REMOTE_SECRETS_DIR}" ]]; then
             log "VERIFY-FAIL: host secrets dir still present after rm -rf: ${REMOTE_SECRETS_DIR}"
             fail=1
           fi
-          if [[ "$container_up" == "1" ]]; then
-            container_creds_dir="/tmp/o2bat-creds-${RUN_STAMP}"
-            # Positive-result assertion, not error-absence: a `docker exec ... test -d`
-            # that fails for ANY reason (daemon flake, container died mid-scrub, exec
-            # denied) would otherwise be indistinguishable from "directory absent" and
-            # silently PASS an unverified container. Require the exec to affirmatively
-            # print ABSENT; anything else (including a docker-exec failure, which yields
-            # an empty verify_out) is treated as verification failure, not success.
-            verify_out="$(docker exec "$CONTAINER" sh -c 'if [ -d "$1" ]; then echo PRESENT; else echo ABSENT; fi' sh "$container_creds_dir" 2>/dev/null || true)"
-            if [[ "$verify_out" != "ABSENT" ]]; then
-              log "VERIFY-FAIL: in-container secrets dir verification did not return ABSENT (got '${verify_out:-<empty>}'): ${container_creds_dir}"
-              fail=1
-            fi
-          fi
+          # (The in-container current-run credential path is verified ABOVE, by the
+          # state-independent positive-controlled `docker cp` probe — deliberately not
+          # here, because a `docker exec`-based verification cannot run at all against a
+          # stopped container, which is precisely the case the owner-review P1 was about.)
 
           # NIT (gate): the >24h stale sweep above uses `-exec rm` under `set -uo pipefail`
           # (host) and `|| true` (container), so a failed sweep would leave stale credential
@@ -606,10 +808,15 @@ jobs:
             log "VERDICT: FAIL — credential residue remains after scrub; a stranded credential file is worse than a red job"
             exit 1
           fi
-          if [[ "$container_up" == "1" ]]; then
-            log "VERDICT: PASS — current-run credentials scrubbed on host and in container; stale (>24h) sweep verified: none remain"
+          # Each PASS below states only what was actually PROVEN in that state. The
+          # container-down wording in particular is no longer "we skipped the container":
+          # it reports an enumeration of the stopped container's own writable layer.
+          if [[ "$container_present" != "1" ]]; then
+            log "VERDICT: PASS — current-run credentials scrubbed on host; stale (>24h) host sweep verified: none remain; container '${CONTAINER}' does not exist, so its writable layer is gone and no in-container credential can persist"
+          elif [[ "$container_up" == "1" ]]; then
+            log "VERDICT: PASS — current-run credentials scrubbed on host; no in-container credential path exists (stdin-only ingestion, proven by positive-controlled docker cp); stale (>24h) sweep verified: none remain"
           else
-            log "VERDICT: PASS — current-run credentials scrubbed on host (container not running); stale (>24h) host sweep verified: none remain"
+            log "VERDICT: PASS — current-run credentials scrubbed on host; container '${CONTAINER}' is ${container_state} (not running) and its writable layer was ENUMERATED via docker cp: no o2bat-creds-* path exists; stale (>24h) host sweep verified: none remain"
           fi
           REMOTE
 
