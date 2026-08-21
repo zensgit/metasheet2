@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { canReadApprovalInstance } from '../../src/services/approval-instance-readability'
 import {
   resetApprovalCommentMentionDeliveryForTests,
   resetApprovalCommentNotifyCheckerForTests,
@@ -122,6 +123,51 @@ describe('C-17(a): mechanical route/guard-chain enumeration (static, no DB requi
   it('no route on this file uses approvals:write (D3/OD-S1-14 — write scope stays approvals:read)', () => {
     expect(routesSrc).not.toContain("rbacGuard('approvals', 'write')")
     expect(routesSrc).not.toContain("rbacGuard('approvals:write'")
+  })
+
+  // Route -> seam wiring: C-11's assertions call `notifyApprovalCommentMentions` DIRECTLY (a
+  // no-DB, no-server unit probe — see approval-comment-notify-seam.test.ts), so nothing in this
+  // real-DB file exercises the actual POST/PATCH handlers' call to that function. Deleting the
+  // call from either handler would red nothing here. This is the cheapest race-free static close:
+  // both handlers must literally invoke it.
+  it('POST and PATCH handlers both call notifyApprovalCommentMentions (static link to the G-S1-9 seam)', () => {
+    const postHandlerSrc = routesSrc.slice(routesSrc.indexOf("r.post('/api/approvals/:id/comments',"), routesSrc.indexOf("r.patch("))
+    const patchHandlerSrc = routesSrc.slice(routesSrc.indexOf("r.patch("), routesSrc.indexOf("r.delete("))
+    expect(postHandlerSrc).toContain('notifyApprovalCommentMentions(')
+    expect(patchHandlerSrc).toContain('notifyApprovalCommentMentions(')
+  })
+})
+
+describe('C-17(b): every exported service function is exercised by >=1 real-DB gate (list-derived, not hand-picked)', () => {
+  const serviceSrc = readRepoFile('packages/core-backend/src/services/approval-comment-service.ts')
+  const exportedFunctionNames = [...serviceSrc.matchAll(/export (?:async )?function (\w+)/g)].map((m) => m[1])
+
+  it('positive control: at least eight exported functions were found in the service source', () => {
+    expect(exportedFunctionNames.length).toBeGreaterThanOrEqual(8)
+  })
+
+  // Explicit function -> gate-id map. This is a DECLARATION, not a discovery — the test below
+  // asserts its KEY SET equals the mechanically-extracted export list, so a future export added
+  // to the service without a matching entry here fails immediately (never silently uncovered).
+  const SERVICE_FUNCTION_COVERAGE: Record<string, string> = {
+    createApprovalComment: 'C-2/C-3/C-8/C-9/R7 (POST route, real-DB)',
+    listApprovalComments: 'C-1/C-13 (GET route, real-DB)',
+    editApprovalComment: 'C-7/C-16/R2 (PATCH route, real-DB)',
+    deleteApprovalComment: 'C-4/C-15 (DELETE route, real-DB)',
+    listMentionCandidates: 'C-12 (mention-candidates route, real-DB)',
+    notifyApprovalCommentMentions: 'C-11 (direct call, no-DB unit probe: approval-comment-notify-seam.test.ts)',
+    setApprovalCommentNotifyChecker: 'C-11 (direct call)',
+    resetApprovalCommentNotifyCheckerForTests: 'C-11 (afterEach)',
+    setApprovalCommentMentionDelivery: 'C-11 (direct call)',
+    resetApprovalCommentMentionDeliveryForTests: 'C-11 (afterEach)',
+  }
+
+  it('the declared coverage map\'s key set equals the mechanically-extracted export list (no drift either direction)', () => {
+    expect(Object.keys(SERVICE_FUNCTION_COVERAGE).sort()).toEqual([...exportedFunctionNames].sort())
+  })
+
+  it.each(exportedFunctionNames)('exported function %s has a declared gate mapping', (name) => {
+    expect(SERVICE_FUNCTION_COVERAGE[name]).toBeTruthy()
   })
 })
 
@@ -601,12 +647,20 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
   // C-12 — mention candidates: subset direction + non-participant absence
   // -----------------------------------------------------------------------------------------------
   describe('C-12: mention candidates — subset of admission, non-participant never appears', () => {
-    it('every returned id satisfies canReadApprovalInstance; a same-org non-participant does not appear for ANY q, including one exactly matching their name', async () => {
+    it('POSITIVE (subset direction): every returned id satisfies canReadApprovalInstance, including a role-matched-via-users.role candidate; NEGATIVE: a same-org non-participant does not appear for ANY q, including one exactly matching their name', async () => {
       const requesterId = freshId('c12-requester')
       const instanceId = await seedInstance(requesterId)
       const ccUserId = freshId('c12-cc')
       await seedUser(ccUserId)
       await seedRecord(instanceId, 'cc', requesterId, { targetType: 'user', targetId: ccUserId })
+
+      // Exercises the users.role UNION branch specifically (the mirror of viewerRoles's SECOND
+      // role source): a role-typed assignment whose assignee_id is a plain role string, matched
+      // directly against a user's `users.role` column (not via user_roles/roles).
+      const roleMatchedUserId = freshId('c12-rolematch')
+      await seedUser(roleMatchedUserId)
+      await pool().query(`UPDATE users SET role = 'c12-manager' WHERE id = $1`, [roleMatchedUserId])
+      await seedAssignment(instanceId, 'c12-manager', 'role')
 
       const nonParticipantId = freshId('c12-nonparticipant')
       await seedUser(nonParticipantId)
@@ -616,6 +670,17 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
       expect(res.status).toBe(200)
       const json = (await res.json()) as { data: { users: Array<{ id: string }> } }
       const ids = json.data.users.map((u) => u.id)
+
+      // POSITIVE subset direction: the role-matched candidate IS present, and — looping over
+      // EVERY returned id, not a hand-picked one — each independently satisfies the S1 predicate
+      // for this instance. A candidate the CTE over-includes beyond admission would fail here.
+      expect(ids).toContain(roleMatchedUserId)
+      expect(ids).toContain(ccUserId)
+      expect(ids.length).toBeGreaterThan(0)
+      for (const id of ids) {
+        await expect(canReadApprovalInstance(pool(), id, instanceId)).resolves.toBe(true)
+      }
+
       expect(ids).not.toContain(nonParticipantId)
 
       // The discriminating case: q exactly matches the non-participant's name — they still must
