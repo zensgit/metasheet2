@@ -1,0 +1,46 @@
+name: L1 battery credential-scrub goldens (real Docker)
+
+# NON-REQUIRED lane. Runs the real-Docker `golden` cases in
+# scripts/ops/multitable-l1-battery-workflow.test.mjs (opt-in via L1_BATTERY_DOCKER_GOLDENS=1) that
+# prove the L1-battery credential-lifecycle fix: a container absent from `docker ps` still yields
+# its writable layer to `docker cp` while refusing `docker exec`, so the scrub must FAIL (not PASS)
+# when a credential path survives on a stopped container. These drive the runner's local docker
+# daemon, so they are DELIBERATELY kept OUT of the required obs-kit `contract` lane (which stays
+# hermetic) — a docker hiccup here does not block merges of unrelated PRs. Registry-free (docker
+# import of a built rootfs; nothing pulled). Path-filtered to the battery workflow + its test so it
+# only runs when they change.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/multitable-l1-battery.yml'
+      - 'scripts/ops/multitable-l1-battery-workflow.test.mjs'
+      - '.github/workflows/multitable-l1-battery-docker-goldens.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multitable-l1-battery.yml'
+      - 'scripts/ops/multitable-l1-battery-workflow.test.mjs'
+      - '.github/workflows/multitable-l1-battery-docker-goldens.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  battery-scrub-goldens:
+    name: battery-scrub-goldens
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      L1_BATTERY_DOCKER_GOLDENS: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - name: Docker preflight (loud — the goldens are the point of this lane)
+        run: docker version --format '{{.Server.Version}}'
+      - name: Run the credential-scrub real-Docker goldens (whole file)
+        run: node --test scripts/ops/multitable-l1-battery-workflow.test.mjs

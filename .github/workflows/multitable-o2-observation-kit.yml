@@ -3,13 +3,22 @@ name: Multitable O2 Observation Kit
 # Self-test for the O-2 enablement-ladder observation/drill kit. Hermetic, no
 # database, no secrets, no remote hosts — `node --test` directly against the
 # checked-out tree (same standalone shape as data-source-exposure-inventory.yml:
-# checkout + setup-node only, no pnpm install). The test proves the observation
+# checkout + setup-node only, no pnpm install).
+#
+# NOTE (2026-08-21): scripts/ops/multitable-l1-battery-workflow.test.mjs also carries
+# real-Docker `golden` cases, but they are OPT-IN (L1_BATTERY_DOCKER_GOLDENS=1) and this
+# job does NOT set that env, so they skip here and this lane stays hermetic — a docker
+# hiccup can never red this required check. The goldens run in the dedicated non-required
+# lane .github/workflows/multitable-l1-battery-docker-goldens.yml.
+#
+# The test proves the observation
 # SQL is read-only by construction, drift-guards its trigger/function/lock-key
 # literals against the authoritative migration, and enforces that every
 # host-reaching command in the drill runbook is marked OWNER-GATED.
 #
 # TWO JOBS, deliberately:
-#   • `contract` — hermetic (checkout + node only): the STATIC census layer. Fast,
+#   • `contract` — checkout + node only (plus the runner's local, registry-free docker
+#     daemon for the L1-battery goldens noted above): the STATIC census layer. Fast,
 #     runs on every trigger, and is the layer that gates a stray write shape by text.
 #   • `execution-proof` — real Postgres + migrations: runs the ENTIRE observation SQL
 #     inside a session pinned `default_transaction_read_only = on`, so a write that
