@@ -217,7 +217,10 @@ instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), ga
   carrying zero attachment rows the same predicate returns false for EVERYONE. So it must not be cited
   as authorizing reuse of `isInstanceParticipant` on comment or other text surfaces (see OD-L9-13's scope
   clause, and the Non-effects note that instance-detail read scope, Lock-7 §2.7 D-5, is not settled
-  here).
+  here). [AMENDED 2026-08-21 — see §4.1: once S1 lands, "unchanged"/"without modification"/"no change"
+  above are superseded — the read surfaces adopt `canReadApprovalInstance` and an implementer SHOULD
+  then re-point this call site; the org-pin self-satisfaction rationale is superseded by the
+  instance-level pin (Lock-10 OD-S1-10). Until S1 lands, this bullet stands as ratified.]
 - **Gate 2 (hidden-field) is DROPPED for `bind_kind='process'`, by an explicit branch.** A process
   attachment is not a form field; there is no `access` matrix entry for it and its `field_id` is `NULL`.
   The gate becomes: `if (row.bind_kind === 'form_field' && row.instanceId) { …existing hidden check… }`.
@@ -680,8 +683,9 @@ the six-item referenced list, its session authorship, and the provenance discipl
 in Lock-10 §5.1.1). This section executes that ruling. The original text above is retained for the
 record; where the original and this section conflict, **this section governs**.
 
-- **OD-L9-13(a) as amended.** Once S1 lands, this lock's attachment surfaces (bind-time participant
-  resolution, `/download`, `/refs`) adopt **`canReadApprovalInstance`** (shape: Lock-10 OD-S1-1..8;
+- **OD-L9-13(a) as amended.** Once S1 lands, this lock's attachment READ surfaces (`/download`,
+  `/refs` — the two the ratified scope clause names; bind/commit authority stays `actorCanAct` per G-5
+  and is untouched by this amendment) adopt **`canReadApprovalInstance`** (shape: Lock-10 OD-S1-1..8;
   consumer ruling: OD-S1-16) in place of `isInstanceParticipant`, which **ceases to exist**. The
   no-fourth-predicate invariant (Lock-7 §L7-A / D-4) is preserved and strengthened: the predicate count
   goes DOWN, not up — there is still exactly one admission predicate, and it is the shared one. The
@@ -698,10 +702,13 @@ record; where the original and this section conflict, **this section governs**.
   too, proving the attachment path sits on the shared predicate and no attachment-local predicate was
   minted. The gate's intent (no fourth predicate) is unchanged; only the named function moves.
 - **Sequencing.** An implementing slice of THIS lock that lands while `isInstanceParticipant` still
-  exists calls the shipped predicate as ratified; the S1 slice that introduces `canReadApprovalInstance`
-  deletes `isInstanceParticipant` and re-points ALL its callers in the same PR (OD-S1-16 leaves no
-  transition window in which two predicates answer read questions). Nothing in this amendment authorizes
-  runtime work by itself; the Runtime authorization paragraph above stands.
+  exists calls the shipped predicate as ratified. The S1 slice deletes `isInstanceParticipant`, so the
+  function's live call sites at that moment (today: the two C-1 consumers, `approval-attachment-storage.ts:275`
+  and `routes/approval-attachments.ts:406`, per Lock-10 §2.10) are re-pointed in the same PR — a deleted
+  function cannot retain callers; this is a compile-level necessity, not an OD-S1-16 ruling. Lock-9
+  slices that implement AFTER S1 call `canReadApprovalInstance` directly — Lock-10 §2.11(3) states the
+  C-1 consumer set gains Lock-9's process-attachment call sites when those slices implement. Nothing in
+  this amendment authorizes runtime work by itself; the Runtime authorization paragraph above stands.
 
 ## 5. Independent-review disposition (2026-08-19)
 

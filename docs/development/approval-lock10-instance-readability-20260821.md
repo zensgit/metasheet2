@@ -870,21 +870,26 @@ owner's authored contribution is those four characters. The referenced list, ver
 | **L9-AMEND** | **arm (a)** | The owner-level amendment of Lock-9 OD-L9-13(a) and gate G-4 is now AUTHORIZED and is **executed in this same commit** — see Lock-9 §4.1, which names `canReadApprovalInstance` and re-points G-4's mutation target. Unblocks OD-S1-10, OD-S1-16, and the C-1 migration |
 | OD-S1-12 | **CONFIRMED** | the detail/history 200→404 narrowing for non-participant `approvals:read` holders is authorized, **platform ids only** (the OD-S1-18 `plm:` carve-out is unchanged); consumer (b) may land |
 | OD-S1-7 / C-2 | **CONFIRMED** | the metrics-ACL widening is authorized: after migration a CC target reads the instance metrics C-2 denies them today; the metrics consumer may land |
-| OD-S1-17(c) | **arm (c-i)** | the org half of the predicate is a **union over the viewer's ACTIVE org memberships**; G-S1-10 is **SOUND** under this ruling. Migration consequence: §2.2(b) class 3's identifying test ("resolves to exactly one **active** org membership") is now well-defined — a multi-org requester **fails** class 3 and falls through the ordered table under the unchanged FAIL-LOUD/terminal-ABORT discipline; note that under (c-i) ANY backfilled org the requester actually belongs to preserves that requester's readability, which lowers the stakes of the class-3 migration-time-vs-creation-time limit already declared there |
+| OD-S1-17(c) | **arm (c-i)** | the org half of the predicate is a **union over the viewer's ACTIVE org memberships**; G-S1-10 is **SOUND** under this ruling — noting §2.2a(c) itself grades (c-i) the simplest and **weakest** arm, and its fixture must be constructed against the fact that `zzzz20260114110000:34-40` backfills EVERY active user into `'default'`: a cross-org-denial viewer must hold NO membership in the instance's org, or the union admits them and the negative is vacuous. Migration consequence: §2.2(b) class 3's identifying test ("resolves to exactly one **active** org membership") is now well-defined — a multi-org requester **fails** class 3 and falls through the ordered table under the unchanged FAIL-LOUD/terminal-ABORT discipline. The class-3 declared limit ("can move a historical instance out of the tenant that ran it") is **NOT diminished** by (c-i): a participant whose memberships lie only in the original org is still denied after such a move; only the requester's own readability survives it, via the union |
 | OD-S1-8(d) | **KEEP** | the DB-backed admin bypass stays in the predicate's arm list as ratified in OD-S1-8 |
 
 Item (6) of the referenced list is not a §5.1 row: HISTORY-TIMELINE is the S2 brief's escalation (the
 comment audit-pointer row would land in the shipped `/history` timeline). Its ruling — arm (i): the
 history reader excludes pointer rows (`metadata->>'commentId' IS NULL`) applied to **both** the count and
-the page query with the same literal, the exact `approval-history.ts:90-100` `policy_denied` pattern — is
-recorded in the parity execution ledger §3 for the S2 lock to cite; it authorizes nothing outside S2.
+the page query with the same literal, the exact `approval-history.ts:90-120` `policy_denied` pattern
+(count exclusion `:98-99`, page exclusion `:117-120`) — is recorded in the parity execution ledger §3 for
+the S2 lock to cite; it authorizes nothing outside S2. The ruling as recorded here and in that ledger row
+is **self-contained**: the "(i)" label refers to a session-authored S2 brief that is NOT in the repo, so
+the S2 lock must restate the ruling from these two in-repo records, never by citing the label alone.
 
 **NOT covered by this reply:** the §5.1 table's last row (the three §5.2 (i)(i-b)(i-c) feed branches) was
 not in the referenced list — the session had stated, in the same thread, that it required no owner answer
 and would be treated as declared residuals. It remains **OPEN**; G-S1-8 stays expected-red as ratified.
 
 **What this resolution does NOT change:** every SESSION-DESIGN-AUTHORITY and RATIFIED item stands exactly
-as ratified; no gate is weakened; no verification claim is added — §3's gates still specify acceptance
+as ratified; no gate in THIS lock's §3 table is edited by this commit (the one gate edit anywhere in the
+commit is Lock-9 G-4, amended as §5.1.1's L9-AMEND row authorizes — re-pointed, intent preserved); no
+verification claim is added — §3's gates still specify acceptance
 and none has been run at the time of this edit.
 
 ### 5.2 Declared residuals — NOT closed by this document
