@@ -63,9 +63,20 @@
  *        (`org_chosen`/`agree` mirror whatever `org_legacy` was handed under rule `request`
  *        regardless of whether it is right, so they cannot catch this class of bug — only a
  *        cross-check against the independently-written `attendance_records` row can).
+ *   (LB) LOAD-BEARING (owner-review P2): a REAL Postgres-side delay (BEFORE INSERT trigger +
+ *        pg_sleep, not a JS mock) on the recorder's own INSERT -> the punch response completes
+ *        in well under the delay, proving the call site does not `await` the recorder. After
+ *        `whenIdleForTestingV1()` settles, the (delayed) row lands with the expected fields.
+ *   (ST) STATEMENT-TIMEOUT (owner-review P2 follow-up): the same real-delay mechanism, this
+ *        time longer than SHADOW_STATEMENT_TIMEOUT_MS but shorter than RECORD_TIMEOUT_MS ->
+ *        Postgres itself cancels the stuck statement (a real `query_canceled`, not a JS-side
+ *        abandonment) — the punch is unaffected, no row ever lands, and the metrics delta shows
+ *        `failed` incrementing (not `timed_out`) — proof the DB-side timeout fired first.
  *   (e)  the shadow INSERT itself fails (the table is renamed away for the duration of this one
- *        punch, then renamed back in a finally) -> punch STILL 200 — the audit write is
- *        non-fatal by construction.
+ *        punch, then renamed back in a finally, AFTER `whenIdleForTestingV1()` — the recorder is
+ *        fire-and-forget now, so renaming the table back too early could race a still-pending
+ *        INSERT and let it land against the real table after all) -> punch STILL 200 — the
+ *        audit write is non-fatal by construction.
  *   ---  env switched to 'enforce', plugin reactivated via the admin API ---
  *   (f)  `parseAttendanceOrgResolutionShadowModeV1` throws inside `activate()`;
  *        `activatePluginInstance` catches plugin-activation throws and records `status:
@@ -88,6 +99,12 @@
  *   - remove the env gate at the route call site -> (a) reds (expects zero rows).
  *   - the call site's `orgLegacy: orgId` mutated to `orgLegacy: getOrgId(req)` -> (P2-1) reds
  *     (org_legacy would read 'default' while attendance_records.org_id is orgY).
+ *   - restore `await` at the call site (drop the fire-and-forget `void ... .catch(() => {})`)
+ *     -> (LB) reds (elapsedMs would be >= the trigger's sleep duration instead of well under
+ *     it).
+ *   - remove the module's `SET LOCAL statement_timeout` statement -> (ST) reds (the delta would
+ *     show `timed_out` incrementing instead of `failed`, since nothing would cancel the
+ *     statement before RECORD_TIMEOUT_MS's JS-side backstop).
  *
  * Shared-DB discipline: every fixture id is a file-namespaced random UUID.
  */
@@ -96,6 +113,7 @@ import * as path from 'node:path'
 import net from 'net'
 import http from 'http'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
 import type { MetaSheetServer } from '../../src/index'
@@ -107,6 +125,20 @@ const REPO_ROOT = path.join(HERE, '../../../../')
 const ATTENDANCE_PLUGIN_DIR = path.join(REPO_ROOT, 'plugins', 'plugin-attendance')
 const SHADOW_TABLE = 'attendance_org_resolution_shadow'
 const SHADOW_ENV_VAR = 'ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1'
+
+// The plugin (a .cjs file, loaded in-process by the real MetaSheetServer this suite boots) and
+// this test file resolve the SAME absolute path here, so Node's CJS require cache hands back
+// the exact same module instance the route actually calls — whenIdleForTestingV1() and the
+// metrics snapshot below reflect the REAL recorder's in-flight/metrics state, not a separate
+// copy of the module.
+const requireCjs = createRequire(import.meta.url)
+const shadowModule = requireCjs(path.join(ATTENDANCE_PLUGIN_DIR, 'lib', 'attendance-org-resolution-shadow.cjs')) as {
+  whenIdleForTestingV1: () => Promise<void>
+  getShadowMetricsSnapshotForTestingV1: () => { attempted: number; written: number; timed_out: number; dropped: number; failed: number }
+  SHADOW_STATEMENT_TIMEOUT_MS: number
+  RECORD_TIMEOUT_MS: number
+}
+const { whenIdleForTestingV1, getShadowMetricsSnapshotForTestingV1, SHADOW_STATEMENT_TIMEOUT_MS, RECORD_TIMEOUT_MS } = shadowModule
 
 type HttpResponse = { status: number; body?: any; raw: string }
 function requestJson(
@@ -157,9 +189,40 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   const userD = randomUUID() // (d) sole membership X, body.orgId=X
   const userP2 = randomUUID() // (P2-1) sole membership orgY, body.orgId="" + x-org-id header
   const userE = randomUUID() // (e) insert failure is non-fatal
+  const userLB = randomUUID() // (LB) LOAD-BEARING: response completes while the recorder's own INSERT is still delayed
+  const userST = randomUUID() // (ST) SET LOCAL statement_timeout genuinely cancels a stuck recorder statement server-side
   const userF = randomUUID() // (f) FRESH — never punches; proves the 404 isn't a business-logic rejection
 
-  const allUserIds = [adminUser, userA, userB, userC, userD, userP2, userE, userF]
+  const allUserIds = [adminUser, userA, userB, userC, userD, userP2, userE, userLB, userST, userF]
+
+  // (LB) / (ST): a BEFORE INSERT trigger on the shadow table, scoped to ONE user_id via a WHEN
+  // clause, that sleeps before letting the row through — a REAL Postgres-side delay, not a JS
+  // mock. This is what proves (LB) the punch response never awaits the recorder's own INSERT,
+  // and (ST) that SHADOW_STATEMENT_TIMEOUT_MS is a genuine server-side statement_timeout (the
+  // statement is CANCELLED by Postgres itself once exceeded — pg_sleep(n) only asks Postgres to
+  // sleep for n seconds; statement_timeout still cuts it off early at the configured bound).
+  const installDelayTrigger = async (userId: string, fnName: string, triggerName: string, sleepSeconds: number) => {
+    await pool!.query(`
+      CREATE OR REPLACE FUNCTION ${fnName}() RETURNS TRIGGER AS $$
+      BEGIN
+        PERFORM pg_sleep(${sleepSeconds});
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+    `)
+    await pool!.query(`
+      CREATE TRIGGER ${triggerName}
+      BEFORE INSERT ON ${SHADOW_TABLE}
+      FOR EACH ROW
+      WHEN (NEW.user_id = '${userId}')
+      EXECUTE FUNCTION ${fnName}();
+    `)
+  }
+
+  const removeDelayTrigger = async (fnName: string, triggerName: string) => {
+    await pool!.query(`DROP TRIGGER IF EXISTS ${triggerName} ON ${SHADOW_TABLE}`).catch(() => undefined)
+    await pool!.query(`DROP FUNCTION IF EXISTS ${fnName}()`).catch(() => undefined)
+  }
 
   const mintToken = async (userId: string, tenantId?: string): Promise<string> => {
     const tenantParam = tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''
@@ -269,10 +332,16 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     await addMembership(userD, orgX)
     await addMembership(userP2, orgY)
     await addMembership(userE, 'default')
+    await addMembership(userLB, 'default')
+    await addMembership(userST, 'default')
     await addMembership(userF, 'default')
   }, 180_000)
 
   afterAll(async () => {
+    // Belt-and-braces: (LB)/(ST) already remove their own trigger/function in a `finally`, but
+    // clean up here too in case a test failed before reaching it.
+    await removeDelayTrigger('shadow_lb_delay_fn', 'shadow_lb_delay_trigger').catch(() => undefined)
+    await removeDelayTrigger('shadow_st_delay_fn', 'shadow_st_delay_trigger').catch(() => undefined)
     await pool?.query(`DELETE FROM ${SHADOW_TABLE} WHERE user_id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
     for (const table of ['attendance_record_segments', 'attendance_record_calculations', 'attendance_records', 'attendance_events']) {
       await pool?.query(`DELETE FROM ${table} WHERE user_id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
@@ -307,6 +376,9 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   it('(b) sole membership "default", no claim, no orgId -> 200, one row: legacy_default, agree=true', async () => {
     const res = await punch(userB)
     expect(res.status).toBe(200)
+    // The recorder is fire-and-forget (owner-review P2) — the response can return before the
+    // audit row lands. Settle deterministically instead of racing the background INSERT.
+    await whenIdleForTestingV1()
     const row = await shadowRowFor(userB)
     expect(row).toMatchObject({
       user_id: userB,
@@ -325,6 +397,7 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   it("(c) THE DISCRIMINATING ROW — memberships {default, X}, token claim 'default', no orgId -> 200, org_chosen=X, rule=sole_non_default_membership, agree=false", async () => {
     const res = await punch(userC, { tenantId: 'default' })
     expect(res.status).toBe(200)
+    await whenIdleForTestingV1()
     const row = await shadowRowFor(userC)
     expect(row).toMatchObject({
       user_id: userC,
@@ -343,6 +416,7 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   it('(d) sole membership X, body.orgId=X -> 200, org_legacy=X, org_chosen=X, rule=request, agree=true', async () => {
     const res = await punch(userD, { orgId: orgX })
     expect(res.status).toBe(200)
+    await whenIdleForTestingV1()
     const row = await shadowRowFor(userD)
     expect(row).toMatchObject({
       user_id: userD,
@@ -358,6 +432,7 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   it("(P2-1) org_legacy PROVENANCE — sole membership orgY, body.orgId='' (empty string) + x-org-id: orgY -> punch 200, actually written under orgY (ground truth), and org_legacy MATCHES that ground truth exactly (not 'default')", async () => {
     const res = await punch(userP2, { orgId: '', xOrgIdHeader: orgY })
     expect(res.status).toBe(200)
+    await whenIdleForTestingV1()
 
     // Ground truth, independent of the shadow table entirely.
     const actualOrgId = await attendanceRecordOrgIdFor(userP2)
@@ -379,12 +454,82 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     })
   })
 
+  it('(LOAD-BEARING) the punch response completes while the recorder\'s own INSERT is still delayed — proves the call site does not await it', async () => {
+    // A real Postgres-side delay (BEFORE INSERT trigger + pg_sleep), not a JS mock — see
+    // installDelayTrigger's own comment. sleepSeconds is well under both
+    // SHADOW_STATEMENT_TIMEOUT_MS and RECORD_TIMEOUT_MS, so this is a plain "still working"
+    // delay, not a cancellation/timeout case (that is (ST) below).
+    const fnName = 'shadow_lb_delay_fn'
+    const triggerName = 'shadow_lb_delay_trigger'
+    const lbSleepSeconds = 2
+    await installDelayTrigger(userLB, fnName, triggerName, lbSleepSeconds)
+    try {
+      const start = Date.now()
+      const res = await punch(userLB)
+      const elapsedMs = Date.now() - start
+      expect(res.status).toBe(200)
+      // The response must not have waited for the trigger delay — this is the exact assertion
+      // a restored `await recordShadowOrgResolutionV1(...)` at the call site would break
+      // (elapsedMs would be >= ~lbSleepSeconds*1000 instead). SHADOW_STATEMENT_TIMEOUT_MS is
+      // this suite's own margin reference: comfortably below it AND below the sleep itself.
+      expect(elapsedMs).toBeLessThan(Math.min(lbSleepSeconds * 1000, SHADOW_STATEMENT_TIMEOUT_MS) - 500)
+
+      // At this exact point the INSERT is (most likely) still sleeping inside the trigger —
+      // not asserted as a hard requirement (a slow CI runner could theoretically let it land
+      // between the response and this line), but the settle-then-assert pair below is the
+      // load-bearing proof regardless of that timing wobble.
+      await whenIdleForTestingV1()
+    } finally {
+      await removeDelayTrigger(fnName, triggerName)
+    }
+    const row = await shadowRowFor(userLB)
+    expect(row).toMatchObject({
+      user_id: userLB,
+      org_legacy: 'default',
+      org_chosen: 'default',
+      agree: true,
+      rule: 'legacy_default',
+    })
+  })
+
+  it('(STATEMENT-TIMEOUT) a recorder statement stuck past SHADOW_STATEMENT_TIMEOUT_MS is CANCELLED SERVER-SIDE by Postgres — not merely abandoned client-side — and lands in the failed (not timed_out) metrics bucket', async () => {
+    // stSleepSeconds exceeds SHADOW_STATEMENT_TIMEOUT_MS but stays under RECORD_TIMEOUT_MS —
+    // Postgres's own statement_timeout must cancel the statement well before the JS race's
+    // backstop would. If SET LOCAL statement_timeout were removed (mutation), nothing would
+    // cancel the sleep before the JS race hits RECORD_TIMEOUT_MS, flipping the outcome from
+    // 'failed' to 'timed_out' — this is exactly what makes this test mutation-sensitive.
+    const fnName = 'shadow_st_delay_fn'
+    const triggerName = 'shadow_st_delay_trigger'
+    const stSleepSeconds = Math.ceil(RECORD_TIMEOUT_MS / 1000) + 1
+    await installDelayTrigger(userST, fnName, triggerName, stSleepSeconds)
+    const before = getShadowMetricsSnapshotForTestingV1()
+    try {
+      const res = await punch(userST)
+      expect(res.status).toBe(200) // the punch itself is entirely unaffected
+      await whenIdleForTestingV1()
+    } finally {
+      await removeDelayTrigger(fnName, triggerName)
+    }
+    const after = getShadowMetricsSnapshotForTestingV1()
+    // The statement was cancelled (a real Postgres error, caught by performShadowRecordV1's own
+    // try/catch) — NOT abandoned by the JS-side race — so this lands in `failed`, not
+    // `timed_out`.
+    expect(after.failed - before.failed).toBe(1)
+    expect(after.timed_out - before.timed_out).toBe(0)
+    // No row was ever committed — Postgres cancelled the INSERT statement before it could land.
+    expect(await shadowRowCountFor(userST)).toBe(0)
+  })
+
   it('(e) the shadow INSERT fails (table renamed away for this one punch) -> punch STILL 200, non-fatal by construction', async () => {
     const hiddenName = `${SHADOW_TABLE}_hidden_e_${randomUUID().replace(/-/g, '')}`
     await pool!.query(`ALTER TABLE ${SHADOW_TABLE} RENAME TO ${hiddenName}`)
     try {
       const res = await punch(userE)
       expect(res.status).toBe(200)
+      // The recorder is fire-and-forget — the table must stay renamed until its (failed)
+      // attempt has actually run, or renaming it back below could race a still-pending INSERT
+      // and let it land against the real table after all.
+      await whenIdleForTestingV1()
     } finally {
       await pool!.query(`ALTER TABLE ${hiddenName} RENAME TO ${SHADOW_TABLE}`)
     }

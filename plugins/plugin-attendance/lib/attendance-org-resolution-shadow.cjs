@@ -72,6 +72,69 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 // Values-free by construction on the failure path: the only thing ever logged when the insert
 // fails is a Postgres error CODE (or 'UNKNOWN') — never the org ids, the user id, or the
 // driver's own error message, none of which belong in a warn log for an audit table.
+//
+// SCHEDULING (owner-review P2): `recordShadowOrgResolutionV1` is fire-and-forget from the call
+// site (`plugins/plugin-attendance/index.cjs`, right after the punch route resolves `orgId` —
+// see that call site's own comment) — `void recordShadowOrgResolutionV1(...).catch(() => {})`,
+// never `await`ed into the punch response. A lock/pool wait inside this module must never drag
+// the punch response, and this function's own returned promise is never on that critical path.
+//
+// RESOURCE ISOLATION (owner-review P2 follow-up): fire-and-forget alone does not stop a stuck
+// shadow query from tying up a connection on the SAME pool the punch route itself depends on —
+// a background query that never returns still holds a checked-out connection forever. Three
+// routes to isolate this module's DB usage from the shared pool were investigated, in the order
+// the owner asked for:
+//   1. A connection string / secrets channel on the plugin context: NOT exposed.
+//      `packages/core-backend/src/types/plugin.ts`'s `DatabaseAPI` is `{ query, transaction,
+//      model }` only, and `PluginContext.config` is plugin-manifest config
+//      (`resolvePluginRuntimeConfig`, packages/core-backend/src/index.ts), not a DB secret.
+//   2. A named-pool factory: `PoolManager.createPool(name, opts)` DOES exist
+//      (packages/core-backend/src/integration/db/connection-pool.ts, already used for shard
+//      pools) — but it is NOT reachable from a plugin. No `.cjs` plugin file in this repo
+//      `require()`s into `packages/core-backend` internals (checked: zero hits); doing so here
+//      would be a new precedent, and exposing `createPool` through `context.api` would be a
+//      CoreAPI surface change affecting every plugin, not a P2 fix's remit.
+//   3. A plugin-owned raw `pg.Pool`: there IS a precedent
+//      (`plugins/plugin-integration-core/lib/sealed-export/stock-preparation-runtime-database.cjs`),
+//      but it deliberately uses a SEPARATE, role-bound credential from its own config loader —
+//      not the shared `DATABASE_URL` — for least-privilege isolation, which is a different
+//      problem than this module has. Reusing the shared `DATABASE_URL` here via a hand-rolled
+//      `new Pool(...)` would mean re-deriving, and inevitably drifting from,
+//      `PoolManager`'s ~15 lines of SSL/timeout/secret-source logic
+//      (`DB_SSL`/`DB_SSL_REJECT_UNAUTHORIZED`/`DB_SSL_CA`/`DB_SSL_CERT`/`DB_SSL_KEY`,
+//      `secretManager.get('DATABASE_URL', ...)`, prod-only SSL gating) outside the one place
+//      that already owns it — a real drift/security risk for a default-off audit feature, not a
+//      hypothetical one.
+//
+// All three routes closed, so this module takes the fallback the owner authorized: use the
+// EXISTING, already-vetted `db.transaction(...)` capability (still backed by the shared pool),
+// but issue `SET LOCAL statement_timeout` as the transaction's first statement
+// (`SHADOW_STATEMENT_TIMEOUT_MS`) so a stuck membership SELECT or audit INSERT is CANCELLED
+// SERVER-SIDE by Postgres itself — not merely abandoned client-side — and the connection is
+// still released back to the shared pool by `ConnectionPool.transaction`'s own
+// `finally { rawClient.release() }` once Postgres raises the cancellation. `SET LOCAL` is
+// transaction-scoped and self-resets at COMMIT/ROLLBACK, so it never leaks onto any other
+// query on that connection.
+//
+// `SHADOW_STATEMENT_TIMEOUT_MS` does NOT bound the time to ACQUIRE a connection from an already
+// full pool in the first place (`pool.connect()`, inside `ConnectionPool.transaction`) — only a
+// running statement. `RECORD_TIMEOUT_MS`'s outer `Promise.race` (in `recordShadowOrgResolutionV1`
+// below) is the backstop for THAT case: it bounds how long this module's own returned promise
+// can stay open regardless of where the stall is, though the underlying work (including
+// whatever connection it may be holding) is not cancelled by the race losing — only by
+// Postgres's own `statement_timeout`, or by the caller's own connection/pool timeouts.
+//
+// `IN_FLIGHT_CAP` bounds how many of this module's own transactions can be concurrently
+// outstanding at all — once that many are already in flight, a new punch's shadow sample is
+// DROPPED (never even attempts a connection) rather than queued, so the worst case this module
+// can ever tie up on the shared pool is `IN_FLIGHT_CAP` connections for at most
+// `SHADOW_STATEMENT_TIMEOUT_MS` each, not an unbounded, growing number.
+//
+// METRICS: `attempted = written + timed_out + dropped + failed` always holds — every call to
+// `recordShadowOrgResolutionV1` increments `attempted` exactly once and resolves into EXACTLY
+// ONE of the other four buckets (see `recordTerminalOnce` below), never zero, never two. This
+// is an in-process counter only (module-level, like the warn-throttle clock above) — see
+// `getShadowMetricsSnapshotForTestingV1` / `startShadowMetricsLoggingV1`.
 
 const DEFAULT_ORG_ID = 'default'
 
@@ -235,21 +298,249 @@ function resetShadowWarnThrottleForTestingV1() {
   lastWarnAtMs = 0
 }
 
+// ---------------------------------------------------------------------------------------------
+// Timeouts, in-flight cap, metrics — see the "SCHEDULING" / "RESOURCE ISOLATION" / "METRICS"
+// paragraphs in the module doc comment above for the full rationale.
+// ---------------------------------------------------------------------------------------------
+
+// Server-side statement timeout for the recorder's transaction (SET LOCAL, see
+// performShadowRecordV1). A fixed internal constant — never request-derived — so inlining it
+// into SQL text is not an injection risk (SET does not accept bound parameters).
+const SHADOW_STATEMENT_TIMEOUT_MS = 4000
+
+// Outer JS-side backstop. Strictly greater than SHADOW_STATEMENT_TIMEOUT_MS so a normal
+// DB-side statement cancellation has a chance to settle `work` first (and land in the `failed`
+// bucket); this timer exists for stalls statement_timeout cannot see — acquiring a connection
+// from an exhausted pool in the first place.
+const RECORD_TIMEOUT_MS = 5000
+
+// How many of this module's own transactions may be concurrently outstanding at once. Once
+// this many are already in flight, a new sample is DROPPED (no connection is even attempted)
+// rather than queued — this is what actually bounds worst-case pool tie-up, not the timeout
+// alone (a hung DB could otherwise let in-flight work grow without limit).
+const IN_FLIGHT_CAP = 8
+
+const SHADOW_TIMEOUT_WARN_MESSAGE =
+  'attendance_org_resolution_shadow exceeded the 5000ms safety timeout; the underlying query/transaction is NOT cancelled by this timer (Postgres statement_timeout may still cancel it server-side) and may still complete in the background'
+const SHADOW_DROPPED_WARN_MESSAGE =
+  'attendance_org_resolution_shadow dropped: in-flight cap reached; sample skipped, no connection attempted'
+
+// In-process metrics. `attempted = written + timed_out + dropped + failed` always holds — see
+// recordTerminalOnce below for the exactly-once accounting that keeps it true.
+const shadowMetrics = { attempted: 0, written: 0, timed_out: 0, dropped: 0, failed: 0 }
+
 /**
- * Route-level orchestration: loads the caller's active memberships (ONE query — the same
- * `user_orgs` predicate the sibling punch-org-resolution module already uses, reused here
- * rather than re-implemented), runs the pure core, and inserts ONE audit row. Non-fatal by
- * construction — any failure (missing table, connection error, constraint violation) is caught,
- * logged at WARN, throttled (`throttledShadowWarn`) with only a Postgres error code (never the
- * org ids, never `err.message`), and swallowed. The punch this is called from must never fail,
- * slow down its response shape, or change its resolved org because of this function.
+ * Test-only: a snapshot copy of the current metrics counters. Never mutated by the caller —
+ * callers get a plain object, not a reference into module state.
+ * @returns {{ attempted: number, written: number, timed_out: number, dropped: number, failed: number }}
+ */
+function getShadowMetricsSnapshotForTestingV1() {
+  return { ...shadowMetrics }
+}
+
+/**
+ * Test-only: zeroes every metrics counter so a test suite's assertions are independent of what
+ * ran earlier in the same process. Never called from production code.
+ */
+function resetShadowMetricsForTestingV1() {
+  shadowMetrics.attempted = 0
+  shadowMetrics.written = 0
+  shadowMetrics.timed_out = 0
+  shadowMetrics.dropped = 0
+  shadowMetrics.failed = 0
+}
+
+function resolveLoggerFn(logger, level) {
+  if (logger && typeof logger[level] === 'function') return logger[level].bind(logger)
+  if (typeof console !== 'undefined' && typeof console[level] === 'function') return console[level].bind(console)
+  return () => {}
+}
+
+/**
+ * Logs the current metrics snapshot at INFO. Values-free by construction: only integer counts,
+ * never user/org identifiers.
+ * @param {{ info?: (message: string, meta?: Record<string, unknown>) => void }} [logger]
+ */
+function logShadowMetricsSnapshotV1(logger) {
+  resolveLoggerFn(logger, 'info')('attendance_org_resolution_shadow metrics snapshot', getShadowMetricsSnapshotForTestingV1())
+}
+
+const SHADOW_METRICS_LOG_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
+
+/**
+ * Starts periodic metrics logging (owner requirement: a 30-day shadow sample must not silently
+ * lose data during an incident without at least a periodic log trail). Returns a stop function.
+ * Callers (plugins/plugin-attendance/index.cjs's activate/deactivate) MUST call the returned
+ * stop function on deactivation/reactivation — `activatePluginInstance` does not call
+ * `deactivate()` before re-running `activate()`, so a caller that starts a new interval on every
+ * activation without stopping the previous one would leak timers across plugin reloads.
+ * @param {{ info?: (message: string, meta?: Record<string, unknown>) => void }} [logger]
+ * @param {number} [intervalMs]
+ * @returns {() => void}
+ */
+function startShadowMetricsLoggingV1(logger, intervalMs = SHADOW_METRICS_LOG_INTERVAL_MS) {
+  const handle = setInterval(() => logShadowMetricsSnapshotV1(logger), intervalMs)
+  if (handle && typeof handle.unref === 'function') handle.unref()
+  return () => clearInterval(handle)
+}
+
+// In-flight bookkeeping. Fire-and-forget scheduling at the call site means the punch response
+// can return before this module's own DB work has completed — this counter (and the waiter
+// list below) is the ONLY way a test can deterministically know "no recorder work is currently
+// outstanding" instead of sleeping a guessed duration.
+let inFlightCount = 0
+let idleWaiters = []
+
+function markRecorderStarted() {
+  inFlightCount += 1
+}
+
+function markRecorderSettled() {
+  inFlightCount -= 1
+  if (inFlightCount <= 0) {
+    inFlightCount = 0
+    const waiters = idleWaiters
+    idleWaiters = []
+    for (const resolve of waiters) resolve()
+  }
+}
+
+/**
+ * Test-only: resolves once no recordShadowOrgResolutionV1 work is currently in flight anywhere
+ * in this process (module-level counter, matching the module-level nature of the warn-throttle
+ * clock above). A DROPPED sample never increments the in-flight counter in the first place, so
+ * this resolves immediately when the cap is the only thing that fired. NEVER used in production
+ * code — the whole point of the fire-and-forget call site is that production code never waits
+ * on this. Real-DB integration tests use this instead of a sleep to deterministically wait for
+ * background work before asserting on rows it writes.
+ * @returns {Promise<void>}
+ */
+function whenIdleForTestingV1() {
+  if (inFlightCount <= 0) return Promise.resolve()
+  return new Promise((resolve) => { idleWaiters.push(resolve) })
+}
+
+/**
+ * Test-only: forces the in-flight counter and waiter list back to a clean slate. A test that
+ * deliberately leaves recorder work permanently pending (e.g. a never-resolving mock db, to
+ * prove the timeout or cap behaviour) would otherwise leak an elevated `inFlightCount` into
+ * every later test in the same process — this is the cleanup hook for exactly that case. Does
+ * NOT resolve any outstanding `whenIdleForTestingV1()` waiters (a reset is "start fresh", not a
+ * real settle event) — a test that still has one pending after calling this has a bug of its
+ * own, and will hang/time out rather than silently pass. Never called from production code.
+ */
+function resetShadowInFlightForTestingV1() {
+  inFlightCount = 0
+  idleWaiters = []
+}
+
+/**
+ * The actual DB work: loads the caller's active memberships (ONE query — the same `user_orgs`
+ * predicate the sibling punch-org-resolution module already uses, reused here rather than
+ * re-implemented), runs the pure core, and inserts ONE audit row — all inside ONE transaction
+ * whose first statement sets a server-side statement timeout (see the module doc comment's
+ * "RESOURCE ISOLATION" paragraph). Non-fatal by construction — any failure (missing table,
+ * connection error, constraint violation, statement-timeout cancellation) is caught, logged at
+ * WARN, throttled, and swallowed — this function itself never rejects. `onTerminal` is called
+ * exactly once, with 'written' or 'failed', before this function returns — see
+ * recordShadowOrgResolutionV1's `recordTerminalOnce` for why exactly-once matters.
+ *
+ * @param {{ transaction: (cb: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown[]> }) => Promise<void>) => Promise<void> }} db
+ * @param {object} req
+ * @param {{ userId: string, orgLegacy: string, route: string }} ctx
+ * @param {{ warn: (message: string, meta?: Record<string, unknown>) => void }} [logger]
+ * @param {(bucket: 'written' | 'failed') => void} onTerminal
+ * @returns {Promise<void>}
+ */
+async function performShadowRecordV1(db, req, ctx, logger, onTerminal) {
+  try {
+    const userId = ctx && typeof ctx.userId === 'string' && ctx.userId.length > 0 ? ctx.userId : null
+    if (userId === null) {
+      // attendance_org_resolution_shadow.user_id is NOT NULL. The route always supplies a
+      // non-empty ctx.userId here — the SAME value already required non-null by the route's
+      // own pre-existing 401 check (getUserId(req)) before this is ever reached — so this
+      // branch should be unreachable in production. Skip the otherwise-guaranteed-to-fail
+      // INSERT rather than issue a query that can only violate the NOT NULL constraint, and
+      // warn (throttled, like every other failure path here) instead of staying silent. Counted
+      // as 'failed' (never wrote a row) for the metrics invariant — there is no separate bucket
+      // for this unreachable-in-production shape.
+      throttledShadowWarn(logger, 'attendance_org_resolution_shadow skipped: missing userId', {})
+      onTerminal('failed')
+      return
+    }
+
+    const orgLegacy = ctx && typeof ctx.orgLegacy === 'string' ? ctx.orgLegacy : ''
+    const route = ctx && typeof ctx.route === 'string' ? ctx.route : ''
+
+    const requestedOrgId = extractRequestedPunchOrgIdV1(req)
+    const requestOrgSupplied = requestedOrgId !== null
+    const rawClaim = req && req.authenticatedTenantId
+    const orgClaim = typeof rawClaim === 'string' && rawClaim.trim().length > 0 ? rawClaim.trim() : null
+
+    await db.transaction(async (trx) => {
+      // Real, server-side statement cancellation scoped to THIS transaction only — see the
+      // module doc comment's "RESOURCE ISOLATION" paragraph for why this exists instead of a
+      // dedicated pool. Must be the FIRST statement in the transaction to cover both queries
+      // below.
+      await trx.query(`SET LOCAL statement_timeout = '${SHADOW_STATEMENT_TIMEOUT_MS}ms'`)
+
+      const activeMembershipOrgIds = await loadActiveMembershipOrgIdsV1(trx, userId)
+
+      const decision = decideShadowOrgResolutionV1({
+        requestOrgSupplied,
+        orgLegacy,
+        orgClaim,
+        activeMembershipOrgIds,
+      })
+
+      await trx.query(
+        `INSERT INTO attendance_org_resolution_shadow
+           (user_id, route, org_legacy, org_claim, request_org_supplied, membership_count,
+            non_default_membership_count, org_chosen, agree, rule)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          userId,
+          route,
+          orgLegacy,
+          orgClaim,
+          requestOrgSupplied,
+          decision.membershipCount,
+          decision.nonDefaultMembershipCount,
+          decision.orgChosen,
+          decision.agree,
+          decision.rule,
+        ],
+      )
+    })
+    onTerminal('written')
+  } catch (err) {
+    const code = err && typeof err === 'object' && typeof err.code === 'string' ? err.code : 'UNKNOWN'
+    throttledShadowWarn(logger, 'attendance_org_resolution_shadow insert failed; non-fatal, punch response unaffected', { code })
+    onTerminal('failed')
+  }
+}
+
+/**
+ * Public entry point, called fire-and-forget from the punch route (see the module doc comment's
+ * "SCHEDULING" paragraph) — `void recordShadowOrgResolutionV1(...).catch(() => {})`. This
+ * function itself is designed to never reject (performShadowRecordV1 catches everything
+ * internally), but the call site's own `.catch` is belt-and-braces in case an unexpected
+ * synchronous throw or rejected promise ever slips through.
+ *
+ * Orchestrates, in order: (1) metrics `attempted`, (2) the in-flight CAP check — over cap drops
+ * the sample immediately, no connection attempted, (3) in-flight bookkeeping +
+ * performShadowRecordV1, raced against a RECORD_TIMEOUT_MS backstop so this function's own
+ * returned promise cannot stay open forever even if the underlying work does. Exactly one of
+ * {written, timed_out, dropped, failed} is recorded per call — `recordTerminalOnce` is the
+ * single choke point that guarantees that, regardless of whether the timeout or the underlying
+ * work "wins" the race.
  *
  * Callers MUST gate the call itself on `parseAttendanceOrgResolutionShadowModeV1(...) ===
  * 'shadow'` — this function does not re-check the env itself, so the 'off' posture's
  * zero-queries guarantee depends entirely on the call site never invoking it, not on an
  * internal early-return.
  *
- * @param {{ query: (sql: string, params?: unknown[]) => Promise<unknown[]> }} db
+ * @param {{ transaction: (cb: (trx: { query: (sql: string, params?: unknown[]) => Promise<unknown[]> }) => Promise<void>) => Promise<void> }} db
  * @param {object} req - Express request (`.user`, `.body`, `.query`, `.headers`,
  *   `.authenticatedTenantId`)
  * @param {{ userId: string, orgLegacy: string, route: string }} ctx - `userId` is the SAME
@@ -263,57 +554,42 @@ function resetShadowWarnThrottleForTestingV1() {
  * @returns {Promise<void>}
  */
 async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
+  shadowMetrics.attempted += 1
+
+  if (inFlightCount >= IN_FLIGHT_CAP) {
+    shadowMetrics.dropped += 1
+    throttledShadowWarn(logger, SHADOW_DROPPED_WARN_MESSAGE, { reason: 'cap_exceeded' })
+    return
+  }
+
+  let terminalRecorded = false
+  const recordTerminalOnce = (bucket) => {
+    if (terminalRecorded) return
+    terminalRecorded = true
+    shadowMetrics[bucket] += 1
+  }
+
+  markRecorderStarted()
+  const work = performShadowRecordV1(db, req, ctx, logger, recordTerminalOnce)
+  // Belt-and-braces: performShadowRecordV1 never rejects by construction, but attaching a
+  // handler here means even an unexpected rejection can never surface as an unhandled
+  // rejection, independent of whether Promise.race below already "handled" it.
+  work.finally(markRecorderSettled).catch(() => {})
+
+  let timeoutHandle
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => {
+      recordTerminalOnce('timed_out')
+      throttledShadowWarn(logger, SHADOW_TIMEOUT_WARN_MESSAGE, { reason: 'timeout' })
+      resolve()
+    }, RECORD_TIMEOUT_MS)
+    if (timeoutHandle && typeof timeoutHandle.unref === 'function') timeoutHandle.unref()
+  })
+
   try {
-    const userId = ctx && typeof ctx.userId === 'string' && ctx.userId.length > 0 ? ctx.userId : null
-    if (userId === null) {
-      // attendance_org_resolution_shadow.user_id is NOT NULL. The route always supplies a
-      // non-empty ctx.userId here — the SAME value already required non-null by the route's
-      // own pre-existing 401 check (getUserId(req)) before this is ever reached — so this
-      // branch should be unreachable in production. Skip the otherwise-guaranteed-to-fail
-      // INSERT rather than issue a query that can only violate the NOT NULL constraint, and
-      // warn (throttled, like every other failure path here) instead of staying silent.
-      throttledShadowWarn(logger, 'attendance_org_resolution_shadow skipped: missing userId', {})
-      return
-    }
-
-    const orgLegacy = ctx && typeof ctx.orgLegacy === 'string' ? ctx.orgLegacy : ''
-    const route = ctx && typeof ctx.route === 'string' ? ctx.route : ''
-
-    const requestedOrgId = extractRequestedPunchOrgIdV1(req)
-    const requestOrgSupplied = requestedOrgId !== null
-    const rawClaim = req && req.authenticatedTenantId
-    const orgClaim = typeof rawClaim === 'string' && rawClaim.trim().length > 0 ? rawClaim.trim() : null
-
-    const activeMembershipOrgIds = await loadActiveMembershipOrgIdsV1(db, userId)
-
-    const decision = decideShadowOrgResolutionV1({
-      requestOrgSupplied,
-      orgLegacy,
-      orgClaim,
-      activeMembershipOrgIds,
-    })
-
-    await db.query(
-      `INSERT INTO attendance_org_resolution_shadow
-         (user_id, route, org_legacy, org_claim, request_org_supplied, membership_count,
-          non_default_membership_count, org_chosen, agree, rule)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        userId,
-        route,
-        orgLegacy,
-        orgClaim,
-        requestOrgSupplied,
-        decision.membershipCount,
-        decision.nonDefaultMembershipCount,
-        decision.orgChosen,
-        decision.agree,
-        decision.rule,
-      ],
-    )
-  } catch (err) {
-    const code = err && typeof err === 'object' && typeof err.code === 'string' ? err.code : 'UNKNOWN'
-    throttledShadowWarn(logger, 'attendance_org_resolution_shadow insert failed; non-fatal, punch response unaffected', { code })
+    await Promise.race([work, timeoutPromise])
+  } finally {
+    clearTimeout(timeoutHandle)
   }
 }
 
@@ -322,7 +598,17 @@ module.exports = {
   decideShadowOrgResolutionV1,
   recordShadowOrgResolutionV1,
   resetShadowWarnThrottleForTestingV1,
+  whenIdleForTestingV1,
+  resetShadowInFlightForTestingV1,
+  getShadowMetricsSnapshotForTestingV1,
+  resetShadowMetricsForTestingV1,
+  startShadowMetricsLoggingV1,
+  logShadowMetricsSnapshotV1,
   WARN_THROTTLE_WINDOW_MS,
+  SHADOW_STATEMENT_TIMEOUT_MS,
+  RECORD_TIMEOUT_MS,
+  IN_FLIGHT_CAP,
+  SHADOW_METRICS_LOG_INTERVAL_MS,
   SHADOW_MODE_OFF,
   SHADOW_MODE_SHADOW,
   SHADOW_RULE_REQUEST,

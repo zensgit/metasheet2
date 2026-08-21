@@ -24,6 +24,7 @@ const { resolvePunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.c
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
+  startShadowMetricsLoggingV1,
   SHADOW_MODE_SHADOW,
 } = require('./lib/attendance-org-resolution-shadow.cjs')
 const {
@@ -558,6 +559,13 @@ let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
+// Owner-review P2 follow-up on #5064: periodic metrics logging for the org-resolution shadow
+// recorder (attempted/written/timed_out/dropped/failed — see
+// lib/attendance-org-resolution-shadow.cjs). Non-null only while shadow mode is active.
+// `activatePluginInstance` does NOT call `deactivate()` before re-running `activate()` on a
+// reload, so this is stopped both defensively at the top of the shadow-mode setup below AND in
+// `deactivate()`, to never leak an interval across plugin reactivation.
+let attendanceOrgResolutionShadowMetricsLogStop = null
 let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
 let reportSyncScheduledTriggerSchedulerUnregister = null
@@ -24688,6 +24696,17 @@ module.exports = {
     const attendanceOrgResolutionShadowMode = parseAttendanceOrgResolutionShadowModeV1(
       process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1,
     )
+    // Defensive stop-before-start: activatePluginInstance does not call deactivate() before
+    // re-running activate() on a reload (see attendanceOrgResolutionShadowMetricsLogStop's own
+    // declaration comment), so a prior activation's interval — if any — must be stopped here,
+    // not only in deactivate(), or repeated reactivations would leak one interval each.
+    if (attendanceOrgResolutionShadowMetricsLogStop) {
+      attendanceOrgResolutionShadowMetricsLogStop()
+      attendanceOrgResolutionShadowMetricsLogStop = null
+    }
+    if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
+      attendanceOrgResolutionShadowMetricsLogStop = startShadowMetricsLoggingV1(logger)
+    }
     const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
     const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
     const emitEvent = (type, data) => {
@@ -29731,16 +29750,21 @@ module.exports = {
         // Shadow audit (env ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow only — see
         // lib/attendance-org-resolution-shadow.cjs). The mode check is deliberately the ONLY
         // gate: when the flag is unset/'off' this call is never reached, so that posture issues
-        // zero extra queries, not "a no-op inside the module". Never awaited into the response
-        // path in any way that could change it — recordShadowOrgResolutionV1 is itself
-        // non-fatal (try/catch + warn-log internally), and its own errors never propagate here.
+        // zero extra queries, not "a no-op inside the module".
+        //
+        // Owner-review P2 (#5064 follow-up): scheduled fire-and-forget — the response never
+        // waits on this. `recordShadowOrgResolutionV1` is itself non-fatal (try/catch +
+        // warn-log internally, plus its own RECORD_TIMEOUT_MS safety backstop and in-flight
+        // cap — see the module doc comment), so it is designed to never reject; the `.catch`
+        // here is belt-and-braces in case an unexpected synchronous throw or rejected promise
+        // ever slips through anyway, so it can never surface as an unhandled rejection.
         if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
-          await recordShadowOrgResolutionV1(
+          void recordShadowOrgResolutionV1(
             db,
             req,
             { userId, orgLegacy: orgId, route: '/api/attendance/punch' },
             logger,
-          )
+          ).catch(() => {})
         }
         const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
         const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
@@ -50416,6 +50440,10 @@ module.exports = {
 	    clearHolidaySyncSchedule()
 	    if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)
 	    importUploadCleanupInterval = null
+	    if (attendanceOrgResolutionShadowMetricsLogStop) {
+	      attendanceOrgResolutionShadowMetricsLogStop()
+	      attendanceOrgResolutionShadowMetricsLogStop = null
+	    }
 	    if (autoShiftAutoWriteSchedulerUnregister) {
 	      autoShiftAutoWriteSchedulerUnregister()
 	      autoShiftAutoWriteSchedulerUnregister = null
