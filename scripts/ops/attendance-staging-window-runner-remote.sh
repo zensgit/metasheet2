@@ -1213,6 +1213,21 @@ soak_opt() {
   printf '%s' "$default"
 }
 
+soak_opt_present() {
+  # soak_opt_present <key> — true (rc 0) iff `key=` appears as one of the ';'-separated
+  # SOAK_OPTS pairs, regardless of value. Needed because soak_opt alone cannot distinguish
+  # "operator supplied this key" from "soak_opt returned its own default" — w7_target in
+  # particular always resolves to a value via its default, so rotate_password=true's
+  # standalone-act refusal (action_soak_seed) must check presence, not the resolved value.
+  local key="$1" pair
+  local IFS=';'
+  for pair in $SOAK_OPTS; do
+    [[ -n "$pair" ]] || continue
+    [[ "${pair%%=*}" == "$key" ]] && return 0
+  done
+  return 1
+}
+
 soak_require_orgs() {
   [[ -n "$SOAK_ORGS" ]] || fail "soak_orgs is required for action=${ACTION}: comma-separated org1,org2,org3 in the runbook's C3 order (org1=legacy-only, org2=W4-only, org3=both-machines/group-arm)"
   local extra
@@ -1649,8 +1664,111 @@ soak_w7_walk_org3() {
   log "soak-seed: org ${org8} W7 posture off->group_shadow applied via W7-3 CLI (correlation ${corr})"
 }
 
+soak_mint_password() {
+  # Single shared generator for BOTH the first-mint path (action_soak_seed, below) and
+  # rotate_password=true (soak_seed_rotate_password, below): 24 random bytes, hex-encoded
+  # (48 chars), from /dev/urandom.
+  local pw
+  pw="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  [[ "${#pw}" -eq 48 ]] || fail "password minting failed"
+  printf '%s' "$pw"
+}
+
+soak_hash_password_in_backend() {
+  # soak_hash_password_in_backend <password> — bcrypt the password IN-CONTAINER, reading it
+  # on STDIN (never `-e`/argv): a `docker exec -e` env or an argv value would sit in the
+  # host process table and the docker daemon's exec config for the call's duration. Stdin
+  # does not. Shared by the first-mint path (below) and rotate_password=true.
+  local pw="$1" hash
+  hash="$(printf '%s' "$pw" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
+  [[ "$hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
+  printf '%s' "$hash"
+}
+
+soak_seed_rotate_password() {
+  # Standalone act (#4556 soak-seed soak_opts rotate_password=true): rotates ONLY the
+  # host-only synthetic-user password and its DB hash for the EXISTING closed synthetic
+  # family (username LIKE '${SOAK_USER_PREFIX}%'). Never inserts, never walks posture,
+  # never touches shift/group/schedule config, never remints a retired family.
+  # action_soak_seed dispatches here BEFORE soak_require_orgs / owner_ref /
+  # entrypoint_inventory_ref are ever read, so soak_orgs / owner_ref /
+  # entrypoint_inventory_ref are unused by this act (soak_orgs stays a REQUIRED workflow
+  # input for action=soak-seed regardless — this act just never reads it; owner_ref /
+  # entrypoint_inventory_ref may still be supplied on the dispatch but are ignored here).
+  [[ -f "$SOAK_CREDENTIALS_FILE" ]] \
+    || fail "rotate_password=true but no credentials file exists at ${SOAK_CREDENTIALS_FILE} — nothing to rotate (run action=soak-seed once, without rotate_password, first)"
+  soak_resolve_pg
+
+  local new_password new_hash
+  new_password="$(soak_mint_password)"
+  new_hash="$(soak_hash_password_in_backend "$new_password")"
+
+  # --- atomic credentials-file replace (tmp+mv, same dir; previous copy kept as .prev,
+  # 0600, so a rotation that fails partway is recoverable: mv the .prev copy back onto
+  # SOAK_CREDENTIALS_FILE to restore the host file to match the DB's still-unrotated hash) --
+  local cred_tmp
+  cred_tmp="$(mktemp "${SOAK_PERSIST_DIR}/.credentials.XXXXXX")"
+  chmod 0600 "$cred_tmp"
+  printf 'SOAK_SYNTH_PASSWORD=%s\n' "$new_password" > "$cred_tmp"
+  cp -p "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev" \
+    || { rm -f "$cred_tmp"; fail "failed to preserve the pre-rotation credentials file as ${SOAK_CREDENTIALS_FILE}.prev — refusing to rotate without a recovery copy"; }
+  chmod 0600 "${SOAK_CREDENTIALS_FILE}.prev"
+  mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"
+  log "soak-seed rotate_password: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, atomic replace; previous copy kept at ${SOAK_CREDENTIALS_FILE}.prev for one-generation recovery)"
+
+  # --- re-hash ONLY the existing synthetic family; no inserts, no posture walk, no
+  # group/shift/schedule seeding, no remint of retired families --------------------------
+  local rotate_sql="${OUTPUT_DIR}/soak-seed-rotate.sql"
+  cat > "$rotate_sql" <<'SQL'
+\set ON_ERROR_STOP on
+BEGIN;
+UPDATE users
+   SET password_hash = :'pw_hash'
+ WHERE username LIKE :'user_prefix';
+COMMIT;
+SQL
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$SOAK_PG_USER" -d "$SOAK_PG_DB" -e \
+    -v pw_hash="$new_hash" -v user_prefix="${SOAK_USER_PREFIX}%" \
+    < "$rotate_sql" > "${OUTPUT_DIR}/soak-seed-rotate.txt" 2>&1 \
+    || fail "rotate_password UPDATE failed against the staging DB (transactional — nothing committed); the credentials file was already rotated — restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} to recover the pre-rotation state, then retry; see soak-seed-rotate.txt"
+
+  local rotated_users
+  rotated_users="$(sed -n 's/^UPDATE \([0-9]\+\)$/\1/p' "${OUTPUT_DIR}/soak-seed-rotate.txt" | tail -n1)"
+  [[ "$rotated_users" =~ ^[0-9]+$ ]] \
+    || fail "could not read the UPDATE row count from soak-seed-rotate.txt (psql output shape changed?)"
+
+  snapshot_staging_ps
+  {
+    echo "action=soak-seed"
+    echo "rotated=1"
+    echo "rotated_users=${rotated_users}"
+    echo "result=ok"
+  } > "${OUTPUT_DIR}/summary.txt"
+  log "soak-seed rotate_password OK: ${rotated_users} existing synthetic family user(s) re-hashed (no inserts, no posture walk, no group/shift seeding); password never printed"
+}
+
 action_soak_seed() {
   soak_validate_opts
+  local rotate_password
+  rotate_password="$(soak_opt rotate_password '')"
+  if [[ -n "$rotate_password" && "$rotate_password" != "true" ]]; then
+    fail "soak_opts rotate_password only accepts 'true' (or omit the key entirely), got '${rotate_password}'"
+  fi
+  if [[ "$rotate_password" == "true" ]]; then
+    # Standalone act: refuse if any full-seed-only opt is ALSO supplied — a rotation
+    # dispatch that also carried users_per_org/tz/w7_target would otherwise silently
+    # ignore them (this branch never reaches the code that reads them), misleading the
+    # operator into thinking they took effect. soak_opt_present checks PRESENCE, not the
+    # resolved value, because w7_target in particular always resolves via its default.
+    local -a rotate_conflicts=()
+    soak_opt_present users_per_org && rotate_conflicts+=(users_per_org)
+    soak_opt_present tz && rotate_conflicts+=(tz)
+    soak_opt_present w7_target && rotate_conflicts+=(w7_target)
+    [[ "${#rotate_conflicts[@]}" -eq 0 ]] \
+      || fail "soak_opts rotate_password=true is a standalone act and refuses users_per_org/tz/w7_target in the same invocation (got: $(IFS=,; echo "${rotate_conflicts[*]}")) — rotate the password alone, or run a normal (non-rotating) soak-seed"
+    soak_seed_rotate_password
+    return 0
+  fi
   soak_require_orgs
   mkdir -p "$SOAK_PERSIST_DIR"
   local users_per_org tz_opt w7_target
@@ -1745,17 +1863,12 @@ action_soak_seed() {
     [[ -n "$password" ]] || fail "credentials file exists but carries no SOAK_SYNTH_PASSWORD: ${SOAK_CREDENTIALS_FILE}"
     log "soak-seed: reusing the existing synthetic-user password from ${SOAK_CREDENTIALS_FILE}"
   else
-    password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    [[ "${#password}" -eq 48 ]] || fail "password minting failed"
+    password="$(soak_mint_password)"
     ( umask 077 && printf 'SOAK_SYNTH_PASSWORD=%s\n' "$password" > "$SOAK_CREDENTIALS_FILE" )
     log "soak-seed: minted a new synthetic-user password into ${SOAK_CREDENTIALS_FILE} (host-only, 0600, never uploaded)"
   fi
-  # Bcrypt the password in-container, reading it on STDIN (never `-e`/argv): a `docker exec -e`
-  # env or an argv value would sit in the host process table and the docker daemon's exec
-  # config for the call's duration. Stdin does not.
   local pw_hash
-  pw_hash="$(printf '%s' "$password" | docker exec -i "$BACKEND_CONTAINER" node -e 'const b = require("bcryptjs"); let d = ""; process.stdin.setEncoding("utf8"); process.stdin.on("data", (c) => { d += c }); process.stdin.on("end", () => { b.hash(d, 10).then((h) => console.log(h)).catch((e) => { console.error(e && e.message); process.exit(1) }) })')"
-  [[ "$pw_hash" == '$2'* ]] || fail "bcrypt hash minting failed in the backend container"
+  pw_hash="$(soak_hash_password_in_backend "$password")"
 
   # --- one-time remint of the RETIRED TEXT-id family (identity-gate defect, 2026-08-16) --
   # The first soak seed minted users whose IDS carried the family marker

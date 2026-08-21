@@ -528,8 +528,13 @@ function extractSoakSlices(remote) {
   return {
     baseline: sliceBetween(remote, 'action_soak_baseline() {', '\nsoak_seed_write_org_sql() {', 'soak-baseline'),
     // The seed slice deliberately spans its helpers (SQL writer, per-org report, W4/W7
-    // posture walks) through the end of action_soak_seed — they are one action's body.
+    // posture walks, the shared password mint/hash helpers, the rotate_password act)
+    // through the end of action_soak_seed — they are one action's body.
     seed: sliceBetween(remote, 'soak_seed_write_org_sql() {', '\naction_soak_flags() {', 'soak-seed'),
+    // Rotation's OWN function text, precisely bounded — assertions below anchor here (not
+    // to seed-wide substrings) so a mutation inside soak_seed_rotate_password cannot hide
+    // behind an unrelated match elsewhere in the (much larger) seed slice.
+    rotate: sliceBetween(remote, 'soak_seed_rotate_password() {', '\naction_soak_seed() {', 'soak-seed-rotate-password'),
     flags: sliceBetween(remote, 'action_soak_flags() {', '\n# --- soak daily-batch guard', 'soak-flags'),
     // The run slice deliberately spans the guard/classifier helper functions ahead of
     // action_soak_run — they are that action's testable units.
@@ -847,6 +852,128 @@ function assertSoakContract({ remote, workflow }) {
     slices.seed,
     /--org "\$SOAK_ORG/,
     'walk CLI invocations must use the function-local $org, never a SOAK_ORG* literal',
+  )
+
+  // soak-seed rotate_password=true: a standalone act that rotates ONLY the host-only
+  // synthetic-user password + its DB hash for the EXISTING closed synthetic family. Every
+  // assertion below anchors to slices.rotate (soak_seed_rotate_password's own text), not
+  // to seed-wide substrings, per the taskʼs own anchoring rule.
+
+  // Dispatch: action_soak_seed must read rotate_password, reject any value other than
+  // 'true', refuse the three full-seed-only opts in the same invocation, and call the
+  // rotation function ONLY from inside that guarded branch.
+  assert.ok(
+    slices.seed.includes("rotate_password=\"$(soak_opt rotate_password '')\""),
+    'action_soak_seed must read rotate_password via soak_opt with an empty (non-rotating) default',
+  )
+  assert.ok(
+    slices.seed.includes("rotate_password only accepts 'true'"),
+    'a rotate_password value other than true/absent must be refused',
+  )
+  assert.ok(
+    slices.seed.includes('rotate_password=true is a standalone act and refuses users_per_org/tz/w7_target'),
+    'rotate_password=true must refuse if users_per_org/tz/w7_target are ALSO supplied',
+  )
+  for (const key of ['users_per_org', 'tz', 'w7_target']) {
+    assert.ok(
+      slices.seed.includes(`soak_opt_present ${key} && rotate_conflicts+=(${key})`),
+      `the standalone-act guard must check PRESENCE (not resolved value) of ${key}`,
+    )
+  }
+  const rotateDispatchIdx = slices.seed.indexOf("if [[ \"$rotate_password\" == \"true\" ]]; then")
+  const rotateCallIdx = slices.seed.indexOf('soak_seed_rotate_password\n    return 0', rotateDispatchIdx)
+  const requireOrgsIdx = slices.seed.indexOf('soak_require_orgs\n  mkdir -p "$SOAK_PERSIST_DIR"')
+  assert.notEqual(rotateDispatchIdx, -1, 'action_soak_seed must branch on rotate_password=="true"')
+  assert.notEqual(rotateCallIdx, -1, 'the rotate branch must call soak_seed_rotate_password and return 0')
+  assert.ok(rotateDispatchIdx < rotateCallIdx, 'the call must sit inside the rotate_password=="true" branch')
+  assert.ok(
+    rotateCallIdx < requireOrgsIdx,
+    'the rotate branch (and its return) must come BEFORE soak_require_orgs — rotation never reaches soak_orgs/owner_ref/entrypoint_inventory_ref requirements',
+  )
+
+  // soak_seed_rotate_password itself: missing-credentials-file fail-closed (never silently
+  // mint), atomic tmp+mv replace with a recoverable .prev, prefix-scoped UPDATE with no
+  // inserts/posture/seeding, and the plaintext password NEVER touching OUTPUT_DIR/logs.
+  assert.ok(
+    slices.rotate.includes('no credentials file exists at ${SOAK_CREDENTIALS_FILE} — nothing to rotate'),
+    'rotation must fail closed (never silently mint) when the credentials file is absent',
+  )
+  const credGuardIdx = slices.rotate.indexOf('no credentials file exists')
+  const mktempIdx = slices.rotate.indexOf('mktemp "${SOAK_PERSIST_DIR}/.credentials.XXXXXX"')
+  assert.notEqual(mktempIdx, -1, 'rotation must write the new credentials file via a same-dir mktemp candidate (atomic replace)')
+  assert.ok(credGuardIdx < mktempIdx, 'the missing-file guard must run BEFORE any credentials-file write')
+  assert.ok(
+    slices.rotate.includes('cp -p "$SOAK_CREDENTIALS_FILE" "${SOAK_CREDENTIALS_FILE}.prev"'),
+    'rotation must preserve the pre-rotation credentials file as .prev before replacing it (recoverable botched rotation)',
+  )
+  assert.ok(
+    slices.rotate.includes('chmod 0600 "${SOAK_CREDENTIALS_FILE}.prev"'),
+    'the .prev recovery copy must be 0600 (host-only), same as the live credentials file',
+  )
+  assert.match(
+    slices.rotate,
+    /mv -f "\$cred_tmp" "\$SOAK_CREDENTIALS_FILE"/,
+    'the credentials file replace must be an atomic same-dir rename',
+  )
+  assert.ok(
+    slices.rotate.includes('restore ${SOAK_CREDENTIALS_FILE}.prev to ${SOAK_CREDENTIALS_FILE} to recover the pre-rotation state'),
+    'a failed DB UPDATE after the file swap must point the operator at the .prev recovery path (this is what makes .prev meaningful)',
+  )
+  // The credentials swap must run BEFORE the DB UPDATE (only then is a failed UPDATE a
+  // "botched rotation" the .prev file can recover from — see the recovery message above).
+  const credSwapIdx = slices.rotate.indexOf('mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"')
+  const updateIdx = slices.rotate.indexOf('UPDATE users')
+  assert.ok(credSwapIdx < updateIdx, 'the credentials-file swap must happen BEFORE the DB UPDATE')
+  // #4931-class C9 pin: the psql -v COMPOSITION is what scopes the UPDATE, not just the
+  // WHERE-clause text — a bare "%" here would rewrite every staging password_hash while
+  // every other assertion in this block stays green.
+  assert.ok(
+    slices.rotate.includes('-v user_prefix="${SOAK_USER_PREFIX}%"'),
+    'the rotate UPDATE psql invocation must scope user_prefix to the closed synthetic family prefix (a bare "%" rewrites every staging password_hash)',
+  )
+  assert.match(
+    slices.rotate,
+    /UPDATE users\n {3}SET password_hash = :'pw_hash'\n {1}WHERE username LIKE :'user_prefix';/,
+    'the rotate SQL must be exactly this prefix-scoped UPDATE (no other column, no other WHERE)',
+  )
+  assert.doesNotMatch(slices.rotate, /INSERT\s+INTO/i, 'rotation must never INSERT — it only re-hashes existing rows')
+  assert.doesNotMatch(slices.rotate, /attendance_shifts|attendance_group|SOAK_W4C5_CLI|SOAK_W7_CLI/, 'rotation must never touch shift/group config or the posture CLIs')
+  assert.match(slices.rotate, /\\set ON_ERROR_STOP on\nBEGIN;/, 'the rotate UPDATE must run inside a stop-on-error transaction')
+  assert.ok(slices.rotate.includes('rotated_users=${rotated_users}'), 'the summary must record the rotated-user count')
+  assert.ok(slices.rotate.includes('echo "rotated=1"'), 'the summary must record rotated=1')
+  // Structural (not textual) proof the plaintext password is never printed: every line in
+  // soak_seed_rotate_password that mentions the variable must be free of echo/tee/>>/OUTPUT_DIR.
+  const passwordLines = slices.rotate.split('\n').filter((l) => l.includes('new_password'))
+  assert.ok(passwordLines.length >= 2, 'expected new_password to appear (mint + the one sanctioned credentials-file write)')
+  for (const line of passwordLines) {
+    assert.doesNotMatch(line, /\bOUTPUT_DIR\b/, `password variable must never touch OUTPUT_DIR: ${line}`)
+    assert.doesNotMatch(line, />>/, `password variable must never be appended (>>): ${line}`)
+    assert.doesNotMatch(line, /\btee\b/, `password variable must never flow through tee: ${line}`)
+    assert.doesNotMatch(line, /\becho\b/, `password variable must never be echoed: ${line}`)
+  }
+
+  // Shared generator/hasher: exactly ONE implementation each, used by both the first-mint
+  // path and rotate_password=true (proves "same generator as the first-mint path").
+  assert.equal(
+    (remote.match(/head -c 24 \/dev\/urandom/g) || []).length,
+    1,
+    'the password generator must be a single shared implementation (soak_mint_password)',
+  )
+  assert.equal(
+    (remote.match(/const b = require\("bcryptjs"\)/g) || []).length,
+    1,
+    'the bcrypt-in-container hasher must be a single shared implementation (soak_hash_password_in_backend)',
+  )
+  assert.ok(slices.seed.includes('password="$(soak_mint_password)"'), 'the first-mint path must call the shared generator')
+  assert.ok(slices.rotate.includes('new_password="$(soak_mint_password)"'), 'rotate_password must call the SAME shared generator as the first-mint path')
+  assert.ok(slices.seed.includes('pw_hash="$(soak_hash_password_in_backend "$password")"'), 'the first-mint path must call the shared hasher')
+  assert.ok(slices.rotate.includes('new_hash="$(soak_hash_password_in_backend "$new_password")"'), 'rotate_password must call the SAME shared hasher as the first-mint path')
+
+  // The staging-only guard runs UNCONDITIONALLY before the action dispatch (main, bottom of
+  // the file) — rotation inherits it structurally without needing its own call.
+  assert.ok(
+    remote.includes('assert_staging_only\n\ncase "$ACTION" in'),
+    'assert_staging_only must run before the action dispatch switch, so rotate_password=true (routed through soak-seed) inherits it unconditionally',
   )
 
   // soak-flags: baseline-marker order gate BEFORE the override write; atomic
@@ -1600,6 +1727,152 @@ test('MUTATION (P2-4): deleting the soak-run live-allowlist coverage loops turns
   )
 })
 
+// --- rotate_password=true MUTATION legs -------------------------------------------------
+// Same convention as above: mutate the shipped soak_seed_rotate_password/action_soak_seed
+// text in memory and prove assertSoakContract turns red for the RIGHT reason (the message
+// each assertion pins), not just "some assertion somewhere failed".
+
+test('MUTATION (rotate C9): unscoping the rotate UPDATEʼs user_prefix to "%" turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = '-v user_prefix="${SOAK_USER_PREFIX}%"'
+  assert.ok(original.includes(anchor), 'mutation anchor must exist')
+  const mutated = original.replace(anchor, '-v user_prefix="%"')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /a bare "%" rewrites every staging password_hash/,
+  )
+})
+
+test('MUTATION: deleting the rotate missing-credentials-file guard turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = '  [[ -f "$SOAK_CREDENTIALS_FILE" ]] \\\n    || fail "rotate_password=true but no credentials file exists at ${SOAK_CREDENTIALS_FILE} — nothing to rotate (run action=soak-seed once, without rotate_password, first)"\n'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(anchor, '')
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rotation must fail closed \(never silently mint\) when the credentials file is absent/,
+  )
+})
+
+test('MUTATION: widening rotate_password to accept any value turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = "rotate_password only accepts 'true' (or omit the key entirely), got '${rotate_password}'"
+  assert.ok(original.includes(anchor), 'mutation anchor must exist')
+  const mutated = original.replace(anchor, 'ignored — any value accepted')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /a rotate_password value other than true\/absent must be refused/,
+  )
+})
+
+test('MUTATION: dropping the standalone-act conflict guard (users_per_org/tz/w7_target) turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = "soak_opt_present w7_target && rotate_conflicts+=(w7_target)"
+  assert.ok(original.includes(anchor), 'mutation anchor must exist')
+  const mutated = original.replace(anchor, '# removed w7_target conflict check')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /the standalone-act guard must check PRESENCE/,
+  )
+})
+
+test('MUTATION: printing the plaintext password into OUTPUT_DIR turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = 'printf \'SOAK_SYNTH_PASSWORD=%s\\n\' "$new_password" > "$cred_tmp"'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(
+    anchor,
+    `${anchor}\n  echo "debug: rotated to $new_password" >> "\${OUTPUT_DIR}/debug.log"`,
+  )
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /password variable must never touch OUTPUT_DIR/,
+  )
+})
+
+test('MUTATION: an INSERT slipped into the rotate SQL turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = "UPDATE users\n   SET password_hash = :'pw_hash'\n WHERE username LIKE :'user_prefix';"
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(
+    anchor,
+    `INSERT INTO users (id) VALUES (gen_random_uuid());\n${anchor}`,
+  )
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rotation must never INSERT/,
+  )
+})
+
+test('MUTATION: dropping rotated=1 from the rotate summary turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const anchor = 'echo "rotated=1"'
+  assert.ok(original.includes(anchor), 'mutation anchor must exist')
+  const mutated = original.replace(anchor, '# rotated flag removed')
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /the summary must record rotated=1/,
+  )
+})
+
+test('MUTATION: reordering the DB UPDATE before the credentials-file swap turns the soak contract red (would make .prev meaningless)', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  // Swap the two ordering anchors so the UPDATE textually precedes the mv -f swap.
+  const swapAnchor = 'mv -f "$cred_tmp" "$SOAK_CREDENTIALS_FILE"'
+  const updateAnchor = "UPDATE users\n   SET password_hash = :'pw_hash'\n WHERE username LIKE :'user_prefix';"
+  assert.ok(slices.rotate.includes(swapAnchor) && slices.rotate.includes(updateAnchor), 'mutation anchors must hit the rotate slice')
+  const swapIdx = slices.rotate.indexOf(swapAnchor)
+  const updateIdx = slices.rotate.indexOf(updateAnchor)
+  assert.ok(swapIdx < updateIdx, 'precondition: swap currently precedes update')
+  // Move the swap line to just AFTER the update block (reversing the real order).
+  const withoutSwap = slices.rotate.slice(0, swapIdx) + slices.rotate.slice(swapIdx + swapAnchor.length)
+  const reinsertAt = withoutSwap.indexOf(updateAnchor) + updateAnchor.length
+  const mutatedRotate = withoutSwap.slice(0, reinsertAt) + '\n  ' + swapAnchor + withoutSwap.slice(reinsertAt)
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /the credentials-file swap must happen BEFORE the DB UPDATE/,
+  )
+})
+
+test('MUTATION: physically reordering soak_require_orgs to precede the rotate_password dispatch turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const dispatchAnchor = 'if [[ "$rotate_password" == "true" ]]; then'
+  const requireOrgsAnchor = 'soak_require_orgs\n  mkdir -p "$SOAK_PERSIST_DIR"'
+  const dispatchIdx = slices.seed.indexOf(dispatchAnchor)
+  const requireOrgsIdx = slices.seed.indexOf(requireOrgsAnchor)
+  assert.ok(dispatchIdx !== -1 && requireOrgsIdx !== -1 && dispatchIdx < requireOrgsIdx, 'preconditions: real order is dispatch-block, then require_orgs')
+  // Physically swap: move the require_orgs+mkdir line to run BEFORE the rotate dispatch
+  // block (everything from `if [[ "$rotate_password"...` up to that line), reversing the
+  // real order the ordering assertion pins.
+  const before = slices.seed.slice(0, dispatchIdx)
+  const dispatchBlock = slices.seed.slice(dispatchIdx, requireOrgsIdx)
+  const after = slices.seed.slice(requireOrgsIdx + requireOrgsAnchor.length)
+  const mutatedSeed = before + requireOrgsAnchor + '\n  ' + dispatchBlock + after
+  const mutated = original.replace(slices.seed, () => mutatedSeed)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /rotation never reaches soak_orgs\/owner_ref\/entrypoint_inventory_ref requirements/,
+  )
+})
+
 // --- P2-1 executable negative controls: the workflow input-validation block must REJECT a
 // newline-injection payload (the here-string `read` validators only inspect line 1; a newline
 // slips the tail past them and into the single-quoted remote prelude). These EXECUTE the real
@@ -1647,6 +1920,42 @@ test('P2-1: a newline-injection payload in soak_opts is REJECTED by workflow val
   const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'punch_target=200' + INJECT })
   assert.equal(r.status, 2, `newline in soak_opts must be rejected (exit 2); got ${r.status}, stderr: ${r.stderr}`)
   assert.match(r.stderr, /single-line/, 'rejection must name the single-line rule')
+})
+
+// --- rotate_password=true workflow-validation legs ---------------------------------------
+// soak_orgs stays a REQUIRED workflow input for action=soak-seed regardless of
+// rotate_password (present-and-ignored, like owner_ref) — the exact dispatch command an
+// operator uses for rotation still supplies -f soak_orgs=... (verified empirically here,
+// not assumed from the taskʼs own dispatch-command shorthand).
+
+test('rotate_password: a rotation dispatch WITH soak_orgs supplied passes workflow validation', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'rotate_password=true' })
+  assert.equal(r.status, 0, `rotation dispatch with soak_orgs must pass validation; stderr: ${r.stderr}`)
+})
+
+test('rotate_password: soak_orgs is STILL required at the workflow layer even for rotate_password=true (present-and-ignored, not exempt)', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: '', SOAK_OPTS: 'rotate_password=true' })
+  assert.equal(r.status, 2, `empty soak_orgs must still be rejected for action=soak-seed; got ${r.status}, stdout: ${r.stdout}`)
+  assert.match(r.stderr, /soak_orgs must be exactly 3 comma-separated org UUIDs/, 'rejection must name the soak_orgs requirement')
+})
+
+test('rotate_password: users_per_org ALONGSIDE rotate_password=true still passes WORKFLOW validation (the conflict refusal is a script-level, not workflow-level, guard)', () => {
+  const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: 'rotate_password=true;users_per_org=5' })
+  assert.equal(r.status, 0, `workflow validation only shape-checks each key independently; stderr: ${r.stderr}`)
+})
+
+for (const badValue of ['false', '1', 'TRUE', 'yes']) {
+  test(`rotate_password invalid-value negative (workflow layer): rotate_password=${badValue} is REJECTED`, () => {
+    const r = runWorkflowValidation({ ACTION: 'soak-seed', SOAK_ORGS: THREE_UUIDS, SOAK_OPTS: `rotate_password=${badValue}` })
+    assert.equal(r.status, 2, `rotate_password=${badValue} must be rejected (exit 2); got ${r.status}, stdout: ${r.stdout}`)
+    assert.match(r.stderr, /rotate_password only accepts 'true'/, 'rejection must name the rotate_password value rule')
+  })
+}
+
+test('rotate_password: an unrelated action carrying rotate_password in soak_opts is rejected (soak_opts scoping unchanged)', () => {
+  const r = runWorkflowValidation({ ACTION: 'status', SOAK_ORGS: '', SOAK_OPTS: 'rotate_password=true' })
+  assert.equal(r.status, 2, `soak_opts must stay scoped to soak actions; got ${r.status}, stdout: ${r.stdout}`)
+  assert.match(r.stderr, /soak_opts is only meaningful for soak actions/)
 })
 
 /**
@@ -1867,6 +2176,144 @@ function extractRunnerFunctions(names) {
       return m[0]
     })
     .join('\n')
+}
+
+// extractRunnerLine: same idea as extractRunnerFunctions, for single-physical-line
+// functions (log/fail) that extractRunnerFunctions canʼt match (its regex requires a
+// newline before the closing brace). Extracting these VERBATIM — rather than paraphrasing
+// them in a probe script — matters: the shipped log() writes to STDOUT, and a paraphrased
+// stand-in that flipped it to stderr would invert a stdout-marker assertion below.
+function extractRunnerLine(name) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(new RegExp(`^${name}\\(\\) \\{.*\\}$`, 'm'))
+  assert.ok(m, `${name} must exist as a single-line function in the runner`)
+  return m[0]
+}
+
+function extractRunnerVar(name) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(new RegExp(`^${name}=.*$`, 'm'))
+  assert.ok(m, `expected a top-level assignment: ${name}`)
+  return m[0]
+}
+
+/**
+ * Minimal, REAL bash harness for action_soak_seed's rotate_password dispatch — extracts the
+ * shipped fail/log, the SOAK_OPTS/SOAK_OPT_VALUE_RE globals, soak_validate_opts/soak_opt/
+ * soak_opt_present, and action_soak_seed itself verbatim from the runner. The two functions
+ * action_soak_seed calls at its two exit branches (soak_seed_rotate_password and
+ * soak_require_orgs) are STUBBED to a one-line marker-and-return by default so each test
+ * proves ONLY the dispatch/guard logic — never masked by (or accidentally dependent on)
+ * downstream docker/psql calls that arenʼt available in this test environment. Pass
+ * `real: true` for either to extract the REAL function instead (used by the missing-
+ * credentials-file test, whose guard is the first line of the real function and needs no
+ * docker/psql to prove).
+ */
+function buildActionSoakSeedProbe({ realRotate = false, realRequireOrgs = false } = {}) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const failLine = extractRunnerLine('fail')
+  const logLine = extractRunnerLine('log')
+  const optsRe = extractRunnerVar('SOAK_OPTS_RE')
+  const optValueRe = extractRunnerVar('SOAK_OPT_VALUE_RE')
+  const optFns = extractRunnerFunctions(['soak_validate_opts', 'soak_opt', 'soak_opt_present'])
+  // action_soak_seed itself is extracted via sliceBetween (marker-bounded), NOT
+  // extractRunnerFunctions: its body embeds a `python3 - <<'PY' ... PY` block whose Python
+  // dict literal closes with a column-0 `}`, which extractRunnerFunctionsʼ brace-counting
+  // regex misreads as the bash function's own end — silently truncating mid-function and
+  // producing an unbalanced (syntax-error) probe script.
+  const actionSoakSeed = sliceBetween(remote, 'action_soak_seed() {', '\naction_soak_flags() {', 'action_soak_seed')
+  const coreFns = optFns + '\n' + actionSoakSeed
+  const rotateFn = realRotate
+    ? extractRunnerFunctions(['soak_seed_rotate_password', 'soak_mint_password', 'soak_hash_password_in_backend', 'soak_resolve_pg', 'soak_psql_ta'])
+    : 'soak_seed_rotate_password() { echo "ROTATE_CALLED"; }'
+  const requireOrgsFn = realRequireOrgs
+    ? extractRunnerFunctions(['soak_require_orgs'])
+    : 'soak_require_orgs() { echo "REQUIRE_ORGS_CALLED"; exit 0; }'
+  return `#!/bin/bash
+set -u
+${failLine}
+${logLine}
+${optsRe}
+${optValueRe}
+SOAK_USER_PREFIX="synth-w4w7-"
+${requireOrgsFn}
+${rotateFn}
+${coreFns}
+action_soak_seed
+`
+}
+
+function runActionSoakSeedProbe(soakOpts, opts = {}, extraEnv = {}) {
+  const script = buildActionSoakSeedProbe(opts)
+  return spawnSync('bash', ['-c', script], {
+    encoding: 'utf8',
+    env: { ...process.env, SOAK_OPTS: soakOpts, ...extraEnv },
+  })
+}
+
+test('rotate_password EXECUTABLE (a): rotation is invoked ONLY when rotate_password=true — the real dispatch branch, run for real', () => {
+  const without = runActionSoakSeedProbe('')
+  assert.equal(without.status, 0, `expected clean exit; stderr: ${without.stderr}`)
+  assert.match(without.stdout, /REQUIRE_ORGS_CALLED/, 'without rotate_password, the normal soak_require_orgs path must run')
+  assert.doesNotMatch(without.stdout, /ROTATE_CALLED/, 'without rotate_password, rotation must never be invoked')
+
+  const withRotate = runActionSoakSeedProbe('rotate_password=true')
+  assert.equal(withRotate.status, 0, `expected clean exit; stderr: ${withRotate.stderr}`)
+  assert.match(withRotate.stdout, /ROTATE_CALLED/, 'rotate_password=true must invoke rotation')
+  assert.doesNotMatch(withRotate.stdout, /REQUIRE_ORGS_CALLED/, 'rotate_password=true must never reach soak_require_orgs')
+})
+
+test('rotate_password EXECUTABLE (b): rotation with users_per_org ALSO set refuses (standalone act), and never calls rotation', () => {
+  const r = runActionSoakSeedProbe('rotate_password=true;users_per_org=5')
+  assert.notEqual(r.status, 0, `expected a nonzero exit; stdout: ${r.stdout}`)
+  assert.match(r.stderr, /rotate_password=true is a standalone act and refuses users_per_org\/tz\/w7_target/, 'must name the standalone-act rule')
+  assert.match(r.stderr, /users_per_org/, 'must name the specific conflicting key')
+  assert.doesNotMatch(r.stdout, /ROTATE_CALLED/, 'rotation must never be invoked when a conflicting opt is present')
+})
+
+for (const [key, value] of [['tz', 'UTC'], ['w7_target', 'group_shadow']]) {
+  test(`rotate_password EXECUTABLE (b) variant: rotation with ${key} ALSO set refuses`, () => {
+    const r = runActionSoakSeedProbe(`rotate_password=true;${key}=${value}`)
+    assert.notEqual(r.status, 0, `expected a nonzero exit; stdout: ${r.stdout}`)
+    assert.match(r.stderr, new RegExp(key), `must name ${key} as the conflicting opt`)
+    assert.doesNotMatch(r.stdout, /ROTATE_CALLED/, 'rotation must never be invoked when a conflicting opt is present')
+  })
+}
+
+test('rotate_password EXECUTABLE (c): a missing credentials file refuses ("nothing to rotate"), via the REAL rotation function', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'soak-rotate-'))
+  const missingCredFile = join(dir, 'credentials.env')
+  assert.ok(!existsSync(missingCredFile), 'precondition: the credentials file must not exist')
+  const r = runActionSoakSeedProbe('rotate_password=true', { realRotate: true, realRequireOrgs: true }, {
+    SOAK_CREDENTIALS_FILE: missingCredFile,
+  })
+  assert.notEqual(r.status, 0, `expected a nonzero exit; stdout: ${r.stdout}`)
+  assert.match(r.stderr, /no credentials file exists at .* — nothing to rotate/, 'must name the specific fail-closed reason')
+  assert.match(r.stderr, new RegExp(missingCredFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'must name the exact path checked')
+})
+
+test('rotate_password EXECUTABLE: an EXISTING credentials file clears the missing-file guard (positive control distinguishing the guard from a generic failure)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'soak-rotate-'))
+  const credFile = join(dir, 'credentials.env')
+  writeFileSync(credFile, 'SOAK_SYNTH_PASSWORD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n', { mode: 0o600 })
+  const r = runActionSoakSeedProbe('rotate_password=true', { realRotate: true, realRequireOrgs: true }, {
+    SOAK_CREDENTIALS_FILE: credFile,
+  })
+  // The real soak_seed_rotate_password proceeds past the file-exists guard and then calls
+  // soak_resolve_pg/docker, neither stubbed here — it WILL fail, but never with the
+  // missing-file message (proving that specific guard, not a downstream failure, gated the
+  // previous test).
+  assert.notEqual(r.status, 0, 'expected a nonzero exit (docker/psql unavailable in this test env)')
+  assert.doesNotMatch(r.stderr, /nothing to rotate/, 'the missing-credentials-file guard must NOT be what failed this run')
+})
+
+for (const badValue of ['false', '1', 'TRUE', 'yes']) {
+  test(`rotate_password EXECUTABLE invalid-value negative (script layer): rotate_password=${badValue} is refused`, () => {
+    const r = runActionSoakSeedProbe(`rotate_password=${badValue}`)
+    assert.notEqual(r.status, 0, `expected a nonzero exit; stdout: ${r.stdout}`)
+    assert.match(r.stderr, /rotate_password only accepts 'true'/, 'must name the rotate_password value rule')
+    assert.doesNotMatch(r.stdout, /ROTATE_CALLED|REQUIRE_ORGS_CALLED/, 'neither branch may run on an invalid value')
+  })
 }
 
 test('EXECUTABLE (Codex P1): the per-org guard refuses a cross-day second batch that a first-entry derivation would admit', () => {
