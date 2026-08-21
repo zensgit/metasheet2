@@ -15,7 +15,10 @@ interface ApprovalHistoryRouterOptions {
   plmAdapter?: ApprovalBridgePlmAdapter | null
 }
 
-function isPlmApprovalId(id: string): boolean {
+// Exported (additive-only; no behavior change) so a Lock-10 (S1) test can gate this hand-copied
+// detector's agreement with the other two shipped copies + the canonical form in
+// approval-instance-readability.ts (OD-S1-18(b): "the divergence of any one of them is a P1").
+export function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
 }
 
