@@ -12,10 +12,15 @@ const TABLE = 'attendance_org_resolution_shadow'
  * claim/membership-driven resolution would independently have picked. Never read by the punch
  * route itself and never gates anything.
  *
- * Two indexes support the read patterns an operator/analyst actually needs once `shadow` is on
- * anywhere (chronological scan; per-user chronological scan) — not exercised by the plugin
- * itself, which never reads this table. No retention/pruning policy exists yet for this table;
- * that is an explicit owner item, out of scope for this shadow-only PR.
+ * Indexes supporting operator/analyst read patterns are added by the FOLLOWING migration
+ * (zzzz20260821091000_add_attendance_org_resolution_shadow_indexes.ts), deliberately kept
+ * separate rather than folded back into this one: this migration's name is already recorded as
+ * executed in any persistent dev/CI database that ran it before the indexes existed, and kysely
+ * never re-runs a migration by that name — editing this file's `up()` after the fact would leave
+ * those databases permanently without the indexes while a from-empty migrate silently gets them,
+ * a divergence a separate, independently-tracked migration avoids entirely. No retention/pruning
+ * policy exists yet for this table; that is an explicit owner item, out of scope for this
+ * shadow-only PR.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
@@ -34,14 +39,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       agree boolean NOT NULL,
       rule text NOT NULL
     )
-  `.execute(db)
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_attendance_org_resolution_shadow_created_at
-      ON attendance_org_resolution_shadow (created_at)
-  `.execute(db)
-  await sql`
-    CREATE INDEX IF NOT EXISTS idx_attendance_org_resolution_shadow_user_id_created_at
-      ON attendance_org_resolution_shadow (user_id, created_at)
   `.execute(db)
 }
 
