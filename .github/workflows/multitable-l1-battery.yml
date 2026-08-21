@@ -579,14 +579,37 @@ jobs:
             fi
           fi
 
+          # NIT (gate): the >24h stale sweep above uses `-exec rm` under `set -uo pipefail`
+          # (host) and `|| true` (container), so a failed sweep would leave stale credential
+          # dirs AND still report PASS — a false-green on credential hygiene. Assert no stale
+          # (>24h) dir REMAINS after the sweep; any remainder fails the job.
+          host_stale_left="$(find /tmp -maxdepth 1 -name 'l1-battery-creds-*' -type d -mmin +1440 2>/dev/null | wc -l | tr -d '[:space:]')"
+          if [[ "${host_stale_left:-0}" != "0" ]]; then
+            log "VERIFY-FAIL: ${host_stale_left} stale (>24h) host credential dir(s) remain after sweep"
+            fail=1
+          fi
+          if [[ "$container_up" == "1" ]]; then
+            # Positive-result assertion (same discipline as the current-run verify): the exec
+            # must affirmatively print an integer count; a docker-exec failure yields empty and
+            # is treated as a verification failure, not a silent pass.
+            cstale_out="$(docker exec "$CONTAINER" sh -c "find /tmp -maxdepth 1 -name 'o2bat-creds-*' -type d -mmin +1440 2>/dev/null | wc -l | tr -d '[:space:]'" 2>/dev/null || true)"
+            if [[ ! "$cstale_out" =~ ^[0-9]+$ ]]; then
+              log "VERIFY-FAIL: in-container stale-sweep verification did not return a count (got '${cstale_out:-<empty>}')"
+              fail=1
+            elif [[ "$cstale_out" != "0" ]]; then
+              log "VERIFY-FAIL: ${cstale_out} stale (>24h) in-container credential dir(s) remain after sweep"
+              fail=1
+            fi
+          fi
+
           if [[ "$fail" != "0" ]]; then
             log "VERDICT: FAIL — credential residue remains after scrub; a stranded credential file is worse than a red job"
             exit 1
           fi
           if [[ "$container_up" == "1" ]]; then
-            log "VERDICT: PASS — current-run credentials scrubbed on host and in container; stale (>24h) sweep completed"
+            log "VERDICT: PASS — current-run credentials scrubbed on host and in container; stale (>24h) sweep verified: none remain"
           else
-            log "VERDICT: PASS — current-run credentials scrubbed on host (container not running); stale (>24h) sweep completed"
+            log "VERDICT: PASS — current-run credentials scrubbed on host (container not running); stale (>24h) host sweep verified: none remain"
           fi
           REMOTE
 

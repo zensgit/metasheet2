@@ -136,6 +136,32 @@ function verifyAfterScrubGuardPresent(remoteBodyText) {
 // 1. STRUCTURAL GUARDS — parse the YAML text.
 // ---------------------------------------------------------------------------
 
+// NIT (gate follow-up): the >24h stale sweep must also be VERIFIED — a failed sweep
+// (rm under `set -uo pipefail` / `|| true`) that leaves stale dirs must red, not report PASS.
+// Ties each "stale … remain after sweep" VERIFY-FAIL to a `fail=1` on the next line, host and
+// container both, so neutering either reds this.
+function staleSweepVerifiedGuardPresent(remoteBodyText) {
+  const hostWired = /VERIFY-FAIL: \$\{host_stale_left\} stale \(>24h\) host credential dir\(s\) remain after sweep"\s*\n\s*fail=1\b/.test(
+    remoteBodyText,
+  )
+  const containerWired =
+    /VERIFY-FAIL: \$\{cstale_out\} stale \(>24h\) in-container credential dir\(s\) remain after sweep"\s*\n\s*fail=1\b/.test(
+      remoteBodyText,
+    )
+  // the container count must be a positive-result assertion (fail-closed on non-integer):
+  const containerFailClosed = /in-container stale-sweep verification did not return a count[^\n]*"\s*\n\s*fail=1\b/.test(
+    remoteBodyText,
+  )
+  return hostWired && containerWired && containerFailClosed
+}
+
+test('structural: the >24h stale sweep is verified (remaining stale dirs red the job), host and container', () => {
+  assert.ok(
+    staleSweepVerifiedGuardPresent(scrubRemoteBody),
+    'a failed stale sweep must fail the job, not silently report PASS — wire each "stale … remain" detection to fail=1, and fail-close the container count',
+  )
+})
+
 test('structural: scrub-creds step exists with the expected id, placed after residue-check', () => {
   assert.match(scrubBlock, /^\s*id: scrub-creds\s*$/m)
   const residueIdx = workflowText.indexOf(RESIDUE_STEP_NAME_LINE)
@@ -274,6 +300,17 @@ case "$cmd" in
             printf '%s\\n' "\${STUB_CONTAINER_STALE_PRINT:-}"
             exit 0 ;;
           *'-exec rm -rf'*)
+            exit 0 ;;
+          *' | wc -l'*)
+            # the stale-sweep-REMAINING count query (NIT verify). Default 0 = none remain
+            # (happy path / post-sweep). STUB_CONTAINER_STALE_COUNT overrides for the
+            # failure-injection case; STUB_CONTAINER_STALE_COUNT_NONINT makes it emit a
+            # non-integer to exercise the fail-closed branch.
+            if [[ "\${STUB_CONTAINER_STALE_COUNT_NONINT:-0}" == "1" ]]; then
+              printf '%s\n' "not-a-number"
+            else
+              printf '%s\n' "\${STUB_CONTAINER_STALE_COUNT:-0}"
+            fi
             exit 0 ;;
           *)
             echo "stub: unrecognized docker exec sh -c script: $inline" >&2
@@ -495,6 +532,53 @@ test('behavior (d-container) stale sweep: in-container stale dirs are printed by
     r.dockerLog,
     /^exec metasheet-staging-backend sh -c find \/tmp -maxdepth 1 -name 'o2bat-creds-\*' -type d -mmin \+1440 -exec rm -rf \{\} \+$/m,
   )
+})
+
+test('behavior (e-container-stale-remains) NIT: a container stale dir surviving the sweep fails the job', () => {
+  // The load-bearing proof of the NIT fix: if the in-container >24h sweep leaves a dir behind
+  // (rm failed / permissions / daemon flake), the post-sweep count is non-zero and the step must
+  // FAIL — not report PASS. Without the added verification this run was exit 0.
+  const r = runScrubRemote({
+    REMOTE_SECRETS_DIR: '',
+    RUN_STAMP: 'ghECONTa1',
+    STUB_CONTAINER_CREDS_PRESENT: '0',
+    STUB_CONTAINER_STALE_COUNT: '2', // two stale dirs remain after the sweep
+  })
+  assert.notEqual(r.status, 0, `a surviving container stale dir must fail the job; stdout: ${r.stdout}`)
+  assert.match(r.stdout, /VERIFY-FAIL: 2 stale \(>24h\) in-container credential dir\(s\) remain after sweep/)
+})
+
+test('behavior (f-container-stale-nonint) NIT: a non-integer stale count is treated as verification failure (fail-closed)', () => {
+  const r = runScrubRemote({
+    REMOTE_SECRETS_DIR: '',
+    RUN_STAMP: 'ghFCONTa1',
+    STUB_CONTAINER_CREDS_PRESENT: '0',
+    STUB_CONTAINER_STALE_COUNT_NONINT: '1', // docker exec yields a non-count (flake) → must NOT pass
+  })
+  assert.notEqual(r.status, 0, `a non-integer container stale count must fail the job, not silently pass; stdout: ${r.stdout}`)
+  assert.match(r.stdout, /VERIFY-FAIL: in-container stale-sweep verification did not return a count/)
+})
+
+test('behavior (g-host-stale-remains) NIT: a host stale dir surviving the sweep fails the job', () => {
+  // Manufacture a REAL >24h host dir and make rm a no-op so the sweep cannot remove it; the
+  // post-sweep host count is then non-zero and the step must FAIL.
+  const staleDir = join('/tmp', `l1-battery-creds-staleproof-${process.pid}-${Date.now()}`)
+  mkdirSync(staleDir, { recursive: true })
+  // set mtime to 48h ago so -mmin +1440 selects it (seconds, matching the d-host fixture)
+  const twoDaysAgo = Date.now() / 1000 - 2 * 86400
+  utimesSync(staleDir, twoDaysAgo, twoDaysAgo)
+  try {
+    const r = runScrubRemote({
+      REMOTE_SECRETS_DIR: '',
+      RUN_STAMP: 'ghGHOSTa1',
+      STUB_PS_NAMES: '', // container down — isolate the host path
+      STUB_RM_NOOP: '1', // the sweep's rm cannot actually remove the stale dir
+    })
+    assert.notEqual(r.status, 0, `a surviving host stale dir must fail the job; stdout: ${r.stdout}`)
+    assert.match(r.stdout, /VERIFY-FAIL: [0-9]+ stale \(>24h\) host credential dir\(s\) remain after sweep/)
+  } finally {
+    rmSync(staleDir, { recursive: true, force: true })
+  }
 })
 
 // ---- (d-host) stale sweep — real filesystem ----
