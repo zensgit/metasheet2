@@ -38,7 +38,10 @@
 #     2. LOGIN with the INTENDED password. It must return success:true; we capture
 #        the SERVER-AUTHORITATIVE data.user.id. If login fails (wrong password ⇒
 #        the email is pre-empted by someone whose password we do not control, or
-#        our own register failed) the script ABORTS non-zero with ZERO database
+#        our own register failed) the script ABORTS non-zero with ZERO privilege/promotion
+#        writes. NOTE: register runs FIRST and commits its own row, so a login that then fails on
+#        a 500/network error may leave a plain (role='user', no admin membership) row behind — that
+#        is harmless and the script is safe to re-run (register is idempotent, promotion never ran).
 #        writes — it never reaches the promotion.
 #     3. Promote BY that verified data.user.id (not by an email lookup), in the one
 #        atomic transaction below. The net invariant: NO code path grants admin to
@@ -291,19 +294,20 @@ fi
 # script exiting non-zero). So we log in HERE, capture the SERVER-AUTHORITATIVE
 # data.user.id, and in step 3 promote ONLY that verified id. A login failure
 # (wrong password ⇒ the email is controlled by someone else, or our own register
-# failed) ABORTS with ZERO database writes — we NEVER promote an account whose
+# failed) ABORTS with ZERO PRIVILEGE writes (no role change, no user_roles admin grant) — we NEVER
+# promote an account whose
 # password we do not control. `if ! LOGIN_OUT="$(...pipeline...)"` propagates the
 # pipeline's non-zero status under `set -o pipefail`, so a 401 aborts before any psql.
 echo "[create-l1-admin] step 2/3: login-first identity verification via /api/auth/login (stdin credential)"
 if ! LOGIN_OUT="$(printf '%s' "$PW_B64" | docker exec -i "$BACKEND" node -e "$NODE_PROG" login "$EMAIL")"; then
-  echo "ERROR: login verification failed — the intended password does not authenticate '${EMAIL}'; refusing to promote (ZERO database writes)" >&2
+  echo "ERROR: login verification failed — the intended password does not authenticate '${EMAIL}'; refusing to promote (no privilege writes; a plain user row from register may remain, safe to re-run)" >&2
   exit 1
 fi
 # Extract the server-verified user id (the ONLY thing the login step writes to
 # stdout). Empty ⇒ login "succeeded" without an id we can key the grant on ⇒ abort.
 USER_ID="$(printf '%s\n' "$LOGIN_OUT" | sed -n 's/^USERID=//p' | head -n1)"
 if [[ -z "$USER_ID" ]]; then
-  echo "ERROR: login verification returned no server user id — refusing to promote (ZERO database writes)" >&2
+  echo "ERROR: login verification returned no server user id — refusing to promote (no privilege writes; a plain user row from register may remain, safe to re-run)" >&2
   exit 1
 fi
 

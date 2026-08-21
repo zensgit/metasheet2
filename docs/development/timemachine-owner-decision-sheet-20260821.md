@@ -8,7 +8,7 @@
 > 下文 B1 段已按此改写。
 >
 > **2026-08-21 二次更新(fix-forward 已落地)**:两缺陷已修 + 过独立复门(APPROVE @ `ceb0f08def`,#5069);
-> **B1 的代码侧前置尚未全满足**(2026-08-21,截至 owner **第四轮**复审):电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)均已落 main;**但建号脚本 #5080 被第四轮复审发现一个提权漏洞(预占邮箱账号被提升为 admin),F1 fix-forward 进行中**;且 **F2(设 `recovery-schema-drift` 为 required)是 owner 动作、尚未做**。P3-INFO-1(subject_type 枚举)已查证**满足**(见 §C1a)。**F1 修复+复门前不建号/不 dispatch/不 ratify。**
+> **B1 的代码侧前置:五轮复审后已全部闭合**(2026-08-21)。电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)、建号脚本(F1:重写 #5080 + 提权修复 #5084 `162679992e`,含 login-first + 收敛行为 golden)、F5 readiness、五轮文案收窄——**均已落 main 且过独立复门(运行时代码 APPROVE,无 P1/P2)**。P3-INFO-1 已查证满足。**剩余全是 owner/ops:F2(设 required)、F3 主机证据、F4、建号/电池、#5039 pending=0、A1 ratify——见下。**
 > 剩余 A1-ratify 前提**纯 owner/ops**:owner 授权 staging 电池实跑 → PASS → 再 ratify。secrets 已设、主机建号脚本已备。
 
 > 一页看全:两条线(O-2 启用加固 + 阶梯加速)的**开发已全部落 main 并验证**;下面全是**只有 owner 能拍的板**。
@@ -34,14 +34,14 @@
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
 - 前置:**代码侧尚未全满足(截至 2026-08-21 第四轮复审)**。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077)。**未完:F1 建号脚本提权漏洞 fix-forward(第四轮新发现)**;F2 设 required 是 owner 动作。全部完成 + staging 实跑 PASS 才可 ratify。已闭合缺陷存档:
-  - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`——需 always() 清理+陈旧目录处理+失败注入测试。**(#5069 已落一轮;owner 二次复审又发现停止容器仍持密码却报 PASS ⇒ P1 第二轮修复进行中,修复前不建号/不 dispatch/不 ratify)**
+  - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`。**已闭合**(#5069 workflow always() 清理 → #5076 停止容器诚实枚举 → #5080/#5084 建号脚本 stdin-only+trap;全过独立复门)。
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
 - 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
   owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
 - 门审边界(修好后仍适用):干净电池只观测 **12/48 census 站点 + 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
 - 后果:未 ratify 期间原 `≥2 天` 判据继续生效,无损失。
-- 载体:A1 = #5042;电池修复轮全落 main(#5069/#5076/#5077/#5080/#5081);**唯一未完 = F1 建号脚本提权漏洞(第四轮),是 A1-ratify 的硬前置**。
+- 载体:A1 = #5042;电池修复轮全落 main(#5069/#5076/#5077/#5080/#5081/#5083/#5084);**代码侧 F1 硬前置已解除(#5084)**;A1-ratify 剩 owner 侧前提(F2/F3 主机证据/建号+实跑 PASS/#5039 pending=0)。
 
 ### C1a · P3-INFO-1 subject_type 枚举(已查证,结论=满足)
 
@@ -68,9 +68,10 @@
 
 ## D2. owner 复审(2026-08-21)新增的待办
 
-- **F1 · 建号脚本(硬前置,fix-forward 进行中)**:owner 复审历经三步——(1) battery workflow `docker cp` 密码进容器 → 停止容器假 PASS,**已修 #5076**;
+- **F1 · 建号脚本(硬前置,✅ 已闭合)**:owner 复审历经四步——(1) battery workflow `docker cp` 密码进容器 → 停止容器假 PASS,**已修 #5076**;
   (2) 配套建号脚本 `create-l1-battery-admin-on-staging.sh` 重现同一泄漏 + 非原子提权,**已重写落 main #5080 `95318992ab`**(stdin-only+trap+单事务);
-  (3) **第四轮又发现该脚本一个提权漏洞**:register 接受 409(预占邮箱)→ 先提升 → 后验密码,预占账号即得 admin。**fix-forward 进行中**(login-first 拿服务端 user.id→再原子提升;预占+错密码必零变化 golden)。**此漏洞修复+复门前不建号。**
+  (3) 第四轮发现该脚本提权漏洞:register 接受 409(预占邮箱)→ 先提升 → 后验密码,预占账号即得 admin。**已修并落 main #5084 `162679992e`**(login-first 拿服务端 user.id→按 id 原子提升;预占+错密码零提权 golden + mismatched-id 收敛行为 golden;独立复门 APPROVE)。
+  (4) 第五轮:'zero database writes' 文案过强(register 先提交普通用户行)——已收窄为'zero privilege writes,普通用户残留可安全重跑'。**F1 全闭合。**
 - **F2 · 设漂移守卫为 required(owner 动作,尚未做)**:check context 实名 **`recovery-schema-drift`**(job 名,非文件名),已对每个 PR 稳定产生(#5075)。
   **F3 复门证实这是安全必需**(非可选):否则有人 revert `public.` 限定符后重生成指纹 → required 全绿而 shadow 重开,只非-required 反例能抓。owner 在 branch protection 加 `recovery-schema-drift` 到 required。
 - **F3 · search_path 根修 —— 已落 main(#5081 `d3289945e1`)**:新迁移 schema-qualified 调用 + 固定 `SET search_path=pg_catalog,public`;函数指纹 `14c180aa→e4a78f6c`;triggers 不变 9/9 DISABLED;真库反例全 5 触发器路径均被防(复门 APPROVE)。
@@ -86,4 +87,6 @@ L4/L5 canary → **L6 soak ≥7 日历日** → L7+ 生产重放全序。**每�
 另需:目标主机跑一次**回滚后 postdeploy-full**(L0 §5 的 owner-gated 半条,本地演练不覆盖)。
 
 ---
-**最短路径(第四轮复审后订正)**:① F1 建号脚本提权 fix-forward + F5 readiness(同轮)→ 过复门 → ② owner 设 `recovery-schema-drift` required(F2,安全必需)→ ③ staging 迁移 + 双主机 postdeploy-full(新指纹)→ ④ 建号(用修好的 #5080 脚本)+ 授权 staging 电池实跑 → PASS + 确认 #5039 pending=0 → ⑤ ratify A1(绑 #5042 exact content SHA)→ L1。F4 旧 PR 清理可并行。**F1 修复+复门前不建号/不 dispatch/不 ratify。**
+> ⚠️ **第五轮 owner 复核观察(2026-08-21)**:F3 迁移已在 prod 执行,但部署窗口内有一次健康探针 `curl rc=7`;新指纹 `e4a78f6c` 的**双主机 postdeploy-full 证据尚未取**,staging 也未验证。**不能据此称 main 全绿或 prod 已稳定** —— F2 之后须先取双主机 postdeploy-full 证据(见 F3)再往下走。
+
+**最短路径(第五轮后,代码侧已闭合——以下全 owner/ops)**:① owner 设 `recovery-schema-drift` required(F2,安全必需)→ ② staging 迁移 + 双主机 postdeploy-full(取新指纹 `e4a78f6c` 证据,迁移须先于 dispatch)→ ③ 建号(用 #5080/#5084 修好的脚本)+ 授权 staging 电池实跑 → PASS + 确认 #5039 pending=0 → ④ ratify A1(绑 #5042 exact content SHA)→ L1。F4 旧 PR 清理可并行。
