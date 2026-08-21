@@ -52,7 +52,8 @@
   now resolve one directory further out; MetaCommentComposer/MetaCommentReactions moved alongside
   it so their relative imports are unchanged). multitable/components/MetaCommentsPanel.vue is now
   a re-export shim at the old path, kept only because multitable-comments-panel.spec.ts's HI-1
-  guard reads that exact file's own source text and multitable/components/MetaCommentsDrawer.vue's
+  guard imports/mounts the component from this exact path (the HI-1 source-scan itself was
+  re-anchored at the real file in #5072) and multitable/components/MetaCommentsDrawer.vue's
   frozen specs mount this component through that path's `import MetaCommentsPanel from
   '../src/multitable/components/MetaCommentsPanel.vue'`. Living callers (MetaCommentsDrawer.vue,
   MetaRecordInspector.vue) now import this file directly at its new home instead of through the
@@ -103,9 +104,10 @@
             >{{ resolvingIds.includes(thread.id) ? l('comment.resolving') : l('comment.resolve') }}</button>
             <span v-if="thread.resolved" class="meta-comments-drawer__badge">{{ l('comment.resolved') }}</span>
           </div>
-          <p class="meta-comments-drawer__content">{{ formatContent(thread.content) }}</p>
+          <p v-if="thread.deleted" class="meta-comments-drawer__content meta-comments-drawer__content--deleted">{{ l('comment.deletedPlaceholder') }}</p>
+          <p v-else class="meta-comments-drawer__content">{{ formatContent(thread.content) }}</p>
           <MetaCommentReactions
-            v-if="canComment || (thread.reactions && thread.reactions.length > 0)"
+            v-if="enableReactions && (canComment || (thread.reactions && thread.reactions.length > 0))"
             :comment-id="thread.id"
             :reactions="thread.reactions"
             :can-react="canComment"
@@ -140,9 +142,10 @@
               @click="emit('delete', reply.id)"
             >{{ deletingIds.includes(reply.id) ? l('comment.deleting') : l('comment.delete') }}</button>
           </div>
-          <p class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
+          <p v-if="reply.deleted" class="meta-comments-drawer__content meta-comments-drawer__content--deleted">{{ l('comment.deletedPlaceholder') }}</p>
+          <p v-else class="meta-comments-drawer__content">{{ formatContent(reply.content) }}</p>
           <MetaCommentReactions
-            v-if="canComment || (reply.reactions && reply.reactions.length > 0)"
+            v-if="enableReactions && (canComment || (reply.reactions && reply.reactions.length > 0))"
             :comment-id="reply.id"
             :reactions="reply.reactions"
             :can-react="canComment"
@@ -231,6 +234,13 @@ const props = withDefaults(defineProps<{
   mentionSuggestions?: MetaCommentMentionSuggestion[]
   composerInitialMentions?: MetaCommentMentionSuggestion[]
   mentionCandidates?: MentionCandidateInput[]
+  /**
+   * S3b: gates the reactions block (picker + existing chips) independent of `canComment`.
+   * Defaults `true` so every existing multitable mount (which never passes this prop) is
+   * byte-identical to before this prop existed. The approval consumer — S2 has no reaction
+   * endpoints — passes `false` explicitly.
+   */
+  enableReactions?: boolean
 }>(), {
   highlightedCommentId: null,
   targetFieldId: null,
@@ -247,6 +257,7 @@ const props = withDefaults(defineProps<{
   mentionSuggestions: () => [],
   composerInitialMentions: () => [],
   mentionCandidates: () => [],
+  enableReactions: true,
 })
 
 const emit = defineEmits<{
@@ -416,11 +427,12 @@ function isOwnComment(comment: MultitableComment): boolean {
 }
 
 function canEditComment(comment: MultitableComment): boolean {
-  return props.canComment && isOwnComment(comment) && !comment.resolved
+  return props.canComment && isOwnComment(comment) && !comment.resolved && comment.deleted !== true
 }
 
 function canDeleteComment(comment: MultitableComment): boolean {
   if (!props.canComment || !isOwnComment(comment)) return false
+  if (comment.deleted === true) return false
   return !(repliesByParentId.value[comment.id]?.length)
 }
 
@@ -464,6 +476,7 @@ function formatCommentPreview(content: string): string {
 .meta-comments-drawer__badge { color: #67c23a; font-size: 10px; }
 .meta-comments-drawer__thread-count { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: 10px; font-weight: 600; }
 .meta-comments-drawer__content { margin: 0; font-size: 13px; color: #333; line-height: 1.4; }
+.meta-comments-drawer__content--deleted { color: #999; font-style: italic; }
 .meta-comments-drawer__input-area { padding: 10px 14px; border-top: 1px solid #eee; display: flex; flex-direction: column; gap: 8px; }
 .meta-comments-drawer__reply-banner { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-radius: 6px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
 .meta-comments-drawer__reply-banner-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }

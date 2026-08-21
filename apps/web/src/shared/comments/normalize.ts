@@ -109,5 +109,13 @@ export function normalizeMultitableComment(payload: RawComment | null | undefine
     createdAt: typeof payload?.createdAt === 'string' ? payload.createdAt : '',
     updatedAt: typeof payload?.updatedAt === 'string' ? payload.updatedAt : undefined,
     reactions: normalizeMultitableCommentReactions(payload),
+    // S3b: additive whitelist carry — see types.ts's own doc on why these are safe no-ops for
+    // every existing (multitable) caller. `payload?.deleted` is read directly (not coerced to a
+    // fixed `false` default) so an ABSENT field stays `undefined`, distinguishable from an
+    // explicit `false` — this normalizer never fabricates a value the payload didn't carry.
+    deleted: (payload as { deleted?: unknown } | null | undefined)?.deleted === true ? true : undefined,
+    editedAt: typeof (payload as { editedAt?: unknown } | null | undefined)?.editedAt === 'string'
+      ? (payload as { editedAt?: unknown }).editedAt as string
+      : undefined,
   }
 }

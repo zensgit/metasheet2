@@ -47,4 +47,19 @@ export interface MultitableComment {
   updatedAt?: string
   /** Aggregated emoji reactions (B6); from GET /api/comments. Absent until hydrated. */
   reactions?: MultitableCommentReaction[]
+  /**
+   * S3b (approval comments tab): whether this comment is a tombstone (S2 D2(b1) — author
+   * retained, body cleared). ADDITIVE — multitable never sets this (its comments have no delete-
+   * as-tombstone concept), so every existing multitable comment payload carries it `undefined`,
+   * which the panel's `!== true` checks below treat identically to `false`. Never fabricated: a
+   * comment this field is absent from is NOT assumed non-deleted by any consumer that cares about
+   * the distinction — only the approval adapter (which always sets it, from the wire) reads it.
+   */
+  deleted?: boolean
+  /**
+   * S3b: the S2 `editedAt` timestamp (`ApprovalCommentView.editedAt`), carried but NOT rendered by
+   * this kit yet (see MetaCommentsPanel.vue's own note) — disclosed, not silently dropped.
+   * ADDITIVE, same multitable-inert reasoning as `deleted` above.
+   */
+  editedAt?: string | null
 }

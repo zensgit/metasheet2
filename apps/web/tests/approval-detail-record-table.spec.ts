@@ -57,6 +57,26 @@ vi.mock('../src/approvals/api', () => ({
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
 }))
 
+// S3b: ApprovalDetailView.vue now unconditionally imports ApprovalCommentsPanel.vue (the 全文评论
+// tab wrapper), which is real, unstubbed component in this harness — mocking its transport layer
+// here keeps the "switching tabs mutates nothing" test below from making a real, unmocked
+// `fetch` call the moment it activates the comments tab. Every method returns an empty/no-op
+// result; nothing in this file asserts on comment CONTENT (that lives in
+// approval-comments-panel.spec.ts / approval-comments-client.spec.ts).
+vi.mock('../src/approvals/approvalCommentsClient', () => ({
+  createApprovalCommentsClient: () => ({
+    truncated: { value: false },
+    listComments: vi.fn().mockResolvedValue({ comments: [] }),
+    createComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    updateComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    deleteComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    resolveComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    addReaction: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    removeReaction: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+  }),
+  fetchApprovalCommentMentionCandidates: vi.fn().mockResolvedValue([]),
+}))
+
 const mockCurrentUserId = ref<string | null>(null)
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({

@@ -2,12 +2,22 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 
 const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // Bump whenever this helper's approval schema changes so an already-bootstrapped test DB reruns the
-// idempotent DDL. The current bump adds fix-round gate P2-1's `approval_cmt_tombstone_mentions_cleared`
-// CHECK (mirrors `approval_cmt_tombstone_body_cleared`'s treatment for the `mentions` column) —
-// matches the production migration zzzz20260822120000_create_approval_comments.ts. Without this
-// bump an already-bootstrapped test DB keeps the PRE-fix schema (the marker check below short-
-// circuits the whole DDL body), so the new CHECK would silently not apply in CI.
-// The previous bump added Lock-10 (S2)'s `approval_comments` table (D2(b1) mutable
+// idempotent DDL. The current bump (S3b, P3-6 carried-hardening item) NAMES the `approval_comments
+// .instance_id` FK as `approval_cmt_instance_fk`, converging the bootstrap's DDL text with the
+// production migration's — before this bump the bootstrap's `CREATE TABLE`'s FK was UNNAMED
+// (`REFERENCES approval_instances(id) ON DELETE CASCADE` with no `CONSTRAINT` clause), so the two
+// texts could never converge on a virgin DB even though the migration itself was already named.
+// SOURCE-TEXT CAVEAT (do not read this as a behavioral claim): the bootstrap's `CREATE TABLE IF
+// NOT EXISTS` means an ALREADY-bootstrapped test DB keeps whatever FK name it materialized under
+// an EARLIER bootstrap version — including Postgres's auto-generated
+// `approval_comments_instance_id_fkey`, from back when the bootstrap's FK was unnamed — and the
+// name never converges there; only a FRESH (never-before-bootstrapped) DB gets the named
+// constraint from this version onward. See `approval-admin-jump-migration.test.ts`'s own P3-6
+// parity test for the structural (THROW-on-missing-anchor) comparison this bump makes meaningful.
+// The previous bump added fix-round gate P2-1's `approval_cmt_tombstone_mentions_cleared` CHECK
+// (mirrors `approval_cmt_tombstone_body_cleared`'s treatment for the `mentions` column) — matches
+// the production migration zzzz20260822120000_create_approval_comments.ts.
+// The bump before that added Lock-10 (S2)'s `approval_comments` table (D2(b1) mutable
 // comment storage + tombstone) — matches the production migration
 // zzzz20260822120000_create_approval_comments.ts.
 // The previous bump added Lock-10 (S1) OD-S1-9(a)'s `approval_instances.org_id`
@@ -18,7 +28,7 @@ const APPROVAL_SCHEMA_BOOTSTRAP_KEY = 'approval-schema-bootstrap'
 // The bump before that added Lock-5's `policy_denied` action to the approval_records CHECK so the
 // per-node-operation-policy real-DB suite's denial-row INSERT is accepted (matches the production
 // migration zzzz20260818090000_add_policy_denied_action_to_approval_records).
-const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s2-fixround-mentions-cleared-check'
+const APPROVAL_SCHEMA_BOOTSTRAP_VERSION = '20260822-s3b-p36-named-instance-fk'
 
 /**
  * Ensures the approval schema (tables, constraints, indexes, sequences) is
@@ -260,7 +270,9 @@ export async function ensureApprovalSchemaReady(): Promise<void> {
     await client.query(`
       CREATE TABLE IF NOT EXISTS approval_comments (
         id           text PRIMARY KEY,
-        instance_id  text NOT NULL REFERENCES approval_instances(id) ON DELETE CASCADE,
+        instance_id  text NOT NULL
+                       CONSTRAINT approval_cmt_instance_fk
+                       REFERENCES approval_instances(id) ON DELETE CASCADE,
         parent_id    text REFERENCES approval_comments(id) ON DELETE CASCADE,
         author_id    text NOT NULL,
         body         text,
