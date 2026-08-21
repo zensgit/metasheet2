@@ -71,6 +71,14 @@ import { checkTableExists } from './_patterns'
  * zzzz20260821090000_create_attendance_org_resolution_shadow.ts:15-23: once any environment has
  * this migration's name recorded as executed, kysely never re-runs it, so editing this file's
  * up() after the fact would leave that environment silently without the index.
+ *
+ * W4C-0 DML CENSUS: `approval_instances` is a `shared_hook`-bucket table
+ * (`scripts/attendance/w4c0-dml-inventory/table-classification.cjs`), so this file's `UPDATE` is a
+ * tracked site claimed by name in `GENERIC_SHARED_ALLOWLIST`
+ * (`scripts/attendance/w4c0-dml-inventory/curated-debt-entries.cjs`) — matched by `relPath` alone,
+ * which claims every DML site in THIS file only. **A later migration implementing Phase 3 or the
+ * class 1/3/4 backfills will have a different filename and needs its own allowlist row** — it does
+ * not inherit this one. Skipping that will red `test (18.x)`'s census, not silently pass.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {
   // PHASE 1 — additive, nullable, NO DEFAULT (OD-S1-9(a)). No constraint references this column
