@@ -90,16 +90,36 @@ until a person edits the sheet. The rehearsal covers the divergent case directly
 whose stored `preserveOnRefresh` was pinned true without restating ownership must drop out
 of the writable set. Both clauses are now load-bearing under mutation.
 
-**F4 — today's refresh path is safe by OMISSION, not by ownership.**
-`stock-preparation-conflict-planner.cjs` derives its writable set from the frozen template
-(`plmRefreshFieldIds`), so pack `ext_` columns are untouched simply because the template has
-never heard of them. That holds, but it is not the property anyone wants to rely on: the
-moment a refresh becomes pack-aware (reading the sheet's real column set rather than the
-template's), safety has to come from ownership. The rehearsal's guard —
-`plmWritableFieldIds`, derived from the *installed field properties* and fail-closed on an
-unclassified column — is the shape that projection must take. It is deliberately written in
-the test, not in `lib/`: it is a specification for the pack-aware refresh, not yet a shipped
+**F4 — today's refresh path is safe by OMISSION, not by ownership. — IMPLEMENTED.**
+`stock-preparation-conflict-planner.cjs` derived its writable set from the frozen template
+(`plmRefreshFieldIds`), so pack `ext_` columns were untouched simply because the template had
+never heard of them. That held, but it was not the property anyone wants to rely on: the
+moment a refresh becomes pack-aware, safety has to come from ownership. The rehearsal's guard
+was deliberately written in the test rather than in `lib/` — a specification, not a shipped
 one.
+
+It is now shipped. `derivePackAwarePlmWritableFields({ templateFields,
+installedFieldProperties })` in the conflict planner projects both bands from the
+`property.stockPreparation` stanza the installer stamped, and the planner and the apply
+writer both consume it. A pack column joins the WRITABLE band only on the full triple —
+`ownership: 'plm_system'` **and** `extension: true` **and** no `preserveOnRefresh` pin — so an
+unstamped, unknown, missing or malformed classification is fail-closed to neither band and
+surfaces a values-free reason. The more important half is the other one: an `ext_` human
+column now joins the HUMAN band, so `assertNoHumanFields` rejects it **by name** at both the
+planner and the writer rather than by its absence from the template. The frozen template still
+governs its own 25 columns — an installed property can never re-classify one. The projection
+is passed in, never fetched: the planner stays pure, and a caller that supplies nothing gets
+the pre-pack writable set byte for byte (pinned by a digest captured from the pre-change
+planner, and by eight mutations in
+`__tests__/stock-preparation-pack-aware-refresh.test.cjs`). The rehearsal's local guard stays
+where it is, now pinned to the production function so the two cannot drift.
+
+*Legacy posture, unchanged and deliberate:* the HTTP dry-run/apply route still supplies no
+projection, because nothing can enumerate a sheet's installed columns yet — multitable
+provisioning exposes only per-field `getObjectField`, and no pack-installation registry
+records which `ext_` ids to ask for. Those routes therefore keep the template-only bands,
+which is exactly today's behaviour. `installedFieldProperties` is the seam they plug into once
+a pack registry or a fields-listing primitive lands; see Open decisions.
 
 **F5 — installer API friction, for the CLI/HTTP entry point.**
 Small, all shape rather than semantics:
