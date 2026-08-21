@@ -643,12 +643,21 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
     // helper every S1 real-DB test calls in `beforeAll`) independently runs
     // `ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id TEXT` with the SAME
     // nullable/no-default shape this migration adds — so the assertion above passes even when the
-    // PRODUCTION migration never ran (proved: excluding
-    // `zzzz20260821100000_add_approval_instance_org_id` from this lane's MIGRATION_EXCLUDE-free
-    // run and mutating the migration to `DEFAULT 'default'` still greened the gate above). The
-    // bootstrap cannot forge a `kysely_migration` ledger row, so this assertion is the
-    // discriminator that closes the poisoning: it fails if the migration was excluded, skipped, or
-    // never reached this database, independent of what the bootstrap helper separately provisions.
+    // PRODUCTION migration never ran. Reproduced directly: on a fresh DB with
+    // `zzzz20260821100000_add_approval_instance_org_id` added to this lane's MIGRATION_EXCLUDE
+    // (so `db:migrate` genuinely skips it — confirmed zero rows in `kysely_migration` for its
+    // name, and the column absent pre-bootstrap), the assertion above still greened once this
+    // suite's `beforeAll` ran. The bootstrap cannot forge a `kysely_migration` ledger row, so this
+    // assertion is the discriminator that closes the poisoning: it fails if the migration was
+    // excluded, skipped, or never reached this database, independent of what the bootstrap helper
+    // separately provisions.
+    // Blast radius, checked: this test file is referenced by exactly one workflow
+    // (`.github/workflows/approval-realdb-instance-readability-s1.yml`, the ONLY lane that
+    // collects it — grepped across `.github/workflows/*.yml`) and is excluded from
+    // `vitest.config.ts`'s default set, so this assertion cannot run in a lane that skips
+    // `db:migrate`. None of the four lanes named above (whose own `MIGRATION_EXCLUDE` lists are
+    // independently drifted from this one, per the migration's docblock) reference this file
+    // either.
     // Residual (honest, not closed): this only holds because this lane's own "Run DB migrations"
     // step runs BEFORE the test step — if a future lane ever called `ensureApprovalSchemaReady`
     // before `db:migrate`, `ADD COLUMN IF NOT EXISTS` would no-op against the bootstrap's
