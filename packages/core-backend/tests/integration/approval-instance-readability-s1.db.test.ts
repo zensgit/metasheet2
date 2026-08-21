@@ -611,6 +611,16 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
   // G-S1-12 PARTIAL — the migrated org_id column has no DB default. The NOT NULL / CHECK half is
   // Phase 3 and is NOT this migration (see zzzz20260821100000's docblock) — labelled PARTIAL, not
   // asserted as the full gate.
+  //
+  // RECORDED-PENDING (fix-round P2-2): the lock's own positive control for G-S1-12
+  // (`docs/development/approval-lock10-instance-readability-20260821.md`'s gate table) reads
+  // `is_nullable = 'NO'` (or the `plm:`-scoped CHECK form of OD-S1-18(b)). Neither has landed —
+  // Phase 3 is deliberately deferred (see the migration's own docblock: landing the CHECK/NOT NULL
+  // before all six `approval_instances` writers stamp `org_id` would 500 every create). That makes
+  // this PARTIAL gate a SECOND pending gate beyond the ONE the S1 implementation brief explicitly
+  // authorized (G-S1-8, `approval-realdb-instance-readability-s1.yml`'s own comment calls that one
+  // out by name). This module does not have standing to authorize a second one unilaterally — it
+  // is disclosed here and needs an owner ruling, not silently re-labelled as compliant.
   // ---------------------------------------------------------------------------------------------
   describe('G-S1-12 PARTIAL: approval_instances.org_id carries no DB default', () => {
     it('information_schema reports column_default IS NULL for approval_instances.org_id', async () => {
@@ -627,6 +637,29 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
       // PARTIAL: is_nullable is 'YES' at this baseline (Phase 3's CHECK/NOT NULL has not landed).
       // This assertion documents the current, honest state rather than asserting the eventual one.
       expect(row.is_nullable).toBe('YES')
+    })
+
+    // Fix-round P2-2 (verification-site poisoning): `ensureApprovalSchemaReady` (the bootstrap
+    // helper every S1 real-DB test calls in `beforeAll`) independently runs
+    // `ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id TEXT` with the SAME
+    // nullable/no-default shape this migration adds — so the assertion above passes even when the
+    // PRODUCTION migration never ran (proved: excluding
+    // `zzzz20260821100000_add_approval_instance_org_id` from this lane's MIGRATION_EXCLUDE-free
+    // run and mutating the migration to `DEFAULT 'default'` still greened the gate above). The
+    // bootstrap cannot forge a `kysely_migration` ledger row, so this assertion is the
+    // discriminator that closes the poisoning: it fails if the migration was excluded, skipped, or
+    // never reached this database, independent of what the bootstrap helper separately provisions.
+    // Residual (honest, not closed): this only holds because this lane's own "Run DB migrations"
+    // step runs BEFORE the test step — if a future lane ever called `ensureApprovalSchemaReady`
+    // before `db:migrate`, `ADD COLUMN IF NOT EXISTS` would no-op against the bootstrap's
+    // already-present column and this assertion would not by itself catch it; that ordering is not
+    // reachable in the current `approval-realdb-instance-readability-s1.yml` lane.
+    it('kysely_migration records zzzz20260821100000_add_approval_instance_org_id as applied (the bootstrap cannot forge this — proves the migration itself ran, not just its shape)', async () => {
+      const result = await pool().query(
+        `SELECT 1 FROM kysely_migration WHERE name = $1`,
+        ['zzzz20260821100000_add_approval_instance_org_id'],
+      )
+      expect(result.rows.length).toBe(1)
     })
   })
 

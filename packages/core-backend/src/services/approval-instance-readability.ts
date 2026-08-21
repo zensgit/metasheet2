@@ -92,7 +92,10 @@
  *
  * Fail-closed on any thrown lookup (OD-S1-1): a DB error denies, it never admits.
  */
+import { Logger } from '../core/logger'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
+
+const logger = new Logger('approval-instance-readability')
 
 /** Reads fresh on every call so a test can flip it around one assertion — never cached, never a
  *  predicate parameter (OD-S1-9(f): the caller never supplies the org; that generalizes to "no
@@ -175,8 +178,20 @@ export async function canReadApprovalInstance(
     const roles = await viewerRoles(db, viewerId)
     const rolesParam = roles.length > 0 ? roles : ['__approval_instance_readability_no_role__']
     const pinEnabled = isOrgPinEnabled()
-    const orgIds = pinEnabled ? await viewerActiveOrgIds(db, viewerId) : []
-    const orgIdsParam = orgIds.length > 0 ? orgIds : ['__approval_instance_readability_no_org__']
+    // P1-1 fix: Postgres resolves column names at PARSE time, so a `$N::boolean = FALSE OR ...`
+    // conjunct referencing `i.org_id` still requires that column to exist even when the runtime
+    // value makes the OR short-circuit — a missing/renamed column would then deny every request
+    // through every S1 consumer regardless of the flag. The org conjunct (and its parameter) is
+    // therefore assembled into the SQL STRING only when `pinEnabled`, so the column is never
+    // named in the query text while the pin is off.
+    const params: unknown[] = [instanceId, viewerId, rolesParam]
+    let orgClause = ''
+    if (pinEnabled) {
+      const orgIds = await viewerActiveOrgIds(db, viewerId)
+      const orgIdsParam = orgIds.length > 0 ? orgIds : ['__approval_instance_readability_no_org__']
+      params.push(orgIdsParam)
+      orgClause = `\n          AND i.org_id = ANY($4::text[])`
+    }
     const result = await db.query(
       `SELECT 1 FROM approval_instances i
         WHERE i.id = $1
@@ -201,14 +216,18 @@ export async function canReadApprovalInstance(
             OR EXISTS (
               SELECT 1 FROM users u WHERE u.id = $2 AND u.is_active = TRUE AND (u.is_admin = TRUE OR u.role = 'admin')
             )
-          )
-          AND ($4::boolean = FALSE OR i.org_id = ANY($5::text[]))
+          )${orgClause}
         LIMIT 1`,
-      [instanceId, viewerId, rolesParam, pinEnabled, orgIdsParam],
+      params,
     )
     return result.rows.length > 0
-  } catch {
-    // Fail-closed (OD-S1-1): any lookup error denies, never admits.
+  } catch (error) {
+    // Fail-closed (OD-S1-1): any lookup error denies, never admits. Logged (not silent) so a
+    // structural failure (e.g. a missing column) surfaces instead of reading as ordinary denial.
+    logger.error(
+      `canReadApprovalInstance lookup failed for instance ${instanceId} — denying (fail-closed)`,
+      error instanceof Error ? error : new Error(String(error)),
+    )
     return false
   }
 }
