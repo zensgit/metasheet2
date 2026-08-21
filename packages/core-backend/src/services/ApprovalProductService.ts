@@ -3947,20 +3947,25 @@ export function assignmentMatchesActor(
 /**
  * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
  * NOT an authority. `dispatchAction`'s own `actorCanAct` (this file, `currentNodeAssignments` +
- * `assignmentMatchesActor`) is branch-resolved inside a parallel region via `parallelBranchStates`
- * and remains the ONE load-bearing gate (the bind-time 403 `APPROVAL_ASSIGNMENT_REQUIRED`, G-5).
- * This helper checks ONLY `approval_instances.current_node_key` (single-linear) — it does not
- * reproduce the parallel-branch resolution, so it may be NARROWER than dispatchAction's real
- * authorization inside an active parallel region (a genuine acting approver mid-parallel-branch
- * could see this fail-fast refuse an upload dispatchAction would actually allow). This is an
- * accepted, disclosed gap: the upload route exists only to reject obviously-wrong uploads early. A
- * false negative here costs the caller a retry at commit time. A false positive is NOT categorically
- * ruled out: this query matches ANY active assignment at `current_node_key`, including one whose
- * OWN parallel branch has already completed (dispatchAction's branch resolution would refuse that
- * actor); this helper would still fail-fast-allow them. That gap is accepted because bind time is
- * the ONE authority (G-5) — a fail-fast false positive here costs nothing beyond a wasted upload
- * that the bind-time gate then genuinely refuses. It never grants upload to a principal with NO
- * active assignment at the stored current node at all.
+ * `assignmentMatchesActor`) remains the ONE load-bearing gate (the bind-time 403
+ * `APPROVAL_ASSIGNMENT_REQUIRED`, G-5).
+ *
+ * P2-2 fix-round correction: the original cut checked ONLY `approval_instances.current_node_key`,
+ * which — inside a parallel region — is the FORK node key, not any branch's node key (assignments
+ * live at `branch_a`/`branch_b`, never at the fork). That made this fail-fast REJECT every actor in
+ * every parallel region categorically (not "narrower in a rare edge case" as originally disclosed;
+ * the v1 carrier is upload-then-`comment+rider`, so the capability was dead on any parallel
+ * template). Fixed by resolving the SAME pending-branch frontier `dispatchAction` resolves
+ * (`collectActiveNodeKeys`, shared with the redaction gate at :220 of
+ * `approval-attachment-runtime.ts` — the identical `current_node_key` + `metadata.parallelBranchStates`
+ * derivation, already excluding `complete` branches) and matching against ANY of those keys, not
+ * just the stored `current_node_key`. This also closes the previously-disclosed false-positive gap
+ * (a completed branch's assignment could fail-fast-allow): a completed branch's node key is no
+ * longer in the derived set at all. The remaining, narrower gap: this still does not reproduce
+ * `dispatchAction`'s actor-to-branch pairing (which branch a MULTI-branch-assigned actor's
+ * submission applies to) — it is a fail-fast set-membership check, not the authority. Bind time
+ * remains the ONE authority (G-5); a residual false positive here costs nothing beyond a wasted
+ * upload that the bind-time gate then genuinely refuses.
  */
 export async function actorHasActiveSeatAtInstance(
   db: Queryable,
@@ -3968,12 +3973,13 @@ export async function actorHasActiveSeatAtInstance(
   actorId: string,
   actorRoles: readonly string[],
 ): Promise<boolean> {
-  const instanceResult = await db.query('SELECT current_node_key FROM approval_instances WHERE id = $1', [instanceId])
-  const currentNodeKey = (instanceResult.rows[0] as { current_node_key?: string | null } | undefined)?.current_node_key
-  if (!currentNodeKey) return false
+  const instanceResult = await db.query('SELECT current_node_key, metadata FROM approval_instances WHERE id = $1', [instanceId])
+  const row = instanceResult.rows[0] as { current_node_key?: string | null; metadata?: Record<string, unknown> | null } | undefined
+  const activeNodeKeys = collectActiveNodeKeys(row?.current_node_key ?? null, row?.metadata ?? null)
+  if (activeNodeKeys.length === 0) return false
   const assignmentsResult = await db.query(
-    'SELECT * FROM approval_assignments WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE',
-    [instanceId, currentNodeKey],
+    'SELECT * FROM approval_assignments WHERE instance_id = $1 AND node_key = ANY($2::text[]) AND is_active = TRUE',
+    [instanceId, activeNodeKeys],
   )
   const rows = assignmentsResult.rows as unknown as ApprovalAssignmentRow[]
   return rows.some((assignment) => assignmentMatchesActor(assignment, actorId, [...actorRoles]))
@@ -9178,11 +9184,25 @@ export class ApprovalProductService {
       // Lock-9 OD-L9-10(a) §5.4: `attachmentIds` v1 ships the `comment` rider ONLY (`handle`/
       // `approve` are DEFERRED — see the PR body). Mirrors the fieldWrites precedent immediately
       // above: on any OTHER action a present `attachmentIds` key is a values-free 400, fail-closed,
-      // never a silent accept-and-ignore. Runs UNCONDITIONALLY (not flag-gated) — this refuses a
-      // MISPLACED rider regardless of APPROVAL_ATTACHMENTS_ENABLED; the flag gates whether the
-      // `comment` branch's bind runs, not whether an out-of-place rider is rejected. Detected by key
-      // PRESENCE, same discipline as fieldWrites.
-      if (request.action !== 'comment' && Object.prototype.hasOwnProperty.call(request, 'attachmentIds')) {
+      // never a silent accept-and-ignore — but ONLY while the feature is actually on.
+      //
+      // P2-1 fix-round correction: this guard previously ran UNCONDITIONALLY (not flag-gated),
+      // reasoning that gating it here too would make G-12(b)'s positive control untestable through
+      // the route. That was wrong on both counts: (1) it broke G-12/§L9-D's own byte-for-byte-no-op
+      // requirement — a flag-OFF `approve`/`reject` carrying a stray `attachmentIds` key went from
+      // 200 (pre-Lock-9, key silently unread) to 400 here, a previously-succeeding action turned
+      // into a rejection with the flag OFF; (2) it was unnecessary — G-12(b)'s discriminating pair
+      // (`tests/integration/approval-lock9-process-attachments-realdb.db.test.ts`, "flag OFF: a
+      // comment with a BOGUS attachmentIds still succeeds") only ever exercises `action: 'comment'`,
+      // which this guard never touches (the `!== 'comment'` condition is already false there) — so
+      // gating on the flag does not affect that control's reachability at all. Gated now: an
+      // out-of-place rider is rejected only when APPROVAL_ATTACHMENTS_ENABLED is on; OFF, the key is
+      // silently ignored on every action exactly as it was before Lock-9 (true no-op, G-12/§L9-D).
+      if (
+        isApprovalAttachmentsEnabled() &&
+        request.action !== 'comment' &&
+        Object.prototype.hasOwnProperty.call(request, 'attachmentIds')
+      ) {
         throw new ServiceError(
           'Attachment ids are only permitted on a comment action (v1 scope)',
           400,

@@ -473,7 +473,8 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     // Lock-9 OD-L9-3(a): the process-upload gate, deliberately distinct from hasApprovalsWrite.
     hasApprovalsAct: (req) => principalHasApprovalsAct(req),
     // Lock-9 §5.2: fail-fast-only seat re-derivation (NOT the authority — see
-    // actorHasActiveSeatAtInstance's own docblock for the parallel-region fidelity gap).
+    // actorHasActiveSeatAtInstance's own docblock; P2-2 fix-round closed the parallel-region
+    // categorical-403 gap by resolving the same pending-branch frontier dispatchAction resolves).
     actorHasActiveSeat: (req, instanceId) => {
       const candidate = req.user?.id ?? req.user?.userId ?? (req.user as { sub?: unknown } | undefined)?.sub
       const actorId = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null

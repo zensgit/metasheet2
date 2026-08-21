@@ -130,6 +130,49 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
     return template.id
   }
 
+  /**
+   * P2-2 fixture: a `fork`/`branch_a`/`branch_b`/`join` parallel template — `current_node_key`
+   * stays at `fork` while an instance is inside the region; assignments live at the branch keys,
+   * never at `fork` itself.
+   */
+  async function publishParallelTemplate(adminToken: string): Promise<string> {
+    const templateKey = `l9-par-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest('/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Lock-9 parallel template',
+        description: 'lock-9 process attachment parallel-region acceptance',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'fork', type: 'parallel', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+            { key: 'branch_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: [APPROVER] } },
+            { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: [OTHER_SEAT] } },
+            { key: 'join', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-fork', source: 'start', target: 'fork' },
+            { key: 'e-fork-a', source: 'fork', target: 'branch_a' },
+            { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+            { key: 'e-a-join', source: 'branch_a', target: 'join' },
+            { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          ],
+        },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status, await publish.clone().text()).toBe(200)
+    return template.id
+  }
+
   async function createInstance(requesterToken: string, templateId: string, reason = 'lock9 acceptance'): Promise<string> {
     const create = await jsonRequest('/api/approvals', requesterToken, {
       method: 'POST',
@@ -250,13 +293,18 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
 
   // ===============================================================================================
   // §5.4 action-scope guard — `attachmentIds` v1 ships the `comment` rider ONLY. Mirrors the
-  // shipped `fieldWrites`-on-wrong-action precedent (APS ~:9165): a present `attachmentIds` key on
-  // any OTHER action is a values-free 400, UNCONDITIONALLY (not flag-gated) — never a silent
-  // accept-and-ignore on `approve`/`reject`/`handle`/etc. (caught in review: the route forwards the
-  // key for every verb, so without this guard it would vanish silently under EITHER flag posture).
+  // shipped `fieldWrites`-on-wrong-action precedent (APS ~:9165): while the flag is ON, a present
+  // `attachmentIds` key on any OTHER action is a values-free 400 — never a silent accept-and-ignore
+  // on `approve`/`reject`/`handle`/etc.
+  //
+  // P2-1 fix-round correction: this guard is ITSELF flag-gated now (it was not, originally — the
+  // gate battery caught that as a G-12/§L9-D byte-for-byte-no-op violation: a flag-OFF `approve`
+  // carrying a stray `attachmentIds` key went from 200 pre-Lock-9 to 400 here). The second case
+  // below used to assert the OLD (wrong) "still fires with the flag OFF" behavior; it now asserts
+  // the corrected no-op, with a same-request discriminating pair against the flag ON.
   // ===============================================================================================
   describe('§5.4 action-scope guard: attachmentIds only valid on comment', () => {
-    it('flag ON: action=approve with attachmentIds present is refused 400, unconditionally — not silently dropped', async () => {
+    it('flag ON: action=approve with attachmentIds present is refused 400 — not silently dropped', async () => {
       const adminToken = await authToken(`l9-admin-${RUN}`)
       const requesterToken = await authToken(REQUESTER)
       const approverToken = await authToken(APPROVER)
@@ -274,26 +322,36 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       expect(ok.status, await ok.clone().text()).toBe(200)
     })
 
-    it('flag OFF: the SAME guard still fires (unconditional, not flag-gated)', async () => {
+    it('flag OFF: a rejecting action carrying attachmentIds succeeds unchanged (byte-for-byte no-op, G-12/§L9-D) — the SAME payload 400s once the flag is ON', async () => {
       const adminToken = await authToken(`l9-admin-${RUN}`)
       const requesterToken = await authToken(REQUESTER)
       const approverToken = await authToken(APPROVER)
       const templateId = await publishPlainTemplate(adminToken)
-      const iid = await createInstance(requesterToken, templateId)
+      // Two independent instances, one dispatch each: `reject` finalizes an instance, so the OFF
+      // and ON legs cannot share one (the second dispatch would 404/409 on an already-decided
+      // instance, not discriminate on the guard at all).
+      const iidOff = await createInstance(requesterToken, templateId)
+      const iidOn = await createInstance(requesterToken, templateId)
       const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
-      let res: Response
+      let offRes: Response
       try {
         delete process.env.APPROVAL_ATTACHMENTS_ENABLED
-        res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        offRes = await jsonRequest(`/api/approvals/${iidOff}/actions`, approverToken, {
           method: 'POST',
-          body: { action: 'reject', attachmentIds: ['att_whatever'] },
+          body: { action: 'reject', comment: 'off flag rejection', attachmentIds: ['att_whatever'] },
         })
       } finally {
         process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
       }
-      expect(res.status, await res.clone().text()).toBe(400)
-      const body = (await res.json()) as { error?: { code?: string } }
-      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+      expect(offRes.status, await offRes.clone().text()).toBe(200)
+
+      const onRes = await jsonRequest(`/api/approvals/${iidOn}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'reject', comment: 'on flag rejection', attachmentIds: ['att_whatever'] },
+      })
+      expect(onRes.status, await onRes.clone().text()).toBe(400)
+      const onBody = (await onRes.json()) as { error?: { code?: string } }
+      expect(onBody.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
     })
   })
 
@@ -471,6 +529,61 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       const ok = await uploadProcess(approverToken, iid)
       expect(ok.status, await ok.clone().text()).toBe(201)
       createdAttachmentIds.add(((await ok.json()) as { id: string }).id)
+    })
+  })
+
+  // ===============================================================================================
+  // P2-2 fix-round — upload fail-fast (`actorHasActiveSeatAtInstance`) must not categorically
+  // 403 every approver in a parallel region. Before the fix, the helper checked ONLY the stored
+  // `current_node_key`, which stays at `fork` (the parallel node) for the whole region — never a
+  // branch key — while assignments live at `branch_a`/`branch_b`. Fixed to resolve the same
+  // pending-branch frontier `dispatchAction` resolves (`collectActiveNodeKeys`).
+  // ===============================================================================================
+  describe('P2-2: upload fail-fast inside a parallel region', () => {
+    it('a genuine branch-A seat holder uploads successfully while the instance sits at the fork (current_node_key="fork"); the SAME actor\'s comment+rider then binds and completes their branch', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER) // seated at branch_a only
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const stored = (await pool().query('SELECT current_node_key FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(stored.current_node_key).toBe('fork') // confirms the fixture actually exercises the gap
+
+      const up = await uploadProcess(approverToken, iid)
+      expect(up.status, await up.clone().text()).toBe(201) // was 403 before the fix — categorical, every actor
+      const attId = ((await up.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const dispatch = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(dispatch.status, await dispatch.clone().text()).toBe(200)
+      const bound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound.status).toBe('bound')
+    })
+
+    it('branch-B seat holder uploads successfully at the SAME fork instant (both branches are live seats, not just the first one checked)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const otherToken = await authToken(OTHER_SEAT) // seated at branch_b only
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const up = await uploadProcess(otherToken, iid)
+      expect(up.status, await up.clone().text()).toBe(201)
+      createdAttachmentIds.add(((await up.json()) as { id: string }).id)
+    })
+
+    it('a principal with NO seat on either branch is still refused 403 at upload (the fix widens to the real frontier, it does not stop checking)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const strangerToken = await authToken(`l9-stranger-${RUN}`, 'user', 'approvals:act')
+      const denied = await uploadProcess(strangerToken, iid)
+      expect(denied.status).toBe(403)
     })
   })
 
