@@ -8,7 +8,7 @@ import { ACTION_POLICY_KEYS, APPROVAL_POLICY_DENIED_ACTION } from '../../src/typ
 
 /**
  * Lock-10 (S1) `canReadApprovalInstance` — real-DB acceptance for the arms this slice actually
- * implements (1 REQUESTER, 2 SEAT, 3 PAST ACTOR incl. `policy_denied`, 4 CC TARGET). Source:
+ * implements (1 REQUESTER, 2 SEAT, 3 PAST ACTOR excl. `policy_denied`, 4 CC TARGET). Source:
  * docs/development/approval-lock10-instance-readability-20260821.md.
  *
  * SCOPE — what this suite does NOT cover, and why (every omission below is a §5.1 OWNER-CONFIRM
@@ -18,19 +18,21 @@ import { ACTION_POLICY_KEYS, APPROVAL_POLICY_DENIED_ACTION } from '../../src/typ
  *     migration is Phase-1-only so `org_id` is not populated for platform rows at this baseline).
  *   - No route/feed adoption (G-S1-2, G-S1-5, G-S1-7, G-S1-8, G-S1-9 — all consumer-side; OD-S1-12
  *     is its own OWNER-CONFIRM row and OD-S1-10/16 are blocked on `L9-AMEND`).
- *   - G-S1-6's full mechanical enumeration over `ACTION_POLICY_KEYS` through the REAL dispatch
- *     choke is Lock-5's own concern and already has a dedicated 1000+-line real-DB suite
- *     (`approval-node-operation-policy.db.test.ts`) proving the choke writes exactly one
- *     `policy_denied` row per genuine refusal and that ABSENT-key verbs are ungated. This suite
- *     does not re-prove that machinery; it proves the narrower, Lock-10-specific fact OD-S1-6
- *     conditions arm 3 on: that a `policy_denied` row (however it was written) makes its actor a
- *     past-actor for `canReadApprovalInstance`, while a bystander with NO such row stays denied and
- *     writes nothing.
+ *   - G-S1-6 is NOT implemented, on purpose: OD-S1-6 admits `policy_denied` into arm 3 ONLY
+ *     together with a gate that proves, over the REAL dispatch choke, that a refused seat-holder's
+ *     row is written and a bystander's isn't, with the `ACTION_POLICY_KEYS` enumeration pinning an
+ *     EXPLICIT `false` per key (widen-only semantics make an omitted key pass vacuously). That
+ *     real-dispatch machinery is Lock-5's own concern
+ *     (`ApprovalProductService.ts` / `approval-node-operation-policy.db.test.ts`, 1000+ lines);
+ *     re-exercising it from this slice was assessed and not built. Per OD-S1-6's own verbatim
+ *     fallback — "if G-S1-6 cannot be written, the arm excludes `policy_denied`" — arm 3
+ *     EXCLUDES `policy_denied` rows (`AND r.action <> 'policy_denied'`). This suite proves the
+ *     exclusion is real: a viewer whose ONLY row on the instance is `policy_denied` is denied.
  *
  * Gates covered: G-S1-1 (zero-attachment/no-attachment-table-at-all instance readable by its
- * requester, non-participant denied), G-S1-6 (narrowed as above), G-S1-11 (monotonic membership —
- * a deactivated seat still admits; a user who never held a seat does not), G-S1-12 PARTIAL (the
- * migrated column carries no DB default — the NOT NULL / CHECK half is Phase-3, not yet run).
+ * requester, non-participant denied), G-S1-11 (monotonic membership — a deactivated seat still
+ * admits; a user who never held a seat does not), G-S1-12 PARTIAL (the migrated column carries no
+ * DB default — the NOT NULL / CHECK half is Phase-3, not yet run).
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -177,6 +179,9 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — arms 1-4, real DB',
       const instanceId = await seedInstance(requesterId)
       // A permission code, not a user id — this is exactly the shape upsertPlmMirror writes.
       await seedAssignment(instanceId, 'approvals:read', false, 'user')
+      // Paired control: as a 'user'-typed seat the SAME assignee_id string IS admitted — isolating
+      // the assignment_type flip below (not the string value) as the cause of the denial.
+      await expect(canReadApprovalInstance(pool(), 'approvals:read', instanceId)).resolves.toBe(true)
       await pool().query(
         `UPDATE approval_assignments SET assignment_type = 'source_queue' WHERE instance_id = $1`,
         [instanceId],
@@ -208,11 +213,12 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — arms 1-4, real DB',
   })
 
   // ---------------------------------------------------------------------------------------------
-  // G-S1-6 (narrowed, see docblock) — policy_denied admits arm 3; a bystander stays denied and
-  // writes nothing.
+  // OD-S1-6 fallback (G-S1-6 itself is NOT implemented — see module + suite docblocks): arm 3
+  // EXCLUDES policy_denied. Proven both ways so the exclusion is a real conjunct, not an artifact
+  // of the fixture never producing a policy_denied-only actor.
   // ---------------------------------------------------------------------------------------------
-  describe('G-S1-6 (narrowed): policy_denied past-actor admission (OD-S1-6)', () => {
-    it('POSITIVE: an actor refused by node policy (policy_denied row) still reads the instance via arm 3', async () => {
+  describe('OD-S1-6 fallback: policy_denied is EXCLUDED from past-actor admission', () => {
+    it('NEGATIVE: a viewer whose ONLY row on the instance is policy_denied is denied (G-S1-6 not built; OD-S1-6 fallback taken)', async () => {
       const requesterId = freshId('s1-requester')
       const refusedActorId = freshId('s1-refused-actor')
       const instanceId = await seedInstance(requesterId)
@@ -225,10 +231,23 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — arms 1-4, real DB',
          VALUES ($1, $2, $3, 'Refused Actor', 'pending', 'pending', 0, '{}'::jsonb)`,
         [instanceId, APPROVAL_POLICY_DENIED_ACTION, refusedActorId],
       )
-      await expect(canReadApprovalInstance(pool(), refusedActorId, instanceId)).resolves.toBe(true)
+      await expect(canReadApprovalInstance(pool(), refusedActorId, instanceId)).resolves.toBe(false)
     })
 
-    it('DISCRIMINATING NEGATIVE: a bystander with no row at all is denied, and the row count on the instance is unchanged by the read', async () => {
+    it('POSITIVE CONTROL: the SAME actor, with a second NON-policy_denied row on the instance, is admitted — isolates the exclusion as the cause of the negative above', async () => {
+      const requesterId = freshId('s1-requester')
+      const actorId = freshId('s1-actor-both-rows')
+      const instanceId = await seedInstance(requesterId)
+      await pool().query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, to_version, metadata)
+         VALUES ($1, $2, $3, 'Refused Actor', 'pending', 'pending', 0, '{}'::jsonb)`,
+        [instanceId, APPROVAL_POLICY_DENIED_ACTION, actorId],
+      )
+      await seedRecord(instanceId, 'comment', actorId)
+      await expect(canReadApprovalInstance(pool(), actorId, instanceId)).resolves.toBe(true)
+    })
+
+    it('DISCRIMINATING: a bystander with no row at all is ALSO denied — same outcome as the policy_denied-only actor, but for a different reason (no row vs. excluded row)', async () => {
       const requesterId = freshId('s1-requester')
       const bystanderId = freshId('s1-bystander')
       const instanceId = await seedInstance(requesterId)
@@ -239,12 +258,9 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — arms 1-4, real DB',
       expect((before.rows[0] as { n: number }).n).toBe(0)
     })
 
-    it('mechanical: ACTION_POLICY_KEYS retains a non-null entry for at least one verb (drift guard on the coupling OD-S1-6 depends on)', () => {
+    it('mechanical: ACTION_POLICY_KEYS retains a non-null entry for at least one verb (drift guard — if this ever changes, OD-S1-6 needs re-examination, not this file silently going stale)', () => {
       const nonNullKeys = Object.entries(ACTION_POLICY_KEYS).filter(([, value]) => value !== null)
       expect(nonNullKeys.length).toBeGreaterThan(0)
-      // revoke/handle are the two RATIFIED-absent keys this repo has already fixed at null
-      // (Lock-3/Lock-5); if either becomes non-null, OD-S1-6's own coupling assumption (arm 3
-      // admits policy_denied only together with G-S1-6) needs re-examination, not a silent pass.
       expect(ACTION_POLICY_KEYS.revoke).toBeNull()
       expect(ACTION_POLICY_KEYS.handle).toBeNull()
     })

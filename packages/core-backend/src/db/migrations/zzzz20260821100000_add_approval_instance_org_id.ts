@@ -1,5 +1,6 @@
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
+import { checkTableExists } from './_patterns'
 
 /**
  * Lock-10 (S1) instance-readability — org anchor, PHASE 1 ONLY.
@@ -75,6 +76,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // PHASE 1 — additive, nullable, NO DEFAULT (OD-S1-9(a)). No constraint references this column
   // yet, so every existing writer of `approval_instances` (updated or not) is unaffected.
   await sql`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id text`.execute(db)
+
+  // Defense in depth: some CI lanes run a NARROWER migration set than the full ledger (three
+  // independent exclusion mechanisms exist — migration-provider.ts:21-59 — including two this
+  // migration was never audited against: observability-strict.yml / observability-e2e.yml /
+  // safety-guard-e2e.yml, and migration-replay.yml's OWN, independently-drifted MIGRATION_EXCLUDE
+  // list). If `approval_attachments` isn't present in a given lane's migrated schema, the class-2
+  // backfill has nothing to read and is correctly a no-op there — Phase 1 (the column add above)
+  // still lands either way, which is the only thing this migration guarantees everywhere.
+  if (!(await checkTableExists(db, 'approval_attachments'))) return
 
   // Pre-flight FAIL LOUD (OD-S1-9(b)): an instance whose bound attachments disagree on org_id
   // would silently re-tenant the instance if one value were picked arbitrarily.

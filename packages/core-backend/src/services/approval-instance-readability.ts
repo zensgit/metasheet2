@@ -22,12 +22,20 @@
  *                     `source_queue` seat stores a PERMISSION CODE, not a user id, in
  *                     `assignee_id` (OD-S1-5, RATIFIED; F-2). Only `'user'` and `'role'` are
  *                     compared.
- *   3. PAST ACTOR   — `EXISTS (... approval_records r WHERE r.actor_id = viewerId)`, including
- *                     `action = 'policy_denied'` rows — admitted together with this repo's
- *                     G-S1-6-equivalent mechanical enumeration
- *                     (`tests/unit/approval-instance-readability-policy-denied-gate.test.ts`), per
- *                     OD-S1-6 (RATIFIED: "admitted only together with gate G-S1-6; if G-S1-6
- *                     cannot be written, the arm excludes `policy_denied`").
+ *   3. PAST ACTOR   — `EXISTS (... approval_records r WHERE r.actor_id = viewerId)`, EXCLUDING
+ *                     `action = 'policy_denied'` rows. OD-S1-6 (RATIFIED) admits `policy_denied`
+ *                     ONLY TOGETHER WITH a gate proving, over the REAL dispatch choke, that (a) a
+ *                     seat-holder refused by node policy writes the row and still reads the
+ *                     instance, (b) a non-participant attempting each seat-gate-exempt verb writes
+ *                     NO row, and (c) the mechanical enumeration over `ACTION_POLICY_KEYS` covers
+ *                     every non-null key — with the fixture pinning an EXPLICIT `false` policy
+ *                     (widen-only semantics make ABSENT ≡ ALLOWED, so an omitted key would make the
+ *                     gate pass vacuously). That machinery lives in Lock-5's own dispatch choke
+ *                     (`ApprovalProductService.ts`) and its 1000+-line real-DB suite
+ *                     (`approval-node-operation-policy.db.test.ts`); re-exercising it end-to-end
+ *                     from this slice was assessed and NOT built. Per OD-S1-6's own verbatim
+ *                     fallback — "if G-S1-6 cannot be written, the arm excludes `policy_denied`" —
+ *                     this arm takes that fallback rather than admit on an unverified claim.
  *   4. CC TARGET    — `approval_records` `action = 'cc'`, user- or role-typed target, matching the
  *                     C-1/C-2 shape (OD-S1-7, RATIFIED as a predicate arm).
  *
@@ -68,6 +76,9 @@
  *   - `plm:`-prefixed instance ids are NEVER admitted through this predicate (OD-S1-18: PLM
  *     mirrors are scoped OUT of S1's consumers in v1). Since no consumer calls this predicate yet,
  *     that guard is enforced HERE, defensively, as `isPlmApprovalId` fail-closed — see below.
+ *   - ARM 3 EXCLUDES `policy_denied` — this takes OD-S1-6's own explicit fallback ("if G-S1-6
+ *     cannot be written, the arm excludes `policy_denied`") rather than admit on an unverified
+ *     claim. See the arm-3 line above for the full reasoning.
  *
  * Fail-closed on any thrown lookup (OD-S1-1): a DB error denies, it never admits.
  */
@@ -147,7 +158,10 @@ export async function canReadApprovalInstance(
                  AND ((a.assignment_type = 'user' AND a.assignee_id = $2)
                    OR (a.assignment_type = 'role' AND a.assignee_id = ANY($3::text[])))
             )
-            OR EXISTS (SELECT 1 FROM approval_records r WHERE r.instance_id = i.id AND r.actor_id = $2)
+            OR EXISTS (
+              SELECT 1 FROM approval_records r
+               WHERE r.instance_id = i.id AND r.actor_id = $2 AND r.action <> 'policy_denied'
+            )
             OR EXISTS (
               SELECT 1 FROM approval_records r
                WHERE r.instance_id = i.id AND r.action = 'cc'
