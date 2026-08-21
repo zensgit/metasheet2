@@ -10,9 +10,11 @@ const {
   resetShadowWarnThrottleForTestingV1,
   whenIdleForTestingV1,
   resetShadowInFlightForTestingV1,
+  getShadowMetricsSnapshotV1,
   getShadowMetricsSnapshotForTestingV1,
   resetShadowMetricsForTestingV1,
   startShadowMetricsLoggingV1,
+  getShadowMetricsLoggingActiveCountForTestingV1,
   logShadowMetricsSnapshotV1,
   WARN_THROTTLE_WINDOW_MS,
   SHADOW_STATEMENT_TIMEOUT_MS,
@@ -30,9 +32,11 @@ const {
   resetShadowWarnThrottleForTestingV1: () => void
   whenIdleForTestingV1: () => Promise<void>
   resetShadowInFlightForTestingV1: () => void
-  getShadowMetricsSnapshotForTestingV1: () => { attempted: number; written: number; timed_out: number; dropped: number; failed: number }
+  getShadowMetricsSnapshotV1: () => { attempted: number; written: number; abandoned: number; dropped: number; failed: number }
+  getShadowMetricsSnapshotForTestingV1: () => { attempted: number; written: number; abandoned: number; dropped: number; failed: number }
   resetShadowMetricsForTestingV1: () => void
   startShadowMetricsLoggingV1: (logger?: { info?: (message: string, meta?: Record<string, unknown>) => void }, intervalMs?: number) => () => void
+  getShadowMetricsLoggingActiveCountForTestingV1: () => number
   logShadowMetricsSnapshotV1: (logger?: { info?: (message: string, meta?: Record<string, unknown>) => void }) => void
   WARN_THROTTLE_WINDOW_MS: number
   SHADOW_STATEMENT_TIMEOUT_MS: number
@@ -434,7 +438,7 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
       'sole_non_default_membership',
     ])
 
-    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 1, timed_out: 0, dropped: 0, failed: 0 })
+    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 1, abandoned: 0, dropped: 0, failed: 0 })
   })
 
   it('reads org_claim from req.authenticatedTenantId, never req.user.tenantId', () => {
@@ -487,7 +491,7 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
       recordShadowOrgResolutionV1(db, req, { userId: 'user-1', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn }),
     ).resolves.toBeUndefined()
     expect(warn).toHaveBeenCalledTimes(1)
-    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, timed_out: 0, dropped: 0, failed: 1 })
+    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, abandoned: 0, dropped: 0, failed: 1 })
   })
 
   it('is non-fatal: when the INSERT throws, the function resolves (not rejects) and logs only a code, never a message or values', async () => {
@@ -525,7 +529,7 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
     expect(warn).toHaveBeenCalledTimes(1)
     const [message] = warn.mock.calls[0] as [string]
     expect(message).toMatch(/missing userId/)
-    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, timed_out: 0, dropped: 0, failed: 1 })
+    expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, abandoned: 0, dropped: 0, failed: 1 })
   })
 
   it('when ctx.userId is an empty string, is treated the same as missing (no query, one warn)', async () => {
@@ -565,6 +569,47 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
     }
   })
 
+  it('P3-4 (#5073 round-2 gate): the "dropped" (in-flight cap reached) warn has its OWN 60s throttle clock, separate from the failure warn — a failure and a drop in the SAME window each log once, neither starves the other', async () => {
+    vi.useFakeTimers()
+    try {
+      const warn = vi.fn()
+      const req = { body: {}, query: {}, headers: {} }
+
+      // First: a FAILURE warns once (consumes the 'default' channel's throttle window).
+      const failingDb = fakeTransactionalDb(async () => {
+        throw Object.assign(new Error('boom'), { code: 'XXTEST' })
+      })
+      await recordShadowOrgResolutionV1(failingDb, req, { userId: 'user-fail', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // A second failure in the SAME window: throttled on the 'default' channel (unaffected by
+      // the drop channel below) — no new call yet.
+      await recordShadowOrgResolutionV1(failingDb, req, { userId: 'user-fail-2', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // Fill the cap with permanently-pending recorders so the NEXT call is dropped.
+      const heldDb = fakeTransactionalDb(() => new Promise(() => {}))
+      for (let i = 0; i < IN_FLIGHT_CAP; i += 1) {
+        void recordShadowOrgResolutionV1(heldDb, req, { userId: `cap-user-${i}`, orgLegacy: 'default', route: '/api/attendance/punch' }, { warn }).catch(() => {})
+      }
+      await Promise.resolve()
+      await Promise.resolve()
+
+      // The drop, in the SAME window as the two failures above: must warn — the 'dropped'
+      // channel has its own clock, so it is NOT throttled by the failure warns that already
+      // consumed the 'default' channel's window.
+      await recordShadowOrgResolutionV1(heldDb, req, { userId: 'user-dropped', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+      expect(warn).toHaveBeenCalledTimes(2)
+      expect(warn.mock.calls[1][1]).toEqual({ reason: 'cap_exceeded' })
+
+      // A second drop in the same window: throttled on the 'dropped' channel itself.
+      await recordShadowOrgResolutionV1(heldDb, req, { userId: 'user-dropped-2', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+      expect(warn).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   describe('the fire-and-forget scheduling contract', () => {
     it('the call-site pattern (void fn().catch(() => {})) lets code after it run immediately, before the recorder\'s underlying INSERT has happened; whenIdleForTestingV1() deterministically waits for it', async () => {
       // Reproduces the exact call-site shape from plugins/plugin-attendance/index.cjs: the
@@ -596,8 +641,8 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
     })
   })
 
-  describe('the 5000ms safety timeout (RECORD_TIMEOUT_MS)', () => {
-    it('a never-resolving db call makes recordShadowOrgResolutionV1 itself resolve at the timeout, warns once with the distinct timeout reason, and counts it as timed_out — the underlying work is still pending afterward', async () => {
+  describe('the RECORD_TIMEOUT_MS observability backstop (NOT a resource bound — #5073 round-2 gate P2-2)', () => {
+    it('a never-resolving db call makes recordShadowOrgResolutionV1 itself resolve at the timeout, warns once with the distinct "abandoned" reason (mentioning RECORD_TIMEOUT_MS\'s own value, not a hardcoded literal), and counts it as abandoned — the underlying work is still pending afterward', async () => {
       vi.useFakeTimers()
       try {
         const warn = vi.fn()
@@ -613,17 +658,20 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
 
         const p = recordShadowOrgResolutionV1(db, req, { userId: 'user-1', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
 
-        // Advance past RECORD_TIMEOUT_MS (5000ms) but not so far as to be meaningless; flush
-        // the timer callback's own microtasks too.
+        // Advance past RECORD_TIMEOUT_MS but not so far as to be meaningless; flush the timer
+        // callback's own microtasks too.
         await vi.advanceTimersByTimeAsync(RECORD_TIMEOUT_MS)
 
         await expect(p).resolves.toBeUndefined()
         expect(selectCalled).toBe(true)
         expect(warn).toHaveBeenCalledTimes(1)
         const [message, meta] = warn.mock.calls[0] as [string, Record<string, unknown>]
-        expect(message).toMatch(/5000ms/)
-        expect(meta).toEqual({ reason: 'timeout' })
-        expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, timed_out: 1, dropped: 0, failed: 0 })
+        // NIT-2: derive the expected figure from the constant, not a hardcoded literal — a test
+        // that hardcodes '5000ms' stays green even if the message drifts from RECORD_TIMEOUT_MS.
+        expect(message).toMatch(new RegExp(`${RECORD_TIMEOUT_MS}ms`))
+        expect(message).toMatch(/observability signal only/i)
+        expect(meta).toEqual({ reason: 'abandoned' })
+        expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, abandoned: 1, dropped: 0, failed: 0 })
 
         // The underlying work is documented to keep running in the background — whenIdle must
         // NOT have resolved yet (the never-resolving SELECT is still "in flight").
@@ -631,6 +679,42 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
         whenIdleForTestingV1().then(() => { idleResolved = true })
         await Promise.resolve()
         expect(idleResolved).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('LATE SETTLE (P2-1 / #5073 round-2 gate PROBE C): when the raced-away work settles AFTER the "abandoned" bucket was already recorded, it must NOT also increment written/failed — attempted must stay equal to the sum of the four terminal buckets. Mutation: deleting the `if (terminalRecorded) return` guard reds this (the guard is otherwise invisible to the whole suite — every OTHER timeout-leg test uses a permanently-pending mock, so the late-settle interleaving this guard exists for is never constructed without this test).', async () => {
+      vi.useFakeTimers()
+      try {
+        const warn = vi.fn()
+        // A CONTROLLABLE deferred, unlike the sibling test's permanently-pending mock: held
+        // until released explicitly, AFTER the race has already fired.
+        let releaseSelect: (() => void) | undefined
+        const selectDeferred = new Promise<unknown[]>((resolve) => { releaseSelect = () => resolve([]) })
+        const db = fakeTransactionalDb((sql: string) => {
+          if (/SELECT org_id/.test(sql)) return selectDeferred
+          return Promise.resolve([])
+        })
+        const req = { body: {}, query: {}, headers: {} }
+
+        const p = recordShadowOrgResolutionV1(db, req, { userId: 'user-1', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+
+        // Cross the race boundary: recordShadowOrgResolutionV1's own promise resolves,
+        // 'abandoned' is recorded, while the underlying SELECT is STILL held.
+        await vi.advanceTimersByTimeAsync(RECORD_TIMEOUT_MS)
+        await expect(p).resolves.toBeUndefined()
+        expect(getShadowMetricsSnapshotForTestingV1()).toEqual({ attempted: 1, written: 0, abandoned: 1, dropped: 0, failed: 0 })
+
+        // NOW let the raced-away work actually finish — the exact interleaving the exactly-once
+        // guard exists for. This must NOT double-count into `written`.
+        releaseSelect?.()
+        await whenIdleForTestingV1()
+
+        const after = getShadowMetricsSnapshotForTestingV1()
+        expect(after).toEqual({ attempted: 1, written: 0, abandoned: 1, dropped: 0, failed: 0 })
+        const sumOfTerminalBuckets = after.written + after.abandoned + after.dropped + after.failed
+        expect(sumOfTerminalBuckets).toBe(after.attempted)
       } finally {
         vi.useRealTimers()
       }
@@ -748,6 +832,14 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
       expect(getShadowMetricsSnapshotForTestingV1().attempted).toBe(0)
     })
 
+    it('NIT-1 (#5073 round-2 gate): getShadowMetricsSnapshotV1 (the production-named entry point) and getShadowMetricsSnapshotForTestingV1 (the test-only alias) are the SAME function, not two implementations that could drift', async () => {
+      expect(getShadowMetricsSnapshotForTestingV1).toBe(getShadowMetricsSnapshotV1)
+      const db = fakeTransactionalDb(async (sql: string) => (/SELECT org_id/.test(sql) ? [] : []))
+      const req = { body: {}, query: {}, headers: {} }
+      await recordShadowOrgResolutionV1(db, req, { userId: 'user-1', orgLegacy: 'default', route: '/api/attendance/punch' })
+      expect(getShadowMetricsSnapshotV1()).toEqual(getShadowMetricsSnapshotForTestingV1())
+    })
+
     it('logShadowMetricsSnapshotV1 logs the current counters at info, values-free (counts only)', async () => {
       const db = fakeTransactionalDb(async (sql: string) => (/SELECT org_id/.test(sql) ? [] : []))
       const req = { body: {}, query: {}, headers: {} }
@@ -758,7 +850,7 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
       expect(info).toHaveBeenCalledTimes(1)
       const [message, meta] = info.mock.calls[0] as [string, Record<string, unknown>]
       expect(message).toMatch(/metrics snapshot/)
-      expect(meta).toEqual({ attempted: 1, written: 1, timed_out: 0, dropped: 0, failed: 0 })
+      expect(meta).toEqual({ attempted: 1, written: 1, abandoned: 0, dropped: 0, failed: 0 })
     })
 
     it('startShadowMetricsLoggingV1 logs on the given interval until its stop function is called', async () => {

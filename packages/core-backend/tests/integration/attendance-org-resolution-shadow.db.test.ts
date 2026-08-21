@@ -71,7 +71,9 @@
  *        time longer than SHADOW_STATEMENT_TIMEOUT_MS but shorter than RECORD_TIMEOUT_MS ->
  *        Postgres itself cancels the stuck statement (a real `query_canceled`, not a JS-side
  *        abandonment) — the punch is unaffected, no row ever lands, and the metrics delta shows
- *        `failed` incrementing (not `timed_out`) — proof the DB-side timeout fired first.
+ *        `failed` incrementing (not `abandoned`) — proof the DB-side statement_timeout fired
+ *        first, not RECORD_TIMEOUT_MS's JS-side observability backstop (#5073 round-2 gate
+ *        P2-2: RECORD_TIMEOUT_MS never cancels anything — see the module's own doc comment).
  *   (e)  the shadow INSERT itself fails (the table is renamed away for the duration of this one
  *        punch, then renamed back in a finally, AFTER `whenIdleForTestingV1()` — the recorder is
  *        fire-and-forget now, so renaming the table back too early could race a still-pending
@@ -103,8 +105,11 @@
  *     -> (LB) reds (elapsedMs would be >= the trigger's sleep duration instead of well under
  *     it).
  *   - remove the module's `SET LOCAL statement_timeout` statement -> (ST) reds (the delta would
- *     show `timed_out` incrementing instead of `failed`, since nothing would cancel the
- *     statement before RECORD_TIMEOUT_MS's JS-side backstop).
+ *     show `abandoned` incrementing instead of `failed`, since nothing would cancel the
+ *     statement before RECORD_TIMEOUT_MS's JS-side observability backstop fires).
+ *   - un-hoist the stop-before-start block in index.cjs's activate() back below the env parse
+ *     -> (P3-1) reds (the metrics-logging interval would still be active after a throwing
+ *     shadow->enforce reactivation, instead of stopped).
  *
  * Shared-DB discipline: every fixture id is a file-namespaced random UUID.
  */
@@ -134,11 +139,18 @@ const SHADOW_ENV_VAR = 'ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1'
 const requireCjs = createRequire(import.meta.url)
 const shadowModule = requireCjs(path.join(ATTENDANCE_PLUGIN_DIR, 'lib', 'attendance-org-resolution-shadow.cjs')) as {
   whenIdleForTestingV1: () => Promise<void>
-  getShadowMetricsSnapshotForTestingV1: () => { attempted: number; written: number; timed_out: number; dropped: number; failed: number }
+  getShadowMetricsSnapshotForTestingV1: () => { attempted: number; written: number; abandoned: number; dropped: number; failed: number }
+  getShadowMetricsLoggingActiveCountForTestingV1: () => number
   SHADOW_STATEMENT_TIMEOUT_MS: number
   RECORD_TIMEOUT_MS: number
 }
-const { whenIdleForTestingV1, getShadowMetricsSnapshotForTestingV1, SHADOW_STATEMENT_TIMEOUT_MS, RECORD_TIMEOUT_MS } = shadowModule
+const {
+  whenIdleForTestingV1,
+  getShadowMetricsSnapshotForTestingV1,
+  getShadowMetricsLoggingActiveCountForTestingV1,
+  SHADOW_STATEMENT_TIMEOUT_MS,
+  RECORD_TIMEOUT_MS,
+} = shadowModule
 
 type HttpResponse = { status: number; body?: any; raw: string }
 function requestJson(
@@ -492,12 +504,12 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     })
   })
 
-  it('(STATEMENT-TIMEOUT) a recorder statement stuck past SHADOW_STATEMENT_TIMEOUT_MS is CANCELLED SERVER-SIDE by Postgres — not merely abandoned client-side — and lands in the failed (not timed_out) metrics bucket', async () => {
+  it('(STATEMENT-TIMEOUT) a recorder statement stuck past SHADOW_STATEMENT_TIMEOUT_MS is CANCELLED SERVER-SIDE by Postgres — a real query_canceled, not this module\'s JS-side observability race — and lands in the failed (not abandoned) metrics bucket', async () => {
     // stSleepSeconds exceeds SHADOW_STATEMENT_TIMEOUT_MS but stays under RECORD_TIMEOUT_MS —
     // Postgres's own statement_timeout must cancel the statement well before the JS race's
     // backstop would. If SET LOCAL statement_timeout were removed (mutation), nothing would
     // cancel the sleep before the JS race hits RECORD_TIMEOUT_MS, flipping the outcome from
-    // 'failed' to 'timed_out' — this is exactly what makes this test mutation-sensitive.
+    // 'failed' to 'abandoned' — this is exactly what makes this test mutation-sensitive.
     const fnName = 'shadow_st_delay_fn'
     const triggerName = 'shadow_st_delay_trigger'
     const stSleepSeconds = Math.ceil(RECORD_TIMEOUT_MS / 1000) + 1
@@ -512,10 +524,10 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     }
     const after = getShadowMetricsSnapshotForTestingV1()
     // The statement was cancelled (a real Postgres error, caught by performShadowRecordV1's own
-    // try/catch) — NOT abandoned by the JS-side race — so this lands in `failed`, not
-    // `timed_out`.
+    // try/catch) — the JS-side race never even fired (RECORD_TIMEOUT_MS is strictly greater
+    // than SHADOW_STATEMENT_TIMEOUT_MS) — so this lands in `failed`, not `abandoned`.
     expect(after.failed - before.failed).toBe(1)
-    expect(after.timed_out - before.timed_out).toBe(0)
+    expect(after.abandoned - before.abandoned).toBe(0)
     // No row was ever committed — Postgres cancelled the INSERT statement before it could land.
     expect(await shadowRowCountFor(userST)).toBe(0)
   })
@@ -545,6 +557,16 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     expect(res.body?.runtime?.status).toBe('failed')
     expect(res.body?.runtime?.error).toMatch(/ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1/)
     expect(res.body?.runtime?.error).toMatch(/enforce/)
+  })
+
+  it('(P3-1 / #5073 round-2 gate) the PRIOR (shadow) activation\'s metrics-logging interval is stopped even though THIS reactivation attempt threw — activatePluginInstance never calls deactivate() on a failed activate(), so this only holds because index.cjs stops the interval BEFORE the throwing env parse, not after', async () => {
+    // The 'switches to env=enforce' case immediately above already drove exactly this
+    // transition (shadow, an active interval -> enforce, activate() throws). This asserts the
+    // real, in-process observable: activatePluginInstance's catch path never runs this plugin's
+    // deactivate(), so the ONLY way this can be 0 is if activate() itself stopped the prior
+    // interval before the parse that threw (see index.cjs's activate(), the P3-1 comment
+    // directly above the stop-before-start block).
+    expect(getShadowMetricsLoggingActiveCountForTestingV1()).toBe(0)
   })
 
   it('(f) POST /api/attendance/punch is no longer mounted once activation failed closed -> exactly 404, using a FRESH user so this cannot be a business-logic rejection wearing a "not 200" disguise', async () => {

@@ -106,9 +106,12 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 //      that already owns it — a real drift/security risk for a default-off audit feature, not a
 //      hypothetical one.
 //
-// All three routes closed, so this module takes the fallback the owner authorized: use the
-// EXISTING, already-vetted `db.transaction(...)` capability (still backed by the shared pool),
-// but issue `SET LOCAL statement_timeout` as the transaction's first statement
+// All three routes closed, so this module takes the fallback this round's owner review
+// specified for a default-off shadow feature (see PR #5073's description for the full review
+// context and the ratification flag for this design-lock expansion — not asserted here, since
+// this comment is permanent source and the sign-off is not): use the EXISTING, already-vetted
+// `db.transaction(...)` capability (still backed by the shared pool), but issue
+// `SET LOCAL statement_timeout` as the transaction's first statement
 // (`SHADOW_STATEMENT_TIMEOUT_MS`) so a stuck membership SELECT or audit INSERT is CANCELLED
 // SERVER-SIDE by Postgres itself — not merely abandoned client-side — and the connection is
 // still released back to the shared pool by `ConnectionPool.transaction`'s own
@@ -116,25 +119,46 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 // transaction-scoped and self-resets at COMMIT/ROLLBACK, so it never leaks onto any other
 // query on that connection.
 //
-// `SHADOW_STATEMENT_TIMEOUT_MS` does NOT bound the time to ACQUIRE a connection from an already
-// full pool in the first place (`pool.connect()`, inside `ConnectionPool.transaction`) — only a
-// running statement. `RECORD_TIMEOUT_MS`'s outer `Promise.race` (in `recordShadowOrgResolutionV1`
-// below) is the backstop for THAT case: it bounds how long this module's own returned promise
-// can stay open regardless of where the stall is, though the underlying work (including
-// whatever connection it may be holding) is not cancelled by the race losing — only by
-// Postgres's own `statement_timeout`, or by the caller's own connection/pool timeouts.
+// `SHADOW_STATEMENT_TIMEOUT_MS` bounds each STATEMENT, not the transaction: the recorder issues
+// TWO statements after `SET LOCAL` (the membership SELECT, then the audit INSERT), each
+// independently allowed up to `SHADOW_STATEMENT_TIMEOUT_MS` — so worst-case wall time for ONE
+// connection is ≈2×`SHADOW_STATEMENT_TIMEOUT_MS`, not one statement's worth. It also does NOT
+// bound the time to ACQUIRE a connection from an already-full pool in the first place
+// (`pool.connect()`, inside `ConnectionPool.transaction`) — that stall is bounded by the pool's
+// own `connectionTimeoutMillis` (default 10000ms — `connection-pool.ts`), a mechanism this
+// module does not configure and does not need to: it already exists on the shared pool.
 //
-// `IN_FLIGHT_CAP` bounds how many of this module's own transactions can be concurrently
+// `RECORD_TIMEOUT_MS`'s outer `Promise.race` (in `recordShadowOrgResolutionV1` below) is NOT a
+// resource bound on anything — it is an OBSERVABILITY SIGNAL only. Tracing every production
+// effect of it firing: (1) the `abandoned` metrics bucket increments, (2) one throttled warn
+// line, (3) `recordShadowOrgResolutionV1`'s OWN returned promise settles — and the only
+// production call site never awaits that promise
+// (`void recordShadowOrgResolutionV1(...).catch(() => {})`, `index.cjs`), so nothing is ever
+// actually waiting on it in production. It does not cancel the underlying work — only
+// Postgres's own `statement_timeout` does that — and it does not release the in-flight slot
+// (that is bound to the underlying work truly settling; see `markRecorderSettled` below, tied
+// to `work.finally`, never to this race). This timer exists only so this function's own
+// returned promise — and whatever, if anything, is watching it in a test — cannot stay pending
+// forever; nothing in production is ever watching it.
+//
+// `IN_FLIGHT_CAP` (8) bounds how many of this module's own transactions can be concurrently
 // outstanding at all — once that many are already in flight, a new punch's shadow sample is
-// DROPPED (never even attempts a connection) rather than queued, so the worst case this module
-// can ever tie up on the shared pool is `IN_FLIGHT_CAP` connections for at most
-// `SHADOW_STATEMENT_TIMEOUT_MS` each, not an unbounded, growing number.
+// DROPPED (never even attempts a connection) rather than queued. Combined with the per-statement
+// bound above, the worst case this module can ever tie up on the shared pool is `IN_FLIGHT_CAP`
+// connections for up to ≈2×`SHADOW_STATEMENT_TIMEOUT_MS` each — not an unbounded, growing
+// number, but concretely: against `DB_POOL_MAX`'s default of 20 (`connection-pool.ts`), this
+// module may occupy up to 40% of the shared pool the punch route itself depends on for the
+// duration of a slow-DB incident. Whether 8 is the right cap against a 20-connection pool is an
+// owner call this comment does not attempt to settle.
 //
-// METRICS: `attempted = written + timed_out + dropped + failed` always holds — every call to
+// METRICS: `attempted = written + abandoned + dropped + failed` always holds — every call to
 // `recordShadowOrgResolutionV1` increments `attempted` exactly once and resolves into EXACTLY
-// ONE of the other four buckets (see `recordTerminalOnce` below), never zero, never two. This
-// is an in-process counter only (module-level, like the warn-throttle clock above) — see
-// `getShadowMetricsSnapshotForTestingV1` / `startShadowMetricsLoggingV1`.
+// ONE of the other four buckets (see `recordTerminalOnce` below), never zero, never two.
+// `abandoned` specifically means "this module stopped WATCHING the work at the
+// `RECORD_TIMEOUT_MS` mark" — the work itself may still be running underneath, and may still
+// succeed (and commit) or fail after that point; this bucket is not evidence a row was lost.
+// This is an in-process counter only (module-level, like the warn-throttle clock above) — see
+// `getShadowMetricsSnapshotV1` / `startShadowMetricsLoggingV1`.
 
 const DEFAULT_ORG_ID = 'default'
 
@@ -265,14 +289,19 @@ function decideShadowOrgResolutionV1(input) {
   }
 }
 
-// Warn-log throttling: at most one warn per process per WARN_THROTTLE_WINDOW_MS, regardless of
-// how many recordShadowOrgResolutionV1 failures happen in that window. This is a
+// Warn-log throttling: at most one warn per process per WARN_THROTTLE_WINDOW_MS PER CHANNEL,
+// regardless of how many recordShadowOrgResolutionV1 failures happen in that window. This is a
 // non-fatal/best-effort audit write on a hot path (every punch, when the flag is on) — a
 // sustained failure (e.g. the table dropped, or a connection-pool outage) must not turn into a
-// warn-per-punch log storm. `lastWarnAtMs` is module-level (shared across every call in this
-// process), matching "once per process", not once per request/user/table.
+// warn-per-punch log storm. `lastWarnAtMsByChannel` is module-level (shared across every call in
+// this process), matching "once per process per channel", not once per request/user/table.
+//
+// P3-4 (#5073 round-2 gate): TWO channels, not one. 'dropped' (the in-flight cap reached) gets
+// its OWN clock, separate from 'default' (every other warn: skipped/insert-failed/abandoned) —
+// without this split, a sustained failure or abandoned-work storm on the 'default' channel could
+// starve the ONE signal that would otherwise tell an operator the cap itself is wedged.
 const WARN_THROTTLE_WINDOW_MS = 60_000
-let lastWarnAtMs = 0
+const lastWarnAtMsByChannel = { default: 0, dropped: 0 }
 
 function resolveWarnFn(logger) {
   return logger && typeof logger.warn === 'function'
@@ -282,20 +311,21 @@ function resolveWarnFn(logger) {
       : () => {}
 }
 
-function throttledShadowWarn(logger, message, meta) {
+function throttledShadowWarn(logger, message, meta, channel = 'default') {
   const now = Date.now()
-  if (now - lastWarnAtMs < WARN_THROTTLE_WINDOW_MS) return
-  lastWarnAtMs = now
+  if (now - lastWarnAtMsByChannel[channel] < WARN_THROTTLE_WINDOW_MS) return
+  lastWarnAtMsByChannel[channel] = now
   resolveWarnFn(logger)(message, meta)
 }
 
 /**
- * Test-only: resets the module-level warn-throttle clock so a test suite can assert throttling
+ * Test-only: resets EVERY channel's warn-throttle clock so a test suite can assert throttling
  * behaviour deterministically regardless of what ran (and warned) earlier in the same process.
  * Never called from production code.
  */
 function resetShadowWarnThrottleForTestingV1() {
-  lastWarnAtMs = 0
+  lastWarnAtMsByChannel.default = 0
+  lastWarnAtMsByChannel.dropped = 0
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,13 +335,21 @@ function resetShadowWarnThrottleForTestingV1() {
 
 // Server-side statement timeout for the recorder's transaction (SET LOCAL, see
 // performShadowRecordV1). A fixed internal constant — never request-derived — so inlining it
-// into SQL text is not an injection risk (SET does not accept bound parameters).
+// into SQL text is not an injection risk (SET does not accept bound parameters). PER STATEMENT,
+// not per transaction — the recorder issues two statements after SET LOCAL (SELECT, then
+// INSERT), so worst-case wall time for one connection is ≈2×this value (see the module doc
+// comment's "RESOURCE ISOLATION" paragraph), not this value.
 const SHADOW_STATEMENT_TIMEOUT_MS = 4000
 
-// Outer JS-side backstop. Strictly greater than SHADOW_STATEMENT_TIMEOUT_MS so a normal
-// DB-side statement cancellation has a chance to settle `work` first (and land in the `failed`
-// bucket); this timer exists for stalls statement_timeout cannot see — acquiring a connection
-// from an exhausted pool in the first place.
+// Outer JS-side OBSERVABILITY signal — NOT a resource bound (see the module doc comment's
+// "RESOURCE ISOLATION" paragraph for the full trace of why). It does not cancel the underlying
+// work and does not release the in-flight slot (that is `work.finally` — see
+// markRecorderSettled). It exists only so recordShadowOrgResolutionV1's own returned promise —
+// which no production caller ever awaits — cannot stay pending forever. Deliberately left at
+// 5000ms rather than resized to ≥2×SHADOW_STATEMENT_TIMEOUT_MS: resizing it would read like
+// resource hardening in a diff while it protects nothing — what actually bounds acquisition is
+// the pool's own connectionTimeoutMillis, and what bounds statement execution is SET LOCAL
+// statement_timeout, per statement; this constant bounds neither.
 const RECORD_TIMEOUT_MS = 5000
 
 // How many of this module's own transactions may be concurrently outstanding at once. Once
@@ -320,23 +358,37 @@ const RECORD_TIMEOUT_MS = 5000
 // alone (a hung DB could otherwise let in-flight work grow without limit).
 const IN_FLIGHT_CAP = 8
 
-const SHADOW_TIMEOUT_WARN_MESSAGE =
-  'attendance_org_resolution_shadow exceeded the 5000ms safety timeout; the underlying query/transaction is NOT cancelled by this timer (Postgres statement_timeout may still cancel it server-side) and may still complete in the background'
+// NIT-2 (#5073 round-2 gate): derive the ms figure from the constant via template literal, not
+// a hardcoded literal, so the message can never drift from RECORD_TIMEOUT_MS.
+const SHADOW_ABANDONED_WARN_MESSAGE =
+  `attendance_org_resolution_shadow stopped WATCHING a recorder after ${RECORD_TIMEOUT_MS}ms `
+  + '(observability signal only — this does NOT cancel the underlying query/transaction; '
+  + 'Postgres statement_timeout may cancel it server-side, per statement, or it may still '
+  + 'complete and commit in the background)'
 const SHADOW_DROPPED_WARN_MESSAGE =
   'attendance_org_resolution_shadow dropped: in-flight cap reached; sample skipped, no connection attempted'
 
-// In-process metrics. `attempted = written + timed_out + dropped + failed` always holds — see
-// recordTerminalOnce below for the exactly-once accounting that keeps it true.
-const shadowMetrics = { attempted: 0, written: 0, timed_out: 0, dropped: 0, failed: 0 }
+// In-process metrics. `attempted = written + abandoned + dropped + failed` always holds — see
+// recordTerminalOnce below for the exactly-once accounting that keeps it true. `abandoned` is
+// NOT "lost" — see the module doc comment's METRICS paragraph for what the bucket actually means.
+const shadowMetrics = { attempted: 0, written: 0, abandoned: 0, dropped: 0, failed: 0 }
 
 /**
- * Test-only: a snapshot copy of the current metrics counters. Never mutated by the caller —
- * callers get a plain object, not a reference into module state.
- * @returns {{ attempted: number, written: number, timed_out: number, dropped: number, failed: number }}
+ * A snapshot copy of the current metrics counters. Never mutated by the caller — callers get a
+ * plain object, not a reference into module state. NOT test-only, despite the sibling alias
+ * below: this is also the read path `logShadowMetricsSnapshotV1` uses in PRODUCTION (periodic
+ * logging — see `startShadowMetricsLoggingV1`).
+ * @returns {{ attempted: number, written: number, abandoned: number, dropped: number, failed: number }}
  */
-function getShadowMetricsSnapshotForTestingV1() {
+function getShadowMetricsSnapshotV1() {
   return { ...shadowMetrics }
 }
+
+// Test-only alias: identical behaviour to getShadowMetricsSnapshotV1, kept so existing test call
+// sites naming the "ForTestingV1" form keep working (#5073 round-2 gate NIT-1: the suffix is a
+// load-bearing "test-only" convention on this line, but the function is also called from
+// production — prefer getShadowMetricsSnapshotV1 for any NEW call site, test or production).
+const getShadowMetricsSnapshotForTestingV1 = getShadowMetricsSnapshotV1
 
 /**
  * Test-only: zeroes every metrics counter so a test suite's assertions are independent of what
@@ -345,7 +397,7 @@ function getShadowMetricsSnapshotForTestingV1() {
 function resetShadowMetricsForTestingV1() {
   shadowMetrics.attempted = 0
   shadowMetrics.written = 0
-  shadowMetrics.timed_out = 0
+  shadowMetrics.abandoned = 0
   shadowMetrics.dropped = 0
   shadowMetrics.failed = 0
 }
@@ -362,18 +414,27 @@ function resolveLoggerFn(logger, level) {
  * @param {{ info?: (message: string, meta?: Record<string, unknown>) => void }} [logger]
  */
 function logShadowMetricsSnapshotV1(logger) {
-  resolveLoggerFn(logger, 'info')('attendance_org_resolution_shadow metrics snapshot', getShadowMetricsSnapshotForTestingV1())
+  resolveLoggerFn(logger, 'info')('attendance_org_resolution_shadow metrics snapshot', getShadowMetricsSnapshotV1())
 }
 
 const SHADOW_METRICS_LOG_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
 
+// Test-only observable for P3-1 (#5073 round-2 gate): how many of this module's own metrics-
+// logging intervals are CURRENTLY active. index.cjs's activate() is responsible for stopping a
+// prior interval before starting a new one (including on a THROWING reactivation — see that
+// call site's own comment) — this counter is what a real-DB test asserts against to prove that
+// actually holds, instead of reasoning about it statically.
+let activeMetricsLoggingCount = 0
+
 /**
  * Starts periodic metrics logging (owner requirement: a 30-day shadow sample must not silently
- * lose data during an incident without at least a periodic log trail). Returns a stop function.
+ * lose data during an incident without at least a periodic log trail). Returns a stop function
+ * (idempotent — calling it more than once has no additional effect).
  * Callers (plugins/plugin-attendance/index.cjs's activate/deactivate) MUST call the returned
  * stop function on deactivation/reactivation — `activatePluginInstance` does not call
- * `deactivate()` before re-running `activate()`, so a caller that starts a new interval on every
- * activation without stopping the previous one would leak timers across plugin reloads.
+ * `deactivate()` before re-running `activate()`, EVEN when that re-run's own `activate()` throws
+ * (e.g. a misconfigured env value) — so a caller that starts a new interval on every activation
+ * without stopping the previous one FIRST would leak timers across plugin reloads.
  * @param {{ info?: (message: string, meta?: Record<string, unknown>) => void }} [logger]
  * @param {number} [intervalMs]
  * @returns {() => void}
@@ -381,7 +442,23 @@ const SHADOW_METRICS_LOG_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
 function startShadowMetricsLoggingV1(logger, intervalMs = SHADOW_METRICS_LOG_INTERVAL_MS) {
   const handle = setInterval(() => logShadowMetricsSnapshotV1(logger), intervalMs)
   if (handle && typeof handle.unref === 'function') handle.unref()
-  return () => clearInterval(handle)
+  activeMetricsLoggingCount += 1
+  let stopped = false
+  return () => {
+    if (stopped) return
+    stopped = true
+    activeMetricsLoggingCount -= 1
+    clearInterval(handle)
+  }
+}
+
+/**
+ * Test-only: how many metrics-logging intervals started by startShadowMetricsLoggingV1 are
+ * currently active (not yet stopped) in this process. Never called from production code.
+ * @returns {number}
+ */
+function getShadowMetricsLoggingActiveCountForTestingV1() {
+  return activeMetricsLoggingCount
 }
 
 // In-flight bookkeeping. Fire-and-forget scheduling at the call site means the punch response
@@ -529,11 +606,14 @@ async function performShadowRecordV1(db, req, ctx, logger, onTerminal) {
  *
  * Orchestrates, in order: (1) metrics `attempted`, (2) the in-flight CAP check — over cap drops
  * the sample immediately, no connection attempted, (3) in-flight bookkeeping +
- * performShadowRecordV1, raced against a RECORD_TIMEOUT_MS backstop so this function's own
- * returned promise cannot stay open forever even if the underlying work does. Exactly one of
- * {written, timed_out, dropped, failed} is recorded per call — `recordTerminalOnce` is the
- * single choke point that guarantees that, regardless of whether the timeout or the underlying
- * work "wins" the race.
+ * performShadowRecordV1, raced against a RECORD_TIMEOUT_MS OBSERVABILITY backstop (see that
+ * constant's own comment — it is not a resource bound) so this function's own returned promise
+ * cannot stay open forever even if the underlying work does. Exactly one of
+ * {written, abandoned, dropped, failed} is recorded per call — `recordTerminalOnce` is the
+ * single choke point that guarantees that, regardless of whether the race or the underlying
+ * work settles first, INCLUDING when the underlying work settles LATE (after the race already
+ * fired `abandoned`) — that late settle must NOT also increment `written`/`failed`, or the
+ * `attempted = written+abandoned+dropped+failed` invariant breaks.
  *
  * Callers MUST gate the call itself on `parseAttendanceOrgResolutionShadowModeV1(...) ===
  * 'shadow'` — this function does not re-check the env itself, so the 'off' posture's
@@ -558,7 +638,10 @@ async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
 
   if (inFlightCount >= IN_FLIGHT_CAP) {
     shadowMetrics.dropped += 1
-    throttledShadowWarn(logger, SHADOW_DROPPED_WARN_MESSAGE, { reason: 'cap_exceeded' })
+    // P3-4 (#5073 round-2 gate): own throttle channel, separate from every other warn in this
+    // module — a sustained failure/abandoned storm sharing the default channel must not starve
+    // the ONE signal that tells an operator the cap itself is wedged.
+    throttledShadowWarn(logger, SHADOW_DROPPED_WARN_MESSAGE, { reason: 'cap_exceeded' }, 'dropped')
     return
   }
 
@@ -579,8 +662,12 @@ async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
   let timeoutHandle
   const timeoutPromise = new Promise((resolve) => {
     timeoutHandle = setTimeout(() => {
-      recordTerminalOnce('timed_out')
-      throttledShadowWarn(logger, SHADOW_TIMEOUT_WARN_MESSAGE, { reason: 'timeout' })
+      // Fires when this module STOPS WATCHING the work, not when the work itself times out —
+      // see SHADOW_ABANDONED_WARN_MESSAGE and RECORD_TIMEOUT_MS's own comment. recordTerminalOnce
+      // guards against this ALSO firing if the work later settles via performShadowRecordV1's
+      // own onTerminal call — that guard is what keeps the sum invariant true under a late settle.
+      recordTerminalOnce('abandoned')
+      throttledShadowWarn(logger, SHADOW_ABANDONED_WARN_MESSAGE, { reason: 'abandoned' })
       resolve()
     }, RECORD_TIMEOUT_MS)
     if (timeoutHandle && typeof timeoutHandle.unref === 'function') timeoutHandle.unref()
@@ -600,9 +687,11 @@ module.exports = {
   resetShadowWarnThrottleForTestingV1,
   whenIdleForTestingV1,
   resetShadowInFlightForTestingV1,
+  getShadowMetricsSnapshotV1,
   getShadowMetricsSnapshotForTestingV1,
   resetShadowMetricsForTestingV1,
   startShadowMetricsLoggingV1,
+  getShadowMetricsLoggingActiveCountForTestingV1,
   logShadowMetricsSnapshotV1,
   WARN_THROTTLE_WINDOW_MS,
   SHADOW_STATEMENT_TIMEOUT_MS,

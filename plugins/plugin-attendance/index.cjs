@@ -559,12 +559,14 @@ let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
-// Owner-review P2 follow-up on #5064: periodic metrics logging for the org-resolution shadow
-// recorder (attempted/written/timed_out/dropped/failed — see
+// Owner-review P2 follow-up on #5064/#5073: periodic metrics logging for the org-resolution
+// shadow recorder (attempted/written/abandoned/dropped/failed — see
 // lib/attendance-org-resolution-shadow.cjs). Non-null only while shadow mode is active.
 // `activatePluginInstance` does NOT call `deactivate()` before re-running `activate()` on a
-// reload, so this is stopped both defensively at the top of the shadow-mode setup below AND in
-// `deactivate()`, to never leak an interval across plugin reactivation.
+// reload — including when that re-run's own `activate()` throws (e.g. a misconfigured env
+// value) — so this is stopped unconditionally, BEFORE the env parse that can throw, at the top
+// of `activate()` (see that call site's own P3-1 comment), and again in `deactivate()`, so a
+// throwing reactivation can never leak the prior activation's interval.
 let attendanceOrgResolutionShadowMetricsLogStop = null
 let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
@@ -24686,6 +24688,20 @@ module.exports = {
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
+    // P3-1 (#5073 round-2 gate): stop-before-start MUST run before anything below can throw.
+    // activatePluginInstance (packages/core-backend/src/index.ts) does NOT call this plugin's
+    // deactivate() before re-running activate() on a reload — not even when that re-run's own
+    // activate() call THROWS (it catches the throw, tears down routes via
+    // cleanupPluginRuntimeRegistrations, and records status:'failed'; deactivate() is never
+    // invoked). The env parse two lines below throws on an unsupported value (e.g. reactivating
+    // shadow -> 'enforce') — if the stop ran AFTER that parse, a throwing reactivation would
+    // leak the PRIOR activation's interval forever (it would never be stopped, since neither
+    // this activate() nor a deactivate() ever reaches the stop call again). Stopping first,
+    // unconditionally, closes that gap regardless of whether the parse below succeeds.
+    if (attendanceOrgResolutionShadowMetricsLogStop) {
+      attendanceOrgResolutionShadowMetricsLogStop()
+      attendanceOrgResolutionShadowMetricsLogStop = null
+    }
     // Shadow audit of the self-service punch route's org resolution — see
     // lib/attendance-org-resolution-shadow.cjs's module doc comment for the full tri-state
     // contract. Parsed ONCE, here, at plugin startup: an unsupported value (including the
@@ -24696,14 +24712,6 @@ module.exports = {
     const attendanceOrgResolutionShadowMode = parseAttendanceOrgResolutionShadowModeV1(
       process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1,
     )
-    // Defensive stop-before-start: activatePluginInstance does not call deactivate() before
-    // re-running activate() on a reload (see attendanceOrgResolutionShadowMetricsLogStop's own
-    // declaration comment), so a prior activation's interval — if any — must be stopped here,
-    // not only in deactivate(), or repeated reactivations would leak one interval each.
-    if (attendanceOrgResolutionShadowMetricsLogStop) {
-      attendanceOrgResolutionShadowMetricsLogStop()
-      attendanceOrgResolutionShadowMetricsLogStop = null
-    }
     if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
       attendanceOrgResolutionShadowMetricsLogStop = startShadowMetricsLoggingV1(logger)
     }
