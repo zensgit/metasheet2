@@ -54,6 +54,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { useNotificationInbox } from '../composables/useNotificationInbox'
 import type { MetaRecordSubscriptionNotification } from '../types'
@@ -88,8 +89,11 @@ async function onItemClick(n: MetaRecordSubscriptionNotification): Promise<void>
   open.value = false
 }
 
-// Ambient badge: surface the unread count without requiring the panel to be opened.
-void refreshUnreadCount()
+// Ambient badge: surface the unread count without requiring the panel to be
+// opened — idle-deferred so it never competes with the sheet-open critical path.
+scheduleIdle(() => {
+  void refreshUnreadCount()
+})
 </script>
 
 <style scoped>

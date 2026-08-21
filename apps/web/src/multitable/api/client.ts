@@ -1431,6 +1431,16 @@ export class MultitableApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
   private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
+  // Catalog caches: the bases/templates lists are small and change rarely, but
+  // were refetched by every mounting surface (workbench, home, field dialogs,
+  // template views) — ≥5 identical GETs in a single sheet-open session. Cached
+  // per client instance with in-flight dedup (same pattern as
+  // usePlugins.fetchPlugins); mutations on this client invalidate, and callers
+  // can pass { force: true } for an explicit refresh.
+  private basesCache: MetaBase[] | null = null
+  private basesInflight: Promise<{ bases: MetaBase[] }> | null = null
+  private templatesCache: MetaTemplate[] | null = null
+  private templatesInflight: Promise<{ templates: MetaTemplate[] }> | null = null
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1448,9 +1458,32 @@ export class MultitableApiClient {
   }
 
   // --- Bases ---
-  async listBases(): Promise<{ bases: MetaBase[] }> {
-    const res = await this.fetch('/api/multitable/bases')
-    return this.parseJson(res)
+  invalidateBasesCache(): void {
+    this.basesCache = null
+  }
+
+  invalidateTemplatesCache(): void {
+    this.templatesCache = null
+  }
+
+  async listBases(opts?: { force?: boolean }): Promise<{ bases: MetaBase[] }> {
+    if (!opts?.force) {
+      // Return copies so a caller sorting/mutating the array cannot pollute the cache.
+      if (this.basesCache) return { bases: [...this.basesCache] }
+      if (this.basesInflight) return this.basesInflight.then((data) => ({ bases: [...data.bases] }))
+    }
+    const inflight = (async () => {
+      const res = await this.fetch('/api/multitable/bases')
+      const data = await this.parseJson<{ bases?: MetaBase[] }>(res)
+      this.basesCache = Array.isArray(data?.bases) ? data.bases : []
+      return { bases: [...this.basesCache] }
+    })()
+    this.basesInflight = inflight
+    try {
+      return await inflight
+    } finally {
+      if (this.basesInflight === inflight) this.basesInflight = null
+    }
   }
 
   async createBase(input: CreateBaseInput): Promise<{ base: MetaBase }> {
@@ -1459,12 +1492,28 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<{ base: MetaBase }>(res)
+    this.invalidateBasesCache()
+    return data
   }
 
-  async listTemplates(): Promise<{ templates: MetaTemplate[] }> {
-    const res = await this.fetch('/api/multitable/templates')
-    return this.parseJson(res)
+  async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
+    if (!opts?.force) {
+      if (this.templatesCache) return { templates: [...this.templatesCache] }
+      if (this.templatesInflight) return this.templatesInflight.then((data) => ({ templates: [...data.templates] }))
+    }
+    const inflight = (async () => {
+      const res = await this.fetch('/api/multitable/templates')
+      const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
+      this.templatesCache = Array.isArray(data?.templates) ? data.templates : []
+      return { templates: [...this.templatesCache] }
+    })()
+    this.templatesInflight = inflight
+    try {
+      return await inflight
+    } finally {
+      if (this.templatesInflight === inflight) this.templatesInflight = null
+    }
   }
 
   /**
@@ -1522,7 +1571,10 @@ export class MultitableApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<InstallTemplateResult>(res)
+    // Installing a template creates a base — the cached bases list is stale.
+    this.invalidateBasesCache()
+    return data
   }
 
   // S2 — zero-write install simulation (design 20260611 §2.1). Same body

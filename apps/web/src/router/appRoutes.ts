@@ -15,10 +15,16 @@ import PluginManagerView from '../views/PluginManagerView.vue'
 import PluginViewHost from '../views/PluginViewHost.vue'
 import PlatformAppLauncherView from '../views/PlatformAppLauncherView.vue'
 import PlatformAppShellView from '../views/PlatformAppShellView.vue'
-import AttendanceExperienceView from '../views/attendance/AttendanceExperienceView.vue'
 import DingTalkAuthCallbackView from '../views/DingTalkAuthCallbackView.vue'
 import HomeRedirect from '../views/HomeRedirect.vue'
 import LoginView from '../views/LoginView.vue'
+
+// Route-level code split: AttendanceExperienceView chains in the attendance
+// monolith (~29k lines of view + per-tab data loading). A static import pulled
+// it into the entry chunk, so every surface — including multitable sheet
+// opens — downloaded and parsed it. Lazy-load it like the other heavy routes;
+// attendance users pay one chunk fetch on first navigation instead.
+const AttendanceExperienceView = () => import('../views/attendance/AttendanceExperienceView.vue')
 
 export const appRoutes: RouteRecordRaw[] = [
   {

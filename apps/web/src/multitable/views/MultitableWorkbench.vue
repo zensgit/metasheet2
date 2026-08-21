@@ -585,6 +585,7 @@ import { useRouter } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
+import { scheduleIdle } from '../../utils/scheduleIdle'
 import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -4245,7 +4246,11 @@ watch(
     }
 
     void mentionInboxState.loadSummary({ spreadsheetId: sheetId })
-    void ensureCommentMentionSuggestions(true)
+    // Mention candidates are NOT loaded eagerly here: the reset above cleared
+    // commentMentionSuggestionsLoadedForSheetId, so the on-demand call inside
+    // loadCommentsForRecord fetches a fresh list the first time a comment
+    // composer actually opens on this sheet. Eager-loading added a request to
+    // every sheet open for a list most sessions never use.
     unsubscribeMentionRealtime = subscribeToMultitableCommentSheetRealtime(sheetId, {
       onCommentCreated: mentionInboxState.onRealtimeCommentCreated,
       onCommentUpdated: mentionInboxState.onRealtimeCommentUpdated,
@@ -4333,7 +4338,12 @@ onMounted(async () => {
     currentUserId.value = userId
   }).catch(() => undefined)
   try {
-    await loadBases()
+    // Perf: the bases rail must NOT gate the sheet's own context load — it only
+    // determines base *selection* when the URL anchors nothing (loadBases picks
+    // bases[0] via selectBase, and its guard already skips that when a sheetId
+    // is anchored or a base is active). Anchored opens run it in parallel so an
+    // uncached, sheet-irrelevant list stops serializing ahead of the grid.
+    const basesLoaded = loadBases()
     let contextLoaded = false
     if (workbench.activeBaseId.value) {
       contextLoaded = await workbench.loadBaseContext(workbench.activeBaseId.value, {
@@ -4346,13 +4356,24 @@ onMounted(async () => {
       // activeBaseId from ctx.sheet.baseId.
       contextLoaded = await workbench.loadSheetMeta(props.sheetId, { viewId: props.viewId })
     } else {
-      await workbench.loadSheets()
-      contextLoaded = !workbench.error.value
+      // Nothing anchored: base selection depends on the bases list, so this
+      // branch (and only this branch) waits for it before loading context.
+      await basesLoaded
+      if (workbench.activeBaseId.value) {
+        contextLoaded = await workbench.loadBaseContext(workbench.activeBaseId.value, {
+          sheetId: props.sheetId,
+          viewId: props.viewId,
+        })
+      } else {
+        await workbench.loadSheets()
+        contextLoaded = !workbench.error.value
+      }
     }
+    await basesLoaded
     if (contextLoaded && workbench.activeBaseId.value) {
       rememberWorkbenchBaseOpen(workbench.activeBaseId.value)
     }
-    await commentInboxState.refreshUnreadCount().catch(() => undefined)
+    // Ambient unread badge — deferred off the critical path (see finally).
     const deepRecordId = props.recordId ?? parseDeepLink()
     if (deepRecordId) {
       await applyCommentDeepLink(deepRecordId, {
@@ -4372,6 +4393,11 @@ onMounted(async () => {
       baseId: workbench.activeBaseId.value ?? '',
       sheetId: workbench.activeSheetId.value ?? '',
       viewId: workbench.activeViewId.value ?? '',
+    })
+    // Ambient comment unread badge: idle-deferred so it never adds a round
+    // trip to the sheet-open critical path.
+    scheduleIdle(() => {
+      void commentInboxState.refreshUnreadCount().catch(() => undefined)
     })
   }
 })
