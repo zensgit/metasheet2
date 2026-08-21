@@ -123,9 +123,12 @@ describe('approval history routing', () => {
     // pinned here, and the real-DB suite proves the behavioural half end to end.
     // Lock-10 (S1): canReadApprovalInstance's three admission-phase queries (mocked above) are
     // Nth 1-3, so the pre-existing count/page queries this block pins shift from Nth 1/2 to Nth 4/5.
+    // Lock-10 (S2) HISTORY-TIMELINE arm (i) — both the count and page query add the
+    // `metadata->>'commentId' IS NULL` conjunct, binding NO parameter, so the parameter arrays
+    // pinned below stay unchanged from S1.
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
       4,
-      'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
+      "SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2 AND metadata->>'commentId' IS NULL",
       ['inst-1', 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
@@ -136,6 +139,18 @@ describe('approval history routing', () => {
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
       5,
       expect.stringContaining('AND action <> $4'),
+      ['inst-1', 1, 1, 'policy_denied'],
+    )
+    // Lock-10 (S2) static pin — a future removal of the exclusion from either query reds here,
+    // even though the `stringContaining` checks above would still pass against the SAME literal.
+    expect(pgState.pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("metadata->>'commentId' IS NULL"),
+      ['inst-1', 'policy_denied'],
+    )
+    expect(pgState.pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("metadata->>'commentId' IS NULL"),
       ['inst-1', 1, 1, 'policy_denied'],
     )
   })
