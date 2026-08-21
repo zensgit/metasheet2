@@ -472,6 +472,95 @@ describeIfDatabase('Lock-4 F4-B — designated empty-assignee fallback: server d
     expect(await assignmentsFor(inst.id, 'legal-review-2')).toEqual([])
   })
 
+  // FS-3 fix round (2026-08-21, gate P2): the CONTROL above proves SITE 2's terminal throw fires,
+  // but only via `emptyAssigneePolicy:'error'` — it never enters `resolveDesignatedFallbackAssignments`
+  // at all, so SITE 2's OWN `designated`-empty-set fail-closed arm (the `if (fallbackAssignments.length
+  // > 0)` guard, `ApprovalGraphExecutor.ts` inside `resolveBranchAdvance`) was unpinned anywhere in the
+  // repo: the site-1 tamper test below (`:524`+, now further down this file) runs through
+  // `resolveFromNode` = SITE 1 only. This test is the SITE 2 sibling of that tamper test — same
+  // technique (publish a VALID graph through the real authoring API, then surgically tamper the
+  // PERSISTED runtime_graph, never hand-craft it), applied to `legal-review-2` so the failing
+  // resolution happens inside `resolveBranchAdvance` via `resolveAfterApproveInParallel`, not
+  // `resolveFromNode`.
+  it(
+    'Gate 3 SITE 2 dispatch-time fail-closed on a PERSISTED-BUT-INVALID parallel graph (bypassing the authoring choke): designated resolving to an EMPTY set INSIDE resolveBranchAdvance (reached via resolveAfterApproveInParallel on the approve action, never resolveFromNode) terminates the APPROVE at APPROVAL_ASSIGNEE_EMPTY with { nodeKey: "legal-review-2" } only, never a silent nobody, never a second fallback hop, and the failed advance leaves NO trace',
+    async () => {
+      const suffix = 's2-tamper'
+      const legalId = `l4-f4b-legal-${TS}-${suffix}`
+      const complianceId = `l4-f4b-compliance-${TS}-${suffix}`
+      const financeId = `l4-f4b-finance-${TS}-${suffix}`
+      const adminFallbackId = `l4-f4b-admin-${TS}-${suffix}`
+      const legalToken = await authToken(baseUrl, legalId)
+      const adminToken = await authToken(baseUrl, `l4-f4b-tpladmin-${TS}-${suffix}`)
+      const requesterId = `l4-f4b-req-${TS}-${suffix}`
+      const requesterToken = await authToken(baseUrl, requesterId)
+      await grantWrite(requesterId)
+
+      // Publish a VALID designated parallel graph through the real authoring API — the fallback
+      // must be present to pass validateEmptyAssigneeFallbackConfigs; it is stripped from the
+      // PERSISTED runtime_graph afterward (never hand-crafted), exactly mirroring the SITE 1
+      // tamper test's technique.
+      const graph = parallelSecondNodeGraph(
+        { legal: legalId, compliance: complianceId, finance: financeId },
+        { emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { userIds: [adminFallbackId] } },
+      )
+      const templateId = await publishGraphTemplate(adminToken, graph, suffix)
+
+      const before = await pool().query<{ id: string; runtime_graph: { nodes: Array<{ key: string; config: Record<string, unknown> }> } }>(
+        'SELECT id, runtime_graph FROM approval_published_definitions WHERE template_id = $1::uuid AND is_active = TRUE',
+        [templateId],
+      )
+      expect(before.rows).toHaveLength(1)
+      const publishedId = before.rows[0].id
+      const runtimeGraph = before.rows[0].runtime_graph
+      const legal2Node = runtimeGraph.nodes.find((n) => n.key === 'legal-review-2')
+      expect(legal2Node).toBeTruthy()
+      expect(legal2Node!.config.emptyAssigneeFallback).toBeTruthy()
+      // Surgical tamper: strip ONLY legal-review-2's fallback key, leaving
+      // `emptyAssigneePolicy: 'designated'` in place there and EVERY other node (including
+      // legal-review's real assignee) untouched — initial resolution still dispatches
+      // legal-review / compliance-review normally, so SITE 2 is reached ONLY once legal-review is
+      // genuinely approved, not at create.
+      delete legal2Node!.config.emptyAssigneeFallback
+      await pool().query('UPDATE approval_published_definitions SET runtime_graph = $2::jsonb WHERE id = $1::uuid', [
+        publishedId,
+        JSON.stringify(runtimeGraph),
+      ])
+
+      const inst = await createApproval(requesterToken, templateId)
+      expect(inst.status).toBe('pending')
+      expect([...(inst.currentNodeKeys ?? [])].sort()).toEqual(['compliance-review', 'legal-review'])
+      // legal-review-2 does not exist yet — SITE 2 has not fired.
+      expect(await assignmentsFor(inst.id, 'legal-review-2')).toEqual([])
+      const beforeApprove = await assignmentsFor(inst.id, 'legal-review')
+      expect(beforeApprove.map((r) => r.is_active)).toEqual([true])
+
+      const advance = await act(legalToken, inst.id, { action: 'approve' })
+      expect(advance.status).toBe(400)
+      const body = (await advance.json()) as { error: { code: string; message: string; details?: { nodeKey?: string } } }
+      expect(body.error.code).toBe('APPROVAL_ASSIGNEE_EMPTY')
+      expect(body.error.details).toEqual({ nodeKey: 'legal-review-2' })
+      // X-4 values-free: no id (the fallback's or anyone else's) leaks into the error payload.
+      expect(JSON.stringify(body.error)).not.toContain(adminFallbackId)
+
+      // Rollback proof: legal-review's deactivation (inside the same transaction that then threw)
+      // is restored active — the failed advance left NO trace, not a half-applied state.
+      const afterApprove = await assignmentsFor(inst.id, 'legal-review')
+      expect(afterApprove.map((r) => r.is_active)).toEqual([true])
+      // Never a silent nobody, never a second fallback hop: assert by COUNT, not merely "not 200".
+      const legal2Count = await pool().query(
+        'SELECT count(*)::int AS n FROM approval_assignments WHERE instance_id = $1 AND node_key = $2',
+        [inst.id, 'legal-review-2'],
+      )
+      expect(legal2Count.rows[0].n).toBe(0)
+      const fallbackCount = await pool().query(
+        'SELECT count(*)::int AS n FROM approval_assignments WHERE assignee_id = $1',
+        [adminFallbackId],
+      )
+      expect(fallbackCount.rows[0].n).toBe(0)
+    },
+  )
+
   // ─────────────────────────────────────────────────────────────────────────────────────────────
   // Gate B-2 / Gate 3 — exhausted/invalid designated set fails closed, real HTTP + DB
   // ─────────────────────────────────────────────────────────────────────────────────────────────
