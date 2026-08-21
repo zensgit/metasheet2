@@ -1,10 +1,11 @@
 # Lock-9 — Approver-Side Process Attachments (审批过程附件) (2026-08-19)
 
-**Status:** DRAFT — design authority only. This document authorizes, enables, and implements NOTHING:
-no runtime code, no migration, no flag change, no tenant UAT, no deployment, no completion label. §4's
-ratification block is deliberately BLANK — it is filled by the owner (or by goal-set in-session
-provenance) and is reversible before any implementation lands. Each contract below still needs its own
-PR, required checks, an independent adversarial gate, and a ledger row.
+**Status:** RATIFIED 2026-08-21 — §4 records the decision under owner-directed, execute-by-reference
+provenance, and §5 records the disposition of the independent review that preceded it. Design authority
+ONLY: this document authorizes, enables, and implements NOTHING — no runtime code, no migration, no flag
+change, no tenant UAT, no deployment, and no completion label. The ratification is reversible before any
+dependent implementation lands. Each contract below still needs its own PR, required checks, an
+independent adversarial gate, and a ledger row.
 **Baseline:** `origin/main@2a3b8033f5dc25a87e5bb3098ddc467f2f26cd63` (`git rev-parse origin/main` at
 draft time; do not hand-expand the abbreviated form). Every anchor below was READ AT THIS BASELINE — line
 numbers are exact here and may differ from other documents' own citations. The repository is not shallow,
@@ -209,7 +210,12 @@ instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), ga
   att.org_id = $4)` (`:219-222`) is **self-satisfied by the process row itself** once bound, so an
   instance carrying only process attachments still resolves participants correctly with **no change** to
   the predicate. This is non-obvious; it is stated so an implementer does not "fix" a predicate that is
-  already correct (OD-L9-13).
+  already correct (OD-L9-13). **SCOPED at ratification:** this argument holds only because the process
+  attachment row is *itself* the row the `EXISTS` clause finds, so it is confined to the ATTACHMENT
+  surfaces (`/download`, `/refs`) — for an instance carrying zero attachment rows the same predicate
+  returns false for EVERYONE, so it must not be cited as authorizing reuse of `isInstanceParticipant` on
+  comment or other text surfaces (see OD-L9-13's scope clause, and the Non-effects note that
+  instance-detail read scope, Lock-7 §2.7 D-5, is not settled here).
 - **Gate 2 (hidden-field) is DROPPED for `bind_kind='process'`, by an explicit branch.** A process
   attachment is not a form field; there is no `access` matrix entry for it and its `field_id` is `NULL`.
   The gate becomes: `if (row.bind_kind === 'form_field' && row.instanceId) { …existing hidden check… }`.
@@ -404,11 +410,123 @@ document authorizes none of them to run.
 ## 4. Owner ratification block
 
 ```text
-Decision:
-Owner:
-Date:
-Document SHA:
-Decisions recorded:
+Decision: RATIFY
+Owner: zensgit — on 2026-08-21 the executing session enumerated its recommendations to the owner; item
+  (c) of that list was "Lock-9 #5011: ratify as drafted (13 ODs, ratify-ready)". The owner replied
+  「按建议执行」, authorizing execution BY REFERENCE to that enumerated list. The recommendation text was
+  authored by the EXECUTING SESSION, not by the owner: the owner's own authored text is 「按建议执行」 and
+  nothing else in this block is owner prose. Recorded by the executing session with that provenance;
+  reversible before dependent implementation lands.
+Date: 2026-08-21
+Document SHA: drafted a201b83a44 (§0-§4); independent-review fold b7858709da (§5). Both commits were
+  REBASED onto origin/main@c473a079b5ff6389b98f4919bb88607a0baa913b for this ratification, which lands on
+  top. The baseline note above records the anchors as READ AT origin/main@2a3b8033f5 — that remains a
+  truthful historical read-point, and the anchors have NOT been re-verified at the rebase head. Every
+  implementing slice must re-verify its own anchors at its own head before relying on a line number.
+Count erratum: the enumerated recommendation said "13 ODs". The document AS DRAFTED carries FOURTEEN,
+  OD-L9-1 … OD-L9-14. The cause is dated: the count was taken against the pre-fold draft a201b83a44, and
+  the review fold b7858709da then ADDED OD-L9-14 to close review finding P2-4 (§5). The authorization is
+  "ratify as drafted", by reference to this document, so all FOURTEEN are ratified. OD-L9-14 is retained
+  deliberately: it is the one explicit owner value-call (who may read a process attachment back), and
+  dropping it to match a stale count would leave the confidentiality posture unratified while slices
+  proceed as if it were settled.
+Decisions recorded: all FOURTEEN per this document's recommendations —
+  OD-L9-1   (a) a STANDALONE process attachment bound to the audit tuple (instance_id, node_key,
+            actor_id, action_record_id); the requester's form_snapshot is untouched and APS :10507 is
+            NOT unfenced. Arm (b) — reusing the requester form attachment FIELD — is refused by master
+            M9 :238 "Form attachments are not implicitly reused".
+  OD-L9-2   (a) minimal reuse of approval_attachments via new columns bind_kind ('form_field'|'process'),
+            node_key, action_record_id, staged_instance_id (pure ADDs, legacy-inert), PLUS the field_id
+            relaxation, which is recorded as a CONSTRAINT MUTATION and not an additive change: ALTER
+            field_id DROP NOT NULL, DROP the named shipped constraint approval_att_field_nonblank, and
+            re-ADD it as CHECK (bind_kind='process' OR field_id ~ '[!-~]'), in a NEW migration whose zzzz
+            timestamp sorts AFTER zzzz20260818120000. The relaxation is a DEPLOY PRECONDITION (it must
+            land before the flag may go ON) and is ONE-WAY once ON (a down re-adding NOT NULL fails while
+            any process row exists, so rollback requires purge-first). A sentinel non-blank field_id on a
+            process row is rejected under both arms. Pinned by G-14.
+  OD-L9-3   (a) upload authority is ONLY the acting approver/handler at the ACTIVE node, enforced at TWO
+            points: (i) LOAD-BEARING at BIND time, the action's own actorCanAct inside dispatchAction
+            (APS :8249, 403 APPROVAL_ASSIGNMENT_REQUIRED) — a genuine reuse; (ii) fail-fast at UPLOAD
+            time, which is NEW CODE, not a reuse — actorCanAct is a local const and the shipped upload
+            route has no seat check, so the slice re-derives the seat. Process-upload scope is
+            approvals:act, deliberately different from the shipped form-upload's approvals:write;
+            identity is server-derived, never the body; node_key is stamped only at commit.
+  OD-L9-4   (a) reuse read gates 0/1/3 unchanged and DROP gate 2 (hidden-field) via an EXPLICIT
+            bind_kind='process' branch on BOTH read surfaces: /download's authorizeAttachmentDownload
+            AND /refs bound mode's own inline gate 2, which does not route through it — /refs is an
+            EXTEND, not a reuse. Arm (b), keeping gate 2 with a sentinel or NULL field_id, is rejected as
+            a verified LEAK: isFieldHiddenAtActiveNode does not throw and hidden.has(null) is false, so
+            both gates would pass BY ACCIDENT and /refs would echo fileName. Failure stays values-free
+            404 / post-authz 410; the type surface widens in lock-step. Pinned by G-3 and G-15.
+  OD-L9-5   (a) record staged_instance_id in a NEW column at upload and leave instance_id NULL until
+            commit, preserving authorizeAttachmentDownload's uploader-only branch; the bind UPDATE keys
+            staged_instance_id, so a row staged against instance A cannot bind to instance B. Arm (b),
+            stamping instance_id at upload, is rejected: it exposes a staged-but-uncommitted approver
+            file to every participant before the action commits.
+  OD-L9-6   (a) immutable audit after commit: no edit and no delete surface is added (bound rows are
+            already GC-frozen); unbound orphans fall to the existing 168 h TTL sweep. Arm (b),
+            post-commit approver delete/edit, is rejected as making the audit record mutable.
+  OD-L9-7   (a) a NEW process-bind function MIRRORING bindAttachmentsOnSubmit's single-UPDATE
+            rowCount-equality → throw → whole-action rollback, running inside the action's transaction
+            alongside the audit-row insert. Arm (b), extending bindAttachmentsOnSubmit itself, is
+            rejected: its WHERE keys on field_id and cannot serve a fieldless process bind.
+  OD-L9-8   (a) a SEPARATE per-action budget over bind_kind='process' rows only, re-checked at bind,
+            rather than sharing the instance's 50 MB form envelope (arm (b), rejected: either side can
+            starve the other). What is RATIFIED is the process-scoped SHAPE; the recommended 5 files and
+            25 MB per action are NOT locked by this ratification and remain the owner's numbers to set.
+  OD-L9-9   (a) reuse validateApprovalAttachments verbatim — the 20 MB per-file limit, the v1 MIME
+            allowlist (PDF/JPEG/PNG/TXT/CSV), the extension-MIME cross-check and the magic-byte
+            signature — with the DB CHECKs as defense in depth. Arm (b), a widened process-only MIME set,
+            is rejected: D6 narrowed the allowlist pending AV scanning and a process rider is not the
+            place to reopen it.
+  OD-L9-10  (a) RIDE an existing action verb — tightest is comment, already node-type-agnostic, with
+            handle and approve carrying it identically; the attachment id is an OPTIONAL action field,
+            NOT a verb, and APPROVAL_ACTION_TYPES stays byte-identical. Arm (b), a new 'attach' verb, is
+            rejected on its >=3 coordinated sites, the Lock-5 ACTION_POLICY_KEYS disposition it would
+            force, and the pinned-copy blast radius. Pinned by G-10.
+  OD-L9-11  (a) gated behind the ALREADY-SHIPPED APPROVAL_ATTACHMENTS_ENABLED (backend) and
+            approvalAttachments (frontend), both default OFF, with NO sub-flag — a process attachment is
+            the same capability, gated once; with the flag OFF the current 400 at APS :10508 stays.
+            Arm (b), a dedicated sub-flag, is rejected as a second vocabulary for one capability.
+            Ratifying this POSTURE authorizes no flag change; see Runtime authorization below.
+  OD-L9-12  (a) the values-free claim is SCOPED, mechanically: no filename, uploader, or size in
+            error/reject payloads, and the audit surface carries the attachment ID only (an identifier,
+            not a value). Filenames served to AUTHORIZED viewers on download and /refs are unchanged and
+            explicitly OUT of scope. Arm (b), an unqualified "values-free", is rejected as false.
+  OD-L9-13  (a) reuse isInstanceParticipant UNCHANGED — no fourth participant predicate is minted
+            (Lock-7 §L7-A / D-4) — its org-pin EXISTS clause being self-satisfied by the bound process
+            row itself. RATIFIED AS AMENDED: the scope clause added to OD-L9-13 at ratification is part
+            of what is ratified. It confines arm (a) to the ATTACHMENT surfaces and forbids quoting it as
+            authorization for comment or other TEXT surfaces (for a zero-attachment instance the same
+            predicate returns false for everyone), and it records that the per-instance readability
+            predicate is being ruled separately in the S1 lock resolving Lock-7 §2.7 D-5, which Lock-9's
+            attachment reads may adopt once it lands.
+  OD-L9-14  (a) post-commit read scope is ALL INSTANCE PARTICIPANTS, via the reused gate-1 predicate on
+            BOTH /download and /refs — the same set that reads a comment. The exposure is ratified as
+            stated, not as a side effect: the requester and any CC recipients CAN read a file an approver
+            attached at a node they never saw. Arms (b) approvers-only and (c) node-scoped are rejected
+            because each would require minting a new participant/scope predicate that Lock-7 D-4 forbids.
+            The SCOPE ASYMMETRY is ACCEPTED as ratified: upload requires approvals:act while readback
+            requires approvals:read, so an act-only principal can upload a process attachment it cannot
+            read back. Pinned by G-16.
+Wording correction made AT ratification, before the decision: OD-L9-13(a) and the matching §L9-C bullet
+  now carry the scope clause quoted in the OD-L9-13 line above. The pre-correction wording ("reuse
+  isInstanceParticipant UNCHANGED; its org-pin EXISTS is self-satisfied by the process row once bound")
+  is TRUE inside the attachment scope but FALSE if cited for a comment or other text surface — an
+  executed probe returns false for EVERYONE on a zero-attachment instance. Recorded so the OD cannot be
+  quoted out of scope; it is aligned with, and does not disturb, the Non-effects statement that
+  instance-detail read scope (Lock-7 §2.7 D-5) is not settled here.
+Independent review: an independent Opus refute-first review of PR #5011 returned REQUEST-CHANGES at
+  draft head a201b83a44 with 4 P2, 2 P3, and 2 NITs. All are folded into the text above and
+  dispositioned in §5, which also records the ONE correction made TO the review (its "no delete route
+  exists" prose is inaccurate; the finding set is unaffected). Nothing was rebutted as a false positive.
+  This field RECORDS the review; the decision above is the owner-directed ratification, not a review
+  verdict.
+Runtime authorization: NONE. Design authority ONLY. No runtime code, no migration run, no feature-flag
+  change, no tenant UAT, no deployment, and no completion label is authorized by this document. Every
+  contract above still needs its own PR, the repository's required checks, an independent adversarial
+  gate, and a ledger row. The gap line APS :10507-10508 stays fenced; the requester form attachment field
+  is NOT reused as a carrier; instance-detail read scope (Lock-7 §2.7 D-5) remains external.
 
 Decisions required ([R] = this document's recommendation; rejected options carry their citation so they
 are not re-proposed):
@@ -505,7 +623,16 @@ are not re-proposed):
   OD-L9-13 Participant predicate — (a)[R] reuse isInstanceParticipant UNCHANGED; its org-pin EXISTS clause
            (ATT-runtime :219-222) is self-satisfied by the process row itself once bound, so an
            attachment-only instance resolves participants with no change · (b) mint a process-specific
-           predicate [rejected: Lock-7 §L7-A / D-4 "Do not mint a fourth participant predicate"]
+           predicate [rejected: Lock-7 §L7-A / D-4 "Do not mint a fourth participant predicate"].
+           SCOPE, ADDED AT RATIFICATION (2026-08-21): the self-satisfaction argument holds ONLY because
+           the process attachment row is itself the row the EXISTS clause finds, so arm (a) is confined
+           to the ATTACHMENT surfaces (/download and /refs) and MUST NOT be quoted as authorizing reuse
+           of isInstanceParticipant on comment or any other TEXT surface — an executed probe shows that
+           for an instance carrying zero attachment rows the same predicate returns FALSE for EVERYONE,
+           which is exactly why this document's Non-effects note leaves instance-detail read scope
+           (Lock-7 §2.7 D-5) unsettled here. That per-instance readability predicate is being ruled
+           SEPARATELY, in the S1 lock resolving Lock-7 §2.7 D-5; Lock-9's attachment reads will be able
+           to adopt it once it lands, and until then arm (a) authorizes nothing beyond attachments.
   OD-L9-14 Post-commit read scope — a bound process attachment has NO form-field hidden gate (dropped in
            OD-L9-4), so "who may read it back" is a confidentiality value-call this document must decide,
            not leave to omission (Lock-7 D-5 "who may fetch the instance" does NOT cover it). (a)[R] ALL
@@ -576,6 +703,9 @@ uploader's own `status='unbound'` row. It cannot reach a bound row, so OD-L9-6's
 unaffected and in fact strengthened; L9-D now cites it as supporting evidence. This is an erratum in the
 review's favourable prose, not a P-level finding against the design.
 
-**Nothing rebutted as a false-positive:** every P1/P2/P3/NIT reproduced against the baseline. §4 remains
-BLANK (ratify-ready, not ratified). This document is DESIGN-ONLY and authorizes no implementation; it awaits
-owner ratification (or in-session goal-set provenance) before any slice lands.
+**Nothing rebutted as a false-positive:** every P1/P2/P3/NIT reproduced against the baseline. §4 was BLANK
+(ratify-ready) at the time this section was written; it is now FILLED — see §4 for the 2026-08-21
+ratification, its owner-directed execute-by-reference provenance, the fourteen recorded ODs, and the count
+erratum explaining why this fold's addition of OD-L9-14 makes the total fourteen rather than the thirteen
+the recommendation text quoted. This document remains DESIGN-ONLY and authorizes no implementation: each
+slice still needs its own PR, required checks, an independent adversarial gate, and a ledger row.

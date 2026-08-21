@@ -158,6 +158,7 @@ work until its named lock is drafted, reviewed, and explicitly ratified by the o
 | Lock-7 | server-enforced readonly/editable field semantics for a named edit surface | RATIFIED — `approval-lock7-field-edit-enforcement-20260817.md` §4 (2026-08-17, goal-set provenance; twelve ODs per document recommendations) | owner |
 | Lock-7b | node-level REQUIRED (必填) field tier as a fourth `NodeFieldAccess` member, handler-only in v1 | RATIFIED — `approval-lock7b-required-at-node-20260820.md` §4 (2026-08-20, goal-set provenance; thirteen ODs per document recommendations) | owner |
 | Lock-8 | bounded additional field vocabulary, excluding department/contact, exact money, and number FWB | RATIFIED — `approval-lock8-field-vocabulary-20260817.md` §4 (2026-08-17, goal-set provenance; nine ODs per document recommendations) | owner |
+| Lock-9 | approver-side process attachments: a standalone action-attachment carrier bound to the audit record, not a form field | RATIFIED — `approval-lock9-handler-process-attachments-20260819.md` §4 (2026-08-21, owner-directed execute-by-reference provenance; fourteen ODs per document recommendations) | owner |
 
 ### M1 - No graph or renderer rewrite
 
