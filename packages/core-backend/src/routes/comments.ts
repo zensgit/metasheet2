@@ -345,11 +345,14 @@ export function commentsRouter(injector?: Injector): Router {
   // Shared by GET (ids in the query string) and POST (ids in the JSON body).
   // The POST variant exists because the grid sends every visible row id per
   // page — inlined in the query string the URL grows with page size toward
-  // 414/URL-length limits. GET stays for rolling-deploy compat AND because the
-  // OAPI-1 `mst_`-token read allowlist is GET-only by design: POST here is
-  // deliberately NOT allowlisted for `mst_` bearers (adding it would be an
-  // auth-boundary change requiring its own design review), so a token POST
-  // falls through to the JWT gate and 401s — fail-closed, unchanged.
+  // 414/URL-length limits. GET stays for rolling-deploy compat and keeps its
+  // OAPI-1 `mst_`-token mount. The POST route is JWT-session-only BY GUARD
+  // SHAPE: rbacGuard only, same as the deferred comment surfaces
+  // (inbox/unread-count/mention-*). Mounting apiTokenAuth+requireScope here
+  // without an allowlist entry would be a dead guard (an `mst_` bearer 401s
+  // at the global gate first) — exactly what the #3365 allowlist⟺guard
+  // tripwire rejects; widening the allowlist instead is an auth-boundary
+  // change needing its own design review.
   const handleCommentSummary = async (
     req: Request,
     res: Response,
@@ -395,7 +398,7 @@ export function commentsRouter(injector?: Injector): Router {
       targetIds: readQueryValues(req.query.targetIds),
     }))
 
-  router.post('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  router.post('/api/comments/summary', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>
     return handleCommentSummary(req, res, {
       spreadsheetId: body.spreadsheetId,
