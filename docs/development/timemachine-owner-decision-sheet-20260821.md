@@ -6,6 +6,10 @@
 > (假 ARMED,静默作废下游全部 409 证据)。**结论:A1 暂不可 ratify,电池暂不可 dispatch**,须先 fix-forward
 > (凭据生命周期 → canonical posture 校验 → 变异测试 → 独立复门 → owner 授权 staging 实跑 → PASS 后再 ratify)。
 > 下文 B1 段已按此改写。
+>
+> **2026-08-21 二次更新(fix-forward 已落地)**:两缺陷已修 + 过独立复门(APPROVE @ `ceb0f08def`,#5069);
+> **B1 的代码侧前置已满足**。P3-INFO-1(subject_type 枚举)已查证**满足**(两表 DB CHECK = recovery 枚举,见 §C1a)。
+> 剩余 A1-ratify 前提**纯 owner/ops**:owner 授权 staging 电池实跑 → PASS → 再 ratify。secrets 已设、主机建号脚本已备。
 
 > 一页看全:两条线(O-2 启用加固 + 阶梯加速)的**开发已全部落 main 并验证**;下面全是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
@@ -24,8 +28,7 @@
 **B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**未满足(2026-08-21 撤回)**。承重工具(电池)有两个 owner 复审确认的真缺陷,fix-forward 前
-  电池不可信,A1 不可 ratify:
+- 前置:**代码侧已满足(2026-08-21)**。两缺陷已修 + 过独立复门(#5069 `ceb0f08def`);仍需 owner 授权 staging 电池实跑 PASS 才可 ratify。原两缺陷(已闭合,存档):
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`——需 always() 清理+陈旧目录处理+失败注入测试。(修复中)
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。(修复中)
@@ -34,6 +37,13 @@
 - 门审边界(修好后仍适用):干净电池只观测 **12/48 census 站点 + 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
 - 后果:未 ratify 期间原 `≥2 天` 判据继续生效,无损失。
 - 载体:A1 = #5042;电池修复轮 = 进行中(P1+P2)。
+
+### C1a · P3-INFO-1 subject_type 枚举(已查证,结论=满足)
+
+- 复门给 A1 留的前置:确认 `record_permissions`/`field_permissions` 只带 recovery 覆盖的主体。
+- **已查证满足**:两表都有 DB CHECK `subject_type IN ('user','role','member-group')`(`zzzz20260418143000` 加宽,此后无迁移改动),
+  与触发器过滤谓词**完全一致**;三个应用写入方全在枚举内(`z.enum`/`isSheetPermissionSubjectType`)。越枚举值无法落库(23514)。
+- 唯一残留由 HARDENING 车道兜住(见 §D3):subject_type CHECK 的**运行时**确认(pg_constraint 读)已并入 A-vs-B required 守卫。
 
 ## C. 需要 owner 裁量的天花板(两个,同类)
 
