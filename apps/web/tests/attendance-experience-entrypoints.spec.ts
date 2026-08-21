@@ -50,6 +50,8 @@ vi.mock('../src/stores/featureFlags', () => ({
       return false
     },
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    isFeatureOverrideAllowed: () => false,
+    setLocalFeatureOverride: vi.fn(),
   }),
 }))
 
@@ -279,6 +281,81 @@ describe('Attendance experience entrypoints', () => {
     await flushUi(2)
 
     expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'reports' } })
+  })
+
+  it('gives Overview an explicit ?tab=overview so it is linkable (fix 3)', async () => {
+    routeState.query = { tab: 'reports' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const overviewTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Overview')
+    expect(overviewTab).toBeTruthy()
+
+    overviewTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'overview' } })
+  })
+
+  it('merges a tab switch onto UNRELATED existing query params instead of discarding them (fix 3)', async () => {
+    routeState.query = { tab: 'admin', surface: 'assignments', returnTo: '/attendance?tab=admin' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const reportsTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Reports')
+    reportsTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({
+      query: { tab: 'reports', surface: 'assignments', returnTo: '/attendance?tab=admin' },
+    })
+  })
+
+  it('drops the TAB-SCOPED section/requestId params on a tab switch (fix 3)', async () => {
+    routeState.query = { tab: 'admin', section: 'attendance-admin-assignments', requestId: 'request-123' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const reportsTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Reports')
+    reportsTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'reports' } })
+  })
+
+  it('self-corrects to Overview (never renders a blank/unexplained state) when a tab\'s gating flag turns off while it is active', async () => {
+    // Reachability probe for fix 1's "Capability not available" branch: this proves
+    // `ensureTabAllowed()` / `watch(availableTabs, …)` bounce `activeTab` back to Overview
+    // synchronously BEFORE the template can ever render `activeView === null` for a tab whose
+    // flag just went false — through the same route+flags surface a real user's click-through
+    // uses. See attendanceCapabilityUnavailable.ts's module doc for what this means for that
+    // branch's live reachability.
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = true
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
+    expect(container!.textContent).not.toContain('Capability not available')
+
+    adminFeatureEnabled.value = false
+    await flushUi(4)
+
+    expect(container!.querySelector('[data-view="admin"]')).toBeNull()
+    expect(container!.querySelector('[data-view="overview"]')).toBeTruthy()
+    expect(container!.textContent).not.toContain('Capability not available')
+    expect(container!.querySelector('[data-attendance-capability-unavailable]')).toBeNull()
   })
 
   it('does not block admin entrypoints for narrow desktop-like viewports without mobile signals', async () => {

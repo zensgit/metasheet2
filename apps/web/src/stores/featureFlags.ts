@@ -116,9 +116,48 @@ function parseJwtPayload(token: string | null): Record<string, unknown> {
   }
 }
 
-function isFeatureOverrideAllowed(): boolean {
+// Exported (Navigability audit fix 1, 2026-08-22) so the "Capability not available" empty state
+// can surface — not reinvent — this EXACT existing predicate: the state shows the local-override
+// toggle only when this returns true, and an "ask your administrator" line otherwise. The
+// predicate itself is unchanged (still DEV-mode-or-explicit-env-flag), matching the design-lock's
+// "do not change... the override gate's own predicate" constraint.
+export function isFeatureOverrideAllowed(): boolean {
   if (import.meta.env.DEV) return true
   return String(import.meta.env.VITE_ALLOW_FEATURE_OVERRIDE || '').trim().toLowerCase() === 'true'
+}
+
+/** Pure read-merge-write over the SAME `metasheet_features` localStorage key
+ * `parseOverrideFeatures()` already reads (Navigability audit fix 1) — exported for direct unit
+ * testing. Never touches keys other than the ones present in `patch`, so it cannot clobber a flag
+ * a developer already set through the pre-existing manual localStorage-editing path. */
+export function mergeFeatureOverrideJson(
+  rawJson: string | null,
+  patch: Partial<Record<keyof Omit<ProductFeatures, 'mode'>, boolean>>,
+): string {
+  let base: Record<string, unknown> = {}
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) base = parsed
+    } catch {
+      base = {}
+    }
+  }
+  return JSON.stringify({ ...base, ...patch })
+}
+
+/**
+ * Enables (or disables) a single ProductFeatures flag in the local dev/QA override — the SAME
+ * sanctioned path `parseOverrideFeatures()` already reads, just no longer requiring hand-editing
+ * `localStorage` directly. No-ops when `isFeatureOverrideAllowed()` is false (never grants the
+ * override capability itself). Callers must re-run `loadProductFeatures(true)` to pick up the
+ * change — this function only persists it.
+ */
+export function setLocalFeatureOverride(feature: keyof Omit<ProductFeatures, 'mode'>, value: boolean): void {
+  if (!isFeatureOverrideAllowed()) return
+  if (typeof localStorage === 'undefined') return
+  const next = mergeFeatureOverrideJson(localStorage.getItem('metasheet_features'), { [feature]: value })
+  localStorage.setItem('metasheet_features', next)
 }
 
 function parseOverrideFeatures(): Partial<ProductFeatures> {
@@ -460,5 +499,7 @@ export function useFeatureFlags() {
     isAttendanceFocused,
     isPlmWorkbenchFocused,
     resolveHomePath,
+    isFeatureOverrideAllowed,
+    setLocalFeatureOverride,
   }
 }

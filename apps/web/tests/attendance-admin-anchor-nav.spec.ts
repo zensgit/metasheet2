@@ -186,9 +186,9 @@ describe('Attendance admin anchor navigation', () => {
     expect(taskHome?.textContent).toContain('Reporting and payroll')
 
     const pendingApprovalsLink = taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
-    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?section=attendance-overview-requests')
+    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?tab=overview&section=attendance-overview-requests')
     expect(taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')?.getAttribute('href'))
-      .toBe('/attendance?section=attendance-overview-anomalies')
+      .toBe('/attendance?tab=overview&section=attendance-overview-anomalies')
     for (const action of ['attendance-groups', 'shifts', 'holidays', 'rule-sets', 'daily-import']) {
       expect(taskHome!.querySelector(`[data-admin-task-action="${action}"]`)).toBeTruthy()
     }

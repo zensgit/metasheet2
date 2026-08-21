@@ -11,6 +11,8 @@ vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     hasFeature: (feature: string) => feature === 'attendanceAdmin' || feature === 'workflow',
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    isFeatureOverrideAllowed: () => false,
+    setLocalFeatureOverride: vi.fn(),
   }),
 }))
 
@@ -141,8 +143,10 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(router?.currentRoute.value.query.tab).toBe('admin')
 
     findButton(container!, '返回总览').click()
-    await waitForRouteTab(router!, undefined)
-    expect(router?.currentRoute.value.query.tab).toBeUndefined()
+    // Navigability audit fix 3: Overview is now an explicit, linkable `?tab=overview` destination
+    // instead of writing no `tab` param at all — see AttendanceExperienceView.vue's selectTab().
+    await waitForRouteTab(router!, 'overview')
+    expect(router?.currentRoute.value.query.tab).toBe('overview')
     expect(container?.querySelector('[data-testid="attendance-overview"]')).not.toBeNull()
 
     await router?.replace('/attendance?tab=workflow')

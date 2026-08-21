@@ -809,7 +809,7 @@
                 </div>
                 <div class="attendance__request-actions" v-if="item.status === 'pending'">
                   <button v-if="!isFocusedAttendanceRequest(item)" class="attendance__btn" @click="cancelRequest(item.id, item.request_type)">{{ tr('Cancel', '取消') }}</button>
-                  <template v-if="canReviewFocusedAttendanceRequest(item)">
+                  <template v-if="canReviewAttendanceRequest(item)">
                     <button class="attendance__btn" @click="resolveRequest(item.id, 'approve')">{{ tr('Approve', '批准') }}</button>
                     <button class="attendance__btn attendance__btn--danger" @click="resolveRequest(item.id, 'reject')">
                       {{ tr('Reject', '驳回') }}
@@ -1425,6 +1425,7 @@
                 :tr="tr"
                 :groups="adminTaskHomeGroups"
                 @select-section="selectAdminSection"
+                @navigate="onAdminTaskHomeNavigate"
               />
             </div>
             <div
@@ -9931,6 +9932,7 @@
 <script setup lang="ts">
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
@@ -10157,6 +10159,7 @@ import {
   type AttendanceLeaveQuickFillShiftWindow,
 } from './attendance/halfDayLeaveHelper'
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
+import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -10501,6 +10504,11 @@ interface AttendanceRequest {
   reason?: string | null
   status: string
   metadata?: Record<string, any>
+  // Navigability audit fix 2: the backend's `mapAttendanceRequestRow` spreads the raw
+  // `attendance_requests` row (`{ ...row }`) before shaping the response, so `user_id` has always
+  // been present on the wire — just not previously declared here. Used to decide row-level
+  // approve/reject entitlement (see attendanceRequestReviewEntitlement.ts).
+  user_id?: string | null
 }
 
 interface AttendanceShiftSwapRequest {
@@ -12122,6 +12130,13 @@ let calendarEffectiveCacheKey: string | null = null
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
 const auth = useAuth()
+// Navigability audit fix 4: `useRouter()` resolves via Vue's provide/inject up to the app root
+// regardless of whether THIS component is the routed match — always available when the real app
+// mounts AttendanceView anywhere under its router-installed tree. Only `undefined` in isolated
+// component tests that construct a bare `createApp(AttendanceView, …)` with no router plugin;
+// `onAdminTaskHomeNavigate` below is written defensively for that case (falls back to a normal
+// same-document navigation rather than throwing).
+const router = useRouter()
 const requestReport = ref<AttendanceRequestReportItem[]>([])
 const requestReportTotal = computed(() =>
   requestReport.value.reduce((sum, row) => sum + (Number(row.total) || 0), 0)
@@ -15198,14 +15213,21 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
     actions: [
       {
         key: 'pending-attendance-approvals',
+        // Navigability audit fix 2: `tab=overview` made explicit (was implicit-via-absence) —
+        // Fix 3 gives Overview an explicit, linkable `?tab=overview`, and this link should not
+        // rely on "no tab param" happening to default there. Destination note: this list is
+        // scoped to a single target user (self by default; GET /api/attendance/requests has no
+        // "all pending requests across the org" query) — see
+        // attendanceRequestReviewEntitlement.ts's header comment. Building an org-wide queue is a
+        // backend/business-logic feature, out of scope for this navigation-only fix.
         label: tr('Pending approvals', '待处理审批'),
-        href: '/attendance?section=attendance-overview-requests',
+        href: '/attendance?tab=overview&section=attendance-overview-requests',
         primary: true,
       },
       {
         key: 'attendance-anomalies',
         label: tr('Anomalies', '异常'),
-        href: '/attendance?section=attendance-overview-anomalies',
+        href: '/attendance?tab=overview&section=attendance-overview-anomalies',
       },
       {
         key: 'daily-import',
@@ -15243,11 +15265,17 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
         label: tr('Attendance groups', '考勤组'),
         sectionId: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
       },
-      {
-        key: 'group-members',
-        label: tr('Members', '成员'),
-        sectionId: ATTENDANCE_ADMIN_SECTION_IDS.groupMembers,
-      },
+      // Navigability audit fix 5(b) (2026-08-22): the standalone "Members" task-home entry was
+      // removed — it duplicated this SAME group's "Attendance groups" entry, landing on a section
+      // (`attendance-admin-group-members`, still present in the admin nav sidebar and reachable
+      // via the section id below) whose only content is "open Attendance groups instead". That
+      // section itself is KEPT: UserManagementView.vue's post-create-user "下一步" deep-link
+      // (`buildAttendanceAdminSectionLocation('attendance-admin-group-members')`, tested in
+      // userManagementView.spec.ts) still needs `attendance-admin-group-members` to resolve to a
+      // section rather than silently falling back to Settings — see
+      // `shouldShowAdminSection`/`resolvedAdminSectionId()`. Smaller-change choice: drop the
+      // redundant task-home shortcut only, leave the waystation section (with its existing "Open
+      // Attendance groups" button) and its sidebar nav entry untouched.
       {
         key: 'user-access',
         label: tr('Access', '权限'),
@@ -15336,6 +15364,20 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
 
 function shouldShowAdminSection(id: string): boolean {
   return !adminFocusedMode.value || resolvedAdminSectionId() === id
+}
+
+// Navigability audit fix 4: AttendanceAdminTaskHome's linkActions ("Pending approvals",
+// "Anomalies") used to be plain `<a href>` anchors that forced a full SPA page reload. That
+// component stays router-agnostic (charter §6.2: "does not… hold route/admin state") and now
+// only emits the href; this handler performs the actual client-side navigation.
+function onAdminTaskHomeNavigate(href: string): void {
+  if (router) {
+    void router.push(href)
+    return
+  }
+  // Defensive fallback for a router-less mount (see the `router` declaration above) — same
+  // destination, just a real navigation instead of a silent no-op.
+  if (typeof window !== 'undefined') window.location.assign(href)
 }
 
 function selectAdminSection(id: string): void {
@@ -16675,8 +16717,16 @@ function isFocusedAttendanceRequest(item: AttendanceRequest): boolean {
   return Boolean(focusedAttendanceRequestId.value && item.id === focusedAttendanceRequestId.value)
 }
 
-function canReviewFocusedAttendanceRequest(item: AttendanceRequest): boolean {
-  return isFocusedAttendanceRequest(item) && String(item.status || '').toLowerCase() === 'pending'
+// Navigability audit fix 2: previously gated ONLY on `isFocusedAttendanceRequest` — a viewer who
+// reached this list any other way (e.g. the task home's "Pending approvals" entry, which carries
+// no `?requestId=`) never saw approve/reject on any row. `canReviewAttendanceRequestRow` (pure,
+// unit-tested in attendanceRequestReviewEntitlement.spec.ts) keeps the deep-link-focus case
+// working unconditionally and additionally allows any OTHER pending row this list already proved
+// the viewer has read access to (owner id differs from the viewer's own id) — see that module's
+// header comment for the full entitlement-signal reasoning. The server's own W4 request-decision
+// authorization still runs on every approve/reject POST; this only controls button visibility.
+function canReviewAttendanceRequest(item: AttendanceRequest): boolean {
+  return canReviewAttendanceRequestRow(item, currentUserId.value, isFocusedAttendanceRequest(item))
 }
 
 function requestTypeCtaLabel(value: string): string {

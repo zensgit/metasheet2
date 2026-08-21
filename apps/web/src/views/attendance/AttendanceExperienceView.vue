@@ -46,9 +46,38 @@
       :key="activeView.key"
       v-bind="activeView.props"
     />
-    <section v-else class="attendance-shell__desktop-hint">
-      <h3>{{ t.capabilityUnavailable }}</h3>
-      <p>{{ t.capabilityHint }}</p>
+    <section v-else class="attendance-shell__desktop-hint" data-attendance-capability-unavailable>
+      <h3>{{ unavailableCapabilityCopy.heading }}</h3>
+      <p>{{ unavailableCapabilityCopy.detail }}</p>
+      <div class="attendance-shell__capability-actions">
+        <button class="attendance-shell__btn" type="button" @click="selectTab('overview')">
+          {{ t.backToOverview }}
+        </button>
+        <button
+          class="attendance-shell__btn"
+          type="button"
+          data-attendance-capability-retry
+          @click="retryCapabilityProbe"
+        >
+          {{ t.retryCapabilityProbe }}
+        </button>
+      </div>
+      <template v-if="unavailableCapabilityOverrideAllowed">
+        <p class="attendance-shell__capability-state" data-attendance-capability-override-state>
+          {{ t.capabilityCurrentStateOff }}
+        </p>
+        <button
+          class="attendance-shell__btn attendance-shell__btn--primary"
+          type="button"
+          data-attendance-capability-enable-locally
+          @click="enableUnavailableCapabilityLocally"
+        >
+          {{ t.enableCapabilityLocally }}
+        </button>
+      </template>
+      <p v-else class="attendance-shell__capability-contact" data-attendance-capability-contact-admin>
+        {{ t.contactAdministrator }}
+      </p>
     </section>
   </div>
 </template>
@@ -60,6 +89,10 @@ import type { LocationQueryRaw } from 'vue-router'
 import { useLocale } from '../../composables/useLocale'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { confirmAttendanceSetupPrefillLeave } from './attendanceSetupPrefillLeaveGuard'
+import {
+  buildAttendanceCapabilityUnavailableCopy,
+  resolveAttendanceCapabilityInfo,
+} from './attendanceCapabilityUnavailable'
 import {
   buildAttendanceGroupRouteHref,
   isAttendanceGroupContextPath,
@@ -91,7 +124,7 @@ const ATTENDANCE_OVERVIEW_SECTION_IDS = new Set([
 
 const route = useRoute()
 const router = useRouter()
-const { hasFeature, loadProductFeatures } = useFeatureFlags()
+const { hasFeature, loadProductFeatures, isFeatureOverrideAllowed, setLocalFeatureOverride } = useFeatureFlags()
 const { isZh } = useLocale()
 
 // W4-2 OD-W4-7② (切区确认 leg): an applied-but-unsaved template prefill lives in the admin
@@ -147,6 +180,10 @@ const t = computed(() => isZh.value
       capabilityHint: '当前账号没有此模块的访问权限。',
       workflowDesktopHint: '当前版本流程设计仅支持桌面端，请在桌面端编辑和发布流程。',
       adminDesktopHint: '管理中心以桌面端为主，请在桌面端管理导入、规则与计薪配置。',
+      retryCapabilityProbe: '重试',
+      capabilityCurrentStateOff: '当前状态：本会话未启用。',
+      enableCapabilityLocally: '在本会话本地启用',
+      contactAdministrator: '请联系管理员为您的账号启用此功能。',
     }
   : {
       attendanceSections: 'Attendance sections',
@@ -162,6 +199,10 @@ const t = computed(() => isZh.value
       capabilityHint: 'Current account does not have access to this section.',
       workflowDesktopHint: 'Workflow designer is desktop-only in this release. Use desktop for editing and publishing flows.',
       adminDesktopHint: 'Admin center is desktop-first. Use desktop to manage import, rules, and payroll settings.',
+      retryCapabilityProbe: 'Retry',
+      capabilityCurrentStateOff: 'Current state: off for this session.',
+      enableCapabilityLocally: 'Enable locally for this session',
+      contactAdministrator: 'Ask your administrator to enable this for your account.',
     })
 
 const availableTabs = computed<Array<{ id: AttendanceTab; label: string }>>(() => {
@@ -278,6 +319,34 @@ const activeView = computed(() => {
   return null
 })
 
+// Navigability audit fix 1: the "Capability not available" fallback below names which capability
+// is unavailable instead of a bare unexplained empty state. `activeTab.value` is one of
+// admin/import/workflow whenever this branch renders (overview/reports never return null above).
+const unavailableCapabilityInfo = computed(() => resolveAttendanceCapabilityInfo(activeTab.value))
+const unavailableCapabilityCopy = computed(() => {
+  const info = unavailableCapabilityInfo.value
+  if (!info) return { heading: t.value.capabilityUnavailable, detail: t.value.capabilityHint }
+  return buildAttendanceCapabilityUnavailableCopy(info, isZh.value)
+})
+// isFeatureOverrideAllowed() is a pure env/DEV-mode predicate (no reactive dependency), read once
+// per render — this is the SAME gate parseOverrideFeatures() already enforces, just surfaced here
+// rather than requiring hand-edited localStorage. When false, the fallback shows an
+// "ask your administrator" line instead of an override control (never a new privilege).
+const unavailableCapabilityOverrideAllowed = isFeatureOverrideAllowed()
+
+async function retryCapabilityProbe(): Promise<void> {
+  await loadProductFeatures(true)
+  syncFromRoute()
+}
+
+async function enableUnavailableCapabilityLocally(): Promise<void> {
+  const info = unavailableCapabilityInfo.value
+  if (!info) return
+  setLocalFeatureOverride(info.flagKey, true)
+  await loadProductFeatures(true)
+  syncFromRoute()
+}
+
 function updateMobileState(): void {
   if (typeof window === 'undefined') return
   const mediaQueryMatches = matchesMediaQuery('(max-width: 899px)')
@@ -331,8 +400,17 @@ async function selectTab(tab: AttendanceTab): Promise<void> {
   }
   activeTab.value = nextTab
 
-  // Keep this page-level state isolated to `tab`.
-  const query = nextTab === 'overview' ? {} : { tab: nextTab }
+  // Navigability audit fix 3: merge onto the existing query instead of replacing it outright —
+  // the prior `{}` (overview) / `{ tab }` (everything else) replacement dropped every OTHER query
+  // param on every tab switch, and Overview could never be deep-linked since it wrote no `tab` at
+  // all. `section`/`requestId` are TAB-SCOPED (a deep-linked admin section or a focused request
+  // from the previous tab has no meaning once the destination tab no longer hosts that surface),
+  // so they are dropped on every tab switch — mirroring `returnToAdminHome()`'s existing
+  // `delete query.section` discipline just below. `surface`/`returnTo` are orthogonal to `tab`
+  // and are preserved.
+  const query: LocationQueryRaw = { ...route.query, tab: nextTab }
+  delete query.section
+  delete query.requestId
   await router.replace({ query })
 }
 
