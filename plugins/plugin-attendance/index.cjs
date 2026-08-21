@@ -22,6 +22,11 @@ const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-gro
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const {
+  parseAttendanceOrgResolutionShadowModeV1,
+  recordShadowOrgResolutionV1,
+  SHADOW_MODE_SHADOW,
+} = require('./lib/attendance-org-resolution-shadow.cjs')
+const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
   OVERTIME_ATTRIBUTION_KEY,
@@ -24673,6 +24678,16 @@ module.exports = {
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
+    // Shadow audit of the self-service punch route's org resolution — see
+    // lib/attendance-org-resolution-shadow.cjs's module doc comment for the full tri-state
+    // contract. Parsed ONCE, here, at plugin startup: an unsupported value (including the
+    // reserved, not-yet-implemented 'enforce') throws — fails the WHOLE plugin closed rather
+    // than silently defaulting this one feature to 'off'. Read early, before anything else in
+    // this function can register a route or open a connection, so a misconfigured value never
+    // lets any attendance route come up at all.
+    const attendanceOrgResolutionShadowMode = parseAttendanceOrgResolutionShadowModeV1(
+      process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1,
+    )
     const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
     const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
     const emitEvent = (type, data) => {
@@ -29713,6 +29728,20 @@ module.exports = {
           return
         }
         const orgId = punchOrgResolution.orgId
+        // Shadow audit (env ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow only — see
+        // lib/attendance-org-resolution-shadow.cjs). The mode check is deliberately the ONLY
+        // gate: when the flag is unset/'off' this call is never reached, so that posture issues
+        // zero extra queries, not "a no-op inside the module". Never awaited into the response
+        // path in any way that could change it — recordShadowOrgResolutionV1 is itself
+        // non-fatal (try/catch + warn-log internally), and its own errors never propagate here.
+        if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
+          await recordShadowOrgResolutionV1(
+            db,
+            req,
+            { userId, orgLegacy: orgId, route: '/api/attendance/punch' },
+            logger,
+          )
+        }
         const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
         const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
         if (rawOccurredAt && !occurredAt) {

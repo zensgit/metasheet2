@@ -78,6 +78,14 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_integration_runs: 'operational',
   attendance_unscheduled_reminder_dispatch: 'operational',
   attendance_import_upload_cleanup_commands: 'operational',
+  // Shadow audit of the self-service punch route's org resolution (env
+  // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow, plugins/plugin-attendance/lib/
+  // attendance-org-resolution-shadow.cjs). Append-only observational bookkeeping — one row
+  // per punch comparing the org the route actually used against an independent claim/
+  // membership-derived guess. It is NOT business attendance data (not source, effect, or
+  // result truth), cannot mint evidence, and must never be read by the W4 calculation path;
+  // same posture as attendance_notification_deliveries above.
+  attendance_org_resolution_shadow: 'operational',
 
   // --- reference: org configuration/reference data, not calculation truth ------------------
   attendance_groups: 'reference',

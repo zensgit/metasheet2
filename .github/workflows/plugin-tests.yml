@@ -1499,6 +1499,7 @@ jobs:
             tests/integration/attendance-w7-4-read-side-labeling.db.test.ts \
             tests/integration/attendance-soak-diff-families.db.test.ts \
             tests/integration/attendance-punch-org-resolution.db.test.ts \
+            tests/integration/attendance-org-resolution-shadow.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 

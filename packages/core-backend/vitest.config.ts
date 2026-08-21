@@ -970,6 +970,13 @@ export default defineConfig({
       // real `user_orgs` membership rows — meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-punch-org-resolution.db.test.ts',
+      // SHADOW audit of the same route's org resolution (env
+      // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1). Boots real MetaSheetServer instances (one
+      // per env posture) with the real plugin and drives the real punch route against real
+      // `user_orgs` membership rows and the real `attendance_org_resolution_shadow` table —
+      // meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-org-resolution-shadow.db.test.ts',
       // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
       // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
       // values against real CHECK constraints and deferred triggers, walks the
