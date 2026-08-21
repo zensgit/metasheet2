@@ -106,6 +106,22 @@ describe('MultitableApiClient catalog cache', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2)
   })
 
+  it('passes a malformed body through untouched and does not cache it', async () => {
+    // mount-behind-flow's routed test client relies on raw passthrough for
+    // unmatched probes ({} / { data: null }); the cache must not reshape them.
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ ok: true, data: {} }))
+      .mockResolvedValue(jsonResponse(basesPayload(['b1'])))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const malformed = await client.listBases()
+    expect(malformed).toEqual({})
+
+    const retry = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(retry.bases.map((b) => b.id)).toEqual(['b1'])
+  })
+
   it('a failed fetch does not poison the cache', async () => {
     const fetchFn = vi.fn()
       .mockRejectedValueOnce(new Error('network down'))

@@ -1470,13 +1470,21 @@ export class MultitableApiClient {
     if (!opts?.force) {
       // Return copies so a caller sorting/mutating the array cannot pollute the cache.
       if (this.basesCache) return { bases: [...this.basesCache] }
-      if (this.basesInflight) return this.basesInflight.then((data) => ({ bases: [...data.bases] }))
+      if (this.basesInflight) {
+        return this.basesInflight.then((data) => (Array.isArray(data?.bases) ? { bases: [...data.bases] } : data))
+      }
     }
     const inflight = (async () => {
       const res = await this.fetch('/api/multitable/bases')
       const data = await this.parseJson<{ bases?: MetaBase[] }>(res)
-      this.basesCache = Array.isArray(data?.bases) ? data.bases : []
-      return { bases: [...this.basesCache] }
+      // Cache only a well-formed payload. Malformed/probe bodies pass through
+      // UNTOUCHED (and uncached): test routers and error shapes rely on the
+      // raw passthrough contract (see mount-behind-flow.spec).
+      if (Array.isArray(data?.bases)) {
+        this.basesCache = data.bases
+        return { bases: [...data.bases] }
+      }
+      return data as { bases: MetaBase[] }
     })()
     this.basesInflight = inflight
     try {
@@ -1500,13 +1508,19 @@ export class MultitableApiClient {
   async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
     if (!opts?.force) {
       if (this.templatesCache) return { templates: [...this.templatesCache] }
-      if (this.templatesInflight) return this.templatesInflight.then((data) => ({ templates: [...data.templates] }))
+      if (this.templatesInflight) {
+        return this.templatesInflight.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
+      }
     }
     const inflight = (async () => {
       const res = await this.fetch('/api/multitable/templates')
       const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
-      this.templatesCache = Array.isArray(data?.templates) ? data.templates : []
-      return { templates: [...this.templatesCache] }
+      // Same passthrough contract as listBases: only a well-formed payload is cached.
+      if (Array.isArray(data?.templates)) {
+        this.templatesCache = data.templates
+        return { templates: [...data.templates] }
+      }
+      return data as { templates: MetaTemplate[] }
     })()
     this.templatesInflight = inflight
     try {
