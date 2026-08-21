@@ -995,6 +995,13 @@ export interface ApprovalActionRequest {
    * on `handle` — present on any other action it is a values-free 400. Detected by key PRESENCE.
    */
   fieldWrites?: unknown
+  /**
+   * Lock-9 OD-L9-10(a) — an OPTIONAL rider, not a verb: staged process-attachment ids to bind at
+   * this action's commit (§5.4). Detected by key PRESENCE, same discipline as `fieldWrites`. v1
+   * ships the `comment` rider only (the `handle`/`approve` riders are DEFERRED, not built here);
+   * `dispatchAction` ignores this key entirely while `APPROVAL_ATTACHMENTS_ENABLED` is OFF (G-12).
+   */
+  attachmentIds?: string[]
 }
 
 export interface ApprovalTemplateListItemDTO {

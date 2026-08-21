@@ -2132,6 +2132,12 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // so the service applies the masked write on a `handle` (or rejects a malformed payload / a
       // non-handle action) by key PRESENCE (`'fieldWrites' in request`). Absent ⇒ never forwarded.
       const hasFieldWrites = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'fieldWrites')
+      // Lock-9 §5.5 — forward `attachmentIds` by key PRESENCE ONLY, unconditionally (no flag check
+      // here): gating happens ENTIRELY at the service (dispatchAction's bind branch), so a flag-OFF
+      // action carrying this key still succeeds with it ignored — the discriminating shape G-12(b)
+      // needs. Gating both here AND at the service would make that positive control untestable
+      // through the route.
+      const hasAttachmentIds = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'attachmentIds')
       // P1-B add_sign: approver user IDs to pull into the current node.
       const targetUserIds = Array.isArray(req.body?.targetUserIds)
         ? req.body.targetUserIds
@@ -2207,6 +2213,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               // Lock-3 §3 / Lock-7 L7-C: present ONLY when the client sent the key, so the service
               // applies the masked write (or refuses a malformed payload) by key presence.
               ...(hasFieldWrites ? { fieldWrites: req.body.fieldWrites } : {}),
+              // Lock-9 §5.5: present ONLY when the client sent the key; the service validates shape
+              // and ignores it entirely while the attachments flag is OFF (G-12(b)).
+              ...(hasAttachmentIds ? { attachmentIds: req.body.attachmentIds } : {}),
             },
             actor,
           )

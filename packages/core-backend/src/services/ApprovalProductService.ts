@@ -93,6 +93,10 @@ import {
   collectAttachmentIdsByField,
 } from './approval-attachment-reconciler'
 import {
+  ApprovalProcessAttachmentBindError,
+  bindProcessAttachmentsOnAction,
+} from './approval-process-attachment-bind'
+import {
   ApprovalConditionFormulaError,
   approvalConditionFormulaHasCaptureProneIdentity,
   approvalConditionFormulaHasDynamicDependency,
@@ -141,6 +145,7 @@ import {
 import { enqueueApprovalEventIfDurable } from '../multitable/automation-producer-emit'
 import { isDurableDeliveryEnabled } from '../multitable/automation-durable-delivery'
 import type { TransactionalQueryable } from '../multitable/pg-transaction-guard'
+import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { getApprovalRecordProjectionService } from '../multitable/approval-record-projection-service'
 import { supersedeDingTalkApprovalCardDeliveriesForInstance } from '../integrations/dingtalk/approval-card-deliveries'
 import {
@@ -3918,7 +3923,13 @@ function toUnifiedApprovalDTO(
   }
 }
 
-function assignmentMatchesActor(
+/**
+ * D-5 (Lock-9 implementation brief): exported (was module-private) so the process-attachment
+ * upload route (§5.2) can re-derive the acting seat WITHOUT reimplementing the user/role match
+ * rule. `dispatchAction`'s own inline uses (currentNodeAssignments.filter(...)) are unaffected —
+ * this is a pure widening of visibility, not a behavior change.
+ */
+export function assignmentMatchesActor(
   assignment: ApprovalAssignmentRow,
   actorId: string,
   actorRoles: string[],
@@ -3931,6 +3942,37 @@ function assignmentMatchesActor(
     return actorRoles.includes(assignment.assignee_id)
   }
   return false
+}
+
+/**
+ * Lock-9 OD-L9-3(a) §5.2 — a FAIL-FAST-ONLY seat check for the process-attachment upload route,
+ * NOT an authority. `dispatchAction`'s own `actorCanAct` (this file, `currentNodeAssignments` +
+ * `assignmentMatchesActor`) is branch-resolved inside a parallel region via `parallelBranchStates`
+ * and remains the ONE load-bearing gate (the bind-time 403 `APPROVAL_ASSIGNMENT_REQUIRED`, G-5).
+ * This helper checks ONLY `approval_instances.current_node_key` (single-linear) — it does not
+ * reproduce the parallel-branch resolution, so it may be NARROWER than dispatchAction's real
+ * authorization inside an active parallel region (a genuine acting approver mid-parallel-branch
+ * could see this fail-fast refuse an upload dispatchAction would actually allow). This is an
+ * accepted, disclosed gap: the upload route exists only to reject obviously-wrong uploads early: a
+ * false negative here costs the caller a retry at commit time; a false positive is impossible
+ * (returns false, never true, for anyone dispatchAction would refuse) because a non-current-node
+ * assignment is real regardless of which branch the actor is in.
+ */
+export async function actorHasActiveSeatAtInstance(
+  db: Queryable,
+  instanceId: string,
+  actorId: string,
+  actorRoles: readonly string[],
+): Promise<boolean> {
+  const instanceResult = await db.query('SELECT current_node_key FROM approval_instances WHERE id = $1', [instanceId])
+  const currentNodeKey = (instanceResult.rows[0] as { current_node_key?: string | null } | undefined)?.current_node_key
+  if (!currentNodeKey) return false
+  const assignmentsResult = await db.query(
+    'SELECT * FROM approval_assignments WHERE instance_id = $1 AND node_key = $2 AND is_active = TRUE',
+    [instanceId, currentNodeKey],
+  )
+  const rows = assignmentsResult.rows as unknown as ApprovalAssignmentRow[]
+  return rows.some((assignment) => assignmentMatchesActor(assignment, actorId, [...actorRoles]))
 }
 
 function normalizePage(value: unknown, fallback: number): number {
@@ -9358,7 +9400,21 @@ export class ApprovalProductService {
       }
 
       if (request.action === 'comment') {
-        await this.insertApprovalRecord(client, id, {
+        // Lock-9 OD-L9-10(a) / §5.4: the process-attachment bind rides the `comment` action ONLY
+        // in v1 (the `handle`/`approve` riders are DEFERRED — see the PR body). Flag-gated at the
+        // call site (P3-1): while APPROVAL_ATTACHMENTS_ENABLED is OFF, `attachmentIds` is never
+        // even read off `request` — a byte-for-byte no-op (G-12).
+        const attachmentsFlagOn = isApprovalAttachmentsEnabled()
+        const requestedAttachmentIds = attachmentsFlagOn && Array.isArray(request.attachmentIds)
+          ? [...new Set(request.attachmentIds.filter((v): v is string => typeof v === 'string' && /[!-~]/.test(v)))]
+          : []
+        // OD-L9-12 / G-11: the audit surface carries the attachment ID ONLY (an identifier, never a
+        // value) — recorded at INSERT time, inside the same transaction the bind below runs in. If
+        // the bind then throws, the whole transaction (including this INSERT) rolls back, so the
+        // metadata never reflects an unbound id — no follow-up UPDATE is ever needed or written
+        // (approval_records is a `shared_hook` DML bucket; a second raw write site would need its
+        // own curated census entry — D-4).
+        const actionRecordId = await this.insertApprovalRecord(client, id, {
           action: 'comment',
           actorId: actor.userId,
           actorName,
@@ -9367,8 +9423,30 @@ export class ApprovalProductService {
           toStatus: instance.status,
           fromVersion: instance.version,
           toVersion: instance.version,
-          metadata: { nodeKey: currentNodeKey },
+          metadata: {
+            nodeKey: currentNodeKey,
+            ...(requestedAttachmentIds.length > 0 ? { attachmentIds: requestedAttachmentIds } : {}),
+          },
         }, actor)
+        if (requestedAttachmentIds.length > 0) {
+          try {
+            await bindProcessAttachmentsOnAction(client, {
+              attachmentIds: requestedAttachmentIds,
+              instanceId: id,
+              nodeKey: currentNodeKey,
+              actionRecordId,
+              actorId: actor.userId,
+              orgId: actor.tenantId?.trim() || 'default',
+            })
+          } catch (error) {
+            const status = error instanceof ApprovalProcessAttachmentBindError ? error.httpStatus : 400
+            throw new ServiceError(
+              'Approval process attachments could not be bound',
+              status,
+              status === 413 ? 'APPROVAL_PROCESS_ATTACHMENT_CAP_EXCEEDED' : 'APPROVAL_PROCESS_ATTACHMENT_BIND_FAILED',
+            )
+          }
+        }
         await client.query('COMMIT')
         return (await this.getApproval(id, actor.userId, actor.roles))!
       }

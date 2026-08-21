@@ -36,7 +36,7 @@ import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import { resolveApprovalTemplateVisibilityActor } from '../routes/approvals'
 import { canReadApprovalInstance } from './approval-instance-readability'
-import { applyTemplateVisibilityFilter } from './ApprovalProductService'
+import { actorHasActiveSeatAtInstance, applyTemplateVisibilityFilter } from './ApprovalProductService'
 import { collectActiveNodeKeys, collectHiddenFieldIds, type RedactableRuntimeGraph } from './approval-form-redaction'
 import { drainPurgeIntents, sweepUnboundAttachments, UNBOUND_ATTACHMENT_TTL_HOURS } from './approval-attachment-gc'
 import {
@@ -306,6 +306,29 @@ export function principalHasApprovalsWrite(req: Request): boolean {
   return codes.has('approvals:write') || codes.has('approvals:*') || codes.has('*:*')
 }
 
+/**
+ * Lock-9 OD-L9-3(a) — process-attachment upload RBAC: approvals:act (or admin / approvals:* /
+ * *:* wildcards). Fail-closed. Deliberately a DIFFERENT permission code from
+ * principalHasApprovalsWrite — the process-upload surface is an acting-approver capability, not a
+ * form-fill one.
+ */
+export function principalHasApprovalsAct(req: Request): boolean {
+  const codes = principalPermissionCodes(req)
+  if (codes === null) return false
+  if (codes === 'admin') return true
+  return codes.has('approvals:act') || codes.has('approvals:*') || codes.has('*:*')
+}
+
+/** Lock-9 §5.2 — mirrors resolveApprovalActorRoles (routes/approvals.ts), duplicated locally to
+ *  avoid a new cross-module export purely for this fail-fast-only seat check. */
+function resolveActorRolesFromRequest(req: Request): string[] {
+  const role = typeof req.user?.role === 'string' && req.user.role.trim().length > 0 ? [req.user.role.trim()] : []
+  const roles = Array.isArray(req.user?.roles)
+    ? req.user!.roles.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+    : []
+  return Array.from(new Set([...role, ...roles]))
+}
+
 function parsePositiveIntMs(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return fallback
@@ -447,6 +470,16 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     },
     hasApprovalsRead: (req) => principalHasApprovalsRead(req),
     hasApprovalsWrite: (req) => principalHasApprovalsWrite(req),
+    // Lock-9 OD-L9-3(a): the process-upload gate, deliberately distinct from hasApprovalsWrite.
+    hasApprovalsAct: (req) => principalHasApprovalsAct(req),
+    // Lock-9 §5.2: fail-fast-only seat re-derivation (NOT the authority — see
+    // actorHasActiveSeatAtInstance's own docblock for the parallel-region fidelity gap).
+    actorHasActiveSeat: (req, instanceId) => {
+      const candidate = req.user?.id ?? req.user?.userId ?? (req.user as { sub?: unknown } | undefined)?.sub
+      const actorId = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
+      if (!actorId) return Promise.resolve(false)
+      return actorHasActiveSeatAtInstance(db, instanceId, actorId, resolveActorRolesFromRequest(req))
+    },
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),
     // Only present after the startup assert above; never a clean-by-default stand-in.
