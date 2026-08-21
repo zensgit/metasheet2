@@ -212,10 +212,12 @@ instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), ga
   the predicate. This is non-obvious; it is stated so an implementer does not "fix" a predicate that is
   already correct (OD-L9-13). **SCOPED at ratification:** this argument holds only because the process
   attachment row is *itself* the row the `EXISTS` clause finds, so it is confined to the ATTACHMENT
-  surfaces (`/download`, `/refs`) — for an instance carrying zero attachment rows the same predicate
-  returns false for EVERYONE, so it must not be cited as authorizing reuse of `isInstanceParticipant` on
-  comment or other text surfaces (see OD-L9-13's scope clause, and the Non-effects note that
-  instance-detail read scope, Lock-7 §2.7 D-5, is not settled here).
+  surfaces (`/download`, `/refs`) — a probe executed by the separate comments-reuse analysis (2026-08-21,
+  NOT re-run at this head; provenance: that analysis, not this document) reports that for an instance
+  carrying zero attachment rows the same predicate returns false for EVERYONE. So it must not be cited
+  as authorizing reuse of `isInstanceParticipant` on comment or other text surfaces (see OD-L9-13's scope
+  clause, and the Non-effects note that instance-detail read scope, Lock-7 §2.7 D-5, is not settled
+  here).
 - **Gate 2 (hidden-field) is DROPPED for `bind_kind='process'`, by an explicit branch.** A process
   attachment is not a form field; there is no `access` matrix entry for it and its `field_id` is `NULL`.
   The gate becomes: `if (row.bind_kind === 'form_field' && row.instanceId) { …existing hidden check… }`.
@@ -418,10 +420,13 @@ Owner: zensgit — on 2026-08-21 the executing session enumerated its recommenda
   nothing else in this block is owner prose. Recorded by the executing session with that provenance;
   reversible before dependent implementation lands.
 Date: 2026-08-21
-Document SHA: drafted a201b83a44 (§0-§4); independent-review fold b7858709da (§5). Both commits were
+Document SHA: drafted a201b83a44 (§0-§4); independent-review fold b7858709da (§5) — those are the
+  PRE-REBASE SHAs the independent review bound to, kept as the historical record. Both commits were
   REBASED onto origin/main@c473a079b5ff6389b98f4919bb88607a0baa913b for this ratification, which lands on
-  top. The baseline note above records the anchors as READ AT origin/main@2a3b8033f5 — that remains a
-  truthful historical read-point, and the anchors have NOT been re-verified at the rebase head. Every
+  top; on the branch as pushed the same two commits are b854271441 (draft) and 028a8f1adc (fold), and the
+  pre-rebase SHAs are no longer reachable from the ref. The baseline note above records the anchors as
+  READ AT origin/main@2a3b8033f5 — that remains a truthful historical read-point, and the anchors have
+  NOT been re-verified at the rebase head. Every
   implementing slice must re-verify its own anchors at its own head before relying on a line number.
 Count erratum: the enumerated recommendation said "13 ODs". The document AS DRAFTED carries FOURTEEN,
   OD-L9-1 … OD-L9-14. The cause is dated: the count was taken against the pre-fold draft a201b83a44, and
@@ -497,8 +502,9 @@ Decisions recorded: all FOURTEEN per this document's recommendations —
             (Lock-7 §L7-A / D-4) — its org-pin EXISTS clause being self-satisfied by the bound process
             row itself. RATIFIED AS AMENDED: the scope clause added to OD-L9-13 at ratification is part
             of what is ratified. It confines arm (a) to the ATTACHMENT surfaces and forbids quoting it as
-            authorization for comment or other TEXT surfaces (for a zero-attachment instance the same
-            predicate returns false for everyone), and it records that the per-instance readability
+            authorization for comment or other TEXT surfaces (per the comments-reuse analysis's probe,
+            a zero-attachment instance returns false for everyone under that predicate — reported by that
+            analysis, not re-run here), and it records that the per-instance readability
             predicate is being ruled separately in the S1 lock resolving Lock-7 §2.7 D-5, which Lock-9's
             attachment reads may adopt once it lands.
   OD-L9-14  (a) post-commit read scope is ALL INSTANCE PARTICIPANTS, via the reused gate-1 predicate on
@@ -512,8 +518,10 @@ Decisions recorded: all FOURTEEN per this document's recommendations —
 Wording correction made AT ratification, before the decision: OD-L9-13(a) and the matching §L9-C bullet
   now carry the scope clause quoted in the OD-L9-13 line above. The pre-correction wording ("reuse
   isInstanceParticipant UNCHANGED; its org-pin EXISTS is self-satisfied by the process row once bound")
-  is TRUE inside the attachment scope but FALSE if cited for a comment or other text surface — an
-  executed probe returns false for EVERYONE on a zero-attachment instance. Recorded so the OD cannot be
+  is TRUE inside the attachment scope but FALSE if cited for a comment or other text surface — per a
+  probe executed by the separate comments-reuse analysis (2026-08-21), the predicate returns false for
+  EVERYONE on a zero-attachment instance. That probe is REPORTED to this document, not re-run by the
+  ratifying session at this head; it is recorded with that provenance so the OD cannot be
   quoted out of scope; it is aligned with, and does not disturb, the Non-effects statement that
   instance-detail read scope (Lock-7 §2.7 D-5) is not settled here.
 Independent review: an independent Opus refute-first review of PR #5011 returned REQUEST-CHANGES at
@@ -627,8 +635,9 @@ are not re-proposed):
            SCOPE, ADDED AT RATIFICATION (2026-08-21): the self-satisfaction argument holds ONLY because
            the process attachment row is itself the row the EXISTS clause finds, so arm (a) is confined
            to the ATTACHMENT surfaces (/download and /refs) and MUST NOT be quoted as authorizing reuse
-           of isInstanceParticipant on comment or any other TEXT surface — an executed probe shows that
-           for an instance carrying zero attachment rows the same predicate returns FALSE for EVERYONE,
+           of isInstanceParticipant on comment or any other TEXT surface — a probe executed by the
+           separate comments-reuse analysis (2026-08-21; NOT re-run by the ratifying session at this
+           head) reports that for a zero-attachment instance the same predicate returns FALSE for EVERYONE,
            which is exactly why this document's Non-effects note leaves instance-detail read scope
            (Lock-7 §2.7 D-5) unsettled here. That per-instance readability predicate is being ruled
            SEPARATELY, in the S1 lock resolving Lock-7 §2.7 D-5; Lock-9's attachment reads will be able
