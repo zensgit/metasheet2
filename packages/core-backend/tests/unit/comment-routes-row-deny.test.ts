@@ -132,6 +132,19 @@ describe('comments routes row-deny gate', () => {
       ['row-denied'],
     )
 
+    // POST variant (ids in the JSON body — the grid's per-page id set outgrew
+    // the query string): same filtering + denied-row exclusions as GET.
+    await request(pinned.url())
+      .post('/api/comments/summary')
+      .send({ spreadsheetId: 'sheet-1', rowIds: ['row-visible', 'row-denied'] })
+      .expect(200)
+    expect(commentService.getCommentPresenceSummary).toHaveBeenLastCalledWith(
+      'sheet-1',
+      ['row-visible'],
+      'actor-row-denied',
+      ['row-denied'],
+    )
+
     await request(pinned.url())
       .get('/api/comments/mention-summary')
       .query({ spreadsheetId: 'sheet-1' })

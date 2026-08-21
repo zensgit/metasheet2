@@ -342,19 +342,26 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.get('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  // Shared by GET (ids in the query string) and POST (ids in the JSON body).
+  // The POST variant exists because the grid sends every visible row id per
+  // page — inlined in the query string the URL grows with page size toward
+  // 414/URL-length limits. GET stays for rolling-deploy compat AND because the
+  // OAPI-1 `mst_`-token read allowlist is GET-only by design: POST here is
+  // deliberately NOT allowlisted for `mst_` bearers (adding it would be an
+  // auth-boundary change requiring its own design review), so a token POST
+  // falls through to the JWT gate and 401s — fail-closed, unchanged.
+  const handleCommentSummary = async (
+    req: Request,
+    res: Response,
+    raw: { spreadsheetId?: unknown; containerId?: unknown; rowIds?: unknown; targetIds?: unknown },
+  ) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
       rowIds: z.array(z.string().min(1)).optional(),
       targetIds: z.array(z.string().min(1)).optional(),
     })
-    const parsed = schema.safeParse({
-      spreadsheetId: readQueryValue(req.query.spreadsheetId),
-      containerId: readQueryValue(req.query.containerId),
-      rowIds: readQueryValues(req.query.rowIds),
-      targetIds: readQueryValues(req.query.targetIds),
-    })
+    const parsed = schema.safeParse(raw)
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
@@ -378,6 +385,24 @@ export function commentsRouter(injector?: Injector): Router {
       logger.error('Failed to list comment summaries', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list comment summaries' } })
     }
+  }
+
+  router.get('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) =>
+    handleCommentSummary(req, res, {
+      spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerId: readQueryValue(req.query.containerId),
+      rowIds: readQueryValues(req.query.rowIds),
+      targetIds: readQueryValues(req.query.targetIds),
+    }))
+
+  router.post('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>
+    return handleCommentSummary(req, res, {
+      spreadsheetId: body.spreadsheetId,
+      containerId: body.containerId,
+      rowIds: body.rowIds,
+      targetIds: body.targetIds,
+    })
   })
 
   router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), apiTokenWriteRateLimit, requireScope('comments:write'), rbacGuard('comments', 'write'), async (req: Request, res: Response) => {
