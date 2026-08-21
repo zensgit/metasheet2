@@ -121,18 +121,20 @@ describe('approval history routing', () => {
     // operation writes. They must exclude it with the SAME predicate — a count that still counts
     // denials would silently shift `total` and the page boundaries — so both parameter lists are
     // pinned here, and the real-DB suite proves the behavioural half end to end.
+    // Lock-10 (S1): canReadApprovalInstance's three admission-phase queries (mocked above) are
+    // Nth 1-3, so the pre-existing count/page queries this block pins shift from Nth 1/2 to Nth 4/5.
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      1,
+      4,
       'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
       ['inst-1', 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      2,
+      5,
       expect.stringContaining('COALESCE(to_version, version) AS version'),
       ['inst-1', 1, 1, 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      2,
+      5,
       expect.stringContaining('AND action <> $4'),
       ['inst-1', 1, 1, 'policy_denied'],
     )
