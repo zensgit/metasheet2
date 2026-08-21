@@ -27,6 +27,30 @@
 //      checked against the frozen template catalog by the pack normalizer, so
 //      this installer cannot add, retype, rename or remove a template column.
 //
+//   4. A pack column that ALREADY EXISTS still gets its ownership classified.
+//      This is the real takeover shape: the customer's sheet was hand-built in
+//      the UI, so every pack column is already there with `property: {}`.
+//      `ensureMissingObjectFields` reports those as skipped and — by rule 1 —
+//      cannot touch them, which used to leave them UNCLASSIFIED. Unclassified
+//      is not neutral: the generic multitable ownership write-guard treats a
+//      field as protected only when a `stockPreparation` / `stockPreparationMvp`
+//      stanza says ownership === 'human_preserved' OR preserveOnRefresh === true,
+//      so a hand-built human column with no stanza is WRITABLE by any pipeline.
+//      Converging the sheet therefore means stamping ownership onto the columns
+//      that already exist, ADDITIVELY, through patchObjectFieldProperty (the
+//      host merges a property patch recursively, so a previously-synced option
+//      set survives the stamp untouched).
+//
+//      Re-classification is never silent. Before ANY write the installer reads
+//      the current property of every pack column that exists and sorts it into
+//      needs-a-stamp / already-stamped / CONFLICTING. A conflicting column — one
+//      whose live stanza declares an ownership or preserveOnRefresh that
+//      disagrees with the pack — aborts the whole install
+//      (CUSTOMER_PACK_OWNERSHIP_CONFLICT) before a single field is created or
+//      patched. Flipping a live column from human-owned to system-owned, or the
+//      reverse, is a decision for a human to make in the pack, not something an
+//      installer may do on its way past.
+//
 // Option-set writes route through the SHARED field-option-sync kernel
 // (field-option-sync-runtime.cjs), the single place option metadata is patched,
 // so a pack dictionary and a runtime option sync hit the host identically.
@@ -36,6 +60,7 @@
 
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+  STOCK_PREPARATION_FIELD_OWNERSHIPS,
 } = require('./stock-preparation-templates.cjs')
 const { normalizeCustomerPack } = require('./stock-preparation-customer-pack.cjs')
 const { syncFieldOptions } = require('./field-option-sync-runtime.cjs')
@@ -49,13 +74,25 @@ const EXTENSION_FIELD_ORDER_BASE = 1000
 
 // Methods this installer genuinely needs. `ensureObject` is deliberately absent
 // — see rule 1 above; requiring it would invite a future edit to reach for it.
+// `readObjectFieldsContent` IS required (rule 4): without the pre-scan the
+// installer cannot tell a hand-built column from a converged one, and it must
+// never guess. The host exposes it on the same scoped provisioning surface as
+// the write primitives (multitable/plugin-scope.ts), object-scope checked.
 const REQUIRED_PROVISIONING_METHODS = Object.freeze([
   'findObjectSheet',
   'getFieldId',
+  'readObjectFieldsContent',
   'ensureMissingObjectFields',
   'patchObjectFieldProperty',
   'ensureView',
 ])
+
+// The two property namespaces the generic multitable ownership write-guard reads
+// (adapters/multitable-ownership-guard.cjs). Conflict detection mirrors the guard
+// exactly: a contradiction in EITHER namespace is a contradiction, because the
+// guard ORs across both. The installer only ever WRITES the first one — the MVP
+// namespace belongs to the MVP provisioner and is not this installer's to edit.
+const OWNERSHIP_PROPERTY_NAMESPACES = Object.freeze(['stockPreparation', 'stockPreparationMvp'])
 
 class StockPreparationCustomerPackInstallError extends Error {
   constructor(status, code, message, details = {}) {
@@ -127,6 +164,193 @@ function buildExtensionFieldDescriptors(pack) {
     order: EXTENSION_FIELD_ORDER_BASE + index,
     property: buildExtensionFieldProperty(field, pack),
   }))
+}
+
+// The ADDITIVE ownership stamp for a column that already exists (rule 4). It is
+// deliberately NARROWER than buildExtensionFieldProperty: only the two keys the
+// ownership guard actually reads, plus the provenance that says who put them
+// there. `required` and `key` are left out on purpose — they are not ownership
+// classification, and a live hand-built column may carry its own; overwriting
+// them would be exactly the kind of silent re-classification rule 4 forbids.
+function buildOwnershipStampPatch(field, pack) {
+  return {
+    stockPreparation: {
+      ownership: field.ownership,
+      preserveOnRefresh: field.preserveOnRefresh,
+      extension: true,
+      packId: pack.packId,
+      packVersion: pack.packVersion,
+    },
+  }
+}
+
+function isPlainObject(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+// Report a declared ownership value in the error details WITHOUT echoing whatever
+// a hand-built column happens to carry: a recognized vocabulary member is schema,
+// anything else could be arbitrary text and the summary is values-free.
+function describeDeclaredOwnership(value) {
+  if (value === undefined) return null
+  return STOCK_PREPARATION_FIELD_OWNERSHIPS.includes(value) ? value : 'unrecognized'
+}
+
+function describeDeclaredPreserveOnRefresh(value) {
+  if (value === undefined) return null
+  return typeof value === 'boolean' ? value : 'unrecognized'
+}
+
+// One existing column against one pack declaration. A key that is ABSENT is not a
+// disagreement — there is nothing to disagree with, and stamping it is the whole
+// point. A key that is PRESENT and not strictly equal to the pack's value is a
+// conflict, junk types included: an installer that cannot read a live
+// classification must not overwrite it.
+function classifyExistingField(field, property) {
+  const conflicts = []
+  for (const namespace of OWNERSHIP_PROPERTY_NAMESPACES) {
+    const stanza = isPlainObject(property) ? property[namespace] : undefined
+    if (!isPlainObject(stanza)) continue
+    if (stanza.ownership !== undefined && stanza.ownership !== field.ownership) {
+      conflicts.push({
+        field: field.id,
+        namespace,
+        property: 'ownership',
+        declared: describeDeclaredOwnership(stanza.ownership),
+        expected: field.ownership,
+      })
+    }
+    if (stanza.preserveOnRefresh !== undefined && stanza.preserveOnRefresh !== field.preserveOnRefresh) {
+      conflicts.push({
+        field: field.id,
+        namespace,
+        property: 'preserveOnRefresh',
+        declared: describeDeclaredPreserveOnRefresh(stanza.preserveOnRefresh),
+        expected: field.preserveOnRefresh,
+      })
+    }
+  }
+  if (conflicts.length) return { state: 'CONFLICT', conflicts }
+
+  // Already stamped only when the namespace this installer writes carries BOTH
+  // guard-relevant keys at the pack's values. A half-stanza (or a match that only
+  // exists in the MVP namespace) still needs the stamp — and stamping it is a
+  // no-op-shaped merge, never a re-classification, since nothing disagreed.
+  //
+  // Deliberately NOT part of this comparison: packId / packVersion. They are
+  // provenance, not classification. Folding them in would make every pack version
+  // bump re-patch every column — churn on a live sheet to correct a label nothing
+  // enforces — and would put "idempotent" at the mercy of a version string. A
+  // column stamped by an earlier version keeps that provenance until its
+  // ownership actually changes, which is the only event worth a write.
+  const stanza = isPlainObject(property) ? property.stockPreparation : undefined
+  if (
+    isPlainObject(stanza)
+    && stanza.ownership === field.ownership
+    && stanza.preserveOnRefresh === field.preserveOnRefresh
+  ) {
+    return { state: 'ALREADY_STAMPED', conflicts: [] }
+  }
+  return { state: 'NEEDS_STAMP', conflicts: [] }
+}
+
+/**
+ * VALIDATE-ALL-THEN-WRITE pre-scan (rule 4). Runs before the first mutation of
+ * the install and reads the live property of every pack column that already
+ * exists. Returns the two work lists; throws on the first conflicting set, so a
+ * pack that disagrees with the live sheet never lands half of itself.
+ */
+async function classifyExistingExtensionFields({ provisioning, projectId, pack }) {
+  if (pack.extensionFields.length === 0) {
+    return { needsStamp: [], alreadyStamped: [] }
+  }
+  let content
+  try {
+    content = await provisioning.readObjectFieldsContent({
+      projectId,
+      objectId: pack.targetObjectId,
+      fieldIds: pack.extensionFields.map((field) => field.id),
+    })
+  } catch (error) {
+    // Same posture as the ownership guard's unverifiable-metadata refusal: an
+    // installer that cannot read the live classification must stop, because the
+    // alternative is silently leaving human columns writable.
+    throw new StockPreparationCustomerPackInstallError(
+      422,
+      'CUSTOMER_PACK_OWNERSHIP_UNVERIFIED',
+      'failed to read existing customer pack field ownership before installing',
+      {
+        objectId: pack.targetObjectId,
+        packId: pack.packId,
+        errorCode: (error && (error.code || error.name)) || 'FIELD_READ_FAILED',
+      },
+    )
+  }
+
+  const needsStamp = []
+  const alreadyStamped = []
+  const conflicts = []
+  const byLogicalId = isPlainObject(content) ? content : {}
+  for (const field of pack.extensionFields) {
+    const existing = byLogicalId[field.id]
+    // Absent from the content map == the column does not exist yet. It will be
+    // created with a full ownership property, so it needs no stamp.
+    if (!existing) continue
+    const verdict = classifyExistingField(field, existing.property)
+    if (verdict.state === 'CONFLICT') conflicts.push(...verdict.conflicts)
+    else if (verdict.state === 'ALREADY_STAMPED') alreadyStamped.push(field.id)
+    else needsStamp.push(field.id)
+  }
+
+  if (conflicts.length) {
+    throw new StockPreparationCustomerPackInstallError(
+      409,
+      'CUSTOMER_PACK_OWNERSHIP_CONFLICT',
+      'customer pack ownership disagrees with the live classification of an existing column; '
+        + 'no field was created or patched',
+      {
+        objectId: pack.targetObjectId,
+        packId: pack.packId,
+        conflictingFields: [...new Set(conflicts.map((entry) => entry.field))],
+        conflicts,
+      },
+    )
+  }
+  return { needsStamp, alreadyStamped }
+}
+
+async function stampExistingExtensionFields({ provisioning, projectId, pack, fieldIds }) {
+  if (fieldIds.length === 0) return []
+  const byId = new Map(pack.extensionFields.map((field) => [field.id, field]))
+  const stamped = []
+  for (const fieldId of fieldIds) {
+    const field = byId.get(fieldId)
+    if (!field) continue
+    try {
+      await provisioning.patchObjectFieldProperty({
+        projectId,
+        objectId: pack.targetObjectId,
+        // LOGICAL id: the host resolves it to the physical one, exactly as the
+        // option-sync kernel hands it over.
+        fieldId,
+        propertyPatch: buildOwnershipStampPatch(field, pack),
+      })
+    } catch (error) {
+      throw new StockPreparationCustomerPackInstallError(
+        422,
+        'CUSTOMER_PACK_OWNERSHIP_STAMP_FAILED',
+        'failed to stamp ownership onto an existing customer pack field',
+        {
+          objectId: pack.targetObjectId,
+          packId: pack.packId,
+          field: fieldId,
+          errorCode: (error && (error.code || error.name)) || 'FIELD_PATCH_FAILED',
+        },
+      )
+    }
+    stamped.push(fieldId)
+  }
+  return stamped
 }
 
 // Where a synced option set's `optionSource` comes from. For a frozen template
@@ -360,11 +584,32 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
     )
   }
 
+  // VALIDATE ALL, THEN WRITE. The pre-scan is the last read-only step: after it
+  // returns, either the pack agrees with every live column or nothing happened.
+  const { needsStamp, alreadyStamped } = await classifyExistingExtensionFields({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+
   const { createdFields, skippedFields } = await ensureExtensionFields({
     provisioning: api,
     projectId: resolvedProjectId,
     pack: normalized,
   })
+  // Stamp only what the additive write itself confirmed as pre-existing. The
+  // pre-scan and ensureMissingObjectFields agree by construction here; taking the
+  // intersection means a column created by THIS run can never be re-patched with
+  // a property it already carries, whichever of the two reads is stale.
+  const skippedSet = new Set(skippedFields)
+  const stampedExistingFields = await stampExistingExtensionFields({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+    fieldIds: needsStamp.filter((fieldId) => skippedSet.has(fieldId)),
+  })
+  const alreadyStampedFields = alreadyStamped.filter((fieldId) => skippedSet.has(fieldId))
+
   const syncedOptionFields = await syncPackOptionSets({
     provisioning: api,
     projectId: resolvedProjectId,
@@ -381,6 +626,7 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
   log.info(
     `[plugin-integration-core] customer pack install done. pack=${normalized.packId}`
       + ` v${normalized.packVersion} created=${createdFields.length} skipped=${skippedFields.length}`
+      + ` stamped=${stampedExistingFields.length} alreadyStamped=${alreadyStampedFields.length}`
       + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`,
   )
 
@@ -390,6 +636,11 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
     objectId: normalized.targetObjectId,
     createdFields,
     skippedFields,
+    // Of the skipped (pre-existing) columns: the ones this run classified, and
+    // the ones that were already classified the same way. A converged sheet
+    // re-runs to created=0 / stamped=0.
+    stampedExistingFields,
+    alreadyStampedFields,
     syncedOptionFields,
     ensuredViews,
   }
@@ -397,6 +648,7 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
 
 module.exports = {
   EXTENSION_FIELD_ORDER_BASE,
+  OWNERSHIP_PROPERTY_NAMESPACES,
   REQUIRED_PROVISIONING_METHODS,
   StockPreparationCustomerPackInstallError,
   installCustomerPack,
@@ -406,7 +658,9 @@ module.exports = {
     buildExtensionFieldDescriptors,
     buildOptionPropertyPatch,
     buildOptionSyncInputs,
+    buildOwnershipStampPatch,
     buildRoleViewDescriptor,
+    classifyExistingField,
     resolveOptionSource,
   },
 }

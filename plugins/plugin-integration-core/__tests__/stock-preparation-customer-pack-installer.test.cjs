@@ -2,9 +2,14 @@
 
 // P0 — customer config pack INSTALLER battery.
 // Plain node test (throws on failure). No DB, no network: the host multitable
-// provisioning API is a mock that reproduces the two semantics this installer
+// provisioning API is a mock that reproduces the three semantics this installer
 // depends on — ensureMissingObjectFields is ON CONFLICT DO NOTHING (additive,
-// never mutating), and patchObjectFieldProperty merges a property patch.
+// never mutating), readObjectFieldsContent reads {logicalId: {name,type,property,
+// order}} for the fields that physically exist, and patchObjectFieldProperty
+// merges a property patch RECURSIVELY (multitable/provisioning.ts mergeJsonObject
+// — a nested object patch merges key-by-key rather than replacing the branch,
+// which is exactly what lets an ownership stamp and a synced option set share the
+// `stockPreparation` namespace on one column).
 // Values-free: only schema ids, business column labels and material grade
 // samples appear.
 
@@ -44,6 +49,40 @@ function physicalFieldId(projectId, objectId, fieldId) {
   return `fld_${projectId}_${objectId}_${fieldId}`
 }
 
+// Byte-for-byte the host's property merge (multitable/provisioning.ts
+// mergeJsonObject): nested plain objects merge, everything else replaces. A
+// shallow spread here would be a LIE about the host and would make the ownership
+// stamp look like it wipes a synced option set.
+function mergeJsonObjectLikeHost(base, patch) {
+  const out = { ...base }
+  for (const [key, value] of Object.entries(patch)) {
+    if (
+      value && typeof value === 'object' && !Array.isArray(value)
+      && out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])
+    ) {
+      out[key] = mergeJsonObjectLikeHost(out[key], value)
+    } else {
+      out[key] = value
+    }
+  }
+  return out
+}
+
+// The generic multitable ownership write-guard's predicate
+// (adapters/multitable-ownership-guard.cjs isProtectedFieldProperty), restated
+// here so this suite can assert what the guard would CONCLUDE about a column —
+// the whole point of stamping ownership onto a hand-built one.
+function guardWouldProtect(property) {
+  if (!property || typeof property !== 'object') return false
+  for (const namespace of ['stockPreparation', 'stockPreparationMvp']) {
+    const meta = property[namespace]
+    if (!meta || typeof meta !== 'object') continue
+    if (meta.ownership === 'human_preserved') return true
+    if (meta.preserveOnRefresh === true) return true
+  }
+  return false
+}
+
 /**
  * Mock host provisioning API.
  *
@@ -57,6 +96,7 @@ function createMockProvisioning({ sheetMissing = false } = {}) {
   const viewsById = new Map()
   const calls = {
     findObjectSheet: [],
+    readObjectFieldsContent: [],
     ensureMissingObjectFields: [],
     patchObjectFieldProperty: [],
     ensureView: [],
@@ -80,6 +120,23 @@ function createMockProvisioning({ sheetMissing = false } = {}) {
       calls.findObjectSheet.push({ projectId, objectId })
       if (sheetMissing) return null
       return { id: `sheet_${objectId}`, baseId: 'base_unit', name: objectId, description: null }
+    },
+    // SELECT-only content read keyed by LOGICAL id, present-fields only — exactly
+    // the host shape (multitable/provisioning.ts readObjectFieldsContent).
+    async readObjectFieldsContent({ projectId, objectId, fieldIds }) {
+      calls.readObjectFieldsContent.push({ projectId, objectId, fieldIds })
+      const out = {}
+      for (const fieldId of fieldIds || []) {
+        const row = fieldsByPhysicalId.get(physicalFieldId(projectId, objectId, fieldId))
+        if (!row) continue
+        out[fieldId] = {
+          name: row.name,
+          type: row.type,
+          property: JSON.parse(JSON.stringify(row.property || {})),
+          order: row.order,
+        }
+      }
+      return out
     },
     // ON CONFLICT (id) DO NOTHING — no UPDATE, no DELETE, exactly like the host
     // primitive (multitable/provisioning.ts ensureMissingObjectFields).
@@ -108,7 +165,7 @@ function createMockProvisioning({ sheetMissing = false } = {}) {
       const id = physicalFieldId(projectId, objectId, fieldId)
       const row = fieldsByPhysicalId.get(id)
       if (!row) throw new Error(`mock: provisioned field not found: ${objectId}.${fieldId}`)
-      row.property = { ...row.property, ...JSON.parse(JSON.stringify(propertyPatch)) }
+      row.property = mergeJsonObjectLikeHost(row.property || {}, JSON.parse(JSON.stringify(propertyPatch)))
       return { id, sheetId: `sheet_${objectId}`, name: row.name, type: row.type, property: row.property, order: row.order }
     },
     async ensureView({ projectId, sheetId, descriptor }) {
@@ -359,6 +416,12 @@ async function secondRunIsANoOpOnFields() {
   assert.equal(calls.ensureObject.length, 0, 'a re-run must still never call ensureObject')
   assert.deepEqual(second.createdFields, [], 'a re-run creates no column')
   assert.deepEqual(second.skippedFields, first.createdFields, 'every pack column is reported as already present')
+  // A column this installer CREATED is born classified, so the re-run finds it
+  // already stamped and patches nothing.
+  assert.deepEqual(first.stampedExistingFields, [], 'a fresh install has nothing pre-existing to stamp')
+  assert.deepEqual(first.alreadyStampedFields, [])
+  assert.deepEqual(second.stampedExistingFields, [], 'a re-run never re-stamps')
+  assert.deepEqual(second.alreadyStampedFields, first.createdFields)
   assert.equal(
     fieldsSnapshot(fieldsByPhysicalId),
     afterFirst,
@@ -388,7 +451,10 @@ async function secondRunIsANoOpOnFields() {
 
 async function partialPreexistingFieldsAreSkippedNotRewritten() {
   // The realistic migration case: the hand-built sheet already carries some of
-  // the pack's columns. Those must be left exactly as they are.
+  // the pack's columns. Their COLUMN IDENTITY (name, type, order) and any
+  // unrelated property keys must survive untouched — the additive primitive
+  // cannot rewrite them and nothing else may either. The one thing the install
+  // does add is the ownership classification the column was missing.
   const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
   const squatted = physicalFieldId(PROJECT_ID, OBJECT_ID, 'ext_legacyRowId')
   fieldsByPhysicalId.set(squatted, {
@@ -397,7 +463,6 @@ async function partialPreexistingFieldsAreSkippedNotRewritten() {
     property: { handBuilt: true },
     order: 42,
   })
-  const before = JSON.stringify(fieldsByPhysicalId.get(squatted))
 
   const summary = await installCustomerPack({
     provisioning,
@@ -408,12 +473,283 @@ async function partialPreexistingFieldsAreSkippedNotRewritten() {
 
   assert.deepEqual(summary.skippedFields, ['ext_legacyRowId'])
   assert.equal(summary.createdFields.length, 9)
-  assert.equal(
-    JSON.stringify(fieldsByPhysicalId.get(squatted)),
-    before,
-    'a pre-existing hand-built column keeps its name, order and property',
-  )
+  assert.deepEqual(summary.stampedExistingFields, ['ext_legacyRowId'])
+  assert.deepEqual(summary.alreadyStampedFields, [])
+
+  const after = fieldsByPhysicalId.get(squatted)
+  assert.equal(after.name, '旧系统ID（人工建列）', 'a tenant rename survives the install')
+  assert.equal(after.type, 'string')
+  assert.equal(after.order, 42, 'the hand-built column keeps its position')
+  assert.equal(after.property.handBuilt, true, 'unrelated property keys survive the stamp')
+  assert.deepEqual(after.property.stockPreparation, {
+    ownership: 'plm_system',
+    preserveOnRefresh: false,
+    extension: true,
+    packId: 'factory-a',
+    packVersion: 1,
+  }, 'the skipped column is classified, not left unowned')
   assert.equal(calls.ensureObject.length, 0)
+}
+
+// Seed every pack column as a HAND-BUILT one: it exists, it has a tenant label
+// and position, and its property is the empty object a UI-dragged column gets.
+// This is the takeover sheet, not a hypothetical.
+function seedHandBuiltPackColumns(fieldsByPhysicalId, { property = {} } = {}) {
+  for (const [index, field] of FACTORY_A_SAMPLE_PACK.extensionFields.entries()) {
+    fieldsByPhysicalId.set(physicalFieldId(PROJECT_ID, OBJECT_ID, field.id), {
+      name: `${field.label}（人工建列）`,
+      type: field.type,
+      property: JSON.parse(JSON.stringify(property)),
+      order: 500 + index,
+    })
+  }
+}
+
+async function handBuiltSheetIsClassifiedNotLeftUnowned() {
+  // THE regression this battery exists for. Before the ownership pre-scan, an
+  // install onto a fully hand-built sheet created nothing (every column already
+  // existed), stamped nothing, and reported success — leaving every human column
+  // with `property: {}`. The generic multitable ownership write-guard protects a
+  // field only when a stanza says human_preserved / preserveOnRefresh, so the
+  // customer's decision columns stayed writable by any pipeline that pointed at
+  // the sheet. A "successful" install that silently disarms the guard is worse
+  // than a failed one.
+  const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
+  seedHandBuiltPackColumns(fieldsByPhysicalId)
+
+  // Precondition: the guard would protect NOTHING on this sheet.
+  for (const field of FACTORY_A_SAMPLE_PACK.extensionFields) {
+    const row = fieldsByPhysicalId.get(physicalFieldId(PROJECT_ID, OBJECT_ID, field.id))
+    assert.equal(guardWouldProtect(row.property), false, `${field.id} starts unprotected`)
+  }
+
+  const summary = await installCustomerPack({
+    provisioning,
+    projectId: PROJECT_ID,
+    pack: FACTORY_A_SAMPLE_PACK,
+    logger: SILENT_LOGGER,
+  })
+
+  assert.equal(calls.ensureObject.length, 0, 'convergence is still additive-only')
+  assert.deepEqual(summary.createdFields, [], 'nothing to create — the sheet already has every column')
+  assert.deepEqual(
+    summary.stampedExistingFields,
+    FACTORY_A_SAMPLE_PACK.extensionFields.map((field) => field.id),
+    'every pre-existing pack column is classified',
+  )
+  assert.deepEqual(summary.alreadyStampedFields, [])
+  // The pre-scan is a READ, and it happens before the additive write.
+  assert.equal(calls.readObjectFieldsContent.length, 1, 'one pre-scan for the whole pack')
+  assert.deepEqual(
+    calls.readObjectFieldsContent[0].fieldIds,
+    FACTORY_A_SAMPLE_PACK.extensionFields.map((field) => field.id),
+  )
+
+  for (const field of FACTORY_A_SAMPLE_PACK.extensionFields) {
+    const row = fieldsByPhysicalId.get(physicalFieldId(PROJECT_ID, OBJECT_ID, field.id))
+    const expectedPreserve = field.ownership === 'human_preserved'
+    assert.deepEqual(
+      row.property.stockPreparation.ownership,
+      field.ownership,
+      `${field.id} carries the pack's ownership`,
+    )
+    assert.equal(row.property.stockPreparation.preserveOnRefresh, expectedPreserve)
+    assert.equal(row.property.stockPreparation.extension, true)
+    assert.equal(row.property.stockPreparation.packId, 'factory-a')
+    assert.equal(row.property.stockPreparation.packVersion, 1)
+    // Column identity is never rewritten — only the property gains keys.
+    assert.equal(row.name, `${field.label}（人工建列）`, `${field.id} keeps its hand-built label`)
+    assert.ok(row.order >= 500, `${field.id} keeps its hand-built position`)
+    // The guard-relevant CONCLUSION, which is the whole point of the stamp.
+    assert.equal(
+      guardWouldProtect(row.property),
+      expectedPreserve,
+      `${field.id} protection must now follow its declared ownership`,
+    )
+  }
+
+  // The ownership stamp and the option sync share the `stockPreparation`
+  // namespace on ext_standard; the host's recursive merge must leave both.
+  const standard = fieldsByPhysicalId.get(physicalFieldId(PROJECT_ID, OBJECT_ID, 'ext_standard'))
+  assert.equal(standard.property.stockPreparation.ownership, 'plm_system', 'the stamp survives the option patch')
+  assert.equal(standard.property.options.length, 12, 'and the option set survives the stamp')
+
+  // A converged sheet re-runs to a no-op: nothing created, nothing re-stamped.
+  const second = await installCustomerPack({
+    provisioning,
+    projectId: PROJECT_ID,
+    pack: FACTORY_A_SAMPLE_PACK,
+    logger: SILENT_LOGGER,
+  })
+  assert.deepEqual(second.createdFields, [])
+  assert.deepEqual(second.stampedExistingFields, [], 'a converged sheet is never re-stamped')
+  assert.deepEqual(
+    second.alreadyStampedFields,
+    FACTORY_A_SAMPLE_PACK.extensionFields.map((field) => field.id),
+  )
+}
+
+async function identicalStanzaIsAlreadyStampedWithNoPatch() {
+  // A column that already carries exactly the pack's classification is a no-op:
+  // counted, never patched. "Idempotent" has to be a fact about the wire.
+  const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
+  for (const field of FACTORY_A_SAMPLE_PACK.extensionFields) {
+    fieldsByPhysicalId.set(physicalFieldId(PROJECT_ID, OBJECT_ID, field.id), {
+      name: field.label,
+      type: field.type,
+      property: {
+        stockPreparation: {
+          ownership: field.ownership,
+          preserveOnRefresh: field.ownership === 'human_preserved',
+        },
+      },
+      order: 900,
+    })
+  }
+
+  const summary = await installCustomerPack({
+    provisioning,
+    projectId: PROJECT_ID,
+    pack: FACTORY_A_SAMPLE_PACK,
+    logger: SILENT_LOGGER,
+  })
+
+  assert.deepEqual(summary.createdFields, [])
+  assert.deepEqual(summary.stampedExistingFields, [], 'an identical stanza is not re-written')
+  assert.deepEqual(
+    summary.alreadyStampedFields,
+    FACTORY_A_SAMPLE_PACK.extensionFields.map((field) => field.id),
+  )
+  // The only property patch on the wire is the option sync — no ownership patch.
+  assert.deepEqual(
+    calls.patchObjectFieldProperty.map((call) => call.fieldId),
+    ['ext_standard'],
+    'the only patch is the option sync, never an ownership re-stamp',
+  )
+}
+
+async function conflictingOwnershipAbortsBeforeAnyMutation() {
+  // The live sheet says this column is system-owned; the pack says a human owns
+  // it. Either direction is a re-classification of a LIVE column, and an
+  // installer does not get to make that call on its way past. Fail closed, and
+  // fail before a single field is created or patched — a half-applied pack on a
+  // customer's production sheet is not a state anyone can reason about.
+  for (const [declared, packOwnership, victim] of [
+    ['plm_system', 'human_preserved', 'ext_blankLength'],
+    ['human_preserved', 'plm_system', 'ext_legacyRowId'],
+  ]) {
+    const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
+    seedHandBuiltPackColumns(fieldsByPhysicalId)
+    const physical = physicalFieldId(PROJECT_ID, OBJECT_ID, victim)
+    fieldsByPhysicalId.get(physical).property = {
+      stockPreparation: { ownership: declared, preserveOnRefresh: declared === 'human_preserved' },
+    }
+    const before = fieldsSnapshot(fieldsByPhysicalId)
+
+    await assert.rejects(
+      () => installCustomerPack({
+        provisioning,
+        projectId: PROJECT_ID,
+        pack: FACTORY_A_SAMPLE_PACK,
+        logger: SILENT_LOGGER,
+      }),
+      (error) => error instanceof StockPreparationCustomerPackInstallError
+        && error.code === 'CUSTOMER_PACK_OWNERSHIP_CONFLICT'
+        && error.status === 409
+        && error.details.conflictingFields.includes(victim)
+        && error.details.conflicts.some(
+          (entry) => entry.field === victim && entry.declared === declared && entry.property === 'ownership',
+        ),
+      `a live ${declared} column must not be silently re-classified as ${packOwnership}`,
+    )
+
+    // ZERO mutations: no create, no patch, no view, and nothing moved in the store.
+    assert.equal(calls.ensureMissingObjectFields.length, 0, 'aborted before the additive write')
+    assert.equal(calls.patchObjectFieldProperty.length, 0, 'aborted before any property patch')
+    assert.equal(calls.ensureView.length, 0, 'aborted before any view write')
+    assert.equal(calls.ensureObject.length, 0)
+    assert.equal(fieldsSnapshot(fieldsByPhysicalId), before, 'the sheet is byte-identical after the refusal')
+  }
+}
+
+async function conflictDetectionSpansBothGuardNamespaces() {
+  // The write-guard ORs `stockPreparation` and `stockPreparationMvp`, so a
+  // contradiction in the MVP namespace is just as real. The installer never
+  // WRITES that namespace — it only refuses to contradict it.
+  const { provisioning, calls, fieldsByPhysicalId } = createMockProvisioning()
+  seedHandBuiltPackColumns(fieldsByPhysicalId)
+  fieldsByPhysicalId.get(physicalFieldId(PROJECT_ID, OBJECT_ID, 'ext_legacyRowId')).property = {
+    stockPreparationMvp: { role: 'main', ownership: 'human_preserved' },
+  }
+  await assert.rejects(
+    () => installCustomerPack({ provisioning, projectId: PROJECT_ID, pack: FACTORY_A_SAMPLE_PACK, logger: SILENT_LOGGER }),
+    (error) => error.code === 'CUSTOMER_PACK_OWNERSHIP_CONFLICT'
+      && error.details.conflicts.some(
+        (entry) => entry.field === 'ext_legacyRowId' && entry.namespace === 'stockPreparationMvp',
+      ),
+    'an MVP-namespace contradiction is a contradiction',
+  )
+  assert.equal(calls.ensureMissingObjectFields.length, 0)
+  assert.equal(calls.patchObjectFieldProperty.length, 0)
+
+  // A junk-typed declaration is a conflict too: an installer that cannot READ a
+  // live classification must never overwrite it.
+  const junk = createMockProvisioning()
+  seedHandBuiltPackColumns(junk.fieldsByPhysicalId)
+  junk.fieldsByPhysicalId.get(physicalFieldId(PROJECT_ID, OBJECT_ID, 'ext_blankWidth')).property = {
+    stockPreparation: { preserveOnRefresh: 'yes' },
+  }
+  await assert.rejects(
+    () => installCustomerPack({
+      provisioning: junk.provisioning,
+      projectId: PROJECT_ID,
+      pack: FACTORY_A_SAMPLE_PACK,
+      logger: SILENT_LOGGER,
+    }),
+    (error) => error.code === 'CUSTOMER_PACK_OWNERSHIP_CONFLICT'
+      && error.details.conflicts.some(
+        (entry) => entry.field === 'ext_blankWidth' && entry.declared === 'unrecognized',
+      ),
+    'an unreadable declaration fails closed and is never echoed verbatim',
+  )
+}
+
+async function unreadableOwnershipFailsClosed() {
+  // Same posture as the write-guard's unverifiable-metadata refusal: if the
+  // pre-scan cannot run, the installer cannot tell a converged sheet from a
+  // hand-built one, so it must not write.
+  const { provisioning, calls } = createMockProvisioning()
+  provisioning.readObjectFieldsContent = async () => {
+    const error = new Error('mock: read refused')
+    error.code = 'MOCK_READ_REFUSED'
+    throw error
+  }
+  await assert.rejects(
+    () => installCustomerPack({ provisioning, projectId: PROJECT_ID, pack: FACTORY_A_SAMPLE_PACK, logger: SILENT_LOGGER }),
+    (error) => error instanceof StockPreparationCustomerPackInstallError
+      && error.code === 'CUSTOMER_PACK_OWNERSHIP_UNVERIFIED'
+      && error.details.errorCode === 'MOCK_READ_REFUSED',
+    'an unverifiable ownership state must stop the install',
+  )
+  assert.equal(calls.ensureMissingObjectFields.length, 0)
+  assert.equal(calls.patchObjectFieldProperty.length, 0)
+}
+
+async function ownershipStampFailurePropagatesAsAClosedCode() {
+  const { provisioning, fieldsByPhysicalId } = createMockProvisioning()
+  seedHandBuiltPackColumns(fieldsByPhysicalId)
+  provisioning.patchObjectFieldProperty = async () => {
+    const error = new Error('mock: stamp refused')
+    error.code = 'MOCK_STAMP_REFUSED'
+    throw error
+  }
+  await assert.rejects(
+    () => installCustomerPack({ provisioning, projectId: PROJECT_ID, pack: FACTORY_A_SAMPLE_PACK, logger: SILENT_LOGGER }),
+    (error) => error instanceof StockPreparationCustomerPackInstallError
+      && error.code === 'CUSTOMER_PACK_OWNERSHIP_STAMP_FAILED'
+      && error.details.errorCode === 'MOCK_STAMP_REFUSED',
+    'a refused ownership stamp must not be swallowed',
+  )
 }
 
 async function optionPatchFailurePropagatesAsAClosedCode() {
@@ -468,13 +804,17 @@ async function packWithoutOptionSetsSkipsTheKernel() {
 }
 
 async function summaryIsValuesFree() {
-  const { provisioning } = createMockProvisioning()
+  const { provisioning, fieldsByPhysicalId } = createMockProvisioning()
+  // Install onto a hand-built sheet so the stamp arms are represented in the
+  // summary that gets checked for leaks.
+  seedHandBuiltPackColumns(fieldsByPhysicalId)
   const summary = await installCustomerPack({
     provisioning,
     projectId: PROJECT_ID,
     pack: FACTORY_A_SAMPLE_PACK,
     logger: SILENT_LOGGER,
   })
+  assert.equal(summary.stampedExistingFields.length, 10)
   const serialized = JSON.stringify(summary)
   for (const leak of ['S30408', 'Q345R', '旧系统ID', '生产备料视图']) {
     assert.equal(serialized.includes(leak), false, `summary must not echo ${leak}`)
@@ -524,6 +864,12 @@ async function main() {
   await optionSetOnATemplateFieldKeepsTemplateSource()
   await secondRunIsANoOpOnFields()
   await partialPreexistingFieldsAreSkippedNotRewritten()
+  await handBuiltSheetIsClassifiedNotLeftUnowned()
+  await identicalStanzaIsAlreadyStampedWithNoPatch()
+  await conflictingOwnershipAbortsBeforeAnyMutation()
+  await conflictDetectionSpansBothGuardNamespaces()
+  await unreadableOwnershipFailsClosed()
+  await ownershipStampFailurePropagatesAsAClosedCode()
   await optionPatchFailurePropagatesAsAClosedCode()
   await viewFailurePropagatesAsAClosedCode()
   await packWithoutOptionSetsSkipsTheKernel()
