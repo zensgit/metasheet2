@@ -18,6 +18,12 @@ function templatesPayload(ids: string[]) {
   return { ok: true, data: { templates: ids.map((id) => ({ id, name: `Template ${id}` })) } }
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => { resolve = res })
+  return { promise, resolve }
+}
+
 describe('MultitableApiClient catalog cache', () => {
   it('serves listBases from cache after the first fetch', async () => {
     const fetchFn = vi.fn(async () => jsonResponse(basesPayload(['b1'])))
@@ -120,6 +126,50 @@ describe('MultitableApiClient catalog cache', () => {
     const retry = await client.listBases()
     expect(fetchFn).toHaveBeenCalledTimes(2)
     expect(retry.bases.map((b) => b.id)).toEqual(['b1'])
+  })
+
+  it('an invalidation while a fetch is in flight prevents the stale write-back (generation)', async () => {
+    const slow = createDeferred<Response>()
+    const fetchFn = vi.fn()
+      .mockImplementationOnce(() => slow.promise)
+      .mockResolvedValue(jsonResponse(basesPayload(['new'])))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const stale = client.listBases()
+    client.invalidateBasesCache()
+    slow.resolve(jsonResponse(basesPayload(['old'])))
+    // The awaiting caller still receives its data — it just must not be cached.
+    expect((await stale).bases.map((b) => b.id)).toEqual(['old'])
+
+    const after = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(after.bases.map((b) => b.id)).toEqual(['new'])
+
+    // 'new' is cached; 'old' never overwrote it.
+    const cached = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(cached.bases.map((b) => b.id)).toEqual(['new'])
+  })
+
+  it('force supersedes an older in-flight fetch even when it resolves later', async () => {
+    const slow = createDeferred<Response>()
+    const fetchFn = vi.fn()
+      .mockImplementationOnce(() => slow.promise)
+      .mockResolvedValue(jsonResponse(basesPayload(['new'])))
+    const client = new MultitableApiClient({ fetchFn })
+
+    const stale = client.listBases()
+    const forced = await client.listBases({ force: true })
+    expect(forced.bases.map((b) => b.id)).toEqual(['new'])
+
+    // The pre-force request resolves LAST — reverse order — and must not
+    // write back over the forced result.
+    slow.resolve(jsonResponse(basesPayload(['old'])))
+    expect((await stale).bases.map((b) => b.id)).toEqual(['old'])
+
+    const cached = await client.listBases()
+    expect(fetchFn).toHaveBeenCalledTimes(2)
+    expect(cached.bases.map((b) => b.id)).toEqual(['new'])
   })
 
   it('a failed fetch does not poison the cache', async () => {

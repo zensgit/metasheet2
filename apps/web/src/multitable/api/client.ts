@@ -1437,10 +1437,15 @@ export class MultitableApiClient {
   // per client instance with in-flight dedup (same pattern as
   // usePlugins.fetchPlugins); mutations on this client invalidate, and callers
   // can pass { force: true } for an explicit refresh.
+  // Generation counters make invalidation win races: an invalidate/force bumps
+  // the generation, so a slower request started EARLIER that resolves LATER
+  // can no longer write its stale payload back into the cache (Codex review).
   private basesCache: MetaBase[] | null = null
-  private basesInflight: Promise<{ bases: MetaBase[] }> | null = null
+  private basesGeneration = 0
+  private basesInflight: { promise: Promise<{ bases: MetaBase[] }>; generation: number } | null = null
   private templatesCache: MetaTemplate[] | null = null
-  private templatesInflight: Promise<{ templates: MetaTemplate[] }> | null = null
+  private templatesGeneration = 0
+  private templatesInflight: { promise: Promise<{ templates: MetaTemplate[] }>; generation: number } | null = null
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1460,37 +1465,51 @@ export class MultitableApiClient {
   // --- Bases ---
   invalidateBasesCache(): void {
     this.basesCache = null
+    // Bump the generation and drop the joinable in-flight handle: any request
+    // already in flight is stale by definition and must neither populate the
+    // cache on resolution nor be joined by later callers.
+    this.basesGeneration++
+    this.basesInflight = null
   }
 
   invalidateTemplatesCache(): void {
     this.templatesCache = null
+    this.templatesGeneration++
+    this.templatesInflight = null
   }
 
   async listBases(opts?: { force?: boolean }): Promise<{ bases: MetaBase[] }> {
-    if (!opts?.force) {
+    if (opts?.force) {
+      // Explicit refresh: supersede the cache AND any older in-flight fetch.
+      this.invalidateBasesCache()
+    } else {
       // Return copies so a caller sorting/mutating the array cannot pollute the cache.
       if (this.basesCache) return { bases: [...this.basesCache] }
       if (this.basesInflight) {
-        return this.basesInflight.then((data) => (Array.isArray(data?.bases) ? { bases: [...data.bases] } : data))
+        return this.basesInflight.promise.then((data) => (Array.isArray(data?.bases) ? { bases: [...data.bases] } : data))
       }
     }
-    const inflight = (async () => {
+    const generation = this.basesGeneration
+    const promise = (async () => {
       const res = await this.fetch('/api/multitable/bases')
       const data = await this.parseJson<{ bases?: MetaBase[] }>(res)
       // Cache only a well-formed payload. Malformed/probe bodies pass through
       // UNTOUCHED (and uncached): test routers and error shapes rely on the
       // raw passthrough contract (see mount-behind-flow.spec).
       if (Array.isArray(data?.bases)) {
-        this.basesCache = data.bases
+        // Generation check: only a latest-generation fetch may populate the
+        // cache — an invalidation while this request was in flight makes its
+        // payload stale, though the awaiting caller still receives it.
+        if (generation === this.basesGeneration) this.basesCache = data.bases
         return { bases: [...data.bases] }
       }
       return data as { bases: MetaBase[] }
     })()
-    this.basesInflight = inflight
+    this.basesInflight = { promise, generation }
     try {
-      return await inflight
+      return await promise
     } finally {
-      if (this.basesInflight === inflight) this.basesInflight = null
+      if (this.basesInflight?.promise === promise) this.basesInflight = null
     }
   }
 
@@ -1506,27 +1525,30 @@ export class MultitableApiClient {
   }
 
   async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
-    if (!opts?.force) {
+    if (opts?.force) {
+      this.invalidateTemplatesCache()
+    } else {
       if (this.templatesCache) return { templates: [...this.templatesCache] }
       if (this.templatesInflight) {
-        return this.templatesInflight.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
+        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
       }
     }
-    const inflight = (async () => {
+    const generation = this.templatesGeneration
+    const promise = (async () => {
       const res = await this.fetch('/api/multitable/templates')
       const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
-      // Same passthrough contract as listBases: only a well-formed payload is cached.
+      // Same passthrough + generation contract as listBases.
       if (Array.isArray(data?.templates)) {
-        this.templatesCache = data.templates
+        if (generation === this.templatesGeneration) this.templatesCache = data.templates
         return { templates: [...data.templates] }
       }
       return data as { templates: MetaTemplate[] }
     })()
-    this.templatesInflight = inflight
+    this.templatesInflight = { promise, generation }
     try {
-      return await inflight
+      return await promise
     } finally {
-      if (this.templatesInflight === inflight) this.templatesInflight = null
+      if (this.templatesInflight?.promise === promise) this.templatesInflight = null
     }
   }
 

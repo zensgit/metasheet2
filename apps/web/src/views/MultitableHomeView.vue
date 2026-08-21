@@ -8,7 +8,7 @@
           打开 Base、继续清洗表或从模板开始。
         </p>
       </div>
-      <MtButton class="multitable-home__refresh" :disabled="loading" @click="loadHomeData">
+      <MtButton class="multitable-home__refresh" :disabled="loading" @click="refreshHomeData">
         {{ loading ? '刷新中...' : '刷新' }}
       </MtButton>
     </header>
@@ -205,11 +205,11 @@ function resolveOpenTarget(context: MetaContext): { sheet: MetaSheet; view: Meta
   return view ? { sheet, view } : null
 }
 
-async function loadBases(): Promise<void> {
+async function loadBases(opts?: { force?: boolean }): Promise<void> {
   loading.value = true
   errorMessage.value = ''
   try {
-    const data = await multitableClient.listBases()
+    const data = await multitableClient.listBases(opts)
     bases.value = data.bases ?? []
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '加载多维表失败'
@@ -218,11 +218,11 @@ async function loadBases(): Promise<void> {
   }
 }
 
-async function loadTemplates(): Promise<void> {
+async function loadTemplates(opts?: { force?: boolean }): Promise<void> {
   templateLoading.value = true
   templateError.value = ''
   try {
-    const data = await multitableClient.listTemplates()
+    const data = await multitableClient.listTemplates(opts)
     templates.value = data.templates ?? []
   } catch (error) {
     templateError.value = error instanceof Error ? error.message : '模板加载失败，可继续新建空白 Base。'
@@ -231,8 +231,15 @@ async function loadTemplates(): Promise<void> {
   }
 }
 
-async function loadHomeData(): Promise<void> {
-  await Promise.all([loadBases(), loadTemplates()])
+async function loadHomeData(opts?: { force?: boolean }): Promise<void> {
+  await Promise.all([loadBases(opts), loadTemplates(opts)])
+}
+
+// The 刷新 button expresses explicit user intent to fetch the latest lists, so
+// it must bypass the catalog cache (Codex review: it previously hit the
+// permanent cache and could never surface bases created elsewhere).
+function refreshHomeData(): void {
+  void loadHomeData({ force: true })
 }
 
 async function openBase(base: MetaBase): Promise<void> {
