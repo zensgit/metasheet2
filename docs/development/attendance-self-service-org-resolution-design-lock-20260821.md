@@ -130,7 +130,7 @@ forward the Org ID box, so a user who types an org there splits write from read 
 
 ## 7. Non-goals
 
-Changing `getOrgId` itself (it is read by most attendance routes — on the baseline commit, 97 distinct routes across 106 call sites); changing the W4 boundary or
+Changing `getOrgId` itself (it is read by most attendance routes — on the baseline commit, 106 exact call sites across ~97 distinct routes; 106 is a grep, 97 is a heuristic that attributes each call to its nearest preceding `addRoute` and so mis-attributes when a handler delegates to a shared helper); changing the W4 boundary or
 operation registry; changing login's tenant resolution (R1 owns that); enabling
 any flag.
 

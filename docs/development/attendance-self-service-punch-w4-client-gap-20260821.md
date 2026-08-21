@@ -20,7 +20,8 @@ authorizes nothing and proposes no change.
    (`packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts`, the
    `input.operationId === null` branch): the write posture is four-valued
    (`legacy_projection_only` / `shadow` / `authoritative` / `blocked`,
-   `w4c0-identity.ts:334`) and is tested in that order. `blocked` is checked FIRST
+   `w4c0-identity.ts:334` — that is the type-declaration order, NOT the test order).
+   `blocked` is checked FIRST
    (`:2025`) and throws `SEGMENT_CALCULATION_SUSPENDED` — a **typed 503**
    (`w4c0-operation-contract.ts:59`; its class IS in `W4_ERROR_NAMES`), which never
    reaches the registry. `legacy_projection_only` (`:2028`) takes the legacy adapter.
