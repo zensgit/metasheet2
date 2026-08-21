@@ -5,11 +5,15 @@ name: Multitable O2 Observation Kit
 # checked-out tree (same standalone shape as data-source-exposure-inventory.yml:
 # checkout + setup-node only, no pnpm install).
 #
-# NOTE (2026-08-21): scripts/ops/multitable-l1-battery-workflow.test.mjs also carries
-# real-Docker `golden` cases, but they are OPT-IN (L1_BATTERY_DOCKER_GOLDENS=1) and this
-# job does NOT set that env, so they skip here and this lane stays hermetic — a docker
-# hiccup can never red this required check. The goldens run in the dedicated non-required
-# lane .github/workflows/multitable-l1-battery-docker-goldens.yml.
+# NOTE (2026-08-21): scripts/ops/multitable-l1-battery-workflow.test.mjs AND
+# scripts/ops/create-l1-battery-admin-on-staging.test.mjs both also carry real-Docker
+# `golden` cases, but they are OPT-IN (L1_BATTERY_DOCKER_GOLDENS=1 / L1_ADMIN_DOCKER_GOLDENS=1
+# respectively) and this job does NOT set either env, so they skip here (LOUDLY) and this lane
+# stays hermetic — a docker hiccup can never red this required check. The goldens run in the
+# dedicated non-required lane .github/workflows/multitable-l1-battery-docker-goldens.yml.
+# create-l1-battery-admin-on-staging.test.mjs guards the durable ops helper (scripts/ops/
+# create-l1-battery-admin-on-staging.sh) that creates the staging L1 admin — its hermetic cases
+# are pure text/structure + string-mutation, no DB and no hosts, safe for this required lane.
 #
 # The test proves the observation
 # SQL is read-only by construction, drift-guards its trigger/function/lock-key
@@ -52,5 +56,5 @@ jobs:
         with:
           node-version: 20
       - name: Run hermetic observation-kit tests (no DB, no hosts)
-        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs
 
