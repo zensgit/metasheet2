@@ -135,6 +135,7 @@ function createFakeProvisioning() {
   const calls = {
     findObjectSheet: [],
     ensureMissingObjectFields: [],
+    readObjectFieldsContent: [],
     patchObjectFieldProperty: [],
     ensureView: [],
   }
@@ -187,6 +188,27 @@ function createFakeProvisioning() {
         addedFieldIds.push(id)
       }
       return { addedFieldIds, skippedExistingFieldIds }
+    },
+
+    // Host contract (multitable/provisioning.ts readObjectFieldsContent via the
+    // plugin provisioning surface): logicalId -> {name, type, property, order}
+    // for the ids that EXIST; absent ids are simply omitted. The customer-pack
+    // installer's pre-scan reads through this to classify pre-existing columns
+    // (NEEDS_STAMP / ALREADY_STAMPED / CONFLICTING) before it writes anything.
+    async readObjectFieldsContent({ projectId, objectId, fieldIds }) {
+      calls.readObjectFieldsContent.push({ projectId, objectId, fieldIds })
+      const content = {}
+      for (const logicalId of fieldIds || []) {
+        const row = fields.get(physicalFieldId(projectId, objectId, logicalId))
+        if (!row) continue
+        content[logicalId] = {
+          name: row.name,
+          type: row.type,
+          property: JSON.parse(JSON.stringify(row.property || {})),
+          order: row.order,
+        }
+      }
+      return content
     },
 
     async patchObjectFieldProperty({ projectId, objectId, fieldId, propertyPatch }) {
@@ -782,14 +804,20 @@ async function summaryAndLogsAreValuesFree() {
   }
 
   assert.equal(fake.logs.length, 1, 'one values-free line per install')
-  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 optionFields=5 views=3/)
+  // stamped/alreadyStamped come from the installer's pre-existing-column
+  // classification: this rehearsal installs all 21 ext_ columns fresh onto a
+  // canonical-only sheet, so both are 0 — the takeover case (hand-built columns
+  // needing an ownership stamp) is covered by the installer suite.
+  assert.match(fake.logs[0], /pack=factory-a-rehearsal v1 created=21 skipped=0 stamped=0 alreadyStamped=0 optionFields=5 views=3/)
   assert.deepEqual(Object.keys(summary).sort(), [
+    'alreadyStampedFields',
     'createdFields',
     'ensuredViews',
     'objectId',
     'packId',
     'packVersion',
     'skippedFields',
+    'stampedExistingFields',
     'syncedOptionFields',
   ])
 }
