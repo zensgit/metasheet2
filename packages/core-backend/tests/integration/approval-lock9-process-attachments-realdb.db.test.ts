@@ -370,8 +370,7 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
   // existed; it did not (`grep fieldWrites` over this file turns up comments only). The test below
   // is a real negative assertion (process binding leaves the snapshot byte-identical + zero revision
   // rows) but has no positive twin in this file demonstrating that a NON-process action on the same
-  // harness WOULD move those fields. Adding that positive control is owner-disposition work, not
-  // fixed in this round.
+  // harness WOULD move those fields. That positive control is not added in this round.
   // ===============================================================================================
   describe('G-1: process binding is form_snapshot-isolated', () => {
     it('a comment action with attachmentIds leaves form_snapshot byte-identical and writes ZERO field-revision rows', async () => {
