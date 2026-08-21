@@ -10,7 +10,7 @@ its only prior references were a PR body and session notes.
   read against this commit unless stated otherwise).
 - Scope: how the **self-service attendance routes** resolve an org when the
   request supplies none. Owns nothing else.
-- Related but separate: `w4-segment-calculation-design-lock-20260724.md` owns the
+- Related but separate: `attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md` owns the
   W4 calculation boundary and its canonical org-key domain. This lock must not
   invent or duplicate that contract; §5 records where the two meet.
 - Ratification placeholder: **§8**. A ratify record must cite an owner-authored
@@ -32,8 +32,10 @@ the history-filter Org ID box), and `jwt-middleware` puts the session org on
 Consequence: a normal browser punch resolves to `DEFAULT_ORG_ID` (`'default'`)
 regardless of the user's actual memberships. Reads on the same UI
 (`punch/events`, `records`/`calendar`, `summary`, request lists) resolve the same
-way, so today the write and the reads agree — the user sees their own data. The
-defect is that the agreement is coincidental, not derived from identity.
+way, so for a default-shaped session the write and the reads agree and the user sees
+their own data. The defect is that the agreement is coincidental, not derived from
+identity — and it is already incomplete: `GET /api/attendance/punch/events` does not
+forward the Org ID box, so a user who types an org there splits write from read today.
 
 ## 2. Facts that constrain any solution
 
@@ -71,7 +73,9 @@ defect is that the agreement is coincidental, not derived from identity.
 
 - `ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1` is a tri-state parsed once at plugin
   start: unset/`off` (default) → the recorder is never called and issues zero
-  queries; `shadow` → one audit row per punch, response unchanged; any other
+  queries; `shadow` → one audit row per punch ATTEMPT (written before validation and
+  geofence, so the table counts attempts, not accepted punches), response unchanged;
+  any other
   value → the plugin fails to activate (an enum must reject unknown values rather
   than silently degrade).
 - `shadow` writes to `attendance_org_resolution_shadow` (#5064): the org the route
@@ -95,7 +99,7 @@ defect is that the agreement is coincidental, not derived from identity.
   A lock that leaves this blank is not ratifiable.
 - **Q3** Must the resolver's output be constrained to the W4 canonical domain (F3),
   and what happens for an org id outside it — fail closed, or resolve elsewhere?
-  Any answer amends `w4-segment-calculation-design-lock-20260724`.
+  Any answer amends `attendance-issue-4556-w4-segment-calculation-design-lock-20260724.md`.
 - **Q4** Does a `'default'` membership count when deciding "sole membership"?
   (Login's `resolveSessionTenantId` currently counts it; two different definitions
   of "sole membership" in one system would be a defect.)
@@ -109,7 +113,9 @@ defect is that the agreement is coincidental, not derived from identity.
   treat a persisted `'default'` hint as a choice (F1). This is Canonical-Org-line
   work; attendance is a consumer.
 - **R2 — joint lock.** Q2's data decision, Q3's amendment to the W4 lock, and the
-  criteria for any `enforce` mode. No `enforce` code may be written before R2.
+  criteria for any `enforce` mode. This DRAFT governs nothing, so it does not forbid
+  anything; it records the author's position that `enforce` code written before R2
+  would be built against undecided semantics.
 
 ## 6. Enablement preconditions for R0 (staging)
 
@@ -124,7 +130,7 @@ defect is that the agreement is coincidental, not derived from identity.
 
 ## 7. Non-goals
 
-Changing `getOrgId` itself (99 routes depend on it); changing the W4 boundary or
+Changing `getOrgId` itself (it is read by most attendance routes — on the baseline commit, 97 distinct routes across 106 call sites); changing the W4 boundary or
 operation registry; changing login's tenant resolution (R1 owns that); enabling
 any flag.
 
