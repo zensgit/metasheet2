@@ -33,6 +33,7 @@ import {
   type ApprovalTemplateVisibilityActor,
 } from '../services/ApprovalProductService'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
+import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -2576,6 +2577,20 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
         return res.status(404).json(
           approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
         )
+      }
+
+      // Lock-10 (S1) OD-S1-1/OD-S1-12/OD-S1-18 — per-instance admission, AFTER rbacGuard
+      // (`approvals:read` gates the resource-shape 403; this gates the INSTANCE, and denies with
+      // the SAME values-free 404 as "not found" — no existence oracle, OD-S1-11). `plm:` ids are
+      // NEVER routed through the predicate (OD-S1-18(a)): platform posture only.
+      if (!isPlmApprovalId(req.params.id)) {
+        const viewerId = resolveApprovalActorId(req)
+        const readable = viewerId && pool ? await canReadApprovalInstance(pool, viewerId, req.params.id) : false
+        if (!readable) {
+          return res.status(404).json(
+            approvalErrorResponse('APPROVAL_NOT_FOUND', 'Approval instance not found'),
+          )
+        }
       }
 
       res.json(approval)

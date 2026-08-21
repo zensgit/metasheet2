@@ -2,113 +2,127 @@
  * Lock-10 (S1) — the ONE per-instance admission predicate for approval instances (OD-S1-1).
  *
  * Ratified design: docs/development/approval-lock10-instance-readability-20260821.md (Status:
- * RATIFIED 2026-08-21). "Design authority ONLY... every OD still needs its own PR". This module
- * implements the ARM SET the lock's §5.1 table marks RATIFIED-and-not-owner-blocked. It is
- * DELIBERATELY INERT: nothing in this PR calls `canReadApprovalInstance` from a route, a feed, or
- * any other consumer. Wiring a consumer to it is a SEPARATE, later slice — see "WHAT THIS SLICE
- * DOES NOT DO" below, which names every OD that blocks that wiring.
+ * RATIFIED 2026-08-21), plus the six by-reference owner rulings recorded in Lock-10 §5.1.1 / the
+ * ledger / Lock-9 §4.1 (docs PR #5078, `dd7fa8630248`): L9-AMEND arm (a) EXECUTED (unblocks
+ * OD-S1-10/OD-S1-16 and the C-1 migration — see the retirement note below), OD-S1-12 CONFIRMED
+ * (detail/history 200->404 narrowing, platform ids only), OD-S1-7/C-2 CONFIRMED (metrics-ACL
+ * widening for CC targets), OD-S1-17(c) RULED (c-i) UNION (org half = union over the viewer's
+ * ACTIVE `user_orgs` memberships), OD-S1-8(d) RULED KEEP (DB-backed admin bypass stays).
  *
  * ============================================================================================
- * ARM TABLE IMPLEMENTED HERE (lock §1.1) — four of the lock's five arms, all RATIFIED and none
- * OWNER-CONFIRM-blocked:
+ * ARM TABLE (lock §1.1) — ALL FIVE arms, all RATIFIED, none owner-blocked as of 2026-08-21:
  * ============================================================================================
  *
- *   1. REQUESTER   — `i.requester_snapshot->>'id' = viewerId`, unconditional (OD-S1-3, RATIFIED).
+ *   1. REQUESTER   — `i.requester_snapshot->>'id' = viewerId`, unconditional (OD-S1-3).
  *   2. SEAT         — `approval_assignments`, user- OR role-typed, `is_active`-INSENSITIVE — a
  *                     seat's membership is monotonic: requiring `is_active` would deny an approver
  *                     read access to the instance the moment their seat is deactivated, which is
- *                     what approving/rejecting/transferring DOES (OD-S1-4, RATIFIED). NOTE:
+ *                     what approving/rejecting/transferring DOES (OD-S1-4). NOTE:
  *                     `assignment_type = 'source_queue'` is NEVER matched here — PLM's
  *                     `source_queue` seat stores a PERMISSION CODE, not a user id, in
- *                     `assignee_id` (OD-S1-5, RATIFIED; F-2). Only `'user'` and `'role'` are
- *                     compared.
- *   3. PAST ACTOR   — `EXISTS (... approval_records r WHERE r.actor_id = viewerId)`, EXCLUDING
- *                     `action = 'policy_denied'` rows. OD-S1-6 (RATIFIED) admits `policy_denied`
- *                     ONLY TOGETHER WITH a gate proving, over the REAL dispatch choke, that (a) a
- *                     seat-holder refused by node policy writes the row and still reads the
- *                     instance, (b) a non-participant attempting each seat-gate-exempt verb writes
- *                     NO row, and (c) the mechanical enumeration over `ACTION_POLICY_KEYS` covers
- *                     every non-null key — with the fixture pinning an EXPLICIT `false` policy
- *                     (widen-only semantics make ABSENT ≡ ALLOWED, so an omitted key would make the
- *                     gate pass vacuously). That machinery lives in Lock-5's own dispatch choke
- *                     (`ApprovalProductService.ts`) and its 1000+-line real-DB suite
- *                     (`approval-node-operation-policy.db.test.ts`); re-exercising it end-to-end
- *                     from this slice was assessed and NOT built. Per OD-S1-6's own verbatim
- *                     fallback — "if G-S1-6 cannot be written, the arm excludes `policy_denied`" —
- *                     this arm takes that fallback rather than admit on an unverified claim.
+ *                     `assignee_id` (OD-S1-5; F-2). Only `'user'` and `'role'` are compared.
+ *   3. PAST ACTOR   — `EXISTS (... approval_records r WHERE r.actor_id = viewerId)`, INCLUDING
+ *                     `action = 'policy_denied'` rows (OD-S1-6). Admitted together with G-S1-6
+ *                     (`tests/integration/approval-instance-readability-s1.db.test.ts`), which
+ *                     proves the coupling that makes this safe: `policy_denied` cannot be
+ *                     self-minted by a non-participant. The coupling is a STRUCTURAL fact, not a
+ *                     per-request check — `ApprovalProductService.ts`'s dispatch choke requires a
+ *                     seat for every verb EXCEPT `revoke` (`request.action !== 'revoke'`,
+ *                     `:9091`), and `revoke` is the ONE verb whose `ACTION_POLICY_KEYS` entry is
+ *                     `null` (`types/approval-product.ts:378`) — so `revoke` never reaches the
+ *                     node-policy branch that inserts `policy_denied`, and every verb THAT DOES
+ *                     reach it already required a seat to invoke. G-S1-6 gates this invariant
+ *                     mechanically (iterating `ACTION_POLICY_KEYS`) AND proves it end-to-end over
+ *                     the real dispatch choke (a seat-holder refused by node policy still reads the
+ *                     instance; a non-participant's seat-gate-exempt attempt writes no row).
  *   4. CC TARGET    — `approval_records` `action = 'cc'`, user- or role-typed target, matching the
- *                     C-1/C-2 shape (OD-S1-7, RATIFIED as a predicate arm).
+ *                     C-1/C-2 shape (OD-S1-7).
+ *   5. ADMIN        — `EXISTS (SELECT 1 FROM users u WHERE u.id = viewerId AND u.is_active = TRUE
+ *                     AND (u.is_admin = TRUE OR u.role = 'admin'))` (OD-S1-8, kept per OD-S1-8(d)).
+ *                     DB-backed only — C-2's/C-3's JWT-claims admin readers are REJECTED as
+ *                     canonical (OD-S1-17(a) below). `users.is_active = TRUE` gates only the
+ *                     `users.role` column here, not `user_roles` rows read by `viewerRoles` — the
+ *                     lock's own note that this asymmetry is not an oversight to "fix" (§1.2).
+ *
+ * OUT: `source_queue` assignments — EXCLUDED, not deferred (OD-S1-5).
  *
  * ============================================================================================
- * WHAT THIS SLICE DOES NOT DO — every omission below is a NAMED OWNER-CONFIRM row in the lock's
- * §5.1 table, re-verified directly against the lock text on `origin/main` before this PR was
- * opened, not an unmentioned gap:
- * ============================================================================================
+ * ORG PIN (OD-S1-9(f) + OD-S1-17(b) + OD-S1-17(c) arm (c-i)) — conjoined with the arm union,
+ * BUT GATED BEHIND `APPROVAL_S1_ORG_PIN_ENABLED`, DEFAULT OFF. This is a deviation from the lock's
+ * text and is disclosed here, in the PR body, and in the module's own gate suite — NOT a design
+ * choice this module is authorized to make unilaterally, but a shipping-safety necessity forced by
+ * two implementer findings the lock's own rulings do not resolve (B-1, B-2 in the S1 implementation
+ * brief):
  *
- *   - NO ADMIN ARM. OD-S1-8 ratifies the DB-backed shape (`users.is_active = TRUE AND
- *     (is_admin OR role='admin')`) *as a design*, but OD-S1-8(d) — whether to keep or drop the
- *     admin arm AT ALL — is its own row, bucketed OWNER-CONFIRM (§5.1), not authorized. Landing an
- *     admin arm here would be choosing an unruled arm-list question unilaterally.
- *   - NO ORG PIN / ORG PARAMETER. Three independent reasons converge, so this predicate takes only
- *     `(db, viewerId, instanceId)` — no `orgId` parameter — deliberately narrower than C-1's
- *     four-parameter `isInstanceParticipant`:
- *       (i)   OD-S1-17(c) (multi-org viewers: union / exact-org / single-org-with-boot-assert) is
- *             OWNER-CONFIRM and UNRULED — there is no defined semantics for "the viewer's org" to
- *             encode yet.
- *       (ii)  This PR's migration is Phase-1-only (see the migration file's docblock): `org_id` is
- *             NULL on effectively every row at this baseline. OD-S1-9(e) rules NULL org_id ⇒ false
- *             for everyone including admins — wiring a live org conjunct today would be a total
- *             lockout, not a narrowing.
- *       (iii) C-1's existing attachment-EXISTS org pin is REMOVED and replaced by an
- *             INSTANCE-level org pin as a PAIR (OD-S1-10) — but OD-S1-10's implementation is
- *             BLOCKED on the owner-confirm row `L9-AMEND` (Lock-9's OD-L9-13(a) says
- *             `isInstanceParticipant` is reused "UNCHANGED"; only an owner-authorized amendment to
- *             that RATIFIED Lock-9 text lets S1 replace it). Doing the removal half without the
- *             addition half — or landing a second, narrower org-pinned predicate alongside the
- *             still-live C-1 — would be exactly the
- *             `feedback_second_narrower_artifact_is_contract_narrowing` failure mode.
- *   - NO ROUTE / FEED ADOPTION. `GET /api/approvals/:id`, `GET /api/approvals/:id/history`, the
- *     metrics route, `listApprovals`'s tabs, comments, and `isInstanceParticipant` itself are all
- *     UNTOUCHED by this PR. OD-S1-12 (the detail/history 200->404 narrowing) is its own
- *     OWNER-CONFIRM row, "explicitly NOT inferred from 「按建议执行」". OD-S1-16
- *     (`isInstanceParticipant` ceases to exist) is design-ratified but implementation-BLOCKED on
- *     the same `L9-AMEND` row as OD-S1-10.
- *   - `plm:`-prefixed instance ids are NEVER admitted through this predicate (OD-S1-18: PLM
- *     mirrors are scoped OUT of S1's consumers in v1). Since no consumer calls this predicate yet,
- *     that guard is enforced HERE, defensively, as `isPlmApprovalId` fail-closed — see below.
- *   - ARM 3 EXCLUDES `policy_denied` — this takes OD-S1-6's own explicit fallback ("if G-S1-6
- *     cannot be written, the arm excludes `policy_denied`") rather than admit on an unverified
- *     claim. See the arm-3 line above for the full reasoning.
+ *   - B-1: class 1 (template-originated)'s backfill source — "the template's owning org" — DOES
+ *     NOt EXIST. `approval_templates` carries no org/tenant column at this baseline.
+ *   - B-2: class 3 (requester-resolvable)'s backfill launders `'default'` into essentially the
+ *     whole platform population, because `zzzz20260114110000_create_user_orgs_table.ts:34-41`
+ *     backfilled EVERY active user into `'default'` — precisely the `DEFAULT_ORG_ID` hole
+ *     OD-S1-9(a) refuses, arriving through the backfill instead of through a column default.
+ *
+ * Consequence: Migration A (this slice) populates `org_id` for class 2 (attachment-bearing
+ * instances) ONLY. Every other existing platform row's `org_id` is NULL, and OD-S1-9(e) rules NULL
+ * org_id false for EVERYONE, admin included — quoted verbatim from the lock's §1.5(iii): "(e)
+ * therefore governs only the genuinely-anomalous row — one whose org was lost, not one whose org
+ * was never derivable." That sentence presumes the backfill succeeded; under B-1/B-2 it cannot,
+ * for the bulk of rows, in this slice. Landing the pin LIVE here would deny the majority of
+ * existing approval instances to their own legitimate requesters/approvers — an outage, not a
+ * narrowing — on every S1 consumer (attachment routes, metrics, detail, history).
+ *
+ * The flag lives INSIDE the predicate (not at any call site) so there remains exactly ONE
+ * predicate and ONE call path for every consumer — re-pointing the retirement's callers to a
+ * route-level flag would recreate the two-predicate window the owner ruling forbids. Arms 1-5 are
+ * ALWAYS live; only the `i.org_id = ANY(viewerOrgIds)` conjunct is dormant. Flip precondition: the
+ * writers-stamp-org PR lands AND Migration B's backfill has actually run against production data
+ * for classes 1/3/4/6 (not merely landed as migration code) — until then this is OFF.
+ *
+ * Discriminator (why OFF is not a new hole): today's ONLY comparable org check on the retired
+ * C-1 attachment routes is `authorizeAttachmentDownload`'s INDEPENDENT gate 0
+ * (`approval-attachment-storage.ts`, `viewerOrgId !== row.orgId` against the ALREADY-POPULATED,
+ * NOT NULL `approval_attachments.org_id`) — untouched by this slice, still enforcing on every
+ * attachment download regardless of this flag. The internal EXISTS-based org pin this module
+ * REMOVES from the old `isInstanceParticipant` compared the SAME attachment org against a
+ * caller-supplied `req.user.tenantId || 'default'` — given `user_orgs`'s blanket `'default'`
+ * backfill, that check was already close to vacuous. Detail/history/metrics have NO comparable
+ * per-request org check today at all. So flag-OFF is "no worse than status quo" everywhere S1
+ * lands in this slice; flag-ON before the backfill completes is a hard outage. See G-S1-3/G-S1-10
+ * in the gate suite, which force the flag on in-process to prove the pin's OWN correctness even
+ * while it ships dormant, and the "shipped default is off" assertion that catches a silent flip.
  *
  * Fail-closed on any thrown lookup (OD-S1-1): a DB error denies, it never admits.
  */
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 
+/** Reads fresh on every call so a test can flip it around one assertion — never cached, never a
+ *  predicate parameter (OD-S1-9(f): the caller never supplies the org; that generalizes to "no
+ *  caller may influence whether the org pin applies" either). */
+export function isOrgPinEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return String(env.APPROVAL_S1_ORG_PIN_ENABLED ?? '').trim().toLowerCase() === 'true'
+}
+
 /**
- * Canonical PLM-mirror id test — `id.startsWith('plm:')`. The lock's OD-S1-18(b) verbatim: "The
- * CHECK's predicate was matched against the runtime's own id test, not assumed: the three shipped
+ * Canonical PLM-mirror id test — `id.startsWith('plm:')`. OD-S1-18(b) verbatim: "The CHECK's
+ * predicate was matched against the runtime's own id test, not assumed: the three shipped
  * detectors are `routes/approvals.ts:94-96`, `routes/approval-history.ts:18-20` and
  * `ApprovalBridgeService.ts:113-115`, and all three are exactly `id.startsWith('plm:')`... It is
  * also fragile: the test is hand-copied into three separate private functions, so the implementing
- * slice must either consolidate them or gate the agreement." This module does not touch those three
- * files (out of scope for an inert slice), but names this function as the canonical form and gates
- * the three existing detectors' agreement with it in
- * `tests/unit/approval-instance-readability-plm-id-agreement.test.ts`.
+ * slice must either consolidate them or gate the agreement." This module names this function as
+ * the canonical form; `tests/unit/approval-instance-readability-plm-id-agreement.test.ts` gates
+ * the three existing (now exported, additive-only) detectors' agreement with it.
  */
 export function isPlmApprovalId(id: string): boolean {
   return id.startsWith('plm:')
 }
 
 /**
- * DB-rebuilt viewer roles for role-typed assignment/CC matching (OD-S1-17(a), RATIFIED — "roles
- * derived from the DB, never from token claims"). Implemented FRESH here rather than imported from
- * `approval-attachment-runtime.ts:177-191` — that function is C-1's, and C-1 is retired/re-pointed
- * only once `L9-AMEND` is answered (see the module docblock); this slice does not refactor or touch
- * that file. The two derivations are intentionally the SAME canonical source
- * (`users.role` for an active user, unioned with `user_roles` joined to `roles`, contributing both
- * `role_id` and `name`), including the deliberately-kept asymmetry: `users.is_active = TRUE` gates
- * only the `users.role` column, not the `user_roles` rows — the lock's own note that this is not an
- * oversight to "fix".
+ * DB-rebuilt viewer roles for role-typed assignment/CC matching (OD-S1-17(a): "roles derived from
+ * the DB, never from token claims"). This is the SAME canonical source C-1's own `viewerRoles`
+ * used (`users.role` for an active user, unioned with `user_roles` joined to `roles`, contributing
+ * both `role_id` and `name`) — including the deliberately-kept asymmetry: `users.is_active = TRUE`
+ * gates only the `users.role` column, not the `user_roles` rows. `approval-attachment-runtime.ts`
+ * now imports THIS export rather than keeping its own copy (OD-S1-16 retirement item 2), so there
+ * is exactly one implementation.
  */
 export async function viewerRoles(db: Queryable, viewerId: string): Promise<string[]> {
   const roles = new Set<string>()
@@ -127,9 +141,23 @@ export async function viewerRoles(db: Queryable, viewerId: string): Promise<stri
 }
 
 /**
- * S1 — the unified per-instance readability admission predicate (OD-S1-1). Implements arms 1-4
- * only; see the module docblock for exactly which arms and consumers are out of scope for this
- * slice and why. Fail-closed: any thrown lookup is caught and denies.
+ * The viewer's ACTIVE `user_orgs` memberships (OD-S1-17(c) arm (c-i): UNION over active
+ * memberships). DB-derived only — no request context, matching the predicate's fixed
+ * `(db, viewerId, instanceId)` signature (OD-S1-9(f)). Empty when the viewer holds no active
+ * membership; conjoined via `= ANY(...)`, so an empty array denies (never "no constraint").
+ */
+async function viewerActiveOrgIds(db: Queryable, viewerId: string): Promise<string[]> {
+  const result = await db.query(`SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE`, [viewerId])
+  return (result.rows as Array<{ org_id?: string | null }>)
+    .map((row) => row.org_id)
+    .filter((orgId): orgId is string => typeof orgId === 'string' && orgId.trim().length > 0)
+}
+
+/**
+ * S1 — the unified per-instance readability admission predicate (OD-S1-1). Every consumer this
+ * slice touches (attachment download/refs — C-1 retirement, metrics — C-2 replacement, detail,
+ * history) calls this ONE function; `isInstanceParticipant` no longer exists as a separate
+ * implementation (OD-S1-16). Fail-closed: any thrown lookup is caught and denies.
  */
 export async function canReadApprovalInstance(
   db: Queryable,
@@ -137,16 +165,18 @@ export async function canReadApprovalInstance(
   instanceId: string,
 ): Promise<boolean> {
   if (!viewerId || !instanceId) return false
-  // OD-S1-18 defensive guard: this predicate is never the arbiter for a PLM mirror id in v1. No
-  // consumer wires this predicate to a route in this slice, so this branch has no live caller yet;
-  // it exists so a future caller that DOES wire a `plm:` id through this predicate fails closed
-  // instead of accidentally admitting on a coincidental arm match (e.g. a requester_snapshot that
-  // happens to carry the viewer's id).
+  // OD-S1-18 guard: never the arbiter for a PLM mirror id in v1 — both consumers that could reach
+  // a `plm:` id (detail, history) branch to the PLM adapter BEFORE calling this predicate, so this
+  // is defense-in-depth, not the primary enforcement. G-S1-4 proves the primary enforcement (a spy
+  // counter, not this branch) is what actually keeps `plm:` ids off this predicate in practice.
   if (isPlmApprovalId(instanceId)) return false
 
   try {
     const roles = await viewerRoles(db, viewerId)
     const rolesParam = roles.length > 0 ? roles : ['__approval_instance_readability_no_role__']
+    const pinEnabled = isOrgPinEnabled()
+    const orgIds = pinEnabled ? await viewerActiveOrgIds(db, viewerId) : []
+    const orgIdsParam = orgIds.length > 0 ? orgIds : ['__approval_instance_readability_no_org__']
     const result = await db.query(
       `SELECT 1 FROM approval_instances i
         WHERE i.id = $1
@@ -160,7 +190,7 @@ export async function canReadApprovalInstance(
             )
             OR EXISTS (
               SELECT 1 FROM approval_records r
-               WHERE r.instance_id = i.id AND r.actor_id = $2 AND r.action <> 'policy_denied'
+               WHERE r.instance_id = i.id AND r.actor_id = $2
             )
             OR EXISTS (
               SELECT 1 FROM approval_records r
@@ -168,9 +198,13 @@ export async function canReadApprovalInstance(
                  AND ((r.metadata->>'targetType' = 'user' AND r.metadata->>'targetId' = $2)
                    OR (r.metadata->>'targetType' = 'role' AND r.metadata->>'targetId' = ANY($3::text[])))
             )
+            OR EXISTS (
+              SELECT 1 FROM users u WHERE u.id = $2 AND u.is_active = TRUE AND (u.is_admin = TRUE OR u.role = 'admin')
+            )
           )
+          AND ($4::boolean = FALSE OR i.org_id = ANY($5::text[]))
         LIMIT 1`,
-      [instanceId, viewerId, rolesParam],
+      [instanceId, viewerId, rolesParam, pinEnabled, orgIdsParam],
     )
     return result.rows.length > 0
   } catch {

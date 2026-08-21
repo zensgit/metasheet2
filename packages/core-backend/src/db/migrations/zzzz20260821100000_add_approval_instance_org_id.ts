@@ -85,6 +85,21 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // yet, so every existing writer of `approval_instances` (updated or not) is unaffected.
   await sql`ALTER TABLE approval_instances ADD COLUMN IF NOT EXISTS org_id text`.execute(db)
 
+  // Non-blank WHEN PRESENT — copied VERBATIM from `approval_attachments`
+  // (zzzz20260715210000_create_approval_attachments.ts:23-24). A Postgres CHECK passes when it
+  // evaluates to NULL, so `org_id ~ '[!-~]'` already permits NULL — which is exactly why this is
+  // safe to land in Phase 1, before any writer stamps an org. Do NOT write
+  // `org_id IS NOT NULL AND org_id ~ '[!-~]'`: not equivalent, and it rejects every un-stamped
+  // INSERT including `plm:` mirrors. This is NOT the Phase-3 `approval_instance_org_present` CHECK
+  // (OD-S1-18(b), `org_id IS NOT NULL OR id LIKE 'plm:%'`) — that one enforces PRESENCE and lands
+  // in a later, separate migration once every non-`plm:` writer stamps an org (see this file's
+  // docblock).
+  await sql`ALTER TABLE approval_instances DROP CONSTRAINT IF EXISTS approval_instance_org_nonblank`.execute(db)
+  await sql`
+    ALTER TABLE approval_instances
+      ADD CONSTRAINT approval_instance_org_nonblank CHECK (org_id ~ '[!-~]')
+  `.execute(db)
+
   // Defense in depth: some CI lanes run a NARROWER migration set than the full ledger (three
   // independent exclusion mechanisms exist — migration-provider.ts:21-59 — including two this
   // migration was never audited against: observability-strict.yml / observability-e2e.yml /

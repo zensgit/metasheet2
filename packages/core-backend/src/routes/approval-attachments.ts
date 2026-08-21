@@ -353,10 +353,12 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
    *                               not already own — and a restored draft can drop the dangling refs
    *                               instead of carrying them into a create that would fail closed.
    *   - `{ instanceId, ids }`   → **bound metadata** for detail/history rendering (§8/G5). Gated by the
-   *                               SAME two predicates the byte path uses — `isInstanceParticipant`, then
-   *                               `isFieldHiddenAtActiveNode` — so the rendered metadata and the served
-   *                               bytes cannot drift on visibility or on "hidden" (G7). A non-participant
-   *                               gets the values-free 404 the download gate gives them.
+   *                               SAME two predicates the byte path uses — `isInstanceParticipant`
+   *                               (the DI seam name; backed by Lock-10's `canReadApprovalInstance`,
+   *                               OD-S1-16), then `isFieldHiddenAtActiveNode` — so the rendered
+   *                               metadata and the served bytes cannot drift on visibility or on
+   *                               "hidden" (G7). A non-participant gets the values-free 404 the
+   *                               download gate gives them.
    *
    * Resolution is BY THE FROZEN ID and scoped to the instance the caller named: an id that does not
    * resolve to a live row bound to THAT instance renders as a `tombstone` (the §8 "附件已删除" contract)
@@ -402,8 +404,10 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     // because an initiator may legitimately upload before they have instance-read permission.
     if (!deps.hasApprovalsRead(req)) return res.status(404).json({ error: 'not_found' })
 
-    // Bound metadata: gate 1 — org-pinned participant (same predicate as §4.2 download).
-    const participant = await deps.authChecks.isInstanceParticipant(viewerId, instanceId, orgId).catch(() => false)
+    // Bound metadata: gate 1 — participant (same predicate as §4.2 download; OD-S1-16). `orgId`
+    // is NOT passed here any more — the predicate derives org server-side (OD-S1-9(f)); this
+    // route's own `orgId` variable still scopes the metadata SELECT below to the caller's org.
+    const participant = await deps.authChecks.isInstanceParticipant(viewerId, instanceId).catch(() => false)
     if (!participant) return res.status(404).json({ error: 'not_found' })
     const { rows } = await deps.db.query(
       `SELECT id, field_id, file_name, size_bytes, mime_type, status, scan_state FROM approval_attachments
