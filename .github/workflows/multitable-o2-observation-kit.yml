@@ -1,19 +1,15 @@
 name: Multitable O2 Observation Kit
 
-# Self-test for the O-2 enablement-ladder observation/drill kit. No database, no
-# secrets, no remote hosts — `node --test` directly against the checked-out tree
-# (same standalone shape as data-source-exposure-inventory.yml: checkout +
-# setup-node only, no pnpm install).
+# Self-test for the O-2 enablement-ladder observation/drill kit. Hermetic, no
+# database, no secrets, no remote hosts — `node --test` directly against the
+# checked-out tree (same standalone shape as data-source-exposure-inventory.yml:
+# checkout + setup-node only, no pnpm install).
 #
-# ONE DEPENDENCY BEYOND checkout+node (2026-08-21): the `golden (real Docker)` cases
-# in scripts/ops/multitable-l1-battery-workflow.test.mjs drive the runner's LOCAL
-# docker daemon. They prove the fact the L1-battery credential-lifecycle fix rests
-# on — that a container absent from `docker ps` still yields its writable layer to
-# `docker cp` while refusing `docker exec` — which no amount of text inspection can
-# establish. They are REGISTRY-FREE by construction (`docker import` of a rootfs the
-# test builds; nothing is pulled), so this required check cannot go red because a
-# registry was unavailable, and they skip with a loud stderr banner when no docker
-# daemon is reachable. Everything else in this job remains hermetic.
+# NOTE (2026-08-21): scripts/ops/multitable-l1-battery-workflow.test.mjs also carries
+# real-Docker `golden` cases, but they are OPT-IN (L1_BATTERY_DOCKER_GOLDENS=1) and this
+# job does NOT set that env, so they skip here and this lane stays hermetic — a docker
+# hiccup can never red this required check. The goldens run in the dedicated non-required
+# lane .github/workflows/multitable-l1-battery-docker-goldens.yml.
 #
 # The test proves the observation
 # SQL is read-only by construction, drift-guards its trigger/function/lock-key

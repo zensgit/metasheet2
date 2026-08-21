@@ -1375,6 +1375,15 @@ test('local run-body mutation-prove: dropping `pipefail` from `set -euo pipefail
 // ---------------------------------------------------------------------------
 
 function dockerSkipReason() {
+  // OPT-IN, not opt-out: the real-Docker goldens run ONLY when L1_BATTERY_DOCKER_GOLDENS=1 is set.
+  // The obs-kit `contract` lane (REQUIRED, no path filter, runs on every PR) does NOT set it, so
+  // this file stays hermetic there — a docker daemon hiccup on an unrelated PR can never red the
+  // required check (the gate's disclosed P2). The dedicated non-required lane
+  // .github/workflows/multitable-l1-battery-docker-goldens.yml sets it and runs the real proof.
+  // Not-set is a LOUD skip (below), never a silent one, so the coverage move is visible.
+  if (process.env.L1_BATTERY_DOCKER_GOLDENS !== '1') {
+    return 'L1_BATTERY_DOCKER_GOLDENS != 1 (goldens run only in the dedicated docker lane, not the hermetic required contract lane)'
+  }
   const probe = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], { encoding: 'utf8' })
   if (probe.error) return `docker CLI not usable: ${probe.error.message}`
   if (probe.status !== 0) return `docker daemon not reachable (exit ${probe.status}): ${(probe.stderr || '').trim()}`
