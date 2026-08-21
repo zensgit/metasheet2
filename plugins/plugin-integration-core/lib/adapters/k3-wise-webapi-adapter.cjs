@@ -144,6 +144,11 @@ const K3_NON_PROFILE_OBJECT_CONFIG_MODULES = Object.freeze([
   'lib/adapters/http-adapter.cjs',
   'lib/adapters/metasheet-multitable-target-adapter.cjs',
   'lib/adapters/metasheet-staging-source-adapter.cjs',
+  // The multitable ownership write-guard. It reads exactly two keys off the MULTITABLE object
+  // config (objectId, projectId) to key a field-ownership lookup, and never sees a K3 profile,
+  // endpoint, verb, or Save body. Declared here rather than dodged by renaming the parameter:
+  // the sweep's question is "does this file mention the identifier", and it does.
+  'lib/adapters/multitable-ownership-guard.cjs',
   // erp:k3-wise-sqlserver is a different TRANSPORT with a disjoint vocabulary (table/columns/
   // writeMode/allowDirectTableWrite/orderBy) and no profile system at all. It issues no HTTP,
   // so the endpoint/verb/body class this file pins does not exist there; its own write safety

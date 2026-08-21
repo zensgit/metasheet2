@@ -16,6 +16,10 @@ const {
   normalizeUpsertRequest,
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
+const {
+  MultitableOwnershipGuardError,
+  createMultitableOwnershipGuard,
+} = require('./multitable-ownership-guard.cjs')
 
 const INTERNAL_FIELD_PREFIX = '_integration_'
 
@@ -162,6 +166,20 @@ function projectRecordForWrite(record, objectConfig) {
   return data
 }
 
+// The LOGICAL field names a batch is about to write. That is the only set the ownership
+// guard needs metadata for, and computing it for the whole batch up front is what lets one
+// reader call cover an entire run instead of one call per row.
+function candidateWriteFields(records, objectConfig) {
+  const fields = new Set()
+  for (const record of Array.isArray(records) ? records : []) {
+    if (!isPlainObject(record)) continue
+    for (const field of Object.keys(record)) {
+      if (shouldWriteField(field, objectConfig)) fields.add(field)
+    }
+  }
+  return Array.from(fields)
+}
+
 function logicalFieldNames(objectConfig) {
   const fields = new Set()
   for (const field of objectConfig.fields || []) {
@@ -249,7 +267,7 @@ async function findExistingRecord(recordsApi, objectConfig, data, keyFields) {
   return Array.isArray(records) && records.length > 0 ? records[0] : null
 }
 
-async function writeOne({ recordsApi, objectConfig, request, record, index, logicalToPhysical }) {
+async function writeOne({ recordsApi, objectConfig, request, record, index, logicalToPhysical, shield }) {
   const logicalData = projectRecordForWrite(record, objectConfig)
   const keyFields = resolvedKeyFields(request, objectConfig)
   const mode = objectConfig.mode === 'append' || keyFields.length === 0 ? 'append' : 'upsert'
@@ -258,6 +276,16 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
   if (mode === 'upsert') assertKeyValues(logicalData, keyFields, index)
   const data = mapRecordFieldsForWrite(logicalData, logicalToPhysical)
   const physicalKeyFields = keyFields.map((field) => mapLogicalFieldName(field, logicalToPhysical))
+  // The ownership guard removes human-owned columns from what is WRITTEN, never from what is
+  // LOOKED UP: reading a row by a protected key is harmless, and keeping the lookup payload
+  // whole means the guard can never turn an update into an accidental duplicate insert.
+  // Stripping happens on the LOGICAL payload because ownership metadata is keyed by logical
+  // field id; with nothing protected the stripped payload is the very same object.
+  const projected = shield ? shield.strip(logicalData) : { data: logicalData, stripped: 0, skip: false }
+  if (projected.skip) {
+    return { index, status: 'skipped', key, reason: 'ownership_guard_empty_payload' }
+  }
+  const writeData = projected.stripped > 0 ? mapRecordFieldsForWrite(projected.data, logicalToPhysical) : data
 
   if (mode === 'upsert') {
     if (typeof recordsApi.queryRecords !== 'function' || typeof recordsApi.patchRecord !== 'function') {
@@ -270,7 +298,7 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
       const updated = await recordsApi.patchRecord({
         sheetId: objectConfig.sheetId,
         recordId: existing.id,
-        changes: data,
+        changes: writeData,
       })
       return {
         index,
@@ -285,7 +313,7 @@ async function writeOne({ recordsApi, objectConfig, request, record, index, logi
 
   const created = await recordsApi.createRecord({
     sheetId: objectConfig.sheetId,
-    data,
+    data: writeData,
   })
   return {
     index,
@@ -301,6 +329,8 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // One guard per adapter instance = one per run, the same scope fieldMapCache already uses.
+  const ownershipGuard = createMultitableOwnershipGuard({ context })
 
   async function fieldMapForObject(objectConfig) {
     if (fieldMapCache.has(objectConfig.objectId)) return fieldMapCache.get(objectConfig.objectId)
@@ -384,19 +414,31 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
       const objectConfig = getObjectConfig(objects, request.object)
       const recordsApi = getRecordsApi(context)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
+      // Resolved ONCE for the whole batch, BEFORE the row loop: a metadata read that fails
+      // must refuse the entire write (fail closed), not degrade into per-row errors that a
+      // caller could mistake for a partial success.
+      const shield = await ownershipGuard.forObject(
+        objectConfig,
+        candidateWriteFields(request.records, objectConfig),
+      )
+      ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, resolvedKeyFields(request, objectConfig))
       const results = []
       const errors = []
+      let skipped = 0
 
       for (let index = 0; index < request.records.length; index += 1) {
         try {
-          results.push(await writeOne({
+          const outcome = await writeOne({
             recordsApi,
             objectConfig,
             request,
             record: request.records[index],
             index,
             logicalToPhysical,
-          }))
+            shield,
+          })
+          if (outcome.status === 'skipped') skipped += 1
+          results.push(outcome)
         } catch (error) {
           errors.push({
             index,
@@ -410,7 +452,10 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
       }
 
       return createUpsertResult({
-        written: results.length,
+        // A guard-skipped row is NOT written. The runner reconciles written+skipped+failed
+        // against the row count, so counting a skip as written would report as inconsistent.
+        written: results.length - skipped,
+        skipped,
         failed: errors.length,
         results,
         errors,
@@ -418,6 +463,7 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
           object: request.object,
           sheetId: objectConfig.sheetId,
           mode: objectConfig.mode,
+          ownershipGuard: ownershipGuard.summary(),
         },
       })
     },
@@ -499,6 +545,9 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // The C6 planner drives insertRows/updateRows one row at a time, so the guard's per-object
+  // cache is what keeps the ownership read to ONE call for the whole apply.
+  const ownershipGuard = createMultitableOwnershipGuard({ context })
 
   async function fieldMapForObject(objectConfig) {
     if (fieldMapCache.has(objectConfig.objectId)) return fieldMapCache.get(objectConfig.objectId)
@@ -554,9 +603,13 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
+      const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
       const created = []
       for (const row of rows) {
-        const data = mapRecordFieldsForWrite(projectRecordForWrite(row, objectConfig), logicalToPhysical)
+        const logicalRow = projectRecordForWrite(row, objectConfig)
+        const projected = shield.strip(logicalRow)
+        if (projected.skip) continue
+        const data = mapRecordFieldsForWrite(projected.data, logicalToPhysical)
         created.push(await recordsApi.createRecord({ sheetId: objectConfig.sheetId, data }))
       }
       return { data: created, metadata: {} }
@@ -568,18 +621,35 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
       const keyFields = policy && Array.isArray(policy.keyFields) && policy.keyFields.length > 0
         ? policy.keyFields
         : objectConfig.keyFields
+      const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
+      ownershipGuard.assertKeyFieldsWritable(shield, objectConfig.objectId, keyFields)
       let rowCount = 0
       for (const row of rows) {
-        const physicalRow = mapRecordFieldsForWrite(projectRecordForWrite(row, objectConfig), logicalToPhysical)
+        const logicalRow = projectRecordForWrite(row, objectConfig)
+        // Guard-skipped rows never reach the lookup: an empty patch is a no-op write, and
+        // skipping before findExistingRecord keeps a stripped row from raising the
+        // "update target row not found" failure for a write it was never going to perform.
+        const projected = shield.strip(logicalRow)
+        if (projected.skip) continue
+        // Lookup uses the FULL row (a protected key is safe to read by); only the patch is stripped.
+        const physicalRow = mapRecordFieldsForWrite(logicalRow, logicalToPhysical)
         const physicalKeyFields = keyFields.map((field) => mapLogicalFieldName(field, logicalToPhysical))
         const existing = await findExistingRecord(recordsApi, objectConfig, physicalRow, physicalKeyFields)
         if (!existing || !existing.id) {
           throw new AdapterValidationError('metasheet:multitable update target row not found for key', { object })
         }
-        await recordsApi.patchRecord({ sheetId: objectConfig.sheetId, recordId: existing.id, changes: physicalRow })
+        const changes = projected.stripped > 0
+          ? mapRecordFieldsForWrite(projected.data, logicalToPhysical)
+          : physicalRow
+        await recordsApi.patchRecord({ sheetId: objectConfig.sheetId, recordId: existing.id, changes })
         rowCount += 1
       }
       return { rowCount, results: [] }
+    },
+    // Diagnostic only - values-free counts for the run. NOT part of the C6 raw write-source
+    // seam (test/lookupByKey/insertRows/updateRows), which the planner validates by presence.
+    ownershipGuardSummary() {
+      return ownershipGuard.summary()
     },
   }
 }
@@ -647,6 +717,9 @@ module.exports = {
   METASHEET_MULTITABLE_ADAPTER_METADATA,
   MULTITABLE_WRITE_TARGET_KIND,
   MULTITABLE_WRITE_PROFILE,
+  // Re-exported so a caller can catch the ownership refusal by type without reaching into
+  // the guard module directly.
+  MultitableOwnershipGuardError,
   createMetaSheetMultitableWriteSource,
   deriveMultitablePlannerTargetConfig,
   createMetaSheetMultitableTargetAdapter,
@@ -656,6 +729,7 @@ module.exports = {
     normalizeFields,
     normalizeFieldIdMap,
     projectRecordForWrite,
+    candidateWriteFields,
     mapRecordFieldsForWrite,
     resolveProvisionedFieldIdMap,
     resolvedKeyFields,
