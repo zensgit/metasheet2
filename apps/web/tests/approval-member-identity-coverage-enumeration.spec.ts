@@ -699,7 +699,7 @@ const SHARED_COMMENTS_APPROVAL_CONSUMERS: SharedCommentsApprovalConsumer[] = [
   },
   {
     file: 'src/views/approval/ApprovalCommentsPanel.vue',
-    guard: 'authorDisplayName computed: `getResolvedUserName(c.authorId) || \\`成员 ${ordinal}\\`` unconditionally overwrites `authorName` on every comment BEFORE it reaches the kit -- see the TIER A entry "ApprovalCommentsPanel.vue -- comment author display name" above, and mentionCandidatesForPanel\'s equivalent `name.trim()`-or-nothing mapping (candidates already carry a real `name` from the S2 endpoint; never `id`).',
+    guard: 'TWO surfaces, both covered. THREAD LIST: authorDisplayName computed -- `getResolvedUserName(c.authorId) || \\`成员 ${ordinal}\\`` -- unconditionally overwrites `authorName` on every comment BEFORE it reaches the kit (TIER A entry "ApprovalCommentsPanel.vue -- comment author display name" above). MENTION DROPDOWN (a SEPARATE kit render path, post-push adversarial-review finding): setting `authorName` above arms the kit\'s OWN `defaultMentionSuggestions` :385 subtitle leak (renders raw `authorId` whenever `authorName` differs from it, which is now always) and :378\'s candidate-label leak (blank `name` falls back to raw `userId`) -- discharged by NOT feeding `mentionCandidates` to the kit at all and supplying our own values-free `mentionSuggestionsForPanel` (ordinal fallback, `subtitle: undefined`) covering every author + candidate id, which supersedes the kit\'s internal derivation. See `approval-comments-panel.spec.ts`\'s dedicated dropdown-opening test.',
     reason: 'S3b 全文评论 tab wrapper -- mounts MetaCommentsPanel.vue and useMultitableComments from shared/comments.',
   },
 ]
