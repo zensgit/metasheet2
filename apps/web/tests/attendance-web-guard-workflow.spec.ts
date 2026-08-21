@@ -63,13 +63,25 @@ describe('attendance web guard workflow contract', () => {
     const nextStepStart = workflow.indexOf('\n      - name:', stepStart + 1)
     const targetedStep = workflow.slice(stepStart, nextStepStart === -1 ? undefined : nextStepStart)
     expect(stepStart).toBeGreaterThan(-1)
+    // GATE-5086 round-2 P3-R1: scoping to the STEP is still not enough — a YAML comment placed
+    // INSIDE this same step satisfies a step-wide match (mutation MR6b: drop the token from the
+    // `run:` command AND add `# <token> runs in the required web-tests lane instead` inside the
+    // step → the step-scoped check stayed GREEN). Narrow once more to the `run:` scalar and strip
+    // comments from it, so only text vitest actually receives can satisfy the assertion.
+    const runStart = targetedStep.indexOf('\n        run: ')
+    expect(runStart).toBeGreaterThan(-1)
+    const targetedRun = targetedStep
+      .slice(runStart)
+      .split('\n')
+      .map((line) => line.replace(/#.*$/, ''))
+      .join('\n')
     for (const spec of [
       'attendanceCapabilityUnavailable',
       'attendanceRequestReviewEntitlement',
       'attendanceFeatureOverride',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
-      expect(targetedStep).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
     }
   })
 })
