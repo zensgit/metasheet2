@@ -1,12 +1,14 @@
 import { createRequire } from 'node:module'
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   decideShadowOrgResolutionV1,
   recordShadowOrgResolutionV1,
+  resetShadowWarnThrottleForTestingV1,
+  WARN_THROTTLE_WINDOW_MS,
 } = require('../../../../plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs') as {
   parseAttendanceOrgResolutionShadowModeV1: (rawValue: string | undefined | null) => 'off' | 'shadow'
   decideShadowOrgResolutionV1: (input: Record<string, unknown>) => Record<string, unknown>
@@ -16,6 +18,8 @@ const {
     ctx: Record<string, unknown>,
     logger?: { warn: (message: string, meta?: Record<string, unknown>) => void },
   ) => Promise<void>
+  resetShadowWarnThrottleForTestingV1: () => void
+  WARN_THROTTLE_WINDOW_MS: number
 }
 
 // Pure-logic coverage for the shadow audit of the self-service punch route's org resolution
@@ -306,9 +310,58 @@ describe('attendance org resolution shadow — decision core, every rule branch'
       rule: 'sole_non_default_membership',
     })
   })
+
+  it('orgLegacy is a fully opaque pass-through — this core never re-derives, defaults, or validates it (P2-1: the getOrgId(req)-vs-orgId divergence class can only be introduced at the CALL SITE, never inside this module)', () => {
+    // Mirrors the real-DB discriminating shape: whatever the caller passes as orgLegacy is
+    // used verbatim, even a value that looks nothing like a real org id (an empty string, the
+    // exact shape a getOrgId(req)-style re-derivation bug would wrongly produce when
+    // body.orgId="" and an x-org-id header is present — see the module doc comment and
+    // tests/integration/attendance-org-resolution-shadow.db.test.ts's dedicated case). This
+    // function performs zero validation on it: rule "request" mirrors it verbatim into
+    // orgChosen, and `agree` is a plain equality against whatever was passed, correct or not.
+    expect(
+      decideShadowOrgResolutionV1({
+        requestOrgSupplied: true,
+        orgLegacy: '',
+        orgClaim: null,
+        activeMembershipOrgIds: ['org-y'],
+      }),
+    ).toEqual({
+      membershipCount: 1,
+      nonDefaultMembershipCount: 1,
+      orgChosen: '',
+      agree: true,
+      rule: 'request',
+    })
+
+    // Same point, non-request rule: an obviously-wrong orgLegacy does not get "corrected" —
+    // agree is computed honestly against it and comes out false.
+    expect(
+      decideShadowOrgResolutionV1({
+        requestOrgSupplied: false,
+        orgLegacy: 'not-a-real-org-id',
+        orgClaim: null,
+        activeMembershipOrgIds: ['org-y'],
+      }),
+    ).toEqual({
+      membershipCount: 1,
+      nonDefaultMembershipCount: 1,
+      orgChosen: 'org-y',
+      agree: false,
+      rule: 'sole_non_default_membership',
+    })
+  })
 })
 
 describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orchestration', () => {
+  // The module throttles its warn log to at most once per WARN_THROTTLE_WINDOW_MS per
+  // process (module-level state) — reset it before every test in this block so each test's
+  // own warn-call-count assertions are independent of execution order and of what any
+  // earlier test in this file already warned about.
+  beforeEach(() => {
+    resetShadowWarnThrottleForTestingV1()
+  })
+
   it('loads active memberships for ctx.userId (one query, same user_orgs predicate as the sibling module) and inserts one row', async () => {
     const calls: Array<{ sql: string; params: unknown[] | undefined }> = []
     const db = {
@@ -423,7 +476,8 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
     expect(JSON.stringify(meta)).not.toMatch(/secret user value XYZ/)
   })
 
-  it('when ctx.userId is absent, skips the membership query (empty membership list) but still attempts the insert', async () => {
+  it('when ctx.userId is missing (null), SKIPS the query entirely (attendance_org_resolution_shadow.user_id is NOT NULL — a doomed INSERT is never attempted) and warns once', async () => {
+    const warn = vi.fn()
     const calls: Array<{ sql: string; params: unknown[] | undefined }> = []
     const db = {
       query: async (sql: string, params?: unknown[]) => {
@@ -432,9 +486,49 @@ describe('attendance org resolution shadow — recordShadowOrgResolutionV1 orche
       },
     }
     const req = { body: {}, query: {}, headers: {} }
-    await recordShadowOrgResolutionV1(db, req, { userId: null, orgLegacy: 'default', route: '/api/attendance/punch' })
-    expect(calls).toHaveLength(1)
-    expect(calls[0].sql).toMatch(/INSERT INTO attendance_org_resolution_shadow/)
-    expect(calls[0].params).toEqual([null, '/api/attendance/punch', 'default', null, false, 0, 0, 'default', true, 'legacy_default'])
+    await recordShadowOrgResolutionV1(db, req, { userId: null, orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+    expect(calls).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(1)
+    const [message] = warn.mock.calls[0] as [string]
+    expect(message).toMatch(/missing userId/)
+  })
+
+  it('when ctx.userId is an empty string, is treated the same as missing (no query, one warn)', async () => {
+    const warn = vi.fn()
+    const calls: unknown[] = []
+    const db = { query: async () => { calls.push(1); return [] } }
+    const req = { body: {}, query: {}, headers: {} }
+    await recordShadowOrgResolutionV1(db, req, { userId: '', orgLegacy: 'default', route: '/api/attendance/punch' }, { warn })
+    expect(calls).toHaveLength(0)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('throttles the warn log to at most once per WARN_THROTTLE_WINDOW_MS per process: two failures within the window log once, a third failure after the window elapses logs again', async () => {
+    vi.useFakeTimers()
+    try {
+      const warn = vi.fn()
+      const db = {
+        query: async () => {
+          throw Object.assign(new Error('boom'), { code: 'XXTEST' })
+        },
+      }
+      const req = { body: {}, query: {}, headers: {} }
+      const ctx = { userId: 'user-1', orgLegacy: 'default', route: '/api/attendance/punch' }
+
+      await recordShadowOrgResolutionV1(db, req, ctx, { warn })
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // A second failure well within the 60s window: throttled, no second call.
+      vi.advanceTimersByTime(1_000)
+      await recordShadowOrgResolutionV1(db, req, ctx, { warn })
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // A third failure once the window has fully elapsed: warns again.
+      vi.advanceTimersByTime(WARN_THROTTLE_WINDOW_MS)
+      await recordShadowOrgResolutionV1(db, req, ctx, { warn })
+      expect(warn).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

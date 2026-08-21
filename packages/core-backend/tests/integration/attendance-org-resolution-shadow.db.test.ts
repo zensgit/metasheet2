@@ -47,6 +47,22 @@
  *   (d)  sole membership X, body.orgId=X (member, matches the existing
  *        attendance-punch-org-resolution.cjs check) -> punch 200, one row: org_legacy=X,
  *        org_chosen=X, rule='request', agree=true.
+ *   (P2-1) THE ORG_LEGACY PROVENANCE CASE (gate #5064 must-fix): sole membership orgY, request
+ *        `x-org-id: orgY` header AND body `{orgId: ""}` (EMPTY STRING, not absent) -> punch 200.
+ *        `getOrgId(req)` (the route's OWN legacy helper) and `extractRequestedPunchOrgIdV1`
+ *        (what the route's actual org resolution — and this module's `request_org_supplied` —
+ *        goes through) diverge on exactly this shape: `getOrgId` reads RAW values through `??`,
+ *        so an empty-string `body.orgId` is already non-null/non-undefined and short-circuits
+ *        the chain there, NEVER reaching the header, resolving to `'default'`;
+ *        `extractRequestedPunchOrgIdV1` normalizes each source FIRST (empty string -> `null`)
+ *        and THEN chains with `??`, so it correctly falls through to the header and resolves to
+ *        `orgY`. The route's real DML write goes through the second (correct) path, so
+ *        `attendance_records.org_id` for this punch is `orgY` — independently queried as the
+ *        ground truth. This case asserts `attendance_org_resolution_shadow.org_legacy` matches
+ *        THAT ground truth exactly, not merely that the row is internally self-consistent
+ *        (`org_chosen`/`agree` mirror whatever `org_legacy` was handed under rule `request`
+ *        regardless of whether it is right, so they cannot catch this class of bug — only a
+ *        cross-check against the independently-written `attendance_records` row can).
  *   (e)  the shadow INSERT itself fails (the table is renamed away for the duration of this one
  *        punch, then renamed back in a finally) -> punch STILL 200 — the audit write is
  *        non-fatal by construction.
@@ -59,14 +75,19 @@
  *        since this activation attempt aborted before this plugin's
  *        `context.api.http.addRoute` calls ran, and the PRIOR (shadow) activation's routes were
  *        already torn down by `cleanupPluginRuntimeRegistrations` before this attempt — returns
- *        a non-200 status (pinned to whatever this server's default unmounted-route handler
- *        actually returns, not assumed).
+ *        exactly `404` (Express's own unmounted-route response; pinned to the actual value, not
+ *        `not.toBe(200)`), using a FRESH user that has never punched anywhere in this file, so
+ *        the 404 cannot be a business-logic rejection (e.g. a repeat-punch/interval guard)
+ *        wearing a "not 200" disguise — a fresh user hitting the SAME unmounted route also gets
+ *        404, so the assertion is not vacuous.
  *
  * Mutations this suite must catch (see the PR's mutation self-check):
  *   - make `agree` always true in the module -> (c) reds (expects agree=false).
  *   - skip the `orgClaim !== 'default'` guard in rule 2 -> (c) reds (expects rule
  *     'sole_non_default_membership', not 'claim').
  *   - remove the env gate at the route call site -> (a) reds (expects zero rows).
+ *   - the call site's `orgLegacy: orgId` mutated to `orgLegacy: getOrgId(req)` -> (P2-1) reds
+ *     (org_legacy would read 'default' while attendance_records.org_id is orgY).
  *
  * Shared-DB discipline: every fixture id is a file-namespaced random UUID.
  */
@@ -127,15 +148,18 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   let priorShadowEnv: string | undefined
 
   const orgX = randomUUID()
+  const orgY = randomUUID() // (P2-1) org_legacy provenance case
 
   const adminUser = randomUUID() // reactivates the plugin via the admin API between phases
   const userA = randomUUID() // (a) sole membership 'default', no orgId — env off
   const userB = randomUUID() // (b) sole membership 'default', no claim, no orgId
   const userC = randomUUID() // (c) memberships {default, X}, claim 'default', no orgId — THE discriminating row
   const userD = randomUUID() // (d) sole membership X, body.orgId=X
+  const userP2 = randomUUID() // (P2-1) sole membership orgY, body.orgId="" + x-org-id header
   const userE = randomUUID() // (e) insert failure is non-fatal
+  const userF = randomUUID() // (f) FRESH — never punches; proves the 404 isn't a business-logic rejection
 
-  const allUserIds = [adminUser, userA, userB, userC, userD, userE]
+  const allUserIds = [adminUser, userA, userB, userC, userD, userP2, userE, userF]
 
   const mintToken = async (userId: string, tenantId?: string): Promise<string> => {
     const tenantParam = tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''
@@ -145,14 +169,23 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
-  const punch = async (userId: string, opts: { orgId?: string; tenantId?: string } = {}) =>
+  const punch = async (userId: string, opts: { orgId?: string; tenantId?: string; xOrgIdHeader?: string } = {}) =>
     requestJson(`${baseUrl}/api/attendance/punch`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${await mintToken(userId, opts.tenantId)}`, 'Content-Type': 'application/json' },
+      headers: {
+        Authorization: `Bearer ${await mintToken(userId, opts.tenantId)}`,
+        'Content-Type': 'application/json',
+        // Only added when explicitly requested — `undefined` here must NOT become the literal
+        // string 'undefined' via the header-object surface.
+        ...(opts.xOrgIdHeader !== undefined ? { 'x-org-id': opts.xOrgIdHeader } : {}),
+      },
       body: JSON.stringify({
         eventType: 'check_in',
         operationId: randomUUID(),
-        ...(opts.orgId ? { orgId: opts.orgId } : {}),
+        // `!== undefined` (not truthy) so a caller can force a LITERAL EMPTY STRING through —
+        // case (P2-1) needs body.orgId==="" specifically, which `opts.orgId ? ... : ...` would
+        // silently drop.
+        ...(opts.orgId !== undefined ? { orgId: opts.orgId } : {}),
       }),
     })
 
@@ -168,6 +201,12 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
 
   const shadowRowCountFor = async (userId: string): Promise<number> =>
     Number((await pool!.query(`SELECT COUNT(*)::int AS n FROM ${SHADOW_TABLE} WHERE user_id = $1`, [userId])).rows[0]?.n ?? 0)
+
+  // Ground truth for (P2-1): the org the punch route ACTUALLY wrote the record under —
+  // completely independent of the shadow module/table, since this reads what the pre-existing
+  // (unmutated-by-this-PR) attendance-punch-org-resolution.cjs + DML write path produced.
+  const attendanceRecordOrgIdFor = async (userId: string): Promise<string | undefined> =>
+    (await pool!.query(`SELECT org_id FROM attendance_records WHERE user_id = $1`, [userId])).rows[0]?.org_id
 
   // Re-runs plugin-attendance's activate() with whatever ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1
   // is set to right now, via the same admin reload path a real operator would use — see the file
@@ -228,7 +267,9 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     await addMembership(userC, 'default')
     await addMembership(userC, orgX)
     await addMembership(userD, orgX)
+    await addMembership(userP2, orgY)
     await addMembership(userE, 'default')
+    await addMembership(userF, 'default')
   }, 180_000)
 
   afterAll(async () => {
@@ -314,6 +355,30 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     })
   })
 
+  it("(P2-1) org_legacy PROVENANCE — sole membership orgY, body.orgId='' (empty string) + x-org-id: orgY -> punch 200, actually written under orgY (ground truth), and org_legacy MATCHES that ground truth exactly (not 'default')", async () => {
+    const res = await punch(userP2, { orgId: '', xOrgIdHeader: orgY })
+    expect(res.status).toBe(200)
+
+    // Ground truth, independent of the shadow table entirely.
+    const actualOrgId = await attendanceRecordOrgIdFor(userP2)
+    expect(actualOrgId).toBe(orgY)
+
+    const row = await shadowRowFor(userP2)
+    // The load-bearing assertion: org_legacy must equal the INDEPENDENTLY-queried actual org,
+    // not merely be internally self-consistent with org_chosen/agree (see the file header for
+    // why those two cannot catch this bug on their own).
+    expect(row?.org_legacy).toBe(actualOrgId)
+    expect(row).toMatchObject({
+      user_id: userP2,
+      route: '/api/attendance/punch',
+      org_legacy: orgY,
+      request_org_supplied: true,
+      org_chosen: orgY,
+      agree: true,
+      rule: 'request',
+    })
+  })
+
   it('(e) the shadow INSERT fails (table renamed away for this one punch) -> punch STILL 200, non-fatal by construction', async () => {
     const hiddenName = `${SHADOW_TABLE}_hidden_e_${randomUUID().replace(/-/g, '')}`
     await pool!.query(`ALTER TABLE ${SHADOW_TABLE} RENAME TO ${hiddenName}`)
@@ -337,8 +402,8 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     expect(res.body?.runtime?.error).toMatch(/enforce/)
   })
 
-  it('(f) POST /api/attendance/punch is no longer mounted once activation failed closed -> non-200', async () => {
-    const res = await punch(userA)
-    expect(res.status).not.toBe(200)
+  it('(f) POST /api/attendance/punch is no longer mounted once activation failed closed -> exactly 404, using a FRESH user so this cannot be a business-logic rejection wearing a "not 200" disguise', async () => {
+    const res = await punch(userF)
+    expect(res.status).toBe(404)
   })
 })

@@ -14,6 +14,15 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 // (migration zzzz20260821090000_create_attendance_org_resolution_shadow.ts), never blocking
 // or altering the punch itself.
 //
+// This module is wired into the route BEFORE `enforcePunchConstraints` (geofence/min-interval
+// checks) and before any punch DML — a shadow row is written for every punch ATTEMPT that
+// reaches this point in the route, not only for attempts that go on to succeed. A request that
+// later 422s (e.g. WORK_DATE_ATTRIBUTION_AMBIGUOUS) or is rejected by the geofence check still
+// gets one shadow row. There is no `punch_outcome` column distinguishing "attempted" from
+// "actually recorded" — out of scope for a shadow-only audit — so a reader joining this table
+// against `attendance_records` should expect more shadow rows than successful punches. There is
+// also no retention/pruning policy yet for this table (owner item, not addressed by this PR).
+//
 // Env `ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1` (tri-state, parsed ONCE at plugin startup
 // by `parseAttendanceOrgResolutionShadowModeV1` — see plugins/plugin-attendance/index.cjs's
 // `activate()`):
@@ -25,8 +34,9 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 //     route has already resolved (and, for a request-supplied org, membership-checked) the
 //     org it is about to use, this module independently re-derives what a claim/membership
 //     driven resolution would have picked and persists ONE comparison row. The insert is
-//     wrapped in try/catch and any failure is logged at WARN and swallowed — never surfaced
-//     to the caller, never blocking the punch (see `recordShadowOrgResolutionV1`).
+//     wrapped in try/catch and any failure is logged at WARN (throttled — see
+//     `throttledShadowWarn` below) and swallowed — never surfaced to the caller, never
+//     blocking the punch (see `recordShadowOrgResolutionV1`).
 //   - 'enforce' or any other value: NOT implemented here. Rather than silently falling back
 //     to 'off' — a contract bug: an enum field must reject an unrecognised value, never
 //     silently default — an unsupported value fails PLUGIN STARTUP closed
@@ -34,12 +44,30 @@ const { extractRequestedPunchOrgIdV1, loadActiveMembershipOrgIdsV1 } = require('
 //     that the throw takes the whole plugin down, not just this feature). 'enforce' semantics
 //     are a future PR's work, not this one's.
 //
-// `org_claim` is deliberately `req.authenticatedTenantId` — the JWT payload's OWN `tenantId`
-// claim, set by `jwt-middleware.ts` ONLY from the verified token, BEFORE that middleware lets
-// an `x-tenant-id` header backfill `req.user.tenantId` for a token that carries no claim of
-// its own. Reading `req.user.tenantId` here would blur "the caller's token asserts org X" with
-// "this one request's header said X", which is exactly the ambiguity a resolution audit needs
-// to keep apart. See packages/core-backend/src/auth/jwt-middleware.ts:101-103.
+// `org_claim` is `req.authenticatedTenantId` — NOT the raw, unverified JWT payload value.
+// `AuthService.verifyToken` (packages/core-backend/src/auth/AuthService.ts) re-derives it PER
+// REQUEST: the token's own `tenantId` claim is looked up against the caller's REAL active
+// `user_orgs` membership (`AuthService.resolveSessionTenantId`) and only survives onto the
+// returned user — and therefore onto `req.authenticatedTenantId`, which `jwt-middleware.ts`
+// sets ONLY from that already-verified user (jwt-middleware.ts:101-103), BEFORE that same
+// middleware lets an `x-tenant-id` header backfill `req.user.tenantId` for a token that carries
+// no claim of its own — if the membership check passes. Reading `req.user.tenantId` here would
+// additionally blur "the caller's membership-verified claim asserts org X" with "this one
+// request's header said X", which is exactly the ambiguity a resolution audit needs to keep
+// apart.
+//
+// `orgLegacy` (the `org_legacy` column) is supplied by the CALLER (the route, via
+// `ctx.orgLegacy`) and is a fully opaque pass-through value as far as this module is concerned
+// — it is never re-derived from `req` here, never defaulted, never validated. The route MUST
+// pass the exact same value it is about to write the punch under (see the call site in
+// `index.cjs`, right after `const orgId = punchOrgResolution.orgId`) — NOT a fresh call to the
+// route's `getOrgId(req)` helper, which uses `??` on RAW (unnormalized) values and therefore
+// diverges from the actually-resolved org whenever the request supplies an EMPTY-STRING
+// `body.orgId` alongside a usable `x-org-id` header (`getOrgId` locks onto the empty string via
+// `??` and never reaches the header; `extractRequestedPunchOrgIdV1`, which the route's actual
+// resolution goes through, normalizes first and correctly falls through to the header). This is
+// a call-site correctness property this module cannot verify from the inside — see the real-DB
+// suite's dedicated case for the constructed proof.
 //
 // Values-free by construction on the failure path: the only thing ever logged when the insert
 // fails is a Postgres error CODE (or 'UNKNOWN') — never the org ids, the user id, or the
@@ -116,6 +144,11 @@ function parseAttendanceOrgResolutionShadowModeV1(rawValue) {
  * caller also holds a real, non-default membership. Trusting it there would silently prefer a
  * placeholder value over an actual membership; refusing it here is deliberate, not an omission.
  *
+ * `orgLegacy` is used ONLY as a plain equality target for `agree` (and, verbatim, as
+ * `orgChosen` under rule `request`) — this function never re-derives, defaults, or validates
+ * it. Whatever the caller passes in is what gets echoed back; correctness of that value is
+ * entirely the caller's responsibility (see the module doc comment above).
+ *
  * @param {{
  *   requestOrgSupplied: boolean,
  *   orgLegacy: string,
@@ -169,14 +202,47 @@ function decideShadowOrgResolutionV1(input) {
   }
 }
 
+// Warn-log throttling: at most one warn per process per WARN_THROTTLE_WINDOW_MS, regardless of
+// how many recordShadowOrgResolutionV1 failures happen in that window. This is a
+// non-fatal/best-effort audit write on a hot path (every punch, when the flag is on) — a
+// sustained failure (e.g. the table dropped, or a connection-pool outage) must not turn into a
+// warn-per-punch log storm. `lastWarnAtMs` is module-level (shared across every call in this
+// process), matching "once per process", not once per request/user/table.
+const WARN_THROTTLE_WINDOW_MS = 60_000
+let lastWarnAtMs = 0
+
+function resolveWarnFn(logger) {
+  return logger && typeof logger.warn === 'function'
+    ? logger.warn.bind(logger)
+    : typeof console !== 'undefined' && typeof console.warn === 'function'
+      ? console.warn.bind(console)
+      : () => {}
+}
+
+function throttledShadowWarn(logger, message, meta) {
+  const now = Date.now()
+  if (now - lastWarnAtMs < WARN_THROTTLE_WINDOW_MS) return
+  lastWarnAtMs = now
+  resolveWarnFn(logger)(message, meta)
+}
+
+/**
+ * Test-only: resets the module-level warn-throttle clock so a test suite can assert throttling
+ * behaviour deterministically regardless of what ran (and warned) earlier in the same process.
+ * Never called from production code.
+ */
+function resetShadowWarnThrottleForTestingV1() {
+  lastWarnAtMs = 0
+}
+
 /**
  * Route-level orchestration: loads the caller's active memberships (ONE query — the same
  * `user_orgs` predicate the sibling punch-org-resolution module already uses, reused here
  * rather than re-implemented), runs the pure core, and inserts ONE audit row. Non-fatal by
  * construction — any failure (missing table, connection error, constraint violation) is caught,
- * logged at WARN with only a Postgres error code (never the org ids, never `err.message`), and
- * swallowed. The punch this is called from must never fail, slow down its response shape, or
- * change its resolved org because of this function.
+ * logged at WARN, throttled (`throttledShadowWarn`) with only a Postgres error code (never the
+ * org ids, never `err.message`), and swallowed. The punch this is called from must never fail,
+ * slow down its response shape, or change its resolved org because of this function.
  *
  * Callers MUST gate the call itself on `parseAttendanceOrgResolutionShadowModeV1(...) ===
  * 'shadow'` — this function does not re-check the env itself, so the 'off' posture's
@@ -189,7 +255,8 @@ function decideShadowOrgResolutionV1(input) {
  * @param {{ userId: string, orgLegacy: string, route: string }} ctx - `userId` is the SAME
  *   value the route already derived via `getUserId(req)` for its own 401 check, passed in
  *   rather than re-extracted here so there is exactly one source of caller identity per
- *   request. `orgLegacy` is the org the route is actually about to use (post membership-check).
+ *   request. `orgLegacy` is the org the route is actually about to use (post membership-check)
+ *   — see the module doc comment for the exact call-site correctness requirement on this value.
  *   `route` is the route's own literal path, not `req.path` — this module is wired into ONE
  *   route only, and a literal keeps this row honest even if the route is ever remounted.
  * @param {{ warn: (message: string, meta?: Record<string, unknown>) => void }} [logger]
@@ -197,7 +264,18 @@ function decideShadowOrgResolutionV1(input) {
  */
 async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
   try {
-    const userId = ctx && typeof ctx.userId === 'string' ? ctx.userId : null
+    const userId = ctx && typeof ctx.userId === 'string' && ctx.userId.length > 0 ? ctx.userId : null
+    if (userId === null) {
+      // attendance_org_resolution_shadow.user_id is NOT NULL. The route always supplies a
+      // non-empty ctx.userId here — the SAME value already required non-null by the route's
+      // own pre-existing 401 check (getUserId(req)) before this is ever reached — so this
+      // branch should be unreachable in production. Skip the otherwise-guaranteed-to-fail
+      // INSERT rather than issue a query that can only violate the NOT NULL constraint, and
+      // warn (throttled, like every other failure path here) instead of staying silent.
+      throttledShadowWarn(logger, 'attendance_org_resolution_shadow skipped: missing userId', {})
+      return
+    }
+
     const orgLegacy = ctx && typeof ctx.orgLegacy === 'string' ? ctx.orgLegacy : ''
     const route = ctx && typeof ctx.route === 'string' ? ctx.route : ''
 
@@ -206,7 +284,7 @@ async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
     const rawClaim = req && req.authenticatedTenantId
     const orgClaim = typeof rawClaim === 'string' && rawClaim.trim().length > 0 ? rawClaim.trim() : null
 
-    const activeMembershipOrgIds = userId ? await loadActiveMembershipOrgIdsV1(db, userId) : []
+    const activeMembershipOrgIds = await loadActiveMembershipOrgIdsV1(db, userId)
 
     const decision = decideShadowOrgResolutionV1({
       requestOrgSupplied,
@@ -234,14 +312,8 @@ async function recordShadowOrgResolutionV1(db, req, ctx, logger) {
       ],
     )
   } catch (err) {
-    const warn =
-      logger && typeof logger.warn === 'function'
-        ? logger.warn.bind(logger)
-        : typeof console !== 'undefined' && typeof console.warn === 'function'
-          ? console.warn.bind(console)
-          : () => {}
     const code = err && typeof err === 'object' && typeof err.code === 'string' ? err.code : 'UNKNOWN'
-    warn('attendance_org_resolution_shadow insert failed; non-fatal, punch response unaffected', { code })
+    throttledShadowWarn(logger, 'attendance_org_resolution_shadow insert failed; non-fatal, punch response unaffected', { code })
   }
 }
 
@@ -249,6 +321,8 @@ module.exports = {
   parseAttendanceOrgResolutionShadowModeV1,
   decideShadowOrgResolutionV1,
   recordShadowOrgResolutionV1,
+  resetShadowWarnThrottleForTestingV1,
+  WARN_THROTTLE_WINDOW_MS,
   SHADOW_MODE_OFF,
   SHADOW_MODE_SHADOW,
   SHADOW_RULE_REQUEST,
