@@ -8,7 +8,7 @@
 > 下文 B1 段已按此改写。
 >
 > **2026-08-21 二次更新(fix-forward 已落地)**:两缺陷已修 + 过独立复门(APPROVE @ `ceb0f08def`,#5069);
-> **B1 的代码侧前置已满足**。P3-INFO-1(subject_type 枚举)已查证**满足**(两表 DB CHECK = recovery 枚举,见 §C1a)。
+> **B1 的代码侧前置尚未全满足**(2026-08-21 owner 三轮复审后订正):电池两缺陷已修(#5069/#5076),但**建号脚本重现泄漏须重写(F1)**、**search_path 根因未修(F3,owner 建议不接受 census-only)**、**漂移守卫尚未 required(F2)**。P3-INFO-1(subject_type 枚举)已查证**满足**(两表 DB CHECK = recovery 枚举,见 §C1a)。
 > 剩余 A1-ratify 前提**纯 owner/ops**:owner 授权 staging 电池实跑 → PASS → 再 ratify。secrets 已设、主机建号脚本已备。
 
 > 一页看全:两条线(O-2 启用加固 + 阶梯加速)的**开发已全部落 main 并验证**;下面全是**只有 owner 能拍的板**。
@@ -28,7 +28,7 @@
 **B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**代码侧已满足(2026-08-21)**。两缺陷已修 + 过独立复门(#5069 `ceb0f08def`);仍需 owner 授权 staging 电池实跑 PASS 才可 ratify。原两缺陷(已闭合,存档):
+- 前置:**代码侧尚未全满足(2026-08-21 三轮复审后订正)**。电池两缺陷已修+过复门(#5069/#5076),但仍有 F1(建号脚本重写)/F3(search_path 根修)未完,且 F2(设 required)是 owner 动作;全部完成 + staging 实跑 PASS 才可 ratify。原两缺陷(已闭合,存档):
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`——需 always() 清理+陈旧目录处理+失败注入测试。**(#5069 已落一轮;owner 二次复审又发现停止容器仍持密码却报 PASS ⇒ P1 第二轮修复进行中,修复前不建号/不 dispatch/不 ratify)**
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
@@ -43,7 +43,7 @@
 - 复门给 A1 留的前置:确认 `record_permissions`/`field_permissions` 只带 recovery 覆盖的主体。
 - **已查证满足**:两表都有 DB CHECK `subject_type IN ('user','role','member-group')`(`zzzz20260418143000` 加宽,此后无迁移改动),
   与触发器过滤谓词**完全一致**;三个应用写入方全在枚举内(`z.enum`/`isSheetPermissionSubjectType`)。越枚举值无法落库(23514)。
-- 唯一残留由 HARDENING 车道兜住(见 §D3):subject_type CHECK 的**运行时**确认(pg_constraint 读)已并入 A-vs-B 漂移守卫(#5071 `d0911f264d`,独立车道 `multitable-recovery-schema-drift.yml`,check context 实名 **`recovery-schema-drift`**)。**该守卫目前尚未 required**——owner 须在 branch protection 加 `recovery-schema-drift` 到 required 才成底线(见 §E)。
+- 唯一残留由 HARDENING 车道兜住(见 §D3):subject_type CHECK 的**运行时**确认(pg_constraint 读)已并入 A-vs-B 漂移守卫(#5071 `d0911f264d`,独立车道 `multitable-recovery-schema-drift.yml`,check context 实名 **`recovery-schema-drift`**)。**该守卫目前尚未 required**——owner 须在 branch protection 加 check context **`recovery-schema-drift`**(job 名,**非**文件名 `multitable-recovery-schema-drift`)到 required 才成底线(见 §E)。
 
 ## C. 需要 owner 裁量的天花板(两个,同类)
 
@@ -65,8 +65,8 @@
 
 - **F1 · P1 凭据第二轮修复(硬前置)**:owner 用真实 Docker 证明——battery workflow 把密码 `docker cp` 进容器 `/tmp`,
   容器**停止**时 `docker ps` 看不到 ⇒ 清理跳过却报 PASS,而 writable layer 里密码仍在(`docker cp <stopped>:/…/password` 读回 9 字节)。
-  **修复中(stdin-pipe 根治,不落容器盘)+ 停止容器 golden**。**修复前不建号、不 dispatch、不 ratify A1**。
-- **F2 · 设漂移守卫为 required**:#5071 的 check context 实名 **`recovery-schema-drift`**;去 pull_request paths 后已对每个 PR 稳定产生该 context(修复轮 `<待填>`),
+  **已修并落 main**(#5076 `5e9a15f02e`,stdin-pipe 根治不落容器盘 + 停止容器诚实枚举 + golden 移非-required docker 车道;两次独立复门 CLEAN)。**⚠️ 但 owner 第三轮复审发现建号脚本 `create-l1-battery-admin-on-staging.sh` 重现了同一泄漏(docker cp 密码进容器)且只在 scratchpad——已删,持久版重写进行中(scripts/ops/,stdin-only+trap+单事务提权);此脚本修复前不建号。**
+- **F2 · 设漂移守卫为 required**:#5071 的 check context 实名 **`recovery-schema-drift`**;去 pull_request paths 后已对每个 PR 稳定产生该 context(#5075 `d67b6ee57e`),
   owner 在 branch protection 加 `recovery-schema-drift` 到 required 即成 A-vs-B 底线。
 - **F3 · search_path 根因裁决(L1 前)**:授权函数仍以**裸名**调 lease helper 且未固定 `SET search_path`;#5069 的 shadow census **只拒已污染库、不根治**。
   triggers DISABLED 时无影响,但 **L1 启用 triggers 前**应裁决并优先:schema-qualified 调用 + 固定函数 search_path + 真库反例。
