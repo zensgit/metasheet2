@@ -990,6 +990,23 @@ function assertSoakContract({ remote, workflow }) {
     'the 0-row failure message must state what was restored',
   )
 
+  // F-round-2 (post-gate #5063 round 2, P3): RAISE NOTICE is gated by client_min_messages
+  // — a session running at the postgres default of 'warning' would silently DROP the
+  // ROTATE_RESULT line even though the transaction committed, which breaks the F4 recovery
+  // rule ('markers absent' must reliably mean 'did not commit'). Verified empirically
+  // against a real postgres:16 both ways (default session AND PGOPTIONS=-c
+  // client_min_messages=warning) — see the PR body for the exact evidence.
+  assert.ok(
+    slices.rotate.includes('SET LOCAL client_min_messages = notice;'),
+    'the rotation transaction must force client_min_messages=notice so ROTATE_RESULT is never silently dropped by a warning-level session default',
+  )
+  const beginIdx = slices.rotate.indexOf('\nBEGIN;\n')
+  const clientMinMsgIdx = slices.rotate.indexOf('SET LOCAL client_min_messages = notice;')
+  const setConfigIdx = slices.rotate.indexOf("SELECT set_config('rotate.user_prefix'")
+  assert.notEqual(beginIdx, -1, 'expected the rotate transaction BEGIN')
+  assert.ok(beginIdx < clientMinMsgIdx, 'client_min_messages must be set AFTER BEGIN (LOCAL is transaction-scoped)')
+  assert.ok(clientMinMsgIdx < setConfigIdx, 'client_min_messages must be set BEFORE anything that could RAISE NOTICE later in the transaction')
+
   // F3 (post-gate #5063): blast-radius, inside the SAME transaction, before COMMIT — a
   // ceiling sanity (999, defense-in-depth, explicitly NOT a derived family-size bound —
   // the family accumulates across dispatches with no hard cap), the UPDATE's row count
@@ -1902,6 +1919,20 @@ test('MUTATION (gate #5063 F3): removing the family-count ceiling check turns th
   assert.throws(
     () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /rotation must refuse a family bigger than the 999 sanity ceiling/,
+  )
+})
+
+test('MUTATION (gate #5063 round-2, P3): removing SET LOCAL client_min_messages turns the soak contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const slices = extractSoakSlices(original)
+  const anchor = 'SET LOCAL client_min_messages = notice;\n'
+  assert.ok(slices.rotate.includes(anchor), 'mutation anchor must hit the rotate slice')
+  const mutatedRotate = slices.rotate.replace(anchor, '')
+  const mutated = original.replace(slices.rotate, () => mutatedRotate)
+  assert.notEqual(mutated, original, 'mutation must change the file')
+  assert.throws(
+    () => assertSoakContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /the rotation transaction must force client_min_messages=notice/,
   )
 })
 

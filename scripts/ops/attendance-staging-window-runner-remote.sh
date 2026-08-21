@@ -1755,6 +1755,12 @@ soak_seed_rotate_password() {
   cat > "$rotate_sql" <<'SQL'
 \set ON_ERROR_STOP on
 BEGIN;
+-- transaction-scoped: recovers RAISE NOTICE regardless of the server/session
+-- client_min_messages default (round-2 gate #5063: a session running at warning
+-- would otherwise silently drop the ROTATE_RESULT line below even though the
+-- transaction committed, which breaks the F4 recovery rule this function
+-- documents — 'markers absent' must reliably mean 'did not commit').
+SET LOCAL client_min_messages = notice;
 -- psql's `:'var'` client-side substitution does NOT reach inside a `DO $$ ... $$` body
 -- (dollar-quoted strings are opaque to it — verified empirically against a real postgres:16,
 -- not assumed: a naive `:'user_prefix'` reference inside the DO block below is a silent
