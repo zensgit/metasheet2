@@ -192,6 +192,14 @@ describe('Attendance admin anchor navigation', () => {
     for (const action of ['attendance-groups', 'shifts', 'holidays', 'rule-sets', 'daily-import']) {
       expect(taskHome!.querySelector(`[data-admin-task-action="${action}"]`)).toBeTruthy()
     }
+    // Navigability audit fix 5(b): the standalone "Members" task-home shortcut is gone — it
+    // duplicated the "Attendance groups" entry right next to it and landed on a section whose
+    // only content was "open Attendance groups instead". The section itself (and its sidebar nav
+    // entry `[data-admin-anchor="attendance-admin-group-members"]`, exercised by
+    // attendance-admin-regressions.spec.ts's "keeps the clicked admin section focused…" test) is
+    // deliberately UNCHANGED — UserManagementView.vue's post-create-user deep link still needs it.
+    expect(taskHome!.querySelector('[data-admin-task-action="group-members"]')).toBeNull()
+    expect(taskHome?.textContent).not.toContain('Members')
 
     const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
     expect(importButton).toBeTruthy()
