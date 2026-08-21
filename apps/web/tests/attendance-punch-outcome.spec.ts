@@ -73,6 +73,17 @@ async function flushUi(cycles = 8): Promise<void> {
   }
 }
 
+/** Punch button release (fix/attendance-punch-button-release, 2026-08-21): a promise this test
+ * controls the settlement of, for simulating an in-flight HTTP call (punch POST or a post-punch
+ * refresh task) that has not yet resolved. */
+function createDeferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     candidate => candidate.textContent?.trim() === label
@@ -620,5 +631,123 @@ describe('Attendance punch outcome clarity (mount)', () => {
 
     expect(container!.textContent).toContain('Check in recorded.')
     expect(container!.querySelector('[data-attendance-punch-note-form]')).toBeNull()
+  })
+
+  // Punch button release (fix/attendance-punch-button-release, 2026-08-21): `punching` used to
+  // stay true until AFTER the post-punch refreshAll() settled (10 overview tasks + the 2-step
+  // loadSelfAttendanceRules — up to 11 requests, no apiFetch timeout), so the button showed
+  // "Working..." for as long as that refresh took even though the POST itself had long returned.
+  // `punching` now covers only the punch POST; a separate `refreshingAfterPunch` counter drives a
+  // non-blocking "Updating..." indicator for the refresh instead.
+  it('button release: punching clears and the button re-enables once the punch POST settles, even while the post-punch refreshAll() is still pending', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        // Every call refreshAll() makes after the punch POST resolved never settles — proves
+        // `punching` does not wait on any of them.
+        return new Promise<Response>(() => {})
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const checkIn = findButton(container!, 'Check In')
+    checkIn.click()
+    await flushUi(10)
+
+    // (a) — the discriminating assertion: the outcome is shown, the button is enabled and back
+    // to its idle label, while the refresh (deliberately never-resolving here) is still pending.
+    expect(container!.textContent).toContain('Check in recorded.')
+    expect(checkIn.disabled).toBe(false)
+    expect(checkIn.textContent?.trim()).toBe('Check In')
+    const indicator = container!.querySelector('[data-testid="attendance-refreshing-indicator"]')
+    expect(indicator).toBeTruthy()
+    expect(indicator!.textContent?.trim()).toBe('Updating...')
+  })
+
+  it('positive control: the button is disabled (and shows "Working...") while the punch POST itself is in flight, and a second click in that window issues no second POST', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    const deferredPunch = createDeferred<Response>()
+    let punchCallCount = 0
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchCallCount += 1
+        return deferredPunch.promise
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    // Capture the element reference before clicking: Vue patches the existing button node in
+    // place when its disabled/label state changes, so this reference stays valid across
+    // re-renders — looking it up again by label would fail once the label flips to "Working...".
+    const checkIn = findButton(container!, 'Check In')
+    checkIn.click()
+    await flushUi(2)
+
+    expect(punchCallCount).toBe(1)
+    expect(checkIn.disabled).toBe(true)
+    expect(checkIn.textContent?.trim()).toBe('Working...')
+
+    // (d) — a second click while the POST is still pending must not fire a second POST: the
+    // button is disabled in the actual DOM, and (like real browsers) jsdom does not dispatch a
+    // click event from `.click()` on a disabled button, so the handler never re-runs.
+    checkIn.click()
+    await flushUi(2)
+    expect(punchCallCount).toBe(1)
+
+    deferredPunch.resolve(jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } }))
+    await flushUi(10)
+
+    expect(checkIn.disabled).toBe(false)
+    expect(punchCallCount).toBe(1)
+  })
+
+  it('the refresh indicator clears once the post-punch refresh actually completes', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    let punchPosted = false
+    const deferredRefresh = createDeferred<Response>()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/punch') && !url.includes('/events')) {
+        punchPosted = true
+        return jsonResponse(200, { ok: true, data: { id: 'event-1', eventType: 'check_in' } })
+      }
+      if (punchPosted) {
+        return deferredRefresh.promise
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    findButton(container!, 'Check In').click()
+    await flushUi(10)
+
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeTruthy()
+
+    // (c) — resolving every pending refresh call clears the indicator.
+    deferredRefresh.resolve(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(10)
+
+    expect(container!.querySelector('[data-testid="attendance-refreshing-indicator"]')).toBeNull()
   })
 })

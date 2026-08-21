@@ -96,6 +96,7 @@
         :hero-clock-time="heroClockTime"
         :hero-clock-date="heroClockDate"
         :punching="punching"
+        :refreshing-after-punch="refreshingAfterPunch"
         :hero-timeline="heroTodayTimeline"
         :punch-outdoor-note-required="punchOutdoorNoteRequired"
         :punch-outdoor-note-draft="punchOutdoorNoteDraft"
@@ -11697,6 +11698,16 @@ function readImportDebugOptions(): AttendanceImportDebugOptions {
 
 const loading = ref(false)
 const punching = ref(false)
+// Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+// `punching` now covers ONLY the punch POST itself — it is released as soon
+// as that call settles and the outcome banner/state is shown, so the button
+// never blocks on the post-punch refresh (up to 11 requests: refreshAll()'s
+// 10 overview tasks plus the 2-step loadSelfAttendanceRules). This counter
+// (never negative; a plain boolean would let an overlapping second punch's
+// refresh clear the indicator while the first punch's refresh is still in
+// flight) drives a separate, non-blocking "Updating..." indicator instead.
+const refreshingAfterPunchCount = ref(0)
+const refreshingAfterPunch = computed(() => refreshingAfterPunchCount.value > 0)
 
 // UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
 // clock, display-only — punch handlers/copy/classes above are untouched.
@@ -21438,6 +21449,26 @@ function resetPunchOutdoorNote() {
   punchOutdoorNoteDraft.value = ''
 }
 
+// Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+// runs the post-punch refresh (refreshAll() or, for G1, loadRequests())
+// AFTER `punching` has already been released, tracked by
+// `refreshingAfterPunchCount` instead so it can drive a non-blocking
+// indicator without holding the punch button. Non-fatal by construction:
+// refreshAll() already catches all of its own task failures internally and
+// reports them via its own setStatusFromError, so it never rejects; the G1
+// loadRequests() call here gets the same best-effort `catch` the old
+// in-try `.catch(() => {})` gave it, preserving identical error semantics.
+async function runPostPunchRefresh(task: () => Promise<unknown>): Promise<void> {
+  refreshingAfterPunchCount.value += 1
+  try {
+    await task()
+  } catch {
+    // best-effort — see comment above; nothing else observes this rejection.
+  } finally {
+    refreshingAfterPunchCount.value = Math.max(0, refreshingAfterPunchCount.value - 1)
+  }
+}
+
 async function punch(eventType: PunchEventType, retryNote?: string) {
   punching.value = true
   // A fresh direct punch (not a G2 note retry) starts clean; the retry call
@@ -21445,6 +21476,14 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
   if (typeof retryNote !== 'string') {
     resetPunchOutdoorNote()
   }
+  // Punch button release (fix/attendance-punch-button-release, 2026-08-21):
+  // set below ONLY on the success path, to the post-punch refresh (if any)
+  // this attempt's outcome calls for. `punching` is released in `finally`
+  // right after the outcome banner/state is set — BEFORE this refresh
+  // starts running (see call site after the try/catch/finally) — so the
+  // button never blocks on it. Left null on the error path: no refresh
+  // happens on a punch failure, unchanged from before.
+  let postPunchRefresh: (() => Promise<unknown>) | null = null
   try {
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
     const orgValue = normalizedOrgId()
@@ -21474,10 +21513,10 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       // message into an unrelated "refresh failed" error), instead of the
       // full refreshAll() a normal recorded punch still triggers below.
       if (showOverview.value) {
-        await loadRequests().catch(() => {})
+        postPunchRefresh = () => loadRequests()
       }
     } else {
-      await refreshAll()
+      postPunchRefresh = () => refreshAll()
     }
   } catch (error: any) {
     const apiError = error as { status?: number; code?: string } | null
@@ -21500,7 +21539,14 @@ async function punch(eventType: PunchEventType, retryNote?: string) {
       setStatusFromError(error, tr('Punch failed', '打卡失败'), 'refresh', 'punch')
     }
   } finally {
+    // Release the button now — the POST has settled and the outcome
+    // banner/state above is already shown. This is the ONLY place
+    // `punching` is written back to false, and it always runs before
+    // `postPunchRefresh` (assigned above, executed below) starts.
     punching.value = false
+  }
+  if (postPunchRefresh) {
+    await runPostPunchRefresh(postPunchRefresh)
   }
 }
 
