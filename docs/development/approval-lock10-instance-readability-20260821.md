@@ -892,6 +892,27 @@ commit is Lock-9 G-4, amended as §5.1.1's L9-AMEND row authorizes — re-pointe
 verification claim is added — §3's gates still specify acceptance
 and none has been run at the time of this edit.
 
+### 5.1.2 THIRD by-reference ruling (2026-08-21) — two implementation-staging escalations from the S1 requalification
+
+**Provenance.** The S1 implementation requalification (PR #5070) escalated two findings as owner rulings
+(P2-1, P2-2(b) in `/tmp/s1-requal-20260821.md`, superseded-head `75417497c72a`). The executing session
+presented both with recommendations; the owner replied 「按建议执行」 (2026-08-21, the THIRD by-reference
+reply of that date). The recommendations were authored by the executing session; the owner's authored
+contribution is those four characters. The recommendation sentences, verbatim:
+
+> 裁决1(P2-1):「建议:确认蛰伏态——pin 随独立 flag 激活,激活是一次单独授权步骤(先在 staging 验
+> backfill 完整性,再 prod);ratified 谓词形状原样落地,只是 org 合取的生效时点后移。」
+> 裁决2(P2-2(b)):「建议:记录为 G-S1-12-PARTIAL(与 G-S1-8 同位阶:台账 + lock §5.1.1 式记录),
+> 阶段 3 `SET NOT NULL` 作为具名后续切片,待 backfill 在生产验证后单独授权落地」
+
+| Escalation | Ruling | Effect |
+|---|---|---|
+| P2-1 — the ratified org pin ships DORMANT | **CONFIRMED** | the org-pin conjunct of `canReadApprovalInstance` activates via its own flag as a SEPARATE authorized step after backfill verification (staging first, then prod); the ratified predicate SHAPE lands unchanged — only the conjunct's activation time moves. OD-S1-9(e)'s NULL⇒false-for-everyone applies from activation, not from code landing. Activation is NOT authorized by this ruling; it requires its own ledger row (environment, approver, time, evidence, rollback — ledger rule 5) |
+| P2-2(b) — G-S1-12-PARTIAL | **RECORDED at this altitude** | the landed slice is phases 1–2 (ADD nullable + BACKFILL); the landed test pins `is_nullable='YES'` as the PARTIAL form; phase 3 (`SET NOT NULL` + the full ratified G-S1-12 assertion incl. `is_nullable='NO'`) is a NAMED FOLLOW-UP SLICE requiring its own authorization after production backfill verification. G-S1-12 as ratified is NOT weakened — it is split into PARTIAL-now / FULL-at-phase-3, both recorded here rather than only in a test-file comment |
+
+The two rulings interlock: both name "after backfill verification" as the trigger for a second,
+separately-authorized step (pin activation; phase-3 NOT NULL). Neither second step is authorized here.
+
 ### 5.2 Declared residuals — NOT closed by this document
 
 **Corrected count (review P2-2, closed).** The draft said "the one place where C-3 is *known* to be
