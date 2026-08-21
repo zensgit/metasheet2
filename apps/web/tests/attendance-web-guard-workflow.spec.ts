@@ -34,6 +34,13 @@ function targetedRunCommand(source: string): string {
   if (typeof run !== 'string' || run.trim().length === 0) {
     throw new Error(`"${TARGETED_STEP_NAME}" step has no run command`)
   }
+  // KNOWN CEILING (GATE-5086 NIT-R10): this proves the token is TEXT the runner receives, not that
+  // vitest receives it as an argument. An inert line such as `echo <token> is covered elsewhere`
+  // inside the block, with the token dropped from the vitest command, stays green. Closing that
+  // means parsing the shell command's argv after `vitest run`, which is materially more machinery
+  // and itself defeatable (&&, subshells, variable expansion) — so the boundary is documented here
+  // rather than chased. Do not read a green here as proof that vitest runs the spec.
+  //
   // A `#` INSIDE a block scalar is literal content, not a YAML comment, so the parser keeps it —
   // but the runner's shell treats it as a comment and vitest never receives it (GATE-5086 NIT-R8:
   // dropping a token and adding `# also covers <token>` inside the block left the pin GREEN).
