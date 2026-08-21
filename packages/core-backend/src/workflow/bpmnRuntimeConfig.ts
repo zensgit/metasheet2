@@ -60,8 +60,16 @@ type MinimalNext = () => void
 /**
  * Express middleware: 503 when the runtime is disabled, otherwise `next()`.
  * Typed structurally so it needs no `express` import and stays unit-testable.
- * Apply to the whole `/api/workflow` router and to the designer's two
- * engine-reaching routes (`/templates/:id/instantiate`, `/workflows/:id/deploy`).
+ *
+ * Apply to the whole `/api/workflow` router and to the designer's ONE
+ * engine-reaching route, `/workflows/:id/deploy`.
+ *
+ * NOT `/templates/:id/instantiate` (Codex round 2): that handler is draft-only
+ * authoring — it ends at `designer.saveWorkflow`, a `workflow_definitions`
+ * upsert with `status: 'draft'`, and `WorkflowDesigner` never imports
+ * `BPMNWorkflowEngine`. The ratified S1 spec keeps draft/modeling/
+ * compile-preview OPEN while the runtime is off and closes only
+ * deploy/start/timer.
  */
 export function requireBpmnRuntimeEnabled(
   _req: unknown,

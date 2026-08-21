@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_BASE_ID,
@@ -12,8 +12,13 @@ import {
   resolveObjectFieldIds,
   buildObjectFieldsRepairSurface,
   runObjectFieldsRepairTransactionWith,
+  ensureMissingObjectFields,
   type MultitableProvisioningQueryFn,
 } from '../../src/multitable/provisioning'
+import {
+  ENSURE_FIELDS_OVERWRITE_MODE_ENV,
+  MultitableEnsureFieldsRefusedError,
+} from '../../src/multitable/ensureFieldsOverwriteMode'
 
 type FakeBase = {
   id: string
@@ -111,6 +116,12 @@ function createQuery(): {
         order,
       }
       if (existing) {
+        // Honor the actual conflict clause: `DO NOTHING` (preserve mode and
+        // ensureMissingObjectFields) must leave the stored row untouched and report
+        // rowCount 0, which is how additive callers tell "added" from "skipped".
+        if (normalized.includes('ON CONFLICT (id) DO NOTHING')) {
+          return { rows: [], rowCount: 0 }
+        }
         Object.assign(existing, nextField)
       } else {
         fields.push(nextField)
@@ -151,6 +162,19 @@ function createQuery(): {
       } else {
         views.push(nextView)
         return { rows: [], rowCount: 1 }
+      }
+    }
+
+    // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+    // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+    // this branch the fake would fall through to the `Unhandled SQL` throw below.
+    if (
+      normalized.includes('FROM meta_fields') &&
+      normalized.includes('WHERE id = $1 AND sheet_id = $2')
+    ) {
+      const [id, sheetId] = params as [string, string]
+      return {
+        rows: fields.filter((field) => field.id === id && field.sheet_id === sheetId),
       }
     }
 
@@ -587,5 +611,207 @@ describe('runObjectFieldsRepairTransactionWith (W2/P2-3 atomic glue)', () => {
     ).rejects.toThrow('verify failed')
     expect(rolledBack).toBe(true)
     expect(committed).toBe(false)
+  })
+})
+
+/**
+ * P0-S S3 (Codex round 2) — ensureFields/ensureObject destructive-reconcile default.
+ *
+ * The ratified direction: an EXISTING object is never silently destructively reconciled.
+ * On any name/type/property/order diff the DEFAULT refuses; only an explicit opt-in may
+ * overwrite; additive repair goes through ensureMissingObjectFields.
+ */
+describe('ensureObject destructive-reconcile guard (P0-S S3 fail-closed default)', () => {
+  const DESCRIPTOR = {
+    id: 'installedAsset',
+    name: 'Installed Asset',
+    fields: [
+      { id: 'assetCode', name: 'Asset Code', type: 'string' as const },
+      { id: 'serialNo', name: 'Serial No', type: 'string' as const },
+    ],
+  }
+  const PROJECT = 'tenant_42:after-sales'
+
+  afterEach(() => {
+    delete process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV]
+  })
+
+  it('leaves a FRESH install completely unaffected — every field is a create, never a refusal', async () => {
+    const { query, fields } = createQuery()
+
+    const result = await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    expect(result.fields).toHaveLength(2)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No'])
+  })
+
+  it('re-ensuring an UNCHANGED descriptor stays idempotent — no diff, so no refusal', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    await expect(
+      ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR }),
+    ).resolves.toBeDefined()
+
+    expect(fields).toHaveLength(2)
+  })
+
+  it('ADDITIVE evolution still works — a brand-new field id is a create, not an overwrite', async () => {
+    const { query, fields } = createQuery()
+
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    await ensureObject({
+      query,
+      projectId: PROJECT,
+      descriptor: {
+        ...DESCRIPTOR,
+        fields: [...DESCRIPTOR.fields, { id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const }],
+      },
+    })
+
+    expect(fields).toHaveLength(3)
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
+  })
+
+  it.each([
+    ['name', { id: 'serialNo', name: 'Serial Number', type: 'string' as const }, ['name']],
+    ['type', { id: 'serialNo', name: 'Serial No', type: 'number' as const }, ['type']],
+  ])(
+    'REFUSES by default when an existing field differs in %s, naming the diff kinds',
+    async (_label, mutated, expectedKinds) => {
+      const { query, fields } = createQuery()
+      await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+      const before = fields.map((field) => ({ ...field }))
+
+      const attempt = ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[0], mutated] },
+      })
+
+      await expect(attempt).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+      const error = await attempt.catch((err) => err as MultitableEnsureFieldsRefusedError)
+      expect(error.code).toBe('MULTITABLE_ENSURE_FIELDS_REFUSED')
+      expect(error.diffKinds).toEqual(expectedKinds)
+      // values-free: ids + kinds only, never the stored or incoming field name
+      expect(error.message).not.toContain('Serial Number')
+      // and the tenant's rows are untouched — the refusal happens BEFORE the write
+      expect(fields).toEqual(before)
+    },
+  )
+
+  it('REFUSES on a reorder — positional churn is a real overwrite, not a no-op', async () => {
+    const { query } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[1], DESCRIPTOR.fields[0]] },
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+  })
+
+  it('the exact literal overwrite env restores the old destructive behavior', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = 'overwrite'
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: {
+          ...DESCRIPTOR,
+          fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+        },
+      }),
+    ).resolves.toBeDefined()
+
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial Number'])
+  })
+
+  it.each(['', 'OVERWRITE', 'overwrit', 'true'])(
+    'a near-miss env value %j does NOT re-arm overwrite — still refuses',
+    async (value) => {
+      const { query } = createQuery()
+      await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+      process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = value
+
+      await expect(
+        ensureObject({
+          query,
+          projectId: PROJECT,
+          descriptor: {
+            ...DESCRIPTOR,
+            fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+          },
+        }),
+      ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+    },
+  )
+
+  it('the per-call opt-in overwrites without disarming the guard process-wide', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    const mutatedDescriptor = {
+      ...DESCRIPTOR,
+      fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+    }
+
+    await expect(
+      ensureObject({ query, projectId: PROJECT, descriptor: mutatedDescriptor, overwriteMode: 'overwrite' }),
+    ).resolves.toBeDefined()
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial Number'])
+
+    // the env was never set, so an ordinary caller is still fail-closed
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: { ...DESCRIPTOR, fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial No v3', type: 'string' as const }] },
+      }),
+    ).rejects.toBeInstanceOf(MultitableEnsureFieldsRefusedError)
+  })
+
+  it('preserve mode keeps the existing row and does not throw', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+    process.env[ENSURE_FIELDS_OVERWRITE_MODE_ENV] = 'preserve'
+
+    await expect(
+      ensureObject({
+        query,
+        projectId: PROJECT,
+        descriptor: {
+          ...DESCRIPTOR,
+          fields: [DESCRIPTOR.fields[0], { id: 'serialNo', name: 'Serial Number', type: 'string' as const }],
+        },
+      }),
+    ).resolves.toBeDefined()
+
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No'])
+  })
+
+  it('ensureMissingObjectFields remains the additive repair path for an existing object', async () => {
+    const { query, fields } = createQuery()
+    await ensureObject({ query, projectId: PROJECT, descriptor: DESCRIPTOR })
+
+    const result = await ensureMissingObjectFields({
+      query,
+      projectId: PROJECT,
+      objectId: DESCRIPTOR.id,
+      fields: [
+        // one already-present field (must be skipped, never mutated) and one genuinely new
+        { id: 'serialNo', name: 'Serial Number', type: 'string' as const },
+        { id: 'warrantyEnd', name: 'Warranty End', type: 'date' as const },
+      ],
+    })
+
+    expect(result.addedFieldIds).toHaveLength(1)
+    expect(result.skippedExistingFieldIds).toHaveLength(1)
+    // the pre-existing row kept its ORIGINAL name despite the differing descriptor
+    expect(fields.map((field) => field.name)).toEqual(['Asset Code', 'Serial No', 'Warranty End'])
   })
 })

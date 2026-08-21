@@ -1771,7 +1771,11 @@ export class MetaSheetServer {
       ? {
           ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
+            // P0-S S3: `overwriteMode` MUST stay in this destructure. It is the per-call
+            // destructive-reconcile opt-in, and this hook is the shipped host path for every
+            // plugin ensureObject — dropping it here would silently re-arm the fail-closed
+            // default for callers that legitimately own the columns they re-derive.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -1794,6 +1798,7 @@ export class MetaSheetServer {
                   projectId,
                   baseId,
                   descriptor,
+                  overwriteMode,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,
