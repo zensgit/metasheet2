@@ -10,9 +10,13 @@
   not fetch anything, hold route/admin state, or decide which sections a role
   may see. `groups` arrives pre-filtered by the parent (charter §6.2 "暂留父层:
   section 权限过滤、active id、数据加载"); this component renders exactly the
-  groups it is given. Href-style entries (deep links into other attendance
-  surfaces, e.g. the overview requests/anomalies queues) render as plain
-  anchors and are not part of the admin section selection path.
+  groups it is given. Href-style entries (deep links into other attendance surfaces, e.g. the
+  overview requests/anomalies queues) still render as real `<a href>` anchors (screen readers,
+  right-click "open in new tab", ctrl/cmd-click all keep working) but a plain left-click now emits
+  `navigate` instead of letting the browser do a full SPA page reload (Navigability audit fix 4,
+  2026-08-22). This component still does not hold router state itself — the parent
+  (AttendanceView.vue) owns the actual `router.push()` call, same division of responsibility as
+  `select-section`. Not part of the admin section selection path.
 -->
 <template>
   <div
@@ -53,6 +57,7 @@
             :class="{ 'attendance__btn--primary': action.primary }"
             :data-admin-task-action="action.key"
             :href="action.href"
+            @click="onLinkActionClick(action.href, $event)"
           >
             {{ action.label }}
           </a>
@@ -109,7 +114,21 @@ defineProps<{
 
 const emit = defineEmits<{
   'select-section': [id: string]
+  navigate: [href: string]
 }>()
+
+// Navigability audit fix 4: a plain left-click (no modifier, not a request to open a new tab)
+// is intercepted and re-emitted as an in-SPA navigation request instead of letting the browser
+// perform a full page reload. Modifier-clicks (ctrl/cmd/shift/middle-button) and any consumer
+// that already called `preventDefault()` are left alone, so "open in new tab" / "open in new
+// window" keep working exactly like a normal link.
+function onLinkActionClick(href: string, event: MouseEvent): void {
+  if (event.defaultPrevented) return
+  if (event.button !== 0) return
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  event.preventDefault()
+  emit('navigate', href)
+}
 </script>
 
 <style scoped>
