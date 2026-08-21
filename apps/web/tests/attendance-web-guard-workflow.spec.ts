@@ -34,7 +34,14 @@ function targetedRunCommand(source: string): string {
   if (typeof run !== 'string' || run.trim().length === 0) {
     throw new Error(`"${TARGETED_STEP_NAME}" step has no run command`)
   }
+  // A `#` INSIDE a block scalar is literal content, not a YAML comment, so the parser keeps it —
+  // but the runner's shell treats it as a comment and vitest never receives it (GATE-5086 NIT-R8:
+  // dropping a token and adding `# also covers <token>` inside the block left the pin GREEN).
+  // Parsing fixes scalar bounds and real YAML comments; this strip fixes shell comments. Both.
   return run
+    .split('\n')
+    .map((line) => line.replace(/#.*$/, ''))
+    .join('\n')
 }
 
 describe('attendance web guard workflow contract', () => {
@@ -70,7 +77,10 @@ describe('attendance web guard workflow contract', () => {
       'attendance-group-context-history',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
-      expect(workflow).toContain(` ${spec}`)
+      // Was a whole-file `toContain(' ${spec}')` — the weakest form, and the origin of the original
+      // false negative (a token named in the workflow's own prose satisfied it). Same parsed
+      // command as the test below, so all eight tokens are now pinned the same way (GATE-5086 §5).
+      expect(targetedRunCommand(workflow)).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
     }
   })
 
@@ -80,14 +90,8 @@ describe('attendance web guard workflow contract', () => {
   // group-context-route family above. Mirrors that test's shape for the three tokens a silent
   // drop would otherwise leave uncovered.
   //
-  // NOTE: unlike the group-context-route test above, this one does NOT use a bare
-  // `workflow.toContain(' ${spec}')` check on the whole file — these three token names also
-  // appear, with a leading space, in this workflow's own explanatory prose comment near the top
-  // ("... specs land here: attendanceCapabilityUnavailable.spec.ts ..."), which would make that
-  // check pass even with the token deleted from the run list (confirmed: re-running mutation M9
-  // against a `toContain`-only version of this test left it GREEN). Scope the check to the
-  // extracted "Run attendance web guard specs (targeted)" step body instead, with a whitespace
-  // boundary so it cannot match as a substring of a different token in either direction.
+  // The check itself lives in `targetedRunCommand()` above — see its doc comment for why this is
+  // parsed rather than sliced out of the file text.
   it('keeps the fix 1/fix 2 navigability-audit specs in the classifier and targeted run list', () => {
     expect(workflow.match(/apps\/web\/src\/stores\/featureFlags\.ts/g)).toHaveLength(2)
     const targetedRun = targetedRunCommand(workflow)
