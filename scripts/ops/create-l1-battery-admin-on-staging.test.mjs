@@ -517,7 +517,7 @@ test('mutation: P1 — relocating the empty-id guard to AFTER the promotion reds
   assert.equal(promotesByVerifiedLoginId(executable), true)
   const guardBlock =
     'if [[ -z "$USER_ID" ]]; then\n' +
-    '  echo "ERROR: login verification returned no server user id — refusing to promote (ZERO database writes)" >&2\n' +
+    '  echo "ERROR: login verification returned no server user id — refusing to promote (no privilege writes; a plain user row from register may remain, safe to re-run)" >&2\n' +
     '  exit 1\n' +
     'fi'
   assert.ok(scriptText.includes(guardBlock), 'sanity: the empty-id guard block exists verbatim')
