@@ -73,9 +73,9 @@ forward the Org ID box, so a user who types an org there splits write from read 
 
 - `ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1` is a tri-state parsed once at plugin
   start: unset/`off` (default) → the recorder is never called and issues zero
-  queries; `shadow` → one audit row per punch ATTEMPT (written before validation and
-  geofence, so the table counts attempts, not accepted punches), response unchanged;
-  any other
+  queries; `shadow` → one audit row per punch ATTEMPT (written before the geofence and
+  before the write itself, so the table counts attempts, not accepted punches; body
+  validation does run first), response unchanged; any other
   value → the plugin fails to activate (an enum must reject unknown values rather
   than silently degrade).
 - `shadow` writes to `attendance_org_resolution_shadow` (#5064): the org the route

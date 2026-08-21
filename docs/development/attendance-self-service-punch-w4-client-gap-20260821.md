@@ -18,18 +18,25 @@ authorizes nothing and proposes no change.
    to mint one from.
 2. In the write boundary
    (`packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts`, the
-   `input.operationId === null` branch): a null-`operationId` punch is served by the
-   legacy adapter **only** when the org's write posture is `legacy_projection_only`.
-   For any other posture it falls through to the operation-registry protocol, which
-   fails closed **before any source DML**.
+   `input.operationId === null` branch): the write posture is four-valued
+   (`legacy_projection_only` / `shadow` / `authoritative` / `blocked`,
+   `w4c0-identity.ts:334`) and is tested in that order. `blocked` is checked FIRST
+   (`:2025`) and throws `SEGMENT_CALCULATION_SUSPENDED` — a **typed 503**
+   (`w4c0-operation-contract.ts:59`; its class IS in `W4_ERROR_NAMES`), which never
+   reaches the registry. `legacy_projection_only` (`:2028`) takes the legacy adapter.
+   Only a **W4 posture** (`shadow` or `authoritative`) falls through to the
+   operation-registry protocol, which fails closed **before any source DML**.
+   (An org id that is neither `'default'` nor a canonical UUID — reachable through the
+   Org ID box, since `user_orgs.org_id` is free text — takes the legacy adapter with
+   the posture never consulted.)
 3. *Which* fail-closed it hits depends on the org, and the org a browser punch
    actually resolves to is `'default'` (it sends no `orgId`; see the companion lock).
    The registry builds the org identity **before** it checks the operation id —
    `createVerifiedAttendanceOrgIdentityV1` at `w4c0-operation-registry.ts:616`, the
-   operation-id guard at `:630` — so for `'default'` under a non-legacy posture the
-   first failure is `W4C0_DEFAULT_ORG_POSTURE_REJECTED`
-   (`w4c0-identity.ts:~575`), not `W4C0_OPERATION_ID_REQUIRED`. The latter is
-   reached only by a canonical-UUID org under a W4 posture.
+   operation-id guard at `:630` — so for `'default'` under a **W4 posture** the first
+   failure is `W4C0_DEFAULT_ORG_POSTURE_REJECTED` (`w4c0-identity.ts:~575`), not
+   `W4C0_OPERATION_ID_REQUIRED`. The latter is reached only by a canonical-UUID org
+   under a W4 posture.
 4. **And that failure does not surface as a typed 4xx.** The plugin's `W4_ERROR_NAMES`
    map (`plugins/plugin-attendance/index.cjs:25249-25274`) does not list
    `AttendanceW4IdentityError`, so the error falls through to the generic handler
