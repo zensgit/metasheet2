@@ -951,3 +951,53 @@ test(
     })
   },
 )
+
+// ---- P2-A convergent close (gate review 4, regate 2): mismatched-id is BEHAVIORALLY rejected ----
+// The structural guard above catches naive neuters but, being a regex, does not CONVERGE — the gate
+// found `e_count := u_count;` and a broadened SELECT that keep the guard GREEN yet promote the wrong
+// account on real PG. The convergent proof is behavioural: run the shipped promotion SQL with a uid
+// that exists but belongs to a DIFFERENT email (uid=B, em=A) — exactly the state a crafted/buggy
+// login response would produce — and assert it ROLLS BACK and grants nothing. This is the arm that
+// stops promote-the-wrong-identity, so it is proven by execution, not by matching text.
+function extractPromotionSql(sh) {
+  // the promotion heredoc: `... psql ... -v uid=... -v em=... <<'SQL'\n<body>\nSQL`
+  const start = sh.indexOf("<<'SQL'")
+  assert.ok(start >= 0, 'promotion heredoc <<SQL not found')
+  const after = sh.slice(start + "<<'SQL'".length)
+  const end = after.search(/\nSQL\b/)
+  assert.ok(end >= 0, 'promotion heredoc terminator not found')
+  return after.slice(0, end).replace(/^\n/, '')
+}
+
+test(
+  'golden (real Docker): a mismatched verified-id (uid=B, em=A) is REJECTED — the e_count arm rolls back and grants nothing',
+  { skip: GOLDEN_SKIP ?? false },
+  () => {
+    withGoldenStack(({ pg }) => {
+      const promoteSql = extractPromotionSql(scriptText)
+      // Use fresh emails that the harness does NOT pre-seed (the stack pre-seeds the real target
+      // email for its login-id reconciliation), so this test isolates the mismatch, not a collision.
+      const emailA = 'mismatch-target@example.com'
+      const seed = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-v', 'ON_ERROR_STOP=1'], {
+        input:
+          `INSERT INTO users (id,email,name,password_hash,role) VALUES ('id-A','${emailA}','A','h','user');\n` +
+          `INSERT INTO users (id,email,name,password_hash,role) VALUES ('id-B','mismatch-attacker@example.com','B','h','user');\n`,
+      })
+      assert.equal(seed.status, 0, `seed must succeed: ${seed.stderr}`)
+      // drive the SHIPPED promotion SQL with the mismatch: promote by B's id while claiming A's email
+      const run = d(
+        ['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-1', '-v', 'ON_ERROR_STOP=1', '-v', 'uid=id-B', `-v`, `em=${emailA}`],
+        { input: promoteSql },
+      )
+      assert.notEqual(run.status, 0, `mismatched uid=B/em=A MUST roll back (RAISE); stdout:\n${run.stdout}\nstderr:\n${run.stderr}`)
+      // and NOTHING was granted: B stays user|0, A untouched
+      const check = d(['exec', '-i', pg, 'psql', '-U', 'ms', '-d', 'metasheet', '-tA'], {
+        input:
+          `SELECT (SELECT role FROM users WHERE id='id-B'),` +
+          `(SELECT count(*) FROM user_roles WHERE user_id='id-B'),` +
+          `(SELECT count(*) FROM user_roles WHERE user_id='id-A');`,
+      })
+      assert.equal(check.stdout.trim(), 'user|0|0', 'a mismatched id must grant nothing to B and must not promote A either')
+    })
+  },
+)
