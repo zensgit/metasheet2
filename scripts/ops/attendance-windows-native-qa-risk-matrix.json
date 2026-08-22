@@ -1,0 +1,97 @@
+{
+  "campaign": "attendance-windows-native-qa-v2-20260804",
+  "expectedSourceSha": "676ed2433813139216d77685021a5b5c1acdb235",
+  "status": "DRAFT_HOLD",
+  "deploymentAuthorized": false,
+  "syntheticDataOnly": true,
+  "isolatedDatabaseName": "metasheet_windows_qa",
+  "residueRequired": 0,
+  "staleEvidenceShas": [
+    "8dfde5a7746aff3d47bb6f9db138e5f0e7b23881",
+    "7d8ba0d1d1deddfb47fd2cea5e00773b8e13d034",
+    "e63f8d52a745ef07b0f3f054742f0c8720c38d35",
+    "66a980357078f9d243fd4b025b080ac9aca9fa21"
+  ],
+  "cases": [
+    {
+      "id": "PQA-01",
+      "title": "Multi-segment authoring",
+      "objective": "Create a two-segment shift, reopen it, and confirm ordering/times/timezone are retained.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for exact source SHA 676ed2433813139216d77685021a5b5c1acdb235."
+    },
+    {
+      "id": "PQA-02",
+      "title": "Overnight attribution",
+      "objective": "Assign an overnight multi-segment shift and verify next-day punch evidence stays on the intended business workDate.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-03",
+      "title": "Timezone validation",
+      "objective": "Valid IANA timezone succeeds; invalid or offset-less authoritative input fails closed.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-04",
+      "title": "Legacy compatibility",
+      "objective": "A synthetic org outside the test allowlist retains existing response/projection shape and writes no W4 rows.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-05",
+      "title": "Shadow posture",
+      "objective": "Exact synthetic-org shadow keeps the legacy projection and appends W4 shadow evidence.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-06",
+      "title": "Ambiguous evidence",
+      "objective": "Duplicate/ambiguous candidates produce review-required, never a fabricated authoritative projection.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-07",
+      "title": "Authorization isolation",
+      "objective": "Same-org other-user, cross-org, forged witness, and inactive membership probes fail before result SQL.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-08",
+      "title": "Fingerprint freeze",
+      "objective": "Changing a shift definition does not mutate an old snapshot; a new mismatch becomes review-required.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-09",
+      "title": "Outbox retry",
+      "objective": "One synthetic dispatch failure followed by retry produces one source/result effect and no duplicate DML.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Awaiting Windows-host synthetic execution evidence for the current exact source SHA."
+    },
+    {
+      "id": "PQA-10",
+      "title": "Scheduled identity/outcome/outbox",
+      "objective": "Re-evaluate scheduled (b2) identity, target outcome, and outbox durability on the current exact source SHA without inventing PASS.",
+      "requiresHostEvidence": true,
+      "defaultStatus": "BLOCKED",
+      "blockedReason": "Code for scheduled identity/outcome/outbox is present on the pinned SHA, but Windows-host synthetic evidence has not been collected. Do not invent PASS from unit/integration suites alone or from the stale W4C-2 package."
+    }
+  ]
+}
