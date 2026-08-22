@@ -1,16 +1,40 @@
 # Attendance #4709 FSER-4 Member Projection Contract Amendment
 
 Date: 2026-08-04
-Status: **PROPOSED / runtime HOLD**
+Status: **RATIFIED / runtime HOLD** (section 7 prerequisite slice only)
 Issue: `#4709`
 Baseline: `origin/main` at
 `783eb72fe038083e21d896bc220c7afcaffaf88d`
 
+Ratified: 2026-08-05, merged SHA
+`45d71c4209af35a63768ce7ce9f576377f6b8ce4` — the commit that landed this
+document on `main` (PR 4746) — with `OD-4709-2=(a)`. Durable owner record
+(relayed transcription): PR 4746 comment `5189419335`,
+<https://github.com/zensgit/metasheet2/pull/4746#issuecomment-5189419335>.
+
+Scope of what the ratification authorizes: **only the section 7 prerequisite**
+— implement the narrow authenticated-member server projection and its real-DB
+authorization matrix from fresh `main` in one **Draft/HOLD** PR, require a
+fresh exact-head independent gate, then stop for a separate merge decision.
+
 This document is a contract repair discovered while starting the authorized
-FSER-4 frontend slice. It authorizes no runtime, merge, flag, deployment,
-staging, production/customer data use, or issue closure. FSER-4 runtime remains
-blocked until the owner ratifies one option in section 6 against the exact
-merged SHA of this amendment.
+FSER-4 frontend slice. Ratification authorizes the slice it names and nothing
+downstream: it authorizes no prerequisite merge, no subsequent frontend slice,
+no flag, no deployment, no staging or soak, no production/customer data use, no
+external notification, and no issue closure; nor does it retroactively
+authorize any earlier runtime action. Each of those remains a separate,
+un-granted owner act.
+
+**Status reconciliation note (2026-08-09):** this header previously read
+`PROPOSED / runtime HOLD`. Only the `PROPOSED` half was in-repo status drift —
+the owner record cited above resolved `OD-4709-2=(a)` on 2026-08-05, before this
+correction, and is unchanged by it. **The runtime HOLD is not drift and is not
+lifted:** the only runtime this ratification authorizes is the section 7
+prerequisite in one Draft/HOLD PR, and FSER-4 runtime beyond that prerequisite
+stays held. This edit transcribes an existing record and confers no new
+authority; the linked owner comment is the authority, not this document and not
+the pull request carrying this edit. If any line here misstates that record, it
+must not merge.
 
 ## 0. Finding
 
@@ -194,7 +218,9 @@ mismatch. No error becomes `not_configured`, `configuration_changed`,
 
 ## 6. Owner Decision
 
-`OD-4709-2` remains **OPEN**.
+`OD-4709-2` is **RESOLVED = (a)** by the owner record of 2026-08-05; see the
+ratification record in this document's header. The ballot below is retained
+verbatim as the options that were put to the owner.
 
 - **(a) RECOMMENDED:** add the narrow authenticated-member projection in
   section 2, including its declared values-free desired shift/window/revision
