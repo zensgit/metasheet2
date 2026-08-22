@@ -295,6 +295,35 @@ describeIfDatabase('Lock-11 §10 W-1/W-2 org derivation — real-DB acceptance (
   }
 
   // =============================================================================================
+  // (β) migration-ordering tripwire (deep-review P2-3, Lock-11 §10.2/§10.3): this writer suite
+  // must not be able to pass on a tree that lacks #5103's two migrations (the provisioning
+  // migration + the revised Migration B backfill) — the D-8(β) single-active-org premise this
+  // slice's own writer relies on is only true in production BECAUSE those two migrations ran.
+  // Asserted against kysely's OWN migration ledger (the authoritative "did this run" record),
+  // fail-closed: a missing row reds this test, it does not skip or pass vacuously.
+  // =============================================================================================
+  describe('(β) migration-ordering tripwire', () => {
+    it('the D-8(β) provisioning migration and the Migration B org_id backfill are BOTH recorded in kysely_migration before this suite\'s fixtures run', async () => {
+      const result = await pool().query<{ name: string }>(
+        `SELECT name FROM kysely_migration WHERE name = ANY($1::text[])`,
+        [[
+          'zzzz20260823050000_provision_zero_membership_active_users',
+          'zzzz20260823100000_backfill_approval_instance_org_id',
+        ]],
+      )
+      const found = new Set(result.rows.map((r) => r.name))
+      expect(
+        found.has('zzzz20260823050000_provision_zero_membership_active_users'),
+        'provisioning migration zzzz20260823050000 must be recorded in kysely_migration — this tree lacks #5103',
+      ).toBe(true)
+      expect(
+        found.has('zzzz20260823100000_backfill_approval_instance_org_id'),
+        'Migration B backfill zzzz20260823100000 must be recorded in kysely_migration — this tree lacks #5103',
+      ).toBe(true)
+    })
+  })
+
+  // =============================================================================================
   // G-L11-1 (W-1) — POST /api/approvals, exactly-one / zero / multi active memberships.
   // =============================================================================================
   describe('G-L11-1 (W-1): POST /api/approvals org derivation', () => {
