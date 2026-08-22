@@ -21,6 +21,7 @@ import {
   isAuthLoginAliasCutoverEnabled,
 } from './login-alias-service'
 import type { AliasQueryClient } from './login-alias-service'
+import { assignUserRoles } from '../rbac/role-assignment'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
@@ -68,6 +69,8 @@ export interface AuthConfig {
 }
 
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
+/** The closed set this service may assign. Both call sites below pass only this id. */
+const SELF_SERVICE_ASSIGNABLE_ROLE_IDS = [ATTENDANCE_SELF_SERVICE_ROLE_ID] as const
 const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:write'] as const
 
 // P23: user_roles (and users) are among exact-anchor recovery's eight recovery-authority
@@ -844,12 +847,14 @@ export class AuthService {
     roleIds: readonly string[],
   ): Promise<void> {
     for (const roleId of roleIds) {
-      await client.query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, roleId]
-      )
+      // Self-service assigns from a set fixed in this module, so the authority is stated as
+      // exactly that set rather than as an unbounded one.
+      await assignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'fixed', roleIds: SELF_SERVICE_ASSIGNABLE_ROLE_IDS },
+        executor: client,
+      })
     }
   }
 

@@ -1678,6 +1678,7 @@
                     name="attendanceSchedulerScopeSubject"
                     :search-placeholder="tr('Search the subject user', '搜索主体用户')"
                     input-id="attendance-scheduler-scope-subject-ref"
+                    endpoint="/api/attendance-admin/users/search"
                   />
                   <label v-else class="attendance__field" for="attendance-scheduler-scope-subject-ref">
                     <span>{{ tr('Subject (role / role tag)', '主体（角色 / 角色标签）') }}</span>
@@ -1785,6 +1786,7 @@
                       :search-placeholder="tr('Search a target user', '搜索目标员工')"
                       input-id="attendance-scheduler-scope-target-users"
                       full-width
+                      endpoint="/api/attendance-admin/users/search"
                     />
                     <button
                       type="button"
@@ -5128,6 +5130,7 @@
                           :help-text="tr('Pick one user and add them directly, or stage several users / paste multiple IDs for bulk changes.', '选择一个用户可直接添加；也可以暂存多个用户或粘贴多个 ID 批量处理。')"
                           :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
                           input-id="attendance-group-member-user-picker"
+                          endpoint="/api/attendance-admin/users/search"
                         />
                         <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
                           <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
@@ -5271,6 +5274,7 @@
                           :help-text="tr('Pick a user to maintain the owner roster. This does not change group membership.', '选择用户维护负责人名单；不会改变考勤人员名单。')"
                           :search-placeholder="tr('Search users to add as owner', '搜索要添加为负责人的用户')"
                           input-id="attendance-group-manager-user-picker"
+                          endpoint="/api/attendance-admin/users/search"
                         />
                         <label class="attendance__field" for="attendance-group-manager-role">
                           <span>{{ tr('Role', '角色') }}</span>
@@ -7407,6 +7411,7 @@
                     :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
                     :full-width="false"
                     input-id="attendance-annual-bulk-adjust-user-picker"
+                    endpoint="/api/attendance-admin/users/search"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -8774,6 +8779,7 @@
                   :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
                   :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
                   input-id="attendance-rotation-user"
+                  endpoint="/api/attendance-admin/users/search"
                 />
                 <label class="attendance__field" for="attendance-rotation-rule">
                   <span>{{ tr('Rotation rule', '轮班规则') }}</span>
@@ -9195,6 +9201,7 @@
                   :help-text="tr('Search by email, name, or user ID, then pick a user for this shift assignment.', '按邮箱、姓名或用户 ID 搜索，然后为该班次选择用户。')"
                   :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
                   input-id="attendance-assignment-user-id"
+                  endpoint="/api/attendance-admin/users/search"
                 />
                 <label class="attendance__field" for="attendance-assignment-shift-id">
                   <span>{{ tr('Shift', '班次') }}</span>
@@ -9375,6 +9382,7 @@
                     :search-placeholder="tr('Search users for bulk apply', '搜索批量套用用户')"
                     :full-width="false"
                     input-id="attendance-bulk-apply-user-picker"
+                    endpoint="/api/attendance-admin/users/search"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>

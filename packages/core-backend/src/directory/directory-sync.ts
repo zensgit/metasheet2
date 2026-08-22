@@ -34,6 +34,7 @@ import {
   isNamespaceAdmissionControlledResource,
   normalizeNamespace,
 } from '../rbac/namespace-admission'
+import { assignUserRoles, type RoleAssignmentScope } from '../rbac/role-assignment'
 import { invalidateUserPerms } from '../rbac/service'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../security/encrypted-secrets'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
@@ -6253,16 +6254,25 @@ async function applyDirectoryProjectedMemberGroupGovernanceInTransaction(
   let defaultNamespaceAdmissionsCount = 0
 
   if (grantSet.roleIds.length > 0) {
-    const insertedRolesResult = await client.query(
-      `INSERT INTO user_roles (user_id, role_id)
-       SELECT u.user_id, r.role_id
-       FROM unnest($1::text[]) AS u(user_id)
-       CROSS JOIN unnest($2::text[]) AS r(role_id)
-       ON CONFLICT DO NOTHING
-       RETURNING user_id, role_id`,
-      [grantSet.userIds, grantSet.roleIds],
-    )
-    defaultRoleAssignmentsCount = insertedRolesResult.rows.length
+    // This seam's real constraint is its CONFIG VALIDATOR, not this call: on integration
+    // create and update, `assertDirectoryProjectedGovernanceConfigValid` refuses the
+    // platform-admin role id and every delegated-admin role id and requires each id to exist
+    // in the role registry. The scope below therefore states that authority — "exactly the
+    // role ids the validated configuration declares" — rather than re-deriving a narrower one
+    // here. Deliberately NOT tightened to `grantSet.namespaces`: `memberGroupDefaultRoleIds`
+    // and `memberGroupDefaultNamespaces` are independent config fields and an integration may
+    // legitimately set the first without the second today, so tightening is a behaviour change
+    // that needs its own review against live configurations.
+    const governanceScope: RoleAssignmentScope = { kind: 'fixed', roleIds: grantSet.roleIds }
+    for (const roleId of grantSet.roleIds) {
+      const assigned = await assignUserRoles({
+        userIds: grantSet.userIds,
+        roleId,
+        scope: governanceScope,
+        executor: client,
+      })
+      defaultRoleAssignmentsCount += assigned.affectedUserIds.length
+    }
   }
 
   if (grantSet.namespaces.length > 0) {

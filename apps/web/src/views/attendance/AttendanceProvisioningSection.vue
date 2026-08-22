@@ -83,6 +83,7 @@
         :search-placeholder="tr('Search users for provisioning', '搜索授权用户')"
         :full-width="true"
         input-id="attendance-provision-user-id"
+        endpoint="/api/attendance-admin/users/search"
       />
       <label class="attendance__field" for="attendance-provision-role">
         <span>{{ tr('Role template', '角色模板') }}</span>

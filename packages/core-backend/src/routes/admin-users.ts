@@ -16,7 +16,9 @@ import { query, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import {
   deriveDelegatedAdminNamespace,
+  deriveGrantNamespaces,
   disableNamespaceAdmissionsWithoutRoles,
+  grantNamespaceAdmissions,
   isNamespaceAdmissionControlledResource,
   listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots,
@@ -24,6 +26,12 @@ import {
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
 } from '../rbac/namespace-admission'
+import {
+  assignUserRoles,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
 import {
   assertPendingUserCannotBeActivatedViaGenericStatusApi,
@@ -346,7 +354,23 @@ const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DEFAULT_ATTENDANCE_ORG_ID = 'default'
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const ATTENDANCE_ROLE_IDS = new Set(['attendance_employee', 'attendance_approver', 'attendance_admin'])
+/**
+ * Attendance role ids, derived from the exported access-preset table.
+ *
+ * Deriving keeps this set and the preset table as one registry: an attendance preset added to
+ * the table is in this set on the same commit, with nothing to update by hand. It is also why
+ * the boundary in `rbac/role-assignment.ts` constrains by namespace derivation rather than by a
+ * set like this one — the boundary must admit every attendance role id, present and future,
+ * without depending on any registry staying in step.
+ *
+ * Cross-checked against the router's own template registry by
+ * `tests/unit/role-assignment-boundary.test.ts`.
+ */
+export const ATTENDANCE_ROLE_IDS = new Set(
+  listAccessPresets()
+    .filter((preset) => preset.productMode === 'attendance' && Boolean(preset.roleId))
+    .map((preset) => String(preset.roleId)),
+)
 const ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED =
   'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED'
 
@@ -3071,19 +3095,18 @@ export function adminUsersRouter(): Router {
         }
       }
 
+      // The authority is the delegation this actor holds. A platform admin is unbounded here,
+      // matching the `delegation.isPlatformAdmin` short-circuit on the `roleIdMatchesNamespaces`
+      // check above; a delegated admin is bounded by the namespaces that check already computed,
+      // so the boundary re-states the route's own rule at the write rather than adding a
+      // second, separately-maintained one.
+      const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
+        ? { kind: 'platform-admin' }
+        : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
       if (action === 'assign') {
-        await query(
-          `INSERT INTO user_roles (user_id, role_id)
-           VALUES ($1, $2)
-           ON CONFLICT DO NOTHING`,
-          [userId, roleId],
-        )
+        await assignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
       } else {
-        await query(
-          `DELETE FROM user_roles
-           WHERE user_id = $1 AND role_id = $2`,
-          [userId, roleId],
-        )
+        await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
       }
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
@@ -3142,6 +3165,11 @@ export function adminUsersRouter(): Router {
           : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
       })
     } catch (error) {
+      // A boundary refusal is a permission outcome, so it answers with its own status and code
+      // rather than reaching the generic handler below. The route's pre-check and the boundary
+      // do not compute the same set — the boundary drops namespaces that are not
+      // admission-controlled — so this arm is reachable and is the seam's real answer for it.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryAuthorityBusy(res, error)) return
       return jsonError(res, 500, 'ROLE_DELEGATION_UPDATE_FAILED', (error as Error)?.message || 'Failed to update delegated role')
     }
@@ -3788,12 +3816,33 @@ export function adminUsersRouter(): Router {
         })
 
         if (roleId) {
-          await client.query(
-            `INSERT INTO user_roles (user_id, role_id)
-             VALUES ($1, $2)
-             ON CONFLICT DO NOTHING`,
-            [userId, roleId],
-          )
+          await assignUserRoles({
+            userIds: [userId],
+            roleId,
+            // This route is behind `ensurePlatformAdmin`; creating administrators is one of
+            // the things it exists to do, so the scope is unbounded — and stated, not implied.
+            scope: { kind: 'platform-admin' },
+            executor: client,
+          })
+        }
+
+        // Namespace admission is the second half of a namespace-scoped grant: without an
+        // enabled row the permission codes written just below are filtered out of every
+        // effective-permission read, so a delegated role provisioned here would carry a role
+        // id and permission rows that resolve to nothing. Enable exactly the namespaces the
+        // grant derives, in this same transaction, so the two halves cannot diverge.
+        //
+        // Derived from the role id and the permission codes actually being granted — not
+        // from a list of namespaces to special-case. Grants that touch no
+        // admission-controlled resource derive an empty list and write nothing.
+        const grantedNamespaces = deriveGrantNamespaces({ roleId, permissionCodes: directPermissions })
+        if (grantedNamespaces.length > 0) {
+          await grantNamespaceAdmissions(client, {
+            userId,
+            namespaces: grantedNamespaces,
+            actorId: adminUserId,
+            source: 'admin_create',
+          })
         }
 
         if (directPermissions.length > 0) {
@@ -4495,12 +4544,7 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, roleId],
-      )
+      await assignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, true)
       }
@@ -4546,11 +4590,7 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, roleId],
-      )
+      await unassignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }
