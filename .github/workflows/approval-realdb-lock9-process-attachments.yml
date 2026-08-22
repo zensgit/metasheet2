@@ -23,12 +23,13 @@ name: Approval real-DB acceptance (Lock-9 process attachments)
 # sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
 # every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
 # approval-realdb-instance-readability-s1.yml / approval-realdb-comments.yml lanes. plugin-tests.yml
-# is left byte-identical.
+# was left byte-identical by THIS lane. [SUPERSEDED 2026-08-22, #5095: the suite now ALSO
+# runs in the required test (20.x) run-list; this standalone lane remains as the evidence lane.]
 #
 # TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
 # (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
 # `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
-# actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel.
+# actually EXECUTED as the SOLE lane until 2026-08-22 (#5095 promoted the suite into required test (20.x); both lanes now run it), with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel.
 
 on:
   workflow_dispatch:

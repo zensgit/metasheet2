@@ -969,7 +969,7 @@ describe(process.env.DATABASE_URL ? 'G-14: migration relaxation + ordering + rol
     await adminPool.end()
   }
 
-  maybeIt('ordering: this migration sorts after the base constraint migration it re-expresses (ratified G-14 property)', async () => {
+  maybeIt('ordering: this migration sorts after the ratified G-14 anchor zzzz20260818120000', async () => {
     // NARROWED 2026-08-22 (signal-PR gate P1-1, aligned to RATIFIED text): the previous form asserted
     // mine > EVERY other file in the directory — an authoring-time hygiene claim G-14 never made, whose
     // own comment described the opposite of its behaviour. Once this suite entered the required
@@ -977,6 +977,11 @@ describe(process.env.DATABASE_URL ? 'G-14: migration relaxation + ordering + rol
     // in the repo (proven by the gate with a no-op probe migration). G-14 rules exactly one ordering
     // property: the relaxation migration sorts after zzzz20260818120000. Assert that, anchored to the
     // real directory (both files must exist — the scan negative control is preserved).
+    // ANCHOR NOTE: zzzz20260818120000 is create_approval_usable_member_groups (Lock-1), NOT the
+    // origin of the field_id CHECK (that is zzzz20260715210000_create_approval_attachments). G-14
+    // names this anchor because it was the lexicographic TIP of the directory at Lock-9's
+    // ratification baseline — do NOT "correct" it to the CHECK's origin file; that would silently
+    // weaken the ratified ordering claim.
     const { readdirSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
