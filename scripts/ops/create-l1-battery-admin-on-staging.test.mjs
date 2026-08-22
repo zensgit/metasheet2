@@ -817,7 +817,16 @@ test(
         // It MUST also exit non-zero, having aborted BEFORE the promotion (login-first).
         assert.notEqual(r.status, 0, `script must exit non-zero on a pre-empted email; stdout:\n${r.stdout}\nstderr:\n${r.stderr}`)
         assert.doesNotMatch(r.stdout, /atomic RBAC promotion/, 'the promotion step must NOT run when login fails')
-        assert.match(r.stderr, /refusing to promote|ZERO database writes/i)
+        // Pin the HONEST semantics (owner review 5/6): the message must say it refuses to promote
+        // and that no PRIVILEGE writes happened — and must NOT claim 'ZERO database writes', which
+        // was an overclaim (register runs first and commits a plain user row).
+        assert.match(r.stderr, /refusing to promote/i, 'the abort must say it refuses to promote')
+        assert.match(r.stderr, /no privilege writes/i, 'the abort must state the actual guarantee: no privilege writes')
+        assert.doesNotMatch(
+          r.stderr,
+          /zero database writes/i,
+          "must not re-claim 'ZERO database writes' — register commits a plain user row before login runs",
+        )
 
         // The host password file was still scrubbed on this failure exit.
         assert.equal(existsSync(f), false, 'the trap must scrub the host password file even on the pre-emption abort')
