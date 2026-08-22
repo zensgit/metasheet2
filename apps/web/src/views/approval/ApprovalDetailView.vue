@@ -362,6 +362,28 @@
                       <p v-if="item.comment" class="approval-detail__timeline-comment">
                         {{ item.comment }}
                       </p>
+                      <!-- Lock-9 OD-L9-10(a): process attachments staged on THIS comment action. -->
+                      <ul
+                        v-if="processAttachmentRefsForHistoryItem(item).length > 0"
+                        class="approval-detail__attachments"
+                        data-testid="approval-timeline-process-attachments"
+                      >
+                        <li v-for="ref in processAttachmentRefsForHistoryItem(item)" :key="ref.id">
+                          <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                          <template v-else>
+                            <a
+                              v-if="ref.downloadUrl"
+                              :href="ref.downloadUrl"
+                              data-testid="approval-timeline-attachment-download"
+                              @click.prevent="handleAttachmentDownload(ref)"
+                            >{{ ref.fileName }}</a>
+                            <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                            <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
+                              {{ formatAttachmentSize(ref.sizeBytes) }}
+                            </span>
+                          </template>
+                        </li>
+                      </ul>
                       <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
                         <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
                         <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
@@ -408,6 +430,28 @@
                   <p v-if="item.comment" class="approval-detail__timeline-comment">
                     {{ item.comment }}
                   </p>
+                  <!-- Lock-9 OD-L9-10(a): process attachments staged on THIS comment action. -->
+                  <ul
+                    v-if="processAttachmentRefsForHistoryItem(item).length > 0"
+                    class="approval-detail__attachments"
+                    data-testid="approval-timeline-process-attachments"
+                  >
+                    <li v-for="ref in processAttachmentRefsForHistoryItem(item)" :key="ref.id">
+                      <span v-if="ref.tombstone" class="approval-detail__attachment-tombstone">附件已删除</span>
+                      <template v-else>
+                        <a
+                          v-if="ref.downloadUrl"
+                          :href="ref.downloadUrl"
+                          data-testid="approval-timeline-attachment-download"
+                          @click.prevent="handleAttachmentDownload(ref)"
+                        >{{ ref.fileName }}</a>
+                        <span v-else class="approval-detail__attachment-unavailable">附件暂不可用</span>
+                        <span v-if="formatAttachmentSize(ref.sizeBytes)" class="approval-detail__attachment-size">
+                          {{ formatAttachmentSize(ref.sizeBytes) }}
+                        </span>
+                      </template>
+                    </li>
+                  </ul>
                   <div v-if="hasTimelineMetadata(item.metadata)" class="approval-detail__timeline-meta">
                     <span v-if="item.metadata?.autoApproved" class="approval-detail__meta-badge approval-detail__meta-badge--auto">自动审批</span>
                     <span v-if="item.metadata?.approvalMode" class="approval-detail__meta-badge">
@@ -935,6 +979,40 @@
             :aria-label="MEMBER_ACTION_DIALOG_GRAMMAR.comment.commentLabel"
           />
         </el-form-item>
+        <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND
+             `isMyTurn`, deliberately NOT `canAct` (the coarse `approvals:act` scope grant, which
+             the 评论 button above has no gate on at all and so also renders for requesters/CC
+             recipients). Budgets are server-authoritative and unratified (OD-L9-8) — no
+             client-side count/size cap here.
+             Lock-9 FE fix round (gate P3-1): `isMyTurn` is a narrower, FAIL-CLOSED approximation
+             of the server's seat check, not an exact mirror — the server's `assignmentMatchesActor`
+             also admits `assignment_type === 'role'`; `isMyTurn` (below) matches only
+             `type === 'user'`. A role-seated approver whose upload the server would accept sees no
+             uploader here. No security impact (fails closed) and consistent with the shipped action
+             bar's own `v-if="isMyTurn"` (line ~67, unchanged by this slice) — this is a display gap,
+             not a new capability gap, and correcting the "exact mirror" wording, not the gate choice
+             itself, is what this fix round changed. -->
+        <el-form-item
+          v-if="attachmentPipelineEnabled && isMyTurn"
+          label="附件"
+          data-testid="approval-comment-attachment-upload"
+        >
+          <input
+            type="file"
+            multiple
+            accept=".pdf,.jpg,.jpeg,.png,.txt,.csv"
+            data-testid="approval-comment-attachment-input"
+            :disabled="commentAttachmentUploading"
+            @change="onCommentAttachmentPick"
+          />
+          <ul v-if="commentStagedAttachments.length > 0" class="approval-detail__comment-attachment-list">
+            <li v-for="item in commentStagedAttachments" :key="item.id">
+              <span>{{ item.name }}</span>
+              <el-button link type="danger" @click="removeCommentAttachment(item.id)">移除</el-button>
+            </li>
+          </ul>
+          <span class="approval-detail__comment-attachment-hint">支持 PDF / JPG / PNG / TXT / CSV，单文件 ≤ 20MB</span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="commentDialogVisible = false">取消</el-button>
@@ -1010,7 +1088,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, type Ref } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -1045,12 +1123,19 @@ import {
 } from '../../approvals/detailField'
 import {
   collectAttachmentRefIds,
+  collectHistoryAttachmentRefIds,
   formatAttachmentSize,
   resolveAttachmentFields,
+  resolveProcessAttachmentRefs,
   type AttachmentFieldDisplay,
   type AttachmentRefMetadata,
+  type ResolvedAttachmentRef,
 } from '../../approvals/attachmentRefs'
-import { fetchApprovalAttachmentRefs } from '../../approvals/attachmentUpload'
+import {
+  deleteApprovalAttachment,
+  fetchApprovalAttachmentRefs,
+  uploadApprovalProcessAttachmentsAtomic,
+} from '../../approvals/attachmentUpload'
 import { fetchApprovalAttachmentBlob } from '../../approvals/attachmentDownload'
 import { phrasesForAction, recentPhrases, rememberPhrase } from '../../approvals/quickPhrases'
 import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
@@ -1279,6 +1364,27 @@ const attachmentFields = computed<AttachmentFieldDisplay[]>(() => {
   )
 })
 
+/**
+ * Lock-9 OD-L9-10(a) render path — process-attachment refs for ONE timeline entry. Proposal, not a
+ * ruling: OD-L9-14 ratifies THAT every participant can read a bound process attachment; WHERE it
+ * renders on the detail surface is unruled (§(c)-3 of the scouting brief) — this slice's answer is
+ * the timeline entry the `comment` action produced. The 审批记录 TABLE view (`recordView ===
+ * 'table'`, a separate projection of the same `store.history`) deliberately does NOT get this
+ * block in this slice — see the PR body.
+ *
+ * DISCLOSED gap (fix round, gate P1-1, see PR body): `item.metadata` only carries
+ * `attachmentIds` on PLM-bridged instances today (`ApprovalBridgeService.loadLocalHistory` already
+ * returns the correct `UnifiedApprovalHistoryDTO` shape). The platform branch of
+ * `GET /api/approvals/:id/history` has no `metadata` column in its projection at all, so this
+ * block is a correctly-implemented no-op against every platform instance until a backend
+ * companion reconciles that route's row shape with the DTO — not a bug in this function, but this
+ * function alone cannot make it render for platform instances.
+ */
+function processAttachmentRefsForHistoryItem(item: { metadata?: Record<string, unknown> }): ResolvedAttachmentRef[] {
+  if (!attachmentPipelineEnabled.value) return []
+  return resolveProcessAttachmentRefs(item.metadata?.attachmentIds, attachmentMetadata.value)
+}
+
 async function handleAttachmentDownload(ref: AttachmentFieldDisplay['refs'][number]): Promise<void> {
   if (!ref.downloadUrl || !ref.fileName) return
   try {
@@ -1306,7 +1412,16 @@ async function loadAttachmentMetadata(): Promise<void> {
     attachmentMetadata.value = []
     return
   }
-  const ids = collectAttachmentRefIds(instance.formSchema ?? null, instance.formSnapshot ?? null)
+  // Lock-9 OD-L9-10(a): union the form-field ids (snapshot-scoped) with the process-attachment ids
+  // staged on `comment` history rows (`metadata.attachmentIds`) into ONE `/refs` call — the server
+  // applies the same per-instance authorization to both id shapes, so there is no reason to split
+  // the round trip.
+  const ids = [
+    ...new Set([
+      ...collectAttachmentRefIds(instance.formSchema ?? null, instance.formSnapshot ?? null),
+      ...collectHistoryAttachmentRefIds(store.history),
+    ]),
+  ]
   if (ids.length === 0) {
     attachmentMetadata.value = []
     return
@@ -1319,7 +1434,14 @@ async function loadAttachmentMetadata(): Promise<void> {
 }
 
 watch(
-  () => [approval.value?.id, approval.value?.formSnapshot, attachmentPipelineEnabled.value] as const,
+  // Lock-9 OD-L9-10(a): `store.history` MUST be a tracked dependency here — process-attachment ids
+  // live only on history-row metadata, and history loads asynchronously (often AFTER `approval`
+  // itself resolves). Without this, the immediate first run fires off the ids known at that
+  // instant, resolves them, and then never re-runs when `loadHistory` lands a moment later — every
+  // process attachment silently never appears, permanently, for every viewer. Dropping this
+  // dependency is the single most likely way to regress this slice; see
+  // `approval-process-attachment-dialog.spec.ts`'s dedicated regression test for the proof.
+  () => [approval.value?.id, approval.value?.formSnapshot, attachmentPipelineEnabled.value, store.history] as const,
   () => {
     void loadAttachmentMetadata()
   },
@@ -1551,6 +1673,48 @@ const upcomingTimelineNodes = computed<UpcomingApprovalNode[]>(() => {
 const actionDialogVisible = ref(false)
 const transferDialogVisible = ref(false)
 const commentDialogVisible = ref(false)
+// Lock-9 OD-L9-10(a): files uploaded (process-attachment route) while the comment dialog is open
+// but not yet bound to a `comment` action. `openCommentDialog` resets this to `[]`; `submitComment`
+// clears it (WITHOUT deleting — the server has just bound them) BEFORE closing the dialog, so the
+// close-watcher below only ever DELETEs uploads that were never submitted.
+const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
+const commentAttachmentUploading = ref(false)
+// Cancel/close (取消 button, mask click, ESC — all flip `commentDialogVisible` via v-model) must
+// retract any staged-but-never-bound process attachment: otherwise it sits as an unbound orphan
+// until the 168h sweep AND keeps consuming the per-staged-instance upload budget (OD-L9-8's
+// disclosed shape gap — see the PR body). Runs only when the list is non-empty, so the
+// post-successful-submit close (list already cleared) never issues a DELETE for an id the server
+// just bound.
+//
+// Lock-9 FE fix round (2026-08-22, gate P3-2): this watcher only fires on a `commentDialogVisible`
+// true→false transition. Two exits never produce that transition and were leaking staged uploads:
+// (a) unmounting this view entirely (route change to a DIFFERENT view) — no watcher on an unmounted
+// component's own ref ever runs again; (b) 下一条/deep-link navigation, which changes
+// `route.params.id` IN PLACE without unmounting (same precedent as this file's own `:key`
+// comment above) — `commentDialogVisible` stays whatever it was across the reload. Factored into
+// `retractStagedCommentAttachments` and called from both `onBeforeUnmount` and the params-id watch
+// below, in addition to this close-watcher.
+function retractStagedCommentAttachments(): void {
+  const staged = commentStagedAttachments.value
+  if (staged.length === 0) return
+  commentStagedAttachments.value = []
+  for (const item of staged) {
+    void deleteApprovalAttachment(item.id).catch(() => {
+      // Best-effort retraction: a transient DELETE failure leaves an unbound server-side orphan,
+      // which the TTL/reconciler must collect — the dialog is already closed, there is no UI left
+      // to report this failure into.
+    })
+  }
+}
+
+watch(commentDialogVisible, (visible, wasVisible) => {
+  if (visible || !wasVisible) return
+  retractStagedCommentAttachments()
+})
+
+onBeforeUnmount(() => {
+  retractStagedCommentAttachments()
+})
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
 const actionComment = ref('')
@@ -2016,7 +2180,62 @@ function openCommentDialog() {
   currentAction.value = 'comment'
   actionComment.value = ''
   actionDialogError.value = null
+  commentStagedAttachments.value = [] // Lock-9: fresh state — this is the ONLY site that opens it.
   commentDialogVisible.value = true
+}
+
+/**
+ * Lock-9 OD-L9-10(a) — process-attachment picker for the comment dialog. Gated by the caller
+ * template on `attachmentPipelineEnabled && isMyTurn` (never `canAct`, which is the coarse
+ * `approvals:act` scope grant — a requester/CC recipient with that scope on a DIFFERENT instance
+ * must not see an uploader here). `stagedInstanceId` is this instance's own id: the row does not
+ * commit to it until the comment action's `attachmentIds` rider binds it (§5.4).
+ */
+async function onCommentAttachmentPick(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const picked = Array.from(input.files ?? [])
+  input.value = '' // allow re-picking the same file after a reject/remove
+  if (picked.length === 0) return
+  const instanceId = approval.value?.id
+  if (!instanceId) return
+  commentAttachmentUploading.value = true
+  try {
+    // Atomic selection: a later authoritative server reject compensates (DELETE) every file
+    // uploaded from THIS pick, so a refused selection leaves zero live/bindable refs behind.
+    const uploaded = await uploadApprovalProcessAttachmentsAtomic(picked, instanceId)
+    for (let i = 0; i < uploaded.length; i += 1) {
+      commentStagedAttachments.value.push({ id: uploaded[i].id, name: picked[i].name })
+    }
+  } catch (error) {
+    // values-free code from the client mirror / server reject — never file contents or paths.
+    ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
+  } finally {
+    commentAttachmentUploading.value = false
+  }
+}
+
+/**
+ * §4.3-style removal (mirrors `ApprovalNewView.vue`'s `removeAttachment`): the server DELETE is the
+ * load-bearing half (soft-delete + durable purge-intent enqueue); the local drop only happens after
+ * it resolves, and a genuine failure leaves the entry in the list so the user can retry.
+ *
+ * Lock-9 FE fix round (gate P3-3): re-reads `commentStagedAttachments.value` AFTER the `await`
+ * rather than closing over the array reference from before it — the close-watcher
+ * (`retractStagedCommentAttachments`) can replace that ref with a NEW (now-empty) array while this
+ * DELETE is in flight (dialog closed mid-remove). Splicing a captured pre-await reference would
+ * mutate an array nothing renders any more, on top of double-DELETEing the same id. Re-reading means
+ * a dialog-closed-mid-remove race finds nothing to splice (already retracted) instead of corrupting
+ * a detached array.
+ */
+async function removeCommentAttachment(attachmentId: string): Promise<void> {
+  try {
+    await deleteApprovalAttachment(attachmentId)
+  } catch {
+    ElMessage.error('附件移除失败，请重试')
+    return
+  }
+  const index = commentStagedAttachments.value.findIndex((item) => item.id === attachmentId)
+  if (index >= 0) commentStagedAttachments.value.splice(index, 1)
 }
 
 // T3-1 v0 (ballot Q7): the mobile surface reuses the SAME version-less unified
@@ -2239,13 +2458,22 @@ async function submitComment() {
   const id = route.params.id as string
   actionDialogError.value = null
   inFlightAction.value = 'comment'
+  // Lock-9 OD-L9-10(a): key PRESENCE, not an empty array — mirrors the backend's own
+  // `hasOwnProperty('attachmentIds')` discipline (routes/approvals.ts §5.5, ApprovalProductService
+  // §5.4). A dialog with no staged uploads sends the exact same request shape as before this slice.
+  const stagedIds = commentStagedAttachments.value.map((item) => item.id)
   try {
     await store.executeAction(id, {
       action: 'comment',
       comment: actionComment.value,
+      ...(stagedIds.length > 0 ? { attachmentIds: stagedIds } : {}),
     })
     ElMessage.success('评论已提交')
     rememberQuickPhraseIfOffered(actionComment.value)
+    // Clear BEFORE closing the dialog — the close-watcher above DELETEs whatever is still in this
+    // list, and these ids are now server-bound (clearing after the flip would race a DELETE against
+    // an already-bound row).
+    commentStagedAttachments.value = []
     commentDialogVisible.value = false
     await store.loadHistory(id)
   } catch (error) {
@@ -2427,6 +2655,10 @@ watch(
   () => route.params.id,
   (next, prev) => {
     if (typeof next === 'string' && next && next !== prev) {
+      // Lock-9 FE fix round (gate P3-2): this component instance is REUSED across a params-only
+      // navigation (no unmount), so any process attachment still staged on the OUTGOING instance's
+      // comment dialog must be retracted here — `onBeforeUnmount` never fires for this transition.
+      retractStagedCommentAttachments()
       showNextEntry.value = false
       void loadDetailPage()
     }
@@ -2621,6 +2853,24 @@ watch(
 .approval-detail__attachment-tombstone {
   color: var(--ms-text-3);
   font-style: italic;
+}
+
+/* Lock-9 OD-L9-10(a): comment-dialog staged process-attachment list, mirrors ApprovalNewView's
+   own uploader list styling. */
+.approval-detail__comment-attachment-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.approval-detail__comment-attachment-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .approval-detail__quick-phrases {

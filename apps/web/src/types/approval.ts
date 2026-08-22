@@ -581,6 +581,13 @@ export interface ApprovalActionRequest {
   addSignMode?: 'before' | 'parallel'
   /** P1-B reduce_sign — assignee_id of the add-signed row to remove. */
   targetAssignmentUserId?: string
+  /**
+   * Lock-9 OD-L9-10(a) FE slice — staged process-attachment ids to bind at this action's commit.
+   * v1 ships the `comment` rider only; the backend forwards this key by PRESENCE (never flag-gated
+   * on this type), so it must be OMITTED (not sent as `[]`) when there are no staged uploads —
+   * mirrors `ApprovalProductService.ts`'s own key-presence discipline for `fieldWrites` above.
+   */
+  attachmentIds?: string[]
 }
 
 export interface ApprovalTemplateListItemDTO {
