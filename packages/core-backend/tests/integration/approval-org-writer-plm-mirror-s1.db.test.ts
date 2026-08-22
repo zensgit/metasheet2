@@ -7,9 +7,18 @@ import type { QueryResult } from '../../src/data-adapters/BaseAdapter'
 import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 
 // Real-DB spec: runs only with a Postgres DATABASE_URL. Excluded from the no-DB
-// default test job -> skipped here (the sentinel test below makes a silent skip
-// impossible to mistake for a pass).
+// default test job -> the whole describe below skips there.
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+// Sentinel deliberately lives OUTSIDE describeIfDatabase (top-level `it`, gated only on
+// EXPECT_DB): a sentinel nested inside `describeIfDatabase` would itself be skipped whenever
+// DATABASE_URL is absent, so it could never catch the failure mode it exists to catch — a
+// DB-expected CI lane (EXPECT_DB=1) whose DATABASE_URL is missing or broken silently reporting
+// this whole file as skipped-green instead of red (feedback_triggered_is_not_verified).
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 /**
  * G-W2 — writers-stamp-org (S1 closeout slice 1), PLM mirror writer.
@@ -51,10 +60,6 @@ describeIfDatabase('writers-stamp-org S1 slice 1 — G-W2 PLM mirror writer (rea
     if (createdInstanceIds.length > 0) {
       await pool.query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [createdInstanceIds])
     }
-  })
-
-  it('sentinel: DATABASE_URL is set (DB-backed lane must not silently skip)', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   it('G-W2: upsertPlmMirror (via the public syncPlmApprovals entry point) stamps NO org_id, and the NULL row survives the landed approval_instance_org_nonblank CHECK', async () => {

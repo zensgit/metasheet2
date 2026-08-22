@@ -1239,6 +1239,11 @@ export default defineConfig({
       // Lock-10 (S1) CONSUMER adoption — detail/history/metrics routes (G-S1-4, G-S1-5, G-S1-7),
       // real DB. Same two-point wiring as its sibling above, same standalone workflow lane.
       'tests/integration/approval-instance-readability-s1-consumers.db.test.ts',
+      // writers-stamp-org (S1 closeout slice 1) — G-W2, the PLM mirror writer's ruled
+      // zero-org derivation. Real DB. Excluded here so describeIfDatabase cannot skip-green it
+      // in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts',
       // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
       // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
       // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
