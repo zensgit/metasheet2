@@ -1,0 +1,51 @@
+-- ============================================================================
+-- OPTIONAL fixture — applied ON TOP of 02-seed-pull-1.sql (additive INSERT
+-- only). It makes the dry-run plan INVALID on purpose. Do NOT load it as part
+-- of the happy path.
+--
+-- WHAT IT REPRODUCES
+--   The duplicate-expanded-key conflict (#2343). Two BOM detail lines in the
+--   SAME bom (SYN-BOM-B) point at the SAME component (SYN-PART-LEAF-E) with
+--   different quantities. The expander produces two rows whose idempotencyKey
+--   is byte-identical, because that key is
+--     { projectNo, componentSourceId, parentSourceId, path }
+--   (lib/stock-preparation-bom-expansion.cjs:401-408) and every member is the
+--   same for both lines. The planner then groups by key
+--   (lib/stock-preparation-conflict-planner.cjs:424-438, :1048-1056) and emits
+--   ONE manual_confirm of type 'duplicate_expanded_key'.
+--
+-- IMPORTANT CORRECTION TO A COMMON ASSUMPTION
+--   "the same component under TWO DIFFERENT parents" is NOT this case. The
+--   path is part of the key, so SYN-PART-LEAF-D under SYN-PART-SUB-B and under
+--   SYN-PART-SUB-C (already in 02-seed-pull-1.sql) yields two DISTINCT keys and
+--   two clean `add` decisions. Only a repeat under the SAME parent collides.
+--
+-- WHAT YOU WILL SEE
+--   expansion : status 'expanded', 9 rows, 0 errors (the expander itself does
+--               not object — no cycle, since LEAF-E is not yet on the path).
+--   plan      : add 7 / update 0 / skip 0 / inactive 0 / manual_confirm 1,
+--               valid = false, summary.conflictTypes includes
+--               'duplicate_expanded_key'.
+--   dry-run   : canApply = false, no dryRunToken minted.
+--
+-- ABOUT CONFLICT_POLICY_NOT_IMPLEMENTED (#2343 D2/D3)
+--   That error code is NOT what this data triggers. With no policy review the
+--   group is simply HELD under reason 'default_hold'
+--   (lib/stock-preparation-conflict-planner.cjs:663-667). The 422
+--   CONFLICT_POLICY_NOT_IMPLEMENTED comes from a SELECTION: an operator
+--   choosing 'merge_quantity', 'select_representative' or 'skip_selected' in
+--   the `conflictPolicyReview` request body / the table-scope policy store
+--   (lib/stock-preparation-conflict-policies.cjs:119-137, refused because
+--   each of those alters a business quantity — see the design note at
+--   lib/stock-preparation-conflict-planner.cjs:682-687).
+--   The ONE policy that resolves the group is 'keep_multiple_rows'
+--   (…-conflict-planner.cjs:64). These two lines carry distinct sort_id values
+--   (30 / 40), which is what gives that policy a stable discriminator to split
+--   the rows on (DUPLICATE_SORT_LINE_FIELDS, …-conflict-planner.cjs:78-82).
+--
+-- TO REMOVE: re-run 02-seed-pull-1.sql (it starts by emptying every table).
+-- ============================================================================
+
+INSERT INTO DN_PDM_BomDetailsInfo (bom_pid, part_id, Bom_ExAttr1, sort_id) VALUES
+  ('SYN-BOM-B', 'SYN-PART-LEAF-E', 1, 30),
+  ('SYN-BOM-B', 'SYN-PART-LEAF-E', 2, 40);
