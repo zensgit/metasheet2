@@ -1,0 +1,71 @@
+name: Attendance Locale zh Smoke Contract
+
+# GATE-5097 P2-2(a): scripts/ops/attendance-locale-zh-workflow-contract.test.mjs and
+# scripts/verify-attendance-locale-zh-smoke.test.mjs previously ran in NO CI workflow at all —
+# an unexecuted guard is indistinguishable from no guard. This mirrors the established
+# workflow-contract pattern (dingtalk-lifecycle-staging-canary-contract.yml): a small,
+# path-filtered, pull_request-triggered lane that runs both `node --test` suites protecting
+# `Attendance Locale zh Smoke (Prod)` (attendance-locale-zh-smoke-prod.yml, schedule +
+# workflow_dispatch only, so it never runs on a PR itself).
+#
+# Two things are pinned here, not one:
+#   - attendance-locale-zh-workflow-contract.test.mjs: the PROD WORKFLOW's shape (auth
+#     resolution, drill-before-resolver ordering, the targeted-run-command tokens).
+#   - verify-attendance-locale-zh-smoke.test.mjs: the PROBE SCRIPT's own behaviour
+#     (expandHistoryFilters, exported and driven against a stub Playwright `page` — a source-text
+#     pin alone cannot tell a real fix from one whose click handler is silently a no-op).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/attendance-locale-zh-smoke-prod.yml'
+      - '.github/workflows/attendance-locale-zh-smoke-contract.yml'
+      - 'scripts/verify-attendance-locale-zh-smoke.mjs'
+      - 'scripts/verify-attendance-locale-zh-smoke.test.mjs'
+      - 'scripts/ops/attendance-locale-zh-workflow-contract.test.mjs'
+      - 'apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+      - name: Setup pnpm cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+      - name: Install dependencies
+        # Only the `@playwright/test` module needs to resolve — neither test launches a browser
+        # (verify-attendance-locale-zh-smoke.test.mjs drives expandHistoryFilters() against a stub
+        # `page`), so no `playwright install` step is needed here.
+        run: pnpm install --frozen-lockfile
+      - name: Run prod-workflow shape contract
+        run: node --test scripts/ops/attendance-locale-zh-workflow-contract.test.mjs
+      - name: Run probe-script behavioural contract
+        run: node --test scripts/verify-attendance-locale-zh-smoke.test.mjs

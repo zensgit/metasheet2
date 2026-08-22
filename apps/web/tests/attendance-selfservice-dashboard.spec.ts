@@ -61,7 +61,6 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
   return button as HTMLButtonElement
 }
 
-
 function installOverviewMock(): void {
   vi.mocked(apiFetch).mockImplementation(async (input) => {
     const url = typeof input === 'string' ? input : input.url

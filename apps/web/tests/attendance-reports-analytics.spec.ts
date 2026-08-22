@@ -197,7 +197,6 @@ function findButtonByText(container: HTMLElement, text: string): HTMLButtonEleme
   return button as HTMLButtonElement
 }
 
-
 describe('Attendance reports analytics', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null

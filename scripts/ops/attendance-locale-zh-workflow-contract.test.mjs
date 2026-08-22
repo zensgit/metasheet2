@@ -70,12 +70,19 @@ test('attendance locale zh smoke waits for async holiday badges while probing mo
 // disclosure by its data-attendance-history-filters hook before waiting on the filter fields, and
 // the product file must still carry that same hook on a real <details>/<summary> pair for the
 // probe to find.
+//
+// GATE-5097 P2-2: this is source-shape sanity ONLY (does the call exist, in the right order) —
+// it does NOT prove expandHistoryFilters() actually opens anything. A mutation that leaves the
+// call in place but makes the click a no-op (GATE-5097 M4) survives this test unchanged; that
+// behaviour is exported and unit-tested against a stub `page` in
+// scripts/verify-attendance-locale-zh-smoke.test.mjs instead.
 test('attendance locale zh smoke expands the collapsed history-filters disclosure before waiting on the filter fields', () => {
   const scriptRaw = readFileSync(path.join(repoRoot, 'scripts/verify-attendance-locale-zh-smoke.mjs'), 'utf8')
 
-  assert.match(scriptRaw, /async function expandHistoryFilters\(page, timeout = timeoutMs\) \{/)
+  assert.match(scriptRaw, /export async function expandHistoryFilters\(page, timeout = timeoutMs\) \{/)
   assert.match(scriptRaw, /page\.locator\('\[data-attendance-history-filters\]'\)/)
-  assert.match(scriptRaw, /await details\.locator\('summary'\)\.first\(\)\.click\(\)/)
+  assert.match(scriptRaw, /const summary = details\.locator\('summary'\)\.first\(\)/)
+  assert.match(scriptRaw, /await summary\.click\(\)/)
   // called before the #attendance-from-date wait it exists to unblock, not after.
   const expandCallIndex = scriptRaw.indexOf('await expandHistoryFilters(page)')
   const fromDateWaitIndex = scriptRaw.indexOf("await page.locator('#attendance-from-date').waitFor(")

@@ -5019,10 +5019,20 @@
                            did NOT add `:disabled` here the way the type field has it — the server does
                            not reject this, so disabling it client-side would be inventing a product
                            restriction ("can an admin fix a mistyped timezone on a saved group") this
-                           task was told not to decide, not mirroring one that exists. Left editable;
-                           added a same-risk-class warning instead so the choice is informed. Whether
-                           to actually lock it (matching the type field, and DingTalk's own product,
-                           which does not allow changing it post-creation) is an owner call. -->
+                           task was told not to decide, not mirroring one that exists. Left editable.
+                           GATE-5097 P2-3: the hint below was rewritten after review traced the LIVE
+                           calculation path — resolveWorkContext() (index.cjs:15366-15386) resolves
+                           `profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? defaultRule`;
+                           attendance_groups is never consulted there, so shift/punch times are NOT
+                           reinterpreted by a group timezone change on the path production runs today
+                           (the group's timezone reaches a live calculation only as a last-resort
+                           fallback inside resolveCalendarTimezone's effective-calendar read, and only
+                           if EVERY other candidate — rotation, shift, AND the default rule, which
+                           always has a timezone — is empty, which does not happen in practice; see
+                           also the flagged-off W7 group-effective-facts resolver, which explicitly
+                           treats group timezone as new policy the legacy per-user path never had).
+                           The prior copy claimed the opposite and would have taught an admin fixing a
+                           mistyped timezone that they were about to corrupt historical calculations. -->
                       <label class="attendance__field" for="attendance-group-timezone">
                         <span>{{ tr('Timezone', '时区') }}</span>
                         <select
@@ -5036,7 +5046,7 @@
                         </select>
                         <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
                         <small v-if="attendanceGroupEditingId" class="attendance__field-hint" data-attendance-group-timezone-change-warning>
-                          {{ tr('Changing the timezone reinterprets this group\'s existing shift times in the new zone.', '修改时区会让该考勤组已有的班次时间按新时区重新解读。') }}
+                          {{ tr('This is stored as group policy. Shift and punch calculations use each shift\'s own timezone (or the default rule\'s), not this value — changing it here does not retime existing shifts.', '此项仅作为考勤组策略保存。打卡与工时计算使用各班次（或默认规则）自身的时区，不使用此值——在此修改不会重新计算已有排班的工时。') }}
                         </small>
                       </label>
                       <label class="attendance__field" for="attendance-group-rule-set">
@@ -5539,13 +5549,17 @@
                            rendered here too, reading the exact same
                            attendanceGroupFixedScheduleWeekMatrix / …Hint computeds (keyed off the
                            SHARED attendanceGroupFixedSchedulePreviewForm.shiftId) as the "schedule"
-                           wizard stage's own panel below (data-attendance-group-fixed-schedule-week-matrix).
-                           For a not-yet-saved group this drawer has no shift picker of its own, so it
-                           always rendered an empty "No shift selected" placeholder; for a saved group it
-                           duplicated, byte-for-byte, the stage's fuller panel (which also has the actual
-                           shift/date fields and the "Preview fixed schedule" action). Removed here; the
-                           canonical, functional matrix lives in the "schedule" stage below and stays
-                           reachable via the jump-off buttons underneath. -->
+                           wizard stage's own panel below (data-attendance-group-fixed-schedule-week-matrix)
+                           — duplicated, byte-for-byte, the stage's fuller panel (which also has the
+                           actual shift/date fields and the "Preview fixed schedule" action). GATE-5097
+                           P3-1 corrected the record: this drawer has no shift picker of its own, but
+                           loadShifts() auto-defaults this SAME shiftId to the org's first shift whenever
+                           one exists (:26641-26643 `if (!…shiftId && shifts.value.length > 0) { … =
+                           shifts.value[0].id }`), so the drawer's copy was POPULATED — not an empty "No
+                           shift selected" placeholder — in any org with at least one shift, which is the
+                           common case, not the exception. The duplication itself is still the reason for
+                           removing it; the canonical, functional matrix lives in the "schedule" stage
+                           below and stays reachable via the jump-off buttons underneath. -->
                       <div
                         v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
                         class="attendance__work-time-holiday-callout"
@@ -7153,7 +7167,18 @@
               <div class="attendance__admin-grid">
                 <!-- A6: raw UUID text input swapped for AttendanceUserPickerField. Semantics
                      unchanged — a user ID is still required to load a balance
-                     (loadAnnualLeaveBalance still rejects an empty value with the same error). -->
+                     (loadAnnualLeaveBalance still rejects an empty value with the same error).
+                     GATE-5097 P1-1: this section's DATA read (GET /api/attendance/leave-balances)
+                     is gated by withPermission('attendance:admin', …) (index.cjs:49859-49862) —
+                     the SAME permission that opens the admin tab (auth.ts:286). The picker's
+                     DEFAULT search endpoint (/api/admin/users) requires the platform-wide
+                     ensurePlatformAdmin instead — a strictly narrower authority a delegated
+                     attendance admin does not have, which would 403 on mount and leave the
+                     picker's <select> with no options and no way to set a value at all (single
+                     v-model setter in this file). Pointed at the attendance-scoped search route
+                     instead, which is gated by the SAME attendance:admin permission as the data
+                     it feeds and admits global admins too (attendance-admin.ts:556) — strictly
+                     wider than the default, never narrower than what this section already needs. -->
                 <AttendanceUserPickerField
                   v-model="annualBalanceUserId"
                   :tr="tr"
@@ -7161,6 +7186,7 @@
                   name="annualBalanceUserId"
                   :search-placeholder="tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索')"
                   input-id="attendance-annual-balance-user"
+                  endpoint="/api/attendance-admin/users/search"
                 />
                 <!-- W5-1 / OD-W5-7: leave-type select drives the #4562-parameterized read path.
                      Closed set only (annual | comp_time); the handler re-validates before any

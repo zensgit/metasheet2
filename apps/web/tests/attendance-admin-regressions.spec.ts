@@ -86,6 +86,59 @@ function selectUserPicker(container: HTMLElement, selector: string, userId: stri
   select!.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+// GATE-5097 P2-1: selectUserPicker() (above) FABRICATES the <option> it then selects, which
+// makes the underlying search -> API -> render path invisible to the test — a mutation that
+// makes the picker render zero real options (e.g. a 403) survives every test that only uses
+// selectUserPicker. loadUserIntoPicker() drives the picker for real instead: types into the
+// search box, clicks "Search users", waits for the mocked endpoint's response to render, and
+// asserts a REAL <option> for the target id exists before selecting it — so an endpoint that
+// returns nothing (403, empty, wrong shape) fails this helper's own assertion, not silently.
+function userSearchResponse(users: Array<{ id: string; email?: string; name?: string | null }>) {
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      items: users.map((user) => ({
+        id: user.id,
+        email: user.email ?? `${user.id}@uiwalk.local`,
+        name: user.name ?? null,
+        role: 'user',
+        is_active: true,
+        is_admin: false,
+        last_login_at: null,
+        created_at: '',
+      })),
+      page: 1,
+      pageSize: 20,
+      total: users.length,
+    },
+  })
+}
+
+async function loadUserIntoPicker(container: HTMLElement, selector: string, userId: string): Promise<void> {
+  const searchInput = container.querySelector<HTMLInputElement>(selector)
+  expect(searchInput, `expected user picker ${selector}`).toBeTruthy()
+  const field = searchInput!.closest('.attendance__field')
+  expect(field, `expected user picker field ${selector}`).toBeTruthy()
+  // Locale-independent: the search button is the only <button> inside the picker's controls
+  // row (AttendanceUserPickerField.vue's `.attendance__user-picker-controls`); its label text
+  // is locale-routed ("Search users" / "搜索用户") so matching by text would break under zh-CN.
+  const searchButton = field!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')
+  expect(searchButton, `expected the picker's search button for ${selector}`).toBeTruthy()
+  searchInput!.value = userId
+  searchInput!.dispatchEvent(new Event('input'))
+  searchButton!.click()
+  await flushUi(4)
+  const select = field!.querySelector<HTMLSelectElement>('select')
+  expect(select, `expected user picker select ${selector}`).toBeTruthy()
+  const option = Array.from(select!.options).find((candidate) => candidate.value === userId)
+  expect(
+    option,
+    `expected a REAL <option value="${userId}"> in ${selector} after searching — the mocked search endpoint did not return it (this is the live data path, not a fabricated option)`,
+  ).toBeTruthy()
+  select!.value = userId
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 function selectMultipleOptions(container: HTMLElement, selector: string, values: string[]): void {
   const select = container.querySelector<HTMLSelectElement>(selector)
   expect(select, `expected multi-select ${selector}`).toBeTruthy()
@@ -1805,6 +1858,11 @@ describe('Attendance admin regressions', () => {
   it('clears a prior annual-leave balance when a new query fails (no stale balance from another user)', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA' }])
+        if (url.includes('q=userB')) return userSearchResponse([{ id: 'userB' }])
+        return userSearchResponse([])
+      }
       if (url.includes('/api/attendance/leave-balances')) {
         if (url.includes('userId=userA')) {
           return jsonResponse(200, {
@@ -1832,13 +1890,15 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
     expect(section).toBeTruthy()
-    // A6: swapped for AttendanceUserPickerField; drive it via the shared selectUserPicker helper.
+    // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; drive it for real via
+    // loadUserIntoPicker (search -> mocked endpoint -> real <option> -> select), not a fabricated
+    // option, so a defect in that path (e.g. a 403) fails here instead of passing silently.
     const loadBtn = section!.querySelector<HTMLButtonElement>('.attendance__admin-actions button')
     expect(section!.querySelector('#attendance-annual-balance-user')).toBeTruthy()
     expect(loadBtn).toBeTruthy()
 
     // (A) query userA → success → A's balance renders, tied to userA.
-    selectUserPicker(section!, '#attendance-annual-balance-user', 'userA')
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'userA')
     await flushUi(2)
     loadBtn!.click()
     await flushUi(4)
@@ -1847,11 +1907,92 @@ describe('Attendance admin regressions', () => {
     expect(shown?.textContent || '').toContain('userA')
 
     // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
-    selectUserPicker(section!, '#attendance-annual-balance-user', 'userB')
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'userB')
     await flushUi(2)
     loadBtn!.click()
     await flushUi(4)
     expect(section!.querySelector('.attendance__annual-balance')).toBeNull()
+  })
+
+  it('GATE-5097 P1-1/P2-1: a delegated attendance admin (attendance:admin, not platform admin) can still search and select a user for the annual-leave-balance picker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      // The picker is wired to the attendance-scoped search route, not the platform-admin one —
+      // if this regresses back to /api/admin/users, this mock returns nothing for it and the
+      // loadUserIntoPicker assertion below fails on a missing real <option>.
+      if (url.includes('/api/admin/users')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'Admin permissions required' } })
+      }
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return userSearchResponse([{ id: 'delegated-target-user', email: 'delegated-target@uiwalk.local' }])
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
+    expect(section).toBeTruthy()
+
+    // All 35 admin sections mount simultaneously (v-show, not v-if), so the OTHER 7 pre-existing
+    // AttendanceUserPickerField sites on the same page also mounted and hit the platform-admin
+    // route, and it 403s them (proving the failure mode P1-1 warns about IS live for those sites
+    // — a real, disclosed follow-up, not fixed here). The point of this test is that the
+    // annual-leave-balance section's OWN picker is unaffected: it went through the
+    // attendance-scoped route instead and never touched the platform-admin one.
+    expect(vi.mocked(apiFetch).mock.calls.some(([requested]) => String(requested).includes('/api/admin/users'))).toBe(true)
+
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'delegated-target-user')
+    const select = section!.querySelector<HTMLSelectElement>('#attendance-annual-balance-user')?.closest('.attendance__field')?.querySelector('select')
+    expect(select?.value).toBe('delegated-target-user')
+    expect(section!.querySelector('.attendance__field-hint--error')).toBeNull()
+
+    // The annual-balance search itself never went through the platform-admin-only route.
+    const annualBalanceSearchCalls = vi.mocked(apiFetch).mock.calls
+      .map(([requested]) => String(requested))
+      .filter((requested) => requested.includes('/api/attendance-admin/users/search'))
+    expect(annualBalanceSearchCalls.length).toBeGreaterThan(0)
+  })
+
+  it('GATE-5097 P2-1: a 403 from the picker\'s search endpoint surfaces a visible error, never a silently empty picker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'Admin permissions required' } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
+    expect(section).toBeTruthy()
+
+    const searchInput = section!.querySelector<HTMLInputElement>('#attendance-annual-balance-user')
+    expect(searchInput).toBeTruthy()
+    const field = searchInput!.closest('.attendance__field')
+    const searchButton = field!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')
+    expect(searchButton).toBeTruthy()
+    searchInput!.value = 'anyone'
+    searchInput!.dispatchEvent(new Event('input'))
+    searchButton!.click()
+    await flushUi(4)
+
+    const select = field!.querySelector<HTMLSelectElement>('select')
+    // Only the placeholder "Select user" option remains — no real results, and (unlike the old
+    // selectUserPicker helper) nothing fabricated to paper over the failure.
+    expect(Array.from(select!.options).map((option) => option.value)).toEqual([''])
+    const errorHint = field!.querySelector('.attendance__field-hint--error')
+    expect(errorHint).toBeTruthy()
+    expect(errorHint!.textContent).toContain('Admin permissions required')
   })
 
   it('annual-leave policy: hydrates from first-screen settings; first save (no Reload) keeps the real policy; blocks malformed ladder', async () => {
@@ -2273,6 +2414,7 @@ describe('Attendance admin regressions', () => {
     it('byte-stable: admin lookup button click (zero args) issues the exact pre-parameterization query', async () => {
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
+        if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
         if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
         return emptyAttendanceResponse()
       })
@@ -2282,8 +2424,8 @@ describe('Attendance admin regressions', () => {
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
       await flushUi(4)
       const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-      // A6: swapped for AttendanceUserPickerField.
-      selectUserPicker(section, '#attendance-annual-balance-user', 'u1')
+      // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; driven for real.
+      await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'u1')
       await flushUi(2)
       section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!.click()
       await flushUi(4)
@@ -2294,6 +2436,7 @@ describe('Attendance admin regressions', () => {
     it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact comp_time admin-lookup query (mock-layer assertion)', async () => {
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
+        if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
         if (url.includes('/api/attendance/leave-balances')) {
           const parsed = new URL(url, 'http://localhost')
           return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u1'))
@@ -2306,8 +2449,8 @@ describe('Attendance admin regressions', () => {
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
       await flushUi(4)
       const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-      // A6: swapped for AttendanceUserPickerField.
-      selectUserPicker(section, '#attendance-annual-balance-user', 'u1')
+      // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; driven for real.
+      await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'u1')
       await flushUi(2)
       vi.mocked(apiFetch).mockClear()
       await vm.loadAnnualLeaveBalance('comp_time')
@@ -3157,7 +3300,9 @@ describe('Attendance admin regressions', () => {
     // a product decision this task was told not to make unilaterally. A same-risk-class warning
     // appears instead once a group is saved.
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-timezone]')?.disabled).toBe(false)
-    expect(groupsSection!.querySelector('[data-attendance-group-timezone-change-warning]')?.textContent).toContain('reinterprets')
+    // GATE-5097 P2-3: copy corrected to not claim shift times get reinterpreted (the live
+    // calculation path never reads attendance_groups.timezone — see the code comment).
+    expect(groupsSection!.querySelector('[data-attendance-group-timezone-change-warning]')?.textContent).toContain('does not retime existing shifts')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="comprehensive-hours"]')?.textContent).toContain('Review and reporting live in their own admin surface')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('applies to all attendance groups')
