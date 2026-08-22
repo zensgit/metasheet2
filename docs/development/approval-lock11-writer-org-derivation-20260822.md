@@ -2021,4 +2021,3 @@ staging U1 probes moved outside the NOT_APPLIED short-circuit with pre-measureme
 catch-up; the (β) mechanical tripwire (migration-presence assertion in each writer suite; no armed
 auto-merge while #5103 is open); the evidence-workflow read-only gate (o2 precedent); W-4 scout/gate at
 max effort.
-
