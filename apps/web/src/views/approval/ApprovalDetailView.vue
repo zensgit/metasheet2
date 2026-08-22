@@ -980,10 +980,18 @@
           />
         </el-form-item>
         <!-- Lock-9 OD-L9-10(a): process-attachment uploader — gated on the pipeline flag AND
-             `isMyTurn` (an exact mirror of the server's seat check), deliberately NOT `canAct`
-             (the coarse `approvals:act` scope grant, which the 评论 button above has no gate on
-             at all and so also renders for requesters/CC recipients). Budgets are
-             server-authoritative and unratified (OD-L9-8) — no client-side count/size cap here. -->
+             `isMyTurn`, deliberately NOT `canAct` (the coarse `approvals:act` scope grant, which
+             the 评论 button above has no gate on at all and so also renders for requesters/CC
+             recipients). Budgets are server-authoritative and unratified (OD-L9-8) — no
+             client-side count/size cap here.
+             Lock-9 FE fix round (gate P3-1): `isMyTurn` is a narrower, FAIL-CLOSED approximation
+             of the server's seat check, not an exact mirror — the server's `assignmentMatchesActor`
+             also admits `assignment_type === 'role'`; `isMyTurn` (below) matches only
+             `type === 'user'`. A role-seated approver whose upload the server would accept sees no
+             uploader here. No security impact (fails closed) and consistent with the shipped action
+             bar's own `v-if="isMyTurn"` (line ~67, unchanged by this slice) — this is a display gap,
+             not a new capability gap, and correcting the "exact mirror" wording, not the gate choice
+             itself, is what this fix round changed. -->
         <el-form-item
           v-if="attachmentPipelineEnabled && isMyTurn"
           label="附件"
@@ -1080,7 +1088,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, type Ref } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageShell from '../../components/layout/PageShell.vue'
@@ -1363,6 +1371,14 @@ const attachmentFields = computed<AttachmentFieldDisplay[]>(() => {
  * the timeline entry the `comment` action produced. The 审批记录 TABLE view (`recordView ===
  * 'table'`, a separate projection of the same `store.history`) deliberately does NOT get this
  * block in this slice — see the PR body.
+ *
+ * DISCLOSED gap (fix round, gate P1-1, see PR body): `item.metadata` only carries
+ * `attachmentIds` on PLM-bridged instances today (`ApprovalBridgeService.loadLocalHistory` already
+ * returns the correct `UnifiedApprovalHistoryDTO` shape). The platform branch of
+ * `GET /api/approvals/:id/history` has no `metadata` column in its projection at all, so this
+ * block is a correctly-implemented no-op against every platform instance until a backend
+ * companion reconciles that route's row shape with the DTO — not a bug in this function, but this
+ * function alone cannot make it render for platform instances.
  */
 function processAttachmentRefsForHistoryItem(item: { metadata?: Record<string, unknown> }): ResolvedAttachmentRef[] {
   if (!attachmentPipelineEnabled.value) return []
@@ -1669,8 +1685,16 @@ const commentAttachmentUploading = ref(false)
 // disclosed shape gap — see the PR body). Runs only when the list is non-empty, so the
 // post-successful-submit close (list already cleared) never issues a DELETE for an id the server
 // just bound.
-watch(commentDialogVisible, (visible, wasVisible) => {
-  if (visible || !wasVisible) return
+//
+// Lock-9 FE fix round (2026-08-22, gate P3-2): this watcher only fires on a `commentDialogVisible`
+// true→false transition. Two exits never produce that transition and were leaking staged uploads:
+// (a) unmounting this view entirely (route change to a DIFFERENT view) — no watcher on an unmounted
+// component's own ref ever runs again; (b) 下一条/deep-link navigation, which changes
+// `route.params.id` IN PLACE without unmounting (same precedent as this file's own `:key`
+// comment above) — `commentDialogVisible` stays whatever it was across the reload. Factored into
+// `retractStagedCommentAttachments` and called from both `onBeforeUnmount` and the params-id watch
+// below, in addition to this close-watcher.
+function retractStagedCommentAttachments(): void {
   const staged = commentStagedAttachments.value
   if (staged.length === 0) return
   commentStagedAttachments.value = []
@@ -1681,6 +1705,15 @@ watch(commentDialogVisible, (visible, wasVisible) => {
       // to report this failure into.
     })
   }
+}
+
+watch(commentDialogVisible, (visible, wasVisible) => {
+  if (visible || !wasVisible) return
+  retractStagedCommentAttachments()
+})
+
+onBeforeUnmount(() => {
+  retractStagedCommentAttachments()
 })
 const returnDialogVisible = ref(false)
 const currentAction = ref<ApprovalActionType>('approve')
@@ -2185,17 +2218,24 @@ async function onCommentAttachmentPick(event: Event): Promise<void> {
  * §4.3-style removal (mirrors `ApprovalNewView.vue`'s `removeAttachment`): the server DELETE is the
  * load-bearing half (soft-delete + durable purge-intent enqueue); the local drop only happens after
  * it resolves, and a genuine failure leaves the entry in the list so the user can retry.
+ *
+ * Lock-9 FE fix round (gate P3-3): re-reads `commentStagedAttachments.value` AFTER the `await`
+ * rather than closing over the array reference from before it — the close-watcher
+ * (`retractStagedCommentAttachments`) can replace that ref with a NEW (now-empty) array while this
+ * DELETE is in flight (dialog closed mid-remove). Splicing a captured pre-await reference would
+ * mutate an array nothing renders any more, on top of double-DELETEing the same id. Re-reading means
+ * a dialog-closed-mid-remove race finds nothing to splice (already retracted) instead of corrupting
+ * a detached array.
  */
 async function removeCommentAttachment(attachmentId: string): Promise<void> {
-  const list = commentStagedAttachments.value
   try {
     await deleteApprovalAttachment(attachmentId)
   } catch {
     ElMessage.error('附件移除失败，请重试')
     return
   }
-  const index = list.findIndex((item) => item.id === attachmentId)
-  if (index >= 0) list.splice(index, 1)
+  const index = commentStagedAttachments.value.findIndex((item) => item.id === attachmentId)
+  if (index >= 0) commentStagedAttachments.value.splice(index, 1)
 }
 
 // T3-1 v0 (ballot Q7): the mobile surface reuses the SAME version-less unified
@@ -2615,6 +2655,10 @@ watch(
   () => route.params.id,
   (next, prev) => {
     if (typeof next === 'string' && next && next !== prev) {
+      // Lock-9 FE fix round (gate P3-2): this component instance is REUSED across a params-only
+      // navigation (no unmount), so any process attachment still staged on the OUTGOING instance's
+      // comment dialog must be retracted here — `onBeforeUnmount` never fires for this transition.
+      retractStagedCommentAttachments()
       showNextEntry.value = false
       void loadDetailPage()
     }

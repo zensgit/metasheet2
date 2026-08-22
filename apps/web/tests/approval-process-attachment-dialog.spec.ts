@@ -29,13 +29,23 @@ import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from
  */
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+// Lock-9 FE fix round (gate P3-2 regression): `mockRouteId` is a real `ref`, and `params` is a
+// getter re-read on every access — so `ApprovalDetailView`'s own `watch(() => route.params.id, ...)`
+// (下一条/deep-link params-only navigation) reacts to `mockRouteId.value = '...'` exactly like the
+// real `route.params.id` reacts to a router navigation, without needing to re-mount.
+const mockRouteId = ref('apv_1')
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return {
     ...actual,
     useRouter: () => ({ push: pushSpy, back: vi.fn() }),
-    useRoute: () => ({ params: { id: 'apv_1' }, query: {}, path: '/approvals/apv_1', meta: {} }),
+    useRoute: () => ({
+      get params() { return { id: mockRouteId.value } },
+      query: {},
+      get path() { return `/approvals/${mockRouteId.value}` },
+      meta: {},
+    }),
   }
 })
 
@@ -244,6 +254,7 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
     mockLoading.value = false
     mockCanAct.value = false
     mockCurrentUserId.value = null
+    mockRouteId.value = 'apv_1'
     approvalAttachmentsFlag = false
     executeActionSpy.mockClear()
     executeActionSpy.mockResolvedValue({})
@@ -485,6 +496,44 @@ describe('ApprovalDetailView — Lock-9 process-attachment comment dialog', () =
       await flushUi()
 
       expect(commentDialog().textContent).not.toContain('first.pdf')
+    })
+
+    // Lock-9 FE fix round (2026-08-22, gate P3-2): the close-watcher above only fires on a
+    // `commentDialogVisible` true→false transition. Unmounting the view entirely (route change to
+    // a DIFFERENT view, dialog left open) never produces that transition — no watcher on an
+    // unmounted component's own ref runs again. `onBeforeUnmount` is the fix.
+    it('unmounting the view with a staged-but-unbound upload still open DELETEs it (was: leaked)', async () => {
+      uploadAtomicSpy.mockResolvedValue([{ id: 'att_unmount_1', sizeBytes: 4 }])
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'leaked-on-unmount.pdf', { type: 'application/pdf' })])
+      expect(commentDialog().textContent).toContain('leaked-on-unmount.pdf')
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled() // not yet — still open, still staged
+
+      app!.unmount()
+      app = null // afterEach's own unmount call would double-unmount otherwise
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_unmount_1')
+    })
+
+    // Lock-9 FE fix round (gate P3-2, second leak site): 下一条/deep-link navigation changes
+    // `route.params.id` IN PLACE without unmounting this component (see this file's `route` mock
+    // above) — the close-watcher never fires either, since `commentDialogVisible` never flips.
+    // The params-id watch must retract on the OUTGOING instance before loading the new one.
+    it('navigating to a different instance (params-only, no unmount) with a staged upload still open DELETEs it', async () => {
+      uploadAtomicSpy.mockResolvedValue([{ id: 'att_nav_1', sizeBytes: 4 }])
+      await mountView()
+      openCommentDialog()
+      await flushUi()
+      await pickFiles([new File(['x'], 'leaked-on-nav.pdf', { type: 'application/pdf' })])
+      expect(deleteAttachmentSpy).not.toHaveBeenCalled()
+
+      mockRouteId.value = 'apv_2' // simulates 下一条 without a remount
+      await flushUi()
+
+      expect(deleteAttachmentSpy).toHaveBeenCalledWith('att_nav_1')
+      expect(loadDetailSpy).toHaveBeenCalledWith('apv_2')
     })
   })
 

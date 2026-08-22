@@ -957,9 +957,47 @@ export async function getApproval(id: string): Promise<UnifiedApprovalDTO> {
   return apiGet(`/api/approvals/${id}`)
 }
 
+/**
+ * Lock-9 FE fix round (2026-08-22, gate P1-2) — `GET /api/approvals/:id/history` wraps its rows in
+ * `{ok, data:{items, page, pageSize, total}}` on BOTH the platform and PLM branches (verified by
+ * reading both `res.json(...)` call sites in `routes/approval-history.ts`); it has never returned a
+ * bare array. `getApprovalHistory` returning `apiGet(...)` unparsed — a raw fetch typed as
+ * `UnifiedApprovalHistoryDTO[]` without ever being one — meant `store.history` held the envelope
+ * object against the real wire, and `for (const item of history ?? [])` (this Lock-9 slice's own
+ * `collectHistoryAttachmentRefIds`, plus a PRE-EXISTING eager watcher in `ApprovalDetailView.vue`)
+ * threw `TypeError: ... is not iterable` on every real request — 0 calls, not empty results.
+ * `normalizeApprovalHistoryEnvelope` is the fix: unwrap `data.items` when present, pass an already-
+ * array response through unchanged (covers the mock branch and guards a future shape change), and
+ * fail closed to `[]` for anything else — same "render nothing rather than throw/fabricate"
+ * discipline `loadAttachmentMetadata`'s own catch already uses. See `approvalApiErrorSurfacing.spec.ts`
+ * for the pinned real-envelope regression test (drives this function directly — no env/module-reset
+ * dance needed, since it takes no dependency on `USE_MOCK`).
+ *
+ * This does NOT fix the deeper drift the fix round found and disclosed rather than solved here: the
+ * platform branch's rows are snake_case (`actor_id`/`occurred_at`/`from_status`/`to_status`) with no
+ * `metadata` column at all, while `UnifiedApprovalHistoryDTO` (and the PLM branch, which already
+ * returns the correct shape via `ApprovalBridgeService.loadLocalHistory`) expects camelCase +
+ * `metadata`. Unwrapping the envelope stops the throw and restores the shipped form-field
+ * attachment read path against the real wire; it does NOT make platform-instance timeline rows
+ * render real actor names/timestamps or process-attachment refs — those still require a backend
+ * companion to reconcile the platform branch's row shape with the DTO. See the PR body.
+ */
+export function normalizeApprovalHistoryEnvelope(payload: unknown): UnifiedApprovalHistoryDTO[] {
+  if (Array.isArray(payload)) return payload as UnifiedApprovalHistoryDTO[]
+  if (payload && typeof payload === 'object') {
+    const data = (payload as Record<string, unknown>).data
+    if (data && typeof data === 'object') {
+      const items = (data as Record<string, unknown>).items
+      if (Array.isArray(items)) return items as UnifiedApprovalHistoryDTO[]
+    }
+  }
+  return []
+}
+
 export async function getApprovalHistory(id: string): Promise<UnifiedApprovalHistoryDTO[]> {
   if (USE_MOCK) return mockHistory(id)
-  return apiGet(`/api/approvals/${id}/history`)
+  const payload = await apiGet<unknown>(`/api/approvals/${id}/history`)
+  return normalizeApprovalHistoryEnvelope(payload)
 }
 
 // ---------------------------------------------------------------------------

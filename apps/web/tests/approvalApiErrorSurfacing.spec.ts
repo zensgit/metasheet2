@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { ApprovalApiError, approvalRequestError } from '../src/approvals/api'
+import { ApprovalApiError, approvalRequestError, normalizeApprovalHistoryEnvelope } from '../src/approvals/api'
+import { collectHistoryAttachmentRefIds } from '../src/approvals/attachmentRefs'
 
 /**
  * B1-04 (宽恕型错误三件套) — unit coverage for the error-surfacing helper that
@@ -83,5 +84,85 @@ describe('approvalRequestError', () => {
     const error = caught as ApprovalApiError
     expect(error.message).toBe('请求失败（422）')
     expect(error.code).toBe('X')
+  })
+})
+
+/**
+ * Lock-9 FE fix round (2026-08-22, gate P1-2) — `getApprovalHistory` itself is behind the same
+ * `USE_MOCK` gate `approvalRequestError` above is documented as unable to bypass under Vitest
+ * (`DEV` is always `true`), so this exercises the extracted pure normalizer directly rather than
+ * fighting the module-level const with `vi.stubEnv`/`vi.resetModules`. The payload below is the
+ * VERBATIM body captured from a real `MetaSheetServer` + live Postgres read in the independent
+ * gate (`GET /api/approvals/:id/history`, platform branch, one seeded `comment` row) — not a
+ * fabricated fixture.
+ */
+describe('normalizeApprovalHistoryEnvelope (Lock-9 fix round, gate P1-2)', () => {
+  const REAL_WIRE_ENVELOPE = {
+    ok: true,
+    data: {
+      items: [
+        {
+          id: '1052',
+          occurred_at: '2026-08-22T06:04:24.994Z',
+          actor_id: 'probe-req-1787378664639',
+          actor_name: 'Requester',
+          action: 'comment',
+          comment: 'hello',
+          from_status: null,
+          to_status: 'approved',
+          version: 1,
+          from_version: null,
+          to_version: 1,
+        },
+      ],
+      page: 1,
+      pageSize: 50,
+      total: 1,
+    },
+  }
+
+  it('unwraps the real {ok, data:{items}} envelope to the items array', () => {
+    const result = normalizeApprovalHistoryEnvelope(REAL_WIRE_ENVELOPE)
+    expect(Array.isArray(result)).toBe(true)
+    expect(result).toHaveLength(1)
+    expect((result[0] as unknown as { id: string }).id).toBe('1052')
+  })
+
+  it('passes an already-array payload through unchanged (mock branch / defensive future-proofing)', () => {
+    const arr = [{ id: 'h1' }]
+    expect(normalizeApprovalHistoryEnvelope(arr)).toBe(arr)
+  })
+
+  it('fails closed to [] for a malformed/absent envelope rather than throwing', () => {
+    expect(normalizeApprovalHistoryEnvelope(null)).toEqual([])
+    expect(normalizeApprovalHistoryEnvelope(undefined)).toEqual([])
+    expect(normalizeApprovalHistoryEnvelope({ ok: true })).toEqual([])
+    expect(normalizeApprovalHistoryEnvelope({ ok: true, data: {} })).toEqual([])
+    expect(normalizeApprovalHistoryEnvelope({ ok: true, data: { items: 'not-an-array' } })).toEqual([])
+  })
+
+  it('end-to-end: the real wire envelope, normalized, no longer throws through collectHistoryAttachmentRefIds', () => {
+    // This IS the P1-2 chain: attachmentRefs.ts:145 `for (const item of history ?? [])` used to
+    // receive the raw envelope object and throw `TypeError: ... is not iterable`. Feeding it
+    // through the normalizer first (as `getApprovalHistory` now does) makes that structurally
+    // impossible regardless of what the server returns.
+    const history = normalizeApprovalHistoryEnvelope(REAL_WIRE_ENVELOPE)
+    expect(() => collectHistoryAttachmentRefIds(history as never)).not.toThrow()
+    // The platform branch's row has no `metadata` column at all (gate P1-1, disclosed in the PR
+    // body) — correctly resolves to no ids, not a crash and not a fabricated one.
+    expect(collectHistoryAttachmentRefIds(history as never)).toEqual([])
+  })
+
+  it('end-to-end: a PLM-shaped row (metadata present) still resolves its staged process-attachment ids', () => {
+    const plmShapedHistory = normalizeApprovalHistoryEnvelope({
+      ok: true,
+      data: {
+        items: [{ id: 'h1', metadata: { attachmentIds: ['att_probe_1'] } }],
+        page: 1,
+        pageSize: 50,
+        total: 1,
+      },
+    })
+    expect(collectHistoryAttachmentRefIds(plmShapedHistory as never)).toEqual(['att_probe_1'])
   })
 })
