@@ -518,10 +518,11 @@ const ALLOWLIST: AllowlistEntry[] = [
   // 2026-08-22): this is NOT the only prose asserting the deferral. On `origin/main`,
   // `docs/development/approval-remaining-dev-design-report-20260820.md:1682-1683` also records
   // it -- naming it "census `authorId` token" rather than the pattern id -- and marks the item
-  // on the owner 开放行 as `owner-scope`. That ledger line is discharged by the owner's fourth
-  // by-reference reply "按建议执行" (2026-08-22) on the three-step plan whose step 1 is this
-  // sweep; this comment does not itself close it. The two ledger lines at :1682-1683 still need
-  // a sync to reflect that closure -- deferred to a later step, not this one.
+  // on the owner 开放行 as `owner-scope`. Whether the owner's fourth by-reference reply
+  // "按建议执行" (2026-08-22) on the three-step plan (step 1 = this sweep) covers THAT SPECIFIC
+  // row is an outstanding owner call, recorded in the PR body, NOT closed by this comment or by
+  // this edit (`feedback_authorization_source_must_be_owner_authored`). The two ledger lines at
+  // :1682-1683 still need a sync once that call is made -- deferred to a later step, not this one.
   ...group('VALUES-FREE-FIXED', 'ApprovalCommentsPanel.vue commentsForPanel mapper -- the S3b upstream guard itself (Always-set authorName closes the shared panel template fallback structurally); now in-alternation via the widened `authorId` arm', [
     ['src/views/approval/ApprovalCommentsPanel.vue', 'authorName: authorDisplayName.value[c.authorId] || c.authorId,'],
   ]),
