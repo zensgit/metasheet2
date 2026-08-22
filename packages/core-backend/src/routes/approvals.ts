@@ -34,6 +34,7 @@ import {
 } from '../services/ApprovalProductService'
 import { listApprovalRecordLinkOptions } from '../services/approval-record-link-options'
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
+import { resolveApprovalActorRoles } from '../services/approval-actor-roles'
 import {
   ApprovalConditionFormulaError,
   assertApprovalConditionFormulaValidForSchema,
@@ -150,16 +151,6 @@ function resolveApprovalActorName(req: Request, fallbackId: string): string {
   if (typeof candidate !== 'string') return fallbackId
   const normalized = candidate.trim()
   return normalized.length > 0 ? normalized : fallbackId
-}
-
-function resolveApprovalActorRoles(req: Request): string[] {
-  const role = typeof req.user?.role === 'string' && req.user.role.trim().length > 0
-    ? [req.user.role.trim()]
-    : []
-  const roles = Array.isArray(req.user?.roles)
-    ? req.user!.roles.filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
-    : []
-  return Array.from(new Set([...role, ...roles]))
 }
 
 function resolveApprovalActorPermissions(req: Request): string[] {

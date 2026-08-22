@@ -36,6 +36,7 @@ import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import { resolveApprovalTemplateVisibilityActor } from '../routes/approvals'
 import { canReadApprovalInstance } from './approval-instance-readability'
+import { resolveApprovalActorRoles } from './approval-actor-roles'
 import { actorHasActiveSeatAtInstance, applyTemplateVisibilityFilter } from './ApprovalProductService'
 import { collectActiveNodeKeys, collectHiddenFieldIds, type RedactableRuntimeGraph } from './approval-form-redaction'
 import { drainPurgeIntents, sweepUnboundAttachments, UNBOUND_ATTACHMENT_TTL_HOURS } from './approval-attachment-gc'
@@ -319,16 +320,6 @@ export function principalHasApprovalsAct(req: Request): boolean {
   return codes.has('approvals:act') || codes.has('approvals:*') || codes.has('*:*')
 }
 
-/** Lock-9 §5.2 — mirrors resolveApprovalActorRoles (routes/approvals.ts), duplicated locally to
- *  avoid a new cross-module export purely for this fail-fast-only seat check. */
-function resolveActorRolesFromRequest(req: Request): string[] {
-  const role = typeof req.user?.role === 'string' && req.user.role.trim().length > 0 ? [req.user.role.trim()] : []
-  const roles = Array.isArray(req.user?.roles)
-    ? req.user!.roles.filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
-    : []
-  return Array.from(new Set([...role, ...roles]))
-}
-
 function parsePositiveIntMs(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return fallback
@@ -479,7 +470,7 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
       const candidate = req.user?.id ?? req.user?.userId ?? (req.user as { sub?: unknown } | undefined)?.sub
       const actorId = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
       if (!actorId) return Promise.resolve(false)
-      return actorHasActiveSeatAtInstance(db, instanceId, actorId, resolveActorRolesFromRequest(req))
+      return actorHasActiveSeatAtInstance(db, instanceId, actorId, resolveApprovalActorRoles(req))
     },
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),

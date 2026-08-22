@@ -173,6 +173,49 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
     return template.id
   }
 
+  /**
+   * G-1 positive-control fixture (residual sweep, P3-3): `start -> handler_h (handle,
+   * fieldWrites) -> approve_1 -> end`, modeled verbatim on
+   * approval-field-edit-enforcement.db.test.ts's `handlerGraph` — `assigneeSources` on BOTH nodes
+   * (NOT `assigneeType`/`assigneeIds`, which is only proven for approval nodes in this file). The
+   * writable field must be `text` or `number` (`record-link`/`attachment`/`explanation` are
+   * refused at ApprovalProductService.ts:11517).
+   */
+  async function publishHandlerTemplate(adminToken: string): Promise<string> {
+    const templateKey = `l9-handler-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest('/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Lock-9 G-1 positive-control handler template',
+        description: 'lock-9 residual sweep — G-1 positive control (handle+fieldWrites moves form_snapshot)',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }, { id: 'memo', type: 'text', label: 'memo' }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'handler_h', type: 'handler', config: { assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }], fieldPermissions: [{ fieldId: 'memo', access: 'editable' }] } },
+            { key: 'approve_1', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }], approvalMode: 'single' } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'handler_h' },
+            { key: 'e2', source: 'handler_h', target: 'approve_1' },
+            { key: 'e3', source: 'approve_1', target: 'end' },
+          ],
+        },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status, await publish.clone().text()).toBe(200)
+    return template.id
+  }
+
   async function createInstance(requesterToken: string, templateId: string, reason = 'lock9 acceptance'): Promise<string> {
     const create = await jsonRequest('/api/approvals', requesterToken, {
       method: 'POST',
@@ -322,6 +365,35 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       expect(ok.status, await ok.clone().text()).toBe(200)
     })
 
+    // NIT-1 (residual sweep, Lock-9 gate audit): flag ON, a MALFORMED `attachmentIds` on the ONE
+    // action that carries it (`comment`) must be a values-free 400, never accept-and-drop.
+    it.each([
+      { label: 'string (not an array)', attachmentIds: 'att_x' as unknown as string[] },
+      { label: 'blank-array (every element unusable)', attachmentIds: ['', '   '] },
+    ])('flag ON: comment with a MALFORMED attachmentIds ($label) is refused 400 APPROVAL_ATTACHMENT_IDS_INVALID — not silently accepted and dropped', async ({ attachmentIds }) => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds },
+      })
+      expect(res.status, await res.clone().text()).toBe(400)
+      const body = (await res.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_IDS_INVALID')
+
+      // Positive control on the SAME instance: attachmentIds: [] stays a 200 no-op — the guard is
+      // not a blanket refusal of the key, only of an unusable value.
+      const ok = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', comment: 'empty rider is fine', attachmentIds: [] },
+      })
+      expect(ok.status, await ok.clone().text()).toBe(200)
+    })
+
     it.each(['reject', 'approve'] as const)(
       'flag OFF: %s carrying attachmentIds succeeds unchanged (byte-for-byte no-op, G-12/§L9-D) — the SAME payload 400s once the flag is ON',
       async (action) => {
@@ -363,14 +435,12 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
   // ===============================================================================================
   // G-1 — process binding never touches form_snapshot.
   //
-  // P3-3 (gate-audit recording, corrected): this describe block does NOT contain a positive control
-  // proving the isolation is process-SELECTED (e.g. a sibling `handle`+`fieldWrites` action on the
-  // same or a twin instance, asserted to actually change `form_snapshot`, contrasted with the
-  // process action below that doesn't). An earlier version of this comment claimed such a control
-  // existed; it did not (`grep fieldWrites` over this file turns up comments only). The test below
-  // is a real negative assertion (process binding leaves the snapshot byte-identical + zero revision
-  // rows) but has no positive twin in this file demonstrating that a NON-process action on the same
-  // harness WOULD move those fields. That positive control is not added in this round.
+  // P3-3 (gate-audit recording, residual-sweep fix round): the positive control this comment
+  // previously recorded as missing now EXISTS — see the "POSITIVE CONTROL" `it` below, on the
+  // `publishHandlerTemplate` fixture. It proves the isolation is process-SELECTED, not a dead path:
+  // a sibling `handle`+`fieldWrites` action on a twin instance DOES move `form_snapshot` and DOES
+  // write a field-revision row, contrasted with the process action's negative assertion just below
+  // (byte-identical snapshot, zero revision rows). Mutation-confirmed (MUT-G1a/MUT-G1b, PR body).
   // ===============================================================================================
   describe('G-1: process binding is form_snapshot-isolated', () => {
     it('a comment action with attachmentIds leaves form_snapshot byte-identical and writes ZERO field-revision rows', async () => {
@@ -399,6 +469,32 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
 
       const bound = (await pool().query('SELECT status, instance_id, bind_kind, field_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
       expect(bound).toMatchObject({ status: 'bound', instance_id: iid, bind_kind: 'process', field_id: null })
+    })
+
+    it('POSITIVE CONTROL: a handle+fieldWrites action on the same harness DOES move form_snapshot and DOES write a revision row — the isolation above is process-SELECTED, not a dead path', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const handlerToken = await authToken(APPROVER) // publishHandlerTemplate seats APPROVER at handler_h
+      const templateId = await publishHandlerTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const before = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+
+      const handleRes = await jsonRequest(`/api/approvals/${iid}/actions`, handlerToken, {
+        method: 'POST',
+        body: { action: 'handle', fieldWrites: { memo: 'g1-positive-control-value' } },
+      })
+      // Ordering matters (feedback_fixture_shape_must_match_named_scenario): assert the handle
+      // action actually reached the handler seat BEFORE the snapshot assertions below — a
+      // mis-wired handler seat 403s and would otherwise look like a passing negative (the
+      // snapshot simply never changing because the action never landed).
+      expect(handleRes.status, await handleRes.clone().text()).toBe(200)
+
+      const revCount = await pool().query('SELECT count(*)::int AS n FROM approval_form_field_revisions WHERE instance_id=$1', [iid])
+      expect(revCount.rows[0].n).toBeGreaterThanOrEqual(1)
+
+      const after = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(after.form_snapshot).not.toEqual(before.form_snapshot)
+      expect(after.form_snapshot.memo).toBe('g1-positive-control-value')
     })
   })
 
@@ -542,6 +638,74 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       const ok = await uploadProcess(approverToken, iid)
       expect(ok.status, await ok.clone().text()).toBe(201)
       createdAttachmentIds.add(((await ok.json()) as { id: string }).id)
+    })
+
+    // NIT-2 (residual sweep, MUT-NIT2 closure (a)): the sole SHARED consumer of
+    // `resolveApprovalActorRoles` (routes/approvals.ts) / `resolveActorRolesFromRequest`
+    // (approval-attachment-runtime.ts, now the SAME extracted helper) that this file's other G-5
+    // legs never exercise is a ROLE-typed seat — every other G-5/G-6/G-8/G-11 test seats its actor
+    // via `assignment_type='user'`, which `assignmentMatchesActor` (ApprovalProductService.ts:3985)
+    // matches on `assignee_id === actorId` alone, never touching `actorRoles` at all. Measured: the
+    // NIT-2 extraction's own acceptance mutation (`resolveApprovalActorRoles` returns `[]`) reds
+    // NOTHING in this suite, the S1 lane, approval-rbac-boundary, approval-history-routing,
+    // approval-field-edit-enforcement, approval-comments, approval-handler-node, or
+    // approval-wp1-parallel-gateway — exactly the "green everywhere" outcome the extraction's own
+    // gate note says makes closure (a) mandatory rather than optional. This leg is that closure: a
+    // role-typed `approval_assignments` row seats the actor via the SAME `actorRoles.includes(...)`
+    // arm at BOTH the fail-fast upload check (`actorHasActiveSeatAtInstance`, fed by
+    // `approval-attachment-runtime.ts`'s DI seam) and the bind-time authority (`dispatchAction`'s
+    // `currentNodeAssignments` filter, fed by `routes/approvals.ts`'s `actor.roles`), so mutating
+    // the shared helper to return `[]` reds BOTH the upload 403 and the bind 403 below.
+    it('a ROLE-typed seat (assignment_type=\'role\', matched via the actor\'s JWT role claim, never assignee_id===actorId) uploads 201 and binds 200 WITH the matching role; a principal with a DIFFERENT role on the SAME node is refused 403 at both upload and bind', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const roleName = `l9-g5-role-${RUN}`
+      // Additive: the template's own user-typed assignment for approve_1 (APPROVER) still exists;
+      // this role-typed row seats a SECOND, independent actor at the SAME node_key.
+      await pool().query(
+        `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+         VALUES ($1, 'role', $2, 'approve_1', TRUE)`,
+        [iid, roleName],
+      )
+
+      const roleHolderId = `l9-g5-roleholder-${RUN}`
+      const roleHolderToken = await authToken(roleHolderId, roleName, 'approvals:act')
+      const wrongRoleId = `l9-g5-wrongrole-${RUN}`
+      const wrongRoleToken = await authToken(wrongRoleId, `${roleName}-nope`, 'approvals:act')
+
+      // Wrong role: refused AT UPLOAD (fail-fast leg), no durable row.
+      const before = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      const uploadDenied = await uploadProcess(wrongRoleToken, iid)
+      expect(uploadDenied.status).toBe(403)
+      const after = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      expect(after).toBe(before)
+
+      // Matching role: uploads 201.
+      const upload = await uploadProcess(roleHolderToken, iid)
+      expect(upload.status, await upload.clone().text()).toBe(201)
+      const attId = ((await upload.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      // Wrong role at BIND time (comment+attachmentIds): also refused 403, attachment stays unbound.
+      const bindDenied = await jsonRequest(`/api/approvals/${iid}/actions`, wrongRoleToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(bindDenied.status).toBe(403)
+      const stillUnbound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(stillUnbound.status).toBe('unbound')
+
+      // Matching role at BIND time: binds 200.
+      const bindOk = await jsonRequest(`/api/approvals/${iid}/actions`, roleHolderToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(bindOk.status, await bindOk.clone().text()).toBe(200)
+      const bound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound.status).toBe('bound')
     })
   })
 
@@ -792,7 +956,7 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
   // sweepUnboundAttachments; a BOUND process attachment is never swept.
   // ===============================================================================================
   describe('G-13: GC reuse (unmodified sweepUnboundAttachments)', () => {
-    it('sweeps a backdated unbound process row; leaves a bound process row untouched', async () => {
+    it('sweeps a backdated unbound process row; leaves a bound-and-ALSO-backdated process row untouched (the discriminator is status, not age)', async () => {
       const adminToken = await authToken(`l9-admin-${RUN}`)
       const requesterToken = await authToken(REQUESTER)
       const approverToken = await authToken(APPROVER)
@@ -810,14 +974,45 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       const up1 = await uploadProcess(approverToken, iid)
       const boundId = ((await up1.json()) as { id: string }).id
       createdAttachmentIds.add(boundId)
-      await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [boundId] } })
+      // G-13 (residual sweep, P3-2): the bind action's response was previously fired and
+      // discarded — assert it actually succeeded, or a broken bind would silently leave `boundId`
+      // unbound and this whole control would be vacuous (the exact G-1/P3-3 shape).
+      const bindRes = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [boundId] } })
+      expect(bindRes.status, await bindRes.clone().text()).toBe(200)
+
+      // De-confound the control from age (P3-2): a fresh `created_at` on the bound row would make
+      // the TTL arm exclude it on age alone, whatever its `status` — so the "sweep never touches
+      // bound rows" claim would hold vacuously even under a mutated status predicate. Backdating
+      // the bound row PAST the TTL forces the discriminator to be `status` alone.
+      await pool().query(`UPDATE approval_attachments SET created_at = now() - interval '169 hours' WHERE id = $1`, [boundId])
+      const preSweep = (await pool().query(
+        `SELECT status, (created_at <= now() - interval '169 hours') AS aged FROM approval_attachments WHERE id=$1`,
+        [boundId],
+      )).rows[0]
+      // A mis-targeted UPDATE (wrong id, wrong column) must red LOUDLY here, not silently restore
+      // the age confound this test exists to remove.
+      expect(preSweep).toMatchObject({ status: 'bound', aged: true })
+
+      // G-13(c): a FRESH (not backdated) unbound process row must survive the sweep on age alone —
+      // pins the OTHER arm of the TTL predicate, untested before this round.
+      const freshId = `att_g13_fresh_${RUN}`
+      await pool().query(
+        `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind, created_at)
+         VALUES ($1,'default',$2,NULL,'k-g13-fresh','fresh.pdf','application/pdf',10,'unbound','process', now())`,
+        [freshId, APPROVER],
+      )
+      createdAttachmentIds.add(freshId)
 
       await sweepUnboundAttachments(pool())
 
       const staleRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [staleId])).rows[0]
       expect(staleRow.status).toBe('deleted')
+      // The discriminator is `status` alone (bound never sweeps), NOT age — the row above is
+      // BOTH bound AND past the TTL window, and must still survive untouched.
       const boundRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [boundId])).rows[0]
       expect(boundRow.status).toBe('bound') // bound-frozen — the sweep never touches it
+      const freshRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [freshId])).rows[0]
+      expect(freshRow.status).toBe('unbound') // G-13(c): too young for the TTL arm, untouched
     })
   })
 
@@ -935,6 +1130,47 @@ describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
       expect(onResult.status, await onResult.clone().text()).toBe(400)
       const boundCountAfterOn = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
       expect(boundCountAfterOn).toBe(boundCountAfterOff) // the ON 400 bound nothing either — no partial bind
+    })
+
+    // NIT-1 (residual sweep, G-12 protection proof, MUT-NIT1-a): the SAME two MALFORMED
+    // attachmentIds payloads that 400 flag-ON must still 200 flag-OFF — a byte-for-byte no-op
+    // asserted at ROW level (metadata has no `attachmentIds` key at all, bound count unchanged),
+    // not merely equal status. §L9-D: "dispatched EXACTLY as it is today."
+    it.each([
+      { label: 'string (not an array)', attachmentIds: 'att_x' as unknown as string[] },
+      { label: 'blank-array (every element unusable)', attachmentIds: ['', '   '] },
+    ])('(c) flag OFF: comment with a MALFORMED attachmentIds ($label) still succeeds 200 — row-level parity, not just status', async ({ attachmentIds }) => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const boundCountBefore = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      let offResult: Response
+      try {
+        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        offResult = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+          method: 'POST',
+          body: { action: 'comment', comment: 'off flag malformed rider', attachmentIds },
+        })
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      expect(offResult.status, await offResult.clone().text()).toBe(200)
+
+      const boundCountAfterOff = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+      expect(boundCountAfterOff).toBe(boundCountBefore) // no bind attempted at all
+
+      const rec = (await pool().query(
+        `SELECT metadata FROM approval_records WHERE instance_id=$1 AND action='comment' ORDER BY created_at DESC LIMIT 1`,
+        [iid],
+      )).rows[0] as { metadata: Record<string, unknown> }
+      // The malformed value never even reaches the metadata surface — no `attachmentIds` key at
+      // all, not merely an empty/rejected one.
+      expect(Object.prototype.hasOwnProperty.call(rec.metadata, 'attachmentIds')).toBe(false)
     })
   })
 })

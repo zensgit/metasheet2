@@ -138,10 +138,14 @@ describe('createApprovalCommentsClient — listComments', () => {
     expect(client.truncated.value).toBe(false)
   })
 
-  it('when truncation is unavoidable, keeps the NEWEST 2000 (not the oldest) and sets `truncated` — reset to false at the start of the NEXT call (gate P2-1)', async () => {
-    // Server total 2200, ASC order id_0 (oldest) .. id_2199 (newest). Capacity is 2000, so the
-    // correct tail window is id_200..id_2199 — id_0..id_199 (the oldest 200) must be dropped, not
-    // the newest 200, because that is what the wrapper's "仅显示最近的评论" notice promises.
+  it.each([2200, 2150])('when truncation is unavoidable, keeps the NEWEST 2000 (not the oldest) and sets `truncated` — reset to false at the start of the NEXT call (gate P2-1) (total=%i)', async (total) => {
+    // Server total (2200 / 2150), ASC order id_0 (oldest) .. id_{total-1} (newest). Capacity is
+    // 2000, so the correct tail window is id_{total-2000}..id_{total-1} — the oldest
+    // (total-2000) ids must be dropped, not the newest, because that is what the wrapper's
+    // "仅显示最近的评论" notice promises. N2-1 (residual sweep): a SECOND, non-page-aligned total
+    // (2150) is parameterized alongside the original page-aligned 2200 — a flooring-to-page-size
+    // mutation of the offset computation produces the CORRECT window at 2200 (200 is already a
+    // multiple of 200) but the WRONG one at 2150 (150 floors to 0), so 2200 alone cannot catch it.
     //
     // OFFSET-KEYED, not queue-positional (gate N-1, 2026-08-22): the mock derives each page's rows
     // from the `offset=` query param it was actually asked for, like a real server would — a
@@ -150,7 +154,8 @@ describe('createApprovalCommentsClient — listComments', () => {
     // (e.g. `offset = 0` instead of `offset = total - capacity`) still receive the correct
     // pre-baked tail pages and pass every id assertion below. This mock cannot make that mistake:
     // the wrong offset gets the wrong (real) page.
-    const total = 2200
+    const capacity = 2000
+    const windowStart = total - capacity
     apiFetchMock.mockImplementation((url: string) => {
       const m = String(url).match(/offset=(\d+)/)
       const offset = m ? Number(m[1]) : 0
@@ -172,15 +177,16 @@ describe('createApprovalCommentsClient — listComments', () => {
     expect(comments).toHaveLength(2000)
     expect(client.truncated.value).toBe(true)
     const ids = comments.map((c) => c.id)
-    // Newest-first after the reverse: id_2199 leads, id_200 trails.
-    expect(ids[0]).toBe('id_2199')
-    expect(ids[ids.length - 1]).toBe('id_200')
-    // The oldest 200 (id_0..id_199) were dropped, not the newest.
+    // Newest-first after the reverse: id_{total-1} leads, id_{windowStart} trails.
+    expect(ids[0]).toBe(`id_${total - 1}`)
+    expect(ids[ids.length - 1]).toBe(`id_${windowStart}`)
+    // The oldest `windowStart` ids were dropped, not the newest.
+    expect(ids).not.toContain(`id_${windowStart - 1}`)
     expect(ids).not.toContain('id_0')
-    expect(ids).not.toContain('id_199')
-    expect(ids).toContain('id_200')
-    expect(ids).toContain('id_2199')
-    // 1 discovery request + 10 tail-window requests.
+    expect(ids).toContain(`id_${windowStart}`)
+    expect(ids).toContain(`id_${total - 1}`)
+    // 1 discovery request + 10 tail-window requests (holds for BOTH totals: 1 discovery + a full
+    // 200-row-page tail of exactly `capacity` rows).
     expect(apiFetchMock).toHaveBeenCalledTimes(11)
 
     // A later short/empty load must not carry the stale truncation flag forward.
@@ -216,9 +222,50 @@ describe('createApprovalCommentsClient — listComments', () => {
 
     const { comments } = await client.listComments({ containerId: 'apv_1', targetId: 'apv_1' })
 
-    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    // Id assertions FIRST (gate N-1 ordering convention, kept consistent with the P2-1 test
+    // above): a mutation that discards the retry (keeping the old forward-pass window) but still
+    // performs the extra fetch would preserve the call count, so the window itself must red here.
     expect(comments).toHaveLength(100)
     expect(client.truncated.value).toBe(true)
+    // The retained window is the NEWEST 100 (id_400..id_499), matching the wrapper's own notice
+    // ("仅显示最近的评论") — before the fix this silently kept the OLDEST 100 (id_0..id_99) instead.
+    const ids = comments.map((c) => c.id)
+    expect(ids[0]).toBe('id_499')
+    expect(ids[ids.length - 1]).toBe('id_400')
+    expect(ids).not.toContain('id_0')
+    expect(ids).not.toContain('id_399')
+    // N2-2 (residual sweep): the short-page branch now re-pages from the TAIL once truncation is
+    // detected, so this is 1 discovery + 1 tail-retry fetch (was 1 before the fix — a live,
+    // unflagged behaviour change on this branch, disclosed in the PR body).
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('N2-2 stale-total safety: a `first.total` far larger than what any retry page actually returns does NOT destroy the rows already collected (non-destructive retry)', async () => {
+    // page.total claims 999, but only 3 real rows exist at offset 0 and EVERY other offset is
+    // empty — the shape a stale/racing COUNT (concurrent deletes, COUNT-vs-SELECT skew) produces.
+    // This is untested by the existing zero-page test (first.raw.length === 0 there short-circuits
+    // the `collected.length > 0` guard before the retry logic is ever reached).
+    const total = 999
+    apiFetchMock.mockImplementation((url: string) => {
+      const m = String(url).match(/offset=(\d+)/)
+      const offset = m ? Number(m[1]) : 0
+      if (offset !== 0) {
+        return Promise.resolve(jsonResponse({ ok: true, data: { comments: [], page: { total, limit: 200, offset } } }))
+      }
+      const rows = [commentView({ id: 'id_0' }), commentView({ id: 'id_1' }), commentView({ id: 'id_2' })]
+      return Promise.resolve(jsonResponse({ ok: true, data: { comments: rows, page: { total, limit: 200, offset } } }))
+    })
+    const client = createApprovalCommentsClient(() => 'apv_1')
+
+    const { comments } = await client.listComments({ containerId: 'apv_1', targetId: 'apv_1' })
+
+    expect(comments).toHaveLength(3)
+    const ids = comments.map((c) => c.id)
+    expect(ids).toEqual(['id_2', 'id_1', 'id_0']) // newest-first after reverse
+    expect(client.truncated.value).toBe(true)
+    // 1 discovery + 1 tail-retry fetch (the retry's own first page is empty, so the loop breaks
+    // immediately — `retry.length === 0`, so the ORIGINAL 3-row `collected` is preserved, not wiped).
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
   })
 
   it('does not truncate when total fits exactly at capacity (2000) — no wasted discovery-only request', async () => {
