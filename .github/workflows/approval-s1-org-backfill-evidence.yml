@@ -232,8 +232,10 @@ jobs:
               "SELECT count(*) FROM approval_instances WHERE org_id IS NULL" || rc=1
 
             # ---- (b) THE DECISIVE NUMBER FOR ORG-PIN ACTIVATION -----------------------------
-            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts:131, "per-instance
-            # admission for PLATFORM ids only (the `plm:` branch above already returned)". With
+            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts:165 (moved from
+            # :131 by #5104's additive attachmentIds companion; the quoted comment text below is
+            # unchanged), "per-instance admission for PLATFORM ids only (the `plm:` branch above
+            # already returned)". With
             # APPROVAL_S1_ORG_PIN_ENABLED=true the predicate conjoins `i.org_id = ANY(viewerOrgIds)`;
             # a NULL org_id makes that NULL, i.e. DENY for everyone including admins (OD-S1-9(e)).
             # p20 is therefore exactly the count of instances that go dark on activation.

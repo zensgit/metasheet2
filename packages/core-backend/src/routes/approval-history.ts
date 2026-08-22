@@ -10,6 +10,7 @@ import type { ApprovalBridgePlmAdapter } from '../services/approval-bridge-types
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import { parsePagination } from '../util/response'
 import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
+import { isApprovalAttachmentsEnabled } from './approval-attachments'
 
 interface ApprovalHistoryRouterOptions {
   injector?: Injector
@@ -92,6 +93,13 @@ function approvalNotFoundResponse() {
  * parser) OR as a raw JSON string (driver/type-parser configuration is not re-verified here) — either
  * shape is handled, and anything else (null, object, malformed string) yields `[]`. Every element is
  * filtered to `string` — a hostile/corrupt metadata blob can never smuggle a non-string value out.
+ * Fix-round P3-1 (post-#5104-gate): both branches — the array-filter AND the `JSON.parse` string
+ * path — are exercised by dedicated real-DB assertions in C-18 (`approval-comments.db.test.ts`), not
+ * only described here; a mutation that deletes the `.filter(...)` or the `JSON.parse` branch now
+ * turns a test red.
+ *
+ * Gated by `isApprovalAttachmentsEnabled()` at the call site below (fix-round P2-1): this function
+ * itself does no gating so it stays a pure parser, independently testable.
  */
 function extractRiderAttachmentIds(raw: unknown): string[] {
   let value: unknown = raw
@@ -223,14 +231,25 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
         [id, pageSize, offset, APPROVAL_POLICY_DENIED_ACTION],
       )
 
-      // Build each item explicitly (never spread-forward the raw row) so the internal
-      // `lock9_attachment_ids_raw` projection alias can never itself leak onto the wire, and so
-      // adding this field can never accidentally widen to any other metadata key in the future.
+      // The row shape is bounded by the explicit SELECT list above (no bare `metadata` column is
+      // ever projected there) — the destructure below only strips the ONE internal
+      // `lock9_attachment_ids_raw` alias so it can never itself leak onto the wire; it is not what
+      // keeps other metadata keys out (the SELECT list already never asked the DB for them).
+      //
+      // Fix-round P2-1: gated on `isApprovalAttachmentsEnabled()`, checked ONCE per request (the
+      // flag can't change mid-request) so that with the flag OFF this map produces byte-for-byte
+      // the SAME `item` shape as before this field existed — no `metadata` key is ever attached,
+      // regardless of what a row's `lock9_attachment_ids_raw` holds. This matches the "Flag OFF
+      // remains a byte-for-byte no-op" doctrine this route's SQL comment above already claimed but
+      // did not, until now, enforce in code (see `isApprovalAttachmentsEnabled` in
+      // `./approval-attachments`, the SAME flag `/refs`, `/download` and `dispatchAction` gate on).
+      const attachmentsEnabled = isApprovalAttachmentsEnabled()
       const items = rows.map((row) => {
         const {
           lock9_attachment_ids_raw: attachmentIdsRaw,
           ...item
         } = row as Record<string, unknown> & { lock9_attachment_ids_raw?: unknown }
+        if (!attachmentsEnabled) return item
         const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
         return attachmentIds.length > 0 ? { ...item, metadata: { attachmentIds } } : item
       })
