@@ -512,9 +512,16 @@ const ALLOWLIST: AllowlistEntry[] = [
   // matches, drops none -- MUT-N1 below pins that nothing previously caught is lost); the *six
   // entries* are the narrowing component, and every one of those six lines was UNTRIAGED
   // (invisible to the census) before this change, so net enforcement strictly increases. Verified
-  // this breaks no ratified text: `git grep name-or-id-fallback origin/main` returns hits in
-  // exactly one file (this census spec, 5 occurrences) and zero in `docs/`; the only prose
-  // asserting the deferral was this very comment, which this edit supersedes.
+  // this widens no RATIFIED text: `git grep name-or-id-fallback origin/main` returns hits in
+  // exactly one file (this census spec, 5 occurrences) and zero in `docs/` -- the grep key is
+  // the pattern id, not the item's name. CORRECTION (residual-sweep gate finding F-1,
+  // 2026-08-22): this is NOT the only prose asserting the deferral. On `origin/main`,
+  // `docs/development/approval-remaining-dev-design-report-20260820.md:1682-1683` also records
+  // it -- naming it "census `authorId` token" rather than the pattern id -- and marks the item
+  // on the owner 开放行 as `owner-scope`. That ledger line is discharged by the owner's fourth
+  // by-reference reply "按建议执行" (2026-08-22) on the three-step plan whose step 1 is this
+  // sweep; this comment does not itself close it. The two ledger lines at :1682-1683 still need
+  // a sync to reflect that closure -- deferred to a later step, not this one.
   ...group('VALUES-FREE-FIXED', 'ApprovalCommentsPanel.vue commentsForPanel mapper -- the S3b upstream guard itself (Always-set authorName closes the shared panel template fallback structurally); now in-alternation via the widened `authorId` arm', [
     ['src/views/approval/ApprovalCommentsPanel.vue', 'authorName: authorDisplayName.value[c.authorId] || c.authorId,'],
   ]),
