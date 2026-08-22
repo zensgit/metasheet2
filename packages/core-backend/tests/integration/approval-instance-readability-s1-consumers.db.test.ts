@@ -81,9 +81,16 @@ describeIfDatabase('Lock-10 (S1) consumer adoption — detail/history/metrics, r
   const pool = () => poolManager.get()
   const createdInstanceIds: string[] = []
   const createdUserIds: string[] = []
+  // NEW-4 (residual sweep, S1 requal §D): a prototype spy on the REAL bridge service method — the
+  // route constructs a NEW ApprovalBridgeService per request (`getBridgeService`, routes/
+  // approvals.ts:271-273), so the spy must live on the prototype, not an instance. Default
+  // `vi.spyOn` calls through, so every OTHER assertion in this file keeps observing real behavior.
+  let getApprovalSpy: ReturnType<typeof vi.spyOn> | undefined
 
   beforeAll(async () => {
     ;({ MetaSheetServer } = await import('../../src/index'))
+    const bridgeModule = await import('../../src/services/ApprovalBridgeService')
+    getApprovalSpy = vi.spyOn(bridgeModule.ApprovalBridgeService.prototype, 'getApproval')
     expect(await canListenOnEphemeralPort()).toBe(true)
     await ensureApprovalSchemaReady()
     server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
@@ -96,6 +103,7 @@ describeIfDatabase('Lock-10 (S1) consumer adoption — detail/history/metrics, r
 
   afterEach(() => {
     readabilitySpyState.calls = 0
+    getApprovalSpy?.mockClear()
   })
 
   afterAll(async () => {
@@ -110,6 +118,9 @@ describeIfDatabase('Lock-10 (S1) consumer adoption — detail/history/metrics, r
         await pool().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
       }
     } finally {
+      // NOT vi.restoreAllMocks() — that would also tear down the vi.mock readability wrapper
+      // other tests in this file depend on.
+      getApprovalSpy?.mockRestore()
       await server?.stop()
     }
   })
@@ -186,6 +197,41 @@ describeIfDatabase('Lock-10 (S1) consumer adoption — detail/history/metrics, r
       // canReadApprovalInstance is NEVER consulted for a plm: id on either door (OD-S1-18(a); the
       // spy proves it here, not just the predicate's own defensive branch — G-S1-4(i)).
       expect(readabilitySpyState.calls).toBe(0)
+    })
+  })
+
+  // ---------------------------------------------------------------------------------------------
+  // NEW-4 (residual sweep, S1 requal §D) — P3-1 ordering: the S1 admission check
+  // (`routes/approvals.ts:2588-2596`) must run and DENY BEFORE `bridgeService.getApproval(...)`
+  // (:2605-2609) ever builds the DTO (assignments, runtime graph, field-access map, node
+  // operations, an `approval_template_versions` query, `projectRecordLinkFormSnapshotForViewer`).
+  // The property under test is CALL ORDER, not admission itself — admission is already gated by
+  // G-S1-5/M1/M8/M11. The acceptance mutation is the real reverse-apply of `1c65569d65` (move the
+  // `isPlmApprovalId` guard block to AFTER the `getApproval` call, no synthetic throw): the
+  // requal measured 48/48 + 39/39 all-green under exactly that reverse-apply — a green spy-zero
+  // assertion here means the gate is not load-bearing.
+  // ---------------------------------------------------------------------------------------------
+  describe('P3-1 ordering: S1 denial short-circuits BEFORE the DTO build', () => {
+    it('non-participant leg calls getApproval ZERO times (404 short-circuits before the DTO build); participant leg DOES call it (positive control — the spy is live and reachable)', async () => {
+      const requesterId = freshId('s1c-order-requester')
+      const instanceId = await seedInstance(requesterId)
+
+      // Participant leg FIRST: proves the spy is live and the route DOES reach getApproval on the
+      // allowed path — without this, a permanently-broken/never-installed spy would also read 0.
+      const requesterToken = await authToken(baseUrl, requesterId, 'user', 'approvals:read')
+      const detailOk = await jsonRequest(baseUrl, `/api/approvals/${instanceId}`, requesterToken)
+      expect(detailOk.status, await detailOk.clone().text()).toBe(200)
+      expect(getApprovalSpy).toHaveBeenCalled()
+
+      getApprovalSpy?.mockClear()
+
+      // Non-participant leg: same existing instance id, a fresh outsider with approvals:read but
+      // no seat/CC/requester relationship — 404, and getApproval must NEVER have been called.
+      const outsiderId = freshId('s1c-order-outsider')
+      const outsiderToken = await authToken(baseUrl, outsiderId, 'user', 'approvals:read')
+      const detailDenied = await jsonRequest(baseUrl, `/api/approvals/${instanceId}`, outsiderToken)
+      expect(detailDenied.status).toBe(404)
+      expect(getApprovalSpy).not.toHaveBeenCalled()
     })
   })
 

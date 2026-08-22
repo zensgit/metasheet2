@@ -9443,8 +9443,32 @@ export class ApprovalProductService {
         // Lock-9 OD-L9-10(a) / §5.4: the process-attachment bind rides the `comment` action ONLY
         // in v1 (the `handle`/`approve` riders are DEFERRED — see the PR body). Flag-gated at the
         // call site (P3-1): while APPROVAL_ATTACHMENTS_ENABLED is OFF, `attachmentIds` is never
-        // even read off `request` — a byte-for-byte no-op (G-12).
+        // even read off `request` — a byte-for-byte no-op (G-12). NIT-1 (residual sweep): flag ON,
+        // a present-but-malformed rider (not an array, or every element unusable) is now a
+        // values-free 400 `APPROVAL_ATTACHMENT_IDS_INVALID` — never silently accepted and dropped.
+        // A mixed array (some usable, some blank) is NOT covered — that residual is disclosed in
+        // the PR body, not fixed here.
         const attachmentsFlagOn = isApprovalAttachmentsEnabled()
+        if (attachmentsFlagOn && request.attachmentIds !== undefined) {
+          const rawIds = request.attachmentIds as unknown
+          const usable = Array.isArray(rawIds)
+            ? rawIds.filter((v): v is string => typeof v === 'string' && /[!-~]/.test(v))
+            : null
+          // NIT-1 (Lock-9 gate audit, residual sweep): a malformed rider on the ONE action that
+          // carries it must be a values-free 400, never accept-and-drop. `[]` stays a 200 no-op
+          // (unchanged) — the `(rawIds as unknown[]).length > 0` qualifier pins that. Guarded on
+          // `!== undefined`, NOT `hasOwnProperty`, so a direct service caller passing an explicit
+          // `undefined` keeps no-opping. Flag-gated: OFF this whole branch is unreachable, so
+          // G-12/§L9-D byte-for-byte no-op is preserved (MUT-NIT1-a proves this in the PR body).
+          if (usable === null || ((rawIds as unknown[]).length > 0 && usable.length === 0)) {
+            throw new ServiceError(
+              'Attachment ids must be a non-empty array of attachment identifiers',
+              400,
+              'APPROVAL_ATTACHMENT_IDS_INVALID',
+              { nodeKey: currentNodeKey },
+            )
+          }
+        }
         const requestedAttachmentIds = attachmentsFlagOn && Array.isArray(request.attachmentIds)
           ? [...new Set(request.attachmentIds.filter((v): v is string => typeof v === 'string' && /[!-~]/.test(v)))]
           : []

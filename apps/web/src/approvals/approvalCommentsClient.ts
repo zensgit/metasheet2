@@ -248,7 +248,32 @@ export function createApprovalCommentsClient(getInstanceId: () => string): Appro
         // first page (the "terminate on a zero-length page even if `total` claims more remain"
         // test below) must not flip `truncated` to true, or the notice would render over an empty
         // list, asserting loss of comments that were never even fetched once.
-        if (collected.length > 0 && collected.length < first.total) truncated.value = true
+        if (collected.length > 0 && collected.length < first.total) {
+          truncated.value = true
+          // N2-2: the forward pass above kept the OLDEST rows, but the wrapper's notice promises the
+          // NEWEST (ApprovalCommentsPanel.vue:100 "仅显示最近的评论"). Re-page from the tail so the copy
+          // and the retained window agree — the same property the `> capacity` branch already has.
+          // NON-DESTRUCTIVE: the forward-pass rows are discarded ONLY once the retry's first page comes
+          // back non-empty, so an inflated `first.total` (concurrent deletes / COUNT-vs-SELECT skew, the
+          // shape the "terminates on a zero-length page" test guards) can never turn a 3-comment load
+          // into a 0-comment one.
+          const tailOffset = Math.max(0, first.total - collected.length)
+          if (tailOffset > 0) {
+            const retry: MultitableComment[] = []
+            let cursor = tailOffset
+            for (let page = 0; page < APPROVAL_COMMENT_LIST_MAX_PAGES; page += 1) {
+              const { raw } = await fetchPage(cursor)
+              if (raw.length === 0) break
+              for (const r of raw) retry.push(toMultitableComment(r, instanceId))
+              if (raw.length < APPROVAL_COMMENT_LIST_PAGE_SIZE) break
+              cursor += raw.length                      // advance by ROWS RECEIVED, never by the
+                                                        // requested page size — the server's effective
+                                                        // page can be smaller, and striding by 200 would
+                                                        // skip rows.
+            }
+            if (retry.length > 0) { collected.length = 0; collected.push(...retry) }
+          }
+        }
       } else {
         // More comments exist than this client will ever hold — keep the NEWEST `capacity` of
         // them (see header note / gate P2-1), discarding the discovery page's (oldest) rows.

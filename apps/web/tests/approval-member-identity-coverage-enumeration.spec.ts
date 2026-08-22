@@ -259,8 +259,8 @@ interface PatternDef {
 const PATTERNS: PatternDef[] = [
   {
     id: 'name-or-id-fallback',
-    label: '`||`/`??` falling back to a bare `.id`/`.userId`/`.roleId`/`.deptId`/`.departmentId`/`.memberId` expression',
-    regex: /(?:\|\||\?\?)\s*[A-Za-z_$][\w$.?[\]]*\.(id|userId|roleId|deptId|departmentId|memberId)\b/,
+    label: '`||`/`??` falling back to a bare `.id`/`.userId`/`.roleId`/`.deptId`/`.departmentId`/`.memberId`/`.authorId` expression',
+    regex: /(?:\|\||\?\?)\s*[A-Za-z_$][\w$.?[\]]*\.(id|userId|roleId|deptId|departmentId|memberId|authorId)\b/,
     positiveControl: { file: 'src/approvals/useApprovalDirectory.ts', lineContains: 'user.name.trim() || user.id' },
   },
   {
@@ -492,27 +492,45 @@ const ALLOWLIST: AllowlistEntry[] = [
   // that would have caught a THIRD approval consumer mounting this kit without an equivalent
   // guard -- it is keyed on the IMPORTING file, not on these three lines.
   //
-  // SCOPE CORRECTION (gate finding P3-3, fix round, 2026-08-22): the `authorId`-not-in-alternation
-  // blind spot documented above is NOT limited to these three kit-internal lines -- it equally
-  // blinds `name-or-id-fallback` to `ApprovalCommentsPanel.vue`'s OWN `|| c.authorId` fallback
-  // (`authorName: authorDisplayName.value[c.authorId] || c.authorId,`), in the very file this
-  // slice's approval-specific upstream guard lives in, where `authorId` is the PRIMARY identity
-  // token (not an edge case). Proven by paired mutation: `|| rawAny.id` reds the pattern,
-  // `|| rawAny.authorId` on the identical line does not (see approvalCommentsClient.spec.ts's own
-  // "server/client page-size coupling" sibling census note for the mutation-testing convention;
-  // the mutation itself lives in this PR's gate report, not checked into source). That specific
-  // fallback is verified UNREACHABLE today (`getResolvedUserName` returns `null`, never the id --
-  // `directoryResolve.ts`'s tri-state contract), and the real behavioural specs
-  // (`approval-comments-panel.spec.ts`'s "never renders a raw author id" + "MENTION DROPDOWN"
-  // tests) catch a live regression on both render surfaces regardless of this text-scan gap -- so
-  // this is a residual-disclosure correction, not a new open leak. Widening the regex's
-  // alternation to include `authorId` is deliberately NOT done here: `name-or-id-fallback` scans
-  // ALL THREE trees (multitable + approval + shared/comments), so widening it is a blast-radius
-  // decision for whoever owns this census, not a fix-round-scoped edit.
+  // SCOPE CORRECTION, SUPERSEDED (gate finding P3-3, residual sweep, 2026-08-22): the prior
+  // version of this note recorded the `authorId`-not-in-alternation blind spot as a DEFERRED
+  // blast-radius decision ("scans ALL THREE trees ... not a fix-round-scoped edit"). That premise
+  // was UNBOUNDED; the residual sweep measured it mechanically instead of re-deferring it: the
+  // widened regex (now including `authorId` in the alternation, see the pattern definition above)
+  // matches exactly 7 lines the prior regex missed, across this file's three scanned roots:
+  //   1. ApprovalCommentsPanel.vue:182 (a COMMENT line describing the fallback this file's own
+  //      upstream guard closes -- OUT-OF-SCOPE, the scan does not strip comments)
+  //   2. ApprovalCommentsPanel.vue:185 (`authorName: authorDisplayName.value[c.authorId] ||
+  //      c.authorId,` -- the S3b upstream guard itself; VALUES-FREE-FIXED, entered below)
+  //   3-6. MetaCommentsPanel.vue:76,130,365,370 (multitable kit-internal renders, byte-identical
+  //      shipped behavior -- OUT-OF-SCOPE, entered in the group below)
+  //   -- MetaCommentsPanel.vue:395 was ALREADY allowlisted pre-emptively (the group below); the
+  //      widening converts it from pre-emptive triage to LIVE coverage, not a new entry.
+  // So the real cost is 6 new ALLOWLIST entries (four of them in the shared multitable tree),
+  // zero behaviour change, zero production edit -- a decision bounded enough for the gate to rule
+  // on in one read rather than defer again. The *regex* change is monotonic (strictly adds
+  // matches, drops none -- MUT-N1 below pins that nothing previously caught is lost); the *six
+  // entries* are the narrowing component, and every one of those six lines was UNTRIAGED
+  // (invisible to the census) before this change, so net enforcement strictly increases. Verified
+  // this breaks no ratified text: `git grep name-or-id-fallback origin/main` returns hits in
+  // exactly one file (this census spec, 5 occurrences) and zero in `docs/`; the only prose
+  // asserting the deferral was this very comment, which this edit supersedes.
+  ...group('VALUES-FREE-FIXED', 'ApprovalCommentsPanel.vue commentsForPanel mapper -- the S3b upstream guard itself (Always-set authorName closes the shared panel template fallback structurally); now in-alternation via the widened `authorId` arm', [
+    ['src/views/approval/ApprovalCommentsPanel.vue', 'authorName: authorDisplayName.value[c.authorId] || c.authorId,'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a COMMENT line describing the shared-panel template fallback this file\'s own upstream guard closes -- prose, not a render/assignment site; the scan does not strip comments', [
+    ['src/views/approval/ApprovalCommentsPanel.vue', '// `thread.authorName ?? thread.authorId` when this is undefined, which is EXACTLY the raw-id'],
+  ]),
   ...group('OUT-OF-SCOPE', 'mention-candidate label / comment-author label+subtitle fallback to the raw id when displayName/authorName is absent (or, for the subtitle, rendered alongside a differing name) -- legitimate, byte-identical multitable behavior (a real directory-backed name producer); the approval consumer (S3b) discharges the census gate via its OWN upstream guard instead of touching this shared file -- see the group note above and the TIER A entry it names', [
     ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: candidate.displayName?.trim() || candidate.userId.trim(),'],
     ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,'],
     ['src/shared/comments/components/MetaCommentsPanel.vue', 'subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId : undefined,'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'comment-author drawer/banner render fallback to the raw id when authorName is absent -- legitimate, byte-identical multitable kit-internal behavior (the S3b approval consumer never mounts these particular render paths without its own upstream guard already having supplied a non-empty authorName); newly caught only because this round widened the pattern\'s alternation to include `.authorId`, not because the code changed', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ thread.authorName ?? thread.authorId }}</span>'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return editingBanner(activeEditingComment.value.authorName ?? activeEditingComment.value.authorId, isZh.value)'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return replyingBanner(activeReplyComment.value.authorName ?? activeReplyComment.value.authorId, isZh.value)'],
   ]),
   ...group('OUT-OF-SCOPE', 'mention-suggestion autocomplete FILTER comparison (query substring match against label/id) -- a boolean predicate, never rendered to the DOM', [
     ['src/shared/comments/components/MetaCommentComposer.vue', 'return suggestion.label.toLowerCase().includes(query) || suggestion.id.toLowerCase().includes(query)'],
