@@ -21,6 +21,7 @@ const workflowsDir = path.join(repoRoot, '.github', 'workflows')
 // The workflows hardened by this sweep (canonical pinned pattern) + the two
 // pre-existing canonical references the pattern was copied from.
 const PINNED_WORKFLOWS = [
+  'approval-s1-org-backfill-evidence.yml',
   'attendance-remote-env-reconcile-prod.yml',
   'attendance-remote-log-snapshot-prod.yml',
   'attendance-remote-metrics-prod.yml',
