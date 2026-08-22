@@ -15,6 +15,21 @@
 // identifying is committed here. A real deployment still loads its pack as
 // deploy-time data from an uncommitted local file.
 //
+// "SHAPE, NOT CONTENT" IS LOAD-BEARING, AND IT HAS BEEN BROKEN ONCE.
+// This file shipped (#5074) carrying the 领料节点 and 交接工段 option sets as
+// they stand in the customer's live `config_info` table — their internal
+// primary keys paired with their own process names. That is a copy of the
+// customer's data, and the fact that it was pasted into a file whose own header
+// forbids it is why the rule is now MECHANISED rather than merely written down:
+//
+//   __tests__/customer-dictionary-leak-guard.test.cjs
+//
+// It refuses any committed run of `'<id> - <name>'` literals whose ids are not
+// a regular ladder — the fingerprint that separates a fixture someone authored
+// from a catalogue someone exported. Keep every dictionary below on a constant
+// step, and keep every NAME an obvious 示例* placeholder. A real vocabulary
+// belongs ONLY in the uncommitted deploy-time pack file.
+//
 // TOTAL SHAPE the rehearsal proves out:
 //   25 frozen canonical columns (stock-preparation-templates.cjs, untouched)
 // + 21 pack extension columns (below)
@@ -114,39 +129,52 @@ const FACTORY_A_REHEARSAL_PACK = {
   // empty — which is not the full shape.
   optionSets: [
     {
-      // 领料节点 — the production node that draws the material. Real vocabulary
-      // shape: the published "编号 - 名称" form the shop floor already reads.
+      // 领料节点 — the production node that draws the material. SIX SYNTHETIC
+      // entries in the "编号 - 名称" form the shop floor reads. The COUNT and
+      // the SHAPE are the properties the rehearsal exercises; the names are
+      // deliberately 示例* placeholders and the ids a regular 10-step ladder,
+      // so nothing here can be mistaken for — or reconstructed into — a real
+      // factory's process vocabulary. See customer-dictionary-leak-guard.
       fieldId: 'ext_pickingNode',
       options: [
-        { value: '48 - 主体焊接' },
-        { value: '124 - 接管' },
-        { value: '125 - 监检' },
-        { value: '126 - 包皮' },
-        { value: '127 - 装配' },
-        { value: '128 - 发货' },
+        { value: '10 - 示例节点一' },
+        { value: '20 - 示例节点二' },
+        { value: '30 - 示例节点三' },
+        { value: '40 - 示例节点四' },
+        { value: '50 - 示例节点五' },
+        { value: '60 - 示例节点六' },
       ],
     },
     {
-      // 交接工段 — the section the part is handed over to. Includes the
-      // 历史值 bucket the real sheet carries for rows migrated from the old
-      // system; dropping it would strand those rows on an invalid option.
+      // 交接工段 — the section the part is handed over to. FIFTEEN synthetic
+      // entries, same construction as above.
+      //
+      // The LAST element is the structural edge case this fixture exists to
+      // carry: a legacy bucket whose id sits INSIDE the live range (140, between
+      // 130 and 150) while its POSITION is the tail of the array. A real 备料
+      // sheet grows exactly that shape — the migration bucket is appended after
+      // the live vocabulary, so the array is not sorted by id — and the pack
+      // pipeline must not quietly reorder it: `normalizeOptionSet` sorts by the
+      // optional `order` key, no option here declares one, and V8's stable sort
+      // therefore has to preserve authored order. Renumber this into a sorted
+      // ladder and that guarantee stops being tested.
       fieldId: 'ext_handoverSection',
       options: [
-        { value: '53 - 主体' },
-        { value: '54 - 非标' },
-        { value: '55 - 总装' },
-        { value: '56 - 零部件' },
-        { value: '57 - 机加工' },
-        { value: '59 - 钣金' },
-        { value: '60 - 电工' },
-        { value: '61 - 抛光' },
-        { value: '158 - MVR' },
-        { value: '163 - 外协' },
-        { value: '206 - 售后' },
-        { value: '257 - 制管' },
-        { value: '290 - 下罐体' },
-        { value: '304 - 大机加' },
-        { value: '58 - 历史值' },
+        { value: '10 - 示例工段一' },
+        { value: '20 - 示例工段二' },
+        { value: '30 - 示例工段三' },
+        { value: '40 - 示例工段四' },
+        { value: '50 - 示例工段五' },
+        { value: '60 - 示例工段六' },
+        { value: '70 - 示例工段七' },
+        { value: '80 - 示例工段八' },
+        { value: '90 - 示例工段九' },
+        { value: '100 - 示例工段十' },
+        { value: '110 - 示例工段十一' },
+        { value: '120 - 示例工段十二' },
+        { value: '130 - 示例工段十三' },
+        { value: '150 - 示例工段十五' },
+        { value: '140 - 示例历史桶' },
       ],
     },
     {
