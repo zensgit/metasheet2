@@ -5,23 +5,30 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { up as phase1Up } from '../../src/db/migrations/zzzz20260821100000_add_approval_instance_org_id'
+import { up as provisioningUp } from '../../src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users'
 import { up as backfillBUp } from '../../src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id'
 
 /**
  * Lock-10 (S1) Migration B — ordered org_id backfill over the residual NULL platform rows left
- * by Phase 1, real-DB acceptance (isolated schema).
+ * by Phase 1, real-DB acceptance (isolated schema). EXTENDED at the Lock-11 §10 D-8(β) revision
+ * (docs/development/approval-lock11-writer-org-derivation-20260822.md, owner sixth by-reference
+ * reply, 2026-08-22) to also cover the companion provisioning migration
+ * `zzzz20260823050000_provision_zero_membership_active_users.ts` (H32-H37, H41) and the revised
+ * class-6 arm of `backfillBUp` itself (H15 audited + H38-H40).
  *
  * Harness shape copied from `approval-attachment-scan-purge-upgrade-migration.db.test.ts`: an
  * isolated `CREATE SCHEMA "<rand>"` + a `Pool` with `options: '-c search_path=<schema>'` + a
- * per-schema `Kysely`, minimal hand-built tables, migrations imported and run directly, `DROP
- * SCHEMA ... CASCADE` in `afterEach`.
+ * per-schema `Kysely`, minimal hand-built tables (now including a minimal `users` table, added
+ * for the D-8(β) provisioning gates), migrations imported and run directly, `DROP SCHEMA ...
+ * CASCADE` in `afterEach`.
  *
- * Both `up()`s are run in sequence in `beforeEach` (phase1Up first, against empty tables — a
- * no-op backfill, but it lands the `org_id` column + non-blank CHECK exactly as Phase 1 does in
- * every real environment), then each test seeds its own fixture and calls `backfillBUp` directly.
- * This is NOT a re-run of a recorded migration (kysely never does that); it is calling the
- * function bodies directly against a fresh isolated schema, which is what every sibling
- * `.db.test.ts` in this repo does.
+ * `phase1Up` is run in `beforeEach` (against empty tables — a no-op backfill, but it lands the
+ * `org_id` column + non-blank CHECK exactly as Phase 1 does in every real environment); each test
+ * then seeds its own fixture and calls `backfillBUp` directly (D-8(β) tests additionally call
+ * `provisioningUp` first, matching the ratified ORDER — provisioning migration merges/runs
+ * BEFORE the revised backfill). This is NOT a re-run of a recorded migration (kysely never does
+ * that); it is calling the function bodies directly against a fresh isolated schema, which is
+ * what every sibling `.db.test.ts` in this repo does.
  */
 
 const dbUrl = process.env.DATABASE_URL
@@ -74,6 +81,14 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
         PRIMARY KEY (user_id, org_id)
       )
     `.execute(testDb)
+    // Minimal `users` table — added for the D-8(β) provisioning migration's gates (H32-H37,
+    // H40). Not needed by any pre-existing H1-H31 fixture (`backfillBUp` never reads `users`).
+    await sql`
+      CREATE TABLE users (
+        id text PRIMARY KEY,
+        is_active boolean NOT NULL DEFAULT true
+      )
+    `.execute(testDb)
 
     // Simulate "Phase 1 already landed" — adds org_id (nullable, no default) + the non-blank
     // CHECK, and runs its own (here trivially empty) class-2 backfill.
@@ -111,6 +126,18 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
 
   async function seedUserOrg(userId: string, orgId: string, isActive = true): Promise<void> {
     await sql`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES (${userId}, ${orgId}, ${isActive})`.execute(testDb)
+  }
+
+  // Added for the D-8(β) provisioning gates (H32-H37, H40).
+  async function seedUser(id: string, isActive = true): Promise<void> {
+    await sql`INSERT INTO users (id, is_active) VALUES (${id}, ${isActive})`.execute(testDb)
+  }
+
+  async function activeMembershipCount(userId: string): Promise<number> {
+    const r = await sql<{ n: string }>`
+      SELECT count(*)::text AS n FROM user_orgs WHERE user_id = ${userId} AND is_active = TRUE
+    `.execute(testDb)
+    return Number(r.rows[0]?.n ?? '0')
   }
 
   async function orgIdOf(id: string): Promise<string | null> {
@@ -305,9 +332,21 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     expect(await orgIdOf(id)).toBe('orgAttach')
   })
 
-  // ---- H15 — class-6 abort population equality (exactly one true positive) ------------------
-
-  it('H15: one row matching every class-6 clause + one row failing EACH clause individually -> aborted count is exactly 1', async () => {
+  // ---- H15 — class-6 population equality (exactly one true positive), AUDITED at D-8(β) -----
+  //
+  // AUDIT (Lock-11 §10 D-8(β) revision, ruled consequence, not a silent change): this fixture's
+  // ONLY `user_orgs` row is `u_h15_resolvable` -> `orgResolvable` (active) — so in THIS isolated
+  // schema `SELECT DISTINCT org_id FROM user_orgs WHERE is_active` returns exactly ONE row. That
+  // means the D-8(β) single-org premise HOLDS here, and the ruled outcome for a class-6 TERMINAL
+  // row changed from "the whole migration ABORTS" to "the terminal row is STAMPED with the
+  // unique active org". This is exactly the shape the ratification names ("this ruling unblocks
+  // #5103... it is an owner amendment of the class-6 arm") — the fixture is UNCHANGED, its
+  // discriminating decoys are UNCHANGED, only the migration's ruled response to the true positive
+  // changed, so the test's ASSERTION changes with it rather than the fixture being reshaped to
+  // dodge the change. Contrast H3/H6/H19 below (still ABORT — audited, unchanged: H3 seeds TWO
+  // distinct active orgs, H6 and H19 seed ZERO/ZERO-ACTIVE orgs, so the single-org premise FAILS
+  // for all three and the original ABORT still fires verbatim).
+  it('H15: one row matching every class-6 clause + one row failing EACH clause individually -> the true positive is STAMPED with the unique active org (single-org premise holds), every decoy unaffected', async () => {
     // The TRUE POSITIVE — matches every class-6 clause.
     await seedInstance({ id: 'h15_true', sourceSystem: 'platform', requesterId: 'u_h15_true' })
     // deliberately no user_orgs row for u_h15_true (zero memberships)
@@ -316,10 +355,12 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     await seedInstance({ id: 'h15_stamped', sourceSystem: 'platform', orgId: 'orgZ' })
 
     // Fails "not plm:%".
-    await seedInstance({ id: `plm:${randomUUID()}`, sourceSystem: 'plm' })
+    const plmId = `plm:${randomUUID()}`
+    await seedInstance({ id: plmId, sourceSystem: 'plm' })
 
     // Fails "not afs:%".
-    await seedInstance({ id: `afs:${randomUUID()}`, sourceSystem: 'platform' })
+    const afsId = `afs:${randomUUID()}`
+    await seedInstance({ id: afsId, sourceSystem: 'platform' })
 
     // Fails "source_system = platform".
     await seedInstance({ id: 'h15_nonplatform', sourceSystem: 'plm' })
@@ -328,16 +369,29 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     await seedInstance({ id: 'h15_template', sourceSystem: 'platform', templateId: randomUUID() })
 
     // Fails "zero attachments" — carries a SINGLE-org attachment (not two-org, so this does not
-    // also trip the class-2 conflict pre-flight, keeping this test's abort attributable to class 6
-    // alone).
+    // also trip the class-2 conflict pre-flight).
     await seedInstance({ id: 'h15_attach', sourceSystem: 'platform' })
     await seedAttachment('att_h15', 'h15_attach', 'orgSingle')
 
-    // Fails "requester not uniquely resolvable" — resolves to exactly one active org.
+    // Fails "requester not uniquely resolvable" — resolves to exactly one active org. This row is
+    // ALSO the fixture's sole source of the single active org (`orgResolvable`) that makes the
+    // D-8(β) premise hold for `h15_true` above.
     await seedInstance({ id: 'h15_resolvable', sourceSystem: 'platform', requesterId: 'u_h15_resolvable' })
     await seedUserOrg('u_h15_resolvable', 'orgResolvable', true)
 
-    await expect(backfillBUp(testDb)).rejects.toThrow(/^approval_instance_org_id backfill \(Migration B\) aborted before any UPDATE: 1 instance\(s\)/)
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+
+    // The true positive: stamped with THE unique active org, not left NULL and not aborted.
+    expect(await orgIdOf('h15_true')).toBe('orgResolvable')
+    // Every decoy: exactly the outcome it had before the D-8(β) revision (none of them are
+    // class-6-shaped, so none of them are touched by the revision).
+    expect(await orgIdOf('h15_stamped')).toBe('orgZ')
+    expect(await orgIdOf(plmId)).toBeNull()
+    expect(await orgIdOf(afsId)).toBeNull()
+    expect(await orgIdOf('h15_nonplatform')).toBeNull()
+    expect(await orgIdOf('h15_template')).toBeNull()
+    expect(await orgIdOf('h15_attach')).toBe('orgSingle')
+    expect(await orgIdOf('h15_resolvable')).toBe('orgResolvable')
   })
 
   // ---- H16 — lane guards: missing user_orgs / approval_attachments must not crash -----------
@@ -572,5 +626,236 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
 
     await expect(backfillBUp(testDb)).resolves.toBeUndefined()
     expect(await orgIdOf(id)).toBe('orgSameTwice')
+  })
+
+  // ============================================================================================
+  // Lock-11 §10 D-8(β) REVISION (ratified 2026-08-22, owner sixth by-reference reply). Two groups:
+  //   H32-H37, H41: the companion provisioning migration
+  //            `zzzz20260823050000_provision_zero_membership_active_users.ts`, standalone.
+  //   H38-H40: the revised class-6 arm of `backfillBUp`, plus the end-to-end ordering.
+  // ============================================================================================
+
+  // ---- H32-H37, H41 — provisioning migration ------------------------------------------------------
+
+  it('H32: a zero-membership ACTIVE user is provisioned into the single active org', async () => {
+    // Establish the single active org via a pre-existing, unrelated membership.
+    await seedUser('u_h32_seed', true)
+    await seedUserOrg('u_h32_seed', 'orgOnly32', true)
+    // The population: an ACTIVE user with NO user_orgs row at all.
+    await seedUser('u_h32_target', true)
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    expect(await activeMembershipCount('u_h32_target')).toBe(1)
+    const row = await sql<{ org_id: string; is_active: boolean }>`
+      SELECT org_id, is_active FROM user_orgs WHERE user_id = 'u_h32_target'
+    `.execute(testDb)
+    expect(row.rows).toEqual([{ org_id: 'orgOnly32', is_active: true }])
+  })
+
+  it('H33: a user who ALREADY holds an active membership is left completely untouched by provisioning (no duplicate row, no value change)', async () => {
+    await seedUser('u_h33', true)
+    await seedUserOrg('u_h33', 'orgOnly33', true)
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    // Still exactly one row, unchanged value — NOT EXISTS excluded it from the INSERT's source
+    // set entirely (no ON CONFLICT branch was even reached for this user).
+    const rows = await sql<{ org_id: string }>`SELECT org_id FROM user_orgs WHERE user_id = 'u_h33'`.execute(testDb)
+    expect(rows.rows).toEqual([{ org_id: 'orgOnly33' }])
+  })
+
+  it('H34: TWO distinct active orgs exist repo-wide -> provisioning ABORTS before any INSERT, values-free (the (i)-guard)', async () => {
+    await seedUser('u_h34_seed_a', true)
+    await seedUserOrg('u_h34_seed_a', 'orgH34A', true)
+    await seedUser('u_h34_seed_b', true)
+    await seedUserOrg('u_h34_seed_b', 'orgH34B', true)
+    await seedUser('u_h34_target', true) // the zero-membership population this migration would touch
+
+    await expect(provisioningUp(testDb)).rejects.toThrow(
+      /^provision_zero_membership_active_users \(Lock-11 D-8\(β\)\) aborted before any INSERT: found 2 distinct active org\(s\)/,
+    )
+    // Values-free: neither org id appears in the rejection.
+    await expect(provisioningUp(testDb)).rejects.not.toThrow(/orgH34A/)
+    await expect(provisioningUp(testDb)).rejects.not.toThrow(/orgH34B/)
+    // No partial write: the target user still has zero memberships.
+    expect(await activeMembershipCount('u_h34_target')).toBe(0)
+  })
+
+  it('H35: running provisioning TWICE provisions 0 additional rows on the second pass (idempotence)', async () => {
+    await seedUser('u_h35_seed', true)
+    await seedUserOrg('u_h35_seed', 'orgOnly35', true)
+    await seedUser('u_h35_target', true)
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+    expect(await activeMembershipCount('u_h35_target')).toBe(1)
+
+    // Second pass: NOT EXISTS now excludes u_h35_target (it has an active row); ON CONFLICT is a
+    // second, independent guard against the same effect. Either alone would make this pass a
+    // no-op; both together is the file's stated "belt-and-suspenders" posture.
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+    expect(await activeMembershipCount('u_h35_target')).toBe(1)
+    const rows = await sql<{ n: string }>`SELECT count(*)::text AS n FROM user_orgs WHERE user_id = 'u_h35_target'`.execute(testDb)
+    expect(rows.rows[0]?.n).toBe('1') // not 2 — no duplicate row, not merely "still active"
+  })
+
+  it('H36: a user whose ONLY membership is INACTIVE is still provisioned (matches U1b/D-9\'s single-is_active population exactly, not merely "zero rows at all")', async () => {
+    await seedUser('u_h36_seed', true)
+    await seedUserOrg('u_h36_seed', 'orgOnly36', true)
+    await seedUser('u_h36_target', true)
+    await seedUserOrg('u_h36_target', 'orgStaleInactive', false) // deactivated membership, different org
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    expect(await activeMembershipCount('u_h36_target')).toBe(1)
+    const active = await sql<{ org_id: string }>`
+      SELECT org_id FROM user_orgs WHERE user_id = 'u_h36_target' AND is_active = TRUE
+    `.execute(testDb)
+    expect(active.rows).toEqual([{ org_id: 'orgOnly36' }])
+    // The stale inactive row is untouched (non-resurrecting posture, same precedent as
+    // zzzz20260721150000): still exactly one row for that (user_id, org_id) pair, still inactive.
+    const stale = await sql<{ is_active: boolean }>`
+      SELECT is_active FROM user_orgs WHERE user_id = 'u_h36_target' AND org_id = 'orgStaleInactive'
+    `.execute(testDb)
+    expect(stale.rows).toEqual([{ is_active: false }])
+  })
+
+  it('H37: a zero-membership user whose users.is_active = FALSE is NOT provisioned (scope precision — this migration is narrower than its two precedents)', async () => {
+    await seedUser('u_h37_seed', true)
+    await seedUserOrg('u_h37_seed', 'orgOnly37', true)
+    await seedUser('u_h37_target', false) // inactive user, zero memberships
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    expect(await activeMembershipCount('u_h37_target')).toBe(0)
+  })
+
+  it("H41: a zero-ACTIVE-membership user whose ONLY row is an already-DEACTIVATED membership to the very org that is now THE sole active org -> provisioning does NOT crash and does NOT resurrect it (pins `ON CONFLICT (user_id, org_id) DO NOTHING`; NOT EXISTS alone would let the INSERT reach a live PRIMARY KEY collision here, which — without the ON CONFLICT clause — is a raw Postgres unique-violation, not a silent no-op)", async () => {
+    await seedUser('u_h41_seed', true)
+    await seedUserOrg('u_h41_seed', 'orgOnly41', true) // establishes the sole active org
+    await seedUser('u_h41_target', true)
+    // The ONLY (user_id, org_id) pair for this user is INACTIVE, and its org_id is the SAME
+    // value the single-org premise will resolve to — a genuine (user_id, org_id) PK collision
+    // waiting to happen once provisioning computes theOrgId = 'orgOnly41'.
+    await seedUserOrg('u_h41_target', 'orgOnly41', false)
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    // Non-resurrecting, same posture as zzzz20260721150000 and zzzz20260114110000's own backfill:
+    // the pre-existing row is left EXACTLY as it was, still inactive — provisioning does not
+    // reactivate a membership a live unbind/deactivation already recorded.
+    const row = await sql<{ is_active: boolean }>`
+      SELECT is_active FROM user_orgs WHERE user_id = 'u_h41_target' AND org_id = 'orgOnly41'
+    `.execute(testDb)
+    expect(row.rows).toEqual([{ is_active: false }])
+    expect(await activeMembershipCount('u_h41_target')).toBe(0)
+  })
+
+  // ---- H38-H40 — the revised class-6 arm of backfillBUp --------------------------------------
+
+  it('H38: SINGLE-org fixture — a class-6 TERMINAL row is STAMPED with the unique active org (dedicated, uncluttered gate; H15 above covers the same outcome amid decoys)', async () => {
+    await seedUser('u_h38_seed', true)
+    await seedUserOrg('u_h38_seed', 'orgOnly38', true) // the sole active org in this schema
+    await seedInstance({ id: 'h38', sourceSystem: 'platform', requesterId: 'u_h38_unresolvable' })
+    // deliberately no user_orgs row for u_h38_unresolvable — genuinely unresolvable requester
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h38')).toBe('orgOnly38')
+  })
+
+  it('H39: TWO-org fixture — a class-6 TERMINAL row still ABORTS, with the ORIGINAL ruled message VERBATIM, values-free', async () => {
+    await seedUserOrg('u_h39_seed_a', 'orgH39A', true)
+    await seedUserOrg('u_h39_seed_b', 'orgH39B', true)
+    await seedInstance({ id: 'h39', sourceSystem: 'platform', requesterId: 'u_h39_unresolvable' })
+
+    // VERBATIM match against the pre-D-8(β) ABORT text — the ruling requires this text to be
+    // byte-for-byte unchanged in the abort arm, not merely "still an error".
+    await expect(backfillBUp(testDb)).rejects.toThrow(
+      /^approval_instance_org_id backfill \(Migration B\) aborted before any UPDATE: 1 instance\(s\) matched Lock-10 §2\.2\(b\) class 6 \(TERMINAL — no derivable org source\)\. Instance ids are NOT interpolated \(values-free discipline\)\. To enumerate them, run the predicate reproduced in this file's CLASS_6_PREDICATE comment against the same database\.$/,
+    )
+    await expect(backfillBUp(testDb)).rejects.not.toThrow(/h39/i)
+    await expect(backfillBUp(testDb)).rejects.not.toThrow(/orgH39A|orgH39B/)
+    expect(await orgIdOf('h39')).toBeNull()
+  })
+
+  it('H40: 269-shape end-to-end — provisioning THEN the revised backfill resolve EVERY previously-unresolvable platform row (p20 -> 0 equivalent), by TWO different mechanisms', async () => {
+    // The single active org, established independently of every row this test cares about.
+    await seedUserOrg('u_h40_seed', 'orgOnly40', true)
+
+    // Population 1 (the "12 zero-membership actives" shape): requesters with ZERO memberships
+    // who ARE known `users` rows -> provisioning gives them a membership -> class 3 (NOT class 6)
+    // resolves their instance in the ordinary, finer-grained, already-ratified way.
+    await seedUser('u_h40_a', true)
+    await seedInstance({ id: 'h40_a', sourceSystem: 'platform', requesterId: 'u_h40_a' })
+    await seedUser('u_h40_b', true)
+    await seedInstance({ id: 'h40_b', sourceSystem: 'platform', requesterId: 'u_h40_b' })
+
+    // Population 2 (the genuinely-unresolvable shape provisioning CANNOT help, because there is
+    // no `users` row for this id at all — the requester snapshot names an id no admission path
+    // ever created): resolved ONLY by the revised class-6 STAMP.
+    await seedInstance({ id: 'h40_c', sourceSystem: 'platform', requesterId: 'u_h40_c_no_such_user' })
+
+    // Sanity: before either migration runs, all three are exactly p20's shape (org_id NULL,
+    // unprefixed, platform).
+    const before = await sql<{ n: string }>`
+      SELECT count(*)::text AS n FROM approval_instances
+       WHERE org_id IS NULL AND id NOT LIKE 'plm:%' AND id NOT LIKE 'afs:%'
+         AND COALESCE(source_system, 'platform') = 'platform'
+    `.execute(testDb)
+    expect(before.rows[0]?.n).toBe('3')
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    // ORDERING GATE (the claim H40's title makes, measured, not merely implied by the final
+    // values): after provisioning but BEFORE the revised backfill runs, the class-6 CENSUS
+    // predicate (CLASS_6_PREDICATE, reproduced from the migration file) must already read 1, not
+    // 3 — h40_a/h40_b now resolve to exactly one active membership (provisioning gave them one),
+    // so they no longer match class 6's "requester not uniquely resolvable" clause; only h40_c
+    // (no `users` row at all, provisioning could never touch it) still matches. If provisioning
+    // had NOT run first, or had not actually granted an ACTIVE membership, this count would still
+    // be 3 and the final org_id values (asserted below) would be reached via class 6 for all
+    // three instead of via class 3 for two of them — a different mechanism the final values alone
+    // cannot distinguish, because every arm converges on the SAME single org.
+    const midCensus = await sql<{ n: string }>`
+      SELECT count(*)::text AS n
+        FROM approval_instances i
+       WHERE i.org_id IS NULL
+         AND i.id NOT LIKE 'plm:%'
+         AND i.id NOT LIKE 'afs:%'
+         AND COALESCE(i.source_system, 'platform') = 'platform'
+         AND i.template_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+         AND NOT EXISTS (
+           SELECT 1 FROM user_orgs uo
+            WHERE uo.user_id = i.requester_snapshot->>'id'
+              AND uo.is_active = TRUE
+            GROUP BY uo.user_id
+           HAVING count(*) = 1
+         )
+    `.execute(testDb)
+    expect(midCensus.rows[0]?.n).toBe('1')
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+
+    // All three now stamped, all with the SAME (only) org — but via the ordering PROVEN above:
+    // h40_a/h40_b via class 3 (their requester now resolves), h40_c via the class-6 stamp (its
+    // requester id names no user at all, so provisioning could never have touched it).
+    expect(await orgIdOf('h40_a')).toBe('orgOnly40')
+    expect(await orgIdOf('h40_b')).toBe('orgOnly40')
+    expect(await orgIdOf('h40_c')).toBe('orgOnly40')
+    // Independent corroboration that h40_a/h40_b went through class 3, not class 6: provisioning
+    // actually gave them a real active membership row (class 6 stamps the instance directly and
+    // never touches user_orgs).
+    expect(await activeMembershipCount('u_h40_a')).toBe(1)
+    expect(await activeMembershipCount('u_h40_b')).toBe(1)
+    expect(await activeMembershipCount('u_h40_c_no_such_user')).toBe(0)
+
+    // p20 -> 0 equivalent: zero rows remain in the population this test started with.
+    const after = await sql<{ n: string }>`
+      SELECT count(*)::text AS n FROM approval_instances
+       WHERE org_id IS NULL AND id NOT LIKE 'plm:%' AND id NOT LIKE 'afs:%'
+         AND COALESCE(source_system, 'platform') = 'platform'
+    `.execute(testDb)
+    expect(after.rows[0]?.n).toBe('0')
   })
 })

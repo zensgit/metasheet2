@@ -11,6 +11,20 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * (OD-S1-17(c), makes class 3's test well-defined). Authorization: owner fifth by-reference reply
  * (`/goal 按建议执行`, 2026-08-22), closeout item "Migration B(带前缀护栏)".
  *
+ * CLASS-6 REVISION (this same PR, second authorization): Lock-11 (writer-org-derivation) §10
+ * (docs/development/approval-lock11-writer-org-derivation-20260822.md), owner SIXTH by-reference
+ * reply (2026-08-22), resolution-table row "D-8 + 269 rows": "(β), ordering half as the body
+ * defines it (:1458): the provisioning step lands BEFORE any writer slice, so the population is
+ * empty when the arms land — concretely, provision the 12 zero-membership active users into the
+ * single org + (i)-guarded: Migration B's class-6 disposition revised to 'backfill the unique org
+ * IFF exactly one active org exists repo-wide, else ABORT as ruled' — the single-org premise
+ * self-asserted INSIDE the migration, FAIL-LOUD retained". This ruling AMENDS the class-6 arm
+ * only; classes 1-5 and their ORDER are untouched (byte-identical SQL — see the per-class diff
+ * note in the MUTATION-COVERAGE HONESTY NOTE below). The companion provisioning migration
+ * `zzzz20260823050000_provision_zero_membership_active_users.ts` is ordered BEFORE this file
+ * (lower timestamp) per §10.2's binding ordering and this file's own class-3-resolves-more-rows
+ * justification (see that file's docblock).
+ *
  * THIS IS NOT A RE-RUN OF PHASE 1. Kysely never re-executes a recorded migration; the Phase-1
  * FILE never re-runs. This is a NEW migration over the rows Phase 1 left NULL, and it fixes a
  * proven gap in that file: Phase 1's class-2 UPDATE carries NO id-prefix guard, so a `plm:` or
@@ -55,10 +69,14 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *      written by `upsertPlmMirror`. Backfill source: NONE EXISTS (OD-S1-9(c-iii) + OD-S1-18) —
  *      permanently NULL.
  *   6. TERMINAL — platform id AND `template_id IS NULL` AND zero attachments AND requester not
- *      resolving to exactly one active org membership. Backfill source: NONE. Ruled: the
- *      migration ABORTS and reports the offending ids (this migration reports CARDINALITY ONLY —
- *      see the DISCLOSED DEVIATION paragraph below); it does not invent an org and does not leave
- *      the row NULL silently past an operator's notice.
+ *      resolving to exactly one active org membership. Backfill source, AS REVISED by Lock-11 §10
+ *      D-8(β) (see "CLASS-6 REVISION" above): IFF exactly one distinct active org exists
+ *      repo-wide (`user_orgs.is_active`-scoped, self-asserted inside this migration), that org —
+ *      the terminal rows ARE backfilled with it. If the single-org premise does NOT hold (zero or
+ *      more than one distinct active org), the original ruling governs unchanged: the migration
+ *      ABORTS and reports the offending CARDINALITY ONLY (see the DISCLOSED DEVIATION paragraph
+ *      below, which still applies to this abort arm verbatim); it does not invent an org and does
+ *      not leave the row NULL silently past an operator's notice in either arm.
  *
  * §5.1.1 arm (c-i) (OD-S1-17(c), verbatim excerpt): "the org half of the predicate is a union over
  * the viewer's ACTIVE org memberships ... Migration consequence: §2.2(b) class 3's identifying
@@ -73,10 +91,13 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * `approval_instance_org_nonblank` (Phase 1's constraint) is left completely untouched.
  * ============================================================================================
  *
- * CLASS_6_PREDICATE — reproduced VERBATIM in THREE places: this comment, the pre-flight census
- * query in up() below, and the `c6_terminal_org_null` probe added to
- * `.github/workflows/approval-s1-org-backfill-evidence.yml` in this same PR. If the three ever
- * diverge, a green evidence probe stops predicting a green migration — see that workflow's header.
+ * CLASS_6_PREDICATE — reproduced VERBATIM in FOUR places (UPDATED at the D-8(β) revision, was
+ * THREE): this comment, the pre-flight census query in up() below, this same up()'s class-6 STAMP
+ * UPDATE's WHERE clause (new at the D-8(β) revision — see "CLASS-6 REVISION" above; it must select
+ * exactly the rows the census counted, or the stamped row-count and the reported cardinality would
+ * silently diverge), and the `c6_terminal_org_null` probe in
+ * `.github/workflows/approval-s1-org-backfill-evidence.yml`. If any of the four ever diverge, a
+ * green evidence probe stops predicting a green migration — see that workflow's header.
  *
  *   i.org_id IS NULL
  *   AND i.id NOT LIKE 'plm:%'
@@ -238,6 +259,36 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * migration — the values-free discipline this file applies to error messages applies here too,
  * only more strongly (these lines are cardinality-only already; they are simply unread by anyone).
  *
+ * ROUND 5 — Lock-11 §10 D-8(β) REVISION (this same PR): unlike every round since round 2, the SQL
+ * in this file DID change this round — deliberately, under a new owner authorization (see
+ * "CLASS-6 REVISION" near the top of this docblock), not as a self-scan correction. The change is
+ * SCOPED to class 6 only:
+ *   - classes 1 (no SQL), 2, 3, 4 (no SQL), and 5 (no SQL) are BYTE-IDENTICAL to the pre-revision
+ *     file — provable per-class, not merely by a whole-file diff, because each class's SQL
+ *     template is a syntactically distinct `sql\`...\`` tag in this file; a per-tag diff against
+ *     the pre-revision copy shows changes ONLY inside the class-6 `if (hasUserOrgs &&
+ *     hasAttachments)` block (the census query's own template is untouched; a new template — the
+ *     single-org-premise SELECT — and a new template — the class-6 STAMP UPDATE — are inserted
+ *     between the (unchanged) census and the (unchanged, now conditionally-reached) ABORT throw).
+ *   - the class-6 census predicate itself (what counts as TERMINAL) is UNCHANGED — same six
+ *     clauses, same CLASS_6_PREDICATE text. What changed is only what happens to a TERMINAL row:
+ *     previously, unconditional ABORT; now, ABORT IFF the single-org premise fails, else STAMP.
+ * Two NEW clauses this round, both requiring their own mutation coverage (added to the sweep in
+ * this same fix round, see this PR's suite and body for the updated mutation table):
+ *   - the single-org guard `activeOrgs.rows.length === 1` (the `if`/`else` branch selector): a
+ *     mutation that deletes this guard (always takes the stamp branch regardless of how many
+ *     distinct active orgs exist) must RED under a two-distinct-active-org fixture that used to
+ *     ABORT — the single-org-fixture-only fixtures cannot discriminate this guard, because for
+ *     them the guarded and unguarded code paths behave identically.
+ *   - the class-6 STAMP UPDATE's own WHERE clause (the fourth verbatim reproduction of
+ *     CLASS_6_PREDICATE): covered by construction — any mutation to it changes EITHER which rows
+ *     get stamped (wrong value on a resolvable-by-another-class row) or how many do (a
+ *     row-count mismatch against the census's `n`), both of which are fixture-observable the same
+ *     way every other UPDATE's WHERE clause in this file already is.
+ * The provably-inert and conditionally-inert clause enumerations above are UNCHANGED by this
+ * round (none of the four inert clauses or the one conditionally-inert clause live inside the
+ * class-6 block), and likewise for disclosure category (C) — no new log-only statement was added.
+ *
  * ROWS THAT LEGITIMATELY STAY NULL AFTER THIS MIGRATION, NO ABORT (enumerated, not asserted as
  * exhaustive by a CHECK — Phase 3 is a separate slice):
  *   - `plm:` / `afs:` prefixed ids (classes 5 / 4).
@@ -261,17 +312,25 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * narrowing. To enumerate the offending ids, an operator re-runs the CLASS_6_PREDICATE above (or
  * the workflow's `c6_terminal_org_null` probe SQL, which is the same predicate) directly against
  * the target database with a SELECT instead of a COUNT — this migration file never does that
- * itself.
+ * itself. This DEVIATION paragraph describes the ABORT arm only (the branch reached when the
+ * D-8(β) single-org premise does NOT hold). The STAMP arm (premise holds) reports nothing at all
+ * beyond the SAME `class6_stamped=<n>` cardinality-only log line every other UPDATE in this file
+ * already emits (`class2_stamped`, `class3_stamped`) — there is no id-shaped text to disclose a
+ * deviation from in that arm, because it is a write, not a report.
  *
- * IDEMPOTENCY / REPLAY: every UPDATE below is scoped `AND i.org_id IS NULL` (P3-3 precedent,
+ * IDEMPOTENCY / REPLAY: every UPDATE below, INCLUDING the class-6 STAMP UPDATE added by the
+ * D-8(β) revision, is scoped `AND i.org_id IS NULL` (P3-3 precedent,
  * `zzzz20260821100000:112-120`), so a row this migration (or an earlier one) already stamped is
  * untouched by a re-run, and a re-run of this migration's OWN body is a no-op on its own output.
  * Both pre-flight censuses are ALSO `org_id IS NULL`-scoped, so a conflict/terminal match on a row
  * this migration would never touch cannot abort the whole run.
  *
  * TRANSACTIONAL POSTURE: kysely wraps migration execution in a transaction on the Postgres
- * dialect, and both aborts below throw BEFORE any UPDATE runs, so an abort here leaves zero
- * partial writes. No nested transaction is opened.
+ * dialect, and both aborts below throw BEFORE any UPDATE runs (INCLUDING the class-6 STAMP
+ * UPDATE added by the D-8(β) revision — the single-org premise is checked, and the `else` throw
+ * taken, strictly before that UPDATE statement), so an abort here leaves zero partial writes. This
+ * file now issues three UPDATEs on its happy paths (class-6 stamp, class 2, class 3), each
+ * reached only past its own pre-flight check. No nested transaction is opened.
  *
  * GUARDS (all three are REQUIRED, not defensive):
  *   - `checkColumnExists(db, 'approval_instances', 'org_id')`: `packages/core-backend/src/db/
@@ -349,12 +408,49 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     `.execute(db)
     const n = Number(class6.rows[0]?.n ?? '0')
     if (n > 0) {
-      throw new Error(
-        `approval_instance_org_id backfill (Migration B) aborted before any UPDATE: ${n} instance(s) ` +
-        `matched Lock-10 §2.2(b) class 6 (TERMINAL — no derivable org source). Instance ids are NOT ` +
-        `interpolated (values-free discipline). To enumerate them, run the predicate reproduced in ` +
-        `this file's CLASS_6_PREDICATE comment against the same database.`,
-      )
+      // Lock-11 §10 D-8(β) revision (ratified 2026-08-22, owner sixth by-reference reply,
+      // resolution-table row "D-8 + 269 rows"): class 6 is no longer an unconditional ABORT. The
+      // single-org premise is SELF-ASSERTED INSIDE THIS MIGRATION (the exact same measurement the
+      // companion provisioning migration `zzzz20260823050000_provision_zero_membership_active_
+      // users.ts` uses for its own (i)-guard, and the same predicate the evidence workflow's
+      // `u1a_distinct_active_orgs` probe reports): IFF `user_orgs` names EXACTLY ONE distinct
+      // active org repo-wide, the terminal rows are backfilled with THAT org; otherwise the
+      // FAIL-LOUD ABORT fires VERBATIM — unchanged text, unchanged values-free discipline — exactly
+      // as the originally-ruled class 6 did before this revision.
+      const activeOrgs = await sql<{ org_id: string }>`
+        SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE
+      `.execute(db)
+      if (activeOrgs.rows.length === 1) {
+        const theOrgId = activeOrgs.rows[0]!.org_id
+        // CLASS_6_PREDICATE reproduced VERBATIM a fourth time (docblock / this file's own census
+        // above / this UPDATE's WHERE / the evidence workflow's `c6_terminal_org_null` probe) — see
+        // this file's CLASS_6_PREDICATE comment header, updated to name all four sites.
+        const class6Stamp = await sql`
+          UPDATE approval_instances i
+             SET org_id = ${theOrgId}
+           WHERE i.org_id IS NULL
+             AND i.id NOT LIKE 'plm:%'
+             AND i.id NOT LIKE 'afs:%'
+             AND COALESCE(i.source_system, 'platform') = 'platform'
+             AND i.template_id IS NULL
+             AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+             AND NOT EXISTS (
+               SELECT 1 FROM user_orgs uo
+                WHERE uo.user_id = i.requester_snapshot->>'id'
+                  AND uo.is_active = TRUE
+                GROUP BY uo.user_id
+               HAVING count(*) = 1
+             )
+        `.execute(db)
+        log(`class6_stamped=${Number(class6Stamp.numAffectedRows ?? 0)}`)
+      } else {
+        throw new Error(
+          `approval_instance_org_id backfill (Migration B) aborted before any UPDATE: ${n} instance(s) ` +
+          `matched Lock-10 §2.2(b) class 6 (TERMINAL — no derivable org source). Instance ids are NOT ` +
+          `interpolated (values-free discipline). To enumerate them, run the predicate reproduced in ` +
+          `this file's CLASS_6_PREDICATE comment against the same database.`,
+        )
+      }
     }
   }
 
