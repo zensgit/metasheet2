@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { resolvePluginRuntimeConfig } from '../../src/plugin-runtime-config'
 
 describe('plugin runtime config resolution', () => {
@@ -114,4 +117,75 @@ describe('plugin runtime config resolution', () => {
       INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON: '["not-an-object"]',
     })).toThrow('INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_JSON must be a JSON object')
   })
+  // Customer-pack catalog: the env names a FILE, because a pack is deploy-time DATA (≈20 extension
+  // columns plus dictionaries of hundreds of entries) that an environment variable cannot carry —
+  // the catalog module says so explicitly and offers no env fallback of its own.
+  describe('customer pack catalog', () => {
+    const ENV_KEY = 'INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH'
+    let tmpDir: string
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'pack-catalog-'))
+    })
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    function writePackFile(contents: string): string {
+      const file = join(tmpDir, 'packs.json')
+      writeFileSync(file, contents, 'utf8')
+      return file
+    }
+
+    it('omits the key entirely when unset — an empty catalog refuses every packId', () => {
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      expect('stockPreparationCustomerPacks' in config).toBe(false)
+    })
+
+    it('reads the pack map off the named file', () => {
+      const file = writePackFile(JSON.stringify({
+        'factory-a': { packId: 'factory-a', packVersion: 1, extensionFields: [] },
+      }))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationCustomerPacks).toEqual({
+        'factory-a': { packId: 'factory-a', packVersion: 1, extensionFields: [] },
+      })
+    })
+
+    it('fails closed — and LOUDLY — when the path is unreadable, rather than degrading to empty', () => {
+      // A typo in the path must not look exactly like "no packs configured".
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+        [ENV_KEY]: join(tmpDir, 'does-not-exist.json'),
+      })).toThrow(`${ENV_KEY} points at a file that could not be read`)
+    })
+
+    it('never echoes the configured path in the error (values-free: paths are deployment topology)', () => {
+      const secretish = join(tmpDir, 'absent-host-specific-name.json')
+      try {
+        resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: secretish })
+        throw new Error('expected a throw')
+      } catch (error) {
+        expect((error as Error).message).not.toContain(secretish)
+        expect((error as Error).message).toContain(ENV_KEY)
+      }
+    })
+
+    it('fails closed on malformed JSON', () => {
+      const file = writePackFile('{not-json')
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a file containing valid JSON`)
+    })
+
+    it('fails closed when the file is not an object keyed by packId', () => {
+      const file = writePackFile('[{"packId":"factory-a"}]')
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a JSON object keyed by packId`)
+    })
+
+    it('is inert for any other plugin', () => {
+      const file = writePackFile(JSON.stringify({ 'factory-a': {} }))
+      expect(resolvePluginRuntimeConfig('plugin-after-sales', { [ENV_KEY]: file })).toEqual({})
+    })
+  })
+
 })
