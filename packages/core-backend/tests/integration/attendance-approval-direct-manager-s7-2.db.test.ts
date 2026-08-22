@@ -222,6 +222,16 @@ describeIfDatabase('S7-2 direct_manager — freeze + assignment + auth (real DB)
     workDate: string,
     reason: string,
   ): Promise<HttpResponse> {
+    // Lock-11 §10 W-4 fixture delta: this helper always names `orgId` on the request (arm f) —
+    // the SUBJECT (whoever the token belongs to) must be an active member of THAT org. This
+    // file drives one requester across many orgs (org anchoring is a directory-lookup property,
+    // never a user_orgs membership property), so grant membership on demand per org used,
+    // idempotently (DO UPDATE, not DO NOTHING — never leaves a stale inactive row).
+    await (pool as Pool).query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [requester, orgId],
+    )
     return requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(token),
