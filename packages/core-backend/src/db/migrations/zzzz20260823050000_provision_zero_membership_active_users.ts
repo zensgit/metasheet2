@@ -64,6 +64,45 @@ import { checkTableExists } from './_patterns'
  * Re-running this migration is a no-op once every previously-zero-membership active user has a
  * membership row.
  *
+ * MUTATION-MEASURED, not merely argued (three mutations, real-DB, `.db.test.ts` gates H32-H37,
+ * H41; local Postgres 15.17, see this PR's evidence for the postgres:16/postgres:15-alpine
+ * caveat):
+ *   - dropping the single-org `if (activeOrgs.rows.length !== 1)` guard entirely (always
+ *     proceed) reds EXACTLY H34 (the two-org fixture) — nothing else. Isolated, load-bearing.
+ *   - dropping `ON CONFLICT (user_id, org_id) DO NOTHING` reds EXACTLY H41 — nothing else. H41 is
+ *     the one shape where it matters: a user's ONLY row is a DEACTIVATED membership to the org
+ *     that turns out to be the single active org. Without `DO NOTHING` the INSERT hits that row's
+ *     PRIMARY KEY and Postgres raises a raw `23505 unique_violation`, aborting the whole
+ *     migration transaction instead of the intended silent, non-resurrecting no-op.
+ *   - dropping the `NOT EXISTS` population filter (INSERT `WHERE u.is_active = TRUE` alone, no
+ *     membership check) leaves the suite **47/47 GREEN — CONDITIONALLY INERT**, not a coverage
+ *     gap: under the (i)-guard every EXISTING active membership row already names the single
+ *     resolved org (that is what "single active org" means), so re-selecting an already-membered
+ *     user and re-attempting their exact `(user_id, theOrgId, true)` row is caught by `ON
+ *     CONFLICT DO NOTHING` with an IDENTICAL final result. Same weaker-category shape as the
+ *     revised backfill migration's own m28 (`SELECT DISTINCT`, conditionally inert because its
+ *     argument leans on a DIFFERENT statement having already run) — here the argument leans on
+ *     the single-org premise already having been asserted by the guard above it, not on this
+ *     clause's own structure. `NOT EXISTS` is NOT dead code: it is what makes the population
+ *     scoping self-documenting and keeps the INSERT's source set small (one un-provisioned user,
+ *     not every active user in the org repeatedly), and it is the clause that decides WHICH rows
+ *     even reach `ON CONFLICT` in the first place — but its removal is not independently
+ *     red-provable given the guard and `ON CONFLICT` already present. Disclosed rather than
+ *     forced into a fake-discriminating fixture.
+ *
+ * RESIDUAL NOT CLOSED BY THIS MIGRATION (found by H41's own construction, disclosed rather than
+ * "fixed" — fixing it would mean `DO UPDATE SET is_active = true`, a resurrection this file's own
+ * non-resurrecting posture and the `zzzz20260721150000` precedent both forbid): a U1b-population
+ * user whose ONLY `user_orgs` row is a DEACTIVATED membership to what turns out to be the single
+ * active org is NOT provisioned by this migration — `ON CONFLICT ... DO NOTHING` deliberately
+ * leaves their row exactly as a prior unbind/deactivation left it. They remain zero-ACTIVE-
+ * membership after this migration runs. This is a possible (not confirmed) shape for some subset
+ * of the ratified "12" — nothing in `u1b`'s own probe SQL distinguishes "no row at all" from "a
+ * deactivated row", so which of the 12 (if any) are this shape is unmeasured. The acceptance
+ * signal is therefore NOT "12 rows appeared" but **`u1b_zero_membership_active_users` re-measured
+ * post-deploy** (the same evidence-dispatch probe this PR's acceptance already uses) — if it does
+ * not reach 0, this is the disclosed, expected reason, not a new defect.
+ *
  * NOT applied to a user whose `users.is_active = false`: unlike the two precedent backfills
  * (which are deliberately NOT filtered by `users.is_active`, matching every LIVE writer's
  * "membership existence is written as active regardless of the user's own active flag" posture),

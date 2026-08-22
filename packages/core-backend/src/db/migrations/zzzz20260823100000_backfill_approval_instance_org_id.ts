@@ -273,18 +273,27 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *   - the class-6 census predicate itself (what counts as TERMINAL) is UNCHANGED — same six
  *     clauses, same CLASS_6_PREDICATE text. What changed is only what happens to a TERMINAL row:
  *     previously, unconditional ABORT; now, ABORT IFF the single-org premise fails, else STAMP.
- * Two NEW clauses this round, both requiring their own mutation coverage (added to the sweep in
- * this same fix round, see this PR's suite and body for the updated mutation table):
- *   - the single-org guard `activeOrgs.rows.length === 1` (the `if`/`else` branch selector): a
- *     mutation that deletes this guard (always takes the stamp branch regardless of how many
- *     distinct active orgs exist) must RED under a two-distinct-active-org fixture that used to
- *     ABORT — the single-org-fixture-only fixtures cannot discriminate this guard, because for
- *     them the guarded and unguarded code paths behave identically.
- *   - the class-6 STAMP UPDATE's own WHERE clause (the fourth verbatim reproduction of
- *     CLASS_6_PREDICATE): covered by construction — any mutation to it changes EITHER which rows
- *     get stamped (wrong value on a resolvable-by-another-class row) or how many do (a
- *     row-count mismatch against the census's `n`), both of which are fixture-observable the same
- *     way every other UPDATE's WHERE clause in this file already is.
+ * Two NEW clauses this round, BOTH MUTATION-MEASURED (real-DB, local Postgres 15.17 — see this
+ * PR's evidence for the postgres:16/postgres:15-alpine caveat), not merely argued:
+ *   - the single-org guard `activeOrgs.rows.length === 1` (the `if`/`else` branch selector):
+ *     deleting this guard (`if (true)`, always takes the stamp branch) reds EXACTLY H3, H6, H19,
+ *     H39 — the four fixtures whose whole-migration outcome depends on the ABORT arm actually
+ *     firing (two zero-active-org fixtures, one two-active-org fixture in H39, one
+ *     two-membership-same-requester fixture in H3) — and no others, on the 47-test suite.
+ *     Single-org fixtures cannot discriminate this guard by construction (both code paths behave
+ *     identically for them); the four reds are exactly the ones that can and do.
+ *   - the class-6 STAMP UPDATE's own `template_id IS NULL` clause (one of the fourth verbatim
+ *     reproduction of CLASS_6_PREDICATE, chosen as the representative measurement — the WHERE
+ *     clause's other five conditions are the SAME TEXT as the census immediately above it, which
+ *     H3/H6/H7-H11/H12-H14/H15/H23/H24/H26 etc. already independently pin at the census site):
+ *     deleting only this one condition from the STAMP's WHERE (leaving the census, the docblock,
+ *     and the workflow probe copies of CLASS_6_PREDICATE untouched) reds EXACTLY H15 — H15's
+ *     `h15_template` decoy (template_id set, otherwise class-6-shaped) gets wrongly stamped
+ *     instead of staying NULL. Scope stated explicitly: the OTHER five stamp-WHERE conditions are
+ *     UNMEASURED at the stamp site specifically (measured at the census site only); claiming
+ *     "covered by construction" for those five without running the mutation would repeat exactly
+ *     the unearned-absolute failure mode rounds 3-4 of this file's requalification were called
+ *     for, so this note stops at what was actually run.
  * The provably-inert and conditionally-inert clause enumerations above are UNCHANGED by this
  * round (none of the four inert clauses or the one conditionally-inert clause live inside the
  * class-6 block), and likewise for disclosure category (C) — no new log-only statement was added.
