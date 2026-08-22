@@ -15,7 +15,7 @@ import {
 } from '../../src/services/approval-comment-service'
 
 /**
- * Lock-10 (S2) `approval_comments` — real-DB acceptance for the FULL gate battery (C-1..C-18):
+ * Lock-10 (S2) `approval_comments` — real-DB acceptance for the FULL gate battery (C-1..C-21):
  * list/create/edit/delete/mention-candidates authorization (S1's `canReadApprovalInstance` reused,
  * never re-derived — OD-S1-14), D3 write widening (participant union, not acting-assignee-only),
  * D2(b1) mutable storage + tombstone, the pointer-row dual-write invariant
