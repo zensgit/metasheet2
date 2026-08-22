@@ -342,19 +342,35 @@ export function commentsRouter(injector?: Injector): Router {
     }
   })
 
-  router.get('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+  // Shared by GET (ids in the query string) and POST (ids in the JSON body).
+  // The POST variant exists because the grid sends every visible row id per
+  // page — inlined in the query string the URL grows with page size toward
+  // 414/URL-length limits. GET stays for rolling-deploy compat and keeps its
+  // OAPI-1 `mst_`-token mount. The POST route is JWT-session-only BY GUARD
+  // SHAPE: rbacGuard only, same as the deferred comment surfaces
+  // (inbox/unread-count/mention-*). Mounting apiTokenAuth+requireScope here
+  // without an allowlist entry would be a dead guard (an `mst_` bearer 401s
+  // at the global gate first) — exactly what the #3365 allowlist⟺guard
+  // tripwire rejects; widening the allowlist instead is an auth-boundary
+  // change needing its own design review.
+  // Bounds (Codex review): the id set must not become an unbounded PostgreSQL
+  // IN list. The grid's visible page is at most a few hundred rows; 5000 ids /
+  // 128 chars per id is generous headroom. Over-limit -> 400 before the
+  // service is ever reached. Applies to GET and POST alike (shared schema).
+  const SUMMARY_MAX_ROW_IDS = 5000
+  const SUMMARY_MAX_ROW_ID_LENGTH = 128
+  const handleCommentSummary = async (
+    req: Request,
+    res: Response,
+    raw: { spreadsheetId?: unknown; containerId?: unknown; rowIds?: unknown; targetIds?: unknown },
+  ) => {
     const schema = z.object({
       spreadsheetId: z.string().min(1).optional(),
       containerId: z.string().min(1).optional(),
-      rowIds: z.array(z.string().min(1)).optional(),
-      targetIds: z.array(z.string().min(1)).optional(),
+      rowIds: z.array(z.string().min(1).max(SUMMARY_MAX_ROW_ID_LENGTH)).max(SUMMARY_MAX_ROW_IDS).optional(),
+      targetIds: z.array(z.string().min(1).max(SUMMARY_MAX_ROW_ID_LENGTH)).max(SUMMARY_MAX_ROW_IDS).optional(),
     })
-    const parsed = schema.safeParse({
-      spreadsheetId: readQueryValue(req.query.spreadsheetId),
-      containerId: readQueryValue(req.query.containerId),
-      rowIds: readQueryValues(req.query.rowIds),
-      targetIds: readQueryValues(req.query.targetIds),
-    })
+    const parsed = schema.safeParse(raw)
     if (!parsed.success) {
       return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
     }
@@ -378,6 +394,24 @@ export function commentsRouter(injector?: Injector): Router {
       logger.error('Failed to list comment summaries', error as Error)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list comment summaries' } })
     }
+  }
+
+  router.get('/api/comments/summary', apiTokenAuth, requireScope('comments:read'), rbacGuard('comments', 'read'), async (req: Request, res: Response) =>
+    handleCommentSummary(req, res, {
+      spreadsheetId: readQueryValue(req.query.spreadsheetId),
+      containerId: readQueryValue(req.query.containerId),
+      rowIds: readQueryValues(req.query.rowIds),
+      targetIds: readQueryValues(req.query.targetIds),
+    }))
+
+  router.post('/api/comments/summary', rbacGuard('comments', 'read'), async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>
+    return handleCommentSummary(req, res, {
+      spreadsheetId: body.spreadsheetId,
+      containerId: body.containerId,
+      rowIds: body.rowIds,
+      targetIds: body.targetIds,
+    })
   })
 
   router.post('/api/comments', apiTokenAuth, oapiWriteAuditBoundary('create', 'comments:write'), apiTokenWriteRateLimit, requireScope('comments:write'), rbacGuard('comments', 'write'), async (req: Request, res: Response) => {

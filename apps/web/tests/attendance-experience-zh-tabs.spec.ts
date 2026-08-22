@@ -8,6 +8,8 @@ vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     hasFeature: (feature: string) => feature === 'attendanceAdmin' || feature === 'workflow',
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    isFeatureOverrideAllowed: () => false,
+    setLocalFeatureOverride: vi.fn(),
   }),
 }))
 

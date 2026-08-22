@@ -159,6 +159,13 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+  // Shadow audit of the punch route's org resolution (env
+  // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow). Classified `calculation_path` — the
+  // HONEST bucket, not a carve-out: it is `require`d directly from
+  // plugins/plugin-attendance/index.cjs's punch route and reads org membership state the
+  // calculation path also depends on, so both ban legs apply to it even though it never
+  // WRITES a calculation itself (only an out-of-band audit row).
+  'plugins/plugin-attendance/lib/attendance-org-resolution-shadow.cjs',
   'plugins/plugin-attendance/lib/attendance-punch-org-resolution.cjs',
   'plugins/plugin-attendance/lib/attendance-shift-service.cjs',
   'plugins/plugin-attendance/lib/attendance-work-date-adapters.cjs',

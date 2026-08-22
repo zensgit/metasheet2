@@ -529,7 +529,13 @@ describeIfDatabase('Lock-5 — per-node operation policy (操作权限): choke, 
     const inst = await createApproval(requesterToken, templateId)
 
     const history = async () => {
-      const response = await jsonRequest(baseUrl, `/api/approvals/${inst.id}/history`, adminToken)
+      // Lock-10 (S1): /history now gates per-instance admission (OD-S1-12), and this suite's
+      // `adminToken` is a TRUSTED-CLAIMS `role: 'admin'` JWT with no matching `users` row — the
+      // admin arm is DB-backed only (OD-S1-8), so that claim alone no longer admits. `requesterId`
+      // IS a real participant (arm 1, unconditional) and sees the exact same full timeline an
+      // admin would (the admission gate does not filter WHICH rows come back, only whether the
+      // viewer may see any) — using it here observes identically what this test needs, honestly.
+      const response = await jsonRequest(baseUrl, `/api/approvals/${inst.id}/history`, requesterToken)
       expect(response.status, await response.clone().text()).toBe(200)
       return (await response.json()) as { data: { items: Array<{ action: string }>; total: number } }
     }

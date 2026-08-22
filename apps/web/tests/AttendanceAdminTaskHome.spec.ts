@@ -81,13 +81,15 @@ describe('AttendanceAdminTaskHome', () => {
 
   function mount(overrides: { groups?: Group[] } = {}) {
     const onSelectSection = vi.fn()
+    const onNavigate = vi.fn()
     app = createApp(AttendanceAdminTaskHome, {
       tr: (en: string) => en,
       groups: overrides.groups ?? FOUR_GROUPS,
       onSelectSection: onSelectSection,
+      onNavigate: onNavigate,
     })
     app.mount(container!)
-    return { onSelectSection }
+    return { onSelectSection, onNavigate }
   }
 
   it('renders the header, region semantics, and the four task groups in order', async () => {
@@ -112,7 +114,7 @@ describe('AttendanceAdminTaskHome', () => {
     expect(root?.textContent).toContain('Approvals, anomalies, imports, and audit follow-up.')
   })
 
-  it('renders link actions as real anchors that do not go through the emit path', async () => {
+  it('renders link actions as real anchors that do not go through the select-section emit path', async () => {
     mount()
     await flushUi()
 
@@ -123,6 +125,55 @@ describe('AttendanceAdminTaskHome', () => {
 
     const primaryLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
     expect(primaryLink?.classList.contains('attendance__btn--primary')).toBe(true)
+  })
+
+  it('a plain left-click on a link action prevents the default navigation and emits navigate (fix 4)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    expect(anomalyLink).toBeTruthy()
+
+    const clickEvent = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    const preventDefaultSpy = vi.spyOn(clickEvent, 'preventDefault')
+    anomalyLink!.dispatchEvent(clickEvent)
+    await flushUi()
+
+    // A real <a href> left-click that reaches jsdom's default action would attempt a full
+    // document navigation ("Not implemented: navigation to another Document"). The component
+    // calls preventDefault() itself and emits `navigate` with the href instead, so the PARENT
+    // (AttendanceView.vue's onAdminTaskHomeNavigate) can route it through the SPA router.
+    expect(preventDefaultSpy).toHaveBeenCalledTimes(1)
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+    expect(onNavigate).toHaveBeenCalledWith('/attendance?section=attendance-overview-anomalies')
+  })
+
+  it('does not intercept a modifier-clicked link action (open-in-new-tab stays native)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    const ctrlClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0, ctrlKey: true })
+    const preventDefaultSpy = vi.spyOn(ctrlClick, 'preventDefault')
+    anomalyLink!.dispatchEvent(ctrlClick)
+    await flushUi()
+
+    expect(preventDefaultSpy).not.toHaveBeenCalled()
+    expect(onNavigate).not.toHaveBeenCalled()
+  })
+
+  it('does not intercept a non-primary-button click (e.g. middle-click open-in-new-tab)', async () => {
+    const { onNavigate } = mount()
+    await flushUi()
+
+    const anomalyLink = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')
+    const middleClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 1 })
+    const preventDefaultSpy = vi.spyOn(middleClick, 'preventDefault')
+    anomalyLink!.dispatchEvent(middleClick)
+    await flushUi()
+
+    expect(preventDefaultSpy).not.toHaveBeenCalled()
+    expect(onNavigate).not.toHaveBeenCalled()
   })
 
   it('emits select-section with the section id when a button action is clicked', async () => {

@@ -28,6 +28,10 @@ import {
   validateApprovalAttachments,
 } from '../services/approval-attachment-validation'
 import {
+  ApprovalProcessAttachmentBindError,
+  assertProcessUploadBudget,
+} from '../services/approval-process-attachment-bind'
+import {
   authorizeAttachmentDownload,
   deriveStorageKey,
   type ApprovalAttachmentStore,
@@ -57,6 +61,24 @@ export interface ApprovalAttachmentRouteDeps {
    * multipart body buffered into memory or written to blob/row storage.
    */
   hasApprovalsWrite(req: Request): boolean
+  /**
+   * Lock-9 OD-L9-3(a) — process-attachment upload gate: does the authenticated principal hold
+   * `approvals:act` (or an admin wildcard)? Deliberately DIFFERENT from `hasApprovalsWrite`'s
+   * `approvals:write` — process uploads are an ACTING-approver surface, not a form-fill surface.
+   *
+   * OPTIONAL (not required): every existing `createApprovalAttachmentRouter({...})` call site in
+   * approval-attachment-storage.test.ts / approval-attachment-routes.test.ts predates this field.
+   * An absent dep is treated as DENY (`deps.hasApprovalsAct?.(req) ?? false`) — fail-closed, so
+   * omission never widens who may upload a process attachment.
+   */
+  hasApprovalsAct?(req: Request): boolean
+  /**
+   * Lock-9 OD-L9-3(a) §5.2 — FAIL-FAST-ONLY seat check (NOT the authority; see
+   * ApprovalProductService.actorHasActiveSeatAtInstance's own docblock for the parallel-region
+   * fidelity gap this deliberately does not close). Absent ⇒ deny (fail-closed), same discipline
+   * as `hasApprovalsAct`.
+   */
+  actorHasActiveSeat?(req: Request, instanceId: string): Promise<boolean>
   /**
    * Is `fieldId` an `attachment`-typed field in `templateId`'s form schema? (§4.1 / G2.) The production
    * wiring loads the template's form schema and checks the field's `type`; returns false for an unknown
@@ -244,6 +266,107 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     }),
   )
 
+  /**
+   * Lock-9 (approver process attachments) — POST /api/approval/attachments/process.
+   *
+   * Because this factory returns null while `APPROVAL_ATTACHMENTS_ENABLED` is OFF (line ~112
+   * above), this route is NEVER registered under the OFF posture — G-12(a)'s "no process-upload
+   * route registers" holds by the SAME mechanism the shipped form-upload route already relies on.
+   *
+   * Scope is `approvals:act` (OD-L9-3(a)), deliberately DIFFERENT from the form-upload route's
+   * `approvals:write` — a process attachment is an ACTING-approver surface, not a form-fill
+   * surface. `fieldId`/`templateId` are explicitly REJECTED if supplied (a process attachment has
+   * no field to bind against) rather than silently ignored. `staged_instance_id` is required and
+   * NEVER trusts a client-supplied `instance_id` — the row commits to an instance only at bind time
+   * (§5.4), and stays uploader-only-readable until then (`storage.ts`'s `!row.instanceId` branch,
+   * OD-L9-5/G7 — unchanged by this route, by construction: this INSERT never writes `instance_id`).
+   */
+  const requireProcessUploadAuth = (req: Request, res: Response, next: NextFunction): void => {
+    const uploaderId = deps.viewerId(req)
+    if (!uploaderId) {
+      res.status(401).json({ error: 'unauthenticated' })
+      return
+    }
+    const orgId = deps.orgId(req)
+    if (!orgId) {
+      res.status(403).json({ error: 'no_org' })
+      return
+    }
+    if (!(deps.hasApprovalsAct?.(req) ?? false)) {
+      // values-free 403 — fail-closed on an absent dep too (no existence oracle; Multer never runs).
+      res.status(403).json({ error: 'forbidden' })
+      return
+    }
+    next()
+  }
+
+  router.post(
+    '/api/approval/attachments/process',
+    requireProcessUploadAuth,
+    requireStorageAvailable,
+    runUpload,
+    asyncHandler(async (req: Request, res: Response) => {
+      const uploaderId = deps.viewerId(req)!
+      const orgId = deps.orgId(req)! // server-derived — never the body
+      const f = (req as Request & { file?: { originalname: string; mimetype: string; size: number; buffer: Buffer } }).file
+      if (!f) return res.status(400).json({ error: 'file_required' })
+      // A process attachment has no field — reject rather than silently ignore a supplied one.
+      if (typeof req.body?.fieldId === 'string' || typeof req.body?.templateId === 'string') {
+        return res.status(400).json({ error: 'process_attachment_has_no_field' })
+      }
+      const stagedInstanceId =
+        typeof req.body?.stagedInstanceId === 'string' && /[!-~]/.test(req.body.stagedInstanceId)
+          ? req.body.stagedInstanceId
+          : null
+      if (!stagedInstanceId) return res.status(400).json({ error: 'staged_instance_id_required' })
+      // §5.2: fail-fast-only seat check (NOT the authority — see ApprovalProductService's
+      // actorHasActiveSeatAtInstance docblock). Absent dep ⇒ deny, fail-closed.
+      const canAct = await (deps.actorHasActiveSeat?.(req, stagedInstanceId) ?? Promise.resolve(false))
+      if (!canAct) return res.status(403).json({ error: 'forbidden' })
+      // OD-L9-8 upload-time budget pre-check (fail-fast; the authoritative re-check is at bind).
+      try {
+        await assertProcessUploadBudget(deps.db, { uploaderId, orgId, stagedInstanceId, incomingBytes: f.size })
+      } catch (error) {
+        const status = error instanceof ApprovalProcessAttachmentBindError ? error.httpStatus : 400
+        return res.status(status).json({ error: 'rejected', rejected: [{ code: status === 413 ? 'too_many_files' : 'upload_rejected' }] })
+      }
+      // OD-L9-9(a): reuse the validation core VERBATIM — same 20MB/file cap, same v1 MIME
+      // allowlist, same extension⇄MIME cross-check, same magic-byte signature check.
+      const verdict = validateApprovalAttachments([{ fileName: f.originalname, mimeType: f.mimetype, sizeBytes: f.size, content: f.buffer }]) as {
+        ok: boolean
+        rejected?: Array<{ fileName: string; code: string }>
+      }
+      if (!verdict.ok) {
+        const rejected = verdict.rejected ?? []
+        return res.status(httpStatusForAttachmentRejects(rejected)).json({ error: 'rejected', rejected })
+      }
+      const mime = f.mimetype.toLowerCase().trim()
+      const scanState = await runApprovalAttachmentScan(
+        { fileName: f.originalname, mimeType: mime, sizeBytes: f.size, content: f.buffer },
+        { env: deps.env ?? process.env, scanHook: deps.scanHook },
+      )
+      if (scanState === 'infected') {
+        return res.status(422).json({ error: 'rejected', rejected: [{ code: 'infected' }] })
+      }
+      const storageKey = deriveStorageKey(mime)
+      const id = `att_${randomUUID()}`
+      // Blob first, row second — same crash-safety ordering as the form-upload route above.
+      await deps.store.put(storageKey, f.buffer)
+      try {
+        await deps.db.query(
+          `INSERT INTO approval_attachments
+             (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, scan_state, status, bind_kind, staged_instance_id)
+           VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8,'unbound','process',$9)`,
+          [id, orgId, uploaderId, storageKey, f.originalname.slice(0, 255), mime, f.size, scanState, stagedInstanceId],
+        )
+      } catch (error) {
+        await deps.store.delete(storageKey).catch(() => false)
+        throw error
+      }
+      return res.status(201).json({ id, sizeBytes: f.size })
+    }),
+  )
+
   router.get('/api/approval/attachments/:id/download', asyncHandler(async (req: Request, res: Response) => {
     const viewerId = deps.viewerId(req)
     if (!viewerId) return res.status(401).json({ error: 'unauthenticated' })
@@ -252,7 +375,7 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     const orgId = deps.orgId(req)
     if (!orgId) return res.status(404).json({ error: 'not_found' })
     const { rows } = await deps.db.query(
-      `SELECT status, uploader_id, org_id, instance_id, field_id, storage_key, file_name, mime_type, scan_state
+      `SELECT status, uploader_id, org_id, instance_id, field_id, storage_key, file_name, mime_type, scan_state, bind_kind
          FROM approval_attachments WHERE id=$1`,
       [String(req.params.id)],
     )
@@ -262,11 +385,12 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
       uploader_id: string
       org_id: string
       instance_id: string | null
-      field_id: string
+      field_id: string | null
       storage_key: string
       file_name: string
       mime_type: string
       scan_state: string | null
+      bind_kind: string
     }
     const auth = await authorizeAttachmentDownload(
       {
@@ -276,6 +400,7 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
         fieldId: row.field_id,
         orgId: row.org_id,
         scanState: row.scan_state,
+        bindKind: row.bind_kind,
       },
       viewerId,
       orgId,
@@ -353,10 +478,12 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
    *                               not already own — and a restored draft can drop the dangling refs
    *                               instead of carrying them into a create that would fail closed.
    *   - `{ instanceId, ids }`   → **bound metadata** for detail/history rendering (§8/G5). Gated by the
-   *                               SAME two predicates the byte path uses — `isInstanceParticipant`, then
-   *                               `isFieldHiddenAtActiveNode` — so the rendered metadata and the served
-   *                               bytes cannot drift on visibility or on "hidden" (G7). A non-participant
-   *                               gets the values-free 404 the download gate gives them.
+   *                               SAME two predicates the byte path uses — `isInstanceParticipant`
+   *                               (the DI seam name; backed by Lock-10's `canReadApprovalInstance`,
+   *                               OD-S1-16), then `isFieldHiddenAtActiveNode` — so the rendered
+   *                               metadata and the served bytes cannot drift on visibility or on
+   *                               "hidden" (G7). A non-participant gets the values-free 404 the
+   *                               download gate gives them.
    *
    * Resolution is BY THE FROZEN ID and scoped to the instance the caller named: an id that does not
    * resolve to a live row bound to THAT instance renders as a `tombstone` (the §8 "附件已删除" contract)
@@ -402,29 +529,39 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
     // because an initiator may legitimately upload before they have instance-read permission.
     if (!deps.hasApprovalsRead(req)) return res.status(404).json({ error: 'not_found' })
 
-    // Bound metadata: gate 1 — org-pinned participant (same predicate as §4.2 download).
-    const participant = await deps.authChecks.isInstanceParticipant(viewerId, instanceId, orgId).catch(() => false)
+    // Bound metadata: gate 1 — participant (same predicate as §4.2 download; OD-S1-16). `orgId`
+    // is NOT passed here any more — the predicate derives org server-side (OD-S1-9(f)); this
+    // route's own `orgId` variable still scopes the metadata SELECT below to the caller's org.
+    const participant = await deps.authChecks.isInstanceParticipant(viewerId, instanceId).catch(() => false)
     if (!participant) return res.status(404).json({ error: 'not_found' })
     const { rows } = await deps.db.query(
-      `SELECT id, field_id, file_name, size_bytes, mime_type, status, scan_state FROM approval_attachments
+      `SELECT id, field_id, file_name, size_bytes, mime_type, status, scan_state, bind_kind FROM approval_attachments
         WHERE id = ANY($1) AND instance_id = $2 AND org_id = $3`,
       [ids, instanceId, orgId],
     )
     const byId = new Map(
       (rows as Array<{
         id: string
-        field_id: string
+        field_id: string | null
         file_name: string
         size_bytes: string | number
         mime_type: string
         status: string
         scan_state: string
+        bind_kind: string
       }>).map((r) => [r.id, r]),
     )
-    // Gate 2 (G7) — hidden-at-active-node is resolved ONCE per distinct field and fail-closed: a field
-    // the echoed snapshot would strip yields NO metadata either (a filename is form content too).
+    // Gate 2 (G7 / Lock-9 OD-L9-4) — hidden-at-active-node is resolved ONCE per distinct FORM field
+    // and fail-closed: a field the echoed snapshot would strip yields NO metadata either (a filename
+    // is form content too). Process rows (`bind_kind==='process'`) carry no `field_id` and are
+    // EXPLICITLY excluded from this set (G15) — this is an EXTEND, not a reuse: `/refs` does not
+    // route through `authorizeAttachmentDownload`, so its own gate-2 loop needs the same explicit
+    // skip storage.ts's gate 2 carries, or `hidden.has(null) === false` would render `fileName` for a
+    // process row by the same accidental pass the byte path condemns (a verified leak).
     const hiddenByField = new Map<string, boolean>()
-    for (const fieldId of new Set([...byId.values()].map((r) => r.field_id))) {
+    for (const fieldId of new Set(
+      [...byId.values()].filter((r) => r.bind_kind !== 'process' && r.field_id != null).map((r) => r.field_id as string),
+    )) {
       const hidden = await deps.authChecks.isFieldHiddenAtActiveNode(instanceId, fieldId).catch(() => true)
       hiddenByField.set(fieldId, hidden)
     }
@@ -433,7 +570,21 @@ export function createApprovalAttachmentRouter(deps: ApprovalAttachmentRouteDeps
         const row = byId.get(id)
         // Not bound to THIS instance, soft-deleted, or infected ⇒ tombstone (never a swap, never a leak).
         if (!row || row.status === 'deleted' || row.scan_state === 'infected') return [{ id, tombstone: true }]
-        if (hiddenByField.get(row.field_id) === true) return [] // hidden ⇒ absent, exactly as the snapshot echo
+        // Lock-9 OD-L9-4 / G15: a process attachment has no hidden-field gate to consult at all —
+        // render it BEFORE the hiddenByField lookup so a process row's absent field_id never reaches
+        // (and is never accidentally waved through by) the form-field hidden check below.
+        if (row.bind_kind === 'process') {
+          return [{
+            id,
+            tombstone: false,
+            fieldId: null,
+            fileName: row.file_name,
+            sizeBytes: Number(row.size_bytes),
+            mimeType: row.mime_type,
+            downloadUrl: `/api/approval/attachments/${encodeURIComponent(id)}/download`,
+          }]
+        }
+        if (row.field_id == null || hiddenByField.get(row.field_id) === true) return [] // hidden ⇒ absent, exactly as the snapshot echo
         return [{
           id,
           tombstone: false,

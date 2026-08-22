@@ -5889,6 +5889,102 @@ attendanceIntegrationDescribe(
     }
   })
 
+  // Subject-org resolution: /me pins the org from the AUTHENTICATED token only (getAuthenticatedOrgId —
+  // req.user.orgId / req.user.workspaceId / the token-derived req.authenticatedTenantId), never from a
+  // request-supplied source. A ?orgId query param or an x-org-id header is silently ignored (not
+  // rejected) for resolution — proven discriminating here by seeding a DIFFERENT balance for the SAME
+  // user id under a second org, so a leak would read as the wrong number rather than merely "some data".
+  // Both halves of the resolution are covered: the token-claim branch (cases a/b/c) AND the literal
+  // 'default' fallback used when there is no claim (cases d/e/f) — a caller with no resolvable org claim
+  // must ALSO see ?orgId/x-org-id ignored, not just a caller whose claim happens to be present.
+  it('④/年假 /me — org is resolved from the authenticated token only; ?orgId and x-org-id cannot redirect it', async () => {
+    if (!baseUrl) return
+    const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
+    if (!dbUrl) return
+    const pool = new Pool({ connectionString: dbUrl })
+    const runSuffix = Date.now().toString(36)
+    const orgA = `al-me-org-a-${runSuffix}`
+    const orgB = `al-me-org-b-${runSuffix}`
+    const meId = `al-me-orgsub-${runSuffix}`
+    const meNoClaimId = `al-me-orgsub-noclaim-${runSuffix}`
+    const mkLot = async (orgId: string, uid: string, amount: number, tag: string) => (await pool.query<{ id: string }>(
+      `INSERT INTO attendance_leave_balances (org_id, user_id, leave_type_code, amount_minutes, remaining_minutes, source_type, source_key, status, granted_at)
+       VALUES ($1,$2,'annual',$3,$3,'annual_accrual',$4,'active','2026-01-01') RETURNING id`,
+      [orgId, uid, amount, `me-org:${runSuffix}:${tag}`])).rows[0].id
+    const mkEvent = async (orgId: string, uid: string, balanceId: string, delta: number) => { await pool.query(
+      `INSERT INTO attendance_leave_balance_events (org_id, user_id, balance_id, event_type, delta_minutes, source_type, source_id)
+       VALUES ($1,$2,$3,'grant',$4,'annual_accrual',$5)`, [orgId, uid, balanceId, delta, balanceId]) }
+    try {
+      // the same user id has DIFFERENT balances under org A and org B — a leak reads as the wrong number.
+      const lotA = await mkLot(orgA, meId, 2400, 'a'); await mkEvent(orgA, meId, lotA, 2400)
+      const lotB = await mkLot(orgB, meId, 9999, 'b'); await mkEvent(orgB, meId, lotB, 9999)
+      // (d/e/f) a token with no tenant claim, zero memberships, keeps today's 'default' fallback — including
+      // when a request-level org selector targets org B, so it must ALSO have a discriminating org-B lot.
+      const lotDefault = await mkLot('default', meNoClaimId, 1200, 'default'); await mkEvent('default', meNoClaimId, lotDefault, 1200)
+      const lotNoClaimB = await mkLot(orgB, meNoClaimId, 7777, 'noclaim-b'); await mkEvent(orgB, meNoClaimId, lotNoClaimB, 7777)
+
+      // token whose tenant claim IS org A
+      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meId}&tenantId=${orgA}&roles=employee&perms=attendance:read`)
+      const token = (tokenRes.body as { token?: string } | undefined)?.token
+      if (!token) { await pool.end().catch(() => undefined); return }
+      const headers = { Authorization: `Bearer ${token}` }
+
+      // Each case below uses expect.soft: a mutation that breaks only some cases (e.g. only (b)/(c), or
+      // only (e)/(f)) must still show the OTHER cases green in the same run — a hard `expect` would abort
+      // the test at whichever case fails first and hide the verdict on the cases after it.
+
+      // (a) positive control: no org override -> 200, org A's 2400 (never B's 9999)
+      const a = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers })
+      expect.soft(a.status, `(a) status: ${JSON.stringify(a.body)}`).toBe(200)
+      const dataA = (a.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataA?.summary?.grantedMinutes, '(a) grantedMinutes').toBe(2400)
+      expect.soft(dataA?.summary?.grantedMinutes, '(a) grantedMinutes').not.toBe(9999)
+
+      // (b) ?orgId=B cannot redirect the read -> still A's 2400, B's 9999 is absent
+      const b = await requestJson(`${baseUrl}/api/attendance/leave-balances/me?orgId=${encodeURIComponent(orgB)}`, { headers })
+      expect.soft(b.status, `(b) status: ${JSON.stringify(b.body)}`).toBe(200)
+      const dataB = (b.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataB?.summary?.grantedMinutes, '(b) grantedMinutes').toBe(2400)
+      expect.soft(dataB?.summary?.grantedMinutes, '(b) grantedMinutes').not.toBe(9999)
+
+      // (c) x-org-id: B header cannot redirect the read either -> still A's 2400
+      const c = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { ...headers, 'x-org-id': orgB } })
+      expect.soft(c.status, `(c) status: ${JSON.stringify(c.body)}`).toBe(200)
+      const dataC = (c.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataC?.summary?.grantedMinutes, '(c) grantedMinutes').toBe(2400)
+      expect.soft(dataC?.summary?.grantedMinutes, '(c) grantedMinutes').not.toBe(9999)
+
+      // (d) a token with no tenant claim, zero memberships -> resolves to 'default', as today
+      const noClaimTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${meNoClaimId}&roles=employee&perms=attendance:read`)
+      const noClaimToken = (noClaimTokenRes.body as { token?: string } | undefined)?.token
+      expect.soft(noClaimToken, '(d) dev-token minted').toBeTruthy()
+      const d = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { Authorization: `Bearer ${noClaimToken}` } })
+      expect.soft(d.status, `(d) status: ${JSON.stringify(d.body)}`).toBe(200)
+      const dataD = (d.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataD?.summary?.grantedMinutes, '(d) grantedMinutes').toBe(1200)
+      expect.soft(dataD?.summary?.grantedMinutes, '(d) grantedMinutes').not.toBe(7777)
+
+      // (e) same no-claim token, ?orgId=B -> the LITERAL 'default' fallback must ALSO ignore a
+      // request-supplied org selector, not just the token-claim branch -> still 1200, never B's 7777
+      const e = await requestJson(`${baseUrl}/api/attendance/leave-balances/me?orgId=${encodeURIComponent(orgB)}`, { headers: { Authorization: `Bearer ${noClaimToken}` } })
+      expect.soft(e.status, `(e) status: ${JSON.stringify(e.body)}`).toBe(200)
+      const dataE = (e.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataE?.summary?.grantedMinutes, '(e) grantedMinutes').toBe(1200)
+      expect.soft(dataE?.summary?.grantedMinutes, '(e) grantedMinutes').not.toBe(7777)
+
+      // (f) same no-claim token, x-org-id: B header -> still 1200, never B's 7777
+      const f = await requestJson(`${baseUrl}/api/attendance/leave-balances/me`, { headers: { Authorization: `Bearer ${noClaimToken}`, 'x-org-id': orgB } })
+      expect.soft(f.status, `(f) status: ${JSON.stringify(f.body)}`).toBe(200)
+      const dataF = (f.body as { data?: { summary?: { grantedMinutes?: number } } } | undefined)?.data
+      expect.soft(dataF?.summary?.grantedMinutes, '(f) grantedMinutes').toBe(1200)
+      expect.soft(dataF?.summary?.grantedMinutes, '(f) grantedMinutes').not.toBe(7777)
+    } finally {
+      await pool.query(`DELETE FROM attendance_leave_balance_events WHERE user_id = ANY($1::text[])`, [[meId, meNoClaimId]]).catch(() => undefined)
+      await pool.query(`DELETE FROM attendance_leave_balances WHERE user_id = ANY($1::text[])`, [[meId, meNoClaimId]]).catch(() => undefined)
+      await pool.end().catch(() => undefined)
+    }
+  })
+
   // W5-0 (Wave 5 explainability design-lock 2026-07-22, RATIFIED §2/§7, OD-W5-9=(a)): the L5a
   // activeLots SELECT now projects `overtime_source` — purely additive (only the new key is
   // asserted here; every OTHER key's presence/values are already covered by the L5a tests above,
