@@ -232,8 +232,11 @@ jobs:
               "SELECT count(*) FROM approval_instances WHERE org_id IS NULL" || rc=1
 
             # ---- (b) THE DECISIVE NUMBER FOR ORG-PIN ACTIVATION -----------------------------
-            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts:131, "per-instance
-            # admission for PLATFORM ids only (the `plm:` branch above already returned)". With
+            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts, the Lock-10
+            # OD-S1-1/OD-S1-12 comment above the platform-branch admission check (anchored by
+            # SYMBOL, not line number — line cites drifted twice; locate by the quoted text),
+            # "per-instance admission for PLATFORM ids only (the `plm:` branch above
+            # already returned)". With
             # APPROVAL_S1_ORG_PIN_ENABLED=true the predicate conjoins `i.org_id = ANY(viewerOrgIds)`;
             # a NULL org_id makes that NULL, i.e. DENY for everyone including admins (OD-S1-9(e)).
             # p20 is therefore exactly the count of instances that go dark on activation.
@@ -436,6 +439,40 @@ jobs:
                      GROUP BY uo.user_id
                     HAVING count(*) = 1
                   )" || rc=1
+            # ---- Lock-11 U1 probes (writer-org-derivation draft §8; all counts-only) ----------
+            # U1a: does ANY org other than the blanket-backfilled one exist on user_orgs, and how
+            # many active users hold >=2 active memberships (sizes Lock-11 outage class 1 / D-10's
+            # moot condition: u1a_distinct_active_orgs = 1 means "nowhere to move to").
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_distinct_active_orgs" \
+              "SELECT count(DISTINCT org_id) FROM user_orgs WHERE is_active" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_multi_org_active_users" \
+              "SELECT count(*) FROM (SELECT user_id FROM user_orgs WHERE is_active
+                 GROUP BY user_id HAVING count(*) > 1) t" || rc=1
+            # U1b: active users with NO active membership — outage class 1b, the class no arm
+            # serves (feeds D-8). The draft marks this the count most likely to be non-zero.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+            # U1c: the second backfill's discriminator — distinct orgs on directory_integrations
+            # (a non-'default' integration org means the multi-org population was already
+            # manufactured, which changes how u1a reads). COUNT DISTINCT only, no org values.
+            # Guarded on table existence so an older schema cannot poison the whole env verdict:
+            # when the table is absent, the presence probe reports 0 and the count probe is
+            # deliberately NOT emitted (absence of the line + presence=0 is the honest record).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integrations_table_present" \
+              "SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'directory_integrations'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integration_distinct_orgs" \
+                "SELECT count(DISTINCT org_id) FROM directory_integrations" || rc=1
+              # The DISCRIMINATING half (gate P2-1): the draft's decision rule is "one non-'default'
+              # integration org ⇒ the multi-org population was already manufactured", which
+              # count(DISTINCT) cannot express ('default' is the repo-authored backfill constant,
+              # zzzz20260324150000:5 — a literal of the same class as the 'plm:%' prefixes).
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_non_default_integration_rows" \
+                "SELECT count(*) FROM directory_integrations WHERE org_id <> 'default'" || rc=1
+            fi
 
             if [[ "$rc" == "0" ]]; then
               echo "verdict=APPLIED"

@@ -4,7 +4,8 @@ import KanbanView from '../views/KanbanView.vue'
 import CalendarView from '../views/CalendarView.vue'
 import GalleryView from '../views/GalleryView.vue'
 import FormView from '../views/FormView.vue'
-import WorkflowDesignerView from '../views/WorkflowDesigner.vue'
+// Lazy: a static import here would pull bpmn-js into the entry chunk.
+const WorkflowDesignerView = defineAsyncComponent(() => import('../views/WorkflowDesigner.vue'))
 
 // Async on purpose: this registry is imported by statically-routed hosts, so a
 // static import here would pull the attendance monolith back into the entry

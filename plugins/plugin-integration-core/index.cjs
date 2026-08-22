@@ -21,6 +21,9 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
+const {
+  createStockPreparationPackInstallStore,
+} = require('./lib/stock-preparation-pack-install-store.cjs')
 const { createReadSourceCompositionConfigStore } = require('./lib/read-source-composition-config-store.cjs')
 // BA-APPLY-2a (design-lock docs/development/bridge-agent-controlled-apply-design-lock-20260708.md §2
 // 形态 B backend channel): approval gate + values-free checklist staging ONLY — this store never
@@ -68,6 +71,7 @@ let credentialStore = null
 let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
+let stockPreparationPackInstallStore = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
 let adapterRegistry = null
@@ -241,6 +245,10 @@ module.exports = {
     readSourceConfigStore = createReadSourceConfigStore({ db })
     // W5b (#3751/#3890): values-free audit trail for the stock-preparation write surface.
     stockPreparationAuditStore = createStockPreparationAuditStore({ db })
+    // Customer-pack install LEDGER (migration 076). Terminal-state rows only; it is what makes a
+    // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
+    // bands instead of falling back to the frozen-template ones.
+    stockPreparationPackInstallStore = createStockPreparationPackInstallStore({ db })
     // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
     // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
     readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
@@ -345,6 +353,7 @@ module.exports = {
         externalSystemRegistry,
         readSourceConfigStore,
         stockPreparationAuditStore,
+        stockPreparationPackInstallStore,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
         adapterRegistry,

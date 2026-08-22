@@ -580,6 +580,14 @@ function buildRevision({ action, parameters, expansion, existingRows, conflictPo
           valid: plan.valid === true,
           conflictTypes: plan.summary && plan.summary.conflictTypes,
           duplicateExpandedKeyResolution: plan.summary && plan.summary.duplicateExpandedKeyResolution,
+          // A dry-run token is a promise about WHAT WILL BE WRITTEN, so the pack-aware
+          // writable/human bands belong in the revision: if a pack install lands between
+          // dry-run and apply, the projected payloads move and the token must stop matching.
+          // Spread CONDITIONALLY — stableStringify emits explicitly-undefined keys, so an
+          // unconditional key would move every legacy revision hash.
+          ...(plan.summary && plan.summary.packAwareOwnership
+            ? { packAwareOwnership: plan.summary.packAwareOwnership }
+            : {}),
         }
       : null,
   })
@@ -676,7 +684,27 @@ async function consumeDryRunToken(tokenStore, token, expected) {
   return stored
 }
 
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview }) {
+// `installedFieldProperties` (OPTIONAL) is the ownership projection of what is actually
+// installed on the target sheet — the `property.stockPreparation` stanza per column. It is
+// threaded through, never fetched here: this module still has no fields-listing primitive
+// (multitable provisioning exposes only per-field reads, and adding an enumeration primitive
+// would be a plugin-API contract change handing every plugin whole-schema access).
+//
+// THE SEAM IS NOW PLUGGED IN. The gap this comment used to describe — "no pack-installation
+// registry exists to enumerate the pack's ids, so today's HTTP route supplies nothing" — was
+// closed by the customer-pack INSTALL LEDGER (integration_stock_prep_pack_installs, migration
+// 076) plus the read-back seam in stock-preparation-pack-installed-fields.cjs: the ledger names
+// the candidate `ext_` ids, readObjectFieldsContent says which of them are still live and how
+// they are classified, and the small-BOM dry-run/apply routes now supply the result here. The
+// large-BOM checkpoint path still supplies nothing and stays on the legacy bands; it plans into
+// a stored job, so wiring it is a separate change.
+//
+// The LEGACY POSTURE remains safe by construction and remains the fallback: omission yields
+// exactly the pre-pack writable set, and since the pack's `ext_` columns are then in neither
+// band, the refresh writes strictly FEWER columns rather than more. That is why the seam
+// degrades to `undefined` on any ledger/host read failure instead of failing the refresh.
+// See derivePackAwarePlmWritableFields in the conflict planner.
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties }) {
   const expansion = await expandPlmProjectBom({
     sourceAdapter,
     projectNo: parameters.projectNo,
@@ -710,6 +738,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     runId: runId || `table-action:${action.actionId}`,
     plannedAt: plannedAt || new Date().toISOString(),
     duplicatePolicyReview: conflictPolicyReview,
+    installedFieldProperties,
   })
   const revision = buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan })
   return {
@@ -770,6 +799,7 @@ async function dryRunStockPreparationAction(input = {}) {
     runId: input.runId,
     runOnlyReview,
     tableScopeReview,
+    installedFieldProperties: input.installedFieldProperties,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -969,6 +999,7 @@ async function applyStockPreparationAction(input = {}) {
     runId: input.runId,
     runOnlyReview,
     tableScopeReview,
+    installedFieldProperties: input.installedFieldProperties,
   })
   if (tokenRecord.revision !== dryRun.revision) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
@@ -992,6 +1023,9 @@ async function applyStockPreparationAction(input = {}) {
     plan: dryRun.plan,
     target: action.target,
     template: action.template,
+    // Same projection the plan was built from, so the writer's human wall rejects the
+    // pack's `ext_` human columns BY NAME rather than by their absence from the template.
+    installedFieldProperties: input.installedFieldProperties,
     // C4 apply: the writer already maps every payload key through the operator-configured
     // target.fieldIdMap, so the scoped API must NOT translate a second time (#4160).
     recordsApi: await createTargetScopedRecordsApi(input.recordsApi, action.target, { fieldIdTranslation: 'pre_mapped' }),
