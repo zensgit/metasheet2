@@ -96,19 +96,21 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * attachment; class 6 requires zero), so the two messages can never be confused in an incident.
  *
  * MUTATION-COVERAGE HONESTY NOTE — CORRECTED (fix round, independent gate report
- * `/tmp/migb-gate-20260822.md`, head `b6309c7486`): an earlier version of this note claimed
+ * `/tmp/migb-gate-20260822.md`, head `b6309c7486a4fb53985566412e81b670ad96aa6f`): an earlier
+ * version of this note claimed
  * exactly ONE coverage gap (this class-6 predicate's `i.id NOT LIKE 'plm:%'` clause). That claim
  * was false — a subsequent independent gate found THREE MORE, undisclosed, in different clauses
  * of this same migration:
- *   - `uo.is_active = TRUE`, untested in BOTH the class-3 subquery (line ~290) AND this class-6
- *     subquery (line ~205) — decisive for 257 of prod's 271 residual rows (see H18/H19/H20 in
- *     `.db.test.ts`).
- *   - the `afs:` prefix guard on the class-3 UPDATE (line ~297) — unlike the `plm:` case, class 3
- *     carries NO `source_system` filter, so this guard was the ONLY thing enforcing the
- *     ABORT-not-default posture for class 4 there, and it had no test (see H21).
- *   - the class-2 conflict census's OWN `plm:`/`afs:` prefix guards (lines ~233-234) — untested;
- *     a regression would false-positive FAIL-LOUD the whole migration over a row it should never
- *     touch (see H23/H24).
+ *   - `uo.is_active = TRUE`, untested in BOTH the class-3 subquery AND this class-6 subquery —
+ *     decisive for 257 of prod's 271 residual rows (see H18/H19/H20 in `.db.test.ts`).
+ *   - the `afs:` prefix guard on the class-3 UPDATE — unlike the `plm:` case, class 3 carries NO
+ *     `source_system` filter, so this guard was the ONLY thing enforcing the ABORT-not-default
+ *     posture for class 4 there, and it had no test (see H21).
+ *   - the class-2 conflict census's OWN `plm:`/`afs:` prefix guards — untested; a regression would
+ *     false-positive FAIL-LOUD the whole migration over a row it should never touch (see H23/H24).
+ * (Line numbers are deliberately omitted throughout this note — they drift on every edit to this
+ * docblock, which is exactly the staleness class this fix round exists to correct. Clause text and
+ * the class/subquery/UPDATE it belongs to are unambiguous without them.)
  * All three, plus the originally-disclosed gap, are now closed with red-proving fixtures in
  * `.db.test.ts` (H18-H26) — including H26, a SYNTHETIC `plm:` id with `source_system='platform'`
  * (not `upsertPlmMirror`'s real shape, but not forbidden by anything in this schema), built
@@ -127,12 +129,13 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *
  * TWO CLAUSES ARE PROVABLY INERT, not coverage gaps — no fixture will ever red them, because the
  * query structure makes them logically unreachable, not merely untested:
- *   - the class-2 conflict census's `a.instance_id IS NOT NULL` (line ~232): the surrounding join
- *     is an INNER JOIN on `i.id = a.instance_id`; SQL's `NULL = x` is never TRUE, so a NULL
- *     `instance_id` already fails the join and can never reach this filter. Deleting this line
- *     (mutation m20 in the fix-round measurement) relocates the remaining `AND` clauses into the
- *     JOIN's `ON` list, which is semantically identical for an INNER JOIN — confirmed empirically,
- *     32/32 green, not a script artifact.
+ *   - the class-2 conflict census's `a.instance_id IS NOT NULL`: the surrounding join is an INNER
+ *     JOIN on `i.id = a.instance_id`; SQL's `NULL = x` is never TRUE, so a NULL `instance_id`
+ *     already fails the join and can never reach this filter. The fix-round measurement (mutation
+ *     m20) replaced only this condition's text with `TRUE` (`WHERE a.instance_id IS NOT NULL` →
+ *     `WHERE TRUE`), keeping every other clause and the `WHERE` keyword itself untouched, isolating
+ *     this one condition — 32/32 green, confirming the clause is inert on its own, not as part of a
+ *     compound change.
  *   - `min(uo.org_id)` vs `max(uo.org_id)` in the class-3 subquery (mutation m22): `HAVING
  *     count(*) = 1` forces every surviving group to be a singleton, so `min` and `max` of a
  *     one-element set are always equal by definition — not merely equal in every fixture tried,
