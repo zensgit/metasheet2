@@ -373,6 +373,64 @@ jobs:
               "SELECT count(*) FROM approval_instances i
                 WHERE i.org_id IS NOT NULL AND i.requester_snapshot->>'id' IS NULL" || rc=1
 
+            # ---- MIGRATION B CLASS-PARTITION PROBES over the residual NULL population --------
+            # These partition the SAME p20 population (platform-id, org_id NULL) by Lock-10
+            # §2.2(b) row class, so a `c6 > 0` result at dispatch time is the PRE-DEPLOY GATE for
+            # Migration B: it means the migration's own class-6 pre-flight would ABORT if run
+            # right now. Necessary, not sufficient — p31 already proves writer drift is live, so a
+            # row created between this probe and deploy could still be class-6 shaped (narrow,
+            # because user_orgs blanket-backfills active users to exactly one 'default', but
+            # nonzero). A `c6 > 0` here is an OWNER ESCALATION, not an implementer decision to
+            # route around: the lock ruled ABORT and ruled nothing about what to do when it fires.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c1_template_originated_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.template_id IS NOT NULL" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_unique_active_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_multi_org_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) >= 2)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_zero_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_requester_id_absent_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NULL" || rc=1
+            # c6_terminal_org_null — THE §2.2(b) class-6 predicate, reproduced VERBATIM from
+            # `zzzz20260823100000_backfill_approval_instance_org_id.ts`'s CLASS_6_PREDICATE
+            # comment and pre-flight census query. This is ONE predicate reproduced in TWO places
+            # (this probe + that migration file); if they ever diverge, a green probe here stops
+            # predicting a green migration. Gate H15 in that migration's `.db.test.ts` is what
+            # proves the migration side; this probe is the only way to see the number in a real
+            # deployment before the migration runs there.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c6_terminal_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL
+                  AND i.id NOT LIKE 'plm:%'
+                  AND i.id NOT LIKE 'afs:%'
+                  AND COALESCE(i.source_system, 'platform') = 'platform'
+                  AND i.template_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM user_orgs uo
+                     WHERE uo.user_id = i.requester_snapshot->>'id'
+                       AND uo.is_active = TRUE
+                     GROUP BY uo.user_id
+                    HAVING count(*) = 1
+                  )" || rc=1
+
             if [[ "$rc" == "0" ]]; then
               echo "verdict=APPLIED"
             else

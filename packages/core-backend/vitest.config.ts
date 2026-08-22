@@ -1250,6 +1250,12 @@ export default defineConfig({
       // in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts',
+      // Lock-10 (S1) Migration B — ordered org_id backfill over the residual NULL platform rows
+      // left by Phase 1 (classes 2/3, ordered, prefix-guarded), real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-org-backfill-b.yml lane, which arms
+      // EXPECT_DB=1.
+      'tests/integration/approval-instance-org-backfill-b.db.test.ts',
       // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
       // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
       // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
