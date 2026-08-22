@@ -106,9 +106,9 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *       had NO red-proving fixture and is NOT inert — it is the single most load-bearing clause in
  *       the file (deleting it turns a requester-SCOPED backfill into a blanket cross-tenant
  *       stamp). Closed by H27/H28/H29 (mutation m26: replace only this condition's text with
- *       `TRUE`, `WHERE` and every sibling clause untouched — reds exactly H27+H28+H29, 3 failed |
- *       32 passed (35), on BOTH engines; H29 in particular PROVES cross-tenant mis-ASSIGNMENT
- *       between two distinct requesters/orgs, not merely a wrong stamp on one row).
+ *       `TRUE`, `WHERE` and every sibling clause untouched — reds exactly H27+H28+H29, on BOTH
+ *       engines; H29 in particular PROVES cross-tenant mis-ASSIGNMENT between two distinct
+ *       requesters/orgs, not merely a wrong stamp on one row).
  *   (2) the inert-clause count was wrong: FOUR clauses are provably inert, not two (corrected
  *       enumeration below), and a fifth (class-2's `SELECT DISTINCT`) is CONDITIONALLY inert — a
  *       materially weaker claim previously omitted entirely.
@@ -118,26 +118,65 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *       `uo.user_id = i.requester_snapshot->>'id'` (mutation m25, reds H15), and the per-clause
  *       halves of the previously-compound mutation m14 (m14a, `plm:` guard only, reds H23; m14b,
  *       `afs:` guard only, reds H24) — and an entire CATEGORY of statements, everything this
- *       migration only LOGS, had no oracle whatsoever (new disclosure category below).
- * The sweep is now 32 measured mutations (m1-m31, m14 split into m14a/m14b), every one re-run
+ *       migration only LOGS, had no oracle whatsoever (disclosure category (C) below).
+ *
+ * SELF-SCAN FOLLOW-UP (same round 3, before any external re-review of the note above): drafting
+ * the "every clause falls into one of three categories" sentence below is ITSELF exactly the kind
+ * of absolute claim this note exists to be suspicious of, so it was mechanically re-tested against
+ * six MORE clauses before publishing rather than asserted from the mutation table alone. Two were
+ * genuine, undiscriminated gaps — not inert, not previously credited by any fixture:
+ *   - the class-2 conflict census's own JOIN condition `i.id = a.instance_id` (mutation m33,
+ *     `ON TRUE`): every existing fixture happened to seed at most one `approval_instances` row per
+ *     attachment-bearing test, so a cross join could never introduce a WRONG join partner. Closed
+ *     by **H30**: an ALREADY-STAMPED instance with two conflicting-org attachments, co-resident
+ *     with a SEPARATE bare eligible instance — under the mutation the already-stamped instance
+ *     "borrows" the bare instance's `org_id IS NULL` eligibility through the widened join and the
+ *     whole migration false-aborts. Reds under m33, and — once written — turned out to ALSO be the
+ *     correct fixture for the class-2 UPDATE's own analogous correlation `a.instance_id = i.id`
+ *     (mutation m32; H30 reds this alongside the pre-existing H17), closing that gap too without a
+ *     second bespoke fixture.
+ *   - the conflict census's `count(DISTINCT a.org_id) > 1` (mutation m34, DISTINCT removed): no
+ *     fixture had ever seeded TWO attachments sharing the SAME org on one instance, so the
+ *     DISTINCT keyword was untested. Closed by **H31**: two same-org attachments on one instance
+ *     → must NOT be flagged as a conflict, must be stamped from that shared org. Reds under m34,
+ *     and (once written) turned out to also be caught by the class-6 `NOT EXISTS (attachments)`
+ *     clause's HAVING-removal mutation (m19) and the conflict-count-collapse mutation (m17),
+ *     credited in the table below.
+ * Two more of the six were mechanical, not behavioural: the conflict census's `GROUP BY
+ * a.instance_id` (m35) and the class-3 subquery's `GROUP BY uo.user_id` (m37) each make the
+ * surrounding aggregate query SYNTACTICALLY INVALID when removed (Postgres errors — a column
+ * appearing outside an aggregate without a GROUP BY) — this breaks essentially every test that
+ * reaches that statement (31/37 and 30/37 respectively), not by design of a targeted fixture but
+ * because the mutation cannot produce a running query at all. Disclosed as its own kind, not
+ * folded into (A)'s "one fixture, one clause" framing. The remaining two of the six (the class-6
+ * `NOT EXISTS (attachments)` clause's own correlation, mutation m36, and — already covered above —
+ * m32/m33) were covered-but-uncredited, same pattern as (3) above; m36 reds H15.
+ *
+ * The sweep is now 38 measured mutations (m1-m37, m14 split into m14a/m14b), every one re-run
  * whole-file (not name-filtered), `cp`-restored and sha256-verified before and after each run,
- * identical red-sets on Postgres 16 and Postgres 15-alpine for all 32 — see the mutation table in
+ * identical red-sets on Postgres 16 and Postgres 15-alpine for all 38 — see the mutation table in
  * this PR's body for the full cross-reference. (Line numbers remain deliberately omitted in this
  * note for the same staleness reason as the prior round.)
  *
- * As of this fix round, every clause of every predicate and every UPDATE in this file falls into
- * exactly one of THREE disclosed categories — not two — placed there by MEASUREMENT, not by
- * inspection:
+ * SCOPE OF THE CLAUSE-CATEGORY CLAIM BELOW — stated narrowly, on purpose, after the self-scan
+ * above caught this note's OWN drafting mistake once already this round: the following applies to
+ * every clause identified BY NAME in this note and in the PR body's mutation table (38 mutations),
+ * not to an asserted-complete enumeration of every predicate/JOIN/GROUP BY in the file. Two
+ * successive self-scans (fix round 3's own docblock claim, then a mechanical follow-up before
+ * publishing it) each found clauses the previous pass had missed; a third pass might too. What
+ * changed is that every clause named below is now MEASURED, not merely inspected — the categories
+ * are true of what has been checked, and the checking is disclosed as ongoing, not closed:
  *   (A) RED-PROVING FIXTURE — a fixture reds under that clause's single-line deletion, measured
- *       whole-file on both target Postgres majors. Every clause not named in (B) or (C) below.
+ *       whole-file on both target Postgres majors.
  *   (B) PROVABLY INERT (or, for one clause, CONDITIONALLY inert) — no fixture will ever red it
  *       because the query structure makes it logically unreachable, not merely untested; see the
- *       corrected FOUR-clause enumeration below, plus the one conditionally-inert clause disclosed
- *       separately because its argument depends on a DIFFERENT statement having already run.
+ *       corrected FOUR-clause enumeration below, plus the one conditionally-inert clause.
  *   (C) LOG-ONLY, UNASSERTED, NO BEHAVIOURAL CONSEQUENCE — the four trailing counts-only census
  *       statements and the two `_stamped` counters emit to the deploy log and are read by nothing
- *       in this codebase; see below for why these are neither (A) nor (B), and why building an
- *       oracle for them is not the right fix.
+ *       in this codebase.
+ *   (D) MECHANICALLY COVERED BY SQL VALIDITY — removing the clause makes the surrounding query
+ *       syntactically invalid, so virtually every test that reaches it reds by construction (m35,
+ *       m37); not a targeted fixture, disclosed as its own kind.
  *
  * FOUR CLAUSES ARE PROVABLY INERT (CORRECTED — a prior draft of this note said TWO; that count was
  * wrong by at least two), not coverage gaps — no fixture will ever red them, because the query
@@ -147,37 +186,39 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *     already fails the join and can never reach this filter. Mutation m20 replaced only this
  *     condition's text with `TRUE` (`WHERE a.instance_id IS NOT NULL` → `WHERE TRUE`), keeping
  *     every other clause and the `WHERE` keyword itself untouched, isolating this one condition —
- *     35/35 green this round, confirming the clause is inert on its own, not as part of a compound
+ *     37/37 green this round, confirming the clause is inert on its own, not as part of a compound
  *     change.
  *   - `min(uo.org_id)` vs `max(uo.org_id)` in the class-3 subquery (mutation m22): `HAVING
  *     count(*) = 1` forces every surviving group to be a singleton, so `min` and `max` of a
  *     one-element set are always equal by definition — not merely equal in every fixture tried,
- *     equal for ALL POSSIBLE inputs. 35/35 green, consistent with the in-file comment at the
+ *     equal for ALL POSSIBLE inputs. 37/37 green, consistent with the in-file comment at the
  *     class-3 UPDATE explaining why `min()` is collation-safe here.
- *   - the class-2 UPDATE's inner subquery `WHERE instance_id IS NOT NULL` (mutation m24, NEW this
- *     round — the THIRD inert clause): the outer join condition `WHERE a.instance_id = i.id`
- *     already makes a NULL `instance_id` from this subquery unreachable, by the identical
- *     `NULL = x` argument as the first bullet — a DIFFERENT physical clause with the SAME
- *     mechanism, not a duplicate of that finding. 35/35 green.
- *   - the class-6 subquery's `GROUP BY uo.user_id` (mutation m27, NEW this round — the FOURTH
- *     inert clause): the subquery's own `WHERE uo.user_id = i.requester_snapshot->>'id'` already
- *     pins every surviving row to one `user_id` value, so the grouping is redundant with the
- *     correlation itself. Verified over four shapes (unique user, multi-membership user, absent
- *     user, NULL requester id) via direct SQL: grouped and ungrouped results are identical in all
- *     four, and 35/35 green under the mutation itself.
+ *   - the class-2 UPDATE's inner subquery `WHERE instance_id IS NOT NULL` (mutation m24): the
+ *     outer join condition `WHERE a.instance_id = i.id` already makes a NULL `instance_id` from
+ *     this subquery unreachable, by the identical `NULL = x` argument as the first bullet — a
+ *     DIFFERENT physical clause with the SAME mechanism, not a duplicate of that finding. 37/37
+ *     green.
+ *   - the class-6 subquery's `GROUP BY uo.user_id` (mutation m27): the subquery's own `WHERE
+ *     uo.user_id = i.requester_snapshot->>'id'` already pins every surviving row to one `user_id`
+ *     value, so the grouping is redundant with the correlation itself. Verified over four shapes
+ *     (unique user, multi-membership user, absent user, NULL requester id) via direct SQL: grouped
+ *     and ungrouped results are identical in all four, and 37/37 green under the mutation itself.
+ *     (Contrast: the class-3 subquery's own `GROUP BY uo.user_id`, mutation m37, is NOT similarly
+ *     inert — its own subquery has no per-row correlation to make the grouping redundant, so
+ *     removing it makes the query invalid instead — category (D), not (B).)
  *
- * ONE CLAUSE IS CONDITIONALLY INERT (NEW this round, a separate and WEAKER category — do not fold
- * it into the FOUR above): the class-2 UPDATE's `SELECT DISTINCT instance_id, org_id` (mutation
- * m28, `SELECT DISTINCT` → `SELECT`) — 35/35 green. Any row reaching this UPDATE has already
- * passed the class-2 conflict census, so every attachment bound to it shares one `org_id`;
- * duplicate source rows therefore write the identical value with or without `DISTINCT`. This is
- * weaker than the four bullets above because the argument depends on a DIFFERENT statement (the
- * conflict census) having already run and thrown on any counter-example first — it is not
- * unreachable by this query's OWN structure the way the four above are.
+ * ONE CLAUSE IS CONDITIONALLY INERT (a separate and WEAKER category — do not fold it into the FOUR
+ * above): the class-2 UPDATE's `SELECT DISTINCT instance_id, org_id` (mutation m28, `SELECT
+ * DISTINCT` → `SELECT`) — 37/37 green, INCLUDING under H31's real duplicate-same-org attachment
+ * pair (the exact shape this argument is about, previously only hypothetical). Any row reaching
+ * this UPDATE has already passed the class-2 conflict census, so every attachment bound to it
+ * shares one `org_id`; duplicate source rows therefore write the identical value with or without
+ * `DISTINCT`. This is weaker than the four bullets above because the argument depends on a
+ * DIFFERENT statement (the conflict census) having already run and thrown on any counter-example
+ * first — it is not unreachable by this query's OWN structure the way the four above are.
  *
- * LOG-ONLY, UNASSERTED, NO BEHAVIOURAL CONSEQUENCE (NEW disclosure category this round — closes
- * the mutation-coverage-honesty gap around this file's own reporting surface): `up()` ends with
- * four counts-only census statements (`class4_afs_deferred_null`, `class5_plm_null`,
+ * LOG-ONLY, UNASSERTED, NO BEHAVIOURAL CONSEQUENCE (disclosure category (C)): `up()` ends with four
+ * counts-only census statements (`class4_afs_deferred_null`, `class5_plm_null`,
  * `class1_residue_null`, `residual_platform_null`) and two `_stamped` counters (`class2_stamped`,
  * `class3_stamped`), all logged via `console.log`. Between them these carry TWELVE predicate
  * clauses (`org_id IS NULL` x4, `id LIKE 'afs:%'`, `id LIKE 'plm:%'`, `id NOT LIKE 'plm:%'` x2,
@@ -190,7 +231,7 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * counts `id LIKE 'plm:%'` instead of `'afs:%'`, reporting the WRONG class entirely; m30: the
  * `class1Residue` census's four clauses collapsed to `WHERE TRUE` all at once; m31:
  * `class3_stamped` hardcoded to `999`, i.e. the log LIES about how many rows were written) all
- * leave the suite 35/35 GREEN. This is a CLEANER falsification than any category-(A) gap, because
+ * leave the suite 37/37 GREEN. This is a CLEANER falsification than any category-(A) gap, because
  * it needs no mutation argument at all — the absence of an observation channel is sufficient on
  * its own. The honest fix is this disclosure, not a synthetic oracle: these statements have no
  * behavioural consequence, so spy-based assertions around them would test the harness, not the

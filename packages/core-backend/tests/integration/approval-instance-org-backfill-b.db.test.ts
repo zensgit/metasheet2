@@ -543,4 +543,34 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     expect(await orgIdOf('h29_a')).toBe('orgH29A')
     expect(await orgIdOf('h29_b')).toBe('orgH29B')
   })
+
+  // ---- H30/H31 — a post-push self-scan (before any external re-review) found the round-3
+  // docblock's own "every clause falls into one of three categories" claim was itself unmeasured
+  // for several clauses. Two of those turned out to be genuine, undiscriminated gaps (not inert),
+  // structurally analogous to N1. Closed here rather than merely disclosed.
+
+  it("H30: an ALREADY-STAMPED instance with TWO conflicting-org attachments, co-resident with a SEPARATE bare eligible instance -> the already-stamped one stays untouched, NO false-positive conflict abort (pins the conflict census's JOIN condition `i.id = a.instance_id`; a widened join lets the already-stamped instance borrow the co-resident bare instance's eligibility and false-abort the whole migration)", async () => {
+    await seedInstance({ id: 'h30_stamped', sourceSystem: 'platform', orgId: 'orgAlreadySet' })
+    await seedAttachment('att_h30_a', 'h30_stamped', 'orgConflictX')
+    await seedAttachment('att_h30_b', 'h30_stamped', 'orgConflictY')
+    // A separate, bare, eligible instance (org_id IS NULL, unprefixed, zero attachments) co-resident
+    // in the SAME schema, with a uniquely-resolvable requester so it does not itself trigger the
+    // class-6 terminal abort (which would mask this test's real target behind an unrelated abort).
+    await seedInstance({ id: 'h30_bare', sourceSystem: 'platform', requesterId: 'u_h30_bare' })
+    await seedUserOrg('u_h30_bare', 'orgBare', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h30_stamped')).toBe('orgAlreadySet')
+    expect(await orgIdOf('h30_bare')).toBe('orgBare')
+  })
+
+  it("H31: an instance with TWO attachments carrying the SAME org (non-conflicting duplicates) -> NOT flagged as a conflict, stamped by class 2 from that org (pins the conflict census's `count(DISTINCT a.org_id) > 1` — without DISTINCT, `count(a.org_id) > 1` would false-flag ANY instance with 2+ same-org attachments as a conflict and abort the whole migration)", async () => {
+    const id = `h31-${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'platform' })
+    await seedAttachment('att_h31_a', id, 'orgSameTwice')
+    await seedAttachment('att_h31_b', id, 'orgSameTwice')
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBe('orgSameTwice')
+  })
 })
