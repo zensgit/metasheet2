@@ -887,3 +887,36 @@ org pin 激活路径只在测试内 flag-ON 探过,无 staging/prod 证据;`APPR
 (expected-red,owner 行未裁);Lock-9 P3-2/P3-3 具名的两个门缺口(G-13 年龄混杂、G-1 正控缺失)在
 本波结束时仍在。**S1 证据车道无 required 信号**(#5070 requal NIT-2 尖锐化):`approval-realdb-instance-readability-s1.yml` 非 required lane,且该套件不在 required `test (20.x)` 的 74 文件清单内——NEW-1 回归门、G-S1-12-PARTIAL 与全部谓词臂门只在非 required 车道有信号;即使 org pin 将来开启,这一车道缺口独立存在。V-1(§4.1)与 §7 的 36 行 PASS-POSITIVE-ONLY、§8 的 BLOCKED-ENV/OWNER-ONLY 清单
 不因本段而减少。
+
+---
+
+## 13. 2026-08-22 收尾冲刺验证事实(与 §11/§12 同规:分层追加,不重跑既有行)
+
+**本段不重跑本文任何既有验证行。** 每行证据由独立门审/复审代理在隔离 detached worktree + 一次性
+Postgres 中亲跑;判定绑 pre-squash head;报告文件具名。**没有任何一行是上线判据——所有开关 OFF,零 UAT。**
+
+### 13.1 判定链与电池(全部 mutation 实证;#5103 SQL 四轮冻结由三 oracle 证明)
+
+| PR(落地) | 终判(绑 head) | 关键电池 | 报告 |
+|---|---|---|---|
+| #5096(`85b2dd30a5`) | MERGE-CLEAN @ `5964c2d2d3` | 8 项验收 mutation 门审亲跑 + 6 个门审自构探针(16-shape 双 boot OFF-parity sha 同值;M15 反事实证去混杂承重) | /tmp/sweep-gate-20260822.md + sweep-requal(耐久副本 gate-reports/) |
+| #5095(`2171b07fb3`) | MERGE-CLEAN @ `adc74954b5` | 收窄判据攻击:改名-移位 rename 探针恰红;未来日期迁移探针恰绿(反演);合流树 77 文件 CI+本地同树同数(840+3);pin 重算逐字节 | /tmp/signal-gate-20260822.md + signal-requal |
+| #5098(`45490f57ec`) | MERGE-CLEAN @ `c7300ea064` | 可执行内容自 round-2 冻结(三 head canon-sha 同值);G-W2 mutation 双侧判别;vitest 排除表并集 318 逐条 | /tmp/stamp-gate-20260822.md + stamp-requal(4 轮) |
+| #5099(`99fd7b498a`) | bind MERGE-CLEAN @ `7e4ce66b32` | MUT-B 前后对照(修复回滚:5050 全绿→1 failed/5051,required 车道现在看得见);真 server 真 PG 信封亲采;敌意 payload 8 形全 fail-closed;census 双向 | /tmp/l9fe-gate-20260822.md + l9fe-requal |
+| #5105(`8f58f52cc7`) | bind MERGE-CLEAN @ `e524c609c1` | 判别半边在真 PG15.19 上四形矩阵证明;守卫行为学(stub docker 侧信道)四场景;values-free 敌意注入零泄漏 | /tmp/u1probes-gate-20260822.md |
+| #5104(`d414022676`) | bind MERGE-CLEAN @ `c6deb9656d` | 行级 wire 探针(敌意 metadata 键字节扫描;S2 指针行排除带走私 attachmentIds 仍除);flag-OFF cmp 字节 parity 带正控;#5099 归一化端到端复证 | /tmp/hist-gate-20260822.md + hist-requal(bind 段) |
+| #5103(**held**) | MERGE-CLEAN 条件绿 @ `e60eff45b3` | 37/37 双引擎(16 glibc + 15-alpine musl);37 mutation 表(m26 恰红 H27-29,H29 实测跨租户错配;m29/30/31 全绿证 log-only 类);merge=字节级并集证明(53/54 文件 byte-identical 归属父;差恰三条 marker 行);SQL 冻结 oracle O3=模板体 sha 五 head 同值 | /tmp/migb-gate-20260822.md + migb-requal(4 轮 660 行) |
+
+### 13.2 生产证据(两次 dispatch,workflow 自身经门审:host-key 钉、只读、values-free)
+
+run 32552496622 / 32568321791,log 耐久于 soak-working/。核心数:§设计报告 11.2。
+**判读约束**:c6=269 非缺陷,是 ruled FAIL-LOUD 在真实人口上的正确触发;u1b=12 与 c3=257 的差
+(245)指向历史实例的 requester 多为非活跃/缺失用户——这是激活裁决的输入,不是本文的结论。
+
+### 13.3 未验证清单(防收尾误读)
+
+阶段 3 `SET NOT NULL` 的 ratified 断言半边(`is_nullable='NO'`)仍从未在任何库跑过;org pin 激活
+零 staging/prod 证据(staging 连 S1 迁移都未应用);`APPROVAL_ATTACHMENTS_ENABLED` ON 零 UAT;
+Lock-11 十 OD 零实现(四写入点仍不盖章,p31 继续增长);#5103 未合(owner-held),其 SQL 从未对
+生产数据执行;G-S1-8 仍 expected-red;evidence workflow 的只读性无自动门(P3-1 随行);U2/U3'/U4/
+U5/U7/U8 仍 unknown(其中 U2/U7/U8 非仓内可解)。§12.3 全部条目不因本段减少。
