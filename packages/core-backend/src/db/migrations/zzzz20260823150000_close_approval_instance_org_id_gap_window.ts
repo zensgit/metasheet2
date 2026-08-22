@@ -17,14 +17,18 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  *
  * HONEST LIMIT on "structurally nil" (disclosed, not silently narrowed): that phrase describes the
  * ruling's INTENT, not a literal proof of zero. This migration runs inside `db:migrate`, which the
- * deploy pipeline executes via `compose exec backend node .../migrate.js` BEFORE the new image
- * starts serving traffic (see the captured deploy log for #5103's own two migrations, cited in this
- * PR's body). Any row created strictly BETWEEN this migration's own execution finishing and the new
- * (org-deriving) image actually taking over traffic — the deploy's own restart interval, not zero —
- * would still land with `org_id IS NULL` and would NOT be closed by this one-shot migration (kysely
- * never re-runs a recorded migration by name). The accurate claim is "reduces the window to the
- * deploy's own restart interval", not "reduces it to nil"; the ruling's stronger phrasing is quoted
- * here verbatim because it IS the ruling's text, not because this migration proves it exactly.
+ * deploy pipeline executes via `compose exec -T backend node .../migrate.js` against the deploy's
+ * backend container (see the captured deploy log for #5103's own two migrations, cited in this
+ * PR's body — that log does not by itself establish, and this docblock does NOT assert, the precise
+ * ordering of "container recreated" vs. "migrate.js executed" vs. "first request served" for this
+ * repo's specific compose sequence). Whatever that ordering is, this migration runs exactly ONCE:
+ * any `approval_instances` row created via the pre-derivation code path that lands strictly around
+ * this deploy's own container-swap-and-migrate sequencing — the deploy's own restart interval, not
+ * zero — would still land with `org_id IS NULL` and would NOT be closed by this one-shot migration
+ * (kysely never re-runs a recorded migration by name). The accurate claim is "reduces the window to
+ * (at most) the deploy's own restart interval", not "reduces it to nil"; the ruling's stronger
+ * phrasing is quoted here verbatim because it IS the ruling's text, not because this migration
+ * proves it exactly.
  *
  * THE WINDOW, PRECISELY. `zzzz20260823100000_backfill_approval_instance_org_id.ts` ("Migration B")
  * is a ONE-SHOT backfill: it resolves (stamps, or permanently classifies as NULL) every
