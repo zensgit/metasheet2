@@ -1735,3 +1735,27 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
   覆盖此项**——移除 run-list 行并重算 pin 后全绿已被实证);证据作业无自动只读门(P3-1,姊妹先例
   `multitable-o2-observation` 的 `default_transaction_read_only=on` 重放);#5098 P3-3 = Lock-10 `:412`
   勘误(D-5)。
+
+---
+
+## 12. 2026-08-22 → 08-23 Lock-11 落地波 —— 写入点全成,org 锚定端到端闭合
+
+**与 §9-§11 同规:分层追加,不改既有 SHA 绑定。** 授权链:第六次 by-reference(Lock-11 十裁 + 269 行,
+#5109 ratification)与第七次(max 深审四修正)。判定绑 pre-squash head,落地为 squash。
+
+### 12.1 六件落地物(合并序)
+
+| 件 | 内容 | 判定链 | 落地 |
+|---|---|---|---|
+| #5109 | **Lock-11 RATIFIED**:锁文入库+§10 十裁记录((β) 排序=约束性;D-10 RETIRED 无日落;回灌=未来 owner 项)+§10.3 第七裁 | 三轮门审(P1=排序定义丢失→恢复)→ MERGE-CLEAN @ `c57dbbd39f`;body 与清单双 hash 三轮零扰动 | `fb9f559dc0` |
+| #5103 | **Migration B + D-8 修订**:provisioning 迁移(12 零成员活跃用户)+ class-6 (i)-guarded(单 org 自断言);SQL 四轮冻结后由裁决解除、差量=恰两新模板证明 | migb-revision 工作流 gate F0→fix→requal CLEAN @ `80bc374aaf`(musl 双引擎 52/52) | `6a2010cf8c`;**prod 执行成功 17:16:20Z(run 32586978396),无 ABORT** |
+| #5116 | u1b 拆分探针(no-row / only-deactivated——深审 P1-1 的不可见形) | gate P2(判别半边)→ 修复 → CLEAN @ `e524c609c1`;四形+随机 400 用户分区恒等实证 | `8097d310eb` |
+| #5112 | **W-1/W-2 建线盖章**(requester 键/单活跃成员/值免 422/双调用路径)+ gap-closer 迁移(第七裁授权)+ (β) 绊线 + §10.3 落地 | gate P1(两语法枚举漏洞:actionType fixture)→ 修复 → requal STALE → 折入 rebase → MERGE-CLEAN @ `b8b87eec14`;**合并门=run-4 证据 u1b 双拆分 0 DISCHARGED** | `2a859ba4c1`;gap-closer prod 执行成功 19:29:25Z(经 GHCR blob flake 重跑 + **部署主机磁盘闸**:GC 回收 32.42GB 后过闸) |
+| #5121 | **W-4 考勤盖章**(arm (f) 验证选择器 SUBJECT 键 + arm (a) 回退,双腿含 legacy)+ G-L11-8 分脑门 + D-10 退役钉 + **G-W3 售后零写钉** + OpenAPI 422 契约 | fable-max gate P1(fixture 审计漏 attendance-files-acl)→ 修复 → requal 驳回 G-L11-9 缺格降级 → β/γ 格补齐 → 终绑 MERGE-CLEAN @ `f115541ad7`(β mutation 恰红;γ pin-差分证非空洞) | `3882dc80f7`;部署成功 |
+| (证据) | 五次生产采集(run 3-6 + 终验)全耐久归档 soak-working/ | — | p11=**271/271**、p20=0、p31=0、u1b 及双拆分=0、u1a=1 |
+
+### 12.2 本波之后的状态
+
+- **Lock-11 四写入点全部落成**:W-1/W-2(#5112)、W-4(#5121)盖章上线;W-3=(d) 零写钉;PLM=零-org 钉(#5098)。生产 org 数据面 271/271 全锚定,新行由写入点保证。
+- **激活链只剩 owner/ops 步骤**:①staging 补一次成功部署(NOT_APPLIED 依旧;evidence 短路会先测 staging 人口——深审 P2-2 探针未落,记为激活前置作业);②**org pin 激活授权**(前置:u1b=0 已实测、u1a=1 复核、staging 验证;独立台账行);③阶段 3(改名后的 OD-S1-18(b) CHECK 形,ratify-first);④附件 flag(UAT 执行人/环境/清单仍待 owner 亲定——第七裁 item 4 OPEN)。
+- **具名残留**:P3-1 twin-write 与 OD-L11-10(iii) 的张力(owner 台账知会);回灌未来项((β) 持续性准入步);staging U1 探针移出短路(深审 P2-2,未落);证据作业只读自动门(P3-3);W-4 NIT(user_orgs 残行/write-only 累加器);S2 P3-1/P3-2 知会项照旧。
