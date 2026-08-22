@@ -26,6 +26,39 @@
 // Every field id carries the reserved `ext_` prefix and is validated against
 // the frozen template catalog at normalize time, so none of these can collide
 // with a template column — today's or a future one's.
+//
+// THE ONE RULE, AND WHERE IT IS ENFORCED
+// -------------------------------------
+// A real dictionary lives ONLY in the uncommitted deploy-time pack file. Never
+// here, never in a __tests__ fixture, never "just to make the rehearsal
+// realistic". The rule is not new — the paragraph at the top of this file has
+// said it since the file was written — and it was broken anyway (#5074
+// committed the customer's live 领料节点 / 交接工段 vocabularies into
+// factory-a.rehearsal.cjs). A rule that only lives in a comment gets read once.
+// So it is now mechanised:
+//
+//     __tests__/customer-dictionary-leak-guard.test.cjs
+//
+// WHERE THE LINE FALLS. The guard, and this rule, are about a customer's
+// INTERNAL ID → NAME PAIRING, because that pairing is a row of their database
+// and exists nowhere else. A published designation is not the same thing:
+//
+//   * `'40 - S30408'` below is fine. S30408 is a grade designation in
+//     GB 24511 / GB/T 150 — the same name in every Chinese pressure-vessel
+//     supplier's catalogue — and `40` is a rung on a ladder invented for this
+//     fixture. Knowing that a factory can order S30408 says nothing about that
+//     factory.
+//   * `'<their config_info key> - <their own process name>'` was NOT fine, and
+//     is not restated here even as an example. The numeric half was a primary
+//     key in ONE customer's `config_info` table (read site
+//     GeneralStockInfoController.java:666; see docs/development/
+//     takeover-beiliao-20260821/demo-field-dictionary-spec.md §212-213). That
+//     number means that name in exactly one database on earth, and quoting the
+//     pair to explain the ban would re-commit the pair.
+//
+// So: industry vocabulary may be quoted; a tenant's key→label mapping may not.
+// Keep every committed option ladder on a CONSTANT numeric step — that is the
+// property the guard checks, and an exported catalogue essentially never has it.
 
 const FACTORY_A_SAMPLE_PACK = {
   packId: 'factory-a',
