@@ -86,6 +86,59 @@ function balanceSummaryPayload(leaveTypeCode: string, userId: string): Record<st
   }
 }
 
+// A6 (A-class batch 2, 2026-08-22): the admin annual-leave-balance "User ID" filter is now an
+// AttendanceUserPickerField (search input + <select>) instead of a raw text <input>; its real
+// v-model value lives on the <select>.
+//
+// GATE-5097 P2-1: drive the picker for real (search -> mocked endpoint -> real <option> ->
+// select) instead of fabricating the option, so a defect in that path (e.g. the endpoint 403ing)
+// fails this helper's own assertion instead of passing silently.
+function userSearchResponse(users: Array<{ id: string; email?: string; name?: string | null }>) {
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      items: users.map((user) => ({
+        id: user.id,
+        email: user.email ?? `${user.id}@uiwalk.local`,
+        name: user.name ?? null,
+        role: 'user',
+        is_active: true,
+        is_admin: false,
+        last_login_at: null,
+        created_at: '',
+      })),
+      page: 1,
+      pageSize: 20,
+      total: users.length,
+    },
+  })
+}
+
+async function loadUserIntoPicker(container: HTMLElement, selector: string, userId: string): Promise<void> {
+  const searchInput = container.querySelector<HTMLInputElement>(selector)
+  expect(searchInput, `expected user picker ${selector}`).toBeTruthy()
+  const field = searchInput!.closest('.attendance__field')
+  expect(field, `expected user picker field ${selector}`).toBeTruthy()
+  // Locale-independent: the search button is the only <button> inside the picker's controls
+  // row (AttendanceUserPickerField.vue's `.attendance__user-picker-controls`); its label text
+  // is locale-routed ("Search users" / "搜索用户") so matching by text would break under zh-CN.
+  const searchButton = field!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')
+  expect(searchButton, `expected the picker's search button for ${selector}`).toBeTruthy()
+  searchInput!.value = userId
+  searchInput!.dispatchEvent(new Event('input'))
+  searchButton!.click()
+  await flushUi(4)
+  const select = field!.querySelector<HTMLSelectElement>('select')
+  expect(select, `expected user picker select ${selector}`).toBeTruthy()
+  const option = Array.from(select!.options).find((candidate) => candidate.value === userId)
+  expect(
+    option,
+    `expected a REAL <option value="${userId}"> in ${selector} after searching — the mocked search endpoint did not return it`,
+  ).toBeTruthy()
+  select!.value = userId
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 describe('W5-1 decision-trace dual-face wiring', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -98,6 +151,12 @@ describe('W5-1 decision-trace dual-face wiring', () => {
     useLocale().setLocale('zh-CN')
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
+      // GATE-5097 P2-1: the annual-leave-balance picker (A6) searches this endpoint on mount and
+      // on every "Search users" click; without a response here loadUserIntoPicker's real-<option>
+      // assertion is the thing that would catch a regression, not a fabricated pass.
+      if (url.startsWith('/api/attendance-admin/users/search')) {
+        return userSearchResponse([{ id: 'u1' }])
+      }
       if (url.startsWith('/api/attendance-admin/decision-trace?')) {
         return jsonResponse(200, { ok: true, data: todayStatusTraceFixture() })
       }
@@ -377,9 +436,7 @@ describe('W5-1 decision-trace dual-face wiring', () => {
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-    const userInput = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
-    userInput.value = 'u1'
-    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'u1')
     await flushUi(2)
 
     // Default (annual) — byte-identical to the pre-W5-1 query.

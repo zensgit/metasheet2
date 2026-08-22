@@ -1685,7 +1685,7 @@ describe('UserManagementView', () => {
     expect(nextStepLinks).toEqual([
       {
         text: '考勤组成员',
-        href: '/attendance?tab=admin&section=attendance-admin-group-members&userId=user-created&q=E-2026-010',
+        href: '/attendance?tab=admin&section=attendance-admin-groups&userId=user-created&q=E-2026-010',
       },
       {
         text: '班次分配',
