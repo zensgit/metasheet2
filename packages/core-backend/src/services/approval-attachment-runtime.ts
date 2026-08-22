@@ -35,7 +35,9 @@ import { authenticate } from '../middleware/auth'
 import type { Queryable } from '../multitable/automation-durable-dispatcher'
 import { createApprovalAttachmentRouter, isApprovalAttachmentsEnabled } from '../routes/approval-attachments'
 import { resolveApprovalTemplateVisibilityActor } from '../routes/approvals'
-import { applyTemplateVisibilityFilter } from './ApprovalProductService'
+import { canReadApprovalInstance } from './approval-instance-readability'
+import { resolveApprovalActorRoles } from './approval-actor-roles'
+import { actorHasActiveSeatAtInstance, applyTemplateVisibilityFilter } from './ApprovalProductService'
 import { collectActiveNodeKeys, collectHiddenFieldIds, type RedactableRuntimeGraph } from './approval-form-redaction'
 import { drainPurgeIntents, sweepUnboundAttachments, UNBOUND_ATTACHMENT_TTL_HOURS } from './approval-attachment-gc'
 import {
@@ -173,75 +175,28 @@ export async function probeApprovalAttachmentStore(
   }
 }
 
-/** DB-rebuilt viewer roles (users.role + user_roles ids/names) — for role-typed assignment/CC matching. */
-async function viewerRoles(db: Queryable, viewerId: string): Promise<string[]> {
-  const roles = new Set<string>()
-  const userResult = await db.query(`SELECT role FROM users WHERE id = $1 AND is_active = TRUE`, [viewerId])
-  const role = (userResult.rows[0] as { role?: string | null } | undefined)?.role
-  if (typeof role === 'string' && role.trim()) roles.add(role.trim())
-  const roleRows = await db.query(
-    `SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = $1`,
-    [viewerId],
-  )
-  for (const row of roleRows.rows as Array<{ role_id?: string | null; name?: string | null }>) {
-    if (typeof row.role_id === 'string' && row.role_id.trim()) roles.add(row.role_id.trim())
-    if (typeof row.name === 'string' && row.name.trim()) roles.add(row.name.trim())
-  }
-  return [...roles]
-}
-
 /**
- * Instance-visibility predicate for the auth-proxied download (§4.2 gate 1): initiator, current-or-past
- * assignee (user- or role-typed), past actor, CC recipient (user- or role-typed), or admin — the SAME
- * membership sources the bridge list tabs (`todo`/`mine`/`cc`/`completed`) read. **Org-pinned**: the
- * caller's org must match the attachment row's org (passed as `orgId`); a cross-org stale membership
- * fails closed. Fail-closed: any lookup error denies (the route maps a throw to the values-free 404
- * via `authorizeAttachmentDownload`).
+ * RETIRED (OD-S1-16, executed here): C-1's own `isInstanceParticipant` + its private `viewerRoles`
+ * copy used to live in this file. Lock-9's OD-L9-13(a) said "reuse `isInstanceParticipant`
+ * unchanged"; the L9-AMEND arm (a) owner ruling (Lock-9 §4.1, `dd7fa8630248`, PR #5078)
+ * re-pointed that citation to `canReadApprovalInstance`, which is what unblocks this deletion —
+ * "the S1 PR deletes isInstanceParticipant re-pointing ALL callers in the SAME PR (no
+ * two-predicate window)". `viewerRoles` now lives ONLY in `approval-instance-readability.ts` (the
+ * canonical, single-source form) — this file has no direct use for it once `isInstanceParticipant`
+ * is gone, so there is no import to add here. The attachment-EXISTS org pin the old
+ * function conjoined (`EXISTS (...approval_attachments... att.org_id = $orgId)`, comparing against
+ * a caller-supplied org) is GONE, not replaced 1:1 — `canReadApprovalInstance`'s own org pin is a
+ * different mechanism (instance-level, DB-derived, currently dormant by default; see that module's
+ * docblock for why) — this is the F-1 fix (OD-S1-10). The router wiring below now calls
+ * `canReadApprovalInstance` directly and no longer threads an `orgId` through the `authChecks`
+ * seam (the interface itself dropped that parameter — `approval-attachment-storage.ts`).
+ *
+ * The download route's OWN, INDEPENDENT org check — `authorizeAttachmentDownload`'s gate 0
+ * (`viewerOrgId !== row.orgId`, comparing the resolver below against the ALREADY-POPULATED,
+ * NOT NULL `approval_attachments.org_id`) — is UNTOUCHED by this retirement. It predates S1, is
+ * not part of the unified predicate, and continues to enforce on every download regardless of the
+ * new predicate's (currently dormant) org pin. See the `orgId` resolver below for why it stays.
  */
-export async function isInstanceParticipant(
-  db: Queryable,
-  viewerId: string,
-  instanceId: string,
-  orgId: string,
-): Promise<boolean> {
-  if (!orgId || !/[!-~]/.test(orgId)) return false
-  const roles = await viewerRoles(db, viewerId)
-  const rolesParam = roles.length > 0 ? roles : ['__approval_attachment_no_role__']
-  // Org pin: require at least one attachment on this instance stamped with the caller's org —
-  // INCLUDING deleted/tombstoned rows. A deleted-only bound attachment must still let an authorized
-  // participant/admin reach the lifecycle 410 (gone), while an outsider/cross-org stays 404. Filtering
-  // `status <> 'deleted'` here would turn a pure-tombstone instance into a false not_participant and
-  // leak a 404 instead of the authorized 410. Cross-org stale relations (viewer still appears on
-  // assignments from another tenant's instance while their principal org differs) still fail closed.
-  const result = await db.query(
-    `SELECT 1 FROM approval_instances i
-      WHERE i.id = $1
-        AND EXISTS (
-          SELECT 1 FROM approval_attachments att
-           WHERE att.instance_id = i.id AND att.org_id = $4
-        )
-        AND (
-          i.requester_snapshot->>'id' = $2
-          OR EXISTS (
-            SELECT 1 FROM approval_assignments a
-             WHERE a.instance_id = i.id
-               AND ((a.assignment_type = 'user' AND a.assignee_id = $2)
-                 OR (a.assignment_type = 'role' AND a.assignee_id = ANY($3::text[])))
-          )
-          OR EXISTS (SELECT 1 FROM approval_records r WHERE r.instance_id = i.id AND r.actor_id = $2)
-          OR EXISTS (
-            SELECT 1 FROM approval_records r
-             WHERE r.instance_id = i.id AND r.action = 'cc'
-               AND ((r.metadata->>'targetType' = 'user' AND r.metadata->>'targetId' = $2)
-                 OR (r.metadata->>'targetType' = 'role' AND r.metadata->>'targetId' = ANY($3::text[])))
-          )
-          OR EXISTS (SELECT 1 FROM users u WHERE u.id = $2 AND u.is_active = TRUE AND (u.is_admin = TRUE OR u.role = 'admin'))
-        )
-      LIMIT 1`,
-    [instanceId, viewerId, rolesParam, orgId],
-  )
-  return result.rows.length > 0
-}
 
 /**
  * Byte-path hidden gate (§4.2 gate 2 / G7): backed by the SAME `collectHiddenFieldIds` +
@@ -352,6 +307,19 @@ export function principalHasApprovalsWrite(req: Request): boolean {
   return codes.has('approvals:write') || codes.has('approvals:*') || codes.has('*:*')
 }
 
+/**
+ * Lock-9 OD-L9-3(a) — process-attachment upload RBAC: approvals:act (or admin / approvals:* /
+ * *:* wildcards). Fail-closed. Deliberately a DIFFERENT permission code from
+ * principalHasApprovalsWrite — the process-upload surface is an acting-approver capability, not a
+ * form-fill one.
+ */
+export function principalHasApprovalsAct(req: Request): boolean {
+  const codes = principalPermissionCodes(req)
+  if (codes === null) return false
+  if (codes === 'admin') return true
+  return codes.has('approvals:act') || codes.has('approvals:*') || codes.has('*:*')
+}
+
 function parsePositiveIntMs(raw: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
   if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return fallback
@@ -460,7 +428,12 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     store: storage.store ?? unavailableStore,
     storageAvailable: storage.store != null,
     authChecks: {
-      isInstanceParticipant: (viewerId, instanceId, orgId) => isInstanceParticipant(db, viewerId, instanceId, orgId),
+      // OD-S1-16: the DI seam keeps its field NAME (minimizes stub churn across
+      // approval-attachment-storage.test.ts / approval-attachment-routes.test.ts, which pass
+      // zero-arg stubs unaffected by this) but is now backed by the ONE predicate,
+      // `canReadApprovalInstance` — no `orgId` param (OD-S1-9(f): the predicate derives org
+      // server-side; it is not threaded through this seam any more).
+      isInstanceParticipant: (viewerId, instanceId) => canReadApprovalInstance(db, viewerId, instanceId),
       isFieldHiddenAtActiveNode: (instanceId, fieldId) => isFieldHiddenAtActiveNode(db, instanceId, fieldId),
     },
     viewerId: (req) => {
@@ -469,12 +442,36 @@ export async function bootApprovalAttachmentRuntime(opts: ApprovalAttachmentRunt
     },
     // server-derived org: the principal's tenant, defaulting to the platform's 'default' org (the same
     // convention the directory/admin routes use) — never a body value.
+    //
+    // OD-S1-16 retirement note (item 7): this resolver feeds ONLY `authorizeAttachmentDownload`'s
+    // gate 0 (`viewerOrgId !== row.orgId`, `approval-attachment-storage.ts`) and the upload/draft/
+    // refs org-scoping queries in `routes/approval-attachments.ts` — ALL of which compare against
+    // `approval_attachments.org_id` (already NOT NULL, populated at upload time), a mechanism that
+    // predates Lock-10 and is not part of the unified predicate `canReadApprovalInstance` builds
+    // (that predicate takes no `orgId` parameter at all — OD-S1-9(f)). It is NOT the "org resolver"
+    // OD-S1-17(b) refuses; that ruling governs values used INSIDE the S1 predicate itself, and this
+    // resolver never reaches it. Per the S1 implementation brief's retirement item 7 ("if it has
+    // another consumer, that consumer needs its own ruling"): it does, that consumer is this
+    // pre-existing gate, and redesigning THAT gate's org resolution is outside Lock-10's ratified
+    // scope — a decision needing its own ruling, not one this slice makes unilaterally. Left
+    // byte-identical.
     orgId: (req) => {
       const tenant = req.user?.tenantId
       return typeof tenant === 'string' && tenant.trim() ? tenant.trim() : 'default'
     },
     hasApprovalsRead: (req) => principalHasApprovalsRead(req),
     hasApprovalsWrite: (req) => principalHasApprovalsWrite(req),
+    // Lock-9 OD-L9-3(a): the process-upload gate, deliberately distinct from hasApprovalsWrite.
+    hasApprovalsAct: (req) => principalHasApprovalsAct(req),
+    // Lock-9 §5.2: fail-fast-only seat re-derivation (NOT the authority — see
+    // actorHasActiveSeatAtInstance's own docblock; P2-2 fix-round closed the parallel-region
+    // categorical-403 gap by resolving the same pending-branch frontier dispatchAction resolves).
+    actorHasActiveSeat: (req, instanceId) => {
+      const candidate = req.user?.id ?? req.user?.userId ?? (req.user as { sub?: unknown } | undefined)?.sub
+      const actorId = typeof candidate === 'string' && candidate.trim() ? candidate.trim() : null
+      if (!actorId) return Promise.resolve(false)
+      return actorHasActiveSeatAtInstance(db, instanceId, actorId, resolveApprovalActorRoles(req))
+    },
     resolveAttachmentField: (templateId, fieldId) => isAttachmentFieldInTemplate(db, templateId, fieldId),
     templateVisible: (req, templateId) => templateVisibleToRequester(db, req, templateId),
     // Only present after the startup assert above; never a clean-by-default stand-in.

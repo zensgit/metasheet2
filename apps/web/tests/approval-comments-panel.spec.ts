@@ -1,0 +1,418 @@
+/**
+ * S3b — mounted coverage for `views/approval/ApprovalCommentsPanel.vue`, the wrapper mounting the
+ * S3a shared comments kit against the S2 approval-comments backend.
+ *
+ * Mocks `approvalCommentsClient` (the transport) and `directoryResolve` (the identity resolver)
+ * directly — the real `MetaCommentsPanel`/`useMultitableComments`/labels are all EXERCISED for
+ * real, so this is genuine integration coverage of the wrapper's own wiring, not a shallow stub.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, defineComponent, h, nextTick, ref as vueRef, type App } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
+import type { MultitableComment } from '../src/shared/comments/types'
+
+async function flushUi(cycles = 6): Promise<void> {
+  for (let i = 0; i < cycles; i += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mocks
+// ---------------------------------------------------------------------------------------------
+const listCommentsMock = vi.fn()
+const createCommentMock = vi.fn()
+const updateCommentMock = vi.fn()
+const deleteCommentMock = vi.fn()
+const resolveCommentMock = vi.fn()
+const addReactionMock = vi.fn()
+const removeReactionMock = vi.fn()
+const mentionCandidatesMock = vi.fn()
+// Mutable so a test can flip it to `true` BEFORE mounting (gate P2-1's untested half — the
+// truncation notice itself was never exercised; see the dedicated describe block below).
+const mockTruncated = { value: false }
+
+vi.mock('../src/approvals/approvalCommentsClient', () => ({
+  createApprovalCommentsClient: () => ({
+    truncated: mockTruncated,
+    listComments: (...args: unknown[]) => listCommentsMock(...args),
+    createComment: (...args: unknown[]) => createCommentMock(...args),
+    updateComment: (...args: unknown[]) => updateCommentMock(...args),
+    deleteComment: (...args: unknown[]) => deleteCommentMock(...args),
+    resolveComment: (...args: unknown[]) => resolveCommentMock(...args),
+    addReaction: (...args: unknown[]) => addReactionMock(...args),
+    removeReaction: (...args: unknown[]) => removeReactionMock(...args),
+  }),
+  fetchApprovalCommentMentionCandidates: (...args: unknown[]) => mentionCandidatesMock(...args),
+}))
+
+const resolvedNames = new Map<string, string | null>()
+vi.mock('../src/approvals/directoryResolve', () => ({
+  ensureUserNamesResolved: vi.fn(),
+  getResolvedUserName: (id: string | null | undefined) => (id ? resolvedNames.get(id) ?? null : null),
+}))
+
+import ApprovalCommentsPanel from '../src/views/approval/ApprovalCommentsPanel.vue'
+import MetaCommentsPanel from '../src/shared/comments/components/MetaCommentsPanel.vue'
+
+const mounts: Array<{ app: App<Element>; container: HTMLDivElement }> = []
+function mount(component: any, props: Record<string, unknown>): HTMLDivElement {
+  const container = document.createElement('div')
+  document.body.appendChild(container)
+  const app = createApp({ render: () => h(component, props) })
+  app.mount(container)
+  mounts.push({ app, container })
+  return container
+}
+
+function comment(overrides: Partial<MultitableComment> & { id: string; authorId: string }): MultitableComment {
+  return {
+    containerId: 'apv_1',
+    targetId: 'apv_1',
+    fieldId: null,
+    targetFieldId: null,
+    mentions: [],
+    content: 'a comment',
+    resolved: false,
+    createdAt: '2026-08-22T09:00:00.000Z',
+    ...overrides,
+  } as MultitableComment
+}
+
+beforeEach(() => {
+  useLocale().setLocale('en')
+  listCommentsMock.mockReset().mockResolvedValue({ comments: [] })
+  createCommentMock.mockReset()
+  updateCommentMock.mockReset()
+  deleteCommentMock.mockReset()
+  resolveCommentMock.mockReset()
+  addReactionMock.mockReset()
+  removeReactionMock.mockReset()
+  mentionCandidatesMock.mockReset().mockResolvedValue([])
+  mockTruncated.value = false
+  resolvedNames.clear()
+})
+
+afterEach(async () => {
+  while (mounts.length) {
+    const m = mounts.pop()!
+    m.app.unmount()
+    m.container.remove()
+  }
+  useLocale().setLocale('en')
+  vi.restoreAllMocks()
+})
+
+describe('enableReactions gate mechanism (raw kit, positive control)', () => {
+  it('reactions render when enableReactions=true (default) and do NOT render when false', async () => {
+    const props = {
+      comments: [comment({ id: 'c1', authorId: 'u1', reactions: [{ emoji: '👍', count: 1, reactedByMe: false }] })],
+      loading: false,
+      canComment: true,
+      canResolve: false,
+      draft: '',
+    }
+    const onContainer = mount(MetaCommentsPanel, { ...props, enableReactions: true })
+    await flushUi()
+    expect(onContainer.querySelector('[data-test="comment-reactions"]')).toBeTruthy()
+
+    const offContainer = mount(MetaCommentsPanel, { ...props, enableReactions: false })
+    await flushUi()
+    expect(offContainer.querySelector('[data-test="comment-reactions"]')).toBeNull()
+  })
+})
+
+describe('ApprovalCommentsPanel — capability absence (hardcoded, never fabricated)', () => {
+  it('never renders the reactions block (S2 has no reaction endpoints)', async () => {
+    listCommentsMock.mockResolvedValue({
+      comments: [comment({ id: 'c1', authorId: 'u1' })],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    expect(container.querySelector('[data-test="comment-reactions"]')).toBeNull()
+    expect(container.querySelector('[data-test="reaction-add"]')).toBeNull()
+  })
+
+  it('never renders a resolve button (S2 has no resolve concept)', async () => {
+    listCommentsMock.mockResolvedValue({
+      comments: [comment({ id: 'c1', authorId: 'u1' })],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    expect(container.querySelector('.meta-comments-drawer__resolve')).toBeNull()
+  })
+})
+
+describe('ApprovalCommentsPanel — tombstone rendering', () => {
+  it('a deleted comment shows the placeholder, offers no Edit/Delete, but Reply stays offered — even for the viewer\'s own comment', async () => {
+    listCommentsMock.mockResolvedValue({
+      comments: [comment({ id: 'c_deleted', authorId: 'u1', deleted: true, content: '' })],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    expect(container.textContent).toContain('This comment was deleted')
+    const buttons = Array.from(container.querySelectorAll('button')).map((b) => b.textContent?.trim())
+    expect(buttons).not.toContain('Edit')
+    expect(buttons).not.toContain('Delete')
+    expect(buttons).toContain('Reply')
+  })
+})
+
+describe('ApprovalCommentsPanel — truncation notice (gate P2-1, previously untested)', () => {
+  it('renders the notice when the client reports truncated=true, and NOT when false — pinning that the notice is reachable at all', async () => {
+    listCommentsMock.mockResolvedValue({ comments: [comment({ id: 'c1', authorId: 'u1' })] })
+    mockTruncated.value = true
+
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    const notice = container.querySelector('[data-testid="approval-comments-truncated-notice"]')
+    expect(notice, 'the truncation notice never rendered — gate P2-1 was previously untested because every spec stubbed truncated:false').toBeTruthy()
+    expect(notice!.textContent).toContain('最近')
+
+    // Positive control in the other direction, same mount path.
+    mockTruncated.value = false
+    const container2 = mount(ApprovalCommentsPanel, { instanceId: 'apv_2', currentUserId: 'u1' })
+    await flushUi()
+    expect(container2.querySelector('[data-testid="approval-comments-truncated-notice"]')).toBeNull()
+  })
+})
+
+describe('ApprovalCommentsPanel — one-level threading only', () => {
+  it('a reply-to-a-reply fixture (defensive against a data-layer anomaly) never renders — the kit template only reads one level of repliesByParentId', async () => {
+    listCommentsMock.mockResolvedValue({
+      comments: [
+        comment({ id: 'c_root', authorId: 'u1', content: 'root content marker' }),
+        comment({ id: 'c_reply', authorId: 'u2', parentId: 'c_root', content: 'reply content marker' }),
+        comment({ id: 'c_reply_of_reply', authorId: 'u3', parentId: 'c_reply', content: 'DEEP_NESTED_MARKER_SHOULD_NOT_RENDER' }),
+      ],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    expect(container.textContent).toContain('root content marker')
+    expect(container.textContent).toContain('reply content marker')
+    expect(container.textContent).not.toContain('DEEP_NESTED_MARKER_SHOULD_NOT_RENDER')
+  })
+})
+
+describe('ApprovalCommentsPanel — member-display-identity guard', () => {
+  it('never renders a raw author id; an unresolved author gets a values-free 成员 N ordinal, a resolved one gets its real name', async () => {
+    resolvedNames.set('raw_id_resolved_marker_9911', 'Alice Resolved')
+    // 'raw_id_unresolved_marker_7788' is intentionally absent from resolvedNames -> null.
+    listCommentsMock.mockResolvedValue({
+      comments: [
+        comment({ id: 'c1', authorId: 'raw_id_resolved_marker_9911', content: 'first' }),
+        comment({ id: 'c2', authorId: 'raw_id_unresolved_marker_7788', content: 'second' }),
+      ],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'someone_else' })
+    await flushUi()
+
+    expect(container.textContent).not.toContain('raw_id_resolved_marker_9911')
+    expect(container.textContent).not.toContain('raw_id_unresolved_marker_7788')
+    expect(container.textContent).toContain('Alice Resolved')
+    expect(container.textContent).toContain('成员 2')
+  })
+})
+
+describe('ApprovalCommentsPanel — mention candidates fetched once per instance', () => {
+  it('fetches mention candidates exactly once on mount, with no `q`', async () => {
+    mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    expect(mentionCandidatesMock).toHaveBeenCalledTimes(1)
+    expect(mentionCandidatesMock).toHaveBeenCalledWith('apv_1')
+  })
+
+  it('re-fetches comments and mention candidates when instanceId changes', async () => {
+    listCommentsMock.mockResolvedValue({ comments: [] })
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    // A real Vue ref (not a plain mutated object) so the root's render function has an actual
+    // tracked reactive dependency — mutating a plain object referenced by a closure does NOT
+    // trigger Vue to re-render and re-resolve the child's props.
+    const instanceId = vueRef('apv_1')
+    const app = createApp({
+      render: () => h(ApprovalCommentsPanel, { instanceId: instanceId.value, currentUserId: 'u1' }),
+    })
+    app.mount(container)
+    mounts.push({ app, container })
+    await flushUi()
+    expect(listCommentsMock).toHaveBeenCalledTimes(1)
+
+    instanceId.value = 'apv_2'
+    await flushUi()
+    expect(listCommentsMock).toHaveBeenCalledTimes(2)
+    expect(mentionCandidatesMock).toHaveBeenCalledTimes(2)
+    expect(mentionCandidatesMock).toHaveBeenLastCalledWith('apv_2')
+  })
+})
+
+describe('ApprovalCommentsPanel — delete flow re-hydrates the tombstone (approach (a))', () => {
+  it('after a successful delete, re-lists so the tombstone (not a stripped row) is what is shown', async () => {
+    listCommentsMock
+      .mockResolvedValueOnce({
+        comments: [
+          comment({ id: 'c1', authorId: 'u1', content: 'before delete' }),
+          // Bystander, untouched by the delete (gate N-3, 2026-08-22): the original fixture's
+          // `not.toContain('before delete')` assertion was satisfied by the SECOND mock response's
+          // own `content: ''`, not by any property of the component — a mutated `loadComments`
+          // that MERGES instead of REPLACING `comments.value` still passed, because
+          // `applyDeletedComment`'s own local filter (triggered by `deleteComment(c1)`) had
+          // already dropped c1's stale row before the merge ever ran. `c2` is never passed to
+          // `deleteComment`, so that local filter cannot be the reason it disappears — it can only
+          // survive in the DOM if `loadComments` merges rather than replaces wholesale.
+          comment({ id: 'c2', authorId: 'u2', content: 'bystander content' }),
+        ],
+      })
+      .mockResolvedValueOnce({ comments: [comment({ id: 'c1', authorId: 'u1', deleted: true, content: '' })] })
+    deleteCommentMock.mockResolvedValue(undefined)
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'u1' })
+    await flushUi()
+
+    const deleteBtn = Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+      .find((b) => b.textContent?.trim() === 'Delete')
+    expect(deleteBtn).toBeTruthy()
+    deleteBtn!.click()
+    await flushUi()
+
+    expect(deleteCommentMock).toHaveBeenCalledWith('c1')
+    expect(listCommentsMock).toHaveBeenCalledTimes(2)
+    expect(container.textContent).toContain('This comment was deleted')
+    // Gate N-3: the re-list's second response omits `c2` entirely — if it still rendered, the
+    // composable merged instead of replacing. This assertion reds under a SINGLE fault (a merge
+    // regression alone, with nothing else broken) — confirmed directly by mutating `loadComments`
+    // (useMultitableComments.ts:35) to merge instead of replace: THIS assertion reds by itself,
+    // before the `before delete` assertion below is ever reached. That is the gap this line
+    // closes: the requal's round-1 mutation ledger (MUT-I green, MUT-I2 green, MUT-I3 red) found
+    // that, on the PRE-this-fix test body, a merge fault alone passed because `deleteComment`'s own
+    // local optimistic removal of c1 (applyDeletedComment) already emptied it out before the merge
+    // ran — c2 is untouched by that local removal, so it cannot hide a merge fault the way c1 did.
+    expect(container.textContent).not.toContain('bystander content')
+    // Gate NIT-2: pin that the placeholder REPLACES the old body rather than merely being
+    // rendered alongside it (the re-list's second `listCommentsMock` resolution returns the
+    // tombstone row with `content: ''`, not the original 'before delete' text). Retained as a
+    // secondary, redundant check — the kit's own deleted-row masking (gate PROBE-C) is the
+    // deeper reason this specific string never appears, and by this point in the test the
+    // assertion above has already covered the merge-vs-replace property on its own.
+    expect(container.textContent).not.toContain('before delete')
+  })
+})
+
+describe('ApprovalCommentsPanel — member-display-identity guard covers the MENTION DROPDOWN too (not just the thread list)', () => {
+  // The kit's own mention-suggestion dropdown (MetaCommentComposer.vue) is a SEPARATE render
+  // surface from the thread list, only mounted once the composer's `showSuggestions` computed
+  // goes true (draft ends in `@...`). It has TWO of its own raw-id fallback paths the earlier
+  // "never renders a raw author id" test above never exercises (it never opens the dropdown):
+  //   - kit :378 `defaultMentionSuggestions`'s candidate label: falls back to the raw
+  //     `candidate.userId` when `displayName` is blank/whitespace.
+  //   - kit :385 `defaultMentionSuggestions`'s author-derived `subtitle`: renders the raw
+  //     `comment.authorId` WHENEVER `authorName` is set and differs from `authorId` — which is
+  //     ALWAYS true here, because this wrapper's own identity guard always sets a resolved-or-
+  //     ordinal `authorName`. Setting authorName (the fix for :384/the thread list) is exactly
+  //     what ARMS :385's fallback for the mention dropdown. The wrapper must therefore supply its
+  //     OWN `:mention-suggestions` (id-keyed dedup priority over the kit's own
+  //     defaultMentionSuggestions — see MetaCommentsPanel.vue's `mentionSuggestions` computed)
+  //     rather than relying on `:mention-candidates` + the kit's internal derivation alone.
+  it('opening the @mention dropdown never shows a raw author id or a raw candidate id, and every 成员 N ordinal is UNIQUE across both halves (gate P3-1)', async () => {
+    // Deliberately shaped so the OLD independent-counter bug (author half starting its own
+    // counter at 1, candidate half separately starting its own array-index counter at 1) would
+    // collide: one unresolved author AND one blank-named candidate, both first in their own
+    // half — both used to render `成员 1` for two different people.
+    mentionCandidatesMock.mockResolvedValue([
+      { id: 'raw_candidate_id_marker_5521', name: '   ', email: 'blank-name@x.io' },
+      { id: 'raw_candidate_id_marker_6633', name: 'Real Candidate Name', email: '' },
+    ])
+    listCommentsMock.mockResolvedValue({
+      comments: [comment({ id: 'c1', authorId: 'raw_author_id_marker_4471', content: 'root' })],
+    })
+    const container = mount(ApprovalCommentsPanel, { instanceId: 'apv_1', currentUserId: 'someone_else' })
+    await flushUi()
+
+    const textarea = container.querySelector('textarea')!
+    textarea.value = '@'
+    textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const dropdown = container.querySelector('[role="listbox"]')
+    expect(dropdown, 'the mention dropdown did not open — the test would pass vacuously without this').toBeTruthy()
+    const dropdownText = dropdown!.textContent ?? ''
+
+    expect(dropdownText).not.toContain('raw_author_id_marker_4471')
+    expect(dropdownText).not.toContain('raw_candidate_id_marker_5521')
+    expect(dropdownText).toContain('Real Candidate Name')
+
+    // Per-suggestion labels (one <strong> per dropdown button) — pin BOTH that a `成员 N`
+    // ordinal is used somewhere AND that the full label set has no duplicates. Under the P3-1
+    // bug, the unresolved author and the blank-named candidate above would both render `成员 1`
+    // and this `new Set(...)` size check would catch it (`labels.length !== uniqueLabels.size`).
+    const labels = Array.from(dropdown!.querySelectorAll('strong')).map((el) => el.textContent ?? '')
+    const ordinalLabels = labels.filter((l) => /^@成员 \d+$/.test(l))
+    expect(ordinalLabels.length, `expected 2 ordinal labels (unresolved author + blank candidate), got: ${JSON.stringify(labels)}`).toBe(2)
+    expect(new Set(labels).size).toBe(labels.length)
+    expect(ordinalLabels).toEqual(['@成员 1', '@成员 2'])
+  })
+})
+
+describe('ApprovalCommentsPanel — instanceId settle race (gate P2-2, mechanism documentation)', () => {
+  // NOTE: this test bakes `:key` into its OWN throwaway `Wrapper`, so it does NOT exercise, and
+  // cannot regress-guard, `ApprovalDetailView.vue`'s actual `:key="route.params.id"` binding —
+  // that binding has its own dedicated regression test,
+  // `approval-detail-record-table.spec.ts`'s "全文评论 panel — :key=... forces a remount" describe
+  // block, which mounts the REAL ApprovalDetailView.vue and reds when its `:key` is removed. This
+  // test exists to document, end-to-end (real DOM content, not just a call-count), WHY keying on
+  // instanceId is sufficient to close the race: a slower A-instance fetch resolving AFTER a
+  // faster B-instance fetch must never overwrite B's rendered comments once B's own panel
+  // instance is the only one mounted.
+  it('keying a panel mount on instanceId forces a remount, so a slower A-instance fetch resolving AFTER a faster B-instance fetch never overwrites B\'s rendered comments', async () => {
+    let resolveA: (v: { comments: MultitableComment[] }) => void = () => {}
+    let resolveB: (v: { comments: MultitableComment[] }) => void = () => {}
+    const pendingA = new Promise<{ comments: MultitableComment[] }>((res) => { resolveA = res })
+    const pendingB = new Promise<{ comments: MultitableComment[] }>((res) => { resolveB = res })
+    listCommentsMock
+      .mockImplementationOnce(() => pendingA)
+      .mockImplementationOnce(() => pendingB)
+
+    // Mirrors ApprovalDetailView.vue's own mount exactly: `:key="instanceId"` alongside
+    // `:instance-id="instanceId"`.
+    const activeInstance = vueRef('apv_A')
+    const Wrapper = defineComponent({
+      setup() {
+        return () => h(ApprovalCommentsPanel, {
+          key: activeInstance.value,
+          instanceId: activeInstance.value,
+          currentUserId: 'u1',
+        })
+      },
+    })
+    const container = mount(Wrapper, {})
+    await flushUi()
+    expect(listCommentsMock).toHaveBeenCalledTimes(1)
+
+    // Navigate to instance B (下一条) BEFORE A's fetch has resolved — the exact race constructed
+    // in the gate report's PROBE-F. The `key` change unmounts the A-instance panel and mounts a
+    // fresh one for B.
+    activeInstance.value = 'apv_B'
+    await flushUi()
+    expect(listCommentsMock).toHaveBeenCalledTimes(2)
+
+    // B settles first (per the gate report's constructed ordering), then A's now-orphaned fetch
+    // resolves late.
+    resolveB({ comments: [comment({ id: 'c_b', authorId: 'u_b', content: 'B body' })] })
+    await flushUi()
+    expect(container.textContent).toContain('B body')
+
+    resolveA({ comments: [comment({ id: 'c_a', authorId: 'u_a', content: 'A body' })] })
+    await flushUi()
+
+    // A's late response lands in the OLD (unmounted) panel's own composable instance, not the
+    // current one — B's comments must still be what is rendered, and A's must never appear.
+    expect(container.textContent).toContain('B body')
+    expect(container.textContent).not.toContain('A body')
+  })
+})

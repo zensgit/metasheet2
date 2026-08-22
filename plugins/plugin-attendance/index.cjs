@@ -22,6 +22,12 @@ const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-gro
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const {
+  parseAttendanceOrgResolutionShadowModeV1,
+  recordShadowOrgResolutionV1,
+  startShadowMetricsLoggingV1,
+  SHADOW_MODE_SHADOW,
+} = require('./lib/attendance-org-resolution-shadow.cjs')
+const {
   DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   MAX_ATTRIBUTION_TAIL_MINUTES,
   OVERTIME_ATTRIBUTION_KEY,
@@ -553,6 +559,15 @@ let lastAutoAbsenceKey = ''
 let autoHolidaySyncTimeout = null
 let autoHolidaySyncInterval = null
 let importUploadCleanupInterval = null
+// Owner-review P2 follow-up on #5064/#5073: periodic metrics logging for the org-resolution
+// shadow recorder (attempted/written/abandoned/dropped/failed — see
+// lib/attendance-org-resolution-shadow.cjs). Non-null only while shadow mode is active.
+// `activatePluginInstance` does NOT call `deactivate()` before re-running `activate()` on a
+// reload — including when that re-run's own `activate()` throws (e.g. a misconfigured env
+// value) — so this is stopped unconditionally, BEFORE the env parse that can throw, at the top
+// of `activate()` (see that call site's own P3-1 comment), and again in `deactivate()`, so a
+// throwing reactivation can never leak the prior activation's interval.
+let attendanceOrgResolutionShadowMetricsLogStop = null
 let autoShiftAutoWriteSchedulerUnregister = null
 let attendanceReportDigestSchedulerUnregister = null
 let reportSyncScheduledTriggerSchedulerUnregister = null
@@ -24673,6 +24688,33 @@ module.exports = {
   async activate(context) {
     const db = context.api.database
     const logger = context.logger
+    // P3-1 (#5073 round-2 gate): stop-before-start MUST run before anything below can throw.
+    // activatePluginInstance (packages/core-backend/src/index.ts) does NOT call this plugin's
+    // deactivate() before re-running activate() on a reload — not even when that re-run's own
+    // activate() call THROWS (it catches the throw, tears down routes via
+    // cleanupPluginRuntimeRegistrations, and records status:'failed'; deactivate() is never
+    // invoked). The env parse two lines below throws on an unsupported value (e.g. reactivating
+    // shadow -> 'enforce') — if the stop ran AFTER that parse, a throwing reactivation would
+    // leak the PRIOR activation's interval forever (it would never be stopped, since neither
+    // this activate() nor a deactivate() ever reaches the stop call again). Stopping first,
+    // unconditionally, closes that gap regardless of whether the parse below succeeds.
+    if (attendanceOrgResolutionShadowMetricsLogStop) {
+      attendanceOrgResolutionShadowMetricsLogStop()
+      attendanceOrgResolutionShadowMetricsLogStop = null
+    }
+    // Shadow audit of the self-service punch route's org resolution — see
+    // lib/attendance-org-resolution-shadow.cjs's module doc comment for the full tri-state
+    // contract. Parsed ONCE, here, at plugin startup: an unsupported value (including the
+    // reserved, not-yet-implemented 'enforce') throws — fails the WHOLE plugin closed rather
+    // than silently defaulting this one feature to 'off'. Read early, before anything else in
+    // this function can register a route or open a connection, so a misconfigured value never
+    // lets any attendance route come up at all.
+    const attendanceOrgResolutionShadowMode = parseAttendanceOrgResolutionShadowModeV1(
+      process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1,
+    )
+    if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
+      attendanceOrgResolutionShadowMetricsLogStop = startShadowMetricsLoggingV1(logger)
+    }
     const { hasAttendanceAdminAccess, hasAttendanceImportAccess, withAnyPermission, withPermission, canAccessOtherUsers } = createRbacHelpers(db, logger)
     const withAttendanceImportPermission = (handler) => withAnyPermission(['attendance:import', 'attendance:admin'], handler)
     const emitEvent = (type, data) => {
@@ -29713,6 +29755,25 @@ module.exports = {
           return
         }
         const orgId = punchOrgResolution.orgId
+        // Shadow audit (env ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow only — see
+        // lib/attendance-org-resolution-shadow.cjs). The mode check is deliberately the ONLY
+        // gate: when the flag is unset/'off' this call is never reached, so that posture issues
+        // zero extra queries, not "a no-op inside the module".
+        //
+        // Owner-review P2 (#5064 follow-up): scheduled fire-and-forget — the response never
+        // waits on this. `recordShadowOrgResolutionV1` is itself non-fatal (try/catch +
+        // warn-log internally, plus its own RECORD_TIMEOUT_MS safety backstop and in-flight
+        // cap — see the module doc comment), so it is designed to never reject; the `.catch`
+        // here is belt-and-braces in case an unexpected synchronous throw or rejected promise
+        // ever slips through anyway, so it can never surface as an unhandled rejection.
+        if (attendanceOrgResolutionShadowMode === SHADOW_MODE_SHADOW) {
+          void recordShadowOrgResolutionV1(
+            db,
+            req,
+            { userId, orgLegacy: orgId, route: '/api/attendance/punch' },
+            logger,
+          ).catch(() => {})
+        }
         const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
         const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
         if (rawOccurredAt && !occurredAt) {
@@ -49853,9 +49914,17 @@ module.exports = {
           res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
           return
         }
-        // Self-service reads the caller's OWN org, pinned from the authenticated token — a ?orgId param / header cannot
-        // point /me at another org (getOrgId is only a fallback for a token that carries no org).
-        const orgId = req.user?.orgId ?? req.user?.workspaceId ?? getOrgId(req)
+        // Self-service reads the caller's OWN org, resolved with NO request-supplied source: getAuthenticatedOrgId
+        // only reads req.user.orgId / req.user.workspaceId / the token-derived req.authenticatedTenantId — it never
+        // consults body/query/header, so a ?orgId param or an x-org-id header is silently ignored (not rejected)
+        // and cannot point /me at another org, in EITHER branch below (token-claim or the 'default' fallback).
+        // This is a real behavior correction for a caller whose session has exactly one active org membership:
+        // AuthService.resolveSessionTenantId mints that org as the session's tenantId at login, which lands on
+        // req.authenticatedTenantId — a value the prior expression never read, so that caller previously read
+        // the (for them, empty) 'default' org instead of the org their own balance lots are written under (an
+        // admin balance write there is itself membership-gated: USER_NOT_IN_ORG otherwise). A caller with no
+        // resolvable org claim (zero memberships, or an ambiguous 2+) is unaffected — 'default' as before.
+        const orgId = getAuthenticatedOrgId(req) ?? DEFAULT_ORG_ID
         const leaveTypeCode = parsed.data.leaveTypeCode ?? 'annual'
         const eventLimit = parsed.data.eventLimit ?? 50
         try {
@@ -50379,6 +50448,10 @@ module.exports = {
 	    clearHolidaySyncSchedule()
 	    if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)
 	    importUploadCleanupInterval = null
+	    if (attendanceOrgResolutionShadowMetricsLogStop) {
+	      attendanceOrgResolutionShadowMetricsLogStop()
+	      attendanceOrgResolutionShadowMetricsLogStop = null
+	    }
 	    if (autoShiftAutoWriteSchedulerUnregister) {
 	      autoShiftAutoWriteSchedulerUnregister()
 	      autoShiftAutoWriteSchedulerUnregister = null

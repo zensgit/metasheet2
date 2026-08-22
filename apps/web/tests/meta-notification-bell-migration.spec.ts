@@ -13,7 +13,9 @@ import type { MetaRecordSubscriptionNotification } from '../src/multitable/types
 function notif(id: string, readAt: string | null = null): MetaRecordSubscriptionNotification {
   return { id, sheetId: 's1', recordId: `rec_${id}`, userId: 'u1', eventType: 'record.updated', actorId: null, revisionId: null, commentId: null, message: null, createdAt: '2026-06-16T00:00:00Z', readAt }
 }
-const flush = async () => { await nextTick(); await Promise.resolve(); await Promise.resolve(); await nextTick() }
+// The ambient unread fetch is idle-deferred (scheduleIdle → setTimeout(0) in
+// jsdom), so flush drains one macrotask in addition to microtasks/ticks.
+const flush = async () => { await nextTick(); await Promise.resolve(); await Promise.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); await nextTick() }
 
 function mount(over: Record<string, unknown> = {}) {
   const apiClient = {

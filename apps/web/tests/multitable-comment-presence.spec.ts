@@ -74,7 +74,13 @@ describe('useMultitableCommentPresence', () => {
 
     await state.loadPresence({ containerId: 'sheet_orders', targetIds: ['rec_1'] })
 
-    expect(fetch).toHaveBeenCalledWith('/api/comments/summary?spreadsheetId=sheet_orders&rowIds=rec_1')
+    // Ids travel in the POST body (not the query string): the grid sends every
+    // visible row id per page and the comma-joined URL grew toward 414 limits.
+    expect(fetch).toHaveBeenCalledWith('/api/comments/summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spreadsheetId: 'sheet_orders', rowIds: ['rec_1'] }),
+    })
     expect(state.presenceByRecordId.value.rec_1).toMatchObject({
       targetId: 'rec_1',
       unresolvedCount: 2,

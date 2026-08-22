@@ -94,6 +94,34 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
     width: `${props.nodeWidth}px`,
   }
 }
+
+// FS-7 fix-round (P2-1, 20260821 gate): the node card's accessible name previously carried the
+// type ONLY on the unnamed fallback (the old `graphNodeLabel` used the node's trimmed `name` when
+// present, else `nodeTypeLabel(type)`) — as soon as an author names a node, the type disappeared
+// from the accname entirely, even though the visible `.template-authoring__canvas-node-kind` bar
+// is a non-contributing SIBLING of this `role="button"` selector (its text is not announced on Tab
+// focus). This composes BOTH when a name exists (`编辑<type>节点「<name>」`, the house 「」-quoting
+// idiom used for named entities elsewhere in this package — e.g. graphLayout.ts's
+// `节点「${node.name}」`) and falls back to the EXACT prior string when unnamed AND the node is
+// found (`编辑<type>节点`, unchanged) so the seven unnamed-fallback accnames stay byte-identical.
+// Values-free: only `name` (author-given business text) and the type label are interpolated —
+// never `pos.key`/`node.key`.
+//
+// Disclosed, not an oversight: `canvasNodeByKey(nodeKey)` returning `undefined` (the node not
+// found in the effective graph) is structurally unreachable in production — `pos.key` always comes
+// from `canvasLayout.nodes`, which TemplateAuthoringView.vue derives via `computeLayout` from the
+// SAME `canvasEffectiveGraph.value.nodes` array `canvasNodeByKey` looks up in, so the two can never
+// disagree within one render. For that defensive branch this does NOT reproduce the OLD
+// `graphNodeLabel`'s `'流程节点'` placeholder (a generic string carrying no type at all) — it falls
+// through to `nodeTypeLabel('approval')` instead, mirroring the SAME `?? 'approval'` default the
+// visible kind-bar directly above already uses (line ~239) rather than inventing a new fallback
+// value. A behavioural difference in dead code, stated rather than silently inherited.
+function canvasNodeAccName(nodeKey: string): string {
+  const node = props.canvasNodeByKey(nodeKey)
+  const typeLabel = props.nodeTypeLabel(node?.type ?? 'approval')
+  const name = node?.name?.trim()
+  return name ? `编辑${typeLabel}节点「${name}」` : `编辑${typeLabel}节点`
+}
 </script>
 
 <template>
@@ -238,23 +266,65 @@ function nodePosStyle(pos: NodeLayout): CSSProperties {
               >
                 {{ nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval') }}
               </div>
-              <div
-                class="template-authoring__canvas-node-selector"
-                role="button"
-                tabindex="0"
-                :aria-label="`编辑${graphNodeLabel(pos.key)}节点`"
-                :aria-pressed="selectedCanvasNode === pos.key"
-                data-testid="approval-canvas-node-select"
-                @click.stop="emit('select-node', pos.key)"
-                @keydown.enter.stop.prevent="emit('select-node', pos.key)"
-                @keydown.space.stop.prevent="emit('select-node', pos.key)"
-                @keydown="emit('node-keydown', $event, pos.key)"
+              <!-- FS-1 fix — the W4 approval-canvas closeout's single FAIL
+                   (docs/development/approval-remaining-dev-verification-report-20260820.md §5.1;
+                   NOT the same finding as "FAIL-1" in
+                   approval-parity-verification-report-20260818.md, which names the unrelated
+                   approval-inspector-keyboard.spec.ts harness rot, already fixed). RATIFIED
+                   criterion violated:
+                   approval-canvas-v2-interaction-design-lock-20260721.md:366 ("Long labels" row,
+                   scope explicitly includes "Node cards"): "Truncate with ellipsis at component
+                   limits (§14); full text on hover/focus tooltip, in the inspector, and in
+                   accessible names." THREE legs — this fixes ONLY the FIRST (hover/focus
+                   tooltip), which is the one §5.1 scopes the FAIL to. The "in the inspector" leg
+                   is a separate, unverified claim about ApprovalCanvasNodeInspector.vue (§5.1:
+                   "looks satisfied... not click-through-verified"), out of scope here. The "in
+                   accessible names" leg is FS-7 — a DIFFERENT defect (the parent `role="button"`
+                   div's own `aria-label` overrides the whole subtree's accessible name per
+                   standard accname computation, so the summary text is never exposed via the
+                   accessible NAME at all) — §5.1 explicitly requires FS-7 stay a SEPARATE slice,
+                   never merged with this one. This fix does not touch `aria-label` and does not
+                   close FS-7.
+                   The summary line below is CSS-ellipsis-truncated
+                   (.template-authoring__canvas-node-summary) but carried NO way to recover the
+                   full text — not on hover, not on keyboard focus. el-tooltip wraps the SAME
+                   focusable selector div (no extra DOM node, no extra tab stop — ElOnlyChild
+                   clones the trigger attrs onto this exact element) with `trigger="['hover',
+                   'focus']"`: Element Plus's default trigger is 'hover' ONLY (verified against
+                   trigger2.mjs — the onFocus/onBlur handlers it wires are gated by
+                   `whenTrigger(trigger, 'focus', …)`, so a bare `<el-tooltip>` would silently
+                   stay hover-only and miss the a11y half, which is the point of this fix), so
+                   'focus' must be listed explicitly. Content is the SAME `canvasNodeSummary(...)`
+                   string already rendered inline — values-free (no raw ids), never re-derived.
+                   P2-1 fix-round (rebase, 20260821): `:aria-label` below was widened from the
+                   bare `` `编辑${graphNodeLabel(pos.key)}节点` `` literal to `canvasNodeAccName
+                   (pos.key)` (composes type AND name — see that function's own doc comment above)
+                   — this hunk is the confirmed merge-conflict intersection with #5058, resolved by
+                   keeping #5058's tooltip wrapper and widening only this one binding. -->
+              <el-tooltip
+                :content="canvasNodeSummary(pos.key)"
+                placement="top"
+                :trigger="['hover', 'focus']"
+                popper-class="template-authoring__canvas-node-summary-tooltip"
               >
-                <span class="template-authoring__canvas-node-summary">
-                  {{ canvasNodeSummary(pos.key) }}
-                </span>
-                <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
-              </div>
+                <div
+                  class="template-authoring__canvas-node-selector"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="canvasNodeAccName(pos.key)"
+                  :aria-pressed="selectedCanvasNode === pos.key"
+                  data-testid="approval-canvas-node-select"
+                  @click.stop="emit('select-node', pos.key)"
+                  @keydown.enter.stop.prevent="emit('select-node', pos.key)"
+                  @keydown.space.stop.prevent="emit('select-node', pos.key)"
+                  @keydown="emit('node-keydown', $event, pos.key)"
+                >
+                  <span class="template-authoring__canvas-node-summary">
+                    {{ canvasNodeSummary(pos.key) }}
+                  </span>
+                  <span class="template-authoring__canvas-node-chevron" aria-hidden="true">›</span>
+                </div>
+              </el-tooltip>
             </div>
             <div
               v-for="line in canvasEdgeLines"

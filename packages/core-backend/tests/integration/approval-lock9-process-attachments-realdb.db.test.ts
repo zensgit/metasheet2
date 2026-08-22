@@ -1,0 +1,1272 @@
+/**
+ * Lock-9 (approver process attachments) — real-DB acceptance for the DB-dependent gates.
+ *
+ * Reference: docs/development/approval-lock9-handler-process-attachments-20260819.md (RATIFIED
+ * 2026-08-21, §4.1 amendment applied). No-DB gates (G-3, G-9, G-10, G-15, the G-4/G-16 absence
+ * grep) live in tests/unit/approval-lock9-process-attachment-unit.test.ts.
+ *
+ * Covers: G-1, G-2, G-4 (through the PRODUCTION wiring, never a stub), G-5, G-6, G-7, G-8, G-11,
+ * G-12, G-13, G-14, G-16. Two-point wired: excluded from vitest.config.ts's no-DB job and run as
+ * WHOLE FILES in the standalone .github/workflows/approval-realdb-lock9-process-attachments.yml
+ * lane, which arms EXPECT_DB=1. As of #5095, also run (whole file, no EXPECT_DB) in the required
+ * plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect this file.
+ *
+ * Harness mirrors approval-attachment-pipeline-realdb.test.ts / approval-handler-node.db.test.ts.
+ */
+import { randomUUID } from 'node:crypto'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import net from 'node:net'
+import * as path from 'node:path'
+import { Pool } from 'pg'
+import { Kysely, PostgresDialect, sql } from 'kysely'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+
+import { MetaSheetServer } from '../../src/index'
+import { poolManager } from '../../src/integration/db/connection-pool'
+import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from '../helpers/approval-schema-bootstrap'
+import { sweepUnboundAttachments } from '../../src/services/approval-attachment-gc'
+import { up as processBindingUp, down as processBindingDown } from '../../src/db/migrations/zzzz20260822130000_approval_attachments_process_binding'
+import { up as createAttachmentsUp } from '../../src/db/migrations/zzzz20260715210000_create_approval_attachments'
+
+const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
+
+// ── Anti-skip-green sentinel (TOP-LEVEL, outside describeIfDatabase) ──────────────────────────
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
+
+const RUN = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+const REQUESTER = `l9-req-${RUN}`
+const APPROVER = `l9-appr-${RUN}`
+const OTHER_SEAT = `l9-appr2-${RUN}` // a DIFFERENT approver, no seat on most instances
+const ACT_ONLY = `l9-actonly-${RUN}` // approvals:act, deliberately NOT approvals:read (G-16)
+
+async function canListenOnEphemeralPort(): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer()
+    server.once('error', () => resolve(false))
+    server.listen(0, '127.0.0.1', () => server.close(() => resolve(true)))
+  })
+}
+
+describeIfDatabase('Lock-9 process attachments — real-DB acceptance', () => {
+  let server: MetaSheetServer | undefined
+  let offServer: MetaSheetServer | undefined
+  let baseUrl = ''
+  let offBaseUrl = ''
+  let storageRoot = ''
+  const savedEnv: Record<string, string | undefined> = {}
+  const pool = () => poolManager.get()
+  const createdTemplateIds = new Set<string>()
+  const createdApprovalIds = new Set<string>()
+  const createdAttachmentIds = new Set<string>()
+  const createdUserIds = new Set<string>()
+
+  async function authToken(userId: string, roles = 'admin', perms = '*:*'): Promise<string> {
+    if (perms.split(',').some((p) => ['*:*', 'approvals:*', 'approvals:write'].includes(p.trim()))) {
+      await grantApprovalWriteForIntegrationActor(userId)
+    }
+    const response = await fetch(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`,
+    )
+    expect(response.status).toBe(200)
+    return ((await response.json()) as { token: string }).token
+  }
+
+  async function jsonRequest(pathName: string, token: string, options: { method?: string; body?: unknown; base?: string } = {}) {
+    return fetch(`${options.base ?? baseUrl}${pathName}`, {
+      method: options.method || 'GET',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      },
+      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    })
+  }
+
+  async function ensureUsers(...ids: string[]): Promise<void> {
+    for (const id of ids) {
+      createdUserIds.add(id)
+      await pool().query(
+        `INSERT INTO users (id, email, name, password_hash, role, permissions, is_active)
+         VALUES ($1, $2, $3, 'test', 'user', '[]'::jsonb, TRUE)
+         ON CONFLICT (id) DO UPDATE SET is_active = TRUE, updated_at = now()`,
+        [id, `${id}@example.test`, id],
+      )
+    }
+  }
+
+  async function publishPlainTemplate(adminToken: string): Promise<string> {
+    const templateKey = `l9-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest('/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Lock-9 plain template',
+        description: 'lock-9 process attachment acceptance',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'approve_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: [APPROVER], approvalMode: 'single' } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'approve_1' },
+            { key: 'e2', source: 'approve_1', target: 'end' },
+          ],
+        },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status, await publish.clone().text()).toBe(200)
+    return template.id
+  }
+
+  /**
+   * P2-2 fixture: a `fork`/`branch_a`/`branch_b`/`join` parallel template — `current_node_key`
+   * stays at `fork` while an instance is inside the region; assignments live at the branch keys,
+   * never at `fork` itself.
+   */
+  async function publishParallelTemplate(adminToken: string): Promise<string> {
+    const templateKey = `l9-par-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest('/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Lock-9 parallel template',
+        description: 'lock-9 process attachment parallel-region acceptance',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'fork', type: 'parallel', config: { branches: ['e-fork-a', 'e-fork-b'], joinMode: 'all', joinNodeKey: 'join' } },
+            { key: 'branch_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: [APPROVER] } },
+            { key: 'branch_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: [OTHER_SEAT] } },
+            { key: 'join', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-fork', source: 'start', target: 'fork' },
+            { key: 'e-fork-a', source: 'fork', target: 'branch_a' },
+            { key: 'e-fork-b', source: 'fork', target: 'branch_b' },
+            { key: 'e-a-join', source: 'branch_a', target: 'join' },
+            { key: 'e-b-join', source: 'branch_b', target: 'join' },
+          ],
+        },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status, await publish.clone().text()).toBe(200)
+    return template.id
+  }
+
+  /**
+   * G-1 positive-control fixture (residual sweep, P3-3): `start -> handler_h (handle,
+   * fieldWrites) -> approve_1 -> end`, modeled verbatim on
+   * approval-field-edit-enforcement.db.test.ts's `handlerGraph` — `assigneeSources` on BOTH nodes
+   * (NOT `assigneeType`/`assigneeIds`, which is only proven for approval nodes in this file). The
+   * writable field must be `text` or `number` (`record-link`/`attachment`/`explanation` are
+   * refused at ApprovalProductService.ts:11517).
+   */
+  async function publishHandlerTemplate(adminToken: string): Promise<string> {
+    const templateKey = `l9-handler-${Date.now()}-${Math.floor(Math.random() * 1e6)}`
+    const create = await jsonRequest('/api/approval-templates', adminToken, {
+      method: 'POST',
+      body: {
+        key: templateKey,
+        name: 'Lock-9 G-1 positive-control handler template',
+        description: 'lock-9 residual sweep — G-1 positive control (handle+fieldWrites moves form_snapshot)',
+        formSchema: { fields: [{ id: 'reason', type: 'text', label: '事由', required: true }, { id: 'memo', type: 'text', label: 'memo' }] },
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', config: {} },
+            { key: 'handler_h', type: 'handler', config: { assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }], fieldPermissions: [{ fieldId: 'memo', access: 'editable' }] } },
+            { key: 'approve_1', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }], approvalMode: 'single' } },
+            { key: 'end', type: 'end', config: {} },
+          ],
+          edges: [
+            { key: 'e1', source: 'start', target: 'handler_h' },
+            { key: 'e2', source: 'handler_h', target: 'approve_1' },
+            { key: 'e3', source: 'approve_1', target: 'end' },
+          ],
+        },
+      },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const template = (await create.json()) as { id: string }
+    createdTemplateIds.add(template.id)
+    const publish = await jsonRequest(`/api/approval-templates/${template.id}/publish`, adminToken, {
+      method: 'POST',
+      body: { policy: { allowRevoke: true } },
+    })
+    expect(publish.status, await publish.clone().text()).toBe(200)
+    return template.id
+  }
+
+  async function createInstance(requesterToken: string, templateId: string, reason = 'lock9 acceptance'): Promise<string> {
+    const create = await jsonRequest('/api/approvals', requesterToken, {
+      method: 'POST',
+      body: { templateId, formData: { reason } },
+    })
+    expect(create.status, await create.clone().text()).toBe(201)
+    const inst = (await create.json()) as { id: string }
+    createdApprovalIds.add(inst.id)
+    return inst.id
+  }
+
+  /**
+   * G-8 seeding helper: the DB's `approval_att_size_bounds` CHECK caps EVERY row (any bind_kind) at
+   * 20 MB, so a single 49MB row is impossible — seed several ≤20MB rows summing to `totalBytes`.
+   */
+  async function seedHugeBoundFormBytes(instanceId: string, uploaderId: string, totalBytes: number): Promise<string[]> {
+    const perRow = 16 * 1024 * 1024 // under the 20MB row cap
+    const ids: string[] = []
+    let remaining = totalBytes
+    let n = 0
+    const unique = randomUUID().replace(/-/g, '')
+    while (remaining > 0) {
+      const size = Math.min(perRow, remaining)
+      const id = `att_g8_seed_${unique}_${n}`
+      await pool().query(
+        `INSERT INTO approval_attachments (id, org_id, uploader_id, instance_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind, bound_at)
+         VALUES ($1,'default',$2,$3,'reason',$4,'huge.pdf','application/pdf',$5,'bound','form_field', now())`,
+        [id, uploaderId, instanceId, `k-g8-seed-${unique}-${n}`, size],
+      )
+      ids.push(id)
+      remaining -= size
+      n += 1
+    }
+    return ids
+  }
+
+  async function uploadProcess(token: string, stagedInstanceId: string, opts: { fileName?: string; content?: Buffer; base?: string } = {}): Promise<Response> {
+    const form = new FormData()
+    form.append('stagedInstanceId', stagedInstanceId)
+    form.append(
+      'file',
+      new Blob([opts.content ?? Buffer.from('%PDF-1.4 lock9 process attachment')], { type: 'application/pdf' }),
+      opts.fileName ?? 'evidence.pdf',
+    )
+    return fetch(`${opts.base ?? baseUrl}/api/approval/attachments/process`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    })
+  }
+
+  beforeAll(async () => {
+    expect(await canListenOnEphemeralPort()).toBe(true)
+    await ensureApprovalSchemaReady()
+    storageRoot = mkdtempSync(path.join(tmpdir(), 'l9-att-'))
+    for (const key of ['APPROVAL_ATTACHMENTS_ENABLED', 'APPROVAL_ATTACHMENT_STORAGE_DIR']) {
+      savedEnv[key] = process.env[key]
+    }
+    process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+    process.env.APPROVAL_ATTACHMENT_STORAGE_DIR = storageRoot
+    server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    await server.start()
+    const address = server.getAddress()
+    const port = address && typeof address === 'object' ? address.port : undefined
+    expect(port).toBeTruthy()
+    baseUrl = `http://127.0.0.1:${port}`
+    await ensureUsers(REQUESTER, APPROVER, OTHER_SEAT, ACT_ONLY)
+  }, 30_000)
+
+  afterAll(async () => {
+    try {
+      const attachmentIds = [...createdAttachmentIds]
+      const keys = attachmentIds.length > 0
+        ? (await pool().query('SELECT storage_key FROM approval_attachments WHERE id = ANY($1::text[])', [attachmentIds])).rows.map(
+            (r: { storage_key: string }) => r.storage_key,
+          )
+        : []
+      const approvalIds = [...createdApprovalIds]
+      if (approvalIds.length > 0) {
+        await pool().query('DELETE FROM approval_records WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_assignments WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_metrics WHERE instance_id = ANY($1::text[])', [approvalIds])
+        await pool().query('DELETE FROM approval_instances WHERE id = ANY($1::text[])', [approvalIds]) // cascades attachments
+      }
+      if (attachmentIds.length > 0) {
+        await pool().query('DELETE FROM approval_attachments WHERE id = ANY($1::text[])', [attachmentIds])
+      }
+      if (keys.length > 0) {
+        await pool().query('DELETE FROM approval_attachment_purge_intents WHERE storage_key = ANY($1::text[])', [keys])
+      }
+      const templateIds = [...createdTemplateIds]
+      if (templateIds.length > 0) {
+        await pool().query('DELETE FROM approval_published_definitions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await pool().query('DELETE FROM approval_template_versions WHERE template_id = ANY($1::uuid[])', [templateIds])
+        await pool().query('DELETE FROM approval_templates WHERE id = ANY($1::uuid[])', [templateIds])
+      }
+      if (createdUserIds.size > 0) {
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...createdUserIds]])
+      }
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      try {
+        rmSync(storageRoot, { recursive: true, force: true })
+      } catch {
+        // best-effort temp cleanup
+      }
+      await offServer?.stop().catch(() => {})
+      await server?.stop().catch(() => {})
+    }
+  }, 30_000)
+
+  it('sentinel: DATABASE_URL set', () => {
+    expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  // ===============================================================================================
+  // §5.4 action-scope guard — `attachmentIds` v1 ships the `comment` rider ONLY. Mirrors the
+  // shipped `fieldWrites`-on-wrong-action precedent (APS ~:9165): while the flag is ON, a present
+  // `attachmentIds` key on any OTHER action is a values-free 400 — never a silent accept-and-ignore
+  // on `approve`/`reject`/`handle`/etc.
+  //
+  // P2-1 fix-round correction: this guard is ITSELF flag-gated now (it was not, originally — the
+  // gate battery caught that as a G-12/§L9-D byte-for-byte-no-op violation: a flag-OFF `approve`
+  // carrying a stray `attachmentIds` key went from 200 pre-Lock-9 to 400 here). The second case
+  // below used to assert the OLD (wrong) "still fires with the flag OFF" behavior; it now asserts
+  // the corrected no-op, with a same-request discriminating pair against the flag ON.
+  // ===============================================================================================
+  describe('§5.4 action-scope guard: attachmentIds only valid on comment', () => {
+    it('flag ON: action=approve with attachmentIds present is refused 400 — not silently dropped', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'approve', attachmentIds: ['att_whatever'] },
+      })
+      expect(res.status, await res.clone().text()).toBe(400)
+      const body = (await res.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+      // positive control: the SAME approve action WITHOUT attachmentIds succeeds normally.
+      const ok = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'approve' } })
+      expect(ok.status, await ok.clone().text()).toBe(200)
+    })
+
+    // NIT-1 (residual sweep, Lock-9 gate audit): flag ON, a MALFORMED `attachmentIds` on the ONE
+    // action that carries it (`comment`) must be a values-free 400, never accept-and-drop.
+    it.each([
+      { label: 'string (not an array)', attachmentIds: 'att_x' as unknown as string[] },
+      { label: 'blank-array (every element unusable)', attachmentIds: ['', '   '] },
+    ])('flag ON: comment with a MALFORMED attachmentIds ($label) is refused 400 APPROVAL_ATTACHMENT_IDS_INVALID — not silently accepted and dropped', async ({ attachmentIds }) => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const res = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds },
+      })
+      expect(res.status, await res.clone().text()).toBe(400)
+      const body = (await res.json()) as { error?: { code?: string } }
+      expect(body.error?.code).toBe('APPROVAL_ATTACHMENT_IDS_INVALID')
+
+      // Positive control on the SAME instance: attachmentIds: [] stays a 200 no-op — the guard is
+      // not a blanket refusal of the key, only of an unusable value.
+      const ok = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', comment: 'empty rider is fine', attachmentIds: [] },
+      })
+      expect(ok.status, await ok.clone().text()).toBe(200)
+    })
+
+    it.each(['reject', 'approve'] as const)(
+      'flag OFF: %s carrying attachmentIds succeeds unchanged (byte-for-byte no-op, G-12/§L9-D) — the SAME payload 400s once the flag is ON',
+      async (action) => {
+        const adminToken = await authToken(`l9-admin-${RUN}`)
+        const requesterToken = await authToken(REQUESTER)
+        const approverToken = await authToken(APPROVER)
+        const templateId = await publishPlainTemplate(adminToken)
+        // Two independent instances, one dispatch each: approve/reject both finalize an instance,
+        // so the OFF and ON legs cannot share one (the second dispatch would 404/409 on an
+        // already-decided instance, not discriminate on the guard at all).
+        const iidOff = await createInstance(requesterToken, templateId)
+        const iidOn = await createInstance(requesterToken, templateId)
+        const commentBody = action === 'reject' ? { comment: 'off flag rejection' } : {}
+        const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+        let offRes: Response
+        try {
+          delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+          offRes = await jsonRequest(`/api/approvals/${iidOff}/actions`, approverToken, {
+            method: 'POST',
+            body: { action, ...commentBody, attachmentIds: ['att_whatever'] },
+          })
+        } finally {
+          process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+        }
+        expect(offRes.status, await offRes.clone().text()).toBe(200)
+
+        const onCommentBody = action === 'reject' ? { comment: 'on flag rejection' } : {}
+        const onRes = await jsonRequest(`/api/approvals/${iidOn}/actions`, approverToken, {
+          method: 'POST',
+          body: { action, ...onCommentBody, attachmentIds: ['att_whatever'] },
+        })
+        expect(onRes.status, await onRes.clone().text()).toBe(400)
+        const onBody = (await onRes.json()) as { error?: { code?: string } }
+        expect(onBody.error?.code).toBe('APPROVAL_ATTACHMENT_ACTION_NOT_ALLOWED')
+      },
+    )
+  })
+
+  // ===============================================================================================
+  // G-1 — process binding never touches form_snapshot.
+  //
+  // P3-3 (gate-audit recording, residual-sweep fix round): the positive control this comment
+  // previously recorded as missing now EXISTS — see the "POSITIVE CONTROL" `it` below, on the
+  // `publishHandlerTemplate` fixture. It proves the isolation is process-SELECTED, not a dead path:
+  // a sibling `handle`+`fieldWrites` action on a twin instance DOES move `form_snapshot` and DOES
+  // write a field-revision row, contrasted with the process action's negative assertion just below
+  // (byte-identical snapshot, zero revision rows). Mutation-confirmed (MUT-G1a/MUT-G1b, PR body).
+  // ===============================================================================================
+  describe('G-1: process binding is form_snapshot-isolated', () => {
+    it('a comment action with attachmentIds leaves form_snapshot byte-identical and writes ZERO field-revision rows', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const before = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+
+      const up1 = await uploadProcess(approverToken, iid)
+      expect(up1.status, await up1.clone().text()).toBe(201)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const act = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', comment: 'evidence attached', attachmentIds: [attId] },
+      })
+      expect(act.status, await act.clone().text()).toBe(200)
+
+      const after = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(after.form_snapshot).toEqual(before.form_snapshot)
+      const revCount = await pool().query('SELECT count(*)::int AS n FROM approval_form_field_revisions WHERE instance_id=$1', [iid])
+      expect(revCount.rows[0].n).toBe(0)
+
+      const bound = (await pool().query('SELECT status, instance_id, bind_kind, field_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound).toMatchObject({ status: 'bound', instance_id: iid, bind_kind: 'process', field_id: null })
+    })
+
+    it('POSITIVE CONTROL: a handle+fieldWrites action on the same harness DOES move form_snapshot and DOES write a revision row — the isolation above is process-SELECTED, not a dead path', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const handlerToken = await authToken(APPROVER) // publishHandlerTemplate seats APPROVER at handler_h
+      const templateId = await publishHandlerTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const before = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+
+      const handleRes = await jsonRequest(`/api/approvals/${iid}/actions`, handlerToken, {
+        method: 'POST',
+        body: { action: 'handle', fieldWrites: { memo: 'g1-positive-control-value' } },
+      })
+      // Ordering matters (feedback_fixture_shape_must_match_named_scenario): assert the handle
+      // action actually reached the handler seat BEFORE the snapshot assertions below — a
+      // mis-wired handler seat 403s and would otherwise look like a passing negative (the
+      // snapshot simply never changing because the action never landed).
+      expect(handleRes.status, await handleRes.clone().text()).toBe(200)
+
+      const revCount = await pool().query('SELECT count(*)::int AS n FROM approval_form_field_revisions WHERE instance_id=$1', [iid])
+      expect(revCount.rows[0].n).toBeGreaterThanOrEqual(1)
+
+      const after = (await pool().query('SELECT form_snapshot FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(after.form_snapshot).not.toEqual(before.form_snapshot)
+      expect(after.form_snapshot.memo).toBe('g1-positive-control-value')
+    })
+  })
+
+  // ===============================================================================================
+  // G-2 — bind_kind discriminator is load-bearing; sentinel non-blank field_id on a process row is
+  // asserted ABSENT after a full flow. Direct-SQL CHECK probe (mirrors the manual psql verification).
+  // ===============================================================================================
+  describe('G-2: bind_kind discriminator + CHECK', () => {
+    it('a process row with field_id IS NOT NULL never exists after a real upload+bind flow (self-contained, not order-dependent on a sibling test)', async () => {
+      // Self-contained: runs its OWN upload+bind rather than relying on an earlier describe block
+      // having already created one — a filtered run (`-t "G-2"`) must not make this vacuously true.
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      expect(up1.status, await up1.clone().text()).toBe(201)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      const bind = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+      expect(bind.status, await bind.clone().text()).toBe(200)
+
+      const thisRow = (await pool().query('SELECT field_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(thisRow.field_id).toBeNull()
+      const n = await pool().query(`SELECT count(*)::int AS n FROM approval_attachments WHERE bind_kind='process' AND field_id IS NOT NULL`)
+      expect(n.rows[0].n).toBe(0)
+    })
+
+    it('direct CHECK probe: bind_kind=process + field_id NULL is ACCEPTED; bind_kind=form_field + field_id NULL is REJECTED by the SAME CHECK', async () => {
+      const id1 = `att_g2probe_${RUN}_ok`
+      await pool().query(
+        `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind)
+         VALUES ($1,'default','probe',NULL,'k-g2-ok','f.pdf','application/pdf',10,'unbound','process')`,
+        [id1],
+      )
+      createdAttachmentIds.add(id1)
+      const id2 = `att_g2probe_${RUN}_bad`
+      await expect(
+        pool().query(
+          `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind)
+           VALUES ($1,'default','probe',NULL,'k-g2-bad','f.pdf','application/pdf',10,'unbound','form_field')`,
+          [id2],
+        ),
+      ).rejects.toThrow(/approval_att_field_nonblank/)
+    })
+  })
+
+  // ===============================================================================================
+  // G-4 — participant predicate ADOPTED, not minted: an instance carrying ONLY a process attachment
+  // resolves participants through the PRODUCTION wiring (bootApprovalAttachmentRuntime's real
+  // canReadApprovalInstance binding), never a stub. The requester (never uploaded) reads it back.
+  // ===============================================================================================
+  describe('G-4: participant predicate through the production wiring', () => {
+    it('the requester (a participant via canReadApprovalInstance, never the uploader) downloads a bound process attachment', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+
+      const dl = await jsonRequest(`/api/approval/attachments/${attId}/download`, requesterToken)
+      expect(dl.status).toBe(200)
+    })
+
+    it('a genuine outsider (not requester/seat/CC/admin) is refused values-free 404 — the predicate still discriminates', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const outsiderId = `l9-outsider-${RUN}`
+      await ensureUsers(outsiderId)
+      const outsiderToken = await authToken(outsiderId, 'user', 'approvals:read')
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+
+      const dl = await jsonRequest(`/api/approval/attachments/${attId}/download`, outsiderToken)
+      expect(dl.status).toBe(404)
+      expect(await dl.json()).toEqual({ error: 'not_found' })
+    })
+  })
+
+  // ===============================================================================================
+  // G-5 — upload authority is the ACTIVE SEAT, not participation. Load-bearing: the BIND-time 403
+  // (dispatchAction's pre-existing actorCanAct gate, APS ~:9091). Secondary leg: the upload-route
+  // fail-fast also refuses a non-seat approvals:act principal.
+  // ===============================================================================================
+  describe('G-5: upload/bind authority is the active seat', () => {
+    it('BIND-time (load-bearing): a non-seat actor posting comment+attachmentIds on the instance is refused 403 APPROVAL_ASSIGNMENT_REQUIRED; the true seat-holder succeeds with the SAME attachment', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const otherToken = await authToken(OTHER_SEAT) // has DB write authority but no seat on THIS instance
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const denied = await jsonRequest(`/api/approvals/${iid}/actions`, otherToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(denied.status).toBe(403)
+      const deniedBody = (await denied.json()) as { code?: string; error?: { code?: string } }
+      expect(deniedBody.code ?? deniedBody.error?.code).toBe('APPROVAL_ASSIGNMENT_REQUIRED')
+      const stillUnbound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(stillUnbound.status).toBe('unbound') // the refused actor bound NOTHING
+
+      const ok = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(ok.status, await ok.clone().text()).toBe(200)
+      const bound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound.status).toBe('bound')
+    })
+
+    it('secondary (fail-fast) leg: a non-seat approvals:act principal is refused AT UPLOAD, before any row is written', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const otherToken = await authToken(OTHER_SEAT, 'user', 'approvals:act')
+      const before = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      const denied = await uploadProcess(otherToken, iid)
+      expect(denied.status).toBe(403)
+      expect(await denied.json()).toEqual({ error: 'forbidden' })
+      const after = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      expect(after).toBe(before) // no durable row from the refused upload
+
+      // positive control: the TRUE seat holder uploads fine at the same instance.
+      const approverToken = await authToken(APPROVER, 'user', 'approvals:act')
+      const ok = await uploadProcess(approverToken, iid)
+      expect(ok.status, await ok.clone().text()).toBe(201)
+      createdAttachmentIds.add(((await ok.json()) as { id: string }).id)
+    })
+
+    // NIT-2 (residual sweep, MUT-NIT2 closure (a)): the sole SHARED consumer of
+    // `resolveApprovalActorRoles` (routes/approvals.ts) / `resolveActorRolesFromRequest`
+    // (approval-attachment-runtime.ts, now the SAME extracted helper) that this file's other G-5
+    // legs never exercise is a ROLE-typed seat — every other G-5/G-6/G-8/G-11 test seats its actor
+    // via `assignment_type='user'`, which `assignmentMatchesActor` (ApprovalProductService.ts:3985)
+    // matches on `assignee_id === actorId` alone, never touching `actorRoles` at all. Measured: the
+    // NIT-2 extraction's own acceptance mutation (`resolveApprovalActorRoles` returns `[]`) reds
+    // NOTHING in this suite, the S1 lane, approval-rbac-boundary, approval-history-routing,
+    // approval-field-edit-enforcement, approval-comments, approval-handler-node, or
+    // approval-wp1-parallel-gateway — exactly the "green everywhere" outcome the extraction's own
+    // gate note says makes closure (a) mandatory rather than optional. This leg is that closure: a
+    // role-typed `approval_assignments` row seats the actor via the SAME `actorRoles.includes(...)`
+    // arm at BOTH the fail-fast upload check (`actorHasActiveSeatAtInstance`, fed by
+    // `approval-attachment-runtime.ts`'s DI seam) and the bind-time authority (`dispatchAction`'s
+    // `currentNodeAssignments` filter, fed by `routes/approvals.ts`'s `actor.roles`), so mutating
+    // the shared helper to return `[]` reds BOTH the upload 403 and the bind 403 below.
+    it('a ROLE-typed seat (assignment_type=\'role\', matched via the actor\'s JWT role claim, never assignee_id===actorId) uploads 201 and binds 200 WITH the matching role; a principal with a DIFFERENT role on the SAME node is refused 403 at both upload and bind', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const roleName = `l9-g5-role-${RUN}`
+      // Additive: the template's own user-typed assignment for approve_1 (APPROVER) still exists;
+      // this role-typed row seats a SECOND, independent actor at the SAME node_key.
+      await pool().query(
+        `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, node_key, is_active)
+         VALUES ($1, 'role', $2, 'approve_1', TRUE)`,
+        [iid, roleName],
+      )
+
+      const roleHolderId = `l9-g5-roleholder-${RUN}`
+      const roleHolderToken = await authToken(roleHolderId, roleName, 'approvals:act')
+      const wrongRoleId = `l9-g5-wrongrole-${RUN}`
+      const wrongRoleToken = await authToken(wrongRoleId, `${roleName}-nope`, 'approvals:act')
+
+      // Wrong role: refused AT UPLOAD (fail-fast leg), no durable row.
+      const before = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      const uploadDenied = await uploadProcess(wrongRoleToken, iid)
+      expect(uploadDenied.status).toBe(403)
+      const after = Number((await pool().query('SELECT count(*)::int AS c FROM approval_attachments')).rows[0].c)
+      expect(after).toBe(before)
+
+      // Matching role: uploads 201.
+      const upload = await uploadProcess(roleHolderToken, iid)
+      expect(upload.status, await upload.clone().text()).toBe(201)
+      const attId = ((await upload.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      // Wrong role at BIND time (comment+attachmentIds): also refused 403, attachment stays unbound.
+      const bindDenied = await jsonRequest(`/api/approvals/${iid}/actions`, wrongRoleToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(bindDenied.status).toBe(403)
+      const stillUnbound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(stillUnbound.status).toBe('unbound')
+
+      // Matching role at BIND time: binds 200.
+      const bindOk = await jsonRequest(`/api/approvals/${iid}/actions`, roleHolderToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(bindOk.status, await bindOk.clone().text()).toBe(200)
+      const bound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound.status).toBe('bound')
+    })
+  })
+
+  // ===============================================================================================
+  // P2-2 fix-round — upload fail-fast (`actorHasActiveSeatAtInstance`) must not categorically
+  // 403 every approver in a parallel region. Before the fix, the helper checked ONLY the stored
+  // `current_node_key`, which stays at `fork` (the parallel node) for the whole region — never a
+  // branch key — while assignments live at `branch_a`/`branch_b`. Fixed to resolve the same
+  // pending-branch frontier `dispatchAction` resolves (`collectActiveNodeKeys`).
+  // ===============================================================================================
+  describe('P2-2: upload fail-fast inside a parallel region', () => {
+    it('a genuine branch-A seat holder uploads successfully while the instance sits at the fork (current_node_key="fork"); the SAME actor\'s comment+rider then binds and completes their branch', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER) // seated at branch_a only
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const stored = (await pool().query('SELECT current_node_key FROM approval_instances WHERE id=$1', [iid])).rows[0]
+      expect(stored.current_node_key).toBe('fork') // confirms the fixture actually exercises the gap
+
+      const up = await uploadProcess(approverToken, iid)
+      expect(up.status, await up.clone().text()).toBe(201) // was 403 before the fix — categorical, every actor
+      const attId = ((await up.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const dispatch = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(dispatch.status, await dispatch.clone().text()).toBe(200)
+      const bound = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(bound.status).toBe('bound')
+    })
+
+    it('branch-B seat holder uploads successfully at the SAME fork instant (both branches are live seats, not just the first one checked)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const otherToken = await authToken(OTHER_SEAT) // seated at branch_b only
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const up = await uploadProcess(otherToken, iid)
+      expect(up.status, await up.clone().text()).toBe(201)
+      createdAttachmentIds.add(((await up.json()) as { id: string }).id)
+    })
+
+    it('a principal with NO seat on either branch is still refused 403 at upload (the fix widens to the real frontier, it does not stop checking)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const templateId = await publishParallelTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const strangerToken = await authToken(`l9-stranger-${RUN}`, 'user', 'approvals:act')
+      const denied = await uploadProcess(strangerToken, iid)
+      expect(denied.status).toBe(403)
+    })
+  })
+
+  // ===============================================================================================
+  // G-6 — bind atomicity + staged-instance integrity. Cross-instance bind refused; a genuine failure
+  // rolls back the WHOLE action (no approval_records row, no partial bind).
+  // ===============================================================================================
+  describe('G-6: bind atomicity + staged-instance integrity', () => {
+    it('an approver who staged against instance A cannot bind to instance B (rowCount-equality → 400, whole action rolled back)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iidA = await createInstance(requesterToken, templateId)
+      const iidB = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iidA)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const recordsBefore = Number((await pool().query('SELECT count(*)::int AS c FROM approval_records WHERE instance_id=$1', [iidB])).rows[0].c)
+      const crossBind = await jsonRequest(`/api/approvals/${iidB}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(crossBind.status, await crossBind.clone().text()).toBe(400)
+      const recordsAfter = Number((await pool().query('SELECT count(*)::int AS c FROM approval_records WHERE instance_id=$1', [iidB])).rows[0].c)
+      expect(recordsAfter).toBe(recordsBefore) // the WHOLE action (including the comment record) rolled back
+      const row = (await pool().query('SELECT status, instance_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(row).toMatchObject({ status: 'unbound', instance_id: null }) // untouched — still staged against A
+
+      // success control: binding to the CORRECT staged instance (A) works.
+      const okBind = await jsonRequest(`/api/approvals/${iidA}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [attId] },
+      })
+      expect(okBind.status, await okBind.clone().text()).toBe(200)
+      const boundRow = (await pool().query('SELECT status, instance_id, action_record_id FROM approval_attachments WHERE id=$1', [attId])).rows[0]
+      expect(boundRow.status).toBe('bound')
+      expect(boundRow.instance_id).toBe(iidA)
+      expect(boundRow.action_record_id).not.toBeNull()
+      const recordRow = (await pool().query(
+        'SELECT id FROM approval_records WHERE instance_id=$1 AND action=$2 ORDER BY id DESC LIMIT 1',
+        [iidA, 'comment'],
+      )).rows[0]
+      expect(String(recordRow.id)).toBe(String(boundRow.action_record_id))
+    })
+
+    it('a nonexistent id in the same request refuses the WHOLE action (400) — no partial bind', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const realId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(realId)
+      const fakeId = `att_${randomUUID()}`
+
+      const act = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [realId, fakeId] },
+      })
+      expect(act.status, await act.clone().text()).toBe(400)
+      const row = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [realId])).rows[0]
+      expect(row.status).toBe('unbound') // the REAL id was NOT bound either — all-or-nothing
+    })
+  })
+
+  // ===============================================================================================
+  // G-7 — staged rows are uploader-only until commit; participant-scoped after.
+  // ===============================================================================================
+  describe('G-7: staged rows are uploader-only until commit', () => {
+    it('an uncommitted (staged) attachment downloads for the uploader ONLY; after commit it opens to participants', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+
+      const staleParticipantAttempt = await jsonRequest(`/api/approval/attachments/${attId}/download`, requesterToken)
+      expect(staleParticipantAttempt.status).toBe(404) // requester is a real participant but NOT the uploader — staged, so refused
+
+      const uploaderDl = await jsonRequest(`/api/approval/attachments/${attId}/download`, approverToken)
+      expect(uploaderDl.status).toBe(200)
+
+      await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+
+      const afterCommit = await jsonRequest(`/api/approval/attachments/${attId}/download`, requesterToken)
+      expect(afterCommit.status).toBe(200) // now a participant can read it
+    })
+  })
+
+  // ===============================================================================================
+  // G-8 — process-scoped caps, independent of the requester's form envelope. Direct-SQL seeding for
+  // the OTHER kind's bytes (no need for real multi-MB HTTP uploads on either leg).
+  // ===============================================================================================
+  describe('G-8: process-scoped caps, independent of the form envelope', () => {
+    it('a huge BOUND form_field row on the instance does not block a legitimate small process bind', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      for (const id of await seedHugeBoundFormBytes(iid, REQUESTER, 49_000_000)) createdAttachmentIds.add(id)
+
+      const up1 = await uploadProcess(approverToken, iid)
+      expect(up1.status, await up1.clone().text()).toBe(201)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      const bind = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+      expect(bind.status, await bind.clone().text()).toBe(200)
+    })
+
+    // NOTE (P3-1, gate-audit recording): this asserts the SEQUENTIAL path only — each upload is
+    // awaited before the next fires, so `assertProcessUploadBudget`'s count is accurate at every
+    // check point and the 6th genuinely observes 5 already-staged files. It does NOT demonstrate a
+    // hard cap: the check is read-then-write with no lock, so N concurrent uploads racing the SAME
+    // budget can each observe a pre-upload count under the limit and each pass (TOCTOU-bypassable).
+    // That is the ratified position for this family, not a gap unique to this route — the shipped
+    // form-attachment route has no upload-time budget at all, and the reconciler's own docblock
+    // states parallel uploads can each pass the upload-time check. Bind-time re-check (G-5/G-6) is
+    // the authority; this upload-time leg is fail-fast-only, same status as `actorHasActiveSeatAtInstance`.
+    it('upload-time fail-fast (sequential only): the 6th of 6 SEQUENTIAL uploads for one instance/uploader is refused 413 once 5 are already staged; count unaffected by coexisting huge form bytes', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      for (const id of await seedHugeBoundFormBytes(iid, REQUESTER, 49_000_000)) createdAttachmentIds.add(id)
+
+      for (let i = 0; i < 5; i += 1) {
+        const up = await uploadProcess(approverToken, iid, { fileName: `f${i}.pdf` })
+        expect(up.status, `file ${i}: ${await up.clone().text()}`).toBe(201)
+        createdAttachmentIds.add(((await up.json()) as { id: string }).id)
+      }
+      const sixth = await uploadProcess(approverToken, iid, { fileName: 'f6.pdf' })
+      expect(sixth.status, await sixth.clone().text()).toBe(413)
+      expect((await sixth.json()).error).toBe('rejected')
+    })
+  })
+
+  // ===============================================================================================
+  // G-11 — values-free scoped correctly: error payloads carry no filename/uploader/size; the audit
+  // metadata carries the attachment ID only; an AUTHORIZED download still serves the real file_name.
+  // ===============================================================================================
+  describe('G-11: values-free scoping', () => {
+    it('a rejected (cap-exceeded) upload body carries no filename/uploader/size; the audit metadata carries the id only; an authorized download serves the real filename', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const freshIds: string[] = []
+      for (let i = 0; i < 5; i += 1) {
+        const up = await uploadProcess(approverToken, iid, { fileName: `g11-${i}.pdf` })
+        const id = ((await up.json()) as { id: string }).id
+        freshIds.push(id)
+        createdAttachmentIds.add(id)
+      }
+      const rejectedFileName = 'super-secret-filename-should-never-leak.pdf'
+      const sixth = await uploadProcess(approverToken, iid, { fileName: rejectedFileName })
+      expect(sixth.status).toBe(413)
+      const rejectedBodyText = JSON.stringify(await sixth.json())
+      expect(rejectedBodyText).not.toContain(rejectedFileName)
+      expect(rejectedBodyText).not.toContain(APPROVER)
+
+      const bindableId = freshIds[0]
+      const attFileNameRow = (await pool().query('SELECT file_name FROM approval_attachments WHERE id=$1', [bindableId])).rows[0]
+      const bind = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [bindableId] },
+      })
+      expect(bind.status, await bind.clone().text()).toBe(200)
+      const rec = (await pool().query(
+        `SELECT metadata FROM approval_records WHERE instance_id=$1 AND action='comment' ORDER BY id DESC LIMIT 1`,
+        [iid],
+      )).rows[0]
+      expect(rec.metadata).toMatchObject({ attachmentIds: [bindableId] })
+      expect(JSON.stringify(rec.metadata)).not.toContain(attFileNameRow.file_name)
+
+      const dl = await jsonRequest(`/api/approval/attachments/${bindableId}/download`, requesterToken)
+      expect(dl.status).toBe(200)
+      expect(dl.headers.get('content-disposition')).toContain(encodeURIComponent(attFileNameRow.file_name))
+    })
+  })
+
+  // ===============================================================================================
+  // G-13 — GC/reconciler reuse: an abandoned unbound process attachment is swept by the UNCHANGED
+  // sweepUnboundAttachments; a BOUND process attachment is never swept.
+  // ===============================================================================================
+  describe('G-13: GC reuse (unmodified sweepUnboundAttachments)', () => {
+    it('sweeps a backdated unbound process row; leaves a bound-and-ALSO-backdated process row untouched (the discriminator is status, not age)', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const staleId = `att_g13_stale_${RUN}`
+      await pool().query(
+        `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind, created_at)
+         VALUES ($1,'default',$2,NULL,'k-g13-stale','stale.pdf','application/pdf',10,'unbound','process', now() - interval '169 hours')`,
+        [staleId, APPROVER],
+      )
+      createdAttachmentIds.add(staleId)
+
+      const up1 = await uploadProcess(approverToken, iid)
+      const boundId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(boundId)
+      // G-13 (residual sweep, P3-2): the bind action's response was previously fired and
+      // discarded — assert it actually succeeded, or a broken bind would silently leave `boundId`
+      // unbound and this whole control would be vacuous (the exact G-1/P3-3 shape).
+      const bindRes = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [boundId] } })
+      expect(bindRes.status, await bindRes.clone().text()).toBe(200)
+
+      // De-confound the control from age (P3-2): a fresh `created_at` on the bound row would make
+      // the TTL arm exclude it on age alone, whatever its `status` — so the "sweep never touches
+      // bound rows" claim would hold vacuously even under a mutated status predicate. Backdating
+      // the bound row PAST the TTL forces the discriminator to be `status` alone.
+      await pool().query(`UPDATE approval_attachments SET created_at = now() - interval '169 hours' WHERE id = $1`, [boundId])
+      const preSweep = (await pool().query(
+        `SELECT status, (created_at <= now() - interval '169 hours') AS aged FROM approval_attachments WHERE id=$1`,
+        [boundId],
+      )).rows[0]
+      // A mis-targeted UPDATE (wrong id, wrong column) must red LOUDLY here, not silently restore
+      // the age confound this test exists to remove.
+      expect(preSweep).toMatchObject({ status: 'bound', aged: true })
+
+      // G-13(c): a FRESH (not backdated) unbound process row must survive the sweep on age alone —
+      // pins the OTHER arm of the TTL predicate, untested before this round.
+      const freshId = `att_g13_fresh_${RUN}`
+      await pool().query(
+        `INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind, created_at)
+         VALUES ($1,'default',$2,NULL,'k-g13-fresh','fresh.pdf','application/pdf',10,'unbound','process', now())`,
+        [freshId, APPROVER],
+      )
+      createdAttachmentIds.add(freshId)
+
+      await sweepUnboundAttachments(pool())
+
+      const staleRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [staleId])).rows[0]
+      expect(staleRow.status).toBe('deleted')
+      // The discriminator is `status` alone (bound never sweeps), NOT age — the row above is
+      // BOTH bound AND past the TTL window, and must still survive untouched.
+      const boundRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [boundId])).rows[0]
+      expect(boundRow.status).toBe('bound') // bound-frozen — the sweep never touches it
+      const freshRow = (await pool().query('SELECT status FROM approval_attachments WHERE id=$1', [freshId])).rows[0]
+      expect(freshRow.status).toBe('unbound') // G-13(c): too young for the TTL arm, untouched
+    })
+  })
+
+  // ===============================================================================================
+  // G-16 — read scope is a decided posture: ALL instance participants (gate 1) can read on BOTH
+  // /download and /refs; an approvals:act-only principal (no approvals:read) is refused (values-
+  // free 404) — the upload/read asymmetry is real, not accidental.
+  // ===============================================================================================
+  describe('G-16: read scope — all participants, act-only principal refused', () => {
+    it('an approvals:act-ONLY principal (not approvals:read) is refused readback on /download and /refs; a participant with approvals:read succeeds', async () => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const up1 = await uploadProcess(approverToken, iid)
+      const attId = ((await up1.json()) as { id: string }).id
+      createdAttachmentIds.add(attId)
+      await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, { method: 'POST', body: { action: 'comment', attachmentIds: [attId] } })
+
+      // ACT_ONLY: a real participant (seeded as a CC target) but with ONLY approvals:act, no read.
+      await pool().query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, from_status, to_status, from_version, to_version, metadata)
+         VALUES ($1,'cc','system','system','pending','pending',1,1,$2::jsonb)`,
+        [iid, JSON.stringify({ targetType: 'user', targetId: ACT_ONLY })],
+      )
+      const actOnlyToken = await authToken(ACT_ONLY, 'user', 'approvals:act')
+      const dlRefused = await jsonRequest(`/api/approval/attachments/${attId}/download`, actOnlyToken)
+      expect(dlRefused.status).toBe(404)
+      const refsRefused = await jsonRequest('/api/approval/attachments/refs', actOnlyToken, {
+        method: 'POST',
+        body: { instanceId: iid, ids: [attId] },
+      })
+      expect(refsRefused.status).toBe(404)
+
+      // Positive control: the requester (approvals:read via admin default) succeeds on both.
+      const dlOk = await jsonRequest(`/api/approval/attachments/${attId}/download`, requesterToken)
+      expect(dlOk.status).toBe(200)
+      const refsOk = await jsonRequest('/api/approval/attachments/refs', requesterToken, {
+        method: 'POST',
+        body: { instanceId: iid, ids: [attId] },
+      })
+      expect(refsOk.status).toBe(200)
+      expect((await refsOk.json()).attachments).toEqual([
+        expect.objectContaining({ id: attId, tombstone: false, fieldId: null }),
+      ])
+    })
+  })
+
+  // ===============================================================================================
+  // G-12 — legacy OFF is a byte-for-byte no-op on BOTH gates.
+  //   (a) route registration: a SECOND boot without the flag never mounts the process route.
+  //   (b) dispatch: with the flag OFF, a comment carrying a bogus attachmentIds still SUCCEEDS and
+  //       binds nothing; with the flag ON, the SAME bogus id 400s (rowCount-equality) — the
+  //       discriminating pair (avoids the G-12(b) vacuity hazard: this asserts through the SERVICE
+  //       dispatch path via the real HTTP route, which THIS slice's own routes/approvals.ts change
+  //       makes a genuine test — forwarding was previously nonexistent).
+  // ===============================================================================================
+  describe('G-12: legacy OFF is a byte-for-byte no-op', () => {
+    it('(a) a flag-OFF boot never registers the process-upload route (404, not 403/401)', async () => {
+      offServer = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      try {
+        await offServer.start()
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      const offAddress = offServer.getAddress()
+      const offPort = offAddress && typeof offAddress === 'object' ? offAddress.port : undefined
+      expect(offPort).toBeTruthy()
+      offBaseUrl = `http://127.0.0.1:${offPort}`
+      const requesterToken = await authToken(REQUESTER)
+      const res = await uploadProcess(requesterToken, 'whatever', { base: offBaseUrl })
+      // No process router mounted at all ⇒ Express's own 404 (not this route's typed JSON refusal).
+      expect(res.status).toBe(404)
+
+      // Positive control: the SAME flag-ON server DOES register it (a 401/403/400 — never a bare 404
+      // from an unmounted route — proves the route exists there).
+      const onRes = await fetch(`${baseUrl}/api/approval/attachments/process`, { method: 'POST' })
+      expect(onRes.status).not.toBe(404)
+    })
+
+    it('(b) flag OFF: a comment with a BOGUS attachmentIds still succeeds (ignored, byte-for-byte); flag ON: the SAME bogus id 400s', async () => {
+      // dispatchAction reads isApprovalAttachmentsEnabled(process.env) FRESH at call time (never
+      // cached at module load — this is the load-bearing design property G-12 depends on), so the
+      // discriminating pair is obtained by flipping the flag AROUND two calls on the SAME
+      // already-booted (always-registered dispatchAction) server — no second boot needed for (b).
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+      const bogusId = `att_${randomUUID()}`
+
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      let offResult: Response
+      try {
+        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        offResult = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+          method: 'POST',
+          body: { action: 'comment', comment: 'off flag', attachmentIds: [bogusId] },
+        })
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      expect(offResult.status, await offResult.clone().text()).toBe(200) // succeeds — the bogus id is IGNORED
+      const boundCountAfterOff = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+
+      // ON dispatch with the SAME bogus id: rowCount-equality throws → 400 (the discriminating half).
+      const onResult = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+        method: 'POST',
+        body: { action: 'comment', attachmentIds: [bogusId] },
+      })
+      expect(onResult.status, await onResult.clone().text()).toBe(400)
+      const boundCountAfterOn = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+      expect(boundCountAfterOn).toBe(boundCountAfterOff) // the ON 400 bound nothing either — no partial bind
+    })
+
+    // NIT-1 (residual sweep, G-12 protection proof, MUT-NIT1-a): the SAME two MALFORMED
+    // attachmentIds payloads that 400 flag-ON must still 200 flag-OFF — a byte-for-byte no-op
+    // asserted at ROW level (metadata has no `attachmentIds` key at all, bound count unchanged),
+    // not merely equal status. §L9-D: "dispatched EXACTLY as it is today."
+    it.each([
+      { label: 'string (not an array)', attachmentIds: 'att_x' as unknown as string[] },
+      { label: 'blank-array (every element unusable)', attachmentIds: ['', '   '] },
+    ])('(c) flag OFF: comment with a MALFORMED attachmentIds ($label) still succeeds 200 — row-level parity, not just status', async ({ attachmentIds }) => {
+      const adminToken = await authToken(`l9-admin-${RUN}`)
+      const requesterToken = await authToken(REQUESTER)
+      const approverToken = await authToken(APPROVER)
+      const templateId = await publishPlainTemplate(adminToken)
+      const iid = await createInstance(requesterToken, templateId)
+
+      const boundCountBefore = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+
+      const savedFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      let offResult: Response
+      try {
+        delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+        offResult = await jsonRequest(`/api/approvals/${iid}/actions`, approverToken, {
+          method: 'POST',
+          body: { action: 'comment', comment: 'off flag malformed rider', attachmentIds },
+        })
+      } finally {
+        process.env.APPROVAL_ATTACHMENTS_ENABLED = savedFlag
+      }
+      expect(offResult.status, await offResult.clone().text()).toBe(200)
+
+      const boundCountAfterOff = Number((await pool().query(`SELECT count(*)::int AS c FROM approval_attachments WHERE bind_kind='process' AND status='bound'`)).rows[0].c)
+      expect(boundCountAfterOff).toBe(boundCountBefore) // no bind attempted at all
+
+      const rec = (await pool().query(
+        `SELECT metadata FROM approval_records WHERE instance_id=$1 AND action='comment' ORDER BY created_at DESC LIMIT 1`,
+        [iid],
+      )).rows[0] as { metadata: Record<string, unknown> }
+      // The malformed value never even reaches the metadata surface — no `attachmentIds` key at
+      // all, not merely an empty/rejected one.
+      expect(Object.prototype.hasOwnProperty.call(rec.metadata, 'attachmentIds')).toBe(false)
+    })
+  })
+})
+
+// =================================================================================================
+// G-14 — DDL relaxation + ordering + rollback. Isolated schema (house rule for shared-DB
+// integration; mirrors approval-attachment-scan-purge-upgrade-migration.db.test.ts's technique),
+// applying the REAL migration functions directly via Kysely — not a psql transcript.
+// =================================================================================================
+describe(process.env.DATABASE_URL ? 'G-14: migration relaxation + ordering + rollback (isolated schema)' : 'G-14 (skipped, no DATABASE_URL)', () => {
+  const dbUrl = process.env.DATABASE_URL
+  const maybeIt = dbUrl ? it : it.skip
+  let adminPool: Pool
+  let schema: string
+  let testPool: Pool
+  let testDb: Kysely<unknown>
+
+  async function setup(): Promise<void> {
+    adminPool = new Pool({ connectionString: dbUrl })
+    schema = `l9_g14_${randomUUID().replace(/-/g, '')}`
+    await adminPool.query(`CREATE SCHEMA "${schema}"`)
+    testPool = new Pool({ connectionString: dbUrl, options: `-c search_path=${schema}` })
+    testDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: testPool }) })
+    await sql`CREATE TABLE approval_instances (id text PRIMARY KEY, status text NOT NULL DEFAULT 'pending')`.execute(testDb)
+    await createAttachmentsUp(testDb)
+  }
+
+  async function teardown(): Promise<void> {
+    await testDb.destroy()
+    await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+    await adminPool.end()
+  }
+
+  maybeIt('ordering: this migration sorts after the ratified G-14 anchor zzzz20260818120000', async () => {
+    // NARROWED 2026-08-22 (signal-PR gate P1-1, aligned to RATIFIED text): the previous form asserted
+    // mine > EVERY other file in the directory — an authoring-time hygiene claim G-14 never made, whose
+    // own comment described the opposite of its behaviour. Once this suite entered the required
+    // test (20.x) lane, that form would red every future PR landing a later-dated migration anywhere
+    // in the repo (proven by the gate with a no-op probe migration). G-14 rules exactly one ordering
+    // property: the relaxation migration sorts after zzzz20260818120000. Assert that, anchored to the
+    // real directory (both files must exist — the scan negative control is preserved).
+    // ANCHOR NOTE: zzzz20260818120000 is create_approval_usable_member_groups (Lock-1), NOT the
+    // origin of the field_id CHECK (that is zzzz20260715210000_create_approval_attachments). G-14
+    // names this anchor because it was the lexicographic TIP of the directory at Lock-9's
+    // ratification baseline — do NOT "correct" it to the CHECK's origin file; that would silently
+    // weaken the ratified ordering claim.
+    const { readdirSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'db', 'migrations')
+    const mine = 'zzzz20260822130000_approval_attachments_process_binding.ts'
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts') || f.endsWith('.sql'))
+    expect(files.length).toBeGreaterThan(100) // scan negative control — the directory really was read
+    expect(files.includes(mine)).toBe(true) // the relaxation migration exists on disk
+    const base = files.filter((f) => f.startsWith('zzzz20260818120000'))
+    expect(base.length).toBe(1) // the base constraint migration exists, uniquely
+    expect(mine > base[0]).toBe(true) // the ratified G-14 ordering: relaxation AFTER base
+  })
+
+  maybeIt('deploy precondition: BEFORE this migration, a bind_kind=process/field_id=NULL write hard-fails on NOT NULL', async () => {
+    await setup()
+    try {
+      await expect(
+        sql`INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status)
+            VALUES ('att_pre', 'org1', 'u1', NULL, 'k1', 'f.pdf', 'application/pdf', 10, 'unbound')`.execute(testDb),
+      ).rejects.toThrow(/null value in column "field_id"/)
+    } finally {
+      await teardown()
+    }
+  })
+
+  maybeIt('after the migration: process/NULL accepted, form_field/NULL still rejected; down REFUSES while a process row exists, then succeeds once purged', async () => {
+    await setup()
+    try {
+      await processBindingUp(testDb)
+
+      await sql`INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind)
+                 VALUES ('att_ok', 'org1', 'u1', NULL, 'k2', 'f.pdf', 'application/pdf', 10, 'unbound', 'process')`.execute(testDb)
+      await expect(
+        sql`INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status, bind_kind)
+            VALUES ('att_bad', 'org1', 'u1', NULL, 'k3', 'f.pdf', 'application/pdf', 10, 'unbound', 'form_field')`.execute(testDb),
+      ).rejects.toThrow(/approval_att_field_nonblank/)
+
+      // down REFUSES while a process row exists.
+      await expect(processBindingDown(testDb)).rejects.toThrow(/process rows exist/)
+
+      // purge, then down succeeds and restores the original shape.
+      await sql`DELETE FROM approval_attachments WHERE id = 'att_ok'`.execute(testDb)
+      await processBindingDown(testDb)
+      await expect(
+        sql`INSERT INTO approval_attachments (id, org_id, uploader_id, field_id, storage_key, file_name, mime_type, size_bytes, status)
+            VALUES ('att_post', 'org1', 'u1', NULL, 'k4', 'f.pdf', 'application/pdf', 10, 'unbound')`.execute(testDb),
+      ).rejects.toThrow(/null value in column "field_id"/)
+    } finally {
+      await teardown()
+    }
+  })
+})

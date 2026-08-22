@@ -88,6 +88,8 @@ vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
     hasFeature: () => true,
     loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    isFeatureOverrideAllowed: () => false,
+    setLocalFeatureOverride: vi.fn(),
   }),
 }))
 vi.mock('../src/views/attendance/AttendanceOverview.vue', () => ({

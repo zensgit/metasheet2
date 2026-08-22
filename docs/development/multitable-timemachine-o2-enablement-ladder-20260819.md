@@ -13,6 +13,18 @@
 > 原证据（prod run `31650980676`、both run `31651250987`，绑镜像 `12f1f8c466`）保留为历史记录，
 > 但**已不是当前镜像的证据**——L0 判据以上面这组为准。
 
+> **⚠️ 指纹变更公告（2026-08-21，migration `zzzz20260821120000_recovery_authority_functions_fix_search_path`）**：
+> 该迁移对 6 个 recovery-authority 函数做了 search_path 加固（CVE-2018-1058 型 shadow 根治）——
+> 3 个 trigger 函数体内的 helper 调用改为 schema-qualified（`public.metasheet_try_recovery_authority_*`），
+> 且 6 个函数全部加上固定 `SET search_path = pg_catalog, public`；containment helper 同时把
+> `proconfig`（即该 search_path）纳入指纹。**结果：functions 指纹从 `14c180aa…` 变为
+> `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498`（两次全新迁移字节稳定）。
+> triggers 指纹 `8c1be0b0…` 不变**（本迁移不发任何 trigger DDL，9/9 仍出厂 DISABLED，OID 保留）。
+> 因此：下文凡描述**当前镜像/全新迁移库 EXPECTED functions 指纹**处，随该迁移部署后应读
+> `e4a78f6c…`；而**已注明日期的主机 run（`32321464042`）与 §5.1 演练（2026-08-20）**保留其
+> 观测到的 pre-fix `14c180aa…` 作为 point-in-time 历史证据，不改写。行为不变（同锁语义、同 40001
+> raise、同 DISABLED 姿态）——只硬化了名字解析。
+
 ## 0. 为什么需要阶梯
 
 closeout 落的是**默认关闭的基座**。把它变成活能力涉及两类互相独立的开关：
@@ -93,7 +105,8 @@ recovery busy-exhaustion 率在口径内。
 
 flag 级：从 compose/env 移除该 flag → 重启 → `predeploy-flags` 验证该 flag CONTAINED。
 trigger 级（大红开关）：9/9 `DISABLE TRIGGER` → `postdeploy-full` 验证回到出厂 inert
-指纹（`8c1be0b0…`/`14c180aa…` 仍应精确匹配——DISABLE 不改函数体）。
+指纹（triggers `8c1be0b0…` / functions `e4a78f6c…`（随 `zzzz20260821120000` 起，pre-fix 为
+`14c180aa…`，见上「指纹变更公告」）仍应精确匹配——DISABLE 不改函数体）。
 回滚不需要迁移、不丢数据（authority locks 表保留，无消费者时惰性）。
 
 ### 5.1 演练记录（2026-08-20，作者在全新 PG15.17 库上**独立复现**，非只信实现车道 transcript）

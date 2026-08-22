@@ -7,20 +7,27 @@ import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
 /**
  * GET /api/approvals/:id/history — guard alignment, real-DB acceptance.
  *
- * `/history` (routes/approval-history.ts) now carries the SAME guard the sibling detail route
- * (`GET /api/approvals/:id`, routes/approvals.ts) has always applied: `authenticate` followed by
- * `rbacGuard('approvals', 'read')`. Neither route adds a per-instance predicate on top of that — this
- * suite proves the shared guard is load-bearing (a principal without `approvals:read` is denied,
- * values-free, before any `approval_records` row is read) and that legitimate readers — a principal
- * holding `approvals:read`, and an admin — are unaffected, whether or not they are the instance's
- * requester.
+ * `/history` (routes/approval-history.ts) carries the SAME PERMISSION guard the sibling detail
+ * route (`GET /api/approvals/:id`, routes/approvals.ts) has always applied: `authenticate`
+ * followed by `rbacGuard('approvals', 'read')`. #5024 (`a0edbe39a4`) is what brought the two routes
+ * to that permission parity, and its own body said "neither this route nor its sibling adds a
+ * per-instance predicate on top of rbacGuard" — TRUE at the time, no longer true after Lock-10
+ * (S1). `canReadApprovalInstance` now runs AFTER this guard on BOTH routes (OD-S1-12): a principal
+ * WITHOUT `approvals:read` still gets 403 here (this guard is leg-1 and runs first — unchanged); a
+ * principal WITH it who is not a participant now gets 404 `APPROVAL_NOT_FOUND` instead of 200. This
+ * suite is the regression harness for BOTH legs: the guard's two 403s and its 401 are pinned
+ * unchanged below (leg-1, #5024's contract); four cases that used to return 200 for a non-
+ * participant are re-cast to 404 (leg-2, S1's narrowing) — see each test's own comment for why.
  *
- * NOTE: this suite does NOT call `grantApprovalWriteForIntegrationActor` (the `permissions` +
- * `user_permissions` seeding helper other approval real-DB suites use) and does not insert any
- * `users` row. Under the trusted-claims path (see `devToken` below) the dev-token's own `perms`
- * query param IS the grant — RBAC table rows are never consulted for a principal whose claims
- * already resolve the permission check. Do not "fix" the absence of a grant helper here; it is
- * absent on purpose.
+ * NOTE, AMENDED: this suite still does NOT call `grantApprovalWriteForIntegrationActor` (the
+ * `permissions` + `user_permissions` seeding helper other approval real-DB suites use) — that
+ * remains true and deliberate; RBAC_TOKEN_TRUST's trusted-claims path is still what satisfies
+ * `rbacGuard` here, never a DB permission row. What DID change: the "admin reader path" test below
+ * now seeds a real `users` row, because Lock-10's admin arm (OD-S1-8) is DB-backed only — a JWT
+ * `role: 'admin'` claim with no matching `users` row no longer bypasses anything. That is not a
+ * grant-helper reintroduction; it is what makes THIS test actually exercise OD-S1-8 rather than
+ * (as it did before this slice) coincidentally passing on the trusted-claims permission check
+ * alone. The 403/403/401 tests remain seed-free by design.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -64,6 +71,7 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
   let baseUrl = ''
   const pool = () => poolManager.get()
   const createdInstanceIds: string[] = []
+  const createdUserIds: string[] = []
 
   beforeAll(async () => {
     expect(await canListenOnEphemeralPort()).toBe(true)
@@ -81,6 +89,9 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
       if (createdInstanceIds.length > 0) {
         await pool().query(`DELETE FROM approval_records WHERE instance_id = ANY($1::text[])`, [createdInstanceIds])
         await pool().query(`DELETE FROM approval_instances WHERE id = ANY($1::text[])`, [createdInstanceIds])
+      }
+      if (createdUserIds.length > 0) {
+        await pool().query(`DELETE FROM users WHERE id = ANY($1::text[])`, [createdUserIds])
       }
     } finally {
       await server?.stop()
@@ -154,7 +165,7 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     expect(JSON.parse(bodyText)).toEqual({ error: 'Insufficient permissions' })
   })
 
-  it('POSITIVE CONTROL: the SAME shape of principal, granted approvals:read, reads the history — isolates the guard as the cause of the negatives above', async () => {
+  it('S1 NARROWING (was POSITIVE CONTROL, 200): granted approvals:read but NOT a participant — the guard alone used to be enough (isolating it as the cause of the two 403s above); now canReadApprovalInstance denies with 404, exactly OD-S1-12\'s narrowing', async () => {
     const grantedId = `hist-guard-granted-${TS}`
     const requesterId = `hist-guard-req-b-${TS}`
     const marker = `MARKER-B-${TS}`
@@ -163,12 +174,13 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     const token = await devToken(baseUrl, grantedId, 'viewer', 'approvals:read')
     const response = await getHistory(baseUrl, instanceId, token)
 
-    expect(response.status).toBe(200)
-    const body = (await response.json()) as { data: { items: Array<{ comment: string | null }> } }
-    expect(body.data.items.some((item) => item.comment === marker)).toBe(true)
+    expect(response.status).toBe(404)
+    const bodyText = await response.text()
+    expect(bodyText).not.toContain(marker)
+    expect(JSON.parse(bodyText)).toEqual({ ok: false, error: { code: 'APPROVAL_NOT_FOUND', message: 'Approval instance not found' } })
   })
 
-  it('POSITIVE CONTROL: the approvals:* wildcard grant also satisfies the guard (hasPermissionCode\'s resource-wildcard arm)', async () => {
+  it('S1 NARROWING (was POSITIVE CONTROL, 200): the approvals:* wildcard grant still satisfies the PERMISSION guard (hasPermissionCode\'s resource-wildcard arm, unchanged) — but a non-participant is now denied by canReadApprovalInstance at 404, not admitted at 200', async () => {
     const grantedId = `hist-guard-wildcard-${TS}`
     const requesterId = `hist-guard-req-b2-${TS}`
     const marker = `MARKER-B2-${TS}`
@@ -177,17 +189,29 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     const token = await devToken(baseUrl, grantedId, 'viewer', 'approvals:*')
     const response = await getHistory(baseUrl, instanceId, token)
 
-    expect(response.status).toBe(200)
-    const body = (await response.json()) as { data: { items: Array<{ comment: string | null }> } }
-    expect(body.data.items.some((item) => item.comment === marker)).toBe(true)
+    expect(response.status).toBe(404)
+    const bodyText = await response.text()
+    expect(bodyText).not.toContain(marker)
+    expect(JSON.parse(bodyText)).toEqual({ ok: false, error: { code: 'APPROVAL_NOT_FOUND', message: 'Approval instance not found' } })
   })
 
-  it('admin reader path still works (matches the sibling detail route\'s admin bypass)', async () => {
+  it('admin reader path still works — but now proves OD-S1-8 (DB-backed admin), not the trusted JWT claim: seeding a REAL users row is the fix, not a reintroduction of the grant helper this suite deliberately omits elsewhere', async () => {
     const requesterId = `hist-guard-req-c-${TS}`
     const marker = `MARKER-C-${TS}`
     const instanceId = await seedInstanceWithComment(requesterId, marker)
 
-    const token = await devToken(baseUrl, `hist-guard-admin-${TS}`, 'admin', '*:*')
+    const adminId = `hist-guard-admin-${TS}`
+    // Pre-S1: the trusted `role: 'admin'` JWT claim was already sufficient at the OLD guard
+    // (rbacGuard alone). Post-S1: canReadApprovalInstance's admin arm (OD-S1-8) is DB-backed
+    // only — a JWT-only admin claim with no matching `users` row does not admit (see the
+    // sibling G-S1-7 NARROWING(i) test in approval-instance-readability-s1-consumers.db.test.ts
+    // for the isolated before/after). Seed the row so this test proves the admin arm for real.
+    createdUserIds.push(adminId)
+    await pool().query(
+      `INSERT INTO users (id, email, name, password_hash, is_active, is_admin) VALUES ($1, $1||'@example.test', $1, 'x', TRUE, TRUE)`,
+      [adminId],
+    )
+    const token = await devToken(baseUrl, adminId, 'admin', '*:*')
     const response = await getHistory(baseUrl, instanceId, token)
 
     expect(response.status).toBe(200)
@@ -195,7 +219,7 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     expect(body.data.items.some((item) => item.comment === marker)).toBe(true)
   })
 
-  it('the instance requester, holding approvals:read, still reads their own history', async () => {
+  it('the instance requester, holding approvals:read, still reads their own history — arm 1 (requester) fires unconditionally, no org/DB-row seeding needed (the org pin ships OFF by default — see the predicate module\'s docblock)', async () => {
     const requesterId = `hist-guard-req-d-${TS}`
     const marker = `MARKER-D-${TS}`
     const instanceId = await seedInstanceWithComment(requesterId, marker)
