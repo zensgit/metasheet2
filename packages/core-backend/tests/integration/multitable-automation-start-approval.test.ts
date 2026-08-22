@@ -84,6 +84,17 @@ async function seedUsers(): Promise<void> {
      ON CONFLICT DO NOTHING`,
     [REQUESTER],
   )
+  // Lock-11 §10 arm (a) fixture delta (§11): REQUESTER is the ONLY identity in this file ever
+  // nominated as the start_approval keying user (rule.createdBy AND every non-null
+  // triggerActorId across the file resolve to REQUESTER — NO_APPROVAL_PERMISSION is a permission
+  // denial fixture that 403s before the derivation slot, so it deliberately gets no membership).
+  // Without this, every real create in this file 422s (APPROVAL_ORG_UNRESOLVED) before this
+  // suite's own W6-1 bridge/writeback assertions run.
+  await q(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [REQUESTER],
+  )
 }
 
 function approvalTemplateRequest() {

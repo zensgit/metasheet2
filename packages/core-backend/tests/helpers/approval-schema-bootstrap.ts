@@ -558,4 +558,36 @@ export async function grantApprovalWriteForIntegrationActor(userId: string): Pro
      ON CONFLICT DO NOTHING`,
     [userId],
   )
+  await grantApprovalOrgMembership(userId)
+}
+
+/**
+ * Lock-11 §10 arm (a) fixture delta (§11 "Class A"): every integration fixture mints its identity
+ * through `GET /api/auth/dev-token`, which writes no `user_orgs` row (§11 root cause). Under arm
+ * (a), a requester with zero active `user_orgs` memberships 422s (`APPROVAL_ORG_UNRESOLVED`) at
+ * create — so every fixture that reaches `POST /api/approvals` / `startApproval` needs exactly
+ * ONE active membership, matching the POST-(D-8β) production shape the ordering in Lock-11 §10.2
+ * requires before this writer slice may merge (the zero-membership population is emptied first).
+ *
+ * Folded into `grantApprovalWriteForIntegrationActor` (called above) rather than added at each of
+ * the ~44 call sites individually — see the Lock-11 W-1/W-2 implementation spec §11 "Recommended
+ * fixture delta". Exported separately too: a handful of suites seed `approvals:write` inline
+ * (not via `grantApprovalWriteForIntegrationActor`) and call this directly instead (see e.g.
+ * `approval-record-link.db.test.ts`).
+ *
+ * `ON CONFLICT ... DO UPDATE SET is_active = TRUE` (not DO NOTHING): a suite that previously
+ * deactivated this same (user, org) pair to test some OTHER negative must not leave a stale
+ * inactive row here that silently reintroduces a zero-membership fixture.
+ *
+ * Deliberately NOT folded into the production `dev-token` route (routes/auth.ts) — that is
+ * production code, and doing so would re-import the very admission-by-default this slice's arm
+ * (a) refuses (W4-PRE-1 posture). This is a TEST-ONLY fixture helper.
+ */
+export async function grantApprovalOrgMembership(userId: string, orgId = 'default'): Promise<void> {
+  const pool = poolManager.get()
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [userId, orgId],
+  )
 }
