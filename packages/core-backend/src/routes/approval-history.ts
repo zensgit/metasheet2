@@ -10,6 +10,7 @@ import type { ApprovalBridgePlmAdapter } from '../services/approval-bridge-types
 import { canReadApprovalInstance } from '../services/approval-instance-readability'
 import { parsePagination } from '../util/response'
 import { APPROVAL_POLICY_DENIED_ACTION } from '../types/approval-product'
+import { isApprovalAttachmentsEnabled } from './approval-attachments'
 
 interface ApprovalHistoryRouterOptions {
   injector?: Injector
@@ -70,6 +71,47 @@ function approvalNotFoundResponse() {
       message: 'Approval instance not found',
     },
   }
+}
+
+/**
+ * Lock-9 FE read-half companion (#5099 gate P1-1) — ADDITIVE ONLY. Pulls exactly ONE key,
+ * `attachmentIds`, out of a `metadata->'attachmentIds'` SQL projection (never the whole `metadata`
+ * object, which can carry policy/internal keys — see this route's docblock further down). The
+ * platform branch's row shape stays snake_case / no other new columns; this is the sole new field.
+ *
+ * Field-path decision (read against `origin/claude/approval-lock9-fe-20260822` at HEAD, PR #5099):
+ * `attachmentRefs.ts`'s `collectHistoryAttachmentRefIds` reads `item.metadata.attachmentIds` (an
+ * object, not a top-level array) — so a bare top-level `attachmentIds` field here would silently
+ * miss the FE's actual read path. This emits `metadata: { attachmentIds }` with ONLY that one key
+ * inside `metadata`, and ONLY when the array is non-empty; an item with no rider ids gets no
+ * `metadata` key at all (omitted, never `metadata: {}` or `metadata: { attachmentIds: [] }`) — the
+ * FE's own `if (!metadata || typeof metadata !== 'object') continue` / `if (!Array.isArray(ids))
+ * continue` guards treat an absent `metadata` key exactly the same as an empty one, so this omission
+ * is a pure size/no-op choice, not a behavior fork.
+ *
+ * Defensive against the jsonb value arriving already-parsed (the common case, `pg`'s default type
+ * parser) OR as a raw JSON string (driver/type-parser configuration is not re-verified here) — either
+ * shape is handled, and anything else (null, object, malformed string) yields `[]`. Every element is
+ * filtered to `string` — a hostile/corrupt metadata blob can never smuggle a non-string value out.
+ * Fix-round P3-1 (post-#5104-gate): both branches — the array-filter AND the `JSON.parse` string
+ * path — are exercised by dedicated real-DB assertions in C-18 (`approval-comments.db.test.ts`), not
+ * only described here; a mutation that deletes the `.filter(...)` or the `JSON.parse` branch now
+ * turns a test red.
+ *
+ * Gated by `isApprovalAttachmentsEnabled()` at the call site below (fix-round P2-1): this function
+ * itself does no gating so it stays a pure parser, independently testable.
+ */
+function extractRiderAttachmentIds(raw: unknown): string[] {
+  let value: unknown = raw
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      return []
+    }
+  }
+  if (!Array.isArray(value)) return []
+  return value.filter((entry): entry is string => typeof entry === 'string')
 }
 
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
@@ -161,6 +203,11 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
         [id, APPROVAL_POLICY_DENIED_ACTION],
       )
       const total = Number(countRes.rows[0]?.c || 0)
+      // Lock-9 FE read-half companion — the ONLY new projection is `metadata->'attachmentIds'`
+      // (a single jsonb key path, never `metadata` itself). This changes neither the WHERE clause
+      // (S2's pointer-row exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries
+      // above/below) nor the row set nor the ORDER/LIMIT/OFFSET — only one additional expression is
+      // read per row, aliased so it never collides with a real column name.
       const { rows } = await pool.query(
         `SELECT
            id,
@@ -173,7 +220,8 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
            to_status,
            COALESCE(to_version, version) AS version,
            from_version,
-           to_version
+           to_version,
+           metadata->'attachmentIds' AS lock9_attachment_ids_raw
          FROM approval_records
          WHERE instance_id = $1
            AND action <> $4
@@ -183,10 +231,33 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
         [id, pageSize, offset, APPROVAL_POLICY_DENIED_ACTION],
       )
 
+      // The row shape is bounded by the explicit SELECT list above (no bare `metadata` column is
+      // ever projected there) — the destructure below only strips the ONE internal
+      // `lock9_attachment_ids_raw` alias so it can never itself leak onto the wire; it is not what
+      // keeps other metadata keys out (the SELECT list already never asked the DB for them).
+      //
+      // Fix-round P2-1: gated on `isApprovalAttachmentsEnabled()`, checked ONCE per request (the
+      // flag can't change mid-request) so that with the flag OFF this map produces byte-for-byte
+      // the SAME `item` shape as before this field existed — no `metadata` key is ever attached,
+      // regardless of what a row's `lock9_attachment_ids_raw` holds. This matches the "Flag OFF
+      // remains a byte-for-byte no-op" doctrine this route's SQL comment above already claimed but
+      // did not, until now, enforce in code (see `isApprovalAttachmentsEnabled` in
+      // `./approval-attachments`, the SAME flag `/refs`, `/download` and `dispatchAction` gate on).
+      const attachmentsEnabled = isApprovalAttachmentsEnabled()
+      const items = rows.map((row) => {
+        const {
+          lock9_attachment_ids_raw: attachmentIdsRaw,
+          ...item
+        } = row as Record<string, unknown> & { lock9_attachment_ids_raw?: unknown }
+        if (!attachmentsEnabled) return item
+        const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
+        return attachmentIds.length > 0 ? { ...item, metadata: { attachmentIds } } : item
+      })
+
       return res.json({
         ok: true,
         data: {
-          items: rows,
+          items,
           page,
           pageSize,
           total,

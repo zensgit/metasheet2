@@ -5,7 +5,7 @@ name: Approval real-DB acceptance (S2 comments)
 # `/history` reader excludes comment audit-pointer rows on BOTH count and page), and the G-S1-9
 # notify seam (fail-closed default).
 #
-#   - tests/integration/approval-comments.db.test.ts — the full real-DB gate battery (C-1..C-17):
+#   - tests/integration/approval-comments.db.test.ts — the full real-DB gate battery (C-1..C-21):
 #     list/create/edit/delete authorization (S1 predicate reused, never re-derived), D3 widening
 #     (CC target + past actor, non-acting-assignee, can write), the pointer-row dual-write
 #     invariant (`approval_records.comment IS NULL` on the pointer row), the tombstone shape,
@@ -13,6 +13,10 @@ name: Approval real-DB acceptance (S2 comments)
 #     canReadApprovalInstance, /history arm (i) exclusion (both the pointer-row negative AND the
 #     legacy-act-path-row positive, per the named §5.1 anti-pattern gate), the reply-refusal
 #     NOT-copied gate (C-15), check-ordering (C-16), and the notify seam (G-S1-9, mutation-proven).
+#     C-18..C-21 (#5104, Lock-9 FE read-half companion to #5099 gate P1-1) add the additive
+#     `/history` `metadata.attachmentIds` field: scoped-read + redaction (C-18), the
+#     APPROVAL_ATTACHMENTS_ENABLED flag-OFF byte-for-byte no-op (C-19), and the
+#     `extractRiderAttachmentIds` parser's non-string-filter and JSON.parse-string branches (C-20/21).
 #
 # S2 does NOT touch APPROVAL_S1_ORG_PIN_ENABLED anywhere in this lane — the org pin stays the
 # shipped-OFF default (Lock-10 §5.1.2); S2 reaches org scoping only through the unmodified S1

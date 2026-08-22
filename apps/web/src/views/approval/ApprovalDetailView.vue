@@ -1372,13 +1372,22 @@ const attachmentFields = computed<AttachmentFieldDisplay[]>(() => {
  * 'table'`, a separate projection of the same `store.history`) deliberately does NOT get this
  * block in this slice — see the PR body.
  *
- * DISCLOSED gap (fix round, gate P1-1, see PR body): `item.metadata` only carries
- * `attachmentIds` on PLM-bridged instances today (`ApprovalBridgeService.loadLocalHistory` already
- * returns the correct `UnifiedApprovalHistoryDTO` shape). The platform branch of
- * `GET /api/approvals/:id/history` has no `metadata` column in its projection at all, so this
- * block is a correctly-implemented no-op against every platform instance until a backend
- * companion reconciles that route's row shape with the DTO — not a bug in this function, but this
- * function alone cannot make it render for platform instances.
+ * STALE-COMMENT UPDATE (#5104, the backend companion this docblock originally asked for): the
+ * platform branch of `GET /api/approvals/:id/history` now projects ONE metadata key —
+ * `metadata: { attachmentIds }`, ONLY when a row's rider ids are non-empty — so THIS function
+ * (which reads exactly `item.metadata?.attachmentIds`) now resolves refs for a platform instance's
+ * rider row too, not only a PLM-bridged one. That is the FULL extent of the reconciliation: #5104
+ * is additive-only and deliberately does NOT touch any other metadata key or rename any snake_case
+ * field. Concretely still open, same as before #5104 (deliberately NOT line-pinned — these move):
+ *   - `item.metadata?.nodeKey` is NEVER populated by the platform branch, so the `timelineBranchGroups`
+ *     parallel-branch grouping above, the "节点: …" `approval-detail__meta-badge` span guarded by
+ *     `item.metadata?.nodeKey` (both timeline renders), and `recordTableRows`' `nodeName` field all
+ *     stay PLM-only — camelCase/snake_case-DTO-shaped work, out of #5104's additive-only scope.
+ *   - Real `actor_name`/`occurred_at` vs. a synthesized display still needs the same
+ *     snake_case-row-vs-camelCase-DTO reconciliation this docblock originally flagged; #5104 did
+ *     not touch those fields either.
+ * So: attachmentIds-only refs now render for platform instances; branch-grouping-by-node and the
+ * broader DTO-shape gap do not, and are not this PR's claim.
  */
 function processAttachmentRefsForHistoryItem(item: { metadata?: Record<string, unknown> }): ResolvedAttachmentRef[] {
   if (!attachmentPipelineEnabled.value) return []
