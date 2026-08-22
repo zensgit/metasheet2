@@ -1245,6 +1245,11 @@ export default defineConfig({
       // plugin-tests.yml run-list — it stays single-lane by design (PR #5095: "does not claim
       // S1 'consumer adoption' is required, only the S1 predicate itself").
       'tests/integration/approval-instance-readability-s1-consumers.db.test.ts',
+      // writers-stamp-org (S1 closeout slice 1) — G-W2, the PLM mirror writer's ruled
+      // zero-org derivation. Real DB. Excluded here so describeIfDatabase cannot skip-green it
+      // in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts',
       // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
       // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
       // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a

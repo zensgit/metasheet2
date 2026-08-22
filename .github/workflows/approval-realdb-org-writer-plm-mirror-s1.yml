@@ -1,0 +1,152 @@
+name: Approval real-DB acceptance (writers-stamp-org S1 slice 1 — G-W2 PLM mirror)
+
+# EVIDENCE LANE for the writers-stamp-org (S1 closeout slice 1) PLM mirror writer regression
+# (tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts, G-W2): the census finds SIX
+# approval_instances writer sites in TOTAL: FOUR runtime-reachable — ApprovalProductService
+# createApproval's INSERT (reached by BOTH the HTTP create route and the multitable automation
+# bridge, which is a second call path into the same site, not a distinct site),
+# ApprovalBridgeService.upsertPlmMirror (THIS lane's subject), the after-sales refund bridge's
+# INSERT, and the attendance plugin's INSERT — plus TWO non-runtime scripts (seed-approvals.ts,
+# test-approvals-contract.mjs), counted INSIDE the six per the landed migration's docblock.
+# upsertPlmMirror is the ONLY site with a
+# derivation this slice treats as settled (OD-S1-18(b) / S1 lock §2.2(b) class 5 — "write
+# nothing"). NOTE: OD-S1-18 is recorded in the lock as SESSION DESIGN AUTHORITY (created by the
+# independent review; never put to the owner) -- not an owner ratification, unlike
+# OD-S1-9(f)/OD-S1-17(b). Drives a PLM sync through the PUBLIC
+# ApprovalBridgeService.syncPlmApprovals() entry point and asserts the resulting plm: row's
+# org_id stays NULL and satisfies the landed approval_instance_org_nonblank CHECK, alongside a
+# same-DB non-NULL-org control row. This pins only this writer's fresh-INSERT path, not a
+# table-wide "plm: rows stay NULL" invariant -- no landed or planned constraint forbids a
+# non-NULL org_id on a plm: row (see the test file's docblock SCOPE note). No production code
+# changes ship in this PR; the OTHER THREE runtime-reachable writer sites (createApproval's
+# INSERT — both call paths — the after-sales refund bridge, and the attendance plugin) remain
+# ESCALATE, and the two non-runtime sites among the six (seed-approvals.ts,
+# test-approvals-contract.mjs) are tracked for Phase 3 (see PR body).
+# Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
+# every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
+# approval-realdb-history-guard.yml / approval-realdb-instance-readability-s1.yml lanes and the
+# sealed-export-s6a-authority-row-lock.yml precedent they cite. plugin-tests.yml is left
+# byte-identical.
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
+# actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run
+# in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
+# file as skipped.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the sibling approval-realdb-* evidence lanes (see
+  # approval-realdb-history-guard.yml's comment for the full rationale: a `merge_group` event does
+  # not honour the `paths` filter the way `pull_request` does, so declaring it would spin up this
+  # PostgreSQL job for every merge group regardless of relevance).
+  pull_request:
+    # No `branches:` filter (mirrors the sibling approval-realdb-* precedents): a brand-new
+    # workflow cannot be workflow_dispatch-ed until it has run once via a trigger it responds to.
+    # The `paths` filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/federation/plm-approval-bridge.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts'
+      - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
+      - 'packages/core-backend/src/services/approval-bridge-types.ts'
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/federation/plm-approval-bridge.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-org-writer-plm-mirror-s1:
+    name: approval-realdb-org-writer-plm-mirror-s1
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run writers-stamp-org S1 slice 1 G-W2 real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-org-writer-plm-mirror-s1.db.test.ts"
+            echo "scope=writers-stamp-org S1 slice 1 G-W2 — PLM mirror writer stamps no org_id"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
