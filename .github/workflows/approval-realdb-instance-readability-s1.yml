@@ -24,12 +24,12 @@ name: Approval real-DB acceptance (S1 instance readability)
 # every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
 # approval-realdb-history-guard.yml / approval-realdb-node-operation-policy.yml lanes and the
 # sealed-export-s6a-authority-row-lock.yml precedent they cite. plugin-tests.yml is left
-# byte-identical.
+# byte-identical. [SUPERSEDED 2026-08-22, #5095: the suite now ALSO runs in the required test (20.x) run-list; this standalone lane remains as the evidence lane.]
 #
 # TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
 # (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
 # `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
-# actually EXECUTES, with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run
+# actually EXECUTED as the SOLE lane until 2026-08-22 (#5095 promoted the suite into required test (20.x); both lanes now run it), with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel: a run
 # in this lane with a missing/broken DATABASE_URL goes RED instead of silently reporting the whole
 # file as skipped.
 
