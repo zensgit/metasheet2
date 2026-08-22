@@ -2010,7 +2010,7 @@ actor/env/checklist) requires owner-authored content and remains OPEN. The refer
 
 | Item | Ruling | Effect |
 |---|---|---|
-| 1 gap-closer | **AUTHORIZED** | a second (i)-guarded backfill migration (same single-org self-assertion, FAIL-LOUD, same class semantics over `org_id IS NULL` platform rows) rides the W-1/W-2 slice and executes at ITS deploy — the Migration-B→W1W2 creation window becomes structurally nil |
+| 1 gap-closer | **AUTHORIZED** | a second (i)-guarded backfill migration (same single-org self-assertion, FAIL-LOUD, over `org_id IS NULL` platform rows — deliberately WITHOUT reproducing the six-class taxonomy, per its own docblock; the one schema-permitted divergence, class-2 attachment sourcing, is unreachable with the attachments flag OFF and prod b3=0) rides the W-1/W-2 slice and executes at ITS deploy — the Migration-B→W1W2 creation window becomes structurally nil |
 | 2 Phase-3 renaming | **ADOPTED** | the plan step is "OD-S1-18(b) CHECK (+`afs:` per D-2) + D-5 fold + G-S1-12-FULL ratify-first restatement", never literal `SET NOT NULL`; the restatement happens when the Phase-3 lock is drafted |
 | 3 activation preconditions | **ADOPTED** | org-pin activation dispatch requires **u1b = 0** (split probes: no-row AND only-deactivated-row both zero) and re-checks u1a=1 (STOP on >1 — D-10 reopens); the admission-step fix (refill class) is a TRACKED item recommended before activation |
 | 4 attachments UAT | **OPEN** | needs owner-authored actor/env/checklist; not reachable by a by-reference reply to a list that carried no recommendation content |
