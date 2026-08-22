@@ -24,9 +24,14 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
  * G-W2 — writers-stamp-org (S1 closeout slice 1), PLM mirror writer.
  *
  * Per the session-authored per-writer analysis for this slice (PR body has the
- * full escalation table): of the six `approval_instances` writer SITES known
- * to a shipped runtime path, THIS is the only one with a derivation this slice
- * treats as settled, and that derivation is "write nothing":
+ * full escalation table): the mechanical census finds SIX `approval_instances`
+ * writer sites in total — FOUR reachable from a shipped runtime path (platform
+ * create, automation bridge, after-sales bridge, attendance plugin — all
+ * ESCALATE), this PLM mirror writer, and no others in src; the census matches
+ * the landed migration's own docblock, which counts `seed-approvals.ts` and
+ * `test-approvals-contract.mjs` INSIDE the six. THIS site is the only one with
+ * a derivation this slice treats as settled, and that derivation is "write
+ * nothing":
  *
  *   OD-S1-18(b) (Lock-10 S1.2.4a): "org_id is NULLABLE for plm: rows only,
  *   enforced by CHECK (org_id IS NOT NULL OR id LIKE 'plm:%')" (Phase 3, not
@@ -56,13 +61,12 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
  * attachment-binding routing, not by anything this test or that CHECK
  * enforces — see PR body's deferred-work list.
  *
- * Also note: this file's census of "six writer SITES" covers everything a
- * shipped runtime request path can reach. Two additional `INSERT INTO
- * approval_instances` sites exist outside any runtime path
+ * Also note: two of the six sites sit outside any runtime path
  * (`src/seeds/seed-approvals.ts:6`, a demo seed, and
  * `packages/core-backend/scripts/test-approvals-contract.mjs:138`, a
- * manually-invoked contract-test script) and are not analyzed here — see PR
- * body's deferred-work list.
+ * manually-invoked contract-test script) and are not analyzed here — they are
+ * counted IN the six above, not in addition to it; both will need attention at
+ * Phase 3 — see PR body's deferred-work list.
  *
  * Mutation-tested manually against this baseline (357be6b0c5/5b924da3a4): adding
  * `org_id` (any literal) to the mirror INSERT's column list flips this test red
