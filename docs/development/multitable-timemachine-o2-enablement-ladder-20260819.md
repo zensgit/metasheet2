@@ -8,7 +8,8 @@
 > 基线：#4654 closeout（merged `12f1f8c466`，inert 落地）。
 > **主机证据（2026-08-20 刷新，取代原 08-12 的一组）**：双主机 postdeploy-full PASS，
 > run `32321464042`（prod `metasheet-backend` + `metasheet-staging-backend` 同刻同指纹：
-> 4 flag 运行态与 next-restart 均 CONTAINED、triggers 9/9 DISABLED `8c1be0b0…`、
+> 4 flag 运行态与 next-restart 均 CONTAINED、triggers 9/9 DISABLED(该 run 当时打印 `8c1be0b0…`；
+> **注：#5069 起 trigger canonical identity 加宽，同一姿态现打印 `4d68217d…`——见 §5.2**)、
 > functions 6/6 `14c180aa…`、`meta_links.foreign_record_id` FK 0/0）。
 > 原证据（prod run `31650980676`、both run `31651250987`，绑镜像 `12f1f8c466`）保留为历史记录，
 > 但**已不是当前镜像的证据**——L0 判据以上面这组为准。
@@ -19,7 +20,9 @@
 > 且 6 个函数全部加上固定 `SET search_path = pg_catalog, public`；containment helper 同时把
 > `proconfig`（即该 search_path）纳入指纹。**结果：functions 指纹从 `14c180aa…` 变为
 > `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498`（两次全新迁移字节稳定）。
-> triggers 指纹 `8c1be0b0…` 不变**（本迁移不发任何 trigger DDL，9/9 仍出厂 DISABLED，OID 保留）。
+> triggers 的 **DDL 与姿态不变**（本迁移不发任何 trigger DDL，9/9 仍出厂 DISABLED，OID 保留）
+> **⚠️ 但工具打印的 trigger 指纹值早已不是 `8c1be0b0…`**：#5069 把 `whenClause` 等并入 canonical identity，
+> 出厂 DISABLED 现打印 `4d68217d…`。原公告"指纹不变"对 DDL 为真、对**打印值**为假——见 §5.2（）。
 > 因此：下文凡描述**当前镜像/全新迁移库 EXPECTED functions 指纹**处，随该迁移部署后应读
 > `e4a78f6c…`；而**已注明日期的主机 run（`32321464042`）与 §5.1 演练（2026-08-20）**保留其
 > 观测到的 pre-fix `14c180aa…` 作为 point-in-time 历史证据，不改写。行为不变（同锁语义、同 40001
@@ -105,11 +108,16 @@ recovery busy-exhaustion 率在口径内。
 
 flag 级：从 compose/env 移除该 flag → 重启 → `predeploy-flags` 验证该 flag CONTAINED。
 trigger 级（大红开关）：9/9 `DISABLE TRIGGER` → `postdeploy-full` 验证回到出厂 inert
-指纹（triggers `8c1be0b0…` / functions `e4a78f6c…`（随 `zzzz20260821120000` 起，pre-fix 为
+指纹（triggers `4d68217d…` / functions `e4a78f6c…`（随 `zzzz20260821120000` 起，pre-fix 为
 `14c180aa…`，见上「指纹变更公告」）仍应精确匹配——DISABLE 不改函数体）。
 回滚不需要迁移、不丢数据（authority locks 表保留，无消费者时惰性）。
 
-### 5.1 演练记录（2026-08-20，作者在全新 PG15.17 库上**独立复现**，非只信实现车道 transcript）
+### 5.1 演练记录
+
+> ⚠️ **本表数值 epoch-bound(2026-08-22 补注)**:下表记录的是**演练当时**(2026-08-20,#5069/#5081 之前)的实测值。
+> `8c1be0b0…`/`14c180aa…` 在当时正确,**今天重跑不会复现**——现行权威值见 **§5.2**(triggers `4d68217d…`、functions `e4a78f6c…`)。
+> **回滚判据请以 §5.2 为准,不要拿本表比对。**
+（2026-08-20，作者在全新 PG15.17 库上**独立复现**，非只信实现车道 transcript）
 
 演练用可执行脚本 `scripts/ops/multitable-recovery-authority-triggers.mjs`，判定用 `multitable-recovery-schema-containment.mjs` 的**原始输出**逐步核对：
 
@@ -159,3 +167,33 @@ ratify 后,L1 出窗必须同时出示:L1 电池 workflow run URL、evidence JSO
 soak 尾部 1–2 天与生产 L1 重叠可再省 1–2 天。代价:若 soak 第 6 天冒出问题,生产触发器已开
 (回滚已演练、单命令可逆,风险有界但真实)。此选项**不随 A1 一并 ratify**;owner 若要行使,
 须另行明示。
+
+### 5.2 指纹权威表(2026-08-22 深审后补;**取证/回滚时以本表为准**)
+
+历史文档里流传的 `8c1be0b0…`(triggers)与 `14c180aa…`(functions)**都已不是工具今天打印的值**,原因是两次独立变更:
+
+| 什么变了 | 载体 | 影响 |
+|---|---|---|
+| trigger **canonical identity 加宽**(并入 `whenClause` 等字段) | #5069 `ceb0f08def` | **triggers 打印值**从 `8c1be0b0…` → `4d68217d…`;**DDL 与 DISABLED 姿态未变** |
+| 函数体 schema-qualify + 固定 `SET search_path` | #5081 `d3289945e1` | **functions 打印值** `14c180aa…` → `e4a78f6c…` |
+
+**今天(含 F3 后)全新迁移库的实测值 —— 本表由实跑 containment 得出,非推算:**
+
+| 姿态 | triggers 指纹 | functions 指纹 | containment VERDICT |
+|---|---|---|---|
+| **出厂 DISABLED**(L0/回滚后应见) | `4d68217d692677b331f4bc795380d2703e3d0a12718a3a293c3d2cad394266a9` | `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498` | **PASS** |
+| **ARMED**(L1 起应见) | `505926e3fe8e89c47c0d2a8dc35e34f64121acc92d60b5dbf805415a9c85283a` | 同上 `e4a78f6c…` | **FAIL(预期)** — 见 §3 |
+
+**旧值只应出现在历史记录里**(某次 run 当时的实测),不得再作为比对基准。凡历史表格中的 `8c1be0b0`/`14c180aa`,均为 **epoch-bound**:它们在当时正确,今天重跑**不会**复现。
+
+### 5.3 ⚠️ L1 起,postdeploy-full 的 **trigger 腿按构造必红**
+
+L1 arm 9/9 之后,containment 的期望常量仍钉"出厂 DISABLED",因此 **L1 → L6 全程每次 postdeploy-full,trigger 腿都会 FAIL**,打印 `505926e3…` vs expected `4d68217d…`。
+
+**这是预期,不是 drift。** 判读规则:
+
+- **flag 腿必须全绿**(4 flag CONTAINED)——这条是真判据,红了才是事故;
+- **trigger 腿红且 observed == `505926e3…`** ⇒ 正是 armed 姿态,正常;
+- **trigger 腿红但 observed 是别的值** ⇒ **真 drift,立即停并按 §5 回滚**。
+
+不写清这条,九天观察期里"红即正常"会把操作员训练成无视指纹——而那正是漂移门失效的方式。
