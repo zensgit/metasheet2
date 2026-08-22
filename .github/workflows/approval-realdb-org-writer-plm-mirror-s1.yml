@@ -2,9 +2,13 @@ name: Approval real-DB acceptance (writers-stamp-org S1 slice 1 — G-W2 PLM mir
 
 # EVIDENCE LANE for the writers-stamp-org (S1 closeout slice 1) PLM mirror writer regression
 # (tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts, G-W2): the census finds SIX
-# approval_instances writer sites in TOTAL (four runtime-reachable + this PLM mirror writer +
-# no others in src; seed-approvals.ts and test-approvals-contract.mjs count INSIDE the six, per
-# the landed migration's docblock). This is the ONLY site with a
+# approval_instances writer sites in TOTAL: FOUR runtime-reachable — ApprovalProductService
+# createApproval's INSERT (reached by BOTH the HTTP create route and the multitable automation
+# bridge, which is a second call path into the same site, not a distinct site),
+# ApprovalBridgeService.upsertPlmMirror (THIS lane's subject), the after-sales refund bridge's
+# INSERT, and the attendance plugin's INSERT — plus TWO non-runtime scripts (seed-approvals.ts,
+# test-approvals-contract.mjs), counted INSIDE the six per the landed migration's docblock.
+# upsertPlmMirror is the ONLY site with a
 # derivation this slice treats as settled (OD-S1-18(b) / S1 lock §2.2(b) class 5 — "write
 # nothing"). NOTE: OD-S1-18 is recorded in the lock as SESSION DESIGN AUTHORITY (created by the
 # independent review; never put to the owner) -- not an owner ratification, unlike
@@ -14,9 +18,10 @@ name: Approval real-DB acceptance (writers-stamp-org S1 slice 1 — G-W2 PLM mir
 # same-DB non-NULL-org control row. This pins only this writer's fresh-INSERT path, not a
 # table-wide "plm: rows stay NULL" invariant -- no landed or planned constraint forbids a
 # non-NULL org_id on a plm: row (see the test file's docblock SCOPE note). No production code
-# changes ship in this PR; the four runtime-reachable writer sites (platform create, automation
-# bridge, after-sales bridge, attendance plugin) remain ESCALATE, and the two non-runtime sites
-# among the six (seed-approvals.ts, test-approvals-contract.mjs) are tracked for Phase 3 (see PR body).
+# changes ship in this PR; the OTHER THREE runtime-reachable writer sites (createApproval's
+# INSERT — both call paths — the after-sales refund bridge, and the attendance plugin) remain
+# ESCALATE, and the two non-runtime sites among the six (seed-approvals.ts,
+# test-approvals-contract.mjs) are tracked for Phase 3 (see PR body).
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a

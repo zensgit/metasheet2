@@ -25,12 +25,15 @@ itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run
  *
  * Per the session-authored per-writer analysis for this slice (PR body has the
  * full escalation table): the mechanical census finds SIX `approval_instances`
- * writer sites in total — FOUR reachable from a shipped runtime path (platform
- * create, automation bridge, after-sales bridge, attendance plugin — all
- * ESCALATE), this PLM mirror writer, and no others in src; the census matches
- * the landed migration's own docblock, which counts `seed-approvals.ts` and
- * `test-approvals-contract.mjs` INSIDE the six. THIS site is the only one with
- * a derivation this slice treats as settled, and that derivation is "write
+ * writer sites in total: FOUR reachable from a shipped runtime path —
+ * ApprovalProductService createApproval's INSERT (reached by BOTH the HTTP
+ * create route and the multitable automation bridge, a second call path into
+ * the SAME site, not a distinct site), ApprovalBridgeService.upsertPlmMirror
+ * (this file's subject), the after-sales refund bridge's INSERT, and the
+ * attendance plugin's INSERT — plus TWO non-runtime scripts, counted INSIDE
+ * the six per the landed migration's own docblock. The other three
+ * runtime-reachable sites remain ESCALATE; THIS site is the only one with a
+ * derivation this slice treats as settled, and that derivation is "write
  * nothing":
  *
  *   OD-S1-18(b) (Lock-10 S1.2.4a): "org_id is NULLABLE for plm: rows only,
