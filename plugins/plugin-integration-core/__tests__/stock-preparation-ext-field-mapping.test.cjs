@@ -382,8 +382,10 @@ function typeCoercionSucceedsAndRefuses() {
   }
 
   // SELECT — with an installed dictionary the value must be IN it.
-  const dictionary = ['48 - 主体焊接', '124 - 接管']
-  assert.deepEqual(coerceSourceValue('48 - 主体焊接', 'select', dictionary), { ok: true, value: '48 - 主体焊接' })
+  // Synthetic ladder, per the customer-dictionary leak guard: a tenant's real
+  // key→label pairs are a row of their database and never belong in git.
+  const dictionary = ['10 - 示例节点甲', '20 - 示例节点乙']
+  assert.deepEqual(coerceSourceValue('10 - 示例节点甲', 'select', dictionary), { ok: true, value: '10 - 示例节点甲' })
   assert.deepEqual(
     coerceSourceValue('999 - not a node', 'select', dictionary),
     { ok: false, reason: 'SOURCE_VALUE_NOT_AN_OPTION' },

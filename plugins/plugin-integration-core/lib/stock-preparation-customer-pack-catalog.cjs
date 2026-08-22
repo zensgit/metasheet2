@@ -21,6 +21,23 @@
 //
 // Values-free: `list()` returns the evidence summary (ids, types, ownership tokens, counts) that
 // summarizeCustomerPackForEvidence already guarantees is free of option values and labels.
+//
+// THE DICTIONARIES NEVER ENTER THE REPOSITORY. The packs under lib/customer-packs/ are SHAPE
+// exemplars for the normalizer and the installer; a real deployment's dictionaries reach this
+// catalog through server config read from an uncommitted deploy-time file on the tenant's own
+// machine, and by no other route. #5074 committed a customer's live 领料节点 / 交接工段 option
+// sets — their `config_info` primary keys paired with their own process names — into
+// factory-a.rehearsal.cjs, past a header in that very file forbidding it. A rule stated only in
+// prose is a rule that gets read once, so it now has a test:
+//
+//     __tests__/customer-dictionary-leak-guard.test.cjs
+//
+// It flags any committed run of `'<id> - <name>'` literals whose numeric ids are not a regular
+// ladder. The distinction it draws — a published designation (`'40 - S30408'`, a GB grade with a
+// fixture-invented rung) is vocabulary, while a tenant's own `config_info` key paired with their
+// own process name is data — is argued in full in the header of lib/customer-packs/
+// factory-a.sample.cjs. Neither that header nor this one restates a leaked pair as an example:
+// quoting one to explain the ban would re-commit it.
 
 const {
   normalizeCustomerPack,
