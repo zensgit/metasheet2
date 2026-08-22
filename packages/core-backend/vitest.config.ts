@@ -1272,6 +1272,19 @@ export default defineConfig({
       // WHOLE FILE into the standalone .github/workflows/approval-realdb-org-writer-w1w2-s1.yml
       // lane, which arms EXPECT_DB=1.
       'tests/integration/approval-org-writer-w1w2-s1.db.test.ts',
+      // Lock-11 §10 W-4 attendance writer org stamping — upsertAttendanceApprovalInstance's
+      // arm (f) validated-selector + arm (a) fallback derivation, gated end-to-end through the
+      // real MetaSheetServer + plugin-attendance HTTP routes. G-L11-0/4/5/6/8/9/10 + (β)
+      // migration-ordering tripwire. Real DB. Excluded here so describeIfDatabase cannot
+      // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-org-writer-w4-s1.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-w4-s1.db.test.ts',
+      // Lock-11 §10 W-3 after-sales refund bridge writer — G-W3, the zero-org "write nothing"
+      // derivation (D-2(d)), mirroring G-W2's PLM-mirror pin. Real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-org-writer-after-sales-w3-s1.yml lane,
+      // which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-after-sales-w3-s1.db.test.ts',
       // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
       // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
       // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
