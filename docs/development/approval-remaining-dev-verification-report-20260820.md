@@ -866,7 +866,7 @@ multitable **7**、attendance 与 ops **3**。⚠️ **§1 抬头的原窗口（
 | PR(squash) | 终判(绑 head) | 关键电池 | 报告 |
 |---|---|---|---|
 | #5072(`25385331b8`) | MERGE-CLEAN@`7c16f33e3a` | 冻结 HI-1 扫描 Probe A 1 failed/12(反演恰好);census SCAN_ROOTS 13 条 triage 逐条对源码核真;Probe D 证豁免静默继承(→P3-A) | /tmp/s3a-requal-20260821.md |
-| #5078(`dd7fa8630248`) | MERGE-CLEAN@`e621f147fe` | 逐字引用 cmp=IDENTICAL;additive word-diff 0 内容删除 token;五处锚点落点亲核;台账↔锁一致性逐行核(该门 item-6 表 9 行,其中 1 处失配 P3-B 已在绑定 head 前修复) | /tmp/s1-rulings-gate-20260821.md |
+| #5078(`dd7fa8630248`) | MERGE-CLEAN@`e621f147fe` | 逐字引用 cmp=IDENTICAL;additive word-diff 0 内容删除 token;五处锚点落点亲核;台账↔锁一致性逐行核(该门 item-6 表 8 数据行 = 6 裁决行 + 2 汇总行,其中 1 处失配 P3-B 已在绑定 head 前修复) | /tmp/s1-rulings-gate-20260821.md |
 | #5070(`9fcccd69c3`) | round-3 MERGE-CLEAN@`f163ad708b` | S1 lane 48/48;真库全量 74 files/729 passed(CI 步骤逐字复现);8 mutations(M8 证 CC 臂放行非 blanket-admin;M13 证回归门;MP31-b 构造 500-vs-404 oracle);行级三表 parity 由 #5089 requal 补强;11 条 required 逐一 pass | /tmp/s1-gate-20260821.md + /tmp/s1-requal-20260821.md(3 轮同文件) |
 | #5087(`b2b4198e01`) | MERGE-CLEAN@`2911e3e4a0` | 47/47 PG16 fresh db:migrate;P2-1 3-cell 矩阵(CHECK 在场红在 500、CHECK 移除红在 mentions 断言、单独移除 CHECK 绿→NIT);/history 双查询排除 mutation 双侧红;677 files/10191 no-DB | /tmp/s2-gate-20260822.md + /tmp/s2-requal-20260822.md |
 | #5088(`1efebe9504`) | round-2 MERGE-CLEAN@`e7c5b29691` | MUT-D 红在 **id 断言**(offset-keyed mock;round-1 曾被队列位置型 mock+计数短路吞掉);MUT-A/C/R 三红;census 双向 set-equality+DECOY 正控;required web lane 394 files/5021;web-tests 无 paths 过滤亲核 | /tmp/s3b-gate-20260822.md + /tmp/s3b-requal-20260822.md(2 轮) |

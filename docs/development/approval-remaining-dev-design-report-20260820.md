@@ -1672,7 +1672,7 @@ PR 过程中曾加入一条后端 `validateAndFreezeRequesterChoices` 的 identi
 
 ### 10.2 三次 by-reference 裁决(均 2026-08-21,owner 亲写「按建议执行」,建议文全部会话作)
 
-第一次(记于**执行台账 §3** 三行与 Lock-10 §0(d),本报告 §9 未录):§K2 不改 / G-14 accepted-as-amended / Lock-9 ratify / 评论 D 臂。**分层更正:本报告 §9.1 表中 G-14 的「OPEN OWNER DECISION, not ruled here」格已被该次裁决取代**(accepted-as-amended,台账 §3 为权威记录)——本句即该格的 supersede 记号,原格文字照房例不改。
+第一次(记于**执行台账 §3** 三行与 Lock-10 §0(c)(Lock-9 ratify 项;(a)(b)(d) 三项由台账三行承载),本报告 §9 未录):§K2 不改 / G-14 accepted-as-amended / Lock-9 ratify / 评论 D 臂。**分层更正:本报告 §9.1 表中 G-14 的「OPEN OWNER DECISION, not ruled here」格已被该次裁决取代**(accepted-as-amended,台账 §3 为权威记录)——本句即该格的 supersede 记号,原格文字照房例不改。
 **第二次**(Lock-10 §5.1.1 逐字引用):L9-AMEND arm (a)、OD-S1-12 确认、OD-S1-7/C-2 确认、OD-S1-17(c)=(c-i) 并集、OD-S1-8(d) KEEP、HISTORY-TIMELINE arm (i)。
 **第三次**(Lock-10 §5.1.2 逐字引用):P2-1 org pin **蛰伏态确认**(`APPROVAL_S1_ORG_PIN_ENABLED` 默认 OFF;激活=backfill 验证后独立授权步骤,需自己的台账行)、P2-2(b) **G-S1-12-PARTIAL**(落地测试钉 `is_nullable='YES'`;阶段 3 `SET NOT NULL` 为具名后续切片,独立授权)。
 
@@ -1680,5 +1680,5 @@ PR 过程中曾加入一条后端 `validateAndFreezeRequesterChoices` 的 identi
 
 - **owner 授权点(三,均未执行)**:org pin 激活;阶段 3 `SET NOT NULL`;`APPROVAL_ATTACHMENTS_ENABLED` 开启(其部署前置——放宽迁移——已随 #5089 落地,但开关仍 OFF,G-12 证 OFF=字节级 no-op)。
 - **owner 开放行**:Lock-10 §5.1 feed-branch 行(§5.2 (i)(i-b)(i-c))仍 OPEN,G-S1-8 expected-red 只记不落;S2 P3-1(arm-5→arm-3 铸造,首例路由)知会;S2 P3-2(mention CTE 无 org 合取,仅 pin-ON 可见);S3b census `authorId` token 缺口(记 PR body,owner-scope)。
-- **carried 非阻断残项(具名,防「全清」误读)**:S3b N2-1(截断守卫缺 2150 非对齐 total)、N2-2(短页分支端点未钉,今日不可达)+ census `authorId` token(上列 owner 行);S1 #5070 NEW-4(P3-1 路由重排未门控,implementer-closable)及其 requal 报的 NIT 组;S2 #5087 P3-5(PR body 可达性措辞,requal 以第三机械理由收束);S3a #5072 NIT-1/3/4/5(shim 注释等化妆级);Lock-9 P3-1(上传预算 TOCTOU——与 shipped form 路径同族,bind 权威成立)、P3-2(G-13 正控年龄混杂,mutation 存活)、P3-3(G-1 正控缺失)、NIT-1..4。
+- **carried 非阻断残项(具名,防「全清」误读)**:S3b N2-1(截断守卫缺 2150 非对齐 total)、N2-2(短页分支端点未钉,今日不可达)+ census `authorId` token(上列 owner 行);S1 #5070 NEW-4(P3-1 路由重排未门控,implementer-closable)及其 requal 报的 NIT 组;S2 #5087 P3-5(PR body 可达性措辞,requal 以第三机械理由收束)——**注:S2 requal 具名的 P3-6(迁移 DDL 无护)不在本清单,因其已被 #5088 的 D-1 parity+级联门关闭,且 #5088 门审亲跑过反证(删 CASCADE → 恰红一测,1 failed/47 passed);**S3a #5072 NIT-1/3/4/5(shim 注释等化妆级);Lock-9 P3-1(上传预算 TOCTOU——与 shipped form 路径同族,bind 权威成立)、P3-2(G-13 正控年龄混杂,mutation 存活)、P3-3(G-1 正控缺失)、NIT-1..4。
 - **C-5 plm: 姿态、§5.2(iii) 残留、#5024 披露约束**:全部照旧,本段不改。
