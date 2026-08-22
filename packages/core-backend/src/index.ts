@@ -79,6 +79,7 @@ import {
   MultitableObjectScopeError,
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
+import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
@@ -596,7 +597,14 @@ export class MetaSheetServer {
           resolveFieldIds: async ({ projectId, objectId, fieldIds }) => {
             return resolveProvisionedObjectFieldIds(projectId, objectId, fieldIds)
           },
-          ensureObject: async ({ projectId, baseId, descriptor }) => {
+          // `overwriteMode` must be destructured and forwarded explicitly: this
+          // hook is the FALLBACK that plugin-scope's ensureObject takes when no
+          // ensureObjectInScope hook is registered (multitable/plugin-scope.ts —
+          // the scoped branch spreads ...input, and index.ts's scoped hook does
+          // forward it). Dropping it here silently downgraded a caller's explicit
+          // opt-in to the fail-closed default, i.e. an advertised API option
+          // (types/plugin.ts EnsureObjectInput) was inert on this path.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -611,6 +619,7 @@ export class MetaSheetServer {
                 projectId,
                 baseId,
                 descriptor,
+                overwriteMode,
               })
             })
           },
@@ -1778,7 +1787,11 @@ export class MetaSheetServer {
       ? {
           ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
+            // P0-S S3: `overwriteMode` MUST stay in this destructure. It is the per-call
+            // destructive-reconcile opt-in, and this hook is the shipped host path for every
+            // plugin ensureObject — dropping it here would silently re-arm the fail-closed
+            // default for callers that legitimately own the columns they re-derive.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -1801,6 +1814,7 @@ export class MetaSheetServer {
                   projectId,
                   baseId,
                   descriptor,
+                  overwriteMode,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,
@@ -1865,10 +1879,24 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              await assertPluginOwnsSheet(txQuery, {
+              // P0-S S4 — sheet-scope enforcement mode. `assertPluginOwnsSheet` throws on a
+              // DIFFERENT-owner sheet in every mode; for an UNREGISTERED sheet it returns
+              // false (test-pinned legacy tolerance). Default 'observe' logs+continues (zero
+              // functional change, adds visibility); 'enforce' rejects unregistered access
+              // (flipped per-deployment after registry backfill).
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, {
                 pluginName,
                 sheetId,
               })
+              if (!ownsSheet) {
+                const scopeMode = resolvePluginSheetScopeMode()
+                this.logger.warn(
+                  `plugin ${pluginName} accessed unregistered sheet ${sheetId} via plugin-scope (mode=${scopeMode})`,
+                )
+                if (scopeMode === 'enforce') {
+                  throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+                }
+              }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },

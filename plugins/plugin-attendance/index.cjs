@@ -3008,9 +3008,19 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   // ensure value columns (stable superset) via the same ensureObject upsert (idempotent, never deletes)
   const valueColumns = buildAttendanceReportRecordsValueColumns(catalog.items)
   const baseDescriptor = getAttendanceReportRecordsDescriptor()
+  // P0-S S3: explicit destructive-reconcile opt-in. These value columns are DERIVED from the
+  // report-field catalog and their `order` is POSITIONAL (1000 + index), so adding, removing
+  // or reordering a single catalog item renumbers every column after it — under the
+  // fail-closed default that classifies as would_overwrite and throws. The columns are
+  // plugin-owned (the catalog is their source of truth), not tenant-authored, so overwriting
+  // is the intended behavior here; declaring it per-call keeps the guard armed for every
+  // OTHER plugin rather than disarming it process-wide via the env.
+  // Follow-up: derive `order` from the field id instead of the index so ordinary syncs stop
+  // producing an order diff at all, then drop this opt-in.
   await provisioning.ensureObject({
     projectId: ensured.projectId,
     descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...valueColumns] },
+    overwriteMode: 'overwrite',
   })
   const logicalIds = [
     ...Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS),
@@ -4282,9 +4292,15 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
   const fieldFingerprint = buildAttendanceReportFieldConfigFingerprint(valueFields).value
 
   const baseDescriptor = getAttendanceReportPeriodSummariesDescriptor()
+  // P0-S S3: explicit destructive-reconcile opt-in — same rationale as the report-records
+  // sync above. These value columns are derived from the catalog plus the dynamic-subtype
+  // definitions and carry a POSITIONAL `order`, so a catalog edit renumbers the tail and the
+  // fail-closed default would refuse. Plugin-owned columns, so overwrite is intended; the
+  // per-call flag keeps the guard armed for every other caller.
   await provisioning.ensureObject({
     projectId: ensured.projectId,
     descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...allValueColumns] },
+    overwriteMode: 'overwrite',
   })
   const logicalIds = [
     ...Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS),

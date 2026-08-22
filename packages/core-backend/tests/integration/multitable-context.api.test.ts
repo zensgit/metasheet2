@@ -729,6 +729,22 @@ describe('Multitable context API', () => {
           fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
           return { rows: [], rowCount: 1 }
         }
+        // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+        // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+        // this branch the fake would fall through to the `Unhandled SQL` throw below.
+        // Reads the same in-memory `fields` array the INSERT above writes, so this models the
+        // real transaction: a first install sees no row (=> create), and a genuine re-install
+        // of a mutated field would still surface the refusal instead of being masked.
+        if (
+          normalized.includes('FROM meta_fields') &&
+          normalized.includes('WHERE id = $1 AND sheet_id = $2')
+        ) {
+          const [fieldId, ownerSheetId] = params as [string, string]
+          return {
+            rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+          }
+        }
+
         if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
           const [sheetId, ids] = params as [string, string[]]
           const idSet = new Set(ids)
@@ -831,6 +847,22 @@ describe('Multitable context API', () => {
           fields.push({ id, sheet_id: sheetId, name, type, property: JSON.parse(propertyJson), order })
           return { rows: [], rowCount: 1 }
         }
+        // P0-S S3 destructive-reconcile pre-read. The guard is fail-closed by DEFAULT now, so
+        // every ensureFields/ensureObject call issues this SELECT before each upsert; without
+        // this branch the fake would fall through to the `Unhandled SQL` throw below.
+        // Reads the same in-memory `fields` array the INSERT above writes, so this models the
+        // real transaction: a first install sees no row (=> create), and a genuine re-install
+        // of a mutated field would still surface the refusal instead of being masked.
+        if (
+          normalized.includes('FROM meta_fields') &&
+          normalized.includes('WHERE id = $1 AND sheet_id = $2')
+        ) {
+          const [fieldId, ownerSheetId] = params as [string, string]
+          return {
+            rows: fields.filter((field) => field.id === fieldId && field.sheet_id === ownerSheetId),
+          }
+        }
+
         if (normalized.includes('FROM meta_fields') && normalized.includes('id = ANY($2::text[])')) {
           const [sheetId, ids] = params as [string, string[]]
           const idSet = new Set(ids)

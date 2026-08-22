@@ -449,6 +449,15 @@ export interface MultitableProvisioningAPI {
     projectId: string
     baseId?: string | null
     descriptor: MultitableProvisioningObjectDescriptor
+    /**
+     * P0-S S3: destructive-reconcile mode for this ONE call. Omit (the normal case) to get
+     * the fail-closed default — re-ensuring an EXISTING field whose name/type/property/order
+     * the descriptor would change throws MultitableEnsureFieldsRefusedError instead of
+     * silently overwriting the tenant's row. Additive evolution (a brand-new field id) and
+     * first installs are unaffected either way. Pass 'overwrite' ONLY if this plugin owns
+     * the columns it re-derives; prefer ensureMissingObjectFields for additive repair.
+     */
+    overwriteMode?: 'refuse' | 'overwrite' | 'observe' | 'preserve'
   }): Promise<{
     baseId: string
     sheet: {
