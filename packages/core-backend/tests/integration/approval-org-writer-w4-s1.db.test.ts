@@ -348,6 +348,10 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const res = await createGeneric(token, {})
       expect(res.status, res.raw).toBe(422)
       expect(res.body?.error?.code).toBe('APPROVAL_ORG_UNRESOLVED')
+      // Values-free (mirrors (i-legacy)'s raw not-contains and (ii)'s details-undefined): no
+      // user id in the response body, and no `details` payload leaking membership shape.
+      expect(res.raw).not.toContain(actorId)
+      expect(res.body?.error?.details).toBeUndefined()
       expect(await attendanceRequestCountForOrg('default')).toBe(before)
     })
   })
@@ -627,6 +631,34 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
         await grantMembership(o1MemberViewerId, orgOne)
         expect(await canReadApprovalInstance(pool as never, o1MemberViewerId, instanceId)).toBe(false)
 
+        // (β) RATIFIED CELL (G-L11-9, lock §4.2 r3): an APPROVER seated on this instance
+        // (approval_assignments, assignment_type='user') whose active membership is in O1 —
+        // the org the row is STILL stamped with (D-10: DO UPDATE never re-derives org_id) ->
+        // TRUE. The SEAT arm is org-INSENSITIVE by construction (OD-S1-4); the org pin conjunct
+        // is satisfied because this viewer's active org IS the stored org. This is the ONE TRUE
+        // cell in the ratified post-move matrix — "old-org approvers retain read" is the other
+        // half of the D-10 trade the r3 correction exists to make visible.
+        const o1ApproverId = freshId('g119-o1approver')
+        await grantMembership(o1ApproverId, orgOne)
+        await pool.query(
+          `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES ($1, 'user', $2, TRUE)`,
+          [instanceId, o1ApproverId],
+        )
+        expect(await canReadApprovalInstance(pool as never, o1ApproverId, instanceId)).toBe(true)
+
+        // (γ) RATIFIED CELL: an APPROVER seated on this instance whose active membership is in
+        // O2 (the subject's NEW org, the one the pending-edit named) -> FALSE. The SEAT arm
+        // alone would admit this viewer (they ARE an assignee); the org pin conjunct is what
+        // denies them, because the stored org_id never moved off O1. Counterpart to (β): a seat
+        // does not imply org membership of the stored org, and the pin enforces the latter.
+        const o2ApproverId = freshId('g119-o2approver')
+        await grantMembership(o2ApproverId, orgTwo)
+        await pool.query(
+          `INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES ($1, 'user', $2, TRUE)`,
+          [instanceId, o2ApproverId],
+        )
+        expect(await canReadApprovalInstance(pool as never, o2ApproverId, instanceId)).toBe(false)
+
         // An admin viewer with NO O1 membership -> FALSE: the admin arm's inner disjunct would
         // match, but the org conjunct sits OUTSIDE that OR and denies regardless — "dark for
         // everyone incl. admins" is not a slogan, it is mechanically enforced here.
@@ -643,6 +675,47 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
         if (priorPin === undefined) delete process.env.APPROVAL_S1_ORG_PIN_ENABLED
         else process.env.APPROVAL_S1_ORG_PIN_ENABLED = priorPin
       }
+    })
+
+    it('pending-edit REFUSAL wedge (PR body disclosure 2 — the mirror of the edit-success case above): naming an org the subject is NOT a member of on PUT -> 422 APPROVAL_ORG_SELECTOR_NOT_PERMITTED, values-free, stored org untouched', async () => {
+      const subjectId = freshId('g119edit-refuse')
+      const token = await mintTokenNoSeed(subjectId)
+      const orgOne = randomUUID()
+      const orgEvil = randomUUID()
+      await grantMembership(subjectId, orgOne)
+
+      const createRes = await createGeneric(token, {})
+      expect(createRes.status, createRes.raw).toBe(201)
+      const requestId = createRes.body?.data?.request?.id as string
+      const instanceId = await approvalInstanceIdForRequest(requestId)
+      createdInstanceIds.push(instanceId)
+      expect(await readInstanceOrg(instanceId)).toBe(orgOne)
+
+      // Legacy leg (operationId omitted), matching the edit-success case above — the derivation
+      // re-runs on `request_pending_edit` (disclosure 2 in the PR body) even though a SUCCESSFUL
+      // re-upsert would leave the stored org untouched (D-10); a refusal here is a distinct,
+      // previously-unpinned code path (the writer door on the edit route, not the create route).
+      const editRes = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+        method: 'PUT',
+        headers: authHeaders(token),
+        body: {
+          orgId: orgEvil,
+          workDate: '2049-05-03',
+          requestType: 'missed_check_in',
+          requestedInAt: '2049-05-03T09:00:00.000Z',
+          reason: 'G-L11-9 pending-edit refusal wedge',
+        },
+      })
+      expect(editRes.status, editRes.raw).toBe(422)
+      expect(editRes.body?.error?.code).toBe('APPROVAL_ORG_SELECTOR_NOT_PERMITTED')
+      // Values-free: no org id / user id leaked in the refusal body.
+      expect(editRes.raw).not.toContain(orgEvil)
+      expect(editRes.raw).not.toContain(subjectId)
+
+      // The refusal throws before the DO UPDATE runs (same transaction as the derive step) — an
+      // edit refusal must never corrupt the previously-stamped org on either row.
+      expect(await readInstanceOrg(instanceId)).toBe(orgOne)
+      expect(await readRequestOrgById(requestId)).toBe(orgOne)
     })
   })
 })
