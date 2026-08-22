@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>E1 approval-flow canvas renderer spike</title>
+    <!--
+      Isolation-only verification harness. Not routed by the production app.
+      tokens.css is imported from the harness module (same path main.ts uses).
+    -->
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
+        color: #111827;
+        background: #f8fafc;
+      }
+      #app { min-height: 100%; height: 100%; }
+      * { box-sizing: border-box; }
+
+      .e1-shell {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        max-height: 100vh;
+        overflow: hidden;
+      }
+      .e1-header {
+        flex: 0 0 auto;
+        min-height: 48px;
+        max-height: 56px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-bottom: 1px solid #e5e7eb;
+        background: #fff;
+      }
+      .e1-header h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        margin-right: 8px;
+      }
+      .e1-header select,
+      .e1-header button {
+        font: inherit;
+        font-size: 13px;
+        padding: 6px 10px;
+        border: 1px solid #d1d5db;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+      }
+      .e1-header button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .e1-header button:focus-visible,
+      .e1-header select:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 2px;
+      }
+      .e1-body {
+        flex: 1 1 auto;
+        min-height: 0;
+        display: flex;
+        position: relative;
+        overflow: hidden;
+      }
+      .e1-canvas-region {
+        flex: 1 1 auto;
+        min-width: 0;
+        min-height: 0;
+        position: relative;
+        overflow: auto;
+        background:
+          linear-gradient(to right, rgba(148, 163, 184, 0.12) 1px, transparent 1px) 0 0 / 24px 24px,
+          linear-gradient(to bottom, rgba(148, 163, 184, 0.12) 1px, transparent 1px) 0 0 / 24px 24px,
+          #f8fafc;
+      }
+      /* Restraint: product surface itself has no decorative gradient on cards; the faint grid is harness chrome only. */
+      .e1-canvas-surface {
+        position: relative;
+        margin: 0 auto;
+      }
+      .e1-edges {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        overflow: visible;
+      }
+      .e1-edge-path {
+        fill: none;
+        stroke: #64748b;
+        stroke-width: 1.5;
+        marker-end: url(#e1-arrow);
+      }
+      .e1-edge-hit {
+        pointer-events: all;
+      }
+      .e1-insert {
+        position: absolute;
+        width: 40px;
+        height: 40px;
+        margin-left: -20px;
+        margin-top: -20px;
+        border-radius: 999px;
+        border: 1px solid #2563eb;
+        background: #eff6ff;
+        color: #1d4ed8;
+        font-size: 20px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        padding: 0;
+        z-index: 2;
+      }
+      .e1-insert:focus-visible {
+        outline: 2px solid #1d4ed8;
+        outline-offset: 2px;
+      }
+      .e1-insert.is-drop-target {
+        background: #dbeafe;
+        border-color: #1d4ed8;
+        box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+      }
+      .e1-card {
+        position: absolute;
+        width: 200px;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        background: #fff;
+        padding: 10px 12px;
+        cursor: pointer;
+        z-index: 1;
+        /* No action-button cluster; selection opens inspector. */
+      }
+      .e1-card.is-draggable {
+        cursor: grab;
+      }
+      .e1-card.is-draggable:active,
+      .e1-card.is-dragging {
+        cursor: grabbing;
+      }
+      .e1-card.is-dragging {
+        opacity: 0.65;
+      }
+      .e1-card:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 2px;
+      }
+      .e1-card.is-selected {
+        border-color: #2563eb;
+        box-shadow: 0 0 0 1px #2563eb;
+      }
+      .e1-card.is-paired {
+        border-color: #7c3aed;
+      }
+      .e1-card.is-readonly {
+        background: #f9fafb;
+      }
+      .e1-card__type {
+        font-size: 12px;
+        color: #6b7280;
+        margin-bottom: 2px;
+      }
+      .e1-card__name {
+        font-size: 14px;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .e1-card__summary {
+        margin: 6px 0 0;
+        padding: 0;
+        list-style: none;
+        font-size: 12px;
+        color: #4b5563;
+      }
+      .e1-card__summary li {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        line-height: 18px;
+      }
+      .e1-card__badges {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+      }
+      .e1-card__badge {
+        font-size: 11px;
+        line-height: 16px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        border: 1px solid #e5e7eb;
+        background: #f3f4f6;
+        color: #374151;
+      }
+      .e1-branch-label {
+        position: absolute;
+        transform: translateX(-50%);
+        max-width: 160px;
+        font-size: 11px;
+        line-height: 14px;
+        color: #374151;
+        background: rgba(248, 250, 252, 0.92);
+        border: 1px solid #e5e7eb;
+        border-radius: 4px;
+        padding: 2px 6px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        z-index: 2;
+        pointer-events: none;
+      }
+      .e1-branch-label.is-default {
+        color: #6b7280;
+        font-style: normal;
+      }
+      .e1-branch-label .e1-priority {
+        color: #1d4ed8;
+        margin-right: 4px;
+      }
+
+      /* Inspector presentations */
+      .e1-inspector {
+        background: #fff;
+        border-left: 1px solid #e5e7eb;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        z-index: 5;
+      }
+      .e1-inspector__header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 12px 14px;
+        border-bottom: 1px solid #e5e7eb;
+      }
+      .e1-inspector__title {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .e1-inspector__body {
+        padding: 12px 14px;
+        overflow: auto;
+        flex: 1 1 auto;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .e1-inspector__section {
+        margin-bottom: 12px;
+      }
+      .e1-inspector__section h3 {
+        margin: 0 0 6px;
+        font-size: 12px;
+        color: #6b7280;
+        font-weight: 600;
+      }
+      .e1-inspector__close {
+        border: 1px solid #d1d5db;
+        background: #fff;
+        border-radius: 6px;
+        padding: 6px 10px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 13px;
+        min-height: 40px;
+      }
+      .e1-inspector__close:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 2px;
+      }
+      .e1-inspector--dock {
+        flex: 0 0 360px;
+        width: 360px;
+        position: relative;
+      }
+      .e1-inspector--overlay {
+        position: absolute;
+        top: 0;
+        right: 0;
+        bottom: 0;
+        width: 320px;
+        box-shadow: -4px 0 16px rgba(15, 23, 42, 0.08);
+      }
+      .e1-inspector--sheet {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100%;
+        border-left: none;
+        border-top: 1px solid #e5e7eb;
+        border-radius: 12px 12px 0 0;
+        box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.08);
+        transition: height 160ms ease;
+      }
+      .e1-inspector--sheet.is-half { height: 55vh; }
+      .e1-inspector--sheet.is-full { height: 92vh; }
+      .e1-sheet-handle {
+        width: 42px;
+        height: 4px;
+        border-radius: 999px;
+        background: #d1d5db;
+        margin: 8px auto 0;
+      }
+      .e1-sheet-actions {
+        display: flex;
+        gap: 8px;
+        padding: 8px 14px 0;
+      }
+      .e1-sheet-actions button {
+        flex: 1;
+        min-height: 44px;
+        border: 1px solid #d1d5db;
+        background: #fff;
+        border-radius: 8px;
+        font: inherit;
+        cursor: pointer;
+      }
+      .e1-sheet-actions button:focus-visible {
+        outline: 2px solid #2563eb;
+        outline-offset: 2px;
+      }
+
+      .e1-banner {
+        margin: 8px 12px 0;
+        padding: 8px 10px;
+        border-radius: 6px;
+        border: 1px solid #fcd34d;
+        background: #fffbeb;
+        color: #92400e;
+        font-size: 13px;
+      }
+      .e1-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+      .e1-insert-menu {
+        position: absolute;
+        z-index: 6;
+        min-width: 180px;
+        background: #fff;
+        border: 1px solid #d1d5db;
+        border-radius: 8px;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.12);
+        padding: 6px;
+      }
+      .e1-insert-menu button {
+        display: block;
+        width: 100%;
+        text-align: left;
+        border: none;
+        background: transparent;
+        padding: 8px 10px;
+        border-radius: 6px;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        min-height: 40px;
+      }
+      .e1-insert-menu button:hover,
+      .e1-insert-menu button:focus-visible {
+        background: #eff6ff;
+        outline: none;
+      }
+      .e1-empty-inspector {
+        color: #6b7280;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .e1-inspector--sheet,
+        .e1-insert,
+        .e1-card {
+          transition: none !important;
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./approval-flow-canvas-e1-harness.ts"></script>
+  </body>
+</html>
