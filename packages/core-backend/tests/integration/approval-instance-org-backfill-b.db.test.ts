@@ -471,7 +471,7 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     await expect(backfillBUp(testDb)).rejects.not.toThrow(/h19/i)
   })
 
-  it('H20: template_id IS NOT NULL + requester with EXACTLY ONE INACTIVE membership -> stays NULL, no abort (the 257-row prod shape, asserted as a VALUE not masked by an abort)', async () => {
+  it('H20: template_id IS NOT NULL + requester with EXACTLY ONE INACTIVE membership -> stays NULL, no abort (a class-1-residue shape with ZERO instances on prod today — prod\'s 257-row c3_zero_membership population is template_id IS NULL, i.e. c6_terminal-shaped, not this fixture\'s shape; asserted as a VALUE not masked by an abort)', async () => {
     const templateId = randomUUID()
     await seedInstance({ id: 'h20', sourceSystem: 'platform', templateId, requesterId: 'u_h20' })
     await seedUserOrg('u_h20', 'orgDeactivated', false)
@@ -758,6 +758,70 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
 
     const orgCount = await sql<{ n: string }>`SELECT count(*)::text AS n FROM user_orgs`.execute(testDb)
     expect(orgCount.rows[0]?.n).toBe('0')
+  })
+
+  // ---- H43-H45 — provisioning's own missing-table guard, the H16a/H16b equivalent -----------
+  //
+  // The docblock claims "a fresh DB, or one where zzzz20260114110000 has not landed yet, skips
+  // cleanly rather than throwing" — checked via `checkTableExists(db, 'users')` AND
+  // `checkTableExists(db, 'user_orgs')`, either missing short-circuits to a no-op return before
+  // any query runs. H16a/H16b prove this shape for `backfillBUp`'s OWN guards
+  // (user_orgs / approval_attachments); provisioning had no equivalent before this round. H42
+  // covers the table-present-but-EMPTY case; these three cover table-ABSENT, a materially
+  // different guard (`checkTableExists`, not a population count of zero).
+
+  it('H43: user_orgs table absent -> provisioningUp resolves (guard fires, no crash)', async () => {
+    await sql`DROP TABLE user_orgs`.execute(testDb)
+    await expect(sql`SELECT 1 FROM user_orgs`.execute(testDb)).rejects.toMatchObject({ code: '42P01' })
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+  })
+
+  it('H44: users table absent -> provisioningUp resolves (guard fires, no crash)', async () => {
+    await sql`DROP TABLE users`.execute(testDb)
+    await expect(sql`SELECT 1 FROM users`.execute(testDb)).rejects.toMatchObject({ code: '42P01' })
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+  })
+
+  it('H45: BOTH users and user_orgs absent (pre-zzzz20260114110000 schema shape) -> provisioningUp resolves (guard fires, no crash)', async () => {
+    await sql`DROP TABLE user_orgs`.execute(testDb)
+    await sql`DROP TABLE users`.execute(testDb)
+
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+  })
+
+  // ---- H46 — composed ordering, F2: a class-1-RESIDUE row (template_id IS NOT NULL) whose ------
+  // requester is provisioned by D-8(β) -> resolved by class 3 with the ACTIVE org, not left NULL
+  //
+  // H40 already proves the composed class-6/class-3 ordering for TERMINAL (template_id IS NULL)
+  // rows. This fixture is the other composed shape the D-8(β) revision changes: a template-
+  // originated row (class 1 emits no SQL for it either way) whose requester is a zero-membership
+  // ACTIVE user. Run backfillBUp ALONE first (control), matching H20's shape, then re-seed and
+  // run provisioningUp -> backfillBUp (treatment) to pin BOTH the direction (composed order
+  // resolves it, isolated does not) and the VALUE (the active org, never a stale inactive one).
+
+  it("H46: template_id IS NOT NULL + requester with ZERO memberships who IS an active `users` row -> stays NULL under backfillBUp alone, but STAMPED with the active org once provisioningUp runs first (composed-order class-3 resolution; F2 fixture)", async () => {
+    await seedUser('u_h46_seed', true)
+    await seedUserOrg('u_h46_seed', 'orgOnly46', true) // establishes the sole active org
+
+    const templateId = randomUUID()
+    await seedUser('u_h46_target', true) // ACTIVE, zero user_orgs memberships
+    await seedInstance({ id: 'h46', sourceSystem: 'platform', templateId, requesterId: 'u_h46_target' })
+
+    // CONTROL — same shape as H20: backfillBUp alone cannot resolve a zero-membership requester,
+    // and template_id IS NOT NULL excludes class 1 too, so the row stays NULL, no abort.
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h46')).toBeNull()
+
+    // TREATMENT — provisioningUp runs first (the ratified order): u_h46_target gains an active
+    // membership to the sole org, so class 3's `HAVING count(*) = 1` now matches and the SECOND
+    // backfillBUp pass (still scoped `org_id IS NULL`, per H17) stamps it via the ordinary,
+    // finer-grained class-3 mechanism — the ACTIVE org, not a stale/inactive one.
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h46')).toBe('orgOnly46')
+    expect(await activeMembershipCount('u_h46_target')).toBe(1)
   })
 
   // ---- H38-H40 — the revised class-6 arm of backfillBUp --------------------------------------

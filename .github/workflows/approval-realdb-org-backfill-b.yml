@@ -1,12 +1,17 @@
 name: Approval real-DB acceptance (S1 Migration B — org_id backfill)
 
-# EVIDENCE LANE for the Lock-10 (S1) Migration B suite:
+# EVIDENCE LANE for the Lock-10 (S1) Migration B suite, EXTENDED at the Lock-11 §10 D-8(β)
+# revision to also cover the companion provisioning migration:
 #   - tests/integration/approval-instance-org-backfill-b.db.test.ts — the ordered class-2/class-3
 #     backfill over the residual NULL population left by Phase 1
 #     (zzzz20260821100000_add_approval_instance_org_id.ts), prefix-guarded (plm:/afs: excluded from
 #     every UPDATE and from the class-6 terminal census), cross-class FAIL-LOUD (class-2 conflict
-#     abort + class-6 terminal abort, both values-free), idempotent replay, and the lane guards
-#     (user_orgs / approval_attachments absent) that keep this migration CI-safe on an empty DB.
+#     abort + revised class-6 terminal abort/STAMP, both values-free), idempotent replay, the lane
+#     guards (user_orgs / approval_attachments absent) that keep the backfill CI-safe on an empty
+#     DB, AND — since the D-8(β) revision — zzzz20260823050000_provision_zero_membership_active_users.ts
+#     (the (i)-guarded single-org provisioning step that runs BEFORE this backfill), its own
+#     ON CONFLICT non-resurrection, idempotence, missing-table guards, and the composed
+#     provisioning-then-backfill ordering/class-attribution end to end.
 # The org pin (APPROVAL_S1_ORG_PIN_ENABLED) ships DEFAULT OFF and is untouched by this migration or
 # this lane — Migration B backfills EXISTING rows only.
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
@@ -37,6 +42,7 @@ on:
     # The `paths` filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-org-backfill-b.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -45,6 +51,7 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-org-backfill-b.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/vitest.config.ts'
