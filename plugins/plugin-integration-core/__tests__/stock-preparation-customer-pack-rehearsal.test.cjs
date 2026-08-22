@@ -852,6 +852,10 @@ async function summaryAndLogsAreValuesFree() {
     'alreadyStampedFields',
     'createdFields',
     'ensuredViews',
+    // F5 closure: the summary now carries the OWNERSHIP BAND per id, so a CLI/route no longer has to
+    // re-normalize the pack to say "13 PLM / 8 human columns added". `ledger` is absent here because
+    // this rehearsal installs without an install store — the ledger stays optional.
+    'installedFields',
     'objectId',
     'packId',
     'packVersion',
@@ -859,6 +863,18 @@ async function summaryAndLogsAreValuesFree() {
     'stampedExistingFields',
     'syncedOptionFields',
   ])
+
+  // The join is the point: every installed id carries the band the pack declared, and NOTHING else
+  // (no label, no option value, no free text) rides along.
+  assert.equal(summary.installedFields.length, PACK_FIELD_COUNT)
+  const declaredById = new Map(FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => [field.id, field]))
+  for (const entry of summary.installedFields) {
+    assert.deepEqual(Object.keys(entry).sort(), ['action', 'extension', 'fieldId', 'ownership', 'preserveOnRefresh'])
+    assert.equal(entry.ownership, declaredById.get(entry.fieldId).ownership)
+    assert.equal(entry.preserveOnRefresh, entry.ownership === 'human_preserved')
+    assert.equal(entry.extension, true)
+    assert.equal(entry.action, 'created')
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -255,14 +255,18 @@ function classifyExistingField(field, property) {
 }
 
 /**
- * VALIDATE-ALL-THEN-WRITE pre-scan (rule 4). Runs before the first mutation of
- * the install and reads the live property of every pack column that already
- * exists. Returns the two work lists; throws on the first conflicting set, so a
- * pack that disagrees with the live sheet never lands half of itself.
+ * The READ-ONLY half of the pre-scan (rule 4): read the live property of every pack column that
+ * already exists and sort the pack's ids into the four buckets. It NEVER throws on a conflict — it
+ * reports one — which is what lets the dry-run below reuse the exact classification the install
+ * runs without duplicating it. The only throw is the unverifiable-read refusal, which is not a
+ * verdict about the sheet but a refusal to guess at one.
+ *
+ * `missing` are the ids no live column carries: those will be CREATED with a full ownership
+ * property and need no stamp.
  */
-async function classifyExistingExtensionFields({ provisioning, projectId, pack }) {
+async function scanExistingExtensionFields({ provisioning, projectId, pack }) {
   if (pack.extensionFields.length === 0) {
-    return { needsStamp: [], alreadyStamped: [] }
+    return { needsStamp: [], alreadyStamped: [], missing: [], conflicts: [] }
   }
   let content
   try {
@@ -289,20 +293,35 @@ async function classifyExistingExtensionFields({ provisioning, projectId, pack }
 
   const needsStamp = []
   const alreadyStamped = []
+  const missing = []
   const conflicts = []
   const byLogicalId = isPlainObject(content) ? content : {}
   for (const field of pack.extensionFields) {
     const existing = byLogicalId[field.id]
     // Absent from the content map == the column does not exist yet. It will be
     // created with a full ownership property, so it needs no stamp.
-    if (!existing) continue
+    if (!existing) {
+      missing.push(field.id)
+      continue
+    }
     const verdict = classifyExistingField(field, existing.property)
     if (verdict.state === 'CONFLICT') conflicts.push(...verdict.conflicts)
     else if (verdict.state === 'ALREADY_STAMPED') alreadyStamped.push(field.id)
     else needsStamp.push(field.id)
   }
 
-  if (conflicts.length) {
+  return { needsStamp, alreadyStamped, missing, conflicts }
+}
+
+/**
+ * VALIDATE-ALL-THEN-WRITE pre-scan (rule 4). Runs before the first mutation of
+ * the install and reads the live property of every pack column that already
+ * exists. Returns the two work lists; throws on the first conflicting set, so a
+ * pack that disagrees with the live sheet never lands half of itself.
+ */
+async function classifyExistingExtensionFields({ provisioning, projectId, pack }) {
+  const scan = await scanExistingExtensionFields({ provisioning, projectId, pack })
+  if (scan.conflicts.length) {
     throw new StockPreparationCustomerPackInstallError(
       409,
       'CUSTOMER_PACK_OWNERSHIP_CONFLICT',
@@ -311,12 +330,12 @@ async function classifyExistingExtensionFields({ provisioning, projectId, pack }
       {
         objectId: pack.targetObjectId,
         packId: pack.packId,
-        conflictingFields: [...new Set(conflicts.map((entry) => entry.field))],
-        conflicts,
+        conflictingFields: [...new Set(scan.conflicts.map((entry) => entry.field))],
+        conflicts: scan.conflicts,
       },
     )
   }
-  return { needsStamp, alreadyStamped }
+  return { needsStamp: scan.needsStamp, alreadyStamped: scan.alreadyStamped }
 }
 
 async function stampExistingExtensionFields({ provisioning, projectId, pack, fieldIds }) {
@@ -555,34 +574,191 @@ async function ensureRoleViews({ provisioning, projectId, sheetId, pack }) {
   return ensured
 }
 
-/**
- * Install a customer config pack onto the canonical stock-preparation main
- * table. Additive only, idempotent: a second run adds no column, drops no
- * column, and never calls ensureObject.
- *
- *   provisioning — scoped host multitable provisioning API
- *   projectId    — already-resolved tenant project id
- *   pack         — raw or normalized pack (normalized here either way)
- *   logger       — optional; only values-free counts are ever logged
- *
- * Returns a values-free summary: schema ids and counts, never option values.
- */
-async function installCustomerPack({ provisioning, projectId, pack, logger } = {}) {
-  const api = assertProvisioningApi(provisioning)
-  const resolvedProjectId = requiredProjectId(projectId)
-  const normalized = normalizeCustomerPack(pack)
-
-  // PRECONDITION, not a creation path: the canonical table must already exist.
-  const sheet = await api.findObjectSheet({ projectId: resolvedProjectId, objectId: normalized.targetObjectId })
+// The canonical target PRECONDITION, shared by the dry-run and the install so the two cannot drift
+// on the one thing a deployer trips over first. The rehearsal report (F5) flags this as the reason a
+// CLI/route needs a two-step flow, so the error names the ensure path rather than the raw absence.
+async function requireCanonicalTargetSheet({ provisioning, projectId, pack }) {
+  const sheet = await provisioning.findObjectSheet({ projectId, objectId: pack.targetObjectId })
   if (!sheet || !sheet.id) {
     throw new StockPreparationCustomerPackInstallError(
       409,
       'CUSTOMER_PACK_TARGET_ABSENT',
       'customer pack install requires an already-provisioned canonical stock-preparation target; '
         + 'run ensureStockPreparationCanonicalTarget first',
-      { objectId: normalized.targetObjectId, packId: normalized.packId },
+      { objectId: pack.targetObjectId, packId: pack.packId },
     )
   }
+  return sheet
+}
+
+// F5 (rehearsal report): the install summary buckets ids by the ACTION TAKEN — created / stamped /
+// alreadyStamped — while every consumer that matters (the ledger, a CLI, a route response) needs the
+// OWNERSHIP BAND per id. The two are different axes and only the pack knows the second, so the join
+// happens once, here, instead of in each caller re-normalizing the pack.
+//
+// The id set is deliberately createdFields ∪ stampedExistingFields ∪ alreadyStampedFields: every one
+// of those is a column this install has confirmed present AND classified. `skippedFields` is NOT the
+// same set — it also contains columns that exist but whose classification this run did not touch.
+function buildInstalledFieldEntries(pack, { createdFields, stampedExistingFields, alreadyStampedFields }) {
+  const byId = new Map(pack.extensionFields.map((field) => [field.id, field]))
+  const actionById = new Map()
+  for (const fieldId of createdFields || []) actionById.set(fieldId, 'created')
+  for (const fieldId of stampedExistingFields || []) actionById.set(fieldId, 'stamped')
+  for (const fieldId of alreadyStampedFields || []) actionById.set(fieldId, 'already_stamped')
+
+  const entries = []
+  for (const [fieldId, action] of actionById) {
+    const field = byId.get(fieldId)
+    // An id the pack does not declare cannot have an ownership band, and guessing one is exactly the
+    // silent re-classification rule 4 forbids. Dropping it keeps the ledger honest.
+    if (!field) continue
+    entries.push({
+      fieldId,
+      ownership: field.ownership,
+      preserveOnRefresh: field.preserveOnRefresh,
+      extension: true,
+      action,
+    })
+  }
+  entries.sort((left, right) => left.fieldId.localeCompare(right.fieldId))
+  return entries
+}
+
+// The ledger's own shape: the four specified keys, no `action`. `action` is install-run evidence
+// (it answers "what did THIS run do"), while the ledger answers "what is on the sheet and who owns
+// it" — a question whose answer must not change because the same install ran twice.
+function toLedgerFieldEntries(entries) {
+  return entries.map(({ fieldId, ownership, preserveOnRefresh, extension }) => ({
+    fieldId,
+    ownership,
+    preserveOnRefresh,
+    extension,
+  }))
+}
+
+/**
+ * DRY RUN — the read-only rehearsal of installCustomerPack (rehearsal report F5: "there is no
+ * dry-run").
+ *
+ * It reuses the install's OWN pre-scan and classification rather than re-deriving them, so what it
+ * reports is what the install will do, not a parallel model of it. Zero writes by construction: the
+ * only host calls it makes are findObjectSheet, readObjectFieldsContent and the pure getFieldId
+ * derivation. It requires the FULL provisioning surface anyway, so "the dry-run passed" also means
+ * the install is not going to fail on a missing primitive.
+ *
+ * Unlike the install it does NOT throw on an ownership conflict — it reports the conflicting ids and
+ * says canInstall:false. Reviewing the conflict is the entire point of a dry-run.
+ *
+ * Values-free: logical schema ids, frozen ownership tokens, counts. `conflicts` carries only the
+ * already-sanitized describeDeclared* projections.
+ */
+async function planCustomerPackInstall({ provisioning, projectId, pack } = {}) {
+  const api = assertProvisioningApi(provisioning)
+  const resolvedProjectId = requiredProjectId(projectId)
+  const normalized = normalizeCustomerPack(pack)
+
+  await requireCanonicalTargetSheet({ provisioning: api, projectId: resolvedProjectId, pack: normalized })
+
+  const scan = await scanExistingExtensionFields({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
+
+  const conflictingFieldIds = [...new Set(scan.conflicts.map((entry) => entry.field))].sort()
+  const conflicting = new Set(conflictingFieldIds)
+  const byId = new Map(normalized.extensionFields.map((field) => [field.id, field]))
+  const describe = (fieldId, action) => {
+    const field = byId.get(fieldId)
+    return {
+      fieldId,
+      ownership: field ? field.ownership : null,
+      preserveOnRefresh: field ? field.preserveOnRefresh : null,
+      extension: true,
+      action,
+    }
+  }
+  const fields = [
+    ...scan.missing.map((fieldId) => describe(fieldId, 'create')),
+    ...scan.needsStamp.map((fieldId) => describe(fieldId, 'stamp')),
+    ...scan.alreadyStamped.map((fieldId) => describe(fieldId, 'already_stamped')),
+    ...conflictingFieldIds.map((fieldId) => describe(fieldId, 'conflict')),
+  ].sort((left, right) => left.fieldId.localeCompare(right.fieldId))
+
+  return {
+    mode: 'dry_run',
+    packId: normalized.packId,
+    packVersion: normalized.packVersion,
+    objectId: normalized.targetObjectId,
+    targetPresent: true,
+    canInstall: conflicting.size === 0,
+    willCreateFieldIds: [...scan.missing].sort(),
+    willStampFieldIds: [...scan.needsStamp].sort(),
+    alreadyStampedFieldIds: [...scan.alreadyStamped].sort(),
+    conflictingFieldIds,
+    conflicts: scan.conflicts.map((entry) => ({ ...entry })),
+    fields,
+    // The role views a real install would ensure, reported with the LOGICAL hidden ids the pack
+    // derived (buildRoleViewDescriptor maps these to physical ids at write time; a dry-run report
+    // reads better and travels better in the pack's own vocabulary).
+    roleViews: normalized.roleViews.map((roleView) => ({
+      roleViewId: roleView.viewId,
+      descriptorId: `sp-${normalized.packId}-${roleView.viewId}`,
+      hideOwnerships: [...roleView.hideOwnerships],
+      hiddenFieldIds: [...roleView.hiddenFieldIds].sort(),
+      hiddenFieldCount: roleView.hiddenFieldIds.length,
+    })),
+    counts: {
+      extensionFields: normalized.extensionFields.length,
+      willCreate: scan.missing.length,
+      willStamp: scan.needsStamp.length,
+      alreadyStamped: scan.alreadyStamped.length,
+      conflicting: conflicting.size,
+      optionSets: normalized.optionSets.length,
+      roleViews: normalized.roleViews.length,
+    },
+  }
+}
+
+/**
+ * Install a customer config pack onto the canonical stock-preparation main
+ * table. Additive only, idempotent: a second run adds no column, drops no
+ * column, and never calls ensureObject.
+ *
+ *   provisioning     — scoped host multitable provisioning API
+ *   projectId        — already-resolved tenant project id
+ *   pack             — raw or normalized pack (normalized here either way)
+ *   logger           — optional; only values-free counts are ever logged
+ *   packInstallStore — OPTIONAL install ledger (stock-preparation-pack-install-store.cjs). Absent →
+ *                      byte-identical to the pre-ledger behaviour: nothing is persisted and nothing
+ *                      throws, so every existing caller and test keeps working unchanged.
+ *   tenantId /
+ *   workspaceId      — ledger scope; required ONLY when a store is supplied (a ledger row that
+ *                      cannot be scoped to a tenant is not a row worth writing).
+ *   mode             — 'install' (default) | 'reinstall'; recorded as last-attempted-mode audit.
+ *
+ * Returns a values-free summary: schema ids and counts, never option values.
+ */
+async function installCustomerPack({
+  provisioning,
+  projectId,
+  pack,
+  logger,
+  packInstallStore,
+  tenantId,
+  workspaceId,
+  mode,
+} = {}) {
+  const api = assertProvisioningApi(provisioning)
+  const resolvedProjectId = requiredProjectId(projectId)
+  const normalized = normalizeCustomerPack(pack)
+
+  // PRECONDITION, not a creation path: the canonical table must already exist.
+  const sheet = await requireCanonicalTargetSheet({
+    provisioning: api,
+    projectId: resolvedProjectId,
+    pack: normalized,
+  })
 
   // VALIDATE ALL, THEN WRITE. The pre-scan is the last read-only step: after it
   // returns, either the pack agrees with every live column or nothing happened.
@@ -630,7 +806,16 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
       + ` optionFields=${syncedOptionFields.length} views=${ensuredViews.length}`,
   )
 
-  return {
+  // F5: the summary now carries the ownership band per id, so a CLI or a route no longer has to
+  // re-normalize the pack to say "13 PLM / 8 human columns". Values-free — ids, frozen ownership
+  // tokens, booleans and an action enum.
+  const installedFields = buildInstalledFieldEntries(normalized, {
+    createdFields,
+    stampedExistingFields,
+    alreadyStampedFields,
+  })
+
+  const summary = {
     packId: normalized.packId,
     packVersion: normalized.packVersion,
     objectId: normalized.targetObjectId,
@@ -641,8 +826,97 @@ async function installCustomerPack({ provisioning, projectId, pack, logger } = {
     // re-runs to created=0 / stamped=0.
     stampedExistingFields,
     alreadyStampedFields,
+    installedFields,
     syncedOptionFields,
     ensuredViews,
+  }
+
+  // TERMINAL-ONLY LEDGER WRITE — the LAST thing the install does, after every host mutation has
+  // succeeded. That ordering is the whole invariant: there is never a 'pending' row, and a crash
+  // anywhere above leaves NO row, so "no row" means "nothing landed" and a retry is safe (the
+  // install itself is additive and idempotent, so the retry is a no-op on a converged sheet).
+  const ledger = await recordPackInstall({
+    packInstallStore,
+    tenantId,
+    workspaceId,
+    projectId: resolvedProjectId,
+    pack: normalized,
+    mode,
+    installedFields,
+    summary,
+  })
+  if (ledger) summary.ledger = ledger
+
+  return summary
+}
+
+// The optional ledger persistence. Absent store → returns null and the caller's behaviour is
+// unchanged; a store that is present but unusable is an error, not a silent skip, because a caller
+// that asked for a ledger and got none would go on to plan refreshes against frozen-template bands
+// while believing the pack was enumerable.
+async function recordPackInstall({
+  packInstallStore,
+  tenantId,
+  workspaceId,
+  projectId,
+  pack,
+  mode,
+  installedFields,
+  summary,
+}) {
+  if (!packInstallStore) return null
+  if (typeof packInstallStore.recordInstall !== 'function') {
+    throw new StockPreparationCustomerPackInstallError(
+      503,
+      'CUSTOMER_PACK_LEDGER_UNAVAILABLE',
+      'customer pack install ledger is missing recordInstall',
+      { packId: pack.packId },
+    )
+  }
+  try {
+    const row = await packInstallStore.recordInstall({
+      tenantId,
+      workspaceId,
+      projectId,
+      objectId: pack.targetObjectId,
+      packId: pack.packId,
+      packVersion: pack.packVersion,
+      mode: mode === 'reinstall' ? 'reinstall' : 'install',
+      installedFields: toLedgerFieldEntries(installedFields),
+      // Counts only — the store's own guard rejects anything else, so this stays arithmetic.
+      summary: {
+        created: summary.createdFields.length,
+        skipped: summary.skippedFields.length,
+        stamped: summary.stampedExistingFields.length,
+        alreadyStamped: summary.alreadyStampedFields.length,
+        optionFields: summary.syncedOptionFields.length,
+        views: summary.ensuredViews.length,
+      },
+      // The installer throws rather than warns (validate-all-then-write), so a successful install
+      // has no warnings and the store derives status='installed'. The empty array is passed
+      // explicitly so the derivation is visible at the call site rather than implied by omission.
+      warnings: [],
+    })
+    return {
+      status: row.status,
+      mode: row.mode,
+      packId: row.packId,
+      packVersion: row.packVersion,
+      objectId: row.objectId,
+      fieldCount: Array.isArray(row.installedFields) ? row.installedFields.length : 0,
+    }
+  } catch (error) {
+    throw new StockPreparationCustomerPackInstallError(
+      500,
+      'CUSTOMER_PACK_LEDGER_WRITE_FAILED',
+      'customer pack install completed but the install ledger write failed; '
+        + 'the pack columns are on the sheet and a re-install is safe and idempotent',
+      {
+        objectId: pack.targetObjectId,
+        packId: pack.packId,
+        errorCode: (error && (error.code || error.name)) || 'LEDGER_WRITE_FAILED',
+      },
+    )
   }
 }
 
@@ -652,15 +926,19 @@ module.exports = {
   REQUIRED_PROVISIONING_METHODS,
   StockPreparationCustomerPackInstallError,
   installCustomerPack,
+  planCustomerPackInstall,
   __internals: {
     assertProvisioningApi,
     buildExtensionFieldProperty,
     buildExtensionFieldDescriptors,
+    buildInstalledFieldEntries,
     buildOptionPropertyPatch,
     buildOptionSyncInputs,
     buildOwnershipStampPatch,
     buildRoleViewDescriptor,
     classifyExistingField,
     resolveOptionSource,
+    scanExistingExtensionFields,
+    toLedgerFieldEntries,
   },
 }

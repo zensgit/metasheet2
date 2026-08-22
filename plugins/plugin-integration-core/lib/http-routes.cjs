@@ -125,6 +125,15 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/prep-lines', 'stockPreparationPrepLineList'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
+  // CUSTOMER PACK entry point — the executable surface for the config pack line. Admin-gated; the
+  // pack itself is NEVER request-supplied (server-held allowlist, see
+  // stock-preparation-customer-pack-catalog.cjs). Static paths precede ':packId' so the literal
+  // segments can never be captured as a pack id.
+  ['GET', '/api/integration/stock-preparation/customer-packs', 'stockPreparationCustomerPackList'],
+  ['GET', '/api/integration/stock-preparation/customer-packs/installs', 'stockPreparationCustomerPackInstallList'],
+  // Dry run: ZERO writes. Reuses the installer's own pre-scan so what it reports is what install does.
+  ['POST', '/api/integration/stock-preparation/customer-packs/:packId/dry-run', 'stockPreparationCustomerPackDryRun'],
+  ['POST', '/api/integration/stock-preparation/customer-packs/:packId/install', 'stockPreparationCustomerPackInstall'],
   // FOS-2: generic field-option-sync (preset-driven). Stock-prep route above is a compat alias.
   ['POST', '/api/integration/field-options/sync', 'fieldOptionsSync'],
   ['GET', '/api/integration/templates', 'templatesList'],
@@ -300,6 +309,20 @@ const {
   syncStockPreparationSandboxOptions,
   optionSetsFromInput,
 } = require('./stock-preparation-option-sync.cjs')
+// CUSTOMER PACK entry point. The installer is additive-only (never ensureObject); the catalog is the
+// server-held allowlist; the seam turns the install ledger into the planner's optional
+// `installedFieldProperties` input.
+const {
+  StockPreparationCustomerPackInstallError,
+  installCustomerPack,
+  planCustomerPackInstall,
+} = require('./stock-preparation-customer-pack-installer.cjs')
+const {
+  StockPreparationCustomerPackCatalogError,
+  createCustomerPackCatalog,
+  resolveCustomerPackCatalogConfig,
+} = require('./stock-preparation-customer-pack-catalog.cjs')
+const { loadPackInstalledFieldProperties } = require('./stock-preparation-pack-installed-fields.cjs')
 // #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
 // structure-only (rows always []), admin-gated, values-free evidence, no external write.
 const {
@@ -460,6 +483,8 @@ function inferHttpStatus(error) {
   if (error instanceof ExternalWriteDryRunError) return error.status
   if (error instanceof StockPreparationTableActionError) return error.status
   if (error instanceof StockPreparationOptionSyncError) return error.status
+  if (error instanceof StockPreparationCustomerPackInstallError) return error.status
+  if (error instanceof StockPreparationCustomerPackCatalogError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -805,6 +830,13 @@ const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'conf
 const VALID_TEMPLATE_INSTANTIATE_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'targetSystemId', 'sourceSystemId', 'pipelineName'])
 const VALID_C6_WRITE_APPLY_CONFIRM_KEYS = new Set(['dryRunToken'])
 const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId'])
+// CUSTOMER PACK install: `mode` is the ONLY accepted body key, and that is the whole point of the
+// allowlist. A `pack` key would turn an admin-authenticated request into schema authoring on the
+// canonical sheet (arbitrary `ext_` columns with arbitrary ownership bands) — packs are deploy-time
+// data resolved from the server-held catalog, never from a request. `tenantId` / `projectId` /
+// `objectId` are absent for the same reason the target-ensure write route rejects them: on a write
+// route they are steering vectors, and the tenant is auth-derived.
+const VALID_CUSTOMER_PACK_INSTALL_BODY_KEYS = new Set(['mode'])
 const VALID_STOCK_PREPARATION_SANDBOX_TARGET_REQUEST_KEYS = new Set(['tenantId', 'workspaceId', 'projectId', 'baseId', 'objectId', 'label', 'optionSets', 'optionSources', 'configInfo'])
 const VALID_STOCK_PREPARATION_OPTION_SYNC_REQUEST_KEYS = new Set([
   'tenantId',
@@ -1048,6 +1080,18 @@ function normalizeTableActionBody(body = {}, allowedKeys = VALID_TABLE_ACTION_DR
   for (const key of Object.keys(body)) {
     if (!allowedKeys.has(key)) {
       throw new HttpRouteError(400, 'TABLE_ACTION_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
+    }
+  }
+  return body
+}
+
+function normalizeCustomerPackBody(body = {}, allowedKeys = VALID_EMPTY_REQUEST_KEYS) {
+  if (!isPlainObject(body)) {
+    throw new HttpRouteError(400, 'CUSTOMER_PACK_REQUEST_INVALID', 'request body must be an object')
+  }
+  for (const key of Object.keys(body)) {
+    if (!allowedKeys.has(key)) {
+      throw new HttpRouteError(400, 'CUSTOMER_PACK_REQUEST_INVALID', `unsupported request field: ${key}`, { field: key })
     }
   }
   return body
@@ -2595,6 +2639,18 @@ function createHandlers(services, options = {}) {
     }
     return stockPreparationAudit
   }
+  // Customer-pack install LEDGER. Optional at registration, exactly like the audit store above: an
+  // environment without the SQL db still registers the read/dry-run routes. The INSTALL route,
+  // however, fails closed without it — an install whose columns cannot be enumerated afterwards is
+  // the very gap this line exists to close, so writing one unrecorded is refused, not allowed
+  // silently. The refresh seam treats its absence as "no pack-aware information" (legacy bands).
+  const stockPreparationPackInstalls = services.stockPreparationPackInstallStore || null
+  function requireStockPreparationPackInstalls() {
+    if (!stockPreparationPackInstalls || typeof stockPreparationPackInstalls.recordInstall !== 'function') {
+      throw new HttpRouteError(501, 'CUSTOMER_PACK_LEDGER_UNAVAILABLE', 'customer pack install ledger is not available; installs are refused without it')
+    }
+    return stockPreparationPackInstalls
+  }
   const adapterRegistry = requireService('adapterRegistry', ['createAdapter', 'listAdapterKinds'])
   const pipelineRegistry = requireService('pipelineRegistry', ['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns'])
   const runner = requireService('pipelineRunner', ['runPipeline'])
@@ -2609,11 +2665,19 @@ function createHandlers(services, options = {}) {
   const stockPreparationSqlServerRuntime =
     services && services.stockPreparationSqlServerRuntime
   const context = options.context || {}
+  // Values-free warnings only (the pack read-back seam's degrade-to-legacy notice).
+  const routeLogger = options.logger || (context && context.logger) || null
   const configuredTableActions = context && context.config
     ? (context.config.stockPreparationTableActions || context.config.tableActions)
     : undefined
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
+  })
+  // SERVER-HELD pack allowlist, built once at registration so a malformed deploy-time pack fails
+  // here (visibly, at activation) rather than on a deployer's first install call. Absent config →
+  // empty catalog → every packId is refused. Nothing about this map is request-influenced.
+  const customerPackCatalog = createCustomerPackCatalog({
+    packs: resolveCustomerPackCatalogConfig(context && context.config),
   })
 
   function getMultitableRecordsApi() {
@@ -2635,6 +2699,49 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  // The scoped provisioning surface the customer-pack installer asserts. Handed over as-is: the
+  // installer does its own REQUIRED_PROVISIONING_METHODS check (which deliberately does NOT include
+  // ensureObject), so the route must not narrow or widen that list here.
+  function getCustomerPackProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning) {
+      throw new HttpRouteError(503, 'CUSTOMER_PACK_API_UNAVAILABLE', 'customer pack install requires the multitable provisioning API')
+    }
+    return provisioning
+  }
+
+  // Read-back seam accessor. Returns null rather than throwing when the host cannot serve the
+  // per-field read: the refresh path must degrade to the (strictly narrower) legacy bands, never
+  // start 503-ing because a pack ledger exists.
+  function getPackReadbackProvisioning() {
+    const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+    if (!provisioning || typeof provisioning.readObjectFieldsContent !== 'function') return null
+    return provisioning
+  }
+
+  /**
+   * Resolve `installedFieldProperties` for one refresh. THIS is what closes the executable gap the
+   * comment in stock-preparation-table-actions.cjs used to describe: the ledger names the candidate
+   * `ext_` ids, the host says which of them are still live and how they are classified, and the
+   * planner is handed the result unchanged.
+   *
+   * `undefined` (no ledger, no pack installed, or any read failure) means the caller must OMIT the
+   * parameter, which is byte-identical to the pre-pack behaviour.
+   */
+  async function resolveInstalledFieldProperties(req, action) {
+    const objectId = (action && action.target && action.target.objectId)
+      || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+    const tenantId = resolveTenantId(req, {})
+    return loadPackInstalledFieldProperties({
+      packInstallStore: stockPreparationPackInstalls,
+      provisioning: getPackReadbackProvisioning(),
+      tenantId,
+      projectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+      objectId,
+      logger: routeLogger,
+    })
   }
 
   function stockPreparationSqlServerRunInput(req) {
@@ -3761,6 +3868,10 @@ function createHandlers(services, options = {}) {
         tokenStore: context.storage,
         policyStore: context.storage,
         conflictPolicyReview: body.conflictPolicyReview,
+        // Pack-aware bands, from the install ledger + a live per-field read. undefined (no ledger,
+        // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
+        // The apply route below resolves it the SAME way so the two agree on the plan revision.
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
       }))
     },
 
@@ -3834,6 +3945,9 @@ function createHandlers(services, options = {}) {
         acceptDuplicateResolution: confirm.acceptDuplicateResolution === true,
         permission: applyPermissionForUser(user),
         sourceAdapter,
+        // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
+        // plan and compares revisions, so the two routes must read the bands from one seam.
+        installedFieldProperties: await resolveInstalledFieldProperties(req, action),
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
@@ -4158,6 +4272,100 @@ function createHandlers(services, options = {}) {
         optionSets: input.optionSets,
       })
       return sendOk(res, result)
+    },
+
+    // ---------------------------------------------------------------------------------------
+    // CUSTOMER PACK — the executable surface. Four routes, one authorization posture:
+    //   admin gate (requireAccess 'admin', mirroring plugin-after-sales' hasInstallAdminAccess)
+    // + SERVER-HELD pack allowlist (mirroring ALLOWED_TEMPLATE_IDS; the pack is never in the body).
+    // The tenant project is auth-derived (resolveAuthUserTenantId -> staging project id), so a
+    // request cannot steer the install at another tenant's sheet.
+    // ---------------------------------------------------------------------------------------
+
+    // What this server is allowed to install. Values-free evidence summaries (ids, types, ownership
+    // tokens, counts) — never an option value or a label.
+    async stockPreparationCustomerPackList(req, res) {
+      requireAccess(req, 'admin')
+      return sendOk(res, {
+        packCount: customerPackCatalog.size,
+        packs: customerPackCatalog.list(),
+      })
+    },
+
+    // The ledger read. Answers "what is installed on this sheet, by which pack, in which band".
+    async stockPreparationCustomerPackInstallList(req, res) {
+      requireAccess(req, 'admin')
+      const store = requireStockPreparationPackInstalls()
+      const query = requestQuery(req)
+      const tenantId = resolveTenantId(req, {})
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const objectId = firstString(query.objectId) || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+      const result = await store.listInstalls({
+        tenantId,
+        projectId,
+        objectId,
+        limit: asListLimit(query.limit),
+      })
+      return sendOk(res, {
+        projectId,
+        objectId,
+        rowCount: result.rowCount,
+        // Explicit projection rather than the raw row: it keeps a future ledger column from
+        // reaching a response by accident, and everything here is an id, a token or a count.
+        installs: result.entries.map((entry) => ({
+          packId: entry.packId,
+          packVersion: entry.packVersion,
+          mode: entry.mode,
+          status: entry.status,
+          installedFields: entry.installedFields,
+          fieldCount: Array.isArray(entry.installedFields) ? entry.installedFields.length : 0,
+          summary: entry.summary,
+          warnings: entry.warnings,
+          lastInstallAt: entry.lastInstallAt,
+        })),
+      })
+    },
+
+    // DRY RUN — ZERO writes. It reuses the installer's own read-only pre-scan, so "what it reports"
+    // and "what install does" cannot drift. It reports ownership conflicts instead of throwing on
+    // them, because reviewing the conflict before it lands is the point (rehearsal report F5).
+    async stockPreparationCustomerPackDryRun(req, res) {
+      requireAccess(req, 'admin')
+      normalizeCustomerPackBody(requestBody(req))
+      const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
+      const tenantId = resolveAuthUserTenantId(req)
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const plan = await planCustomerPackInstall({
+        provisioning: getCustomerPackProvisioning(),
+        projectId,
+        pack,
+      })
+      return sendOk(res, { projectId, ...plan })
+    },
+
+    // INSTALL — additive only (the installer never calls ensureObject) and idempotent. The ledger is
+    // REQUIRED here: an install nobody can enumerate afterwards is the gap this line closes.
+    async stockPreparationCustomerPackInstall(req, res) {
+      requireAccess(req, 'admin')
+      const body = normalizeCustomerPackBody(requestBody(req), VALID_CUSTOMER_PACK_INSTALL_BODY_KEYS)
+      const pack = customerPackCatalog.get(firstString(requestParams(req).packId))
+      const store = requireStockPreparationPackInstalls()
+      // Auth-derived, never request-supplied: a request tenantId/projectId would be a steering
+      // vector on a WRITE route (same discipline as the target-ensure route above).
+      const tenantId = resolveAuthUserTenantId(req)
+      const projectId = resolveIntegrationStagingProjectId(tenantId, undefined)
+      const result = await installCustomerPack({
+        provisioning: getCustomerPackProvisioning(),
+        projectId,
+        pack,
+        logger: routeLogger || undefined,
+        packInstallStore: store,
+        tenantId,
+        workspaceId: resolveWorkspaceId(req, {}),
+        mode: body.mode === 'reinstall' ? 'reinstall' : 'install',
+      })
+      const created = Array.isArray(result.createdFields) ? result.createdFields.length : 0
+      return sendOk(res, { projectId, ...result }, created > 0 ? 201 : 200)
     },
 
     // #3751 MVP: readiness of the 9 frozen MVP tables (or the objectIds subset). Admin-gated;
@@ -5317,7 +5525,7 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
   if (!context || !context.api || !context.api.http || typeof context.api.http.addRoute !== 'function') {
     throw new Error('registerIntegrationRoutes: context.api.http.addRoute is required')
   }
-  const handlers = createHandlers(services || {}, { context })
+  const handlers = createHandlers(services || {}, { context, logger })
   const registered = []
   const routeDefinitions = services
     && services.stockPreparationSqlServerRuntime
