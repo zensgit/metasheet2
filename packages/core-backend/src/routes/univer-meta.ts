@@ -9281,6 +9281,14 @@ export function univerMetaRouter(): Router {
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
+      // O-2 X2: this route's applyPermissionDeEscalation writes field_permissions and
+      // spreadsheet_permissions, BOTH of which carry a recovery-authority trigger that is ARMED from
+      // ladder rung L1 onward. Without this line a 40001 raised under a held exclusive lease fell
+      // through to the 500 below — an unmapped 500, which is exactly what the L6 soak criterion
+      // forbids. Dormant during L1 (only the battery holds a lease, over synthetic subjects) and
+      // ACTIVE from L4, when real subjects take leases. Same mapping the five sibling catches in
+      // this file already use; this one was an omission, not a design.
+      if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] config-restore execute failed:', err)
