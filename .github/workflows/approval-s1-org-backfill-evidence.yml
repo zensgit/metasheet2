@@ -5,12 +5,11 @@ name: Approval S1 Org Backfill Evidence (Read-Only)
 # in the ledger, how many rows carry an org, and how many instances would go dark if
 # `APPROVAL_S1_ORG_PIN_ENABLED` were flipped ON.
 #
-# THIS WORKFLOW NEVER WRITES. Every remote statement is a SELECT, a `docker inspect`, a `printenv`,
-# or `migrate.js --confirm`. That last one is read-only BY INSPECTION, not by its docstring: it
-# calls `Migrator.getMigrations()`, which guards its ledger read behind
-# `#doesTableExists(this.#migrationTable)` and returns `[]` when the table is absent
-# (kysely 0.28.8 dist/cjs/migration/migrator.js:61) — it never runs
-# `#ensureMigrationTablesExists`, so it cannot create `kysely_migration` on a DB that lacks it.
+# THIS WORKFLOW NEVER WRITES. Every remote statement is a SELECT, a `docker inspect`, or a
+# `printenv`. (An earlier draft also ran `migrate.js --confirm` as corroboration; it was REMOVED —
+# on a pre-`5fa1038017` image the argument falls through to `migrateToLatest()`, which takes the
+# production migration advisory lock and can even apply migrations. The raw ledger SELECT (p01)
+# is version-independent and is the sole authority.)
 #
 # There is NO host git-sync step (the docker-gc template's sync mutates the host checkout and a
 # read-only probe has no use for it), NO compose
@@ -57,13 +56,26 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           ENVIRONMENTS: ${{ github.event.inputs.environments || 'both' }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_SSH_KEY_B64" ]] || { echo "DEPLOY_SSH_KEY_B64 is required" >&2; exit 2; }
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
           printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh_opts="-o StrictHostKeyChecking=no -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+
+          case "$ENVIRONMENTS" in prod|staging|both) ;; *) echo "invalid environments input" >&2; exit 2;; esac
 
           mkdir -p output/s1-org-evidence
           evidence_log="output/s1-org-evidence/evidence.log"
@@ -121,7 +133,7 @@ jobs:
           # run_env <label> <pg_container> <backend_container>
           run_env() {
             local label="$1" pg_container="$2" backend_container="$3"
-            local pg_user pg_db creds ledger column executed_at confirm_rc
+            local pg_user pg_db creds ledger column executed_at
 
             echo "=== S1 EVIDENCE START ${label} ==="
             echo "env=${label}"
@@ -143,8 +155,8 @@ jobs:
             read -r pg_user pg_db <<< "$creds"
 
             # ---- GATE: is the migration applied here at all? -------------------------------
-            # Primary check is the RAW LEDGER SELECT — it is version-independent, unlike
-            # `migrate.js --confirm`, which depends on the running image carrying that subcommand.
+            # The RAW LEDGER SELECT is the sole applied-check — version-independent, and the
+            # only acceptable one (see the header note on the removed --confirm corroboration).
             if ! probe "$pg_container" "$pg_user" "$pg_db" "${label}.p01_ledger_row_present" \
                  "SELECT count(*) FROM kysely_migration WHERE name = '${MIGRATION_NAME}'"; then
               echo "verdict=INDETERMINATE"
@@ -195,14 +207,6 @@ jobs:
             fi
             echo "${label}.p03_migration_executed_at=${executed_at}"
 
-            # Corroboration only (see p01). Introduced in 5fa1038017, an ancestor of both deployed
-            # SHAs at time of writing; a `2` here means the running image predates it.
-            confirm_rc=0
-            docker exec "$backend_container" \
-              node packages/core-backend/dist/src/db/migrate.js --confirm "${MIGRATION_NAME}" >/dev/null 2>&1 || confirm_rc=$?
-            # rc 0=applied 1=pending 2=name-unknown-to-this-image; 125/126/127 mean the docker exec
-            # itself failed (backend container down or the path moved), NOT a migration verdict.
-            echo "${label}.p04_migrate_confirm_rc=${confirm_rc}"
 
             local rc=0
 
