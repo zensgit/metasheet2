@@ -726,18 +726,25 @@ describeIfDatabase('Lock-10 (S1) canReadApprovalInstance — all 5 arms + org pi
     // assertion is the discriminator that closes the poisoning: it fails if the migration was
     // excluded, skipped, or never reached this database, independent of what the bootstrap helper
     // separately provisions.
-    // Blast radius, checked: this test file is referenced by exactly one workflow
-    // (`.github/workflows/approval-realdb-instance-readability-s1.yml`, the ONLY lane that
-    // collects it — grepped across `.github/workflows/*.yml`) and is excluded from
+    // Blast radius, checked: as of #5095 this test file is referenced by TWO workflows —
+    // the original standalone `.github/workflows/approval-realdb-instance-readability-s1.yml`
+    // lane, and (whole file, no EXPECT_DB) the required `plugin-tests.yml` "Run approval
+    // real-DB integration" step in `test (20.x)` — grepped across `.github/workflows/*.yml`,
+    // no third lane collects it (re-verified at this head). It is excluded from
     // `vitest.config.ts`'s default set, so this assertion cannot run in a lane that skips
-    // `db:migrate`. None of the four lanes named above (whose own `MIGRATION_EXCLUDE` lists are
-    // independently drifted from this one, per the migration's docblock) reference this file
-    // either.
-    // Residual (honest, not closed): this only holds because this lane's own "Run DB migrations"
-    // step runs BEFORE the test step — if a future lane ever called `ensureApprovalSchemaReady`
-    // before `db:migrate`, `ADD COLUMN IF NOT EXISTS` would no-op against the bootstrap's
-    // already-present column and this assertion would not by itself catch it; that ordering is not
-    // reachable in the current `approval-realdb-instance-readability-s1.yml` lane.
+    // `db:migrate`. None of the four lanes named above (whose own `MIGRATION_EXCLUDE` lists
+    // are independently drifted from this one, per the migration's docblock) reference this
+    // file either. Re-verified in the new lane: its "Run DB migrations" step runs before its
+    // "Run approval real-DB integration" step (migrations first in both lanes);
+    // plugin-tests.yml's `MIGRATION_EXCLUDE` does not list
+    // `zzzz20260821100000_add_approval_instance_org_id`, so this assertion runs for-real (not
+    // skip-green) there too.
+    // Residual (honest, not closed): this only holds because each lane's own "Run DB migrations"
+    // step runs BEFORE the test step in that lane — if a future lane ever called
+    // `ensureApprovalSchemaReady` before `db:migrate`, `ADD COLUMN IF NOT EXISTS` would no-op
+    // against the bootstrap's already-present column and this assertion would not by itself
+    // catch it; that ordering is not reachable in either of the two lanes that currently
+    // collect this file, but the residual now has two lanes to hold for instead of one.
     it('kysely_migration records zzzz20260821100000_add_approval_instance_org_id as applied (the bootstrap cannot forge this — proves the migration itself ran, not just its shape)', async () => {
       const result = await pool().query(
         `SELECT 1 FROM kysely_migration WHERE name = $1`,

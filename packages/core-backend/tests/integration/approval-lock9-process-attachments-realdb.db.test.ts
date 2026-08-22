@@ -8,7 +8,8 @@
  * Covers: G-1, G-2, G-4 (through the PRODUCTION wiring, never a stub), G-5, G-6, G-7, G-8, G-11,
  * G-12, G-13, G-14, G-16. Two-point wired: excluded from vitest.config.ts's no-DB job and run as
  * WHOLE FILES in the standalone .github/workflows/approval-realdb-lock9-process-attachments.yml
- * lane, which arms EXPECT_DB=1.
+ * lane, which arms EXPECT_DB=1. As of #5095, also run (whole file, no EXPECT_DB) in the required
+ * plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect this file.
  *
  * Harness mirrors approval-attachment-pipeline-realdb.test.ts / approval-handler-node.db.test.ts.
  */
