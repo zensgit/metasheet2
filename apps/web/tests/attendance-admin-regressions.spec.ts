@@ -1938,14 +1938,14 @@ describe('Attendance admin regressions', () => {
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
     expect(section).toBeTruthy()
 
-    // All 35 admin sections mount simultaneously (v-show, not v-if), so the OTHER 7 pre-existing
-    // AttendanceUserPickerField sites on the same page also mounted and hit the platform-admin
-    // route, and it 403s them (proving the failure mode P1-1 warns about IS live for those sites
-    // — a real, disclosed follow-up, not fixed here). The point of this test is that the
-    // annual-leave-balance section's OWN picker is unaffected: it went through the
-    // attendance-scoped route instead and never touched the platform-admin one.
-    expect(vi.mocked(apiFetch).mock.calls.some(([requested]) => String(requested).includes('/api/admin/users'))).toBe(true)
-
+    // GATE-5097 P2-4: this used to also assert that /api/admin/users WAS called (i.e. that the
+    // other pre-existing AttendanceUserPickerField sites on the same page — all 34 admin sections
+    // mount simultaneously via v-show, not v-if — are still on the unfixed default endpoint).
+    // That encoded "the follow-up hasn't happened yet" as a passing precondition: applying this
+    // PR's own prescribed follow-up (adding the endpoint override to those sites too) turned it
+    // into a false assertion and failed this test for an unrelated reason. Removed — the
+    // load-bearing proof that THIS section's picker works is the real-<option> assertion inside
+    // loadUserIntoPicker() below plus the attendance-scoped-only assertion at the end of this test.
     await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'delegated-target-user')
     const select = section!.querySelector<HTMLSelectElement>('#attendance-annual-balance-user')?.closest('.attendance__field')?.querySelector('select')
     expect(select?.value).toBe('delegated-target-user')

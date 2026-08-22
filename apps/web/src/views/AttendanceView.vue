@@ -5554,7 +5554,7 @@
                            actual shift/date fields and the "Preview fixed schedule" action). GATE-5097
                            P3-1 corrected the record: this drawer has no shift picker of its own, but
                            loadShifts() auto-defaults this SAME shiftId to the org's first shift whenever
-                           one exists (:26641-26643 `if (!…shiftId && shifts.value.length > 0) { … =
+                           one exists (:26645-26647 `if (!…shiftId && shifts.value.length > 0) { … =
                            shifts.value[0].id }`), so the drawer's copy was POPULATED — not an empty "No
                            shift selected" placeholder — in any org with at least one shift, which is the
                            common case, not the exception. The duplication itself is still the reason for
@@ -7176,9 +7176,21 @@
                      attendance admin does not have, which would 403 on mount and leave the
                      picker's <select> with no options and no way to set a value at all (single
                      v-model setter in this file). Pointed at the attendance-scoped search route
-                     instead, which is gated by the SAME attendance:admin permission as the data
-                     it feeds and admits global admins too (attendance-admin.ts:556) — strictly
-                     wider than the default, never narrower than what this section already needs. -->
+                     instead, which admits global admins too (attendance-admin.ts:556) and is
+                     strictly wider than the /api/admin/users default this replaces.
+                     GATE-5097 P3-5: that route's gate and the data read's gate are NOT proven
+                     byte-identical, despite sharing the `attendance:admin` permission name —
+                     core-backend's rbacGuard('attendance','admin') resolves through
+                     userHasPermission, which applies isPermissionAllowedByNamespaceAdmission
+                     (rbac/service.ts:39-41; `attendance` is not in
+                     NON_NAMESPACED_PERMISSION_RESOURCES, namespace-admission.ts:11-38), while the
+                     PLUGIN's own withPermission('attendance:admin', …) (index.cjs:23452-23467)
+                     does not consult namespace admission at all. So a delegated admin with
+                     attendance:admin but no ENABLED user_namespace_admissions row for the
+                     attendance namespace still passes the data read and 403s this search — a
+                     smaller, pre-existing population than before this fix (every delegated admin
+                     was blocked outright), not a fully closed one. Tracked as a follow-up, not
+                     fixed here. -->
                 <AttendanceUserPickerField
                   v-model="annualBalanceUserId"
                   :tr="tr"
