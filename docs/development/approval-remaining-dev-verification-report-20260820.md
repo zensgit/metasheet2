@@ -917,6 +917,6 @@ Postgres 中亲跑;判定绑 pre-squash head;报告文件具名。**没有任何
 
 阶段 3 `SET NOT NULL` 的 ratified 断言半边(`is_nullable='NO'`)仍从未在任何库跑过;org pin 激活
 零 staging/prod 证据(staging 连 S1 迁移都未应用);`APPROVAL_ATTACHMENTS_ENABLED` ON 零 UAT;
-Lock-11 十 OD 零实现(四写入点仍不盖章,p31 的漂移机制未闭合(两次采样均为 1,增长未被实测));#5103 未合(owner-held),其 SQL 从未对
+Lock-11 十 OD 零实现(四写入点仍不盖章,p31 的漂移机制未闭合(三次采样均为 1,增长未被实测));#5103 未合(owner-held),其 SQL 从未对
 生产数据执行;G-S1-8 仍 expected-red;evidence workflow 的只读性无自动门(P3-1 随行);U2/U3'/U4/
 U5/U7/U8 仍 unknown(其中 U2/U7/U8 非仓内可解)。§12.3 全部条目不因本段减少。
