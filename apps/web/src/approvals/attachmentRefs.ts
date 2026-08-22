@@ -130,6 +130,70 @@ export function resolveAttachmentFields(
   return result
 }
 
+/**
+ * Lock-9 OD-L9-10(a) — every process-attachment id referenced by `store.history[].metadata`, across
+ * ALL history rows, de-duplicated. A process attachment has no form field to key on (`fieldId: null`
+ * at `/refs`), so it cannot go through `collectAttachmentRefIds`'s schema-field walk above — this is
+ * a deliberate SEPARATE collector, not a widening of that one. A non-array/absent `metadata` or
+ * `metadata.attachmentIds` contributes nothing rather than being coerced into a bogus id.
+ */
+export function collectHistoryAttachmentRefIds(
+  history: ReadonlyArray<{ metadata?: unknown } | null | undefined> | null | undefined,
+): string[] {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const item of history ?? []) {
+    const metadata = item?.metadata
+    if (!metadata || typeof metadata !== 'object') continue
+    const ids = (metadata as Record<string, unknown>).attachmentIds
+    if (!Array.isArray(ids)) continue
+    for (const id of ids) {
+      if (!isRefId(id) || seen.has(id)) continue
+      seen.add(id)
+      out.push(id)
+    }
+  }
+  return out
+}
+
+/**
+ * Lock-9 OD-L9-10(a) read path — resolve ONE history entry's staged `metadata.attachmentIds` against
+ * the already-fetched `/refs` metadata. A NEW pure resolver, deliberately distinct from
+ * `resolveAttachmentFields` above (which is form-field-scoped and keys off the frozen
+ * `formSchema`/`formSnapshot` pair — a process attachment has neither). Same two hard rules this
+ * module exists to enforce: resolve BY THE FROZEN ID (an id the server omitted — hidden/never
+ * bound to this instance for a reason this reader cannot see — renders as nothing; an id the server
+ * returned as `tombstone` renders as a tombstone), and never fabricate a filename/size/link for an
+ * id this call could not resolve.
+ */
+export function resolveProcessAttachmentRefs(
+  attachmentIds: unknown,
+  metadata: ReadonlyArray<AttachmentRefMetadata>,
+): ResolvedAttachmentRef[] {
+  if (!Array.isArray(attachmentIds)) return []
+  const byId = new Map(metadata.map((entry) => [entry.id, entry]))
+  const refs: ResolvedAttachmentRef[] = []
+  for (const id of attachmentIds) {
+    if (!isRefId(id)) continue
+    const entry = byId.get(id)
+    if (!entry) continue // server omitted it entirely ⇒ render nothing, never a tombstone (no leak)
+    if (entry.tombstone || !entry.fileName) {
+      refs.push({ id, tombstone: true })
+      continue
+    }
+    refs.push({
+      id,
+      tombstone: false,
+      fileName: entry.fileName,
+      ...(typeof entry.sizeBytes === 'number' && Number.isFinite(entry.sizeBytes) ? { sizeBytes: entry.sizeBytes } : {}),
+      ...(typeof entry.downloadUrl === 'string' && entry.downloadUrl.startsWith('/api/approval/attachments/')
+        ? { downloadUrl: entry.downloadUrl }
+        : {}),
+    })
+  }
+  return refs
+}
+
 /** Human byte size for display. Values-free by construction — it only formats a number it was given. */
 export function formatAttachmentSize(sizeBytes: number | undefined): string {
   if (typeof sizeBytes !== 'number' || !Number.isFinite(sizeBytes) || sizeBytes < 0) return ''
