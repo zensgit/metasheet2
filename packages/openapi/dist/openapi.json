@@ -8185,6 +8185,37 @@
               }
             }
           },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the requester's org could not be resolved (Lock-11 arm (a)): the requester holds zero active organization memberships, or holds two or more. The request was authorized (approvals:write passed) but the org derivation refused; this is distinct from 403. The response body is values-free — it carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "example": "APPROVAL_ORG_UNRESOLVED"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
           }

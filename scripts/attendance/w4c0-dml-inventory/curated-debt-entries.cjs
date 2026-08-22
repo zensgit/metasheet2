@@ -688,6 +688,7 @@ const GENERIC_SHARED_ALLOWLIST = [
   { relPath: 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts', reason: 'Lock-10 (S1) generic approval_instances.org_id schema/backfill migration (Phase 1 only), not attendance-specific — same shape as zzzz20260404100000 above' },
   { relPath: 'packages/core-backend/src/services/approval-comment-service.ts', reason: 'Lock-10 (S2) approval-comments pointer-row audit writer — generic approval product, not attendance-specific; same shape as the approval bridge/migration entries above' },
   { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts', reason: 'Lock-10 (S1) Migration B, revised at Lock-11 §10 D-8(β) — generic approval_instances.org_id residual backfill (classes 2/3, ordered, plus the (i)-guarded class-6 stamp), not attendance-specific — same shape as zzzz20260821100000 above' },
+  { relPath: 'packages/core-backend/src/db/migrations/zzzz20260823150000_close_approval_instance_org_id_gap_window.ts', reason: 'Lock-11 §10.3 gap-closer (seventh by-reference ruling, item 1) — generic approval_instances.org_id backfill over the Migration-B->W1W2 creation window (created_at-scoped, (i)-guarded), not attendance-specific — same shape as zzzz20260823100000 above' },
 ]
 
 function isGenericSharedAllowlisted(site) {

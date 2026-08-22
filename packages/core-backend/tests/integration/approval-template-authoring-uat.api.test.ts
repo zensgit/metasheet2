@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import net from 'net'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalOrgMembership } from '../helpers/approval-schema-bootstrap'
 
 // tests/setup.ts replaces global fetch in its beforeAll. Capture Node's real implementation while
 // this module is evaluated so this real-HTTP suite cannot silently call the empty test stub.
@@ -121,6 +121,10 @@ describeIfDatabase('Approval template authoring MVP — operator UAT (real DB, n
        ON CONFLICT DO NOTHING`,
       [REQUESTER_USER_ID],
     )
+    // Lock-11 §10 arm (a) fixture delta (§11): dev-token writes no `user_orgs` row; the requester
+    // needs exactly one active membership or the real `POST /api/approvals` call below 422s
+    // (APPROVAL_ORG_UNRESOLVED) before this suite's own authoring/publish/start assertions run.
+    await grantApprovalOrgMembership(REQUESTER_USER_ID)
     adminToken = await authToken(baseUrl, 'uat-admin')
     requesterToken = await authToken(baseUrl, REQUESTER_USER_ID)
   })

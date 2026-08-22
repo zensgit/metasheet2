@@ -17109,6 +17109,21 @@ export interface operations {
                     };
                 };
             };
+            /** @description APPROVAL_ORG_UNRESOLVED — the requester's org could not be resolved (Lock-11 arm (a)): the requester holds zero active organization memberships, or holds two or more. The request was authorized (approvals:write passed) but the org derivation refused; this is distinct from 403. The response body is values-free — it carries no org id, membership count, or user id. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error: {
+                            /** @example APPROVAL_ORG_UNRESOLVED */
+                            code: string;
+                            message: string;
+                        };
+                    };
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };

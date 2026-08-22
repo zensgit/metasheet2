@@ -1256,6 +1256,22 @@ export default defineConfig({
       // standalone .github/workflows/approval-realdb-org-backfill-b.yml lane, which arms
       // EXPECT_DB=1.
       'tests/integration/approval-instance-org-backfill-b.db.test.ts',
+      // Lock-11 §10.3 gap-closer (seventh by-reference ruling, item 1) — org_id backfill over the
+      // Migration-B->W1W2 NULL-row creation window, created_at-scoped, (i)-guarded (single-active-
+      // org premise self-asserted, values-free FAIL-LOUD, idempotent, prefix-guarded). Real DB.
+      // Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-org-gap-closer.yml lane,
+      // which arms EXPECT_DB=1.
+      'tests/integration/approval-org-instance-gap-closer.db.test.ts',
+      // Lock-11 §10 W-1/W-2 create-time org stamping — the shared arm-(a) derivation
+      // (deriveApprovalInstanceOrgId) as wired into ApprovalProductService.createApproval,
+      // gated end-to-end through BOTH real writers: POST /api/approvals (W-1) and the
+      // multitable automation start_approval bridge (W-2). G-L11-0/1/2/3/10 + refusal
+      // precedence. Real DB (boots a live MetaSheetServer + drives AutomationService.executeRule).
+      // Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-org-writer-w1w2-s1.yml
+      // lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-w1w2-s1.db.test.ts',
       // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
       // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
       // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
