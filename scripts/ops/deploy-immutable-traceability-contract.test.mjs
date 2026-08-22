@@ -42,7 +42,26 @@ test('docker images carry commit trace metadata for backend and web', () => {
 
 test('docker-build workflow deploys exact commit images and verifies served backend/web commits', () => {
   const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
+  const deployJobMatches = raw.match(/^  deploy:\s*$/gm) ?? []
+  assert.equal(deployJobMatches.length, 1, 'docker-build workflow must expose exactly one deploy job')
+  const deployJobStart = raw.indexOf('\n  deploy:\n')
+  const deployStepsStart = raw.indexOf('\n    steps:\n', deployJobStart)
+  assert.ok(deployJobStart >= 0 && deployStepsStart > deployJobStart, 'deploy job header must be structurally bounded')
+  const deployJobHeader = raw.slice(deployJobStart, deployStepsStart)
 
+  assertContains(raw, 'confirm_production_deploy:', 'manual production deploy input')
+  assertContains(deployJobHeader, "github.event_name == 'workflow_dispatch'", 'manual production deploy gate')
+  assertContains(deployJobHeader, "github.ref == 'refs/heads/main'", 'production deploy main-ref gate')
+  assertContains(
+    deployJobHeader,
+    "github.event.inputs.confirm_production_deploy == 'DEPLOY_PRODUCTION'",
+    'production deploy confirmation gate',
+  )
+  assertContains(deployJobHeader, 'environment:\n      name: production', 'production deploy environment')
+  assert.ok(
+    !raw.includes("if: ${{ github.ref == 'refs/heads/main' }}"),
+    'a push to main must build images without automatically deploying production',
+  )
   assertContains(raw, '--build-arg VCS_REF="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_TAG="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"', 'docker-build workflow')
