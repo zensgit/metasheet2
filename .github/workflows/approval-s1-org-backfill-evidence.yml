@@ -376,6 +376,79 @@ jobs:
               "SELECT count(*) FROM approval_instances i
                 WHERE i.org_id IS NOT NULL AND i.requester_snapshot->>'id' IS NULL" || rc=1
 
+            # ---- MIGRATION B CLASS PROBES over the residual NULL population ------------------
+            # These probe the SAME p20 population (platform-id, org_id NULL) by Lock-10 §2.2(b)
+            # row class. CORRECTED (fix round, gate NIT-1): they do NOT partition p20 — c1
+            # (template-originated) and c3_unique (uniquely-resolvable) are NOT mutually exclusive
+            # (a template-originated row can ALSO be uniquely-resolvable; on prod today they are
+            # the exact same 2 rows, via class-3's ordered fall-through onto class-1 residue), so
+            # c1 + c3_unique + c3_multi_org + c3_zero_membership + c3_requester_id_absent can
+            # double-count and need not sum to p20. UPDATED at the Lock-11 §10 D-8(β) revision:
+            # `c6_terminal_org_null` is NO LONGER by itself a reliable ABORT predictor — read it
+            # TOGETHER with `u1a_distinct_active_orgs` below. A nonzero `c6` now means the
+            # migration's class-6 arm will EITHER stamp every counted row with the unique active
+            # org (`u1a_distinct_active_orgs == 1`) OR abort exactly as before
+            # (`u1a_distinct_active_orgs != 1`) — see that migration's "CLASS-6 REVISION" docblock
+            # note and gates H15/H38/H39 in its `.db.test.ts`. Necessary-for-an-abort, not
+            # sufficient — p31 already proves writer drift is live, so a row created between this
+            # probe and deploy could still be class-6 shaped (narrow, because user_orgs
+            # blanket-backfills active users to exactly one 'default', but nonzero). A nonzero
+            # `c6` combined with `u1a_distinct_active_orgs != 1` is an OWNER ESCALATION, not an
+            # implementer decision to route around: the lock ruled ABORT for that case and ruled
+            # nothing about what to do when it fires. A nonzero `c6` combined with
+            # `u1a_distinct_active_orgs == 1` is the RATIFIED stamp arm and requires no escalation.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c1_template_originated_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.template_id IS NOT NULL" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_unique_active_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_multi_org_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM user_orgs uo
+                               WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+                               GROUP BY uo.user_id HAVING count(*) >= 2)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_zero_membership_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c3_requester_id_absent_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND i.requester_snapshot->>'id' IS NULL" || rc=1
+            # c6_terminal_org_null — THE §2.2(b) class-6 predicate (population, UNCHANGED by the
+            # D-8(β) revision), reproduced VERBATIM from
+            # `zzzz20260823100000_backfill_approval_instance_org_id.ts`'s CLASS_6_PREDICATE
+            # comment, pre-flight census query, AND (new at the D-8(β) revision) its class-6 STAMP
+            # UPDATE — this probe is now the FOURTH verbatim reproduction, not the second; if any
+            # of the four ever diverge, a green probe here stops predicting a green migration.
+            # What CHANGED at D-8(β) is not this predicate but what the migration does with the
+            # rows it counts — see the comment above this probe block and the migration's own
+            # "CLASS-6 REVISION" docblock note. Gates H15/H38/H39 in that migration's
+            # `.db.test.ts` prove the migration side; this probe is the only way to see the number
+            # in a real deployment before the migration runs there.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.c6_terminal_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL
+                  AND i.id NOT LIKE 'plm:%'
+                  AND i.id NOT LIKE 'afs:%'
+                  AND COALESCE(i.source_system, 'platform') = 'platform'
+                  AND i.template_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM user_orgs uo
+                     WHERE uo.user_id = i.requester_snapshot->>'id'
+                       AND uo.is_active = TRUE
+                     GROUP BY uo.user_id
+                    HAVING count(*) = 1
+                  )" || rc=1
             # ---- Lock-11 U1 probes (writer-org-derivation draft §8; all counts-only) ----------
             # U1a: does ANY org other than the blanket-backfilled one exist on user_orgs, and how
             # many active users hold >=2 active memberships (sizes Lock-11 outage class 1 / D-10's
