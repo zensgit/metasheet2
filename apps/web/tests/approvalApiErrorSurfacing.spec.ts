@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it , vi} from 'vitest'
 import { ApprovalApiError, approvalRequestError, normalizeApprovalHistoryEnvelope } from '../src/approvals/api'
 import { collectHistoryAttachmentRefIds } from '../src/approvals/attachmentRefs'
 
@@ -151,6 +151,29 @@ describe('normalizeApprovalHistoryEnvelope (Lock-9 fix round, gate P1-2)', () =>
     // The platform branch's row has no `metadata` column at all (gate P1-1, disclosed in the PR
     // body) — correctly resolves to no ids, not a crash and not a fabricated one.
     expect(collectHistoryAttachmentRefIds(history as never)).toEqual([])
+  })
+
+  it('getApprovalHistory itself unwraps the real envelope (pins the CALL SITE, not just the helper)', async () => {
+    // Requal P2 (2026-08-22): reverting getApprovalHistory to its pre-fix body while leaving the
+    // normalizer intact left the ENTIRE required lane green — the five tests above exercise the
+    // function, nothing exercised the wiring. This test pins the call site: it must red if the
+    // route function stops routing through the normalizer.
+    vi.resetModules()
+    vi.stubEnv('DEV', false)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => REAL_WIRE_ENVELOPE,
+      clone() { return this },
+    }))
+    try {
+      const { getApprovalHistory } = await import('../src/approvals/api')
+      await expect(getApprovalHistory('apv_1')).resolves.toHaveLength(1)
+    } finally {
+      vi.unstubAllEnvs()
+      vi.unstubAllGlobals()
+      vi.resetModules()
+    }
   })
 
   it('end-to-end: a PLM-shaped row (metadata present) still resolves its staged process-attachment ids', () => {
