@@ -95,52 +95,107 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * The class-2 conflict abort and the class-6 abort are PROVABLY DISJOINT (conflict requires >= 1
  * attachment; class 6 requires zero), so the two messages can never be confused in an incident.
  *
- * MUTATION-COVERAGE HONESTY NOTE — CORRECTED (fix round, independent gate report
- * `/tmp/migb-gate-20260822.md`, head `b6309c7486a4fb53985566412e81b670ad96aa6f`): an earlier
- * version of this note claimed
- * exactly ONE coverage gap (this class-6 predicate's `i.id NOT LIKE 'plm:%'` clause). That claim
- * was false — a subsequent independent gate found THREE MORE, undisclosed, in different clauses
- * of this same migration:
- *   - `uo.is_active = TRUE`, untested in BOTH the class-3 subquery AND this class-6 subquery —
- *     decisive for 257 of prod's 271 residual rows (see H18/H19/H20 in `.db.test.ts`).
- *   - the `afs:` prefix guard on the class-3 UPDATE — unlike the `plm:` case, class 3 carries NO
- *     `source_system` filter, so this guard was the ONLY thing enforcing the ABORT-not-default
- *     posture for class 4 there, and it had no test (see H21).
- *   - the class-2 conflict census's OWN `plm:`/`afs:` prefix guards — untested; a regression would
- *     false-positive FAIL-LOUD the whole migration over a row it should never touch (see H23/H24).
- * (Line numbers are deliberately omitted throughout this note — they drift on every edit to this
- * docblock, which is exactly the staleness class this fix round exists to correct. Clause text and
- * the class/subquery/UPDATE it belongs to are unambiguous without them.)
- * All three, plus the originally-disclosed gap, are now closed with red-proving fixtures in
- * `.db.test.ts` (H18-H26) — including H26, a SYNTHETIC `plm:` id with `source_system='platform'`
- * (not `upsertPlmMirror`'s real shape, but not forbidden by anything in this schema), built
- * specifically to exercise this predicate's `i.id NOT LIKE 'plm:%'` clause independent of the
- * `source_system` clause, since no real writer in this codebase is known to produce that
- * combination. As of this fix round every clause of every predicate and every UPDATE in this file
- * has EITHER a red-proving fixture that was actually run (whole-file, not name-filtered) and
- * actually reds under the corresponding single-line deletion, OR is documented below as PROVABLY
- * INERT (not merely untested) — none are cited as load-bearing by inspection alone. A full 22-
- * mutation sweep (up from the original 10) also re-measured the class-6 census's `org_id IS NULL`
- * scope, its `NOT EXISTS (attachments)` clause, its `HAVING count(*) = 1`, the class-2 conflict
- * census's `HAVING count(DISTINCT org_id) > 1`, and the class-3 UPDATE's `org_id IS NULL` scope —
- * all five red under deletion, all five caught by EXISTING fixtures (H3, H12, H13, H14, H15, H17,
- * and the H7/H9 positive controls) that were not previously credited with catching them. See the
- * mutation table in this PR's body for the full re-measured cross-reference.
+ * MUTATION-COVERAGE HONESTY NOTE — CORRECTED AGAIN (fix round 3, requalification report
+ * `/tmp/migb-requal-20260822.md`, head `c8c7a22d508e97aba757f84ec1fb933a63f75f6d`): the PREVIOUS
+ * version of this note (fix round 2) claimed "every clause of every predicate and every UPDATE in
+ * this file has EITHER a red-proving fixture … OR is documented below as PROVABLY INERT" and "TWO
+ * CLAUSES ARE PROVABLY INERT". BOTH claims were false, in three independent ways, found by an
+ * independent requalification of that exact text (not a new behavioural defect — the SQL below is
+ * UNCHANGED for the THIRD consecutive round; comment-stripped diff proves it):
+ *   (1) the class-3 UPDATE's own correlation predicate `r.user_id = i.requester_snapshot->>'id'`
+ *       had NO red-proving fixture and is NOT inert — it is the single most load-bearing clause in
+ *       the file (deleting it turns a requester-SCOPED backfill into a blanket cross-tenant
+ *       stamp). Closed by H27/H28/H29 (mutation m26: replace only this condition's text with
+ *       `TRUE`, `WHERE` and every sibling clause untouched — reds exactly H27+H28+H29, 3 failed |
+ *       32 passed (35), on BOTH engines; H29 in particular PROVES cross-tenant mis-ASSIGNMENT
+ *       between two distinct requesters/orgs, not merely a wrong stamp on one row).
+ *   (2) the inert-clause count was wrong: FOUR clauses are provably inert, not two (corrected
+ *       enumeration below), and a fifth (class-2's `SELECT DISTINCT`) is CONDITIONALLY inert — a
+ *       materially weaker claim previously omitted entirely.
+ *   (3) the 22-mutation sweep was not the exhaustive sweep the prior claim required: three more
+ *       clauses were covered but never measured/credited — the class-2 conflict census's OWN
+ *       `org_id IS NULL` scope (mutation m23, reds H13), the class-6 subquery's OWN correlation
+ *       `uo.user_id = i.requester_snapshot->>'id'` (mutation m25, reds H15), and the per-clause
+ *       halves of the previously-compound mutation m14 (m14a, `plm:` guard only, reds H23; m14b,
+ *       `afs:` guard only, reds H24) — and an entire CATEGORY of statements, everything this
+ *       migration only LOGS, had no oracle whatsoever (new disclosure category below).
+ * The sweep is now 32 measured mutations (m1-m31, m14 split into m14a/m14b), every one re-run
+ * whole-file (not name-filtered), `cp`-restored and sha256-verified before and after each run,
+ * identical red-sets on Postgres 16 and Postgres 15-alpine for all 32 — see the mutation table in
+ * this PR's body for the full cross-reference. (Line numbers remain deliberately omitted in this
+ * note for the same staleness reason as the prior round.)
  *
- * TWO CLAUSES ARE PROVABLY INERT, not coverage gaps — no fixture will ever red them, because the
- * query structure makes them logically unreachable, not merely untested:
+ * As of this fix round, every clause of every predicate and every UPDATE in this file falls into
+ * exactly one of THREE disclosed categories — not two — placed there by MEASUREMENT, not by
+ * inspection:
+ *   (A) RED-PROVING FIXTURE — a fixture reds under that clause's single-line deletion, measured
+ *       whole-file on both target Postgres majors. Every clause not named in (B) or (C) below.
+ *   (B) PROVABLY INERT (or, for one clause, CONDITIONALLY inert) — no fixture will ever red it
+ *       because the query structure makes it logically unreachable, not merely untested; see the
+ *       corrected FOUR-clause enumeration below, plus the one conditionally-inert clause disclosed
+ *       separately because its argument depends on a DIFFERENT statement having already run.
+ *   (C) LOG-ONLY, UNASSERTED, NO BEHAVIOURAL CONSEQUENCE — the four trailing counts-only census
+ *       statements and the two `_stamped` counters emit to the deploy log and are read by nothing
+ *       in this codebase; see below for why these are neither (A) nor (B), and why building an
+ *       oracle for them is not the right fix.
+ *
+ * FOUR CLAUSES ARE PROVABLY INERT (CORRECTED — a prior draft of this note said TWO; that count was
+ * wrong by at least two), not coverage gaps — no fixture will ever red them, because the query
+ * structure makes them logically unreachable, not merely untested:
  *   - the class-2 conflict census's `a.instance_id IS NOT NULL`: the surrounding join is an INNER
  *     JOIN on `i.id = a.instance_id`; SQL's `NULL = x` is never TRUE, so a NULL `instance_id`
- *     already fails the join and can never reach this filter. The fix-round measurement (mutation
- *     m20) replaced only this condition's text with `TRUE` (`WHERE a.instance_id IS NOT NULL` →
- *     `WHERE TRUE`), keeping every other clause and the `WHERE` keyword itself untouched, isolating
- *     this one condition — 32/32 green, confirming the clause is inert on its own, not as part of a
- *     compound change.
+ *     already fails the join and can never reach this filter. Mutation m20 replaced only this
+ *     condition's text with `TRUE` (`WHERE a.instance_id IS NOT NULL` → `WHERE TRUE`), keeping
+ *     every other clause and the `WHERE` keyword itself untouched, isolating this one condition —
+ *     35/35 green this round, confirming the clause is inert on its own, not as part of a compound
+ *     change.
  *   - `min(uo.org_id)` vs `max(uo.org_id)` in the class-3 subquery (mutation m22): `HAVING
  *     count(*) = 1` forces every surviving group to be a singleton, so `min` and `max` of a
  *     one-element set are always equal by definition — not merely equal in every fixture tried,
- *     equal for ALL POSSIBLE inputs. Confirmed empirically, 32/32 green, consistent with the
- *     in-file comment at the class-3 UPDATE explaining why `min()` is collation-safe here.
+ *     equal for ALL POSSIBLE inputs. 35/35 green, consistent with the in-file comment at the
+ *     class-3 UPDATE explaining why `min()` is collation-safe here.
+ *   - the class-2 UPDATE's inner subquery `WHERE instance_id IS NOT NULL` (mutation m24, NEW this
+ *     round — the THIRD inert clause): the outer join condition `WHERE a.instance_id = i.id`
+ *     already makes a NULL `instance_id` from this subquery unreachable, by the identical
+ *     `NULL = x` argument as the first bullet — a DIFFERENT physical clause with the SAME
+ *     mechanism, not a duplicate of that finding. 35/35 green.
+ *   - the class-6 subquery's `GROUP BY uo.user_id` (mutation m27, NEW this round — the FOURTH
+ *     inert clause): the subquery's own `WHERE uo.user_id = i.requester_snapshot->>'id'` already
+ *     pins every surviving row to one `user_id` value, so the grouping is redundant with the
+ *     correlation itself. Verified over four shapes (unique user, multi-membership user, absent
+ *     user, NULL requester id) via direct SQL: grouped and ungrouped results are identical in all
+ *     four, and 35/35 green under the mutation itself.
+ *
+ * ONE CLAUSE IS CONDITIONALLY INERT (NEW this round, a separate and WEAKER category — do not fold
+ * it into the FOUR above): the class-2 UPDATE's `SELECT DISTINCT instance_id, org_id` (mutation
+ * m28, `SELECT DISTINCT` → `SELECT`) — 35/35 green. Any row reaching this UPDATE has already
+ * passed the class-2 conflict census, so every attachment bound to it shares one `org_id`;
+ * duplicate source rows therefore write the identical value with or without `DISTINCT`. This is
+ * weaker than the four bullets above because the argument depends on a DIFFERENT statement (the
+ * conflict census) having already run and thrown on any counter-example first — it is not
+ * unreachable by this query's OWN structure the way the four above are.
+ *
+ * LOG-ONLY, UNASSERTED, NO BEHAVIOURAL CONSEQUENCE (NEW disclosure category this round — closes
+ * the mutation-coverage-honesty gap around this file's own reporting surface): `up()` ends with
+ * four counts-only census statements (`class4_afs_deferred_null`, `class5_plm_null`,
+ * `class1_residue_null`, `residual_platform_null`) and two `_stamped` counters (`class2_stamped`,
+ * `class3_stamped`), all logged via `console.log`. Between them these carry TWELVE predicate
+ * clauses (`org_id IS NULL` x4, `id LIKE 'afs:%'`, `id LIKE 'plm:%'`, `id NOT LIKE 'plm:%'` x2,
+ * `id NOT LIKE 'afs:%'` x2, `template_id IS NOT NULL`,
+ * `COALESCE(source_system,'platform') = 'platform'`) plus the two counters — NONE read by anything
+ * in this codebase; they exist for an operator tailing the deploy log, not for this migration's own
+ * control flow. The suite has NO oracle for any of them: zero matches for a console spy, `vi.*`,
+ * or any emitted key, by construction (the helper set has no way to observe a log line). Proven by
+ * measurement, not merely by the absence of an oracle — THREE mutations (m29: the `class4` census
+ * counts `id LIKE 'plm:%'` instead of `'afs:%'`, reporting the WRONG class entirely; m30: the
+ * `class1Residue` census's four clauses collapsed to `WHERE TRUE` all at once; m31:
+ * `class3_stamped` hardcoded to `999`, i.e. the log LIES about how many rows were written) all
+ * leave the suite 35/35 GREEN. This is a CLEANER falsification than any category-(A) gap, because
+ * it needs no mutation argument at all — the absence of an observation channel is sufficient on
+ * its own. The honest fix is this disclosure, not a synthetic oracle: these statements have no
+ * behavioural consequence, so spy-based assertions around them would test the harness, not the
+ * migration — the values-free discipline this file applies to error messages applies here too,
+ * only more strongly (these lines are cardinality-only already; they are simply unread by anyone).
  *
  * ROWS THAT LEGITIMATELY STAY NULL AFTER THIS MIGRATION, NO ABORT (enumerated, not asserted as
  * exhaustive by a CHECK — Phase 3 is a separate slice):

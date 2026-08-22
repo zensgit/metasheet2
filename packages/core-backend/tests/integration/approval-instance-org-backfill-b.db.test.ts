@@ -497,4 +497,50 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     await expect(backfillBUp(testDb)).resolves.toBeUndefined()
     expect(await orgIdOf(id)).toBeNull()
   })
+
+  // ---- FIX ROUND 3 (requalification report /tmp/migb-requal-20260822.md, head c8c7a22d508e97a) --
+  //
+  // H27-H29 close N1: the class-3 UPDATE's own correlation predicate
+  // `r.user_id = i.requester_snapshot->>'id'` had NO red-proving fixture and is NOT inert — every
+  // shipped fixture that seeds a resolvable user either (a) makes that user the SAME instance's own
+  // requester (so the correlation's presence/absence is unobservable — same value either way), or
+  // (b) is class-6-shaped, so the pre-flight aborts before the class-3 UPDATE ever runs. Deleting
+  // this predicate (replacing only its text with `TRUE`, `WHERE` and every sibling clause untouched
+  // — same single-variable isolation style as m20/m24/m25/m27) turns a requester-SCOPED backfill
+  // into a blanket cross-tenant stamp: every eligible row gets `r`'s (arbitrary, or last-in-plan)
+  // org, regardless of whose requester it actually is. These reproduce the requalification's
+  // G1/G2/G3 shapes verbatim.
+
+  it("H27 (requal G1): template-originated row whose requester has ZERO memberships, co-resident with a FOREIGN uniquely-resolvable user in a DIFFERENT org -> stays NULL (pins the class-3 correlation predicate; a correlation regression stamps this row from the stranger's org instead)", async () => {
+    const templateId = randomUUID()
+    await seedInstance({ id: 'h27', sourceSystem: 'platform', templateId, requesterId: 'u_h27_zero' })
+    // deliberately NO user_orgs row for u_h27_zero (zero memberships) — class 1 has no source
+    // (template_id excludes class 6), so this row can ONLY be reached by class 3's correlation.
+    await seedUserOrg('u_h27_stranger', 'orgH27Stranger', true) // foreign, single-org, uniquely
+    // resolvable: gives the class-3 subquery `r` a row to (mis)assign from if the correlation that
+    // ties `r` to THIS row's own requester is ever dropped.
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h27')).toBeNull()
+  })
+
+  it("H28 (requal G2): requester_snapshot = '{}' (id absent, prod's c3_requester_id_absent=12 shape) + template_id NOT NULL, co-resident with a FOREIGN uniquely-resolvable user -> stays NULL (same correlation pin as H27, id-absent variant)", async () => {
+    const templateId = randomUUID()
+    await seedInstance({ id: 'h28', sourceSystem: 'platform', templateId, requesterId: null })
+    await seedUserOrg('u_h28_stranger', 'orgH28Stranger', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h28')).toBeNull()
+  })
+
+  it("H29 (requal G3): TWO eligible rows, TWO different uniquely-resolvable requesters in TWO different orgs -> each row is stamped from its OWN requester's org, never swapped (the only fixture that would catch cross-ASSIGNMENT between two tenants, not merely an incorrect stamp on one)", async () => {
+    await seedInstance({ id: 'h29_a', sourceSystem: 'platform', requesterId: 'u_h29_a' })
+    await seedUserOrg('u_h29_a', 'orgH29A', true)
+    await seedInstance({ id: 'h29_b', sourceSystem: 'platform', requesterId: 'u_h29_b' })
+    await seedUserOrg('u_h29_b', 'orgH29B', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h29_a')).toBe('orgH29A')
+    expect(await orgIdOf('h29_b')).toBe('orgH29B')
+  })
 })
