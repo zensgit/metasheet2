@@ -153,6 +153,10 @@ import {
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import {
+  deriveApprovalInstanceOrgIdWithSelector,
+  ApprovalOrgUnresolvedError,
+} from './services/approval-instance-org-derivation'
 import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
 import { createAttendanceRecordOperationBoundaryV1 } from './attendance/w4c3c-record-operation-boundary'
 import { appendOperatorRetirementCalculationV1 } from './attendance/w4c3c-ops-retirement'
@@ -2215,6 +2219,36 @@ export class MetaSheetServer {
                   return {
                     effectiveState: posture.effectiveState,
                     referenceSegments: posture.referenceSegments,
+                  }
+                },
+                // Lock-11 §10 W-4: least-privilege wrapper over the ONE shared org-derivation
+                // primitive (services/approval-instance-org-derivation.ts). Result-shaped —
+                // never lets an `ApprovalOrgUnresolvedError` instance cross the plugin boundary
+                // (feedback_attack_your_own_criterion: the plugin must never `instanceof` a
+                // host error class). `trxQuery` is supplied by the caller already bound to its
+                // own open transaction client; this wrapper only adapts the return shape
+                // ({rows: [...]} the derivation module expects) around the plugin's bare-rows
+                // `trx.query`.
+                deriveApprovalInstanceOrgIdForAttendanceSubjectV1: async (input: {
+                  trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+                  subjectUserId: string
+                  requestNamedOrgId: string | null
+                }) => {
+                  const queryFn = async (sql: string, params?: unknown[]) => ({
+                    rows: await input.trxQuery(sql, params),
+                  })
+                  try {
+                    const orgId = await deriveApprovalInstanceOrgIdWithSelector(
+                      queryFn,
+                      input.subjectUserId,
+                      input.requestNamedOrgId,
+                    )
+                    return { ok: true as const, orgId }
+                  } catch (error) {
+                    if (error instanceof ApprovalOrgUnresolvedError) {
+                      return { ok: false as const, reason: error.reason }
+                    }
+                    throw error
                   }
                 },
                 // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second
