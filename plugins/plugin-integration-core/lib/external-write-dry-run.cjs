@@ -30,6 +30,12 @@ const SAFE_WRITE_ERROR_CODES = new Set([
   // dead-lettered K3 row is diagnosable instead of collapsing to WRITE_FAILED.
   'K3_WISE_SAVE_FAILED',
   C6_TEST_INJECTED_ROW_FAILURE,
+  // Multitable ownership guard (adapters/multitable-ownership-guard.cjs): a refusal to write a
+  // protected column, or an inability to verify ownership, is a TARGET-CONFIGURATION fact, not a
+  // transient failure. Without these tokens both collapse into an opaque WRITE_FAILED and an
+  // operator cannot tell a misconfigured target from a flaky one.
+  'METASHEET_MULTITABLE_OWNERSHIP_PROTECTED_KEY_FIELD',
+  'METASHEET_MULTITABLE_OWNERSHIP_UNVERIFIED',
   'DATA_SOURCE_BRIDGE_CONFIG_ERROR',
   'DATA_SOURCE_GENERIC_QUERY_DISABLED_REQUIRED',
   'DATA_SOURCE_NOT_C6_WRITE_TARGET',
@@ -1204,5 +1210,6 @@ module.exports = {
     normalizeServerBoundSqlEqualityFilters,
     targetKeyIdentity,
     valuesEqual,
+    valuesFreeErrorCode,
   },
 }
