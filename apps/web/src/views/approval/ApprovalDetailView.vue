@@ -1378,10 +1378,11 @@ const attachmentFields = computed<AttachmentFieldDisplay[]>(() => {
  * (which reads exactly `item.metadata?.attachmentIds`) now resolves refs for a platform instance's
  * rider row too, not only a PLM-bridged one. That is the FULL extent of the reconciliation: #5104
  * is additive-only and deliberately does NOT touch any other metadata key or rename any snake_case
- * field. Concretely still open, same as before #5104:
- *   - `item.metadata?.nodeKey` (the parallel-branch grouping above, the node badge at :403/:471,
- *     and `nodeName` at :1288) is NEVER populated by the platform branch — it stays camelCase/
- *     snake_case-DTO-shaped work, out of #5104's additive-only scope.
+ * field. Concretely still open, same as before #5104 (deliberately NOT line-pinned — these move):
+ *   - `item.metadata?.nodeKey` is NEVER populated by the platform branch, so the `timelineBranchGroups`
+ *     parallel-branch grouping above, the "节点: …" `approval-detail__meta-badge` span guarded by
+ *     `item.metadata?.nodeKey` (both timeline renders), and `recordTableRows`' `nodeName` field all
+ *     stay PLM-only — camelCase/snake_case-DTO-shaped work, out of #5104's additive-only scope.
  *   - Real `actor_name`/`occurred_at` vs. a synthesized display still needs the same
  *     snake_case-row-vs-camelCase-DTO reconciliation this docblock originally flagged; #5104 did
  *     not touch those fields either.

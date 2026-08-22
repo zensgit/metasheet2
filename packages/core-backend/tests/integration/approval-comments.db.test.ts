@@ -1009,13 +1009,18 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
     // C-18's original six cases assume the feature is live (a Lock-9 rider row only exists once
     // attachments are in use), so the flag is forced ON for every test in this describe block —
     // C-19 below is the ONE case that deliberately overrides it back OFF mid-test to get the
-    // discriminating pair. Scoped to this nested describe only; the outer suite's ambient env
-    // (flag unset/OFF by default) is untouched for every OTHER describe block in this file.
+    // discriminating pair. Scoped to this nested describe only; the outer suite's ambient env is
+    // SAVED and RESTORED (never unconditionally deleted) around every test, so a job that sets
+    // APPROVAL_ATTACHMENTS_ENABLED at a wider scope than this file is left exactly as it found it
+    // for whatever runs after this describe block in the same worker.
+    let savedAttachmentsFlag: string | undefined
     beforeEach(() => {
+      savedAttachmentsFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
       process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
     })
     afterEach(() => {
-      delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      if (savedAttachmentsFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      else process.env.APPROVAL_ATTACHMENTS_ENABLED = savedAttachmentsFlag
     })
 
     async function seedRiderRow(instanceId: string, actorId: string, comment: string | null, metadata: Record<string, unknown>): Promise<void> {
