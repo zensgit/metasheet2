@@ -1969,21 +1969,28 @@ u1c_non_default_integration_rows=0 (run 32568321791, main); c6_terminal=269, c3_
 |---|---|---|
 | D-1 | **Both channels permitted, EVERY channel must validate against `user_orgs`** | unvalidated channels forbidden; the shipped attendance boundary pattern is the precedent, not a violation |
 | D-2 (W-3) | **(d) now** — `afs:` rows stay NULL (dark at activation) + (a)-with-validation later | the OD-S1-18 id-shape scope change (`plm:` → `plm:`/`afs:`) is RECORDED as an activation precondition, not executed here |
-| D-3 | **CONFIRMED** — arm (a) is the derivation floor for platform/automation/attendance; failure shape = values-free 422 | measured refusal population today: zero (u1a_multi=0); the 12 zero-membership actives 422 until D-8(β) lands |
+| D-3 | **CONFIRMED** — arm (a) is the derivation floor for platform/automation/attendance; failure shape = values-free 422 | measured refusal population today: zero (u1a_multi=0); the zero-membership class is emptied by D-8(β) BEFORE any arm-(a) writer ships (see the binding ordering in §10.2) — no live 422 window for those 12 is scheduled |
 | D-4 | **CONFIRMED** — requester-keying; W-2's keying user follows per-action `config.requester.mode` | actor≠requester consequence accepted as drafted |
-| D-5 | **Erratum acknowledged** — Lock-10 `:412` (PLM `SET NOT NULL` vs NULL-permanent) to be corrected in the Phase-3 slice's docs commit | recorded, unexecuted here |
+| D-5 | **Erratum acknowledged** — Lock-10 `:412` (PLM `SET NOT NULL` vs NULL-permanent) affects Phase 3's migration text only (body `:1455`); it sits outside this chain (`:1425`) and is corrected whenever Phase 3's text is next edited | recorded, unexecuted here |
 | D-6 | **No blanket deferral** of W-3/W-4 | activation requires all four writers dispositioned |
 | D-7 | **W-1 arm (a) now**; arm (g) deferred until a multi-org reality exists | u1a=1 makes (g) zero-gain today; revisit trigger = a second active org appearing |
-| D-8 + 269 rows | **(β)** provision the 12 zero-membership active users into the single org **+ (i)-guarded**: Migration B's class-6 disposition revised to "backfill the unique org IFF exactly one active org exists repo-wide, else ABORT as ruled" — the single-org premise self-asserted INSIDE the migration, FAIL-LOUD retained | this ruling unblocks #5103 (after its revision + re-gate); it is an owner amendment of the class-6 arm, made by this by-reference ruling |
+| D-8 + 269 rows | **(β) as the body defines it** (`:1458`): the provisioning step lands **BEFORE any writer slice, so the population is empty when the arms land** — concretely, provision the 12 zero-membership active users into the single org **+ (i)-guarded**: Migration B's class-6 disposition revised to "backfill the unique org IFF exactly one active org exists repo-wide, else ABORT as ruled" — the single-org premise self-asserted INSIDE the migration, FAIL-LOUD retained | this ruling unblocks #5103 (after its revision + re-gate); it is an owner amendment of the class-6 arm, made by this by-reference ruling. The ordering is part of the ruled arm, restated as binding in §10.2 |
 | D-9 | **Single `is_active`** liveness predicate (byte-agreement with the reader) | read together with retired D-10 |
-| D-10 | **RETIRED BY EVIDENCE** (u1a=1 — nowhere to move to) | not answered; re-opens automatically if a second active org appears before the W-4 slice lands, per the draft's own moot-condition |
+| D-10 | **RETIRED BY EVIDENCE** (u1a=1 — nowhere to move to) | not answered; re-opens automatically whenever a second active org appears — NO time bound (the body's moot-condition has one parameter and no sunset). If that happens after the W-4 slice ships, the shipped `DO UPDATE` behaviour is NOT a de-facto ruling: D-10 must then be answered before activation proceeds |
 | D-11 | **(ii)** — gate the same-transaction split-brain with the values-free equality gate G-L11-8 | scope as narrowed at r3 |
 
 ### 10.2 What this ratification authorizes and what it does not
 
+**Binding ordering (part of ruled arm D-8(β), not advisory):** the D-8(β) provisioning migration must
+be MERGED (and therefore auto-deployed) **before any arm-(a) writer slice merges** — W-1/W-2 and W-4 land
+only after the zero-membership population is empty. Concretely: the revised #5103 (which carries the
+provisioning migration ordered before the backfill) merges FIRST; the writer slices follow. Migration B's
+own position is therefore ON the (β) side of the fence: it ships WITH the provisioning step, ahead of
+every writer slice.
+
 Authorizes: the implementation slices for the ruled arms (each still requires its own PR, required CI,
 independent adversarial gate, and ledger row), including the Migration B class-6 revision and the D-8(β)
-provisioning migration. Does NOT authorize: org-pin activation (separate authorization with its own
+provisioning migration, subject to the binding ordering above. Does NOT authorize: org-pin activation (separate authorization with its own
 ledger row per Lock-10 §5.1.2), Phase 3 `SET NOT NULL`, `APPROVAL_ATTACHMENTS_ENABLED` ON, any staging/
 prod flag change, or the OD-S1-18 scope change (recorded as an activation precondition only). No
 verification claim is made by this block: §4's gates specify acceptance; none has run at ratification.
