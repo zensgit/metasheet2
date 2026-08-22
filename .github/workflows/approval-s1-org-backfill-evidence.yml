@@ -373,12 +373,18 @@ jobs:
               "SELECT count(*) FROM approval_instances i
                 WHERE i.org_id IS NOT NULL AND i.requester_snapshot->>'id' IS NULL" || rc=1
 
-            # ---- MIGRATION B CLASS-PARTITION PROBES over the residual NULL population --------
-            # These partition the SAME p20 population (platform-id, org_id NULL) by Lock-10
-            # §2.2(b) row class, so a `c6 > 0` result at dispatch time is the PRE-DEPLOY GATE for
-            # Migration B: it means the migration's own class-6 pre-flight would ABORT if run
-            # right now. Necessary, not sufficient — p31 already proves writer drift is live, so a
-            # row created between this probe and deploy could still be class-6 shaped (narrow,
+            # ---- MIGRATION B CLASS PROBES over the residual NULL population ------------------
+            # These probe the SAME p20 population (platform-id, org_id NULL) by Lock-10 §2.2(b)
+            # row class. CORRECTED (fix round, gate NIT-1): they do NOT partition p20 — c1
+            # (template-originated) and c3_unique (uniquely-resolvable) are NOT mutually exclusive
+            # (a template-originated row can ALSO be uniquely-resolvable; on prod today they are
+            # the exact same 2 rows, via class-3's ordered fall-through onto class-1 residue), so
+            # c1 + c3_unique + c3_multi_org + c3_zero_membership + c3_requester_id_absent can
+            # double-count and need not sum to p20. `c6_terminal_org_null` alone is the PRE-DEPLOY
+            # GATE for Migration B: a nonzero result means the migration's own class-6 pre-flight
+            # would ABORT if run right now. Necessary, not sufficient — p31 already proves writer
+            # drift is live, so a row created between this probe and deploy could still be
+            # class-6 shaped (narrow,
             # because user_orgs blanket-backfills active users to exactly one 'default', but
             # nonzero). A `c6 > 0` here is an OWNER ESCALATION, not an implementer decision to
             # route around: the lock ruled ABORT and ruled nothing about what to do when it fires.

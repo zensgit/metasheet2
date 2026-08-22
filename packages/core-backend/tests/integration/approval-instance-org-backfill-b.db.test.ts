@@ -379,4 +379,122 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     expect(await orgIdOf('h17_c2')).toBe('orgRepeat')
     expect(await orgIdOf('h17_c3')).toBe('orgRepeat2')
   })
+
+  // ---- FIX-ROUND (gate report /tmp/migb-gate-20260822.md, head b6309c7486) ------------------
+  //
+  // H18-H26 close P2-1 (is_active untested in class 3 AND class 6, decides 257/271 of prod's
+  // residual population), P2-2 (the afs: guard on the class-3 UPDATE had no backstop and no red-
+  // proving test), P2-3 (the only prod-effective code path — template-originated + uniquely-
+  // resolvable requester, stamped via class-3 ordered fall-through — was untested), and P3-2
+  // (the class-2 conflict census's own plm:/afs: prefix guards were untested). H26 additionally
+  // closes the migration file's own MUTATION-COVERAGE HONESTY NOTE gap (the class-6 `id NOT LIKE
+  // 'plm:%'` clause) with a synthetic fixture — see that note's rewrite in this same PR for why
+  // this is the only place in the suite a `plm:` row's `source_system` is deliberately set to
+  // `'platform'` rather than mirroring `upsertPlmMirror`'s real shape.
+
+  // ---- H18 / H19 / H20 — is_active is load-bearing in BOTH class 3 and class 6 --------------
+
+  it('H18: requester with ONE INACTIVE (alphabetically-first) + ONE ACTIVE membership -> stamped from the ACTIVE org, not the inactive one', async () => {
+    await seedInstance({ id: 'h18', sourceSystem: 'platform', requesterId: 'u_h18' })
+    // Inactive org sorts BEFORE the active org (orgA < orgZ): if `is_active` were dropped from
+    // class 3's subquery, `HAVING count(*) = 1` would fail (2 total memberships) and the row
+    // would fall through unstamped; if `is_active` were also (or instead) dropped from class 6's
+    // subquery, this row would be misclassified as class-6 TERMINAL (2 total memberships also
+    // fails class 6's own `HAVING count(*) = 1`, flipping `NOT EXISTS` to TRUE) and the whole
+    // migration would ABORT before ever reaching class 3 — either mutation reds this test.
+    await seedUserOrg('u_h18', 'orgA', false) // inactive, sorts first
+    await seedUserOrg('u_h18', 'orgZ', true) // active
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h18')).toBe('orgZ')
+  })
+
+  it('H19: requester with EXACTLY ONE INACTIVE membership (zero active) -> ABORT (class 6 fires; a deactivated-only membership does not count as resolvable)', async () => {
+    await seedInstance({ id: 'h19', sourceSystem: 'platform', requesterId: 'u_h19' })
+    await seedUserOrg('u_h19', 'orgInactiveOnly', false)
+
+    await expect(backfillBUp(testDb)).rejects.toThrow(/class 6/i)
+    await expect(backfillBUp(testDb)).rejects.not.toThrow(/h19/i)
+  })
+
+  it('H20: template_id IS NOT NULL + requester with EXACTLY ONE INACTIVE membership -> stays NULL, no abort (the 257-row prod shape, asserted as a VALUE not masked by an abort)', async () => {
+    const templateId = randomUUID()
+    await seedInstance({ id: 'h20', sourceSystem: 'platform', templateId, requesterId: 'u_h20' })
+    await seedUserOrg('u_h20', 'orgDeactivated', false)
+
+    // Class 1 has no source (template_id IS NOT NULL excludes class 6); class 3 must NOT stamp
+    // from the deactivated membership's org. Unlike H19, this fixture is NOT class-6-shaped
+    // (template_id IS NOT NULL), so a regression that stamps from an inactive membership would
+    // surface as a wrong VALUE here, not be hidden behind class 6's abort.
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h20')).toBeNull()
+  })
+
+  // ---- H21 — afs: prefix guard on the class-3 UPDATE (no source_system backstop, unlike plm:) --
+
+  it('H21: afs:<uuid> WITHOUT attachments, requester uniquely resolvable -> NOT stamped (class-3 afs: prefix guard proof; class 3 has no source_system filter, so this guard is the ONLY thing keeping it out)', async () => {
+    const id = `afs:${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'platform', requesterId: 'u_h21' })
+    await seedUserOrg('u_h21', 'orgE', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBeNull()
+  })
+
+  // ---- H22 — the only prod-effective write path: template-originated + uniquely-resolvable ---
+
+  it('H22: template_id IS NOT NULL + requester resolves to EXACTLY ONE active org -> STAMPED by class 3 via ordered fall-through (class 1 emits no SQL; matches the docblock and pins the only 2 rows Migration B stamps on prod today)', async () => {
+    const templateId = randomUUID()
+    await seedInstance({ id: 'h22', sourceSystem: 'platform', templateId, requesterId: 'u_h22' })
+    await seedUserOrg('u_h22', 'orgFallthrough', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('h22')).toBe('orgFallthrough')
+  })
+
+  // ---- H23 / H24 — the class-2 conflict census's OWN prefix guards (lines 233-234) -----------
+
+  it('H23: plm:<uuid> with TWO conflicting-org attachments -> NO abort (conflict census excludes plm: rows), stays NULL', async () => {
+    const id = `plm:${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'plm' })
+    await seedAttachment('att_h23_a', id, 'orgConflictA')
+    await seedAttachment('att_h23_b', id, 'orgConflictB')
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBeNull()
+  })
+
+  it('H24: afs:<uuid> with TWO conflicting-org attachments -> NO abort (conflict census excludes afs: rows), stays NULL', async () => {
+    const id = `afs:${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'platform' })
+    await seedAttachment('att_h24_a', id, 'orgConflictC')
+    await seedAttachment('att_h24_b', id, 'orgConflictD')
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBeNull()
+  })
+
+  // ---- H25 — corrects the docblock's stay-NULL bullet 3 (P3-1) -------------------------------
+
+  it("H25: source_system='erp' (non-platform, unprefixed), requester resolves to EXACTLY ONE active org -> STAMPED by class 3 (class 3 has no source_system filter; only class 6 does — this is NOT the unconditional stay-NULL shape the docblock previously implied)", async () => {
+    const id = `erpid-${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'erp', requesterId: 'u_h25' })
+    await seedUserOrg('u_h25', 'orgErp', true)
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBe('orgErp')
+  })
+
+  // ---- H26 — closes the migration's own MUTATION-COVERAGE HONESTY NOTE gap -------------------
+
+  it("H26: plm:<uuid> with source_system='platform' (synthetic — not upsertPlmMirror's real shape, but not forbidden), no attachments, unresolvable requester -> NO abort, stays NULL (proves class 6's `id NOT LIKE 'plm:%'` clause is independently load-bearing, not merely masked by the source_system clause)", async () => {
+    const id = `plm:${randomUUID()}`
+    await seedInstance({ id, sourceSystem: 'platform', requesterId: null })
+    // Deliberately NO user_orgs row: every OTHER class-6 clause is satisfied (platform-shaped by
+    // source_system, no template, no attachments, requester unresolvable) — only the id-prefix
+    // clause keeps this row out of the terminal census. Without it, this migration would ABORT.
+
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf(id)).toBeNull()
+  })
 })

@@ -95,20 +95,41 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * The class-2 conflict abort and the class-6 abort are PROVABLY DISJOINT (conflict requires >= 1
  * attachment; class 6 requires zero), so the two messages can never be confused in an incident.
  *
- * MUTATION-COVERAGE HONESTY NOTE: the gate suite's mutation battery (`.db.test.ts` docblock)
- * red-proves every clause of this predicate except `i.id NOT LIKE 'plm:%'` — every `plm:` fixture
- * in that suite also carries `source_system <> 'platform'`, so the `COALESCE(source_system,
- * 'platform') = 'platform'` clause is what actually excludes a `plm:` row from class 6 at this
- * baseline, not the id-prefix clause. The prefix clause is deliberate defense-in-depth (a `plm:`
- * row with `source_system = 'platform'` is not known to occur anywhere in this codebase, but
- * nothing enforces that it cannot), not a proven-load-bearing exclusion — do not cite it as such.
+ * MUTATION-COVERAGE HONESTY NOTE — CORRECTED (fix round, independent gate report
+ * `/tmp/migb-gate-20260822.md`, head `b6309c7486`): an earlier version of this note claimed
+ * exactly ONE coverage gap (this class-6 predicate's `i.id NOT LIKE 'plm:%'` clause). That claim
+ * was false — a subsequent independent gate found THREE MORE, undisclosed, in different clauses
+ * of this same migration:
+ *   - `uo.is_active = TRUE`, untested in BOTH the class-3 subquery (line ~290) AND this class-6
+ *     subquery (line ~205) — decisive for 257 of prod's 271 residual rows (see H18/H19/H20 in
+ *     `.db.test.ts`).
+ *   - the `afs:` prefix guard on the class-3 UPDATE (line ~297) — unlike the `plm:` case, class 3
+ *     carries NO `source_system` filter, so this guard was the ONLY thing enforcing the
+ *     ABORT-not-default posture for class 4 there, and it had no test (see H21).
+ *   - the class-2 conflict census's OWN `plm:`/`afs:` prefix guards (lines ~233-234) — untested;
+ *     a regression would false-positive FAIL-LOUD the whole migration over a row it should never
+ *     touch (see H23/H24).
+ * All three, plus the originally-disclosed gap, are now closed with red-proving fixtures in
+ * `.db.test.ts` (H18-H26) — including H26, a SYNTHETIC `plm:` id with `source_system='platform'`
+ * (not `upsertPlmMirror`'s real shape, but not forbidden by anything in this schema), built
+ * specifically to exercise this predicate's `i.id NOT LIKE 'plm:%'` clause independent of the
+ * `source_system` clause, since no real writer in this codebase is known to produce that
+ * combination. As of this fix round every clause of every predicate and every UPDATE in this file
+ * has a red-proving fixture that was actually run (whole-file, not name-filtered) and actually
+ * reds under the corresponding single-line deletion — none are cited as load-bearing by inspection
+ * alone. See the mutation table in this PR's body for the full re-measured cross-reference.
  *
  * ROWS THAT LEGITIMATELY STAY NULL AFTER THIS MIGRATION, NO ABORT (enumerated, not asserted as
  * exhaustive by a CHECK — Phase 3 is a separate slice):
  *   - `plm:` / `afs:` prefixed ids (classes 5 / 4).
  *   - `template_id IS NOT NULL` AND requester unresolvable (class-1 residue — no source exists).
- *   - `COALESCE(source_system,'platform') <> 'platform'` without a `plm:`/`afs:` prefix (outside
- *     class 5 and outside class 6's platform predicate).
+ *   - `COALESCE(source_system,'platform') <> 'platform'` without a `plm:`/`afs:` prefix, AND the
+ *     requester does NOT resolve to exactly one active `user_orgs` membership (outside class 5 and
+ *     outside class 6's platform predicate). CORRECTED (fix round): an earlier draft of this
+ *     bullet omitted the "AND unresolvable" qualifier, implying this shape unconditionally stays
+ *     NULL. It does not — class 3 carries NO `source_system` filter, so a row on this shape WITH a
+ *     uniquely-resolvable requester IS stamped by class 3 (see H25 in `.db.test.ts`, e.g.
+ *     `source_system='erp'`, unprefixed, resolvable requester -> stamped from the requester's org).
  *
  * DISCLOSED DEVIATION from §2.2(b)'s class-6 text ("ABORTS and reports the offending ids"): this
  * migration reports CARDINALITY ONLY, never an instance id, following the VALUES-FREE DISCIPLINE
