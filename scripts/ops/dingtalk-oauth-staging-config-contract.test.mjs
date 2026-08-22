@@ -1,10 +1,47 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 const workflow = readFileSync(new URL('../../.github/workflows/dingtalk-oauth-staging-config.yml', import.meta.url), 'utf8')
 const remote = readFileSync(new URL('./dingtalk-oauth-staging-config-remote.sh', import.meta.url), 'utf8')
 const contractWorkflow = readFileSync(new URL('../../.github/workflows/dingtalk-oauth-staging-config-contract.yml', import.meta.url), 'utf8')
+
+function extractShellFunction(source, name) {
+  const start = source.indexOf(`${name}() {`)
+  assert.notEqual(start, -1, `shell function missing: ${name}`)
+  const end = source.indexOf('\n}\n', start)
+  assert.notEqual(end, -1, `shell function end missing: ${name}`)
+  return source.slice(start, end + 3)
+}
+
+function runDigestIdentity({ identity, override, digest, functionName = 'resolve_image_pin' }) {
+  const functions = [
+    extractShellFunction(remote, 'read_attendance_deploy_identity_field'),
+    extractShellFunction(remote, 'resolve_live_backend_image_pin'),
+    extractShellFunction(remote, 'resolve_image_pin'),
+    extractShellFunction(remote, 'deployed_sha'),
+  ].join('\n')
+  return spawnSync('bash', ['-o', 'pipefail', '-c', `set -euo pipefail
+fail() { printf '%s\\n' "$*" >&2; exit 1; }
+health_commit() { printf stale-health-metadata; }
+${functions}
+ATTENDANCE_DEPLOY_IDENTITY_FILE="$IDENTITY_FILE"
+ATTENDANCE_OVERRIDE_FILE="$OVERRIDE_FILE"
+BACKEND_CONTAINER=metasheet-staging-backend
+docker() { printf '%s' "$LIVE_DIGEST"; }
+${functionName}`], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      IDENTITY_FILE: identity,
+      OVERRIDE_FILE: override,
+      LIVE_DIGEST: digest,
+    },
+  })
+}
 
 test('workflow is manual, staging-serialized, pinned-SSH, and fail-honest', () => {
   assert.match(workflow, /workflow_dispatch:/)
@@ -72,6 +109,32 @@ test('write is compose-validated, atomic, backend-only, and rollback-capable', (
   assert.match(remote, /redis_before.*redis_after/s)
   assert.match(remote, /web_before.*web_after/s)
   assert.doesNotMatch(remote, /\[\[ -w "\$target_dir" \]\]/)
+})
+
+test('digest-pinned staging resolves only through the matching completion record and override', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oauth-digest-pin-'))
+  const identity = join(dir, 'deploy-identity.env')
+  const override = join(dir, 'attendance.override.yml')
+  const sha = 'a'.repeat(40)
+  const digest = `ghcr.io/zensgit/metasheet2-backend@sha256:${'b'.repeat(64)}`
+  writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=${digest}\n`)
+  writeFileSync(override, `services:\n  backend:\n    image: ${digest}\n`)
+
+  try {
+    const pin = runDigestIdentity({ identity, override, digest })
+    assert.equal(pin.status, 0, pin.stderr)
+    assert.equal(pin.stdout, `zensgit ${sha}`)
+
+    const deployed = runDigestIdentity({ identity, override, digest, functionName: 'deployed_sha' })
+    assert.equal(deployed.status, 0, deployed.stderr)
+    assert.equal(deployed.stdout, sha, 'digest identity must not depend on stale health build metadata')
+
+    writeFileSync(identity, `deploy_sha=${sha}\nbackend_digest=ghcr.io/zensgit/metasheet2-backend@sha256:${'c'.repeat(64)}\n`)
+    const rejected = runDigestIdentity({ identity, override, digest })
+    assert.notEqual(rejected.status, 0, 'a digest absent from the completion record must fail closed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('transport input closed sets reject shell metacharacters', () => {
