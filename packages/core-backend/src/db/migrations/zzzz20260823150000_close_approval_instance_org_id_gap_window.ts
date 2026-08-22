@@ -15,6 +15,17 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * platform rows) rides the W-1/W-2 slice and executes at ITS deploy — the Migration-B->W1W2
  * creation window becomes structurally nil".
  *
+ * HONEST LIMIT on "structurally nil" (disclosed, not silently narrowed): that phrase describes the
+ * ruling's INTENT, not a literal proof of zero. This migration runs inside `db:migrate`, which the
+ * deploy pipeline executes via `compose exec backend node .../migrate.js` BEFORE the new image
+ * starts serving traffic (see the captured deploy log for #5103's own two migrations, cited in this
+ * PR's body). Any row created strictly BETWEEN this migration's own execution finishing and the new
+ * (org-deriving) image actually taking over traffic — the deploy's own restart interval, not zero —
+ * would still land with `org_id IS NULL` and would NOT be closed by this one-shot migration (kysely
+ * never re-runs a recorded migration by name). The accurate claim is "reduces the window to the
+ * deploy's own restart interval", not "reduces it to nil"; the ruling's stronger phrasing is quoted
+ * here verbatim because it IS the ruling's text, not because this migration proves it exactly.
+ *
  * THE WINDOW, PRECISELY. `zzzz20260823100000_backfill_approval_instance_org_id.ts` ("Migration B")
  * is a ONE-SHOT backfill: it resolves (stamps, or permanently classifies as NULL) every
  * `org_id IS NULL` row that existed AT ITS OWN DEPLOY. From that deploy until THIS migration's own
@@ -29,6 +40,17 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * actually ran, since the two migrations execute in DIFFERENT deploys and no other artefact
  * carries that fact).
  *
+ * HONEST LIMIT — two different clocks, disclosed rather than assumed equal: `kysely_migration.
+ * timestamp` is written by the Node migrator (`new Date().toISOString()` — the APPLICATION host's
+ * clock); `approval_instances.created_at` is Postgres `now()` (the DATABASE host's clock). This
+ * migration compares one against the other (`created_at > backfillTimestamp::timestamptz`) without
+ * any cross-clock correction. If the application host's clock ever ran AHEAD of the database host's
+ * clock by some skew δ at the moment Migration B recorded its timestamp, a genuine window row
+ * created in DB-clock-time during that same δ interval would carry a `created_at` that is NOT
+ * `>` the recorded (skewed-ahead) boundary, and would be silently MISSED — an under-close of the
+ * exact window this migration exists to shut, not an over-close. No claim is made here that δ is
+ * negligible on this deployment; it is a real dependency of this design, not assumed away.
+ *
  * SCOPE DECISION, DISCLOSED (not silently narrower, not silently broader than the ruling text):
  * this migration does NOT reproduce Migration B's six-class taxonomy (template-originated /
  * attachment-bearing / requester-resolvable / afs / plm / terminal) for the window population.
@@ -37,9 +59,23 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * not an oversight: Migration B's six classes exist to pick the CORRECT source when more than one
  * DISTINCT org could be in play. Under the single-active-org premise this migration self-asserts
  * (the same premise Migration B's class-6 revision and the companion provisioning migration both
- * require), there is only ONE possible correct org value in the ENTIRE system — so every window
- * row, whatever its shape, resolves to the same answer a class-2/class-3/class-6 walk would have
- * produced anyway, and replicating the taxonomy would add code with no discriminating power. The
+ * require), there is only ONE possible correct org value drawn from `user_orgs` — so a window row
+ * resolvable via class 3 (`requester_snapshot` -> exactly one active `user_orgs` membership) or via
+ * class 6 (terminal) both resolve to that SAME single org either way, and replicating THAT half of
+ * the taxonomy would add code with no discriminating power.
+ *
+ * NARROWER THAN THAT FOR ATTACHMENT-BEARING ROWS — disclosed, not glossed over: this claim does
+ * NOT extend to a window row that already has a BOUND attachment (Migration B's class 2). Class 2's
+ * source is `approval_attachments.org_id`, which carries only a nonblank CHECK
+ * (`approval_att_org_nonblank`) and no FK or CHECK tying it to `user_orgs` at all — it is a
+ * free-form tenant label, and Migration B's own class-2 pre-flight FAIL-LOUDs on cross-attachment
+ * conflict precisely because it CAN diverge from any other source. Nothing in this schema proves
+ * `att.org_id` equals the single self-asserted active org for an attachment-bearing window row; this
+ * migration stamps such a row with the active org WITHOUT reading or cross-checking its attachments'
+ * `org_id` at all (unlike Migration B, which pre-flights exactly that conflict for its own
+ * population). This is an accepted scope narrowing under the current single-org production shape
+ * (where every `user_orgs` and `approval_attachments` row observed so far names the same one org),
+ * not a proof that covers a future multi-org shape. The
  * temporal (`created_at`) boundary is what keeps this migration's population DISJOINT from
  * Migration B's own: every row Migration B already resolved or permanently classified (including
  * class-1 residue, which stays NULL by design, forever, regardless of the single-org premise) was
