@@ -55,6 +55,15 @@
           <span>{{ tr('Org ID', '组织 ID') }}</span>
           <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
         </label>
+        <!-- A6 (A-class batch 2, 2026-08-22): considered swapping for AttendanceUserPickerField
+             (as done at the annual-leave-balance site) but did NOT — this filter renders on the
+             Reports tab, which `AttendanceExperienceView.vue` never gates by role ("'overview'/
+             'reports' are never gated"), while the picker's `useAttendanceAdminUsers` composable
+             defaults to `/api/admin/users` (`ensurePlatformAdmin`-gated) and fires on mount. Every
+             non-platform-admin visiting Reports would get a background 403 the moment the tab
+             loads. The other 8 existing picker usages are all admin-tab-only, so this reachability
+             gap is new here, not a pre-existing pattern. Left as the original text input; the
+             empty/"current user" semantics are unchanged. -->
         <label class="attendance__field" for="attendance-user-id">
           <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
           <input
@@ -169,6 +178,10 @@
             <span>{{ tr('Org ID', '组织 ID') }}</span>
             <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
           </label>
+          <!-- A6: same reachability problem as the report-export filter row above — the Overview
+               tab is even less gated (self-service, open to every authenticated user by design),
+               so the admin-only-by-default AttendanceUserPickerField was NOT swapped in here
+               either. See the report-export block's comment for the full reasoning. -->
           <label class="attendance__field" for="attendance-user-id">
             <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
             <input
@@ -2303,12 +2316,17 @@
                     data-makeup-punch="timezone"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-makeup-punch-cycle-type">
+                <!-- A9 (A-class batch 2, 2026-08-22): this used to be a disabled <select> offering
+                     exactly one option — the backend schema genuinely only accepts one value here
+                     (`cycle.type: z.enum(['calendar_month'])`, `index.cjs:26318`) and the save
+                     payload always hardcodes the literal `'calendar_month'` regardless of any UI
+                     state (`saveMakeupPunchPolicy`), so the disabled dropdown never bound to form
+                     state at all. Presented as plain read-only text instead of a fake control. -->
+                <div class="attendance__field" data-makeup-punch="cycle-type-fixed">
                   <span>{{ tr('Cycle type', '周期类型') }}</span>
-                  <select id="attendance-makeup-punch-cycle-type" disabled data-makeup-punch="cycle-type">
-                    <option value="calendar_month">{{ tr('Calendar month', '自然月') }}</option>
-                  </select>
-                </label>
+                  <strong>{{ tr('Calendar month', '自然月') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts calendar-month cycles in v1.', '固定 — v1 后端仅接受自然月周期。') }}</small>
+                </div>
                 <label class="attendance__field" for="attendance-makeup-punch-cycle-start">
                   <span>{{ tr('Cycle start day', '周期起始日') }}</span>
                   <input
@@ -2347,18 +2365,21 @@
                     <span>{{ option.label }}</span>
                   </label>
                 </fieldset>
-                <label class="attendance__field" for="attendance-makeup-punch-quota-principal">
+                <!-- A9: same reasoning as cycle-type above — `quota.principal: z.enum(['self_service_user'])`
+                     (`index.cjs:26323`) and the save payload hardcodes the literal
+                     `'self_service_user'`; the disabled select never bound to form state. -->
+                <div class="attendance__field" data-makeup-punch="quota-principal-fixed">
                   <span>{{ tr('Quota principal', '额度主体') }}</span>
-                  <select id="attendance-makeup-punch-quota-principal" disabled data-makeup-punch="quota-principal">
-                    <option value="self_service_user">{{ tr('Self-service user', '自助申请人') }}</option>
-                  </select>
-                </label>
-                <label class="attendance__field" for="attendance-makeup-punch-window-unit">
+                  <strong>{{ tr('Self-service user', '自助申请人') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts self-service-user quotas in v1.', '固定 — v1 后端仅接受自助申请人额度。') }}</small>
+                </div>
+                <!-- A9: same reasoning again — `submitWindow.unit: z.enum(['calendar_day'])`
+                     (`index.cjs:26326`) and the save payload hardcodes the literal `'calendar_day'`. -->
+                <div class="attendance__field" data-makeup-punch="window-unit-fixed">
                   <span>{{ tr('Submit-window unit', '提交窗口单位') }}</span>
-                  <select id="attendance-makeup-punch-window-unit" disabled data-makeup-punch="window-unit">
-                    <option value="calendar_day">{{ tr('Calendar day', '自然日') }}</option>
-                  </select>
-                </label>
+                  <strong>{{ tr('Calendar day', '自然日') }}</strong>
+                  <small class="attendance__field-hint">{{ tr('Fixed — the backend only accepts calendar-day submit windows in v1.', '固定 — v1 后端仅接受自然日提交窗口。') }}</small>
+                </div>
                 <label class="attendance__field" for="attendance-makeup-punch-window-days">
                   <span>{{ tr('Submit window (calendar days)', '提交时限（自然日）') }}</span>
                   <input
@@ -4991,14 +5012,32 @@
                         <span>{{ tr('Code', '编码') }}</span>
                         <input id="attendance-group-code" v-model="attendanceGroupForm.code" type="text" :placeholder="tr('optional', '可选')" />
                       </label>
+                      <!-- A2 (A-class batch 2, 2026-08-22): confirmed the server accepts a timezone
+                           change on an existing group unconditionally (index.cjs's PATCH handler),
+                           while the SAME handler 409s a group-type change with "protect schedule
+                           semantics" as the reason (see the type field's hint one below). Deliberately
+                           did NOT add `:disabled` here the way the type field has it — the server does
+                           not reject this, so disabling it client-side would be inventing a product
+                           restriction ("can an admin fix a mistyped timezone on a saved group") this
+                           task was told not to decide, not mirroring one that exists. Left editable;
+                           added a same-risk-class warning instead so the choice is informed. Whether
+                           to actually lock it (matching the type field, and DingTalk's own product,
+                           which does not allow changing it post-creation) is an owner call. -->
                       <label class="attendance__field" for="attendance-group-timezone">
                         <span>{{ tr('Timezone', '时区') }}</span>
-                        <select id="attendance-group-timezone" v-model="attendanceGroupForm.timezone">
+                        <select
+                          id="attendance-group-timezone"
+                          v-model="attendanceGroupForm.timezone"
+                          data-attendance-group-timezone
+                        >
                           <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
                             {{ option.label }}
                           </option>
                         </select>
                         <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
+                        <small v-if="attendanceGroupEditingId" class="attendance__field-hint" data-attendance-group-timezone-change-warning>
+                          {{ tr('Changing the timezone reinterprets this group\'s existing shift times in the new zone.', '修改时区会让该考勤组已有的班次时间按新时区重新解读。') }}
+                        </small>
                       </label>
                       <label class="attendance__field" for="attendance-group-rule-set">
                         <span>{{ tr('Rule policy', '规则策略') }}</span>
@@ -5496,32 +5535,17 @@
                         </small>
                       </div>
 
-                      <div
-                        v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
-                        class="attendance__fixed-schedule-week-matrix"
-                        data-attendance-group-work-time-week-matrix
-                      >
-                        <div class="attendance__admin-section-header">
-                          <div>
-                            <h6>{{ tr('Weekly shift matrix', '周班次矩阵') }}</h6>
-                            <span class="attendance__field-hint">{{ attendanceGroupFixedScheduleWeekMatrixHint }}</span>
-                          </div>
-                        </div>
-                        <div class="attendance__fixed-schedule-week-grid">
-                          <div
-                            v-for="day in attendanceGroupFixedScheduleWeekMatrix"
-                            :key="`drawer-${day.value}`"
-                            class="attendance__fixed-schedule-week-day"
-                            :class="{ 'attendance__fixed-schedule-week-day--rest': !day.isWorkingDay }"
-                            data-attendance-group-work-time-week-day
-                          >
-                            <span>{{ day.label }}</span>
-                            <strong>{{ day.assignmentLabel }}</strong>
-                            <small>{{ day.timeLabel }}</small>
-                          </div>
-                        </div>
-                      </div>
-
+                      <!-- A8 (A-class batch 2, 2026-08-22): a "Weekly shift matrix" preview used to be
+                           rendered here too, reading the exact same
+                           attendanceGroupFixedScheduleWeekMatrix / …Hint computeds (keyed off the
+                           SHARED attendanceGroupFixedSchedulePreviewForm.shiftId) as the "schedule"
+                           wizard stage's own panel below (data-attendance-group-fixed-schedule-week-matrix).
+                           For a not-yet-saved group this drawer has no shift picker of its own, so it
+                           always rendered an empty "No shift selected" placeholder; for a saved group it
+                           duplicated, byte-for-byte, the stage's fuller panel (which also has the actual
+                           shift/date fields and the "Preview fixed schedule" action). Removed here; the
+                           canonical, functional matrix lives in the "schedule" stage below and stays
+                           reachable via the jump-off buttons underneath. -->
                       <div
                         v-if="normalizeAttendanceGroupType(attendanceGroupForm.attendanceType) === 'fixed_shift'"
                         class="attendance__work-time-holiday-callout"
@@ -5837,22 +5861,6 @@
                     </div>
                   </section>
                 </section>
-              </div>
-            </div>
-
-            <div
-              v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
-              class="attendance__admin-section"
-              v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.groupMembers)"
-            >
-              <div class="attendance__admin-section-header">
-                <h4>{{ tr('Group members', '分组成员') }}</h4>
-                <button class="attendance__btn attendance__btn--primary" type="button" @click="selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups)">
-                  {{ tr('Open Attendance groups', '打开考勤组') }}
-                </button>
-              </div>
-              <div class="attendance__empty" data-attendance-group-members-redirect>
-                {{ tr('Group members now live inside the selected attendance group detail. Use Attendance groups to select a group, then edit People.', '分组成员已并入所选考勤组详情。请打开考勤组，选择分组后在“考勤人员”中维护。') }}
               </div>
             </div>
 
@@ -7143,10 +7151,17 @@
                 <h4>{{ tr('Annual leave balance', '年假余额') }}</h4>
               </div>
               <div class="attendance__admin-grid">
-                <label class="attendance__field" for="attendance-annual-balance-user">
-                  <span>{{ tr('User ID', '用户 ID') }}</span>
-                  <input id="attendance-annual-balance-user" v-model="annualBalanceUserId" type="text" />
-                </label>
+                <!-- A6: raw UUID text input swapped for AttendanceUserPickerField. Semantics
+                     unchanged — a user ID is still required to load a balance
+                     (loadAnnualLeaveBalance still rejects an empty value with the same error). -->
+                <AttendanceUserPickerField
+                  v-model="annualBalanceUserId"
+                  :tr="tr"
+                  :label="tr('User ID', '用户 ID')"
+                  name="annualBalanceUserId"
+                  :search-placeholder="tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索')"
+                  input-id="attendance-annual-balance-user"
+                />
                 <!-- W5-1 / OD-W5-7: leave-type select drives the #4562-parameterized read path.
                      Closed set only (annual | comp_time); the handler re-validates before any
                      fetch (UI 输入自验). Default 'annual' keeps the pre-parameterization query
@@ -14121,7 +14136,21 @@ function openAttendanceGroupRoute(
   surface: AttendanceGroupRouteSurface | null,
 ): void {
   const groupId = String(props.routeGroupContext?.group.id || attendanceGroupEditingId.value || '').trim()
-  if (!groupId) return
+  if (!groupId) {
+    // A3 (A-class batch 2, 2026-08-22, narrowed): A3 as originally worded — "the schedule STAGE
+    // silently does nothing on an unsaved group" — is not real; that stage already shows a
+    // "Save basic info to unlock schedule preview and assignment actions" placeholder with a
+    // "Complete basic info" button (runtime-confirmed). What WAS silent: this function is also
+    // reached from the group-editing DRAWERS' jump-off buttons ("Open Shifts" /
+    // "Open Assignments" / "Open Advanced scheduling" / "Open Rule sets" / "Open Holidays"),
+    // which stay reachable on an unsaved group (opened from the policies-stage summary cards,
+    // which don't gate on attendanceGroupEditingId) and used to return here with zero feedback.
+    setStatus(
+      tr('Save the attendance group before opening this.', '请先保存考勤组，再执行此操作。'),
+      'error',
+    )
+    return
+  }
   emit('open-group-route', { groupId, step, surface })
 }
 
@@ -15276,15 +15305,12 @@ const adminTaskHomeGroups = computed<AttendanceAdminTaskHomeGroup[]>(() => [
       },
       // Navigability audit fix 5(b) (2026-08-22): the standalone "Members" task-home entry was
       // removed — it duplicated this SAME group's "Attendance groups" entry, landing on a section
-      // (`attendance-admin-group-members`, still present in the admin nav sidebar and reachable
-      // via the section id below) whose only content is "open Attendance groups instead". That
-      // section itself is KEPT: UserManagementView.vue's post-create-user "下一步" deep-link
-      // (`buildAttendanceAdminSectionLocation('attendance-admin-group-members')`, tested in
-      // userManagementView.spec.ts) still needs `attendance-admin-group-members` to resolve to a
-      // section rather than silently falling back to Settings — see
-      // `shouldShowAdminSection`/`resolvedAdminSectionId()`. Smaller-change choice: drop the
-      // redundant task-home shortcut only, leave the waystation section (with its existing "Open
-      // Attendance groups" button) and its sidebar nav entry untouched.
+      // whose only content was "open Attendance groups instead". A-class batch 2 (2026-08-22,
+      // A4) finished the job: the waystation section (`attendance-admin-group-members`) and its
+      // rail entry are now deleted outright, and UserManagementView.vue's post-create-user "下一
+      // 步" deep-link (`buildAttendanceAdminSectionLocation(...)`, tested in
+      // userManagementView.spec.ts) now points straight at `attendance-admin-groups` instead of
+      // through the removed waystation, so there is no dangling deep link.
       {
         key: 'user-access',
         label: tr('Access', '权限'),

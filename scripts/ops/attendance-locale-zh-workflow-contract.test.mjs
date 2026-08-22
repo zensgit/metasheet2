@@ -61,3 +61,46 @@ test('attendance locale zh smoke waits for async holiday badges while probing mo
   assert.match(raw, /await target\.waitFor\(\{ timeout: holidayBadgeProbeWaitMs \}\)/)
   assert.match(raw, /await target\.first\(\)\.waitFor\(\{ timeout: holidayBadgeProbeWaitMs \}\)/)
 })
+
+// A10 (A-class batch 2, 2026-08-22): `Attendance Locale zh Smoke (Prod)` has failed on every run
+// since 2026-07-23 waiting on `#attendance-from-date` — #4501 (8112810cd2, 2026-07-21) moved the
+// date/org/user history filters inside a collapsed-by-default <details data-attendance-history-filters>
+// disclosure that the probe never opens. Pin BOTH halves of the fix so a rename on either side
+// breaks this test instead of silently reopening the gap: the probe script must open the
+// disclosure by its data-attendance-history-filters hook before waiting on the filter fields, and
+// the product file must still carry that same hook on a real <details>/<summary> pair for the
+// probe to find.
+test('attendance locale zh smoke expands the collapsed history-filters disclosure before waiting on the filter fields', () => {
+  const scriptRaw = readFileSync(path.join(repoRoot, 'scripts/verify-attendance-locale-zh-smoke.mjs'), 'utf8')
+
+  assert.match(scriptRaw, /async function expandHistoryFilters\(page, timeout = timeoutMs\) \{/)
+  assert.match(scriptRaw, /page\.locator\('\[data-attendance-history-filters\]'\)/)
+  assert.match(scriptRaw, /await details\.locator\('summary'\)\.first\(\)\.click\(\)/)
+  // called before the #attendance-from-date wait it exists to unblock, not after.
+  const expandCallIndex = scriptRaw.indexOf('await expandHistoryFilters(page)')
+  const fromDateWaitIndex = scriptRaw.indexOf("await page.locator('#attendance-from-date').waitFor(")
+  assert.notEqual(expandCallIndex, -1, 'expected a call to expandHistoryFilters(page)')
+  assert.notEqual(fromDateWaitIndex, -1, 'expected the #attendance-from-date waitFor this fix unblocks')
+  assert.ok(expandCallIndex < fromDateWaitIndex, 'expandHistoryFilters must run before the #attendance-from-date wait')
+})
+
+test('AttendanceEmployeeWorkspace still exposes the data-attendance-history-filters hook the probe pins', () => {
+  const componentPath = path.join(repoRoot, 'apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue')
+  const raw = readFileSync(componentPath, 'utf8')
+
+  assert.match(raw, /<details class="attendance-ew__history-filters" data-attendance-history-filters>/)
+  // the disclosure must still open via its own <summary>, not via a v-bind default the product
+  // side could flip silently — this fix does not touch that default-open decision.
+  const detailsIndex = raw.indexOf('data-attendance-history-filters')
+  const summaryIndex = raw.indexOf('<summary', detailsIndex)
+  const closeIndex = raw.indexOf('</details>', detailsIndex)
+  assert.notEqual(detailsIndex, -1)
+  assert.notEqual(summaryIndex, -1)
+  assert.notEqual(closeIndex, -1)
+  assert.ok(summaryIndex > detailsIndex && summaryIndex < closeIndex, 'expected a <summary> inside the data-attendance-history-filters <details>')
+  assert.doesNotMatch(
+    raw.slice(detailsIndex - 80, detailsIndex),
+    /:open=|v-bind:open=/,
+    'the <details> default-open state must stay a static (owner) decision, not something this fix silently flips',
+  )
+})

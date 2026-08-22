@@ -86,6 +86,23 @@ function balanceSummaryPayload(leaveTypeCode: string, userId: string): Record<st
   }
 }
 
+// A6 (A-class batch 2, 2026-08-22): the admin annual-leave-balance "User ID" filter is now an
+// AttendanceUserPickerField (search input + <select>) instead of a raw text <input>; its real
+// v-model value lives on the <select>.
+function selectUserPicker(container: HTMLElement, selector: string, userId: string): void {
+  const searchInput = container.querySelector<HTMLInputElement>(selector)
+  expect(searchInput, `expected user picker ${selector}`).toBeTruthy()
+  const field = searchInput!.closest('.attendance__field')
+  expect(field, `expected user picker field ${selector}`).toBeTruthy()
+  const select = field!.querySelector<HTMLSelectElement>('select')
+  expect(select, `expected user picker select ${selector}`).toBeTruthy()
+  if (!Array.from(select!.options).some((option) => option.value === userId)) {
+    select!.appendChild(new Option(userId, userId))
+  }
+  select!.value = userId
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 describe('W5-1 decision-trace dual-face wiring', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -377,9 +394,7 @@ describe('W5-1 decision-trace dual-face wiring', () => {
     container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-    const userInput = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
-    userInput.value = 'u1'
-    userInput.dispatchEvent(new Event('input', { bubbles: true }))
+    selectUserPicker(section, '#attendance-annual-balance-user', 'u1')
     await flushUi(2)
 
     // Default (annual) — byte-identical to the pre-W5-1 query.

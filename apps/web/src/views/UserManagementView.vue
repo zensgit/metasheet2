@@ -137,7 +137,7 @@
         <div class="user-admin__role-actions">
           <router-link
             class="user-admin__button user-admin__button--secondary user-admin__button-link"
-            :to="buildAttendanceAdminSectionLocation('attendance-admin-group-members')"
+            :to="buildAttendanceAdminSectionLocation('attendance-admin-groups')"
           >
             考勤组成员
           </router-link>

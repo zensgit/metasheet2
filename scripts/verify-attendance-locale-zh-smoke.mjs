@@ -489,6 +489,25 @@ async function verifyZhShellTabs(page, options = {}) {
   return result
 }
 
+// A10 (A-class batch 2, 2026-08-22): the overview tab's date/org/user history filters (the row
+// this probe waits on next) moved inside a collapsed-by-default <details data-attendance-history-filters>
+// disclosure in #4501 (8112810cd2, 2026-07-21) — AttendanceEmployeeWorkspace.vue's `#historyFilters`
+// slot host. A human opens it by clicking its visible, labelled <summary> ("日期 / 组织 / 用户筛选");
+// this probe never did, so every run since has timed out waiting for a locator that resolves to a
+// hidden element (see `Attendance Locale zh Smoke (Prod)`, red on every run since 2026-07-23).
+// Fix the probe, not the product: the <details> default-open state is a product decision the owner
+// has not made, so this only opens the disclosure — it does not touch AttendanceEmployeeWorkspace.vue.
+async function expandHistoryFilters(page, timeout = timeoutMs) {
+  const details = page.locator('[data-attendance-history-filters]')
+  await details.waitFor({ timeout })
+  const isOpen = await details.evaluate((node) => node.hasAttribute('open'))
+  if (isOpen) return
+  await details.locator('summary').first().click()
+  await details.evaluate((node) => node.hasAttribute('open')).then((open) => {
+    if (!open) throw new Error('Expected [data-attendance-history-filters] to be open after clicking its summary')
+  })
+}
+
 async function writeSummaryJson(filePath, summary) {
   await fs.writeFile(filePath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
 }
@@ -581,6 +600,7 @@ async function run() {
       throw new Error(`Expected locale select value zh-CN, got ${localeValue || '<empty>'}`)
     }
 
+    await expandHistoryFilters(page)
     await page.locator('#attendance-from-date').waitFor({ timeout: timeoutMs })
     await page.getByRole('heading', { name: '考勤', exact: true }).waitFor({ timeout: timeoutMs })
 
