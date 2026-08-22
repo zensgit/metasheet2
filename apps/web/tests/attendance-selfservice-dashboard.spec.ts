@@ -1124,6 +1124,104 @@ describe('Attendance self-service dashboard', () => {
     )).toBe(false)
   })
 
+  it('shows approve/reject for a pending request owned by someone else, once the server actually returns one (fix 2)', async () => {
+    // IMPORTANT (corrected per independent review GATE-5086, P2-1): this fixture exercises
+    // `canReviewAttendanceRequestRow`'s entitlement predicate directly by mocking
+    // `/api/attendance/requests?` to return a foreign-owned row, regardless of what `userId`
+    // query param the request actually carried. It does NOT reproduce the task-home "Pending
+    // approvals" link's real path. That path calls `loadRequests()` with
+    // `userId: normalizedUserId()`, which is empty/self by default — so `targetUserId ===
+    // requesterId` server-side (index.cjs's `/api/attendance/requests` route) and the server
+    // returns ONLY the viewer's own rows, so `canReviewAttendanceRequestRow` still shows NO
+    // approve/reject buttons on the task-home path today — that gap is real and undisclosed by
+    // this test alone; it is tracked in the PR body's Fix 2 section, not fixed by this PR. What
+    // this fixture DOES represent: an approver has typed another user's id into the target-user
+    // box and the server's `canAccessOtherUsers` check has legitimately let a foreign-owned row
+    // through — a real path that was equally broken before this fix, and the one fix 2 actually
+    // repairs.
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'request-foreign-pending',
+                work_date: '2026-04-15',
+                request_type: 'leave',
+                requested_in_at: '2026-04-15T09:00:00+08:00',
+                requested_out_at: '2026-04-15T18:00:00+08:00',
+                reason: 'Foreign owner pending request',
+                status: 'pending',
+                user_id: 'other-admin-x',
+                metadata: {},
+              },
+            ],
+          },
+        })
+      }
+      return baseImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const row = container!.querySelector<HTMLElement>('[data-attendance-request-id="request-foreign-pending"]')
+    expect(row).toBeTruthy()
+    expect(row?.textContent).toContain('Approve')
+    expect(row?.textContent).toContain('Reject')
+
+    const approveButton = Array.from(row!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(candidate => candidate.textContent?.trim() === 'Approve')
+    expect(approveButton).toBeTruthy()
+    approveButton!.click()
+    await flushUi(4)
+
+    expect(vi.mocked(apiFetch).mock.calls.some(call =>
+      String(call[0]).includes('/api/attendance/requests/request-foreign-pending/approve'),
+    )).toBe(true)
+  })
+
+  it('still hides approve/reject for a pending request the viewer owns themselves, even with an explicit user_id (fix 2)', async () => {
+    const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : (input as Request).url
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [
+              {
+                id: 'request-self-pending',
+                work_date: '2026-04-15',
+                request_type: 'leave',
+                requested_in_at: '2026-04-15T09:00:00+08:00',
+                requested_out_at: '2026-04-15T18:00:00+08:00',
+                reason: 'Self-owned pending request',
+                status: 'pending',
+                user_id: authMockState.currentUserId,
+                metadata: {},
+              },
+            ],
+          },
+        })
+      }
+      return baseImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const row = container!.querySelector<HTMLElement>('[data-attendance-request-id="request-self-pending"]')
+    expect(row).toBeTruthy()
+    expect(row?.textContent).not.toContain('Approve')
+    expect(row?.textContent).not.toContain('Reject')
+  })
+
   it('opens a focused attendance approval request from approval center and exposes review actions', async () => {
     app = createApp(AttendanceView, {
       mode: 'overview',

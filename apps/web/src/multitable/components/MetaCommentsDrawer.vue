@@ -75,7 +75,9 @@ import { useLocale } from '../../composables/useLocale'
 import type { MetaCommentMentionSuggestion, MultitableComment } from '../types'
 import { MtIconButton } from '../ui'
 import { commentLabel, type MetaCommentLabelKey } from '../utils/meta-comment-labels'
-import MetaCommentsPanel, { type MentionCandidateInput } from './MetaCommentsPanel.vue'
+// S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
+// imported directly here rather than through the old-path re-export shim.
+import MetaCommentsPanel, { type MentionCandidateInput } from '../../shared/comments/components/MetaCommentsPanel.vue'
 
 // W2 S4 (OD-W2-7=b): props/emits below are the drawer's PUBLIC compat contract, unchanged from
 // pre-extraction — kept byte-identical so every existing MetaCommentsDrawer consumer (in-repo

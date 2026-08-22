@@ -1,0 +1,497 @@
+name: Approval S1 Org Backfill Evidence (Read-Only)
+
+# READ-ONLY evidence pack for the Lock-10 (S1) `approval_instances.org_id` migration
+# (`zzzz20260821100000_add_approval_instance_org_id`). Answers, per environment: is the migration
+# in the ledger, how many rows carry an org, and how many instances would go dark if
+# `APPROVAL_S1_ORG_PIN_ENABLED` were flipped ON.
+#
+# THIS WORKFLOW NEVER WRITES. Every remote statement is a SELECT, a `docker inspect`, or a
+# `printenv`. (An earlier draft also ran `migrate.js --confirm` as corroboration; it was REMOVED —
+# on a pre-`5fa1038017` image the argument falls through to `migrateToLatest()`, which takes the
+# production migration advisory lock and can even apply migrations. The raw ledger SELECT (p01)
+# is version-independent and is the sole authority.)
+#
+# There is NO host git-sync step (the docker-gc template's sync mutates the host checkout and a
+# read-only probe has no use for it), NO compose
+# up/down, and NO `db:migrate`. Reading the staging DB does not go through the window runner:
+# `metasheet-staging-postgres` lives on the SAME deploy host, and window-runner exclusivity is a
+# DEPLOY constraint, not a READ constraint.
+#
+# VALUES-FREE DISCIPLINE. `approval_instances.org_id` values are tenant labels and instance ids are
+# record identifiers; neither is ever selected, echoed, or interpolated into an error. Every probe
+# returns a BARE INTEGER validated by `^[0-9]+$`; the ONE non-integer output is the migration's own
+# ledger timestamp, which is a deploy time, not tenant data. Bucket labels are repo-authored
+# constants, never values read from the database. psql stderr is deliberately NOT surfaced: a
+# Postgres error message can embed a row value (CHECK-violation detail), so a failing probe reports
+# its NAME and exit status only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environments:
+        description: 'Which deployments to probe: prod | staging | both'
+        required: false
+        default: 'both'
+        type: choice
+        options: [both, prod, staging]
+
+concurrency:
+  # NOT cancel-in-progress: a cancelled evidence run leaves a partial artifact that reads as a
+  # complete one.
+  group: approval-s1-org-backfill-evidence
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Collect org-backfill evidence (read-only)
+        id: probe
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          ENVIRONMENTS: ${{ github.event.inputs.environments || 'both' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          [[ -n "$DEPLOY_SSH_KEY_B64" ]] || { echo "DEPLOY_SSH_KEY_B64 is required" >&2; exit 2; }
+          [[ -n "$DEPLOY_KNOWN_HOSTS" ]] || { echo "DEPLOY_KNOWN_HOSTS is required" >&2; exit 2; }
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts \
+            || { echo "DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key" >&2; exit 2; }
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i ~/.ssh/deploy_key"
+
+          case "$ENVIRONMENTS" in prod|staging|both) ;; *) echo "invalid environments input" >&2; exit 2;; esac
+
+          mkdir -p output/s1-org-evidence
+          evidence_log="output/s1-org-evidence/evidence.log"
+
+          # Quoted heredoc: nothing in the remote script is interpolated by the runner shell.
+          # Environment selection arrives as a positional arg, so no runner-side value is ever
+          # spliced into remote SQL.
+          set +e
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- "$ENVIRONMENTS" <<'REMOTE' 2>&1 | tee "$evidence_log"
+          set -uo pipefail
+
+          MIGRATION_NAME='zzzz20260821100000_add_approval_instance_org_id'
+          ENVIRONMENTS="${1:-both}"
+          PROBE_VALUE=''
+
+          abort() { echo "[s1-evidence][fatal] $*" >&2; exit 2; }
+
+          # probe <pg_container> <pg_user> <pg_db> <name> <sql>
+          #
+          # Shape adapted from `residue_check`
+          # (scripts/ops/attendance-staging-window-runner-remote.sh:~593): tuples-only, unaligned,
+          # ON_ERROR_STOP=1, and a HARD FAILURE when the result is not a bare integer — a query
+          # that errors, drops its connection, or returns the wrong shape is NEVER silently
+          # recorded as 0. The `name=value` record line is this function's ONLY stdout; the numeric
+          # value is returned through the PROBE_VALUE global, never through stdout, so a caller can
+          # never capture a log line as the value (the failure mode that file records against run
+          # 29395824577).
+          probe() {
+            local container="$1" pg_user="$2" pg_db="$3" name="$4" sql="$5" value rc
+            PROBE_VALUE=''
+            value="$(docker exec "$container" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA -c "$sql" 2>/dev/null | tr -d '[:space:]')"
+            rc=$?
+            if [[ "$rc" != "0" || ! "$value" =~ ^[0-9]+$ ]]; then
+              # The offending value is NOT echoed: psql error text can embed a row value.
+              echo "${name}=ERROR"
+              echo "[s1-evidence][error] probe '${name}' failed or returned a non-integer (psql rc=${rc}; value suppressed by values-free policy)" >&2
+              return 1
+            fi
+            PROBE_VALUE="$value"
+            echo "${name}=${value}"
+            return 0
+          }
+
+          # resolve_creds <pg_container> -> "<POSTGRES_USER> <POSTGRES_DB>" on stdout, read from the
+          # RUNNING container's own env (same helper shape as the window runner's
+          # resolve_postgres_creds, lines 188-197) so credentials are never hardcoded here.
+          resolve_creds() {
+            local container="$1" pg_user pg_db
+            pg_user="$(docker exec "$container" printenv POSTGRES_USER 2>/dev/null || true)"
+            pg_db="$(docker exec "$container" printenv POSTGRES_DB 2>/dev/null || true)"
+            [[ -n "$pg_user" && -n "$pg_db" ]] || return 1
+            printf '%s %s' "$pg_user" "$pg_db"
+          }
+
+          # run_env <label> <pg_container> <backend_container>
+          run_env() {
+            local label="$1" pg_container="$2" backend_container="$3"
+            local pg_user pg_db creds ledger column executed_at
+
+            echo "=== S1 EVIDENCE START ${label} ==="
+            echo "env=${label}"
+            echo "pg_container=${pg_container}"
+
+            if ! docker inspect -f '{{.State.Running}}' "$pg_container" 2>/dev/null | grep -qx true; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=pg_container_not_running"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+
+            if ! creds="$(resolve_creds "$pg_container")"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=cannot_resolve_postgres_user_or_db_from_container_env"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            read -r pg_user pg_db <<< "$creds"
+
+            # ---- GATE: is the migration applied here at all? -------------------------------
+            # The RAW LEDGER SELECT is the sole applied-check — version-independent, and the
+            # only acceptable one (see the header note on the removed --confirm corroboration).
+            if ! probe "$pg_container" "$pg_user" "$pg_db" "${label}.p01_ledger_row_present" \
+                 "SELECT count(*) FROM kysely_migration WHERE name = '${MIGRATION_NAME}'"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_probe_failed"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            ledger="$PROBE_VALUE"
+
+            if ! probe "$pg_container" "$pg_user" "$pg_db" "${label}.p02_org_id_column_present" \
+                 "SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'approval_instances'
+                     AND column_name = 'org_id'"; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=column_probe_failed"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            column="$PROBE_VALUE"
+
+            if [[ "$ledger" == "0" && "$column" == "0" ]]; then
+              # NOT_APPLIED is a real, reportable verdict — never a skip and never a PASS.
+              echo "verdict=NOT_APPLIED"
+              echo "reason=no_ledger_row_and_no_org_id_column"
+              echo "note=every population probe is N/A for ${label} because the migration has not run there"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 0
+            fi
+            if [[ "$ledger" != "$column" ]]; then
+              # A ledger row without the column, or the column without a ledger row: schema and
+              # history disagree. Hard fail — never report numbers off an inconsistent baseline.
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_and_column_disagree"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+
+            # Ledger timestamp: the ONLY non-integer output line. Values-free — kysely writes
+            # `new Date().toISOString()` into a varchar(255); it carries no tenant or record
+            # identity and is what ties this pack to a specific deploy/CI run.
+            executed_at="$(docker exec "$pg_container" psql -U "$pg_user" -d "$pg_db" -v ON_ERROR_STOP=1 -tA \
+              -c "SELECT timestamp FROM kysely_migration WHERE name = '${MIGRATION_NAME}'" 2>/dev/null | tr -d '[:space:]')"
+            if [[ ! "$executed_at" =~ ^[0-9T:.Z+-]+$ ]]; then
+              echo "verdict=INDETERMINATE"
+              echo "reason=ledger_timestamp_not_iso_shaped"
+              echo "=== S1 EVIDENCE END ${label} ==="
+              return 1
+            fi
+            echo "${label}.p03_migration_executed_at=${executed_at}"
+
+
+            local rc=0
+
+            # ---- Constraint shape ----------------------------------------------------------
+            # p05 expected 1 (Phase-1 non-blank CHECK landed). p06 expected 0 — Phase 3
+            # (`approval_instance_org_present`) must NOT be present; landing it before every writer
+            # stamps an org would 500 every create.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p05_constraint_org_nonblank_present" \
+              "SELECT count(*) FROM pg_constraint
+                WHERE conname = 'approval_instance_org_nonblank'
+                  AND conrelid = 'approval_instances'::regclass" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p06_constraint_phase3_org_present_present" \
+              "SELECT count(*) FROM pg_constraint
+                WHERE conname = 'approval_instance_org_present'
+                  AND conrelid = 'approval_instances'::regclass" || rc=1
+
+            # ---- Population totals ---------------------------------------------------------
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_total" \
+              "SELECT count(*) FROM approval_instances" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p11_org_present_total" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NOT NULL" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p12_org_null_total" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NULL" || rc=1
+
+            # ---- (b) THE DECISIVE NUMBER FOR ORG-PIN ACTIVATION -----------------------------
+            # "Platform ids" are the non-`plm:` ids — routes/approval-history.ts:131, "per-instance
+            # admission for PLATFORM ids only (the `plm:` branch above already returned)". With
+            # APPROVAL_S1_ORG_PIN_ENABLED=true the predicate conjoins `i.org_id = ANY(viewerOrgIds)`;
+            # a NULL org_id makes that NULL, i.e. DENY for everyone including admins (OD-S1-9(e)).
+            # p20 is therefore exactly the count of instances that go dark on activation.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p20_platform_id_org_null" \
+              "SELECT count(*) FROM approval_instances WHERE org_id IS NULL AND id NOT LIKE 'plm:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p21_platform_id_total" \
+              "SELECT count(*) FROM approval_instances WHERE id NOT LIKE 'plm:%'" || rc=1
+
+            # ---- RULED-POSTURE VIOLATIONS (expected 0; no CHECK can catch these) ------------
+            # The class-2 UPDATE carries NO id-prefix guard, so a `plm:` mirror that carries a
+            # bound attachment WOULD BE stamped with an org — against OD-S1-18(b)'s rule that class
+            # 5 stays NULL permanently. The MECHANISM is proven (a PG15 replay of the migration's
+            # verbatim SQL stamps such a row); whether any such row EXISTS in a given deployment is
+            # UNKNOWN, and is exactly what this probe measures. Attachment binding may in practice
+            # be unreachable for `plm:` ids (they are minted by plm-approval-bridge.ts:43 and both
+            # consumers branch to the PLM adapter before the predicate), in which case this reads 0.
+            # It is worth probing anyway because the future Phase-3 CHECK is an OR
+            # (`org_id IS NOT NULL OR id LIKE 'plm:%'`), so it PASSES on such a row and can never
+            # detect it — verified by replay: with every genuinely-NULL platform row stamped,
+            # VALIDATE CONSTRAINT succeeded while a wrongly-stamped `plm:` row was present.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p22_plm_prefix_org_present_VIOLATION" \
+              "SELECT count(*) FROM approval_instances WHERE id LIKE 'plm:%' AND org_id IS NOT NULL" || rc=1
+            # Same hole for class 4: the lock rules that an unset after-sales org must ABORT the
+            # migration, never default — yet an `afs:` mirror with a bound attachment would be
+            # stamped instead. Same status as p22: mechanism proven, population unknown.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p23_afs_prefix_org_present_VIOLATION" \
+              "SELECT count(*) FROM approval_instances WHERE id LIKE 'afs:%' AND org_id IS NOT NULL" || rc=1
+
+            # ---- (c) STRUCTURAL BUCKET DISTRIBUTION ----------------------------------------
+            # STRUCTURAL buckets, deliberately NOT named class-1..6. Classes 1, 3 and 6 have no
+            # in-DB discriminator at this baseline (the lock records that class 1's source column
+            # does not exist), so a four-way structural split is an APPROXIMATION of the ratified
+            # taxonomy, not the taxonomy. Buckets are mutually exclusive and exhaustive by
+            # construction; the summary step asserts b1+b2+b3+b4 == p10 mechanically.
+            # The attachment EXISTS mirrors the migration's own source predicate verbatim: no
+            # status filter, no bind_kind filter, and NOT `staged_instance_id` (Lock-9's staging
+            # column, which the S1 backfill never read).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b1_id_prefix_plm_total" \
+              "SELECT count(*) FROM approval_instances i WHERE i.id LIKE 'plm:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b1_id_prefix_plm_org_null" \
+              "SELECT count(*) FROM approval_instances i WHERE i.id LIKE 'plm:%' AND i.org_id IS NULL" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b2_id_prefix_afs_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id LIKE 'afs:%'" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b2_id_prefix_afs_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id LIKE 'afs:%' AND i.org_id IS NULL" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b3_has_bound_attachment_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b3_has_bound_attachment_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%' AND i.org_id IS NULL
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b4_no_structural_source_total" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.b4_no_structural_source_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%' AND i.org_id IS NULL
+                  AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+
+            # ---- Class-2 backfill fidelity + post-migration writer drift --------------------
+            # p30 mirrors EXACTLY the population the migration's UPDATE targeted, so it was 0 the
+            # instant the migration committed. Non-zero TODAY is writer drift, not a migration
+            # defect: the six `approval_instances` writers still stamp no org.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p30_attachment_bearing_still_org_null" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL
+                  AND EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)" || rc=1
+            # p31 isolates that drift by creation time. kysely stores the ledger timestamp as
+            # varchar(255) holding `new Date().toISOString()`, which casts cleanly to timestamptz;
+            # if it ever does not, this probe ERRORS rather than reporting a false 0.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p31_platform_org_null_created_after_migration" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NULL AND i.id NOT LIKE 'plm:%'
+                  AND i.created_at > (SELECT (m.timestamp)::timestamptz FROM kysely_migration m
+                                       WHERE m.name = '${MIGRATION_NAME}')" || rc=1
+
+            # ---- FAIL-LOUD predicate, re-run as a count ------------------------------------
+            # The migration's own cross-class conflict predicate, verbatim, wrapped in a COUNT. The
+            # migration's abort message interpolates the offending instance ids into its error
+            # text; this probe deliberately reports the CARDINALITY ONLY.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p40_cross_org_attachment_conflict_unbackfilled" \
+              "SELECT count(*) FROM (
+                 SELECT a.instance_id
+                   FROM approval_attachments a
+                   JOIN approval_instances i ON i.id = a.instance_id
+                  WHERE a.instance_id IS NOT NULL AND i.org_id IS NULL
+                  GROUP BY a.instance_id
+                 HAVING count(DISTINCT a.org_id) > 1
+               ) c" || rc=1
+            # p41: already-stamped instances whose attachments disagree with the stamp — the rows
+            # where the instance-level pin and the attachment route's independent gate 0
+            # (`viewerOrgId != row.orgId`, approval-attachment-storage.ts) would disagree.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p41_instance_attachment_org_mismatch" \
+              "SELECT count(DISTINCT a.instance_id)
+                 FROM approval_attachments a
+                 JOIN approval_instances i ON i.id = a.instance_id
+                WHERE i.org_id IS NOT NULL AND a.org_id IS DISTINCT FROM i.org_id" || rc=1
+
+            # ---- Tenant cardinality (COUNT DISTINCT only — no org value is selected) --------
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p50_distinct_org_values" \
+              "SELECT count(DISTINCT org_id) FROM approval_instances WHERE org_id IS NOT NULL" || rc=1
+            # p51: instances stamped with an org that NO active `user_orgs` membership references.
+            # Those go dark on activation even though they WERE backfilled, because the pin is
+            # `org_id = ANY(viewer's ACTIVE memberships)` (viewerActiveOrgIds).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p51_org_with_no_active_membership" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.org_id = i.org_id AND uo.is_active = TRUE)" || rc=1
+
+            # p52 is the SHARPEST activation number in this pack, and p20 cannot see it: these are
+            # instances that WERE backfilled (org_id NOT NULL) but whose OWN REQUESTER — readability
+            # arm 1, `i.requester_snapshot->>'id'` — holds no active `user_orgs` membership in that
+            # org, so the pin's `i.org_id = ANY(viewerActiveOrgIds)` conjunct denies them their own
+            # instance. This is the expected shape, not an edge case: `user_orgs` blanket-backfilled
+            # every active user into `'default'` (zzzz20260114110000:34-41) while the class-2
+            # backfill writes REAL tenant orgs copied from `approval_attachments.org_id`.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p52_backfilled_requester_would_be_denied" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL
+                  AND i.requester_snapshot->>'id' IS NOT NULL
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                                   WHERE uo.user_id = i.requester_snapshot->>'id'
+                                     AND uo.org_id = i.org_id AND uo.is_active = TRUE)" || rc=1
+            # p53 keeps p52's denominator honest: `requester_snapshot` is JSONB NOT NULL DEFAULT
+            # '{}' (zzzz20260404100000:36/58/67), so rows with no `id` key are silently OUTSIDE p52
+            # rather than counted as safe. Report them, never fold them in.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p53_backfilled_requester_id_absent" \
+              "SELECT count(*) FROM approval_instances i
+                WHERE i.org_id IS NOT NULL AND i.requester_snapshot->>'id' IS NULL" || rc=1
+
+            if [[ "$rc" == "0" ]]; then
+              echo "verdict=APPLIED"
+            else
+              echo "verdict=INDETERMINATE"
+              echo "reason=one_or_more_probes_errored"
+            fi
+            echo "=== S1 EVIDENCE END ${label} ==="
+            return "$rc"
+          }
+
+          case "$ENVIRONMENTS" in
+            prod)    targets="prod:metasheet-postgres:metasheet-backend" ;;
+            staging) targets="staging:metasheet-staging-postgres:metasheet-staging-backend" ;;
+            both)    targets="prod:metasheet-postgres:metasheet-backend staging:metasheet-staging-postgres:metasheet-staging-backend" ;;
+            *)       abort "unknown environments input (expected prod|staging|both)" ;;
+          esac
+
+          overall_rc=0
+          for t in $targets; do
+            IFS=':' read -r t_label t_pg t_backend <<< "$t"
+            run_env "$t_label" "$t_pg" "$t_backend" || overall_rc=1
+          done
+          exit "$overall_rc"
+          REMOTE
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "probe_rc=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Write step summary
+        if: always()
+        env:
+          PROBE_RC: ${{ steps.probe.outputs.probe_rc }}
+          ENVIRONMENTS: ${{ github.event.inputs.environments || 'both' }}
+        run: |
+          set -euo pipefail
+          log="output/s1-org-evidence/evidence.log"
+          {
+            echo "## Approval S1 org-backfill evidence (read-only)"
+            echo ""
+            echo "- Migration: \`zzzz20260821100000_add_approval_instance_org_id\`"
+            echo "- Environments requested: \`${ENVIRONMENTS}\`"
+            echo "- Remote exit code: \`${PROBE_RC:-missing}\`"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ ! -f "$log" ]]; then
+            echo "- Status: **INDETERMINATE** (evidence.log missing)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          get() { awk -v k="$1=" 'index($0,k)==1 { sub(/^[^=]*=/,""); print; exit }' "$log"; }
+
+          # Per-environment blocks are rendered SEPARATELY and labelled, so a staging NOT_APPLIED
+          # can never be read as covering prod.
+          for env_label in prod staging; do
+            if ! grep -q "=== S1 EVIDENCE START ${env_label} ===" "$log"; then continue; fi
+            verdict="$(awk -v e="$env_label" '
+              $0 == "=== S1 EVIDENCE START " e " ===" { p=1; next }
+              $0 == "=== S1 EVIDENCE END " e " ===" { p=0 }
+              p && /^verdict=/ { sub(/^verdict=/, ""); print; exit }' "$log")"
+            {
+              echo "### ${env_label} — verdict: **${verdict:-INDETERMINATE}**"
+              echo ""
+              echo '```'
+              awk -v e="$env_label" '
+                $0 == "=== S1 EVIDENCE START " e " ===" { p=1 }
+                p { print }
+                $0 == "=== S1 EVIDENCE END " e " ===" { p=0 }' "$log"
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            # Mechanical exclusivity/exhaustiveness self-test on the four structural buckets.
+            total="$(get "${env_label}.p10_instances_total")"
+            b1="$(get "${env_label}.b1_id_prefix_plm_total")"
+            b2="$(get "${env_label}.b2_id_prefix_afs_total")"
+            b3="$(get "${env_label}.b3_has_bound_attachment_total")"
+            b4="$(get "${env_label}.b4_no_structural_source_total")"
+            if [[ "$total$b1$b2$b3$b4" =~ ^[0-9]+$ ]] && [[ -n "$total" && -n "$b1" && -n "$b2" && -n "$b3" && -n "$b4" ]]; then
+              sum=$(( b1 + b2 + b3 + b4 ))
+              if [[ "$sum" == "$total" ]]; then
+                echo "- Bucket partition self-test: **OK** (b1+b2+b3+b4 == p10 == ${total})" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- Bucket partition self-test: **FAILED** (sum=${sum} != p10=${total}) — the buckets are not a partition; do not trust the distribution" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            # Ruled-posture violations, surfaced at the top level so they cannot be missed.
+            for v in p22_plm_prefix_org_present_VIOLATION p23_afs_prefix_org_present_VIOLATION; do
+              val="$(get "${env_label}.${v}")"
+              if [[ "$val" =~ ^[0-9]+$ ]] && [[ "$val" != "0" ]]; then
+                echo "- **RULED-POSTURE VIOLATION** \`${v}\` = ${val} on ${env_label} — the Phase-3 CHECK cannot detect this; owner decision required before activation" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          mkdir -p output/s1-org-evidence
+          cp "$GITHUB_STEP_SUMMARY" output/s1-org-evidence/step-summary.md
+
+      - name: Upload evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: approval-s1-org-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 30
+          path: |
+            output/s1-org-evidence/**
+
+      - name: Fail when the remote probe failed
+        if: always()
+        run: |
+          rc="${{ steps.probe.outputs.probe_rc }}"
+          if [[ -z "$rc" ]]; then
+            echo "probe_rc missing; failing workflow." >&2
+            exit 1
+          fi
+          if [[ "$rc" != "0" ]]; then
+            echo "Remote evidence probe failed: rc=$rc (see the per-environment verdicts in the summary)" >&2
+            exit 1
+          fi

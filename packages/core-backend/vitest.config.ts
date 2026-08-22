@@ -94,6 +94,17 @@ export default defineConfig({
       // reason as the F4-A file immediately above; wired into the SAME
       // .github/workflows/approval-realdb-lock4-p3a.yml lane.
       'tests/integration/approval-lock4-f4c-same-person.db.test.ts',
+      // Lock-4 F4-B (designated empty-assignee fallback, 审批人为空时) real-DB acceptance — gates
+      // B-1 (both executor sites: resolveFromNode initial/re-entry, and resolveBranchAdvance via a
+      // parallel branch's second node), the Gate-2 'error' negative controls on each identical
+      // fixture, Gate 3 (the authoring choke, which fires at CREATE — one of its five entry points
+      // — not merely publish, plus a post-publish persisted-graph tamper that proves dispatch-time
+      // fail-closed), and Gate 4 (legacy-graph byte-identical deep-equal).
+      // DB-independent logic lives in tests/unit/approval-p3a-f4b-designated-fallback{,-normalize}
+      // .test.ts (not excluded — runs in the no-DB job). Excluded here so `describeIfDatabase`
+      // cannot skip-green this file; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-f4b-designated.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-lock4-f4b-designated.db.test.ts',
       'tests/integration/dept-head-sync-plumbing.test.ts',
       // DT-HARDEN-02 orphan guard (real DB): proves the admission SAVEPOINT rolls back a users
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
@@ -959,6 +970,13 @@ export default defineConfig({
       // real `user_orgs` membership rows — meaningless without real PostgreSQL.
       // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
       'tests/integration/attendance-punch-org-resolution.db.test.ts',
+      // SHADOW audit of the same route's org resolution (env
+      // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1). Boots real MetaSheetServer instances (one
+      // per env posture) with the real plugin and drives the real punch route against real
+      // `user_orgs` membership rows and the real `attendance_org_resolution_shadow` table —
+      // meaningless without real PostgreSQL.
+      // Two-point wired: excluded here, whole-file run in plugin-tests.yml.
+      'tests/integration/attendance-org-resolution-shadow.db.test.ts',
       // #4556 W7-1b: OD-W7-10(a)'s four-cell matrix at the recompute route.
       // Seeds prior COMPLETED calculations with specific `context_snapshot.selector`
       // values against real CHECK constraints and deferred triggers, walks the
@@ -1212,6 +1230,41 @@ export default defineConfig({
       // attachment scan_state + purge-intent storage_key unique upgrade path (real DB, isolated schema).
       // Two-point wiring — excluded HERE so it cannot skip-green in the no-DB lane.
       'tests/integration/approval-attachment-scan-purge-upgrade-migration.db.test.ts',
+      // Lock-10 (S1) instance readability — canReadApprovalInstance, all 5 arms + org pin (G-S1-1,
+      // G-S1-3, G-S1-6, G-S1-10, G-S1-11, G-S1-12 partial), real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-instance-readability-s1.yml lane, which arms
+      // EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
+      // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
+      'tests/integration/approval-instance-readability-s1.db.test.ts',
+      // Lock-10 (S1) CONSUMER adoption — detail/history/metrics routes (G-S1-4, G-S1-5, G-S1-7),
+      // real DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job;
+      // wired as a WHOLE FILE into ONLY the standalone
+      // .github/workflows/approval-realdb-instance-readability-s1.yml lane, which arms
+      // EXPECT_DB=1. Unlike its sibling above, this file was NOT added to #5095's
+      // plugin-tests.yml run-list — it stays single-lane by design (PR #5095: "does not claim
+      // S1 'consumer adoption' is required, only the S1 predicate itself").
+      'tests/integration/approval-instance-readability-s1-consumers.db.test.ts',
+      // writers-stamp-org (S1 closeout slice 1) — G-W2, the PLM mirror writer's ruled
+      // zero-org derivation. Real DB. Excluded here so describeIfDatabase cannot skip-green it
+      // in the no-DB job; wired as a WHOLE FILE into the standalone
+      // .github/workflows/approval-realdb-org-writer-plm-mirror-s1.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts',
+      // Lock-10 (S2) approval_comments — create/list/edit/delete/mention-candidates, D3 write
+      // widening, D2(b1) tombstone, HISTORY-TIMELINE arm (i) exclusion, G-S1-9 notify seam, real
+      // DB. Excluded here so describeIfDatabase cannot skip-green it in the no-DB job; wired as a
+      // WHOLE FILE into the standalone .github/workflows/approval-realdb-comments.yml lane, which
+      // arms EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
+      // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
+      'tests/integration/approval-comments.db.test.ts',
+      // Lock-9 approver process attachments — relaxation migration ordering/rollback, bind atomicity
+      // (cross-instance refusal, rowCount-equality rollback), staged uploader-only reads, process-
+      // scoped caps, GC reuse, and the flag-OFF byte-for-byte no-op (G-12), real DB. Excluded here so
+      // describeIfDatabase cannot skip-green it in the no-DB job; wired as a WHOLE FILE into the
+      // standalone .github/workflows/approval-realdb-lock9-process-attachments.yml lane, which arms
+      // EXPECT_DB=1. As of #5095, also wired (whole file, no EXPECT_DB) into the required
+      // plugin-tests.yml "Run approval real-DB integration" step — two lanes now collect it.
+      'tests/integration/approval-lock9-process-attachments-realdb.db.test.ts',
       // P2 durable-delivery S2-a claim engine / fence-CAS — real-DB constructed-concurrency (zombie/SKIP
       // LOCKED). Excluded HERE so it cannot skip-green in the no-DB lane; whole-file wired into
       // plugin-tests.yml. Two-point wiring.
@@ -1379,6 +1432,26 @@ export default defineConfig({
       // WHOLE FILE into the `Run BPMN startProcess poller-disabled zero-residue` step in
       // plugin-tests.yml.
       'tests/integration/bpmn-poller-disabled-startprocess-zero-residue.db.test.ts',
+      // Recovery-authority schema drift A-vs-B floor: proves the hand-maintained constants in
+      // scripts/ops/multitable-recovery-schema-containment.mjs still equal what the REAL
+      // migrations (zzzz20260721121000_add_recovery_authority_locks.ts +
+      // zzzz20260728120000_correct_recovery_authority_locks.ts) install, plus the subject_type
+      // CHECK domain on record_permissions/field_permissions the helper does not fingerprint.
+      // DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green it, and
+      // wired as a WHOLE FILE into the standalone .github/workflows/multitable-recovery-schema-drift.yml
+      // lane (NOT plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main;
+      // see the seven approval-realdb-*.yml lanes' headers). That lane
+      // multitable-recovery-authority-*-realdb.test.ts files already run in).
+      'tests/integration/recovery-schema-drift.db.test.ts',
+      // Recovery-authority search-path shadow counterexample + mutation matrix: reproduces the
+      // CVE-2018-1058-shaped shadow on a real migrated DB and proves zzzz20260821120000 defeats it
+      // (schema-qualified calls + fixed SET search_path, each independently sufficient). Needs real
+      // Postgres (two connections, a held exclusive lease, a shadow schema, a non-transactional
+      // call-counter). DATABASE_URL-gated; excluded here so the no-DB default job cannot skip-green
+      // it, and wired as a WHOLE FILE into the SAME standalone
+      // .github/workflows/multitable-recovery-schema-drift.yml lane as the drift guard above (NOT
+      // plugin-tests.yml — that file is s6a sha256-pinned and kept byte-identical to main).
+      'tests/integration/recovery-authority-search-path.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

@@ -14,6 +14,20 @@
 > 落入 main；P4 方案 A + bounded C 已由 #4470/#4473 落入 main。开发目标现进入 **V2 Charter**：
 > `stock-preparation-v2-material-master-reconciliation-charter-20260719.md`。V2 runtime 在该 Charter
 > ratify 前保持 NO-GO；RC-A #4437 继续作为独立操作线，不因本目标更新而重跑或改包。
+>
+> **2026-08-22 更正（上面那句已过期，勿据以决策）：** 该 Charter **已于 2026-07-21 由 owner
+> RATIFIED**（OD-V2-1..7 全部按推荐裁定；#4484 与 RATIFIED flip #4511 均已合入 main）。因此
+> "V2 runtime 在 Charter ratify 前 NO-GO" 这一条**已不再是当前闸门**，本文此前一直未更新，
+> 已实际误导过读者。
+>
+> **当前真实闸门：** ratify **只解锁 D1**（已由 #4507 落入 main，schema-only、LATENT、开关默认
+> OFF）。下一刀 **D2（binding 载体）的设计锁仍是未合并的 PROPOSED PR #4520**，自 2026-07-21 起
+> OPEN。它同时被 `general-prep-system-design-and-verification-20260722.md` 与
+> `general-prep-execution-plan-20260722.md` 引为硬依赖——**一次 owner ratify 可解开三条线**。
+> V2 runtime 仍另受 `MULTITABLE_MATERIAL_RECONCILIATION_ENABLED` 默认 OFF 与 `externalWrite=false`
+> 约束（OD-V2-6），且每一刀须各自过退出条件，ratify 不自动授权后续运行时代码、迁移、路由或实体机执行。
+>
+> 本段只更正闸门陈述，不改本文的历史 grounding 与 §1–§5 判断。
 
 ## 1. 核心判断
 

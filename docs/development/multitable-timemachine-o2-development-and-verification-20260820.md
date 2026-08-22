@@ -309,6 +309,15 @@ main 前进多次自动部署。核实：`12f1f8c466..main` 新增 8 条迁移**
 ⇒ 姿态**推定**未变，但**证据对当前镜像已过期**：阶梯 L0 的"目标主机 postdeploy-full PASS（当前镜像）"
 **必须重跑一次**才成立。该动作触主机，属 owner 授权范围。
 
+> **补注（2026-08-21，指纹已变——本表 fp 为 pre-fix 历史值，不改写）**：上表 functions fp `14c180aa…`
+> 是本记录时点（2026-08-12 镜像）观测值。此后新增 migration
+> `zzzz20260821120000_recovery_authority_functions_fix_search_path`（CVE-2018-1058 型 shadow 根治：
+> 3 个 trigger 函数 helper 调用改 schema-qualified + 6 函数固定 `SET search_path = pg_catalog, public`，
+> containment 同时把 proconfig 纳入指纹）**触碰了 recovery schema 的函数体**——因此上面「零条触碰
+> recovery schema」的核实仅对 `12f1f8c466..main` 的**旧窗口**成立；随该迁移部署，**functions fp 变为
+> `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498`（两次全新迁移字节稳定），triggers
+> fp `8c1be0b0…` 不变**（不发 trigger DDL，9/9 仍 DISABLED，行为不变）。L0 当前镜像重跑须以新 fp 为准。
+
 ## 6. 剩余（**非本记录的开发范围**）
 
 **A. 阶梯执行（owner + ops，日历为瓶颈）**

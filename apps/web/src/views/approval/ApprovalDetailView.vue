@@ -471,6 +471,39 @@
             </div>
           </div>
         </div>
+
+        <!-- 全文评论 (S3b): the shared comments kit, wired to the S2 approval-comments endpoints.
+             Own sibling section, FULL-WIDTH (grid-column 1/-1, see the stylesheet below) below the
+             two-column 审批详情/审批记录 row — same "anchor-style nav scrolls an always-rendered
+             region" convention as those two, so the scroll ref target exists on first click; the
+             PANEL ITSELF only mounts (and only then makes its first fetch) once
+             `commentsActivated` flips true — see scrollToDetailSection. Placed AFTER, not
+             between, `.approval-detail__form`/`.approval-detail__timeline` in DOM order — a
+             three-item child of a 2-column `grid-auto-flow: row` (sparse, non-dense) grid placed
+             BETWEEN them would instead push the timeline into the form's own column on a second
+             row, since a later full-span item cannot backfill an earlier skipped cell under
+             sparse packing.
+
+             `:key="route.params.id"` (gate finding P2-2, 2026-08-22): a 下一条 / deep-link
+             navigation changes `route.params.id` in place without unmounting this element. Without
+             the key, the SAME `ApprovalCommentsPanel` instance survived that navigation and its
+             `watch(() => props.instanceId, activate)` re-activated in place; if the OLD instance's
+             in-flight `listComments`/mention-candidates fetch settled AFTER the new instance's,
+             the stale response overwrote the composable's `comments.value` with the WRONG
+             instance's data (constructed race, confirmed: DOM showed instance A's comments while
+             `route.params.id` was already B). Keying on the route param forces a full
+             unmount+remount on every instance change, so a slower, now-orphaned fetch resolves
+             into a composable/`comments` ref nothing renders — the race is structurally
+             unreachable rather than patched with a generation counter. -->
+        <div v-if="!isMobileLayout" ref="commentsSectionRef" class="approval-detail__comments" data-testid="approval-detail-comments-section">
+          <h2>全文评论</h2>
+          <ApprovalCommentsPanel
+            v-if="commentsActivated"
+            :key="(route.params.id as string)"
+            :instance-id="(route.params.id as string)"
+            :current-user-id="currentUserId"
+          />
+        </div>
       </div>
 
       <!-- Action bar -->
@@ -1027,6 +1060,10 @@ import { memberActionFailure } from '../../approvals/memberActionErrorCopy'
 import { MEMBER_ACTION_DIALOG_GRAMMAR, ACTION_DIALOG_TEST_ID } from '../../approvals/memberActionDialogGrammar'
 import StatusTag from '../../components/status/StatusTag.vue'
 import AsyncStateBlock from '../../components/status/AsyncStateBlock.vue'
+// S3b: the 全文评论 tab wrapper. This file itself does not import shared/comments directly —
+// ApprovalCommentsPanel.vue is the actual shared/comments importer the P3-A census tripwire
+// (approval-member-identity-coverage-enumeration.spec.ts) triages.
+import ApprovalCommentsPanel from './ApprovalCommentsPanel.vue'
 import { resolveStatusDisplay } from '../../utils/statusDomains'
 
 const route = useRoute()
@@ -1066,23 +1103,33 @@ const headerTitle = computed(() => approval.value?.title ?? '审批详情')
 // ---------------------------------------------------------------------------
 const formSectionRef = ref<HTMLElement | null>(null)
 const timelineSectionRef = ref<HTMLElement | null>(null)
+const commentsSectionRef = ref<HTMLElement | null>(null)
 
 type DetailAnchorSection = 'form' | 'record' | 'comments'
 const activeDetailTab = ref<DetailAnchorSection>('record')
 
-// Anchor-style nav: scrolls the already-rendered region into view. 全文评论 has no
-// separate stream to build — comments render inline in the timeline today (action
-// === 'comment' rows), so its anchor targets the same timeline region as 审批记录.
-// P3-2 (gate fix round, 2026-08-17): a distinct scroll target for 全文评论 was tried
-// (pointing it at the action bar) and reverted — the action bar renders no comment
-// text at all, so repointing it there would relabel the "dud tab" complaint rather
-// than fix it (comment text is only ever visible in the timeline). A real fix needs
-// an actual `action === 'comment'`-filtered projection, deferred — see PR body; the
-// mis-attribution to the master lock's EXCLUDED clause is corrected there too.
-// Purely presentational: it never mutates store state, dispatches an action, or fetches.
+// S3b (2026-08-22): 全文评论 is no longer a dud. P3-2 (gate fix round, 2026-08-17) left it
+// pointed at the SAME timeline region as 审批记录 because the only "comment" data then visible
+// was inline `action === 'comment'` history rows, and the action bar (the alternative target
+// tried and reverted at the time) renders no comment text at all either. The real fix named as
+// deferred there — "an actual `action === 'comment'`-filtered projection" — landed differently
+// than that sentence predicted: not a filtered history projection, but the S2 `approval_comments`
+// mutable-comment surface (create/edit/delete/reply, HISTORY-TIMELINE arm (i) excludes its
+// pointer rows from /history on purpose — comments render ONLY here, never re-hydrated into the
+// timeline). 全文评论 now has its own section (`commentsSectionRef`, below) and its own anchor
+// target, separate from 审批记录's `timelineSectionRef`.
+// `commentsActivated` lazy-mounts `ApprovalCommentsPanel` (and therefore its first comments +
+// mention-candidate fetch) on first activation only — the tab click itself still never mutates
+// store state or dispatches a store action; it flips a local flag and scrolls.
+const commentsActivated = ref(false)
 function scrollToDetailSection(section: DetailAnchorSection): void {
   activeDetailTab.value = section
-  const target = section === 'form' ? formSectionRef.value : timelineSectionRef.value
+  if (section === 'comments') commentsActivated.value = true
+  const target = section === 'form'
+    ? formSectionRef.value
+    : section === 'comments'
+      ? commentsSectionRef.value
+      : timelineSectionRef.value
   target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
 }
 
@@ -2411,13 +2458,21 @@ watch(
 }
 
 .approval-detail__form,
-.approval-detail__timeline {
+.approval-detail__timeline,
+.approval-detail__comments {
   min-width: 0;
   padding: var(--ms-space-5);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
   box-shadow: var(--ms-shadow-card);
+}
+
+/* S3b: full-width row below the 审批详情/审批记录 two-column row — see the template comment on
+   this section for why it is a THIRD, full-span grid child rather than living between the other
+   two (sparse `grid-auto-flow: row` cannot backfill an earlier skipped cell for a later item). */
+.approval-detail__comments {
+  grid-column: 1 / -1;
 }
 
 .approval-detail__actor-avatar {
@@ -2436,7 +2491,8 @@ watch(
 }
 
 .approval-detail__form h2,
-.approval-detail__timeline h2 {
+.approval-detail__timeline h2,
+.approval-detail__comments h2 {
   margin: 0 0 var(--ms-space-4);
   color: var(--ms-text-1);
   font-size: var(--ms-font-size-section-title);

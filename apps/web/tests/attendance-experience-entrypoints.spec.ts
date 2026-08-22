@@ -41,6 +41,11 @@ vi.mock('vue-router', () => ({
 
 const adminFeatureEnabled = ref(true)
 const workflowFeatureEnabled = ref(true)
+// Fix 1 (retargeted per GATE-5086): hoisted so specific tests can flip the override gate and
+// assert on the local-override write, mirroring adminFeatureEnabled/workflowFeatureEnabled above.
+const overrideAllowedRef = ref(false)
+const loadProductFeaturesSpy = vi.fn().mockResolvedValue(undefined)
+const setLocalFeatureOverrideSpy = vi.fn()
 
 vi.mock('../src/stores/featureFlags', () => ({
   useFeatureFlags: () => ({
@@ -49,7 +54,9 @@ vi.mock('../src/stores/featureFlags', () => ({
       if (feature === 'workflow') return workflowFeatureEnabled.value
       return false
     },
-    loadProductFeatures: vi.fn().mockResolvedValue(undefined),
+    loadProductFeatures: loadProductFeaturesSpy,
+    isFeatureOverrideAllowed: () => overrideAllowedRef.value,
+    setLocalFeatureOverride: setLocalFeatureOverrideSpy,
   }),
 }))
 
@@ -133,6 +140,9 @@ describe('Attendance experience entrypoints', () => {
     routeState.params = {}
     adminFeatureEnabled.value = true
     workflowFeatureEnabled.value = true
+    overrideAllowedRef.value = false
+    loadProductFeaturesSpy.mockClear()
+    setLocalFeatureOverrideSpy.mockClear()
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -279,6 +289,217 @@ describe('Attendance experience entrypoints', () => {
     await flushUi(2)
 
     expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'reports' } })
+  })
+
+  it('gives Overview an explicit ?tab=overview so it is linkable (fix 3)', async () => {
+    routeState.query = { tab: 'reports' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const overviewTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Overview')
+    expect(overviewTab).toBeTruthy()
+
+    overviewTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'overview' } })
+  })
+
+  it('merges a tab switch onto UNRELATED existing query params instead of discarding them (fix 3)', async () => {
+    routeState.query = { tab: 'admin', surface: 'assignments', returnTo: '/attendance?tab=admin' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const reportsTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Reports')
+    reportsTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({
+      query: { tab: 'reports', surface: 'assignments', returnTo: '/attendance?tab=admin' },
+    })
+  })
+
+  it('drops the TAB-SCOPED section/requestId params on a tab switch (fix 3)', async () => {
+    routeState.query = { tab: 'admin', section: 'attendance-admin-assignments', requestId: 'request-123' }
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const reportsTab = Array.from(container!.querySelectorAll<HTMLButtonElement>('.attendance-shell__tab'))
+      .find(button => button.textContent?.trim() === 'Reports')
+    reportsTab!.click()
+    await flushUi(2)
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'reports' } })
+  })
+
+  it('self-corrects to Overview (never renders a blank/unexplained state) when a tab\'s gating flag turns off while it is active', async () => {
+    // Reachability probe for fix 1's "Capability not available" branch: this proves
+    // `ensureTabAllowed()` / `watch(availableTabs, …)` bounce `activeTab` back to Overview
+    // synchronously BEFORE the template can ever render `activeView === null` for a tab whose
+    // flag just went false — through the same route+flags surface a real user's click-through
+    // uses. See attendanceCapabilityUnavailable.ts's module doc for what this means for that
+    // branch's live reachability.
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = true
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
+    expect(container!.textContent).not.toContain('Capability not available')
+
+    adminFeatureEnabled.value = false
+    await flushUi(4)
+
+    expect(container!.querySelector('[data-view="admin"]')).toBeNull()
+    expect(container!.querySelector('[data-view="overview"]')).toBeTruthy()
+    expect(container!.textContent).not.toContain('Capability not available')
+    // Neither the retargeted denial banner (this scenario doesn't go through syncFromRoute's
+    // `?tab=` normalization — see the next test for that) nor the generic dead-branch safety net
+    // renders here.
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-shell-unexpected-empty]')).toBeNull()
+  })
+
+  it('corrects the URL and names the denied capability when deep-linking to a disabled tab (fix 1, retargeted per GATE-5086)', async () => {
+    // GATE-5086's actual reachable finding: `/attendance?tab=admin` with `attendanceAdmin` OFF
+    // used to silently land on Overview while the address bar kept `?tab=admin` and nothing
+    // explained why. Assert all three required behaviors: URL normalized, explanation names the
+    // tab, and the user is actually on Overview (back-to-overview "works" because it's already
+    // where they land — see the next test for the banner's own dismiss button).
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'overview' } })
+    expect(routeState.query).toEqual({ tab: 'overview' })
+    expect(container!.querySelector('[data-view="overview"]')).toBeTruthy()
+    expect(container!.querySelector('[data-view="admin"]')).toBeNull()
+
+    const banner = container!.querySelector('[data-attendance-tab-unavailable-banner]')
+    expect(banner).toBeTruthy()
+    expect(banner!.textContent).toContain('Admin Center')
+    expect(container!.querySelector('[data-attendance-capability-contact-admin]')).toBeTruthy()
+  })
+
+  it('drops the denial banner (and the tab-scoped section/requestId) from the corrected URL', async () => {
+    routeState.query = { tab: 'workflow', section: 'attendance-admin-assignments', requestId: 'request-1' }
+    workflowFeatureEnabled.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(replaceSpy).toHaveBeenCalledWith({ query: { tab: 'overview' } })
+    const banner = container!.querySelector('[data-attendance-tab-unavailable-banner]')
+    expect(banner!.textContent).toContain('Workflow Designer')
+  })
+
+  it('dismisses the denial banner via its own back-to-overview button without touching the route', async () => {
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeTruthy()
+    replaceSpy.mockClear()
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-capability-back-to-overview]')!.click()
+    await flushUi(2)
+
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeNull()
+    expect(container!.querySelector('[data-view="overview"]')).toBeTruthy()
+    // Dismissing is a pure UI-state action here — the URL was already corrected when the
+    // denial fired, so dismissing it does not need to touch the router again.
+    expect(replaceSpy).not.toHaveBeenCalled()
+  })
+
+  it('retrying takes the user to the originally-requested tab once its flag resolves on', async () => {
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeTruthy()
+
+    adminFeatureEnabled.value = true
+    container!.querySelector<HTMLButtonElement>('[data-attendance-capability-retry]')!.click()
+    await flushUi(4)
+
+    expect(loadProductFeaturesSpy).toHaveBeenCalledWith(true)
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeNull()
+    expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
+    expect(routeState.query).toEqual({ tab: 'admin' })
+  })
+
+  it('retrying leaves the banner in place (does not silently vanish) when the capability is still denied', async () => {
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-attendance-capability-retry]')!.click()
+    await flushUi(4)
+
+    expect(loadProductFeaturesSpy).toHaveBeenCalledWith(true)
+    const banner = container!.querySelector('[data-attendance-tab-unavailable-banner]')
+    expect(banner).toBeTruthy()
+    expect(banner!.textContent).toContain('Admin Center')
+  })
+
+  it('enabling locally writes the override, then takes the user to the originally-requested tab (only when the override gate is open)', async () => {
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+    overrideAllowedRef.value = true
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const enableButton = container!.querySelector<HTMLButtonElement>('[data-attendance-capability-enable-locally]')
+    expect(enableButton).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-capability-contact-admin]')).toBeNull()
+
+    // The mocked store doesn't actually flip hasFeature() as a side effect of
+    // setLocalFeatureOverride() — simulate the real store's effect directly, same as the retry
+    // test above, since this suite mocks the whole flags store.
+    adminFeatureEnabled.value = true
+    enableButton!.click()
+    await flushUi(4)
+
+    expect(setLocalFeatureOverrideSpy).toHaveBeenCalledWith('attendanceAdmin', true)
+    expect(loadProductFeaturesSpy).toHaveBeenCalledWith(true)
+    expect(container!.querySelector('[data-attendance-tab-unavailable-banner]')).toBeNull()
+    expect(container!.querySelector('[data-view="admin"]')).toBeTruthy()
+  })
+
+  it('shows "ask your administrator" instead of an enable-locally control when the override gate is closed', async () => {
+    routeState.query = { tab: 'admin' }
+    adminFeatureEnabled.value = false
+    overrideAllowedRef.value = false
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('[data-attendance-capability-enable-locally]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-capability-contact-admin]')).toBeTruthy()
   })
 
   it('does not block admin entrypoints for narrow desktop-like viewports without mobile signals', async () => {

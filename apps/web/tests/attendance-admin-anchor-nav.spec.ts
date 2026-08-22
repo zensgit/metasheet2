@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
+import { createMemoryHistory, createRouter, type Router } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 
@@ -186,12 +187,22 @@ describe('Attendance admin anchor navigation', () => {
     expect(taskHome?.textContent).toContain('Reporting and payroll')
 
     const pendingApprovalsLink = taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
-    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?section=attendance-overview-requests')
+    expect(pendingApprovalsLink?.getAttribute('href')).toBe('/attendance?tab=overview&section=attendance-overview-requests')
+    // Relabeled per GATE-5086 (P2-1/P3-5): this link's destination is scoped to the viewer's own
+    // requests by default, never an org-wide review queue — "Pending approvals" over-promised.
+    expect(pendingApprovalsLink?.textContent?.trim()).toBe('My requests')
     expect(taskHome!.querySelector<HTMLAnchorElement>('[data-admin-task-action="attendance-anomalies"]')?.getAttribute('href'))
-      .toBe('/attendance?section=attendance-overview-anomalies')
+      .toBe('/attendance?tab=overview&section=attendance-overview-anomalies')
     for (const action of ['attendance-groups', 'shifts', 'holidays', 'rule-sets', 'daily-import']) {
       expect(taskHome!.querySelector(`[data-admin-task-action="${action}"]`)).toBeTruthy()
     }
+    // Navigability audit fix 5(b): the standalone "Members" task-home shortcut is gone — it
+    // duplicated the "Attendance groups" entry right next to it and landed on a section whose
+    // only content was "open Attendance groups instead". The section itself (and its sidebar nav
+    // entry `[data-admin-anchor="attendance-admin-group-members"]`, exercised by
+    // attendance-admin-regressions.spec.ts's "keeps the clicked admin section focused…" test) is
+    // deliberately UNCHANGED — UserManagementView.vue's post-create-user deep link still needs it.
+    expect(taskHome!.querySelector('[data-admin-task-action="group-members"]')).toBeNull()
 
     const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
     expect(importButton).toBeTruthy()
@@ -211,6 +222,94 @@ describe('Attendance admin anchor navigation', () => {
     expect(window.location.hash).toBe('')
     expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
     expect(clearSection).toHaveBeenCalledTimes(1)
+  })
+
+  it('pins the parent navigate wiring for task-home link actions (fix 4, GATE-5086 P2-2)', async () => {
+    // GATE-5086's mutation M8 deleted `@navigate="onAdminTaskHomeNavigate"` at
+    // AttendanceView.vue's <AttendanceAdminTaskHome> usage and found 272/272 green across 5
+    // suites — the three AttendanceAdminTaskHome.spec.ts cases only prove the CHILD emits;
+    // nothing proved the PARENT was listening. With that binding gone the click still calls
+    // preventDefault() (AttendanceAdminTaskHome.vue's onLinkActionClick) and the emit goes
+    // nowhere — a fully inert click, strictly worse than the full-page reload this fix set out
+    // to remove. This suite mounts AttendanceView with no router installed (see the
+    // `injection "Symbol(router)" not found` warnings throughout this file), so
+    // onAdminTaskHomeNavigate's fallback branch (`window.location.assign`) is what's
+    // observable here; a real app with a router would take the `router.push` branch instead —
+    // both branches are gated on the SAME `@navigate` binding this test pins.
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    // jsdom's `window.location.assign` is non-configurable, so it cannot be `vi.spyOn`'d
+    // directly — replace the whole `location` object for this test only, matching the pattern
+    // already established in App.spec.ts's "clears local auth state and redirects after sign
+    // out" test.
+    const originalLocation = window.location
+    const assign = vi.fn()
+    Object.defineProperty(window, 'location', {
+      value: { ...originalLocation, assign },
+      writable: true,
+      configurable: true,
+    })
+    try {
+      const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+      expect(link).toBeTruthy()
+      link!.click()
+      await flushUi(2)
+
+      expect(assign).toHaveBeenCalledWith('/attendance?tab=overview&section=attendance-overview-requests')
+    } finally {
+      Object.defineProperty(window, 'location', {
+        value: originalLocation,
+        writable: true,
+        configurable: true,
+      })
+    }
+  })
+
+  it('routes task-home link actions through router.push when a real router is installed (fix 4 production path, GATE-5086 P2-2)', async () => {
+    // Companion to the previous test, which mounts AttendanceView with NO router installed at
+    // all (same as every other test in this file) and can therefore only observe
+    // onAdminTaskHomeNavigate's `window.location.assign` FALLBACK branch. `useRouter()` resolves
+    // to a real router anywhere in the app once `app.use(router)` is called — AttendanceView
+    // does not need to sit under a `<router-view>` for this — so mounting it as the app root
+    // under a real router exercises the branch that actually runs in production:
+    // `void router.push(href)`. Mutating ONLY that line (e.g. to `void 0`, leaving the
+    // `@navigate` binding itself intact) reds this test while leaving the previous
+    // fallback-branch test green; the two are deliberately non-overlapping.
+    const router: Router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/attendance', component: { template: '<div />' } },
+      ],
+    })
+    await router.push('/attendance?tab=admin')
+    await router.isReady()
+
+    const routedApp = createApp(AttendanceView, { mode: 'admin' })
+    routedApp.use(router)
+    routedApp.mount(container!)
+    await flushUi()
+
+    // This app instance is local to this test (the outer `app`/`afterEach` unmount the shared
+    // one, which stays null here) — unmount it ourselves, and in a `finally` so a failed
+    // assertion below can't leak a mounted app into the rest of this file's 30+ other tests
+    // (the exact "flake attributed to the last active suite" shape documented elsewhere in this
+    // repo's institutional memory).
+    try {
+      const link = container!.querySelector<HTMLAnchorElement>('[data-admin-task-action="pending-attendance-approvals"]')
+      expect(link).toBeTruthy()
+      link!.click()
+
+      // vue-router's navigation resolves over more microtask ticks than a fixed flushUi() loop
+      // reliably covers (documented pitfall from this PR's own earlier router-link investigation)
+      // — poll until settled rather than assuming a fixed tick count catches it.
+      await vi.waitFor(() => {
+        expect(router.currentRoute.value.fullPath).toBe('/attendance?tab=overview&section=attendance-overview-requests')
+      })
+    } finally {
+      routedApp.unmount()
+    }
   })
 
   it('creates an attendance group from the detail pane and selects it for people management', async () => {

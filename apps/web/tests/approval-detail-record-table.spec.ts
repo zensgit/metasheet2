@@ -23,13 +23,17 @@ import { createApp, defineComponent, h, inject, nextTick, provide, reactive, ref
 import { __resetResolvedDirectoryNamesForTests } from '../src/approvals/directoryResolve'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
+// Reactive so the P2-2 fix-round guard below can flip `route.params.id` mid-test (a route-param-
+// only navigation, e.g. 下一条) and observe how ApprovalCommentsPanel.vue reacts to it — every
+// OTHER test in this file only ever reads the initial 'apv_1' and is unaffected.
+const mockRouteParams = reactive({ id: 'apv_1' })
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
   return {
     ...actual,
     useRouter: () => ({ push: pushSpy, back: vi.fn() }),
-    useRoute: () => ({ params: { id: 'apv_1' }, query: {}, path: '/approvals/apv_1', meta: {} }),
+    useRoute: () => ({ params: mockRouteParams, query: {}, path: '/approvals/apv_1', meta: {} }),
   }
 })
 
@@ -55,6 +59,34 @@ vi.mock('../src/approvals/api', () => ({
   remindApproval: vi.fn().mockResolvedValue({ ok: true, data: {} }),
   searchApprovalDirectoryUsers: vi.fn().mockResolvedValue([]),
   resolveApprovalDirectoryUsers: (...args: unknown[]) => resolveApprovalDirectoryUsersSpy(...args),
+}))
+
+// S3b: ApprovalDetailView.vue now unconditionally imports ApprovalCommentsPanel.vue (the 全文评论
+// tab wrapper), which is real, unstubbed component in this harness — mocking its transport layer
+// here keeps the "switching tabs mutates nothing" test below from making a real, unmocked
+// `fetch` call the moment it activates the comments tab. Every method returns an empty/no-op
+// result; nothing in this file asserts on comment CONTENT (that lives in
+// approval-comments-panel.spec.ts / approval-comments-client.spec.ts).
+// `createApprovalCommentsClientSpy` (gate P2-2 fix-round guard, 2026-08-22): counts factory
+// invocations — `ApprovalCommentsPanel.vue` calls it exactly once in its own `setup()`, so this
+// call count is a direct proxy for "did the panel instance remount". See the
+// `:key="route.params.id"` describe block below, which asserts on it directly.
+const createApprovalCommentsClientSpy = vi.fn()
+vi.mock('../src/approvals/approvalCommentsClient', () => ({
+  createApprovalCommentsClient: (...args: unknown[]) => {
+    createApprovalCommentsClientSpy(...args)
+    return {
+      truncated: { value: false },
+      listComments: vi.fn().mockResolvedValue({ comments: [] }),
+      createComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+      updateComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+      deleteComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+      resolveComment: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+      addReaction: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+      removeReaction: vi.fn().mockRejectedValue(new Error('not exercised in this spec')),
+    }
+  },
+  fetchApprovalCommentMentionCandidates: vi.fn().mockResolvedValue([]),
 }))
 
 const mockCurrentUserId = ref<string | null>(null)
@@ -333,6 +365,8 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    mockRouteParams.id = 'apv_1'
+    createApprovalCommentsClientSpy.mockClear()
     mockActiveApproval.value = baseInstance()
     mockHistory.value = historyFixture()
     mockLoading.value = false
@@ -466,6 +500,32 @@ describe('ApprovalDetailView — UI-6 detail tab anchors + audit-derived record 
       q(container!, 'approval-action-dialog-confirm')!.click()
       await flushUi()
       expect(executeActionSpy).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // 1b. 全文评论 panel: `:key="route.params.id"` (gate finding P2-2, 2026-08-22)
+  // -----------------------------------------------------------------------------------------
+  describe('全文评论 panel — :key="route.params.id" forces a remount on instance navigation (gate P2-2)', () => {
+    it('a route-param-only navigation (下一条) while the comments tab is active REMOUNTS ApprovalCommentsPanel — the client factory runs a second time', async () => {
+      await mountView()
+      q(container!, 'approval-detail-tab-comments')!.click()
+      await flushUi()
+      // One panel mount so far -> one client construction.
+      expect(createApprovalCommentsClientSpy).toHaveBeenCalledTimes(1)
+
+      // 下一条 / deep-link: only `route.params.id` changes, nothing else about the mount.
+      mockRouteParams.id = 'apv_2'
+      await flushUi()
+
+      // Without `:key`, the SAME panel instance survives and its own `watch(instanceId, activate)`
+      // re-activates in place — the client is constructed ONCE in `setup()` and never again, so
+      // this count would stay 1 (this is exactly the shape of the instanceId settle race, gate
+      // P2-2 / PROBE-F: the panel's composable/client never get replaced, only re-fed). Keying on
+      // the route param unmounts the old instance and mounts a fresh one, so a SECOND, independent
+      // client is constructed for `apv_2` — this is the actual mechanism the fix relies on, not
+      // just its downstream symptom.
+      expect(createApprovalCommentsClientSpy).toHaveBeenCalledTimes(2)
     })
   })
 
@@ -710,6 +770,8 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
   let container: HTMLDivElement | null = null
 
   beforeEach(() => {
+    mockRouteParams.id = 'apv_1'
+    createApprovalCommentsClientSpy.mockClear()
     mockActiveApproval.value = baseInstance()
     mockHistory.value = []
     mockLoading.value = false

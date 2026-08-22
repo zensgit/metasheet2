@@ -283,8 +283,19 @@ describe('MetaCommentsPanel (W2 S4 extraction)', () => {
   })
 
   describe('HI-1: zero new data paths', () => {
+    // S3a (2026-08-21, shared comments FE kit extraction): MetaCommentsPanel.vue's actual body
+    // moved to src/shared/comments/components/MetaCommentsPanel.vue; src/multitable/components/
+    // MetaCommentsPanel.vue (the old anchor below) is now a re-export shim, so a scan anchored
+    // there would pass vacuously (a shim cannot contain a fetch/client./apiClient. call by
+    // construction). Repointed to the real file so this RATIFIED guard (design-lock
+    // multitable-w2-unified-record-inspector-design-lock-20260714.md §7 S4 "HI-1: zero new data
+    // paths") keeps covering the code it names instead of silently scanning an empty shell --
+    // same precedent as comment-affordance-color-consistency.spec.ts's CONSUMER_FILES swap
+    // ("swapped in place ... so this lock keeps covering that rule at its new home instead of
+    // silently losing it off the guarded list"). The three assertions below are byte-identical
+    // to the pre-S3a guard; only the readFileSync target moved.
     it('source scan: no client./fetch(/api. call appears anywhere in this component', () => {
-      const src = readSrc('src/multitable/components/MetaCommentsPanel.vue')
+      const src = readSrc('src/shared/comments/components/MetaCommentsPanel.vue')
       expect(src).not.toMatch(/[^.]\bfetch\(/)
       expect(src).not.toMatch(/(?<!api)client\.\w+\(/)
       expect(src).not.toMatch(/\bapiClient\.\w+\(/)

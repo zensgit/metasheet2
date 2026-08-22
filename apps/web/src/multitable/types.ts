@@ -2,6 +2,18 @@
 // Multitable TypeScript types — derived from OpenAPI schemas in base.yml
 // ---------------------------------------------------------------------------
 
+// S3a (comments shared FE kit extraction): MetaCommentMentionSuggestion, MultitableCommentReaction,
+// COMMENT_REACTION_PALETTE, and MultitableComment now live in shared/comments/types.ts (their
+// definitions are domain-neutral — nothing in them is multitable-specific). Imported (so
+// MultitableCommentInboxItem below can still `extends MultitableComment`) AND re-exported under
+// their original names, so every existing import of these 4 names from `'../types'` / `'./types'`
+// keeps resolving unchanged.
+import type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment } from '../shared/comments/types'
+import { COMMENT_REACTION_PALETTE } from '../shared/comments/types'
+
+export type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment }
+export { COMMENT_REACTION_PALETTE }
+
 // --- Field types ---
 export type MetaFieldType =
   | 'string'
@@ -588,45 +600,6 @@ export interface MetaCommentsScope {
   containerId: string
 }
 
-export interface MetaCommentMentionSuggestion {
-  id: string
-  label: string
-  subtitle?: string
-}
-
-/** Aggregated emoji reaction on a comment (B6). Mirrors the backend CommentReactionSummary. */
-export interface MultitableCommentReaction {
-  emoji: string
-  count: number
-  reactedByMe: boolean
-}
-
-/**
- * Reaction picker palette. Mirrors the backend allowlist
- * (CommentService.COMMENT_REACTION_EMOJIS); the backend rejects anything
- * off-list (400), so a drifted entry fails safe rather than corrupting data.
- */
-export const COMMENT_REACTION_PALETTE = ['👍', '👎', '❤️', '😄', '🎉', '😮', '😢', '🚀']
-
-export interface MultitableComment {
-  id: string
-  containerId: string
-  targetId: string
-  spreadsheetId?: string
-  rowId?: string
-  fieldId?: string | null
-  targetFieldId?: string | null
-  parentId?: string
-  mentions: string[]
-  authorId: string
-  authorName?: string
-  content: string
-  resolved: boolean
-  createdAt: string
-  updatedAt?: string
-  /** Aggregated emoji reactions (B6); from GET /api/comments. Absent until hydrated. */
-  reactions?: MultitableCommentReaction[]
-}
 
 export interface MultitableCommentPresenceSummary {
   containerId: string

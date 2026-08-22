@@ -187,6 +187,12 @@ import { authRouter } from './routes/auth'
 import { auditLogsRouter } from './routes/audit-logs'
 import { approvalHistoryRouter } from './routes/approval-history'
 import { approvalMetricsRouter } from './routes/approval-metrics'
+import { approvalCommentsRouter } from './routes/approval-comments'
+import {
+  setApprovalCommentMentionDelivery,
+  setApprovalCommentNotifyChecker,
+} from './services/approval-comment-service'
+import { canReadApprovalInstance } from './services/approval-instance-readability'
 import {
   resolveApprovalSlaSchedulerLeaderOptions,
   startApprovalSlaScheduler,
@@ -1438,6 +1444,8 @@ export class MetaSheetServer {
     this.app.use(approvalHistoryRouter({ injector: this.injector }))
     // 路由：审批 SLA / 耗时指标（Wave 2 WP5）
     this.app.use(approvalMetricsRouter())
+    // 路由：审批评论（Lock-10 S2）
+    this.app.use(approvalCommentsRouter())
     // 路由：角色/权限/表/文件/表权限（占位）
     this.app.use(rolesRouter())
     this.app.use(permissionsRouter())
@@ -3439,6 +3447,15 @@ export class MetaSheetServer {
           return false
         }
       })
+      // Lock-10 (S2) OD-S1-15 / G-S1-9 — the approval-comment notify seam. Wired here, in the
+      // SAME block as the multitable comment seam above, so production always has a real checker
+      // before any request can reach the approval-comment routes. The module-level default
+      // (`approval-comment-service.ts`) is FAIL-CLOSED (`async () => false`) — this is the ONE
+      // place that opens it, by delegating to the SAME S1 predicate the routes themselves gate on
+      // (a mentioned user can be notified iff they could read the instance).
+      setApprovalCommentNotifyChecker(async ({ instanceId, userId }) =>
+        canReadApprovalInstance(poolManager.get(), userId, instanceId))
+      setApprovalCommentMentionDelivery((userId, event, payload) => collabService.sendTo(userId, event, payload))
       collabService.initialize(this.httpServer)
     } catch (e) {
       this.logger.error('Failed to initialize WebSocket service', e as Error)
