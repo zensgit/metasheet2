@@ -2132,6 +2132,15 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
       // so the service applies the masked write on a `handle` (or rejects a malformed payload / a
       // non-handle action) by key PRESENCE (`'fieldWrites' in request`). Absent ⇒ never forwarded.
       const hasFieldWrites = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'fieldWrites')
+      // Lock-9 §5.5 — forward `attachmentIds` by key PRESENCE ONLY, unconditionally (no flag check
+      // here): the route never inspects the flag, it only forwards what the client sent. The
+      // service's misplaced-rider guard (dispatchAction, `request.action !== 'comment'`) is ITSELF
+      // flag-gated (P2-1 fix-round), so with the flag OFF a stray `attachmentIds` on ANY action
+      // reaches the service and is silently unread there — true byte-for-byte no-op (G-12/§L9-D).
+      // With the flag ON, the misplaced-rider 400 and the bind branch's own validation are what
+      // discriminate; G-12(b)'s positive control (`action: 'comment'`) is unaffected either way,
+      // since the misplaced-rider guard never applies to a `comment` action in the first place.
+      const hasAttachmentIds = req.body != null && Object.prototype.hasOwnProperty.call(req.body, 'attachmentIds')
       // P1-B add_sign: approver user IDs to pull into the current node.
       const targetUserIds = Array.isArray(req.body?.targetUserIds)
         ? req.body.targetUserIds
@@ -2207,6 +2216,9 @@ export function approvalsRouter(options?: ApprovalRouterOptions): Router {
               // Lock-3 §3 / Lock-7 L7-C: present ONLY when the client sent the key, so the service
               // applies the masked write (or refuses a malformed payload) by key presence.
               ...(hasFieldWrites ? { fieldWrites: req.body.fieldWrites } : {}),
+              // Lock-9 §5.5: present ONLY when the client sent the key; the service validates shape
+              // and ignores it entirely while the attachments flag is OFF (G-12(b)).
+              ...(hasAttachmentIds ? { attachmentIds: req.body.attachmentIds } : {}),
             },
             actor,
           )
