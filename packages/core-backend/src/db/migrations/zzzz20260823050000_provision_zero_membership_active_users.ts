@@ -43,15 +43,19 @@ import { checkTableExists } from './_patterns'
  * it re-measures and re-applies against whatever the population is AT MIGRATION TIME, not the
  * number 12 itself; the number is provenance, not a hardcoded bound.
  *
- * SINGLE-ORG PREMISE, SELF-ASSERTED, FAIL-LOUD (the "(i)-guard"): this migration provisions ALL
- * 12 users into "the" org, which is only a coherent operation when `user_orgs` names EXACTLY ONE
- * distinct active org repo-wide — the identical premise, and the identical measurement query
- * (`SELECT DISTINCT org_id FROM user_orgs WHERE is_active`, evidence workflow's `u1a_*` probes),
- * that the revised Migration B's class-6 (i)-guard uses. If the premise does not hold (zero
- * distinct active orgs — an empty `user_orgs`, degenerate but must not silently no-op-then-insert
- * garbage — or two-or-more, meaning "the" org is not well-defined), this migration ABORTS before
- * any INSERT, values-free (org ids are never interpolated into the error): the operator is told
- * HOW MANY distinct active orgs were found, never WHICH ones.
+ * SINGLE-ORG PREMISE, SELF-ASSERTED, FAIL-LOUD (the "(i)-guard") — CHECKED ONLY WHEN THERE IS A
+ * POPULATION TO PROVISION: this migration provisions ALL 12 users into "the" org, which is only a
+ * coherent operation when `user_orgs` names EXACTLY ONE distinct active org repo-wide — the
+ * identical premise, and the identical measurement query (`SELECT DISTINCT org_id FROM user_orgs
+ * WHERE is_active`, evidence workflow's `u1a_*` probes), that the revised Migration B's class-6
+ * (i)-guard uses. The premise is asserted ONLY after a pre-flight population check finds at least
+ * one zero-active-membership active user to provision (see the pre-flight comment in `up()` — an
+ * unconditional premise check aborted every empty-DB CI lane in this PR's first cut; H42 pins the
+ * fix). Once a population exists, if the premise does not hold (zero distinct active orgs — e.g.
+ * `user_orgs` itself is empty but `users` is not, degenerate but must not silently
+ * no-op-then-insert garbage — or two-or-more, meaning "the" org is not well-defined), this
+ * migration ABORTS before any INSERT, values-free (org ids are never interpolated into the
+ * error): the operator is told HOW MANY distinct active orgs were found, never WHICH ones.
  *
  * IDEMPOTENT, NON-RESURRECTING: same posture as the two precedent `user_orgs` backfills
  * (`zzzz20260114110000_create_user_orgs_table.ts`'s inline backfill and
@@ -115,11 +119,38 @@ import { checkTableExists } from './_patterns'
  * SCHEMA: zero schema change (no column, no index, no constraint) — pure data migration, guarded
  * on both `users` and `user_orgs` existing (a fresh DB, or one where `zzzz20260114110000` has not
  * landed yet, skips cleanly rather than throwing).
+ *
+ * CI POSTURE: this migration is NOT added to any `MIGRATION_EXCLUDE` list and runs in every CI
+ * lane's `db:migrate` step, including on an EMPTY database (`users` and `user_orgs` both exist,
+ * both zero rows). The pre-flight population check above is what keeps that case a harmless
+ * no-op: population = 0, early return, the single-org premise is never evaluated — CI's `users`
+ * table having zero active rows means `user_orgs` also has zero distinct active orgs, which would
+ * otherwise trip the FAIL-LOUD guard on every fresh-DB CI lane in this repo. Pinned by **H42**.
  */
 export async function up(db: Kysely<unknown>): Promise<void> {
   const hasUsers = await checkTableExists(db, 'users')
   const hasUserOrgs = await checkTableExists(db, 'user_orgs')
   if (!hasUsers || !hasUserOrgs) return
+
+  // PRE-FLIGHT POPULATION CHECK (required for CI-safety on an empty/fresh DB — found by CI, not
+  // by this migration's own real-DB suite; see H42). The single-org premise below is only a
+  // meaningful, assertable REQUIREMENT when this migration would actually WRITE something. On an
+  // empty database (every CI lane's `db:migrate` step, a fresh schema with zero `users` rows)
+  // there is nothing to provision, `user_orgs` legitimately names ZERO distinct active orgs, and
+  // this migration MUST be a safe no-op there — exactly the same "population-first, premise-
+  // second" shape the revised backfill migration's own class-6 arm uses (`if (n > 0) { ...assert
+  // premise... }`), applied here to fix a real gap in the FIRST cut of this file: an unconditional
+  // premise check aborted `db:migrate` on every empty-DB CI lane (`approval-realdb-org-backfill-b`
+  // and `migration-prod-image-parity (postgres:15-alpine)` both caught this live).
+  const population = await sql<{ n: string }>`
+    SELECT count(*)::text AS n
+      FROM users u
+     WHERE u.is_active = TRUE
+       AND NOT EXISTS (
+         SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE
+       )
+  `.execute(db)
+  if (Number(population.rows[0]?.n ?? '0') === 0) return
 
   // Single-org premise, self-asserted, FAIL-LOUD (values-free) — see docblock. Read via the exact
   // set (not just the count) so the resolved org id is a value THIS migration observed, never a

@@ -13,7 +13,7 @@ import { up as backfillBUp } from '../../src/db/migrations/zzzz20260823100000_ba
  * by Phase 1, real-DB acceptance (isolated schema). EXTENDED at the Lock-11 §10 D-8(β) revision
  * (docs/development/approval-lock11-writer-org-derivation-20260822.md, owner sixth by-reference
  * reply, 2026-08-22) to also cover the companion provisioning migration
- * `zzzz20260823050000_provision_zero_membership_active_users.ts` (H32-H37, H41) and the revised
+ * `zzzz20260823050000_provision_zero_membership_active_users.ts` (H32-H37, H41, H42) and the revised
  * class-6 arm of `backfillBUp` itself (H15 audited + H38-H40).
  *
  * Harness shape copied from `approval-attachment-scan-purge-upgrade-migration.db.test.ts`: an
@@ -749,6 +749,15 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     `.execute(testDb)
     expect(row.rows).toEqual([{ is_active: false }])
     expect(await activeMembershipCount('u_h41_target')).toBe(0)
+  })
+
+  it("H42: EMPTY population (fresh/CI-shaped DB — zero `users` rows at all, hence zero distinct active orgs) -> provisioning resolves as a safe no-op, does NOT abort on the FAIL-LOUD single-org guard (regression pin for a P1 CI outage this migration's first cut shipped: `approval-realdb-org-backfill-b` and `migration-prod-image-parity (postgres:15-alpine)` both caught 'found 0 distinct active org(s)' aborting db:migrate on every fresh-DB CI lane before the pre-flight population check was added)", async () => {
+    // Deliberately NO seedUser / seedUserOrg calls at all — `users` and `user_orgs` both exist
+    // (created in beforeEach) but are completely empty, exactly like every CI lane's fresh DB.
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+
+    const orgCount = await sql<{ n: string }>`SELECT count(*)::text AS n FROM user_orgs`.execute(testDb)
+    expect(orgCount.rows[0]?.n).toBe('0')
   })
 
   // ---- H38-H40 — the revised class-6 arm of backfillBUp --------------------------------------
