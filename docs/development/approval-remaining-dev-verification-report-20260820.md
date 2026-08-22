@@ -935,14 +935,14 @@ U5/U7/U8 仍 unknown(其中 U2/U7/U8 非仓内可解)。§12.3 全部条目不�
 |---|---|---|
 | #5109(`fb9f559dc0`) | MERGE-CLEAN @ `c57dbbd39f` | body 重构 hash `5222a094…` 与清单 hash `622a6a75…` 三轮零扰动(对 transcript 原始记录核);(β) 排序定义恢复为 §10.2 约束性段落 |
 | #5103(`6a2010cf8c`) | requal CLEAN @ `80bc374aaf` | SQL 差量=恰两新模板(八旧模板逐字节稳定);musl 双引擎 52/52;**prod 执行成功无 ABORT**(run 32586978396 日志亲读);单 org 前提真实数据成立 |
-| #5116(`8097d310eb`) | CLEAN @ `e524c609c1` | 分区恒等 no_row+only_deactivated≡u1b 四形+随机 400 用户实证;误写正控使恒等破裂(判别力证明) |
-| #5112(`2a859ba4c1`) | MERGE-CLEAN @ `b8b87eec14` | MUT-B 前后对照(同回滚 5050 全绿→1 failed/5051);(β) 绊线删 ledger 行恰红;gap-closer 六 mutation 各恰红一测;census 287→288→289 三段并集证明;合并门 run-4 证据 DISCHARGED(拆分行在场且 0) |
+| #5116(`8097d310eb`) | MERGE-CLEAN 首轮 0P1/0P2 @ `6b09fcd98c` | 分区恒等 no_row+only_deactivated≡u1b 以 5 形+2 非活跃控制+随机 400 用户实证;误写正控使恒等破裂(判别力证明);ON CONFLICT 不复活停用行=对落地迁移三 SQL 亲跑证得 |
+| #5112(`2a859ba4c1`) | MERGE-CLEAN @ `b8b87eec14` | (β) 绊线删 ledger 行恰红一测;gap-closer 六 mutation 判别(五个各恰红一测,一个按设计红六测);census 287→288→289 三段并集证明;30 共通文件 28 blob 字节同一的 rebase 完整性;合并门 run-4 证据 DISCHARGED(拆分行在场且 0) |
 | #5121(`3882dc80f7`) | 终绑 MERGE-CLEAN @ `f115541ad7` | β 格 mutation 恰红 `:647`(ratified 矩阵唯一 TRUE 格);γ 以 pin-差分证非空洞假;两泄漏植入抵达线上被断言拦截;123/1744 考勤 CI 语料双腿绿;8/8 敌意探针(x-tenant-id 伪造被无视、x-org-id 双向验证、无 'default' 豁免) |
 | 生产验收 | — | run4/run6(soak-working):**p11=271/271、p20=0、p31=0、c6=0、u1b 与双拆分=0**;W1W2 上线后复采不变 |
 
 ### 14.2 门审拦住的(纪律承重新证)
 
-#5112 gate:两语法枚举缺口(`actionType:` 逃过 `type:` 扫描,W6 smoke 经 form.submitted 间接达写入点)——「repo-wide 扫描无遗漏」句被第四处证伪并撤回传播;#5121 gate:fixture 审计遗漏 attendance-files-acl(122 文件 CI 语料才是权威分母,非 17 套件 spec 语料);#5121 requal:**驳回**把 ratified G-L11-9 四格矩阵缺格当披露项处理——「锁点名 A 不得只交 A′」;#5109 gate:(β) 排序定义在压缩转述中丢失(排序即定义,丢=坍缩为 (α));终绑自纠:stale 树提取 run-list 得 98 文件险些误判「不可复现」,CI 日志纠正为 123。基础设施双险(GHCR blob、部署主机磁盘闸 1.0G<1G)均按「先证因再动作」处置(重跑/派发 GC 回收 32.42GB)。
+#5112 gate:两语法枚举缺口(`actionType:` 逃过 `type:` 扫描,W6 smoke 经 form.submitted 间接达写入点)——「repo-wide 扫描无遗漏」句被第四处证伪并撤回传播;#5121 gate:fixture 审计遗漏 attendance-files-acl(123 文件 CI 语料才是权威分母,非 17 套件 spec 语料);#5121 requal:**驳回**把 ratified G-L11-9 四格矩阵缺格当披露项处理——「锁点名 A 不得只交 A′」;#5109 gate:(β) 排序定义在压缩转述中丢失(排序即定义,丢=坍缩为 (α));终绑自纠:stale 树提取 run-list 得 98 文件险些误判「不可复现」,CI 日志纠正为 123。基础设施双险(GHCR blob、部署主机磁盘闸 1002M<1GiB)均按「先证因再动作」处置(重跑/派发 GC 回收 32.42GB)。
 
 ### 14.3 未验证清单(收尾语义的边界)
 

@@ -1749,10 +1749,10 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 |---|---|---|---|
 | #5109 | **Lock-11 RATIFIED**:锁文入库+§10 十裁记录((β) 排序=约束性;D-10 RETIRED 无日落;回灌=未来 owner 项)+§10.3 第七裁 | 三轮门审(P1=排序定义丢失→恢复)→ MERGE-CLEAN @ `c57dbbd39f`;body 与清单双 hash 三轮零扰动 | `fb9f559dc0` |
 | #5103 | **Migration B + D-8 修订**:provisioning 迁移(12 零成员活跃用户)+ class-6 (i)-guarded(单 org 自断言);SQL 四轮冻结后由裁决解除、差量=恰两新模板证明 | migb-revision 工作流 gate F0→fix→requal CLEAN @ `80bc374aaf`(musl 双引擎 52/52) | `6a2010cf8c`;**prod 执行成功 17:16:20Z(run 32586978396),无 ABORT** |
-| #5116 | u1b 拆分探针(no-row / only-deactivated——深审 P1-1 的不可见形) | gate P2(判别半边)→ 修复 → CLEAN @ `e524c609c1`;四形+随机 400 用户分区恒等实证 | `8097d310eb` |
+| #5116 | u1b 拆分探针(no-row / only-deactivated——深审 P1-1 的不可见形) | gate MERGE-CLEAN 首轮 0P1/0P2 @ `6b09fcd98c`;分区恒等 no_row+only_deactivated≡u1b 以 5 形+2 非活跃控制+随机 400 用户实证,误写正控证判别力 | `8097d310eb` |
 | #5112 | **W-1/W-2 建线盖章**(requester 键/单活跃成员/值免 422/双调用路径)+ gap-closer 迁移(第七裁授权)+ (β) 绊线 + §10.3 落地 | gate P1(两语法枚举漏洞:actionType fixture)→ 修复 → requal STALE → 折入 rebase → MERGE-CLEAN @ `b8b87eec14`;**合并门=run-4 证据 u1b 双拆分 0 DISCHARGED** | `2a859ba4c1`;gap-closer prod 执行成功 19:29:25Z(经 GHCR blob flake 重跑 + **部署主机磁盘闸**:GC 回收 32.42GB 后过闸) |
 | #5121 | **W-4 考勤盖章**(arm (f) 验证选择器 SUBJECT 键 + arm (a) 回退,双腿含 legacy)+ G-L11-8 分脑门 + D-10 退役钉 + **G-W3 售后零写钉** + OpenAPI 422 契约 | fable-max gate P1(fixture 审计漏 attendance-files-acl)→ 修复 → requal 驳回 G-L11-9 缺格降级 → β/γ 格补齐 → 终绑 MERGE-CLEAN @ `f115541ad7`(β mutation 恰红;γ pin-差分证非空洞) | `3882dc80f7`;部署成功 |
-| (证据) | 五次生产采集(run 3-6 + 终验)全耐久归档 soak-working/ | — | p11=**271/271**、p20=0、p31=0、u1b 及双拆分=0、u1a=1 |
+| (证据) | 六次成功生产采集(runs 32552496622/32568321791/32562970891/32588740066/32593179454/32593902401)全耐久归档 soak-working/ | — | p11=**271/271**、p20=0、p31=0、u1b 及双拆分=0、u1a=1 |
 
 ### 12.2 本波之后的状态
 
