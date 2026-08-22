@@ -294,6 +294,14 @@ function commonApprovalClientMockResult(statement: string): { rows: unknown[]; r
   if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
     return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
   }
+  // Lock-11 W-1/W-2 org derivation (deriveApprovalInstanceOrgId) — the shared queries added to
+  // every create path are answered here per this function's docblock. Exactly ONE active
+  // membership so unrelated create tests reach a 201, not a 422. Dedicated positive/negative
+  // (0-row, 2-row) coverage lives in its own describe block below, which overrides this default
+  // per-test via a narrower mockImplementation.
+  if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+    return { rows: [{ org_id: 'default' }], rowCount: 1 }
+  }
   return null
 }
 
@@ -8072,6 +8080,228 @@ describe('ApprovalProductService', () => {
         normalize(sql as string).startsWith('INSERT INTO approval_template_versions'))
       const persistedGraph = JSON.parse(String(insertVersionCall?.[1]?.[2]))
       expect(persistedGraph.nodes[1].config.approvalThreshold).toBe(2)
+    })
+  })
+
+  // ===========================================================================================
+  // Lock-11 §10 W-1/W-2 org derivation (deriveApprovalInstanceOrgId, arm (a)) — Class B mocked-pool
+  // coverage. Real-DB acceptance (G-L11-0/1/2/3/10 + refusal-precedence) lives in the standalone
+  // integration suite; this describe block is the mocked-pool positive/negative pair the
+  // `commonApprovalClientMockResult` docblock calls for, plus the precedence ordering check that
+  // does not need a real DB.
+  // ===========================================================================================
+  describe('Lock-11 org derivation (deriveApprovalInstanceOrgId, mocked pool)', () => {
+    const orgGraph = buildRuntimeGraph()
+
+    function mountOrgDerivationSql(orgRows: Array<{ org_id: string }>) {
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'tpl-1', key: 'travel', name: 'Travel', description: null, category: null,
+              visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+              active_version_id: 'ver-1', latest_version_id: 'ver-1', created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'ver-1', template_id: 'tpl-1', version: 1, status: 'published',
+              form_schema: { fields: [] }, approval_graph: orgGraph, created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+          return { rows: [] }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return {
+            rows: [{
+              id: 'pub-1', template_id: 'tpl-1', template_version_id: 'ver-1',
+              runtime_graph: orgGraph, is_active: true, published_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+          return { rows: [{ request_no: 'AP-200001' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+      pgState.client.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'COMMIT' || statement === 'ROLLBACK') {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+          return { rows: [], rowCount: 0 }
+        }
+        // Overrides the shared default in commonApprovalClientMockResult (which always answers
+        // exactly one row) so this describe's tests control cardinality (0 / 1 / 2) directly.
+        if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+          return { rows: orgRows, rowCount: orgRows.length }
+        }
+        if (statement.startsWith('INSERT INTO approval_instances')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (statement.startsWith('INSERT INTO approval_assignments')) {
+          return { rows: [], rowCount: 1 }
+        }
+        if (statement.startsWith('INSERT INTO approval_records')) {
+          return { rows: [], rowCount: 1 }
+        }
+        {
+          const epochResult = commonApprovalClientMockResult(statement)
+          if (epochResult) return epochResult
+        }
+        throw new Error(`Unhandled client query: ${statement} params=${JSON.stringify(params)}`)
+      })
+    }
+
+    it('exactly one active membership stamps org_id as the LAST INSERT param (positive control, G-L11-1 mocked half)', async () => {
+      mountOrgDerivationSql([{ org_id: 'org-single' }])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .resolves.toBeTruthy()
+
+      const insertCall = pgState.client.query.mock.calls.find(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))
+      expect(insertCall).toBeDefined()
+      const insertSql = normalize(insertCall![0] as string)
+      const insertParams = insertCall![1] as unknown[]
+      // Column list gained org_id LAST (24 -> 25 columns); $17 is appended, not interleaved —
+      // every pre-existing $1..$16 placeholder keeps its original position.
+      expect(insertSql).toMatch(/created_at, updated_at, org_id\)/)
+      expect(insertSql).toMatch(/now\(\), now\(\), \$17\)/)
+      expect(insertParams[16]).toBe('org-single')
+    })
+
+    it('zero active memberships → 422 APPROVAL_ORG_UNRESOLVED, values-free (no org id / count / user id on the error), no INSERT (G-L11-1 neg-2 mocked half)', async () => {
+      mountOrgDerivationSql([])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_ORG_UNRESOLVED', details: undefined })
+
+      expect(pgState.client.query.mock.calls.some(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))).toBe(false)
+      // Fail-loud rollback (§3, `:7690-7692` per the spec) — the txn is rolled back, never committed.
+      expect(pgState.client.query.mock.calls.some(([sql]) => normalize(sql as string) === 'COMMIT')).toBe(false)
+    })
+
+    it('two-or-more active memberships → 422 APPROVAL_ORG_UNRESOLVED, values-free, no INSERT (G-L11-1 neg-1 mocked half)', async () => {
+      mountOrgDerivationSql([{ org_id: 'org-a' }, { org_id: 'org-b' }])
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 422, code: 'APPROVAL_ORG_UNRESOLVED', details: undefined })
+
+      expect(pgState.client.query.mock.calls.some(([sql]) =>
+        normalize(sql as string).startsWith('INSERT INTO approval_instances'))).toBe(false)
+    })
+
+    it('refusal precedence: a requester failing BOTH approvals:write and org derivation gets 403, not 422 — the derivation slot sits AFTER the write-authorization boundary', async () => {
+      pgState.pool.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement.startsWith('SELECT * FROM approval_templates WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'tpl-1', key: 'travel', name: 'Travel', description: null, category: null,
+              visibility_scope: { type: 'all', ids: [] }, sla_hours: null, status: 'published',
+              active_version_id: 'ver-1', latest_version_id: 'ver-1', created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_template_versions WHERE id = $1')) {
+          return {
+            rows: [{
+              id: 'ver-1', template_id: 'tpl-1', version: 1, status: 'published',
+              form_schema: { fields: [] }, approval_graph: orgGraph, created_at: new Date(), updated_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith('SELECT * FROM approval_published_definitions')) {
+          return {
+            rows: [{
+              id: 'pub-1', template_id: 'tpl-1', template_version_id: 'ver-1',
+              runtime_graph: orgGraph, is_active: true, published_at: new Date(),
+            }],
+            rowCount: 1,
+          }
+        }
+        if (statement.startsWith(`SELECT 'AP-' || nextval('approval_request_no_seq')::text AS request_no`)) {
+          return { rows: [{ request_no: 'AP-200002' }], rowCount: 1 }
+        }
+        throw new Error(`Unhandled pool query: ${statement}`)
+      })
+      pgState.client.query.mockImplementation(async (sql: string) => {
+        const statement = normalize(sql)
+        if (statement === 'BEGIN' || statement === 'ROLLBACK') return { rows: [], rowCount: 0 }
+        if (statement.startsWith('SELECT assignment_type, assignee_id, node_key FROM approval_assignments')) {
+          return { rows: [], rowCount: 0 }
+        }
+        // DB-only actor authority at the final write boundary (userHasApprovalsWriteOnQuery):
+        // not admin, no legacy permissions column, no DB permission codes → 403 FORBIDDEN.
+        if (statement.startsWith('SELECT role, department, is_admin, is_active FROM users WHERE id = $1')) {
+          return { rows: [{ role: 'user', department: null, is_admin: false, is_active: true }], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT ur.role_id, r.name FROM user_roles ur LEFT JOIN roles r')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT role_id FROM user_roles WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT permission_code FROM user_permissions WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT DISTINCT permission_code AS code FROM (')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT permissions FROM users WHERE id = $1')) {
+          return { rows: [{ permissions: [] }], rowCount: 1 }
+        }
+        if (statement.startsWith('SELECT id FROM users WHERE id = $1 FOR SHARE')) {
+          return { rows: [{ id: 'requester-1' }], rowCount: 1 }
+        }
+        if (
+          statement === 'SAVEPOINT record_link_actor_groups'
+          || statement === 'RELEASE SAVEPOINT record_link_actor_groups'
+        ) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT group_id FROM platform_member_group_members WHERE user_id = $1 FOR SHARE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        if (statement.startsWith('SELECT id FROM approval_templates WHERE')) {
+          return { rows: [{ id: 'tpl-1' }], rowCount: 1 }
+        }
+        // If this test ever reached the derivation, zero rows would ALSO 422 — the point of the
+        // test is that it must never get there; a mutation that deletes the 403 throw (or
+        // reorders the derivation before it) turns this into a false pass at 422 instead of 403.
+        if (statement.startsWith('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE')) {
+          return { rows: [], rowCount: 0 }
+        }
+        throw new Error(`Unhandled client query: ${statement}`)
+      })
+      const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+      const service = new ApprovalProductService(buildNoopMetrics() as never)
+      vi.spyOn(service, 'getApproval').mockResolvedValue(buildApprovalDto({ templateVersionId: 'ver-1', publishedDefinitionId: 'pub-1' }))
+
+      await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
+        .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
     })
   })
 })
