@@ -53,6 +53,12 @@ const {
   ID_NOISE_FIELD_IDS,
 } = require(path.join(LIB, 'customer-packs', 'factory-a.rehearsal.cjs'))
 
+// The productionized form of this suite's own ownership spec — see
+// "THE SPEC IS NOW REAL" in refreshPreservesHumanCells().
+const {
+  derivePackAwarePlmWritableFields,
+} = require(path.join(LIB, 'stock-preparation-conflict-planner.cjs'))
+
 const PROJECT_ID = 'proj_rehearsal'
 const OBJECT_ID = STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
 
@@ -597,6 +603,39 @@ async function refreshPreservesHumanCells() {
   for (const fieldId of ['ext_blankLength', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankMass']) {
     assert.ok(humanFieldIds.includes(fieldId))
     assert.equal(writableSet.has(fieldId), false)
+  }
+
+  // ── THE SPEC IS NOW REAL ──────────────────────────────────────────────────
+  // `plmWritableFieldIds` above was written as a SPECIFICATION for a refresh that
+  // did not yet exist. The conflict planner now ships that semantic as
+  // derivePackAwarePlmWritableFields (tightened by an extension-stamp requirement
+  // the local guard predates and does not model). The local guard is kept — an
+  // independently restated spec is the point of a rehearsal — but it is pinned to
+  // production here, so the two can no longer drift apart in silence.
+  const production = derivePackAwarePlmWritableFields({
+    templateFields: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields,
+    installedFieldProperties: fake.fields,
+  })
+  assert.deepEqual(
+    production.packPlmWritableFieldIds,
+    [...writableSet].filter((fieldId) => fieldId.startsWith('ext_')).sort(),
+    'the production derivation admits exactly the pack PLM columns this spec admits',
+  )
+  assert.deepEqual(
+    production.packHumanPreservedFieldIds,
+    humanFieldIds.filter((fieldId) => fieldId.startsWith('ext_')).sort(),
+    'and the production HUMAN band is exactly the pack human columns',
+  )
+  assert.deepEqual(production.unclassifiedPackFieldIds, [], 'a fully installed pack leaves nothing unclassified')
+  for (const fieldId of humanFieldIds) {
+    assert.equal(
+      production.plmWritableFieldIds.includes(fieldId),
+      false,
+      `production must not let a refresh write ${fieldId}`,
+    )
+    // The half the spec could not assert before: the human WALL now knows the
+    // pack's columns BY NAME, not merely by their absence from the template.
+    assert.ok(production.humanPreservedFieldIds.includes(fieldId))
   }
 
   // A row as it stands the morning after someone worked it: PLM identity filled

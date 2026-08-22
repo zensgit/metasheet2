@@ -860,6 +860,10 @@ async function runLargeBomCheckpointApplyJobChunk(input = {}) {
       plan: chunkPlan,
       target: job.target,
       template: job.template,
+      // Same OPTIONAL projection the plan was built from. Threading it here too keeps
+      // the human wall extended at WRITE time and not only at plan time — a chunked
+      // apply must not be the one path where a pack `ext_` human column slips through.
+      installedFieldProperties: input.installedFieldProperties,
       recordsApi,
     })
 
@@ -904,6 +908,9 @@ async function planLargeBomBackgroundExpansionJob(input = {}) {
     runId: input.runId || `large-bom:${job.jobId}`,
     plannedAt: input.plannedAt,
     duplicatePolicyReview: conflictPolicyReview,
+    // OPTIONAL pack-aware ownership projection, threaded (never fetched — this module
+    // does no field I/O). Omitted => the frozen-template bands, i.e. today's behaviour.
+    installedFieldProperties: input.installedFieldProperties,
   })
   const revision = largeBomPlanRevision({ job, plan, existingRows, conflictPolicyReview })
   job.planRevision = revision

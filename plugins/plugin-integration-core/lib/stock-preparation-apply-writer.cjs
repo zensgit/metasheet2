@@ -10,7 +10,10 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
-const { DECISIONS } = require('./stock-preparation-conflict-planner.cjs')
+const {
+  DECISIONS,
+  derivePackAwarePlmWritableFields,
+} = require('./stock-preparation-conflict-planner.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
@@ -463,7 +466,16 @@ async function applyStockPreparationPlan(input = {}) {
   const target = normalizeTarget(input.target)
   const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
   const recordsApi = getRecordsApi(input.recordsApi)
-  const humanFields = template.fields.filter((field) => field.ownership === 'human_preserved').map((field) => field.id)
+  // The human wall is ownership-aware (#5074 follow-up): with optional
+  // installedFieldProperties it ALSO rejects a customer pack's `ext_` human columns
+  // BY NAME, not merely by their absence from the frozen template. Omit the input
+  // and this is byte-identical to the template-only wall it replaces. The wall only
+  // ever GROWS — derivePackAwarePlmWritableFields is fail-closed, so an unclassified
+  // pack column never leaves the wall and never becomes writable either.
+  const humanFields = derivePackAwarePlmWritableFields({
+    templateFields: template.fields,
+    installedFieldProperties: input.installedFieldProperties,
+  }).humanPreservedFieldIds
   const templateFields = fieldMapForTemplate(template)
   const counts = {
     created: 0,
