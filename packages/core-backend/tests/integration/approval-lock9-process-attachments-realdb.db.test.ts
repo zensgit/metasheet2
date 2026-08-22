@@ -969,18 +969,25 @@ describe(process.env.DATABASE_URL ? 'G-14: migration relaxation + ordering + rol
     await adminPool.end()
   }
 
-  maybeIt('ordering: this migration sorts after EVERY OTHER file currently in the migrations directory', async () => {
-    // Asserted as a RELATIVE property (mine > every other file), not a hardcoded "IS the max" —
-    // a hardcoded max would false-red on any unrelated PR that lands a later-dated migration first,
-    // which is not this slice's ordering claim to make (D-1: re-read the directory at test time).
+  maybeIt('ordering: this migration sorts after the base constraint migration it re-expresses (ratified G-14 property)', async () => {
+    // NARROWED 2026-08-22 (signal-PR gate P1-1, aligned to RATIFIED text): the previous form asserted
+    // mine > EVERY other file in the directory — an authoring-time hygiene claim G-14 never made, whose
+    // own comment described the opposite of its behaviour. Once this suite entered the required
+    // test (20.x) lane, that form would red every future PR landing a later-dated migration anywhere
+    // in the repo (proven by the gate with a no-op probe migration). G-14 rules exactly one ordering
+    // property: the relaxation migration sorts after zzzz20260818120000. Assert that, anchored to the
+    // real directory (both files must exist — the scan negative control is preserved).
     const { readdirSync } = await import('node:fs')
     const { dirname, join } = await import('node:path')
     const { fileURLToPath } = await import('node:url')
     const dir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'db', 'migrations')
     const mine = 'zzzz20260822130000_approval_attachments_process_binding.ts'
-    const files = readdirSync(dir).filter((f) => (f.endsWith('.ts') || f.endsWith('.sql')) && f !== mine)
+    const files = readdirSync(dir).filter((f) => f.endsWith('.ts') || f.endsWith('.sql'))
     expect(files.length).toBeGreaterThan(100) // scan negative control — the directory really was read
-    expect(files.every((f) => f < mine)).toBe(true)
+    expect(files.includes(mine)).toBe(true) // the relaxation migration exists on disk
+    const base = files.filter((f) => f.startsWith('zzzz20260818120000'))
+    expect(base.length).toBe(1) // the base constraint migration exists, uniquely
+    expect(mine > base[0]).toBe(true) // the ratified G-14 ordering: relaxation AFTER base
   })
 
   maybeIt('deploy precondition: BEFORE this migration, a bind_kind=process/field_id=NULL write hard-fails on NOT NULL', async () => {
