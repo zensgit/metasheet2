@@ -548,6 +548,10 @@ describeIfDatabase('Lock-11 §10 W-1/W-2 org derivation — real-DB acceptance (
       const recordId = freshId('g113-rec-neg')
       await seedSheetRecord(recordId, 'G-L11-3 negative')
 
+      const countBefore = (await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_instances`,
+      )).rows[0].count
+
       const execRule = {
         id: freshId('g113-rule-neg'),
         name: 'G-L11-3 negative',
@@ -583,6 +587,13 @@ describeIfDatabase('Lock-11 §10 W-1/W-2 org derivation — real-DB acceptance (
       expect(bridge.rows).toHaveLength(1)
       expect((bridge.rows[0] as { status: string }).status).toBe('failed')
       expect((bridge.rows[0] as { approval_instance_id: string | null }).approval_instance_id).toBeNull()
+
+      // The row-count assertion itself (not merely the bridge's NULL FK proxy) — the rollback on
+      // a mid-transaction 422 is asserted, never assumed (spec §3).
+      const countAfter = (await pool().query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM approval_instances`,
+      )).rows[0].count
+      expect(countAfter).toBe(countBefore)
     })
   })
 })
