@@ -7,6 +7,10 @@
 // write, external DB write, raw SQL, stored procedure, or K3 path.
 
 const { scrubSecretStringValue } = require('./payload-redaction.cjs')
+const {
+  applyExtFieldMapping,
+  isNormalizedExtFieldMapping,
+} = require('./stock-preparation-ext-field-mapping.cjs')
 
 const DEFAULT_PAGE_LIMIT = 1000
 const DEFAULT_MAX_PAGES = 100
@@ -497,7 +501,18 @@ function makeSummary({ projectNoPresent, matchField, status, rowsExpanded, rootM
   return summary
 }
 
-function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
+// THE ROW-PRODUCTION BOUNDARY.
+//
+// `createRow` emits the fixed canonical shape and, when — and only when — an
+// `extFieldMapping` is configured, the tenant `ext_` values that mapping
+// produced. `extValues` is merged AFTER the canonical keys and is guaranteed by
+// the mapping normalizer to contain nothing but `ext_`-prefixed ids that the
+// customer pack declared `plm_system`, so it can neither shadow a canonical
+// column nor smuggle a human-owned one past the refresh wall.
+//
+// Omit the mapping and this function is byte-identical to the pre-change one:
+// no key is added, not even an empty one.
+function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine, extValues }) {
   const componentSourceId = toKey(readField(partRow, 'OBJ_ID'))
   const path = makePath(pathTokens)
   const row = {
@@ -516,10 +531,15 @@ function createRow({ projectNo, parentSourceId, pathTokens, depth, partRow, rawQ
     active,
   }
   if (!isBlank(sortLine)) row.sortLine = sortLine
+  if (isPlainObject(extValues)) {
+    for (const [fieldId, value] of Object.entries(extValues)) {
+      row[fieldId] = value
+    }
+  }
   return row
 }
 
-function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine }) {
+function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partRow, rawQuantity, totalQuantity, active, sortLine, extFieldMapping }) {
   const componentSourceId = toKey(readField(partRow, plan.part.idField))
   if (componentSourceId === null) {
     return {
@@ -533,6 +553,16 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
     Material: plan.part.materialField ? readField(partRow, plan.part.materialField) : undefined,
     SysVer: plan.part.versionField ? readField(partRow, plan.part.versionField) : undefined,
   }
+  // The mapping reads the RAW source row, not `normalizedPart`: the canonical
+  // five keys are the only ones the frozen read plan knows about, and the whole
+  // point of a tenant mapping is to reach the columns it does not.
+  //
+  // `readField` is handed over rather than reimplemented, so a mapped source
+  // column resolves through EXACTLY the same lookup (own key first, then a
+  // single case-insensitive match, ambiguity refused) as a canonical one.
+  const mapped = extFieldMapping
+    ? applyExtFieldMapping(extFieldMapping, partRow, { readField })
+    : null
   return {
     row: createRow({
       projectNo,
@@ -544,9 +574,13 @@ function rowFromPart(plan, { projectNo, parentSourceId, pathTokens, depth, partR
       totalQuantity,
       active,
       sortLine,
+      extValues: mapped ? mapped.values : undefined,
     }),
     componentSourceId,
     sourceVersion: normalizedPart.SysVer,
+    // A refused cell is reported, never guessed at. It does NOT drop the row:
+    // one unparseable legacy cell must not cost a BOM component its PLM data.
+    extErrors: mapped && mapped.errors.length ? mapped.errors.map((entry) => ({ ...entry, depth })) : undefined,
   }
 }
 
@@ -575,12 +609,29 @@ function failureResult({ projectNoPresent, matchField, status = 'failed', rows, 
   }
 }
 
+// Fail-closed on the mapping itself: an `extFieldMapping` that has not been
+// through `normalizeExtFieldMapping` has not been checked against a customer
+// pack, so its targets could be human-owned, canonical, or simply not installed.
+// This module refuses to be the place where that check is skipped. Absent is
+// fine (every existing caller); present-but-unvalidated is not.
+function requireNormalizedExtFieldMapping(extFieldMapping) {
+  if (extFieldMapping === undefined || extFieldMapping === null) return null
+  if (!isNormalizedExtFieldMapping(extFieldMapping)) {
+    throw new StockPreparationBomExpansionError(
+      'extFieldMapping must be produced by normalizeExtFieldMapping (stock-preparation-ext-field-mapping.cjs)',
+      { field: 'extFieldMapping', reason: 'EXT_FIELD_MAPPING_NOT_NORMALIZED' },
+    )
+  }
+  return extFieldMapping
+}
+
 async function expandPlmProjectBom(input = {}) {
   const sourceAdapter = requireSourceAdapter(input.sourceAdapter)
   const projectNo = typeof input.projectNo === 'string' ? input.projectNo.trim() : ''
   if (!projectNo) {
     throw new StockPreparationBomExpansionError('projectNo is required', { field: 'projectNo' })
   }
+  const extFieldMapping = requireNormalizedExtFieldMapping(input.extFieldMapping)
   const plan = normalizeStockPreparationBomReadPlan(input.readPlan || PLM_STOCK_PREPARATION_BOM_READ_PLAN)
   const options = {
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', DEFAULT_PAGE_LIMIT),
@@ -756,11 +807,13 @@ async function expandPlmProjectBom(input = {}) {
           totalQuantity: parentRow.totalQuantity * qty.value,
           active: true,
           sortLine: plan.bomDetail.sortField ? readField(detail, plan.bomDetail.sortField) : undefined,
+          extFieldMapping,
         })
         if (rowResult.error) {
           addRowError(rowResult.error)
           continue
         }
+        if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
         if (!pushRow(rowResult.row)) return
         await expandChildren(rowResult.row, childTokens)
       }
@@ -823,11 +876,13 @@ async function expandPlmProjectBom(input = {}) {
             totalQuantity: qty.value,
             active: true,
             sortLine: plan.orderDetail.sortField ? readField(detail, plan.orderDetail.sortField) : undefined,
+            extFieldMapping,
           })
           if (rowResult.error) {
             addRowError(rowResult.error)
             continue
           }
+          if (rowResult.extErrors) rowResult.extErrors.forEach(addRowError)
           if (!pushRow(rowResult.row)) break
           await expandChildren(rowResult.row, pathTokens)
         }
@@ -910,7 +965,13 @@ module.exports = {
     makePath,
     parseQuantity,
     readAll,
+    readField,
     toKey,
     nonNegativeInteger,
+    // The row-production boundary, exposed so a test can pin what a row CARRIES
+    // without standing up an adapter and a whole expansion.
+    createRow,
+    rowFromPart,
+    requireNormalizedExtFieldMapping,
   },
 }

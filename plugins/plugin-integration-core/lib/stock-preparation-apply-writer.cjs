@@ -14,6 +14,7 @@ const {
   DECISIONS,
   derivePackAwarePlmWritableFields,
 } = require('./stock-preparation-conflict-planner.cjs')
+const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
 
 const APPLY_PERMISSIONS = Object.freeze(['write', 'admin'])
 const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
@@ -27,6 +28,10 @@ const KNOWN_TARGET_WRITE_ERROR_CODES = Object.freeze(new Set([
   'target_record_validation_failed',
   'target_row_not_found',
   'target_scope_violation',
+  // An `ext_` logical id reached the records-API boundary with no physical id
+  // bound for it. Raised by `mapFieldName` — see the comment there for why this
+  // is a refusal and not a fallback.
+  'unmapped_extension_field',
   'unsupported_decision',
 ]))
 
@@ -105,14 +110,58 @@ function getRecordsApi(recordsApi) {
   return recordsApi
 }
 
-function mapFieldName(field, fieldIdMap = {}) {
-  return fieldIdMap[field] || field
+// "Does this target bind logical ids to physical ids AT ALL?" — the same
+// predicate the table-action completeness gate uses
+// (stock-preparation-table-actions.cjs `targetFieldMapHasExplicitBindings`).
+// An EMPTY map is a legitimate mode: the target is addressed by logical id and
+// every key passes through untranslated. A map with at least one binding is the
+// explicit mode, where a key that is absent from the map is a HOLE, not a
+// pass-through.
+function fieldIdMapHasExplicitBindings(fieldIdMap = {}) {
+  for (const key of Object.keys(fieldIdMap || {})) {
+    if (typeof fieldIdMap[key] === 'string' && fieldIdMap[key].trim()) return true
+  }
+  return false
+}
+
+/**
+ * Translate ONE logical field id to its physical id.
+ *
+ * The raw-id fallback (`fieldIdMap[field] || field`) is kept for CANONICAL ids —
+ * removing it would break the empty-map mode and every existing caller. It is
+ * REFUSED for a tenant `ext_` id under an explicit map, and that refusal is the
+ * point of this function.
+ *
+ * An `ext_` logical id has no meaning to the records API: the physical id is
+ * `stableMetaId('fld', projectId, objectId, fieldId)`
+ * (packages/core-backend/src/multitable/provisioning.ts:130-136, :146-148), so a
+ * fallback would send a string that addresses NO column. Before this guard that
+ * produced a silent write to a wrong/nonexistent field id, surfacing (if at all)
+ * as an opaque host error at the very end of an apply. Now the hole is named at
+ * the boundary, with the logical id that is missing from the map.
+ */
+function mapFieldName(field, fieldIdMap = {}, explicit = fieldIdMapHasExplicitBindings(fieldIdMap)) {
+  const physical = fieldIdMap[field]
+  if (physical) return physical
+  if (explicit && isTenantExtensionField(field)) {
+    throw new StockPreparationApplyWriterError(
+      'target.fieldIdMap has no physical id for an extension field; refusing to fall back to the raw logical id',
+      {
+        code: 'unmapped_extension_field',
+        reason: 'unmapped_extension_field',
+        field,
+      },
+    )
+  }
+  return field
 }
 
 function mapRecordFields(record, fieldIdMap = {}) {
+  // Computed ONCE per payload: the mode is a property of the map, not of the key.
+  const explicit = fieldIdMapHasExplicitBindings(fieldIdMap)
   const out = {}
   for (const [field, value] of Object.entries(record || {})) {
-    out[mapFieldName(field, fieldIdMap)] = value
+    out[mapFieldName(field, fieldIdMap, explicit)] = value
   }
   return out
 }
@@ -588,6 +637,8 @@ module.exports = {
     findExistingRecord,
     applyStatus,
     classifyTargetWriteError,
+    fieldIdMapHasExplicitBindings,
+    mapFieldName,
     mapRecordFields,
     normalizeTarget,
     requireApplyPermission,

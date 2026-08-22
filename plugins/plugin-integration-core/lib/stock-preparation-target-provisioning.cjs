@@ -215,8 +215,47 @@ function summarizeStockPreparationTargetReadiness(input = {}) {
   }
 }
 
-function missingLogicalFields(template, resolvedFieldIds = {}) {
-  return templateFieldIds(template).filter((fieldId) => !optionalString(resolvedFieldIds[fieldId]))
+/**
+ * The tenant `ext_` columns a caller wants BOUND in the returned fieldIdMap,
+ * on top of the frozen template's own.
+ *
+ * A pack's extension columns are installed by the pack installer, not by this
+ * module, so this list only ever says "resolve these too" — it never creates a
+ * column. Every entry is validated against the frozen catalog, so a caller
+ * cannot smuggle a canonical id (or a content-key-shaped one) in through this
+ * door and have it treated as an extension.
+ */
+function normalizeExtensionFieldIds(input, template) {
+  if (input === undefined || input === null) return []
+  if (!Array.isArray(input)) {
+    throw new StockPreparationTargetProvisioningError(
+      422,
+      'TARGET_SCHEMA_INCOMPLETE',
+      'extensionFieldIds must be an array of tenant extension field ids',
+      { field: 'extensionFieldIds' },
+    )
+  }
+  const catalog = templateFieldIds(template)
+  const seen = new Set()
+  const out = []
+  for (const fieldId of input) {
+    assertExtensionFieldIdValid(fieldId, { templateFieldIds: catalog })
+    if (seen.has(fieldId)) continue
+    seen.add(fieldId)
+    out.push(fieldId)
+  }
+  return out
+}
+
+// `extraFieldIds` carries the tenant extension ids. An `ext_` column that the
+// caller asked to bind but that does not resolve makes the target NOT READY —
+// the same fail-closed posture the template's own columns already had, and the
+// reason a downstream `ext_` write can now be a hard failure instead of a silent
+// fallback to the raw logical id.
+function missingLogicalFields(template, resolvedFieldIds = {}, extraFieldIds = []) {
+  return templateFieldIds(template)
+    .concat(Array.isArray(extraFieldIds) ? extraFieldIds : [])
+    .filter((fieldId) => !optionalString(resolvedFieldIds[fieldId]))
 }
 
 async function inspectStockPreparationCanonicalTarget(input = {}) {
@@ -248,6 +287,7 @@ async function inspectStockPreparationTarget(input = {}) {
   const modePrefix = optionalString(input.modePrefix) || 'canonical'
   const fieldMapMode = optionalString(input.fieldMapMode) || CANONICAL_FIELD_MAP_MODE
   const includeObjectId = input.includeObjectId !== false
+  const extensionFieldIds = normalizeExtensionFieldIds(input.extensionFieldIds, template)
   const sheet = await provisioning.findObjectSheet({ projectId, objectId: template.objectId })
   if (!sheet) {
     return {
@@ -258,7 +298,7 @@ async function inspectStockPreparationTarget(input = {}) {
         template,
         mode: `${modePrefix}_missing`,
         status: 'missing',
-        missingFields: templateFieldIds(template),
+        missingFields: templateFieldIds(template).concat(extensionFieldIds),
         fieldMapMode,
         includeObjectId,
       }),
@@ -267,9 +307,9 @@ async function inspectStockPreparationTarget(input = {}) {
   const resolved = await provisioning.resolveFieldIds({
     projectId,
     objectId: template.objectId,
-    fieldIds: templateFieldIds(template),
+    fieldIds: templateFieldIds(template).concat(extensionFieldIds),
   })
-  const missingFields = missingLogicalFields(template, resolved)
+  const missingFields = missingLogicalFields(template, resolved, extensionFieldIds)
   if (missingFields.length) {
     return {
       ready: false,
@@ -369,6 +409,13 @@ async function ensureStockPreparationTarget(input = {}) {
     modePrefix,
     fieldMapMode,
     includeObjectId,
+    // Forwarded, NOT applied to the create path below: `ensureObject` builds the
+    // object from the frozen template descriptor and cannot create a pack's
+    // `ext_` columns (the pack installer does that, separately). So an already
+    // pack-installed target binds its extension columns here, while a
+    // freshly-created one honestly reports a map without them — and the
+    // table-action completeness gate is what refuses to write until they exist.
+    extensionFieldIds: input.extensionFieldIds,
   })
   if (inspected.ready) return inspected
   if (inspected.mode === `${modePrefix}_incomplete`) {
@@ -594,6 +641,7 @@ module.exports = {
     templateFieldIds,
     templateFieldCounts,
     missingLogicalFields,
+    normalizeExtensionFieldIds,
     buildCanonicalTargetBinding,
     hashEvidenceValue,
     sandboxStockPreparationTemplate,

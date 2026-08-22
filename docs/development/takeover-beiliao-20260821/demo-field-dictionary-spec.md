@@ -15,6 +15,10 @@
 >
 > 因此本报告把 `defaultColumnsInfoForGeneral`（38 个字段）当作**备料/通用件共用的主字段字典**来处理——它是 `/generalStock`（通用件页）的权威静态定义，同时其字段集合、identity 命名与 `/stock`（备料主页）在后端 `columns` 表中维护的字段目录（`ColumnMapper.xml:8-12`）在语义上完全对应，只是 `/stock` 页把"谁能编辑哪一列"这件事从写死的布尔值搬到了数据库 RBAC 里（`role` × `role_column` × `columns`，`ColumnMapper.xml:14-22`）。这一点在向客户复刻演示环境时必须讲清楚，否则会把两套不同的权限机制当成一套。
 
+> **更正索引（2026-08-23）**：§4 建档表里八个人工列的 `ext_` 逻辑 id 已被代码推翻并更正，
+> 见 [§4 开头的更正块](#4-metasheet-字段建档表合并去重后的唯一字段目录)。
+> §1–§3 记录的是**源系统 identity**（`prepareDate` / `embryoLength` …），未受影响、无需更正。
+
 ---
 
 ## 0. 页面 ↔ 字段来源对照
@@ -140,6 +144,62 @@
 ## 4. MetaSheet 字段建档表（合并去重后的唯一字段目录）
 
 命名约定：客户系统里"生产/采购/仓库均不可手工编辑、由 PLM 或系统写入"的字段 → `plm_system_<identity>`；"至少有一个角色可以在网格里手工编辑"的字段 → `ext_<identity>`。字典型字段（`归属=dict`）同时挂一个 MetaSheet 选项集（见 §6）。
+
+> ### 更正（2026-08-23）——下表八个人工列的 `ext_` 逻辑 id 以代码为准
+>
+> **本节下表里的以下八个 id 已作废（superseded），不要再按它们建列或写映射：**
+> `ext_prepareDate`、`ext_pickNode`、`ext_embryoLength`、`ext_embryoWidth`、
+> `ext_embryoThickness`、`ext_embryoNum`、`ext_embryoQuality`。
+> （第八列 `ext_handoverSection` 两侧同名，无需更正。）
+>
+> **权威 id（以 `plugins/plugin-integration-core/lib/customer-packs/factory-a.rehearsal.cjs:94-102`
+> 声明的为准）：**
+>
+> | 中文名 | 本表原写法（作废） | 权威 id | pack 声明的类型 | pack 声明的 ownership |
+> |---|---|---|---|---|
+> | 备料日期 | `ext_prepareDate` | `ext_stockPrepDate` | `date` | `human_preserved` |
+> | 领料节点 | `ext_pickNode` | `ext_pickingNode` | `select` | `human_preserved` |
+> | 交接工段 | `ext_handoverSection` | `ext_handoverSection`（不变） | `select` | `human_preserved` |
+> | 毛胚长度（外径） | `ext_embryoLength` | `ext_blankLength` | `number` | `human_preserved` |
+> | 毛胚宽度（内径） | `ext_embryoWidth` | `ext_blankWidth` | `number` | `human_preserved` |
+> | 毛胚厚度（长度） | `ext_embryoThickness` | `ext_blankThickness` | `number` | `human_preserved` |
+> | 毛胚数量 | `ext_embryoNum` | `ext_blankQuantity` | `number` | `human_preserved` |
+> | 毛胚质量（kg） | `ext_embryoQuality` | `ext_blankMass` | `number` | `human_preserved` |
+>
+> 同一组 id 也出现在 `customer-pack-rehearsal-report.md`「The 46-column shape」一节，
+> 以及 `plugins/plugin-integration-core/lib/customer-packs/factory-a.sample.cjs:49-51`
+> 与 `__tests__/stock-preparation-customer-pack-{installer,rehearsal}.test.cjs`、
+> `__tests__/stock-preparation-pack-aware-refresh.test.cjs:244`。
+> 反过来，`ext_embryo*` / `ext_prepareDate` / `ext_pickNode` 在整个仓库的代码里
+> **一次引用都没有**（`grep -rn 'ext_embryo' --include=*.cjs --include=*.ts` 只命中本文件）。
+>
+> **裁定层级与方向：技术负责人层（tech-lead layer）、default-forward。**
+> 即：不改代码里已存在的 id，改文档。
+>
+> **为什么是代码赢，而不是文档赢。**
+> 逻辑 id 不是一个可以随手改的标签——它是**确定性物理字段 id 的输入**。
+> `stableMetaId()`（`packages/core-backend/src/multitable/provisioning.ts:130-136`）
+> 把 `(projectId, objectId, fieldId)` 做 sha1 截断成物理 id，
+> `getObjectFieldId()`（同文件 `:146-148`）是它唯一的调用形态。
+> 所以把 `ext_blankLength` 改名成 `ext_embryoLength` 不是"改个字符串"，
+> 而是**换掉一个物理列**：已经装出来的那一列不会被改名，只会多出一列空列，
+> 而旧列上的人工数据留在原地、再也没有代码会去读它。
+> 改文档的代价是零；改 id 的代价是每一个已 provision 的租户表。
+>
+> **顺带裁定"数字还是文本"（本节下表把五个毛胚列写成"单行文本"，§5 第 8 条给了理由）。**
+> pack 实际声明的是 `number`（上表第四列，`factory-a.rehearsal.cjs:98-102`）。
+> §5 第 8 条对**来源系统**的观察是成立的、并未被推翻：`GeneralStockInfo.java:26` 明确
+> 说明总数量/毛胚各列在客户系统里是 `String`，因为允许用户连单位一起输入。
+> 两者不矛盾，只是分工不同——**落库类型按 pack 走 `number`，字符串→数字的转换发生在
+> 源列→`ext_` 的映射器里，不在 pack 里**。pack 是 schema，不做值转换；映射器 fail-closed：
+> 形如 `"10"` 的源值转成 `10`，形如 `"10件"` 的源值必须报一个带类型的拒绝原因，
+> 绝不静默截断成 `10`。（`ext_stockPrepDate` 同理：`date` 列，源值是字符串。）
+>
+> **本更正只裁定上述八列。** §4 下表里其余的 `ext_*` 与 `plm_system_*` 命名
+> （`ext_material`、`ext_remark`、`ext_totalNum`、`plm_system_taskCode` …）
+> 在代码里同样零引用，仍然只是**提案**，不是已实现的 id；真正落地时以
+> `factory-a.rehearsal.cjs` 的 pack 声明和冻结模板
+> （`plugins/plugin-integration-core/lib/stock-preparation-templates.cjs`）为准。
 
 | 中文名 | fieldId | 多维表类型 | 归属 | 编辑角色 |
 |---|---|---|---|---|
