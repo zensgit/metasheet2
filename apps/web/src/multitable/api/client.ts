@@ -2700,10 +2700,18 @@ export class MultitableApiClient implements CommentsApiClient {
 
   async listCommentPresence(params: { containerId: string; targetIds?: string[] }): Promise<{ items: MultitableCommentPresenceSummary[] }> {
     const targetIds = (params.targetIds ?? []).filter((targetId) => typeof targetId === 'string' && targetId.trim().length > 0)
-    const res = await this.fetch(`/api/comments/summary${qs({
-      spreadsheetId: params.containerId,
-      rowIds: targetIds.length ? targetIds.join(',') : undefined,
-    })}`)
+    // POST with the ids in the body: the grid sends every visible row id per
+    // page, and the previous comma-joined query string grew with page size
+    // toward URL-length limits (414). The backend keeps the GET variant for
+    // rolling-deploy compat; deploy core-backend before this client.
+    const res = await this.fetch('/api/comments/summary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        spreadsheetId: params.containerId,
+        ...(targetIds.length ? { rowIds: targetIds } : {}),
+      }),
+    })
     const data = await this.parseJson<{ items?: MultitableCommentPresenceSummary[] }>(res)
     return normalizeCommentPresenceList(data)
   }
