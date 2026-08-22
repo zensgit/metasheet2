@@ -352,6 +352,16 @@ describeDb('F1 files-acl-tombstone: resource-level ACL matrix (real DB, route-le
 
     const owner = uid('s2reg-owner')
     const tOwner = await mintUserToken(owner)
+    // Lock-11 §10 W-4 fixture delta (mirrors the same-shaped seed in attendance-outdoor-punch.test.ts):
+    // this owner drives an outdoor-approval punch below with no org selector (arm a), and the writer's
+    // org-derivation now refuses arm (a) with zero active `user_orgs` memberships — seed exactly one
+    // active 'default' membership so the derivation resolves and the pre-existing 202/pendingApproval
+    // regression assertion stays true.
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [owner],
+    )
     try {
       await putSettings({
         geoFence: FENCE,
