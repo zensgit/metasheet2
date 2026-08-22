@@ -1358,6 +1358,21 @@ export class MultitableApiClient implements CommentsApiClient {
   private fetch: FetchFn
   private readonly isZhOption?: ApiErrorLocaleOption
   private readonly configRestoreConfirmByToken = new Map<string, ConfigRestoreExecuteConfirm>()
+  // Catalog caches: the bases/templates lists are small and change rarely, but
+  // were refetched by every mounting surface (workbench, home, field dialogs,
+  // template views) — ≥5 identical GETs in a single sheet-open session. Cached
+  // per client instance with in-flight dedup (same pattern as
+  // usePlugins.fetchPlugins); mutations on this client invalidate, and callers
+  // can pass { force: true } for an explicit refresh.
+  // Generation counters make invalidation win races: an invalidate/force bumps
+  // the generation, so a slower request started EARLIER that resolves LATER
+  // can no longer write its stale payload back into the cache (Codex review).
+  private basesCache: MetaBase[] | null = null
+  private basesGeneration = 0
+  private basesInflight: { promise: Promise<{ bases: MetaBase[] }>; generation: number } | null = null
+  private templatesCache: MetaTemplate[] | null = null
+  private templatesGeneration = 0
+  private templatesInflight: { promise: Promise<{ templates: MetaTemplate[] }>; generation: number } | null = null
 
   constructor(opts?: { fetchFn?: FetchFn; isZh?: ApiErrorLocaleOption }) {
     this.fetch = opts?.fetchFn ?? defaultFetchFn()
@@ -1375,9 +1390,54 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   // --- Bases ---
-  async listBases(): Promise<{ bases: MetaBase[] }> {
-    const res = await this.fetch('/api/multitable/bases')
-    return this.parseJson(res)
+  invalidateBasesCache(): void {
+    this.basesCache = null
+    // Bump the generation and drop the joinable in-flight handle: any request
+    // already in flight is stale by definition and must neither populate the
+    // cache on resolution nor be joined by later callers.
+    this.basesGeneration++
+    this.basesInflight = null
+  }
+
+  invalidateTemplatesCache(): void {
+    this.templatesCache = null
+    this.templatesGeneration++
+    this.templatesInflight = null
+  }
+
+  async listBases(opts?: { force?: boolean }): Promise<{ bases: MetaBase[] }> {
+    if (opts?.force) {
+      // Explicit refresh: supersede the cache AND any older in-flight fetch.
+      this.invalidateBasesCache()
+    } else {
+      // Return copies so a caller sorting/mutating the array cannot pollute the cache.
+      if (this.basesCache) return { bases: [...this.basesCache] }
+      if (this.basesInflight) {
+        return this.basesInflight.promise.then((data) => (Array.isArray(data?.bases) ? { bases: [...data.bases] } : data))
+      }
+    }
+    const generation = this.basesGeneration
+    const promise = (async () => {
+      const res = await this.fetch('/api/multitable/bases')
+      const data = await this.parseJson<{ bases?: MetaBase[] }>(res)
+      // Cache only a well-formed payload. Malformed/probe bodies pass through
+      // UNTOUCHED (and uncached): test routers and error shapes rely on the
+      // raw passthrough contract (see mount-behind-flow.spec).
+      if (Array.isArray(data?.bases)) {
+        // Generation check: only a latest-generation fetch may populate the
+        // cache — an invalidation while this request was in flight makes its
+        // payload stale, though the awaiting caller still receives it.
+        if (generation === this.basesGeneration) this.basesCache = data.bases
+        return { bases: [...data.bases] }
+      }
+      return data as { bases: MetaBase[] }
+    })()
+    this.basesInflight = { promise, generation }
+    try {
+      return await promise
+    } finally {
+      if (this.basesInflight?.promise === promise) this.basesInflight = null
+    }
   }
 
   async createBase(input: CreateBaseInput): Promise<{ base: MetaBase }> {
@@ -1386,12 +1446,37 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<{ base: MetaBase }>(res)
+    this.invalidateBasesCache()
+    return data
   }
 
-  async listTemplates(): Promise<{ templates: MetaTemplate[] }> {
-    const res = await this.fetch('/api/multitable/templates')
-    return this.parseJson(res)
+  async listTemplates(opts?: { force?: boolean }): Promise<{ templates: MetaTemplate[] }> {
+    if (opts?.force) {
+      this.invalidateTemplatesCache()
+    } else {
+      if (this.templatesCache) return { templates: [...this.templatesCache] }
+      if (this.templatesInflight) {
+        return this.templatesInflight.promise.then((data) => (Array.isArray(data?.templates) ? { templates: [...data.templates] } : data))
+      }
+    }
+    const generation = this.templatesGeneration
+    const promise = (async () => {
+      const res = await this.fetch('/api/multitable/templates')
+      const data = await this.parseJson<{ templates?: MetaTemplate[] }>(res)
+      // Same passthrough + generation contract as listBases.
+      if (Array.isArray(data?.templates)) {
+        if (generation === this.templatesGeneration) this.templatesCache = data.templates
+        return { templates: [...data.templates] }
+      }
+      return data as { templates: MetaTemplate[] }
+    })()
+    this.templatesInflight = { promise, generation }
+    try {
+      return await promise
+    } finally {
+      if (this.templatesInflight?.promise === promise) this.templatesInflight = null
+    }
   }
 
   /**
@@ -1449,7 +1534,10 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson(res)
+    const data = await this.parseJson<InstallTemplateResult>(res)
+    // Installing a template creates a base — the cached bases list is stale.
+    this.invalidateBasesCache()
+    return data
   }
 
   // S2 — zero-write install simulation (design 20260611 §2.1). Same body
