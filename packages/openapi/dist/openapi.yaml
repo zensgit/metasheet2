@@ -7377,6 +7377,38 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be
+            resolved to a single active organization (Lock-11 W-4 arm (a)): zero
+            or two-or-more active user_orgs memberships.
+            APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an
+            organization (orgId / x-org-id) that is not one of the subject's
+            active memberships (Lock-11 W-4 arm (f)). Outdoor-approval leg only
+            — reachable from POST /api/attendance/punch when an outdoor punch
+            requires approval and enters the request_create boundary. Both
+            refusals are values-free: the response carries no org id, membership
+            count, or user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - APPROVAL_ORG_UNRESOLVED
+                          - APPROVAL_ORG_SELECTOR_NOT_PERMITTED
+                      message:
+                        type: string
   /api/attendance/punch/events:
     x-plugin: plugin-attendance
     get:
@@ -7894,6 +7926,36 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be
+            resolved to a single active organization (Lock-11 W-4 arm (a)): zero
+            or two-or-more active user_orgs memberships.
+            APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an
+            organization (orgId / x-org-id) that is not one of the subject's
+            active memberships (Lock-11 W-4 arm (f)). Both refusals are
+            values-free: the response carries no org id, membership count, or
+            user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - APPROVAL_ORG_UNRESOLVED
+                          - APPROVAL_ORG_SELECTOR_NOT_PERMITTED
+                      message:
+                        type: string
     get:
       summary: List attendance requests
       security:
@@ -8091,6 +8153,36 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be
+            resolved to a single active organization (Lock-11 W-4 arm (a)): zero
+            or two-or-more active user_orgs memberships.
+            APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an
+            organization (orgId / x-org-id) that is not one of the subject's
+            active memberships (Lock-11 W-4 arm (f)). Both refusals are
+            values-free: the response carries no org id, membership count, or
+            user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - APPROVAL_ORG_UNRESOLVED
+                          - APPROVAL_ORG_SELECTOR_NOT_PERMITTED
+                      message:
+                        type: string
     delete:
       summary: Cancel attendance request by id
       security:
@@ -8356,6 +8448,36 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be
+            resolved to a single active organization (Lock-11 W-4 arm (a)): zero
+            or two-or-more active user_orgs memberships.
+            APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an
+            organization (orgId / x-org-id) that is not one of the subject's
+            active memberships (Lock-11 W-4 arm (f)). Both refusals are
+            values-free: the response carries no org id, membership count, or
+            user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - APPROVAL_ORG_UNRESOLVED
+                          - APPROVAL_ORG_SELECTOR_NOT_PERMITTED
+                      message:
+                        type: string
     get:
       summary: List shift-swap requests visible to the current user
       security:
@@ -8671,6 +8793,36 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          description: >-
+            APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be
+            resolved to a single active organization (Lock-11 W-4 arm (a)): zero
+            or two-or-more active user_orgs memberships.
+            APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an
+            organization (orgId / x-org-id) that is not one of the subject's
+            active memberships (Lock-11 W-4 arm (f)). Both refusals are
+            values-free: the response carries no org id, membership count, or
+            user id.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - error
+                properties:
+                  error:
+                    type: object
+                    required:
+                      - code
+                      - message
+                    properties:
+                      code:
+                        type: string
+                        enum:
+                          - APPROVAL_ORG_UNRESOLVED
+                          - APPROVAL_ORG_SELECTOR_NOT_PERMITTED
+                      message:
+                        type: string
     get:
       summary: List schedule-dispatch requests visible to the current actor
       description: >-

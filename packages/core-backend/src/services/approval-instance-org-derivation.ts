@@ -4,8 +4,10 @@
  *
  * Ratified design: docs/development/approval-lock11-writer-org-derivation-20260822.md (RATIFIED
  * 2026-08-22, design only — see §10 for the binding rulings this slice implements). This module
- * lands ONLY the shared arm-(a) derivation used by W-1 (`POST /api/approvals`) and W-2 (the
- * multitable automation `start_approval` bridge) — see the lock §3-§7 for the full provenance.
+ * originally landed ONLY the shared arm-(a) derivation used by W-1 (`POST /api/approvals`) and
+ * W-2 (the multitable automation `start_approval` bridge) — see the lock §3-§7 for the full
+ * provenance. `deriveApprovalInstanceOrgIdWithSelector` below adds W-4's arm (f)-with-arm-(a)-
+ * fallback on top, additively — W-1/W-2 callers are untouched.
  *
  * RULED ARMS THIS MODULE IMPLEMENTS (§10, not re-litigated here):
  *   D-3  Arm (a) — derive from the KEYING USER's active `user_orgs` memberships. Exactly one
@@ -49,7 +51,9 @@ export type ApprovalOrgDerivationQueryFn = (
  *     `markBridgeFailed` then rethrows, so no new failure plumbing is needed.
  */
 export class ApprovalOrgUnresolvedError extends Error {
-  constructor(public readonly reason: 'zero_memberships' | 'multiple_memberships') {
+  constructor(
+    public readonly reason: 'zero_memberships' | 'multiple_memberships' | 'selector_not_permitted',
+  ) {
     super('Approval instance org could not be resolved for the keying user')
     this.name = 'ApprovalOrgUnresolvedError'
   }
@@ -85,4 +89,50 @@ export async function deriveApprovalInstanceOrgId(
     return orgIds[0]
   }
   throw new ApprovalOrgUnresolvedError(orgIds.length === 0 ? 'zero_memberships' : 'multiple_memberships')
+}
+
+/**
+ * W-4 arm (f) with arm (a) fallback (Lock-11 §10 resolution table, D-1/D-9/D-11(ii); ratified
+ * design doc §10.3 item scope). OD-L11-2 arm (i) — one derivation home: this stays in the SAME
+ * module as `deriveApprovalInstanceOrgId` rather than minting a second primitive elsewhere.
+ *
+ * `requestNamedOrgId === null` ⇒ no selector on the request ⇒ delegate unchanged to arm (a)
+ * (`deriveApprovalInstanceOrgId`) — zero/multi memberships refuse exactly as W-1/W-2 do.
+ *
+ * `requestNamedOrgId !== null` ⇒ arm (f): the named org must be one of the SUBJECT's (the
+ * `keyingUserId` passed in — the ATTENDANCE REQUEST'S SUBJECT, not necessarily the acting user;
+ * see W-4's cross-user schedule-dispatch call site) active `user_orgs` memberships. Single
+ * `is_active` (D-9), exact-string compare, NO `users` join — deliberately narrower than the
+ * boundary's `requireActiveMembership` + `requireActiveUser` conjunction (w4c0-authorization.ts),
+ * which stays exactly as shipped. This is a new, narrower SUBJECT-only check the writer adds on
+ * top, not a replacement for the boundary's actor∧subject conjunction.
+ *
+ * `queryFn` MUST be bound to the open transaction client (same TOCTOU discipline as arm (a)).
+ */
+export async function deriveApprovalInstanceOrgIdWithSelector(
+  queryFn: ApprovalOrgDerivationQueryFn,
+  keyingUserId: string,
+  requestNamedOrgId: string | null,
+): Promise<string> {
+  if (requestNamedOrgId === null) {
+    return deriveApprovalInstanceOrgId(queryFn, keyingUserId)
+  }
+
+  const uid = typeof keyingUserId === 'string' ? keyingUserId.trim() : ''
+  const namedOrgId = typeof requestNamedOrgId === 'string' ? requestNamedOrgId.trim() : ''
+  if (!uid || !namedOrgId) {
+    throw new ApprovalOrgUnresolvedError('selector_not_permitted')
+  }
+
+  // Byte-shape follows arm (a)'s SQL (D-9: single is_active, no users join) with one extra
+  // `org_id = $2` conjunct — deliberately narrower than the boundary's own membership check,
+  // never joined against `users` (that liveness question belongs to the boundary, not here).
+  const result = await queryFn(
+    `SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE`,
+    [uid, namedOrgId],
+  )
+  if (Array.isArray(result.rows) && result.rows.length > 0) {
+    return namedOrgId
+  }
+  throw new ApprovalOrgUnresolvedError('selector_not_permitted')
 }

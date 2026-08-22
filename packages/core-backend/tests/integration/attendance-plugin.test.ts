@@ -214,6 +214,21 @@ const attendanceIntegrationDescribe = attendanceIntegrationDbUrl ? describe : de
 const attendanceIntegrationMissingDbMessage =
   'Attendance integration tests require ATTENDANCE_TEST_DATABASE_URL or DATABASE_URL; skipping instead of silently returning.'
 
+// Lock-11 §10 W-4 fixture delta (spec §11 "Class A"): a subject with zero active `user_orgs`
+// memberships now 422s (APPROVAL_ORG_UNRESOLVED) at the writer when creating an attendance
+// request/outdoor-punch/schedule-dispatch/shift-swap — this file's dev-token users write no
+// such row. `orgId` defaults to `'default'` (the getOrgId(req) fallback every fixture below
+// relies on when it never sends an explicit org selector). `ON CONFLICT ... DO UPDATE SET
+// is_active = TRUE` (not DO NOTHING): a suite that previously deactivated this same
+// (user, org) pair for some OTHER negative must not leave a stale inactive row here.
+async function seedAttendanceOrgMembershipForTest(pool: Pool, userId: string, orgId = 'default'): Promise<void> {
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [userId, orgId],
+  )
+}
+
 async function requireAttendanceTable(pool: Pool, tableName: string): Promise<void> {
   const tableCheck = await pool.query(`SELECT to_regclass($1) AS name`, [`public.${tableName}`])
   if (!tableCheck.rows[0]?.name) {
@@ -6381,6 +6396,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6798,6 +6814,7 @@ attendanceIntegrationDescribe(
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -6992,6 +7009,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const ruleRes = await requestJson(`${baseUrl}/api/attendance/overtime-rules`, { method: 'POST', headers, body: JSON.stringify({ name: `ns3-ot-${runSuffix}`, minMinutes: 0, roundingMinutes: 1 }) })
@@ -7168,6 +7186,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
@@ -7306,6 +7325,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(settingsRowPool!, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
       originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
@@ -7377,6 +7397,7 @@ attendanceIntegrationDescribe(
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
@@ -7534,7 +7555,7 @@ attendanceIntegrationDescribe(
       adminToken = await tokenFor(`attendance-v12b-admin-${runSuffix}`)
       if (!adminToken) return
       const tokens: Record<string, string> = {}
-      for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; tokens[k] = t }
+      for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; await seedAttendanceOrgMembershipForTest(pool, uid); tokens[k] = t }
       const ensureLeaveType = async (code: string) => {
         const res = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken!), body: JSON.stringify({ code, name: `${code} ${runSuffix}`, paid: false, requiresApproval: true }) })
         expect([201, 409]).toContain(res.status)
@@ -7621,6 +7642,7 @@ attendanceIntegrationDescribe(
       const tokenShort = await tokenFor(uShort)
       const tokenFifo = await tokenFor(uFifo)
       if (!tokenOk || !tokenShort || !tokenFifo) return
+      for (const uid of [uOk, uShort, uFifo]) await seedAttendanceOrgMembershipForTest(pool, uid)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       // comp_time leave type (explicit code='comp_time'); idempotent across reruns (409 -> look it up).
@@ -7743,6 +7765,7 @@ attendanceIntegrationDescribe(
       process.env.RBAC_BYPASS = 'true'
       adminTok = await tokenFor(`al-l3-admin-${runSuffix}`)
       if (!adminTok) return
+      for (const uid of allUsers) await seedAttendanceOrgMembershipForTest(pool, uid)
 
       // policy standardDayMinutes=480, deliberately DISTINCT from the leave type's defaultMinutesPerDay=600 below,
       // so a full (600-min) day deducts the 8h STANDARD day (480), proving the entitlement basis ≠ scheduled minutes.
@@ -7905,6 +7928,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
       const origRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${token}` } })
       originalSettings = ((origRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}) as Record<string, unknown>
@@ -9884,6 +9908,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
@@ -11753,6 +11778,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestedInAt = new Date().toISOString()
@@ -11831,6 +11857,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const workDate = new Date().toISOString().slice(0, 10)
     const requestReason = 'I need to correct the check-in time from the kiosk.'
@@ -12022,6 +12049,7 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) return
+    await seedAttendanceOrgMembershipForTest(settingsRowPool!, testUserId)
 
     const pickFutureWeekday = (): string => {
       const cursor = new Date('2029-03-01T00:00:00.000Z')
@@ -18886,6 +18914,8 @@ attendanceIntegrationDescribe(
       const token = await tokenFor(userId)
       const tokenExp = await tokenFor(userExp)
       if (!token || !tokenExp) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
+      await seedAttendanceOrgMembershipForTest(pool, userExp)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       // comp_time leave type (explicit code='comp_time'; idempotent across reruns → 409 then look up)
@@ -18990,6 +19020,7 @@ attendanceIntegrationDescribe(
       const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
+      await seedAttendanceOrgMembershipForTest(pool, userId)
       const hdr = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
 
       const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr, body: JSON.stringify({ code: 'comp_time', name: `Comp Time L7x ${runSuffix}`, paid: false, requiresApproval: true }) })
@@ -19082,6 +19113,7 @@ attendanceIntegrationDescribe(
       const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
       const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
       if (!adminToken || !otherToken) return
+      await seedAttendanceOrgMembershipForTest(pool, adminU)
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
 
       const ltRes = await requestJson(`${baseUrl}/api/attendance/leave-types`, { method: 'POST', headers: hdr(adminToken), body: JSON.stringify({ code: 'comp_time', name: `Comp Time Auth ${runSuffix}`, paid: false, requiresApproval: true }) })

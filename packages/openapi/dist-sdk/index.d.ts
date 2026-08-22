@@ -997,6 +997,21 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Outdoor-approval leg only — reachable from POST /api/attendance/punch when an outdoor punch requires approval and enters the request_create boundary. Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -1439,6 +1454,21 @@ export interface paths {
                 400: components["responses"]["ValidationError"];
                 401: components["responses"]["Unauthorized"];
                 403: components["responses"]["Forbidden"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -1550,6 +1580,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         post?: never;
@@ -1856,6 +1901,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;
@@ -2180,6 +2240,21 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
                 404: components["responses"]["NotFound"];
                 409: components["responses"]["Conflict"];
+                /** @description APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id. */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            error: {
+                                /** @enum {string} */
+                                code: "APPROVAL_ORG_UNRESOLVED" | "APPROVAL_ORG_SELECTOR_NOT_PERMITTED";
+                                message: string;
+                            };
+                        };
+                    };
+                };
             };
         };
         delete?: never;

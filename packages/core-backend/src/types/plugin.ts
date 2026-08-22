@@ -1207,6 +1207,32 @@ export interface PluginServices {
       readonly referenceSegments: boolean
     }>
     /**
+     * Lock-11 §10 W-4 — least-privilege access to the ONE org-derivation primitive
+     * (`services/approval-instance-org-derivation.ts`) for `approval_instances.org_id`
+     * writer-side stamping in `upsertAttendanceApprovalInstance`. Result-shaped (never throws
+     * a host error class across the plugin boundary — the plugin must not `instanceof` a host
+     * error, see feedback_attack_your_own_criterion): `ok: true` with the org to stamp, or
+     * `ok: false` with one of the three values-free refusal reasons. `trxQuery` MUST be bound
+     * to the plugin's own open transaction client (same TOCTOU discipline as W-1/W-2's
+     * in-transaction derivation call).
+     *
+     * `requestNamedOrgId === null` ⇒ arm (a) (subject's single active membership).
+     * `requestNamedOrgId !== null` ⇒ arm (f): the named org validated against the SUBJECT's
+     * (`subjectUserId`) active `user_orgs` memberships — falls through to the same refusal
+     * reason set on a miss.
+     */
+    deriveApprovalInstanceOrgIdForAttendanceSubjectV1(input: {
+      trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+      subjectUserId: string
+      requestNamedOrgId: string | null
+    }): Promise<
+      | { readonly ok: true; readonly orgId: string }
+      | {
+          readonly ok: false
+          readonly reason: 'zero_memberships' | 'multiple_memberships' | 'selector_not_permitted'
+        }
+    >
+    /**
      * W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round) — lock
      * §8.2 step 7 second clause ("source-definition fingerprint equality").
      * Pure; no DB access. The route calls this with its OWN pre-transaction

@@ -70,6 +70,15 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
 
   async function mintToken(userId: string, perms: string): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Lock-11 §10 W-4 fixture delta: schedule-dispatch's route.orgId is session-derived
+    // (getAuthenticatedOrgId) — per the punch-route precedent, session fields are NEVER a
+    // "named" selector, so arm (a) always applies here regardless of `tenantId` above. Seed
+    // exactly one active membership in ORG so arm (a) resolves for every subject/actor minted.
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
@@ -162,6 +171,17 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
   }
 
   async function createScheduleDispatchRequest(token: string, payload: Record<string, unknown>): Promise<string> {
+    // Lock-11 §10 W-4: schedule-dispatch is cross-user capable — the derivation's SUBJECT is
+    // `payload.userId` (the dispatch TARGET), which may differ from the actor whose token
+    // mints this request and may never have had mintToken called for it. Seed the target too.
+    const targetUserId = payload.userId
+    if (typeof targetUserId === 'string' && targetUserId) {
+      await pool.query(
+        `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+        [targetUserId, ORG],
+      )
+    }
     const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
       method: 'POST',
       headers: authHeaders(token),
@@ -315,6 +335,13 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       reason: `${prefix} support`,
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     try {
       const create = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
         method: 'POST',
@@ -705,6 +732,13 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       slotIndex: 0,
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, ORG],
+    )
     try {
       const [first, second] = await Promise.all([
         requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
@@ -796,6 +830,15 @@ describeDb('schedule-dispatch D1 contract (real DB, route-level)', () => {
       endDate: '2049-08-20',
       approvalFlowId,
     }
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is the dispatch TARGET
+    // (payload.userId), which bypasses mintToken here (this test drives the raw HTTP call).
+    // Membership does not bypass the scheduler-scope checks this test exercises earlier
+    // (those refuse 403 before the writer is ever reached).
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [dispatchedUserId, ORG],
+    )
     try {
       process.env.RBAC_BYPASS = 'false'
       const noScope = await requestJson(`${baseUrl}/api/attendance/schedule-dispatch-requests`, {
