@@ -42,7 +42,6 @@
 #        writes. NOTE: register runs FIRST and commits its own row, so a login that then fails on
 #        a 500/network error may leave a plain (role='user', no admin membership) row behind — that
 #        is harmless and the script is safe to re-run (register is idempotent, promotion never ran).
-#        writes — it never reaches the promotion.
 #     3. Promote BY that verified data.user.id (not by an email lookup), in the one
 #        atomic transaction below. The net invariant: NO code path grants admin to
 #        an account we did not just authenticate.

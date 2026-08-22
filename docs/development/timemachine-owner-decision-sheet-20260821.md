@@ -33,7 +33,7 @@
 **B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**代码侧尚未全满足(截至 2026-08-21 第四轮复审)**。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077)。**未完:F1 建号脚本提权漏洞 fix-forward(第四轮新发现)**;F2 设 required 是 owner 动作。全部完成 + staging 实跑 PASS 才可 ratify。已闭合缺陷存档:
+- 前置:**代码侧已闭合;仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)。**未满足的全是 owner/ops**:F2 设 required、F3 双主机新指纹证据、#5039 staging pending=0、建号 + 电池实跑 PASS。四者齐备才可 ratify。已闭合缺陷存档:
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`。**已闭合**(#5069 workflow always() 清理 → #5076 停止容器诚实枚举 → #5080/#5084 建号脚本 stdin-only+trap;全过独立复门)。
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
@@ -77,7 +77,7 @@
 - **F3 · search_path 根修 —— 已落 main(#5081 `d3289945e1`)**:新迁移 schema-qualified 调用 + 固定 `SET search_path=pg_catalog,public`;函数指纹 `14c180aa→e4a78f6c`;triggers 不变 9/9 DISABLED;真库反例全 5 触发器路径均被防(复门 APPROVE)。
   **⚠️ ops 协调**:迁移使 prod 函数变新指纹**仅在迁移跑时生效**;镜像落但迁移未应用时跑 postdeploy-full 会 FAIL 在 config 字段=**预期(config-field)非 drift**,迁移须先于 containment/L1 dispatch。**⚠️ 待补:新指纹的双主机 postdeploy-full 证据尚未取。**
 - **F4 · 旧 Time Machine PR 处置(可并行)**:整条线仍有 #4216 / #4219 / #4224 / #4205 / #4204 / #4200 / #3805 全 OPEN,逐个复核 superseded/parked 后关闭或标注(#4205 已知 T-state parked)。
-- **F5 · P3(第四轮):#5080 golden readiness 竞态**:`pg_isready` 后即连目标库(可能库未建好即返回)——PR 跑一度 19/20,应改**目标库上 `SELECT 1` 循环**。随 F1 同轮修。
+- **F5 · P3(第四轮):#5080 golden readiness 竞态 — ✅ CLOSED**:`pg_isready` 后即连目标库(可能库未建好即返回)——PR 跑一度 19/20。**已改为目标库上 `SELECT 1` 循环(`waitForTargetDbQueryable`),随 F1 同轮落 main #5084 `162679992e`**;goldens 连跑无 flake。
 - **F6 · P3-1(可选硬化)**:`recovery-authorization-stability.ts` 的函数指纹与 containment 常量无机械交叉守卫——将来改一份漏另一份会静默再破生产 lease。可加一条断言绑定。
 
 ## E. 阶梯执行(全 owner-gated,日历为瓶颈,非开发)
