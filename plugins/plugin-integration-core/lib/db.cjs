@@ -232,6 +232,52 @@ function createDb({ database, logger } = {}) {
     return database.query(sql, values)
   }
 
+  /**
+   * Single-statement UPSERT on a UNIQUE key: INSERT … ON CONFLICT (cols) DO UPDATE.
+   *
+   * Added under the module header's own extension clause ("added here as a new validated method"),
+   * not as a raw-SQL escape hatch: the table, every row column and every conflict column pass the
+   * same identifier whitelist as insertOne/updateRow, and every value is parameterized.
+   *
+   * Why a real UPSERT rather than selectOne-then-insert/update: the select-then-write shape has a
+   * race window in which two concurrent writers both see "absent" and the second INSERT dies on the
+   * unique index. Ledgers that are keyed by a natural identity (see
+   * integration_stock_prep_pack_installs) need the atomic form so a re-install is idempotent under
+   * concurrency, which is exactly the discipline the after-sales install ledger uses.
+   *
+   * `conflictColumns` names the UNIQUE index columns. `updateColumns` defaults to every row column
+   * that is not a conflict column; passing it narrows what a conflict may overwrite (an
+   * insert-only-immutable column such as `created_at` stays out).
+   */
+  async function upsertOne(table, row, { conflictColumns, updateColumns } = {}) {
+    const tableIdent = quoteIdent(assertTable(table))
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw new Error('upsertOne: row must be a plain object')
+    }
+    if (!Array.isArray(conflictColumns) || conflictColumns.length === 0) {
+      throw new Error('upsertOne: conflictColumns must be a non-empty array (refusing an unkeyed UPSERT)')
+    }
+    const cols = Object.keys(row)
+    if (cols.length === 0) throw new Error('upsertOne: row must have at least one column')
+    const conflictIdents = conflictColumns.map((c) => quoteIdent(assertColumn(c)))
+    const colIdents = cols.map((c) => quoteIdent(assertColumn(c))).join(', ')
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
+    const values = cols.map((c) => prepareParamValue(row[c]))
+    const conflictSet = new Set(conflictColumns)
+    const updatable = Array.isArray(updateColumns)
+      ? updateColumns.filter((c) => !conflictSet.has(c))
+      : cols.filter((c) => !conflictSet.has(c))
+    if (updatable.length === 0) {
+      throw new Error('upsertOne: no updatable column remains (use insertOne for insert-only writes)')
+    }
+    const setPairs = updatable
+      .map((c) => `${quoteIdent(assertColumn(c))} = EXCLUDED.${quoteIdent(c)}`)
+      .join(', ')
+    const sql = `INSERT INTO ${tableIdent} (${colIdents}) VALUES (${placeholders})`
+      + ` ON CONFLICT (${conflictIdents.join(', ')}) DO UPDATE SET ${setPairs} RETURNING *`
+    return database.query(sql, values)
+  }
+
   async function insertMany(table, rows) {
     if (!Array.isArray(rows)) throw new Error('insertMany: rows must be an array')
     if (rows.length === 0) return []
@@ -322,6 +368,7 @@ function createDb({ database, logger } = {}) {
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,
         insertOne: scoped.insertOne,
+        upsertOne: scoped.upsertOne,
         insertMany: scoped.insertMany,
         updateRow: scoped.updateRow,
         deleteRows: scoped.deleteRows,
@@ -338,6 +385,7 @@ function createDb({ database, logger } = {}) {
     selectOne,
     selectOneForUpdate,
     insertOne,
+    upsertOne,
     insertMany,
     updateRow,
     deleteRows,

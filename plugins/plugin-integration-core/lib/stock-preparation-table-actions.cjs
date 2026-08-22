@@ -686,13 +686,24 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 
 // `installedFieldProperties` (OPTIONAL) is the ownership projection of what is actually
 // installed on the target sheet — the `property.stockPreparation` stanza per column. It is
-// threaded through, never fetched here: this module has no fields-listing primitive
-// (multitable provisioning exposes only per-field getObjectField, and no pack-installation
-// registry exists to enumerate the pack's ids), so today's HTTP route supplies nothing and
-// the planner falls back to the frozen-template bands. That LEGACY POSTURE is safe by
-// construction — omission yields exactly the pre-pack writable set — and the parameter is
-// the seam a caller that can enumerate installed fields plugs into without touching the
-// pure planner. See derivePackAwarePlmWritableFields in the conflict planner.
+// threaded through, never fetched here: this module still has no fields-listing primitive
+// (multitable provisioning exposes only per-field reads, and adding an enumeration primitive
+// would be a plugin-API contract change handing every plugin whole-schema access).
+//
+// THE SEAM IS NOW PLUGGED IN. The gap this comment used to describe — "no pack-installation
+// registry exists to enumerate the pack's ids, so today's HTTP route supplies nothing" — was
+// closed by the customer-pack INSTALL LEDGER (integration_stock_prep_pack_installs, migration
+// 076) plus the read-back seam in stock-preparation-pack-installed-fields.cjs: the ledger names
+// the candidate `ext_` ids, readObjectFieldsContent says which of them are still live and how
+// they are classified, and the small-BOM dry-run/apply routes now supply the result here. The
+// large-BOM checkpoint path still supplies nothing and stays on the legacy bands; it plans into
+// a stored job, so wiring it is a separate change.
+//
+// The LEGACY POSTURE remains safe by construction and remains the fallback: omission yields
+// exactly the pre-pack writable set, and since the pack's `ext_` columns are then in neither
+// band, the refresh writes strictly FEWER columns rather than more. That is why the seam
+// degrades to `undefined` on any ledger/host read failure instead of failing the refresh.
+// See derivePackAwarePlmWritableFields in the conflict planner.
 async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties }) {
   const expansion = await expandPlmProjectBom({
     sourceAdapter,
