@@ -1994,3 +1994,31 @@ provisioning migration, subject to the binding ordering above. Does NOT authoriz
 ledger row per Lock-10 §5.1.2), Phase 3 `SET NOT NULL`, `APPROVAL_ATTACHMENTS_ENABLED` ON, any staging/
 prod flag change, or the OD-S1-18 scope change (recorded as an activation precondition only). No
 verification claim is made by this block: §4's gates specify acceptance; none has run at ratification.
+
+### 10.3 Seventh by-reference ruling (2026-08-22) — closeout-plan amendments from the max-effort review
+
+**Provenance.** A Fable-5 max-effort adversarial review of the closeout plan
+(/tmp/closeout-approach-review-20260822.md, archived copy in soak-working/) returned
+PLAN-NEEDS-AMENDMENTS; the executing session presented four items; the owner replied 「按建议执行」
+(2026-08-22, the SEVENTH by-reference reply). The reply covers items 1–3; item 4 (attachments-flag UAT
+actor/env/checklist) requires owner-authored content and remains OPEN. The referenced items, verbatim:
+
+> 1. **gap-closer 迁移**(P1-2):同 (i)-guarded 模式的第二个收口迁移,折进 W1W2 切片、随其部署执行——把「Migration B 一次性执行→W1W2 上线」之间产生的 NULL 行窗口结构性归零。建议:**授权**;
+> 2. **阶段 3 步骤改名**(P2-1):ratified 记录的正确形是 `CHECK (org_id IS NOT NULL OR id LIKE 'plm:%')`(+afs: 按 D-2),不是字面 `SET NOT NULL`;G-S1-12-FULL 的 `is_nullable='NO'` 在该 CHECK 下不可满足,需在阶段 3 锁起草时 ratify-first 重述。建议:**采纳改名与重述路径**;
+> 3. **激活前置追加**(P2-4):「激活 dispatch 时 u1b=0」为具名前置;准入修复(防回灌)开 tracked 项,建议排在激活前落地。建议:**采纳**;
+> 4. **附件 flag UAT**(P3-4):需要你指定 UAT 的执行人/环境/清单。 [NOT covered — needs owner-authored content]
+
+| Item | Ruling | Effect |
+|---|---|---|
+| 1 gap-closer | **AUTHORIZED** | a second (i)-guarded backfill migration (same single-org self-assertion, FAIL-LOUD, same class semantics over `org_id IS NULL` platform rows) rides the W-1/W-2 slice and executes at ITS deploy — the Migration-B→W1W2 creation window becomes structurally nil |
+| 2 Phase-3 renaming | **ADOPTED** | the plan step is "OD-S1-18(b) CHECK (+`afs:` per D-2) + D-5 fold + G-S1-12-FULL ratify-first restatement", never literal `SET NOT NULL`; the restatement happens when the Phase-3 lock is drafted |
+| 3 activation preconditions | **ADOPTED** | org-pin activation dispatch requires **u1b = 0** (split probes: no-row AND only-deactivated-row both zero) and re-checks u1a=1 (STOP on >1 — D-10 reopens); the admission-step fix (refill class) is a TRACKED item recommended before activation |
+| 4 attachments UAT | **OPEN** | needs owner-authored actor/env/checklist; not reachable by a by-reference reply to a list that carried no recommendation content |
+
+Session-executed under existing authorization (recorded, not new grants): u1b split probes + the
+mandatory prod evidence dispatch between #5103's deploy and the W-1/W-2 merge (merge gated on u1b=0);
+staging U1 probes moved outside the NOT_APPLIED short-circuit with pre-measurement before the staging
+catch-up; the (β) mechanical tripwire (migration-presence assertion in each writer suite; no armed
+auto-merge while #5103 is open); the evidence-workflow read-only gate (o2 precedent); W-4 scout/gate at
+max effort.
+
