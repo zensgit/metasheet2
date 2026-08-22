@@ -20,7 +20,7 @@
 
 | # | Migration | Owning line | DDL/DML summary | Scanner risk (actual) | Real risk | Idempotent? | Lock/availability impact | Blast radius on 8 platform-auth tables / `meta_links` / `meta_record*` |
 |---|---|---|---|---|---|---|---|---|
-| 1 | `zzzz20260817120000_add_handle_action_to_approval_records` | Approval | Widens `approval_records_action_check` 14→15 members (adds `handle`) | **high** | False positive — idempotent CHECK swap | Yes (`DROP CONSTRAINT IF EXISTS` + deterministic re-`ADD`) | `ACCESS EXCLUSIVE` briefly, validating scan (no `NOT VALID`); superset of old CHECK so cannot fail on existing rows | Zero — ALTERs only `approval_records`, no new FK |
+| 1 | `zzzz20260817120000_add_handle_action_to_approval_records` | Approval | Widens `approval_records_action_check` 14→15 members (adds `handle`) | **high** | False positive — idempotent CHECK swap | Yes (`DROP CONSTRAINT IF EXISTS` + deterministic re-`ADD`) | `ACCESS EXCLUSIVE`, validating full-table scan (no `NOT VALID`) — **and #3 does it a SECOND time on the same table**. Superset-of-old-CHECK argument holds ONLY IF every existing row satisfies the OLD check — an unverified historical premise. **Read-only pre-check required** (see §7) | Zero — ALTERs only `approval_records`, no new FK |
 | 2 | `zzzz20260817130000_create_approval_form_field_revisions` | Approval | New table `approval_form_field_revisions` (10 cols, BIGSERIAL PK) + 1 index | low | Low | Yes (`CREATE TABLE/INDEX IF NOT EXISTS`) | Negligible — new empty table | Zero — no FK anywhere in the table |
 | 3 | `zzzz20260818090000_add_policy_denied_action_to_approval_records` | Approval | Widens `approval_records_action_check` 15→16 members (adds `policy_denied`) | **high** | False positive — same idiom as #1 | Yes | Same as #1 | Zero — same table as #1, no new FK |
 | 4 | `zzzz20260818120000_create_approval_usable_member_groups` | Approval | New table `approval_usable_member_groups` (org_id, group_id, created_by, created_at) + conditional composite PK + 1 index; guarded no-op if `platform_member_groups` absent | low | Low | Yes (`checkTableExists` + `.ifNotExists()` + `pg_constraint` guard before `ADD PRIMARY KEY`) | Negligible — new/near-empty table | **Two outward FKs**: `group_id → platform_member_groups.id` (adjacent to, but not one of, the 8 named tables) and `created_by → users.id` (one of the 8) |
@@ -35,7 +35,7 @@
 
 **Scanner-actual flags** (from the real script, run against this file): `hasDropStatement=true` (matches `\bDROP\s+CONSTRAINT\b`), `hasCreateTableWithoutIfNotExists=false`, `hasKyselyCreateTableWithoutIfNotExists=false` → `risk=high`, reason string `"Migration up path contains non-idempotent-looking CREATE TABLE or DROP statement."` The heuristic's `DROP` regex does not special-case `DROP CONSTRAINT IF EXISTS` followed by a same-name `ADD CONSTRAINT` — it flags any `DROP CONSTRAINT` token regardless. **This is the same false-positive shape the 2026-08-20 disposition note found for its own first migration** (`add_handle_action_to_approval_records` is in fact the identical migration — the 2026-08-20 note and this report cover the same file).
 
-Real risk: the new CHECK is a strict superset of the old one (only adds `handle`), so the mandatory validation scan that `ADD CONSTRAINT ... CHECK` (no `NOT VALID`) performs cannot fail against any pre-existing row. The `DROP`→`ADD` pair executes inside kysely's one-transaction-per-migration wrapper, so `ACCESS EXCLUSIVE` is held continuously — there is no window where the constraint is absent and a session could insert a value outside either CHECK.
+Real risk: the new CHECK is a strict superset of the old one (only adds `handle`), so the mandatory validation scan **cannot fail against any row that satisfies the OLD check**. ⚠️ **That is a STATIC argument resting on a HISTORICAL premise this report did NOT verify** — that the old CHECK was continuously present and validated, so no row violating it was ever admitted. If the constraint was ever added `NOT VALID`, dropped for a window, or the data predates it, a violating row can exist and the scan WILL fail. **This premise is only answerable from the data — run the read-only pre-check in §7 before applying. Do not treat the superset argument as a substitute for it.** The `DROP`→`ADD` pair executes inside kysely's one-transaction-per-migration wrapper, so `ACCESS EXCLUSIVE` is held continuously — there is no window where the constraint is absent and a session could insert a value outside either CHECK.
 
 `down()`: drops the widened CHECK and re-adds the 14-member form `NOT VALID`. `NOT VALID` means Postgres does not re-scan existing rows, but **does** enforce the narrower CHECK going forward — so a rollback does not delete any `handle` rows already written, but a fresh `handle` write after rollback would be rejected (`23514`). This is a real, working rollback of the constraint shape, not a no-op; it does not purge history, by explicit design (comment: "any `handle` rows written while the widened constraint was live are left in place").
 
@@ -47,7 +47,7 @@ Scanner-actual: `hasCreateTableWithoutIfNotExists=false` (the `IF NOT EXISTS` cl
 `down()`: `DROP INDEX IF EXISTS` + `DROP TABLE IF EXISTS` — destructive of any accumulated revision rows (this is a genuinely different risk shape from #1/#3's down, which only narrows a CHECK; this one deletes data). On staging this table does not exist yet, so at the point of any near-term rollback there is nothing to lose — but the down statement itself is destructive, not merely narrowing.
 
 ### #3 `zzzz20260818090000_add_policy_denied_action_to_approval_records`
-Byte-for-byte the same idiom as #1: `DROP CONSTRAINT IF EXISTS` + re-`ADD` widening `approval_records_action_check` 15→16 (adds `policy_denied`). Scanner-actual: `hasDropStatement=true` → `risk=high`, same reason string as #1. Same false-positive analysis applies verbatim: new CHECK is a strict superset, no `NOT VALID` but the superset relationship guarantees the validation scan cannot fail, single-transaction DROP→ADD leaves no bare window. `down()` mirrors #1's pattern (`NOT VALID`, forward-only narrowing, no history purge).
+Byte-for-byte the same idiom as #1: `DROP CONSTRAINT IF EXISTS` + re-`ADD` widening `approval_records_action_check` 15→16 (adds `policy_denied`). Scanner-actual: `hasDropStatement=true` → `risk=high`, same reason string as #1. Same false-positive analysis applies verbatim, **including the same caveat**: the superset relationship guarantees the scan cannot fail only for rows satisfying the OLD check — the unverified historical premise (see #1 and §7). Single-transaction DROP→ADD leaves no bare window. **Note this is the SECOND validating full-table scan + `ACCESS EXCLUSIVE` on `approval_records` in the same batch** (after #1); budget the window for both. `down()` mirrors #1's pattern (`NOT VALID`, forward-only narrowing, no history purge).
 
 One sequencing note: #3's `up()` unconditionally rebuilds the CHECK from a fixed 16-member list (it does not read the current constraint state), so it does not structurally *require* #1 to have already run — but by filename order (`0817120000` < `0818090000`) it always will have.
 
@@ -161,3 +161,38 @@ That document is a **verification record** for the alignment-report tool (it rec
 对齐扫描器的 `extractUpSource()` **只截取 `up()` 函数体**。任何把 DDL 委托给 `up()` 之前定义的 helper 的迁移,其真实 DDL **完全在截取范围之外**——本报告 #7(我们的 F3)正是这种形状:六条 `CREATE OR REPLACE FUNCTION` 全在 helper 里,扫描器只看到约百字符的包装器。
 
 **含义:扫描器对这种形状系统性低报风险**,不能仅凭其分级下结论。这与"高风险多为 `DROP CONSTRAINT IF EXISTS` 启发式误报"是**相反方向**的偏差——一个高报、一个低报,两者都要记住。
+
+---
+
+## 7. 执行前的只读预检(owner 通知 2026-08-22 要求;本报告据此更正)
+
+本报告初版对两条 CHECK 加宽写了"新 CHECK 是旧的严格超集,故不可能败于存量行"。**该断言过强**:它是静态推理,却依赖一个**本报告未曾查证的历史前提**——旧 CHECK 一直在位且被验证过,因而从未进过违反它的行。若该约束历史上曾以 `NOT VALID` 加入、曾被 drop 过一段窗口、或数据早于约束存在,违反行就可能存在,验证扫描**会失败**。
+
+**这是同一类错误的第三次**(前两次:"全部迁移零 DML 故不受既有数据形态影响"——由考勤线撤回;以及 `add_approval_instance_org_id` 的跨组织冲突):**把只能靠数据回答的问题,当成静态可判**。
+
+### 预检一(两条 CHECK 加宽,验证前提)
+
+只读,对真实 staging(或彩排库)跑;返回非空即**不得直接应用**:
+
+```sql
+-- 是否存在超出目标枚举的历史 action 值(目标枚举以迁移里的 actionCheck(...) 为准)
+SELECT action, count(*)
+  FROM approval_records
+ GROUP BY action
+ ORDER BY 2 DESC;
+```
+把结果与两条迁移各自的枚举列表比对。任何不在最终 16 项内的值 ⇒ `ADD CONSTRAINT` 会失败,须先裁决该历史值(修数据 / 再加宽枚举 / 用 `NOT VALID` 并另行清理)。
+
+### 预检二(`add_approval_instance_org_id` 的跨组织冲突)
+
+该迁移 up() 内已自带前置检查并在冲突时 `throw`。**在真实数据上先只读跑一遍同形查询**,避免在应用窗口里才发现:见迁移文件内 `conflicts` 查询(约 121-133 行),照抄为只读 SELECT 执行。
+
+### 锁窗口预算
+
+#1 与 #3 **各做一次** `approval_records` 全表验证扫描并持 `ACCESS EXCLUSIVE`——**同一批里连做两次**。按 staging 上 `approval_records` 的实际行数估算窗口,不要按"两条都是加宽所以很快"想当然。
+
+### 关于"冻结"的范围(避免歧义)
+
+owner 建议钉一个 SHA 并冻结携带迁移的合并。**建议明确:冻结范围是"新增迁移文件"的合并,其他改动照常**,否则易被理解为全线停合。措辞可用:
+
+> 自 `<pinned SHA>` 起,冻结**新增迁移文件**的合并(其余 PR 照常),直至本批彩排 + 应用完成。
