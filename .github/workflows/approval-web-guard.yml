@@ -36,6 +36,7 @@ on:
       - 'apps/web/src/approvals/attachmentDownload.ts'
       - 'apps/web/src/stores/featureFlags.ts'
       - 'apps/web/tests/approval-attachment-upload.test.ts'
+      - 'apps/web/tests/approvalApiErrorSurfacing.spec.ts'
       - 'apps/web/tests/approval-attachment-refs.test.ts'
       - 'apps/web/tests/approval-attachment-download.test.ts'
       - 'apps/web/tests/featureFlagsApprovalAttachments.spec.ts'
@@ -327,6 +328,12 @@ on:
       # so an edit to either file never triggered this guard.
       - 'apps/web/src/approvals/useApprovalBatchActions.ts'
       - 'apps/web/tests/useApprovalBatchActions.spec.ts'
+      # Lock-9 OD-L9-10(a) (2026-08-22): process-attachment upload in the 评论 comment-action
+      # dialog + refs read path (flag-gated). `attachmentUpload.ts`/`attachmentRefs.ts`/
+      # `types/approval.ts`/`ApprovalDetailView.vue` already have path entries above.
+      - 'apps/web/tests/approval-attachment-upload-process.test.ts'
+      - 'apps/web/tests/approvalApiErrorSurfacing.spec.ts'
+      - 'apps/web/tests/approval-process-attachment-dialog.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
   push:
     branches: [main]
@@ -619,6 +626,10 @@ on:
       # P7-R1 (FAIL-0/FAIL-7): same set as the pull_request block above.
       - 'apps/web/src/approvals/useApprovalBatchActions.ts'
       - 'apps/web/tests/useApprovalBatchActions.spec.ts'
+      # Lock-9 OD-L9-10(a): same set as the pull_request block above.
+      - 'apps/web/tests/approval-attachment-upload-process.test.ts'
+      - 'apps/web/tests/approvalApiErrorSurfacing.spec.ts'
+      - 'apps/web/tests/approval-process-attachment-dialog.spec.ts'
       - '.github/workflows/approval-web-guard.yml'
 
 jobs:
@@ -755,4 +766,8 @@ jobs:
         # normalize whitelist) could previously break the approval 全文评论 tab silently, with
         # nothing in THIS lane re-running. `approval-comments-client`/`approval-comments-panel`
         # are the new S3b-specific specs (the adapter + the mounted tab wrapper).
-        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel --reporter=dot
+        # Lock-9 OD-L9-10(a) (2026-08-22): `approval-process-attachment-dialog` added here for the
+        # FIRST time — the mounted comment-dialog/timeline-render spec for the new process-attachment
+        # upload path. `approval-attachment-upload` above already substring-covers the sibling
+        # client-logic spec (approval-attachment-upload-process.test.ts) — no separate token needed.
+        run: pnpm --filter @metasheet/web exec vitest run approval-attachment-download approval-attachment-refs approval-attachment-upload approval-process-attachment-dialog featureFlagsApprovalAttachments approvalNewView searchApprovalDirectoryUsers approval-member-identity-coverage-enumeration approval-common-template-presets approvalTemplateAuthoring approval-detail-field approval-detail-record-table approval-record-link approval-record-link-picker approval-template-authoring-detail approval-template-authoring-graph-preserve approval-template-authoring-condition-edit approval-template-authoring-parallel-edit approval-template-authoring-cc-edit approval-template-authoring-approval-node-edit approval-template-authoring-canvas-inspector approval-template-authoring-complex-node-config-allowlist approval-template-authoring-threshold-timeout-compat approval-node-threshold-timeout-config approval-handler-node-authoring approval-handler-node-config approval-graph-topology-edit approval-graph-layout approval-canvas-viewport approval-version-graph-overlay approval-condition-summary amountAutoSum useAutoSumTotal approval-amount-in-words approval-form-draft lineDerivation approvalMobileI18n approvalMobileResponsive pageShell statusTag approval-e2e-lifecycle myDelegationView approvalDelegationView approvalDelegationStatus approval-e2e-permissions approvalCenterTable workflowHubView newTodoPill approval-urge-button-state approval-route-preview-controller approval-route-preview-summary approval-form-draft approval-amount-in-words approval-number-field-props approval-condition-summary approval-prefill-from-snapshot approval-upcoming-nodes approval-assignee-source approval-field-visibility templateGalleryFilter approvalTemplateCenterCategory approval-center approval-center-master-detail approval-center-detail-pane-controller approvalCenterRemindBadge approvalCenterUnreadBadge approvalCenterSourceFilter approval-graph-summary requesterPreviewFields routePreviewErrors approval-template-route-preview-api ui-foundation-style-guard uiFoundationTexture approval-template-authoring-linear-step-spine approvalDetailPolish asyncStateBlock approvalMetricsView approvalMetricsTopnReport approvalTemplateGovernance templateArchiveConfirm approvalTemplateVersionHistory approval-template-version-diff approval-template-authoring-policy-carrier useApprovalBatchActions approvalApiErrorSurfacing shared-comments-stub-client multitable-comments-panel approval-comments-client approval-comments-panel --reporter=dot
