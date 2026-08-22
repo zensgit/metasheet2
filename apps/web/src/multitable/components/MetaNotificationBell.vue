@@ -52,8 +52,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import { scheduleIdle } from '../../utils/scheduleIdle'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { useNotificationInbox } from '../composables/useNotificationInbox'
 import type { MetaRecordSubscriptionNotification } from '../types'
@@ -88,8 +89,17 @@ async function onItemClick(n: MetaRecordSubscriptionNotification): Promise<void>
   open.value = false
 }
 
-// Ambient badge: surface the unread count without requiring the panel to be opened.
-void refreshUnreadCount()
+// Ambient badge: surface the unread count without requiring the panel to be
+// opened — idle-deferred so it never competes with the sheet-open critical
+// path, and voided on unmount so a late idle callback cannot fetch into a
+// torn-down component.
+let bellAlive = true
+onBeforeUnmount(() => {
+  bellAlive = false
+})
+scheduleIdle(() => {
+  if (bellAlive) void refreshUnreadCount()
+})
 </script>
 
 <style scoped>

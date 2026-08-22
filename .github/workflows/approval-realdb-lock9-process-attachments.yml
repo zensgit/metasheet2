@@ -1,0 +1,167 @@
+name: Approval real-DB acceptance (Lock-9 process attachments)
+
+# EVIDENCE LANE for the Lock-9 (approver process attachments) real-DB acceptance suite:
+#   - tests/integration/approval-lock9-process-attachments-realdb.db.test.ts — G-1 (form_snapshot
+#     isolation), G-2 (bind_kind discriminator + CHECK), G-4 (participant predicate through the
+#     PRODUCTION wiring), G-5 (bind-time active-seat 403 + upload fail-fast), G-6 (bind atomicity /
+#     cross-instance refusal), G-7 (staged uploader-only reads), G-8 (process-scoped caps), G-11
+#     (values-free scoping), G-12 (flag-OFF byte-for-byte no-op, both gates), G-13 (GC reuse), G-14
+#     (DDL relaxation + ordering + rollback, isolated schema), G-16 (read scope posture).
+# No-DB gates (G-3, G-9, G-10, G-15, the G-4/G-16 absence grep) live in
+# tests/unit/approval-lock9-process-attachment-unit.test.ts, auto-collected by the required
+# test (18.x)/(20.x) jobs — no workflow wiring needed for those.
+#
+# Reference: docs/development/approval-lock9-handler-process-attachments-20260819.md (RATIFIED
+# 2026-08-21, §4.1 amendment applied — read canReadApprovalInstance, not isInstanceParticipant).
+# The attachments flag ships DEFAULT OFF (APPROVAL_ATTACHMENTS_ENABLED unset) everywhere; this lane
+# arms it IN-PROCESS around individual assertions (the suite's own beforeAll), matching the
+# isApprovalAttachmentsEnabled() fresh-read-at-call-time design G-12 depends on. Nothing in this
+# lane flips the shipped default. Ephemeral first-party PostgreSQL container; no customer source,
+# no deployment, no production flag change.
+#
+# WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
+# sha256-pinned provenance input (sealed-export-package-provenance.cjs PINNED_EVIDENCE_FILES), so
+# every edit forces an s6a re-pin and a merge-serialisation race. This mirrors the sibling
+# approval-realdb-instance-readability-s1.yml / approval-realdb-comments.yml lanes. plugin-tests.yml
+# was left byte-identical by THIS lane. [SUPERSEDED 2026-08-22, #5095: the suite now ALSO
+# runs in the required test (20.x) run-list; this standalone lane remains as the evidence lane.]
+#
+# TWO-POINT WIRING (the other half): the suite is excluded from the no-DB default vitest config
+# (packages/core-backend/vitest.config.ts) in the SAME commit that adds this file, so the required
+# `test (18.x/20.x)` job no longer collect-and-skip-greens it. This workflow is where the suite
+# actually EXECUTED as the SOLE lane until 2026-08-22 (#5095 promoted the suite into required test (20.x); both lanes now run it), with EXPECT_DB=1 arming the suite's top-level anti-skip-green sentinel.
+
+on:
+  workflow_dispatch:
+  # NO `merge_group:` — deliberately, matching the sibling approval-realdb-* evidence lanes (a
+  # `merge_group` event does not honour the `paths` filter the way `pull_request` does, so
+  # declaring it would spin up this PostgreSQL job for every merge group regardless of relevance).
+  pull_request:
+    # No `branches:` filter (mirrors the sibling approval-realdb-* precedents): a brand-new
+    # workflow cannot be workflow_dispatch-ed until it has run once via a trigger it responds to.
+    # The `paths` filter keeps it off unrelated PRs.
+    paths:
+      - 'packages/core-backend/tests/integration/approval-lock9-process-attachments-realdb.db.test.ts'
+      - 'packages/core-backend/tests/unit/approval-lock9-process-attachment-unit.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715210000_create_approval_attachments.ts'
+      - 'packages/core-backend/src/services/approval-process-attachment-bind.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-actor-roles.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/approval-attachment-reconciler.ts'
+      - 'packages/core-backend/src/services/approval-attachment-gc.ts'
+      - 'packages/core-backend/src/services/approval-attachment-validation.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-lock9-process-attachments.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/tests/integration/approval-lock9-process-attachments-realdb.db.test.ts'
+      - 'packages/core-backend/tests/unit/approval-lock9-process-attachment-unit.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260822130000_approval_attachments_process_binding.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260715210000_create_approval_attachments.ts'
+      - 'packages/core-backend/src/services/approval-process-attachment-bind.ts'
+      - 'packages/core-backend/src/services/approval-attachment-storage.ts'
+      - 'packages/core-backend/src/services/approval-attachment-runtime.ts'
+      - 'packages/core-backend/src/services/approval-actor-roles.ts'
+      - 'packages/core-backend/src/services/approval-form-redaction.ts'
+      - 'packages/core-backend/src/services/approval-attachment-reconciler.ts'
+      - 'packages/core-backend/src/services/approval-attachment-gc.ts'
+      - 'packages/core-backend/src/services/approval-attachment-validation.ts'
+      - 'packages/core-backend/src/services/approval-instance-readability.ts'
+      - 'packages/core-backend/src/services/ApprovalProductService.ts'
+      - 'packages/core-backend/src/routes/approval-attachments.ts'
+      - 'packages/core-backend/src/routes/approvals.ts'
+      - 'packages/core-backend/src/types/approval-product.ts'
+      - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
+      - 'packages/core-backend/vitest.config.ts'
+      - '.github/workflows/approval-realdb-lock9-process-attachments.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  approval-realdb-lock9-process-attachments:
+    name: approval-realdb-lock9-process-attachments
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_approval_realdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_approval_realdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_approval_realdb
+      # Arms the suite's top-level sentinel: in THIS lane a missing DATABASE_URL is a red run,
+      # never a silent skipped-green.
+      EXPECT_DB: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+
+      - name: Use empty npmrc for pnpm
+        run: |
+          echo "" > /tmp/empty-npmrc
+          echo "NPM_CONFIG_USERCONFIG=/tmp/empty-npmrc" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run DB migrations
+        env:
+          # Same per-PR-gate exclusion list as plugin-tests.yml's "Run DB migrations" step
+          # (see packages/core-backend/MIGRATION_EXCLUDE_TRACKING.md) — this lane provisions the
+          # identical schema the approval real-DB steps run against, INCLUDING this PR's
+          # zzzz20260822130000_approval_attachments_process_binding.ts.
+          MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
+        run: pnpm --filter @metasheet/core-backend db:migrate
+
+      - name: Run Lock-9 process-attachment real-DB acceptance (whole file)
+        # WHOLE FILE, --reporter=verbose: a name filter matching zero tests would exit green and
+        # hide regressions; verbose prints every collected test so an empty collection shows in
+        # the log.
+        run: >-
+          pnpm --filter @metasheet/core-backend exec vitest
+          --config vitest.integration.config.ts run
+          tests/integration/approval-lock9-process-attachments-realdb.db.test.ts
+          --reporter=verbose
+
+      - name: Values-free evidence (this job)
+        run: |
+          {
+            echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
+            echo "suites=approval-lock9-process-attachments-realdb.db.test.ts"
+            echo "scope=Lock-9 process attachments: G-1,G-2,G-4,G-5,G-6,G-7,G-8,G-11,G-12,G-13,G-14,G-16 (flag default OFF)"
+            echo "sentinelArmed=EXPECT_DB=1"
+            echo "customerSourceAccess=NOT_INVOLVED"
+            echo "flagChanged=false"
+            echo "externalWrite=false"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

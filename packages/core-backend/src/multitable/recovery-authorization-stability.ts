@@ -161,23 +161,31 @@ const RECOVERY_AUTHORITY_FUNCTION_SPECS = [
     resultType: 'boolean',
     bodyFingerprint: 'a15e99d0cf593b61d859c19cf942ded5ab8b7a504b43bd7de4cb413fcfbb5d36',
   },
+  // The three trigger-function body fingerprints moved when
+  // zzzz20260821120000_recovery_authority_functions_fix_search_path schema-qualified the helper calls
+  // (`public.metasheet_try_recovery_authority_*`); the pre-fix bare-call values were
+  // 29e5495f… / 0ab8b5f3… / 58cb1351… respectively. The three try-lock helper fingerprints above are
+  // UNCHANGED (their bodies call only pg_catalog built-ins, nothing to qualify). This runtime posture
+  // check fingerprints prosrc only; the fixed SET search_path (proconfig) is asserted by the drift lane
+  // and the containment helper, and the qualified body checked here is itself sufficient to confirm the
+  // canonical hardened substrate.
   {
     functionName: 'metasheet_recovery_authority_subject_trigger',
     identityArguments: '',
     resultType: 'trigger',
-    bodyFingerprint: '29e5495ffded31696eb75189643d58799535c2403b3594fc55a3689b366020a5',
+    bodyFingerprint: 'b268b9d3dcba7b5a57cc432966531ee09a7c29c08b3b9e6b57b86320b454d4ea',
   },
   {
     functionName: 'metasheet_recovery_authority_user_trigger',
     identityArguments: '',
     resultType: 'trigger',
-    bodyFingerprint: '0ab8b5f37a91d8dc6aa400380172108cce96cc4565bfd757adb8394df30cd83c',
+    bodyFingerprint: 'ba6a4c0f530a19fcf741ff7a8f07b71fb4fdbc3841a4810ecb40ef072997600b',
   },
   {
     functionName: 'metasheet_recovery_role_permission_trigger',
     identityArguments: '',
     resultType: 'trigger',
-    bodyFingerprint: '58cb1351c583ff273c54b64371c7420fc9ded14e11109a09659e9ffd4c466fc1',
+    bodyFingerprint: '35ccd89093396358616fa6e09d5894090ba154150d42999e5b7d3f53aacdcb82',
   },
 ] as const
 

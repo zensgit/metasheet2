@@ -217,7 +217,10 @@ instance-visibility (`:264-280`), gate 2 hidden-field redaction (`:281-292`), ga
   carrying zero attachment rows the same predicate returns false for EVERYONE. So it must not be cited
   as authorizing reuse of `isInstanceParticipant` on comment or other text surfaces (see OD-L9-13's scope
   clause, and the Non-effects note that instance-detail read scope, Lock-7 §2.7 D-5, is not settled
-  here).
+  here). [AMENDED 2026-08-21 — see §4.1: once S1 lands, "unchanged"/"without modification"/"no change"
+  above are superseded — the read surfaces adopt `canReadApprovalInstance` and an implementer SHOULD
+  then re-point this call site; the org-pin self-satisfaction rationale is superseded by the
+  instance-level pin (Lock-10 OD-S1-10). Until S1 lands, this bullet stands as ratified.]
 - **Gate 2 (hidden-field) is DROPPED for `bind_kind='process'`, by an explicit branch.** A process
   attachment is not a form field; there is no `access` matrix entry for it and its `field_id` is `NULL`.
   The gate becomes: `if (row.bind_kind === 'form_field' && row.instanceId) { …existing hidden check… }`.
@@ -395,7 +398,7 @@ document authorizes none of them to run.
 | G-1 | Process binding never touches `form_snapshot` | a process-attachment action commits with the requester's `form_snapshot` byte-identical and zero field-revision rows | a form-field write in the same fixture DOES change `form_snapshot` — the isolation is process-selected, not a dead path |
 | G-2 | `bind_kind` discriminator is load-bearing | a `bind_kind='process'` row has `field_id IS NULL` and the CHECK `(bind_kind='process' OR field_id ~ '[!-~]')` accepts it; a `form_field` row with NULL `field_id` is REJECTED by the same CHECK | dropping the `bind_kind='process'` disjunct reds a named test; a sentinel non-blank `field_id` on a process row is asserted ABSENT (OD-L9-2 trap) |
 | G-3 | Download hidden-gate skip is explicit, not accidental | a bound process attachment downloads for a participant with NO field-hidden evaluation; flipping the skip to a sentinel `field_id` path reds a named test | a `form_field` attachment at a HIDDEN node still serves no bytes (gate 2 intact for forms) — the skip is `bind_kind`-selected |
-| G-4 | Participant predicate reused unchanged | an instance carrying ONLY process attachments resolves participants correctly via the shipped `isInstanceParticipant` (org-pin self-satisfied by the process row) | mutating `isInstanceParticipant` reds the process-download test too — proving no fourth predicate was minted (OD-L9-13) |
+| G-4 | Participant predicate reused unchanged | an instance carrying ONLY process attachments resolves participants correctly via the shipped `isInstanceParticipant` (org-pin self-satisfied by the process row) | mutating `isInstanceParticipant` reds the process-download test too — proving no fourth predicate was minted (OD-L9-13) **[AMENDED 2026-08-21 — §4.1: predicate and mutation target re-pointed to `canReadApprovalInstance` once S1 lands]** |
 | G-5 | Upload authority is the active seat, not participation | a CC recipient / past actor at another node is REFUSED upload (403 `APPROVAL_ASSIGNMENT_REQUIRED`); the acting approver at the current node is allowed | neutering the `actorCanAct` gate lets the CC recipient upload — asserted on the 403, so the gate is proven live |
 | G-6 | Bind atomicity + staged-instance integrity | forcing a failure at the action commit leaves the process row `unbound` with `instance_id IS NULL`; an approver who staged against instance A cannot bind to instance B (rowCount-equality → rollback) | the success path binds all staged rows and inserts the audit row — the rollback test is not passing against a no-op; a cross-instance bind attempt reds a named test |
 | G-7 | Staged rows are uploader-only until commit | a staged (uncommitted) process attachment is downloadable ONLY by its uploader, NOT by other participants; after commit it is participant-scoped | stamping `instance_id` at upload (OD-L9-5 rejected arm) reds this test by leaking the staged blob to a participant |
@@ -506,7 +509,9 @@ Decisions recorded: all FOURTEEN per this document's recommendations —
             a zero-attachment instance returns false for everyone under that predicate — reported by that
             analysis, not re-run here), and it records that the per-instance readability
             predicate is being ruled separately in the S1 lock resolving Lock-7 §2.7 D-5, which Lock-9's
-            attachment reads may adopt once it lands.
+            attachment reads may adopt once it lands. [AMENDED 2026-08-21 — see §4.1: that S1 lock
+            (Lock-10) has since been RATIFIED and the owner ruled L9-AMEND arm (a); the attachment
+            surfaces adopt `canReadApprovalInstance` and `isInstanceParticipant` ceases to exist.]
   OD-L9-14  (a) post-commit read scope is ALL INSTANCE PARTICIPANTS, via the reused gate-1 predicate on
             BOTH /download and /refs — the same set that reads a comment. The exposure is ratified as
             stated, not as a side effect: the requester and any CC recipients CAN read a file an approver
@@ -642,6 +647,8 @@ are not re-proposed):
            (Lock-7 §2.7 D-5) unsettled here. That per-instance readability predicate is being ruled
            SEPARATELY, in the S1 lock resolving Lock-7 §2.7 D-5; Lock-9's attachment reads will be able
            to adopt it once it lands, and until then arm (a) authorizes nothing beyond attachments.
+           [AMENDED 2026-08-21 — see §4.1: Lock-10 ratified; owner ruled L9-AMEND arm (a) by the second
+           by-reference reply; adopt `canReadApprovalInstance` once S1 lands.]
   OD-L9-14 Post-commit read scope — a bound process attachment has NO form-field hidden gate (dropped in
            OD-L9-4), so "who may read it back" is a confidentiality value-call this document must decide,
            not leave to omission (Lock-7 D-5 "who may fetch the instance" does NOT cover it). (a)[R] ALL
@@ -661,6 +668,47 @@ its own PR, required checks, an independent adversarial gate, and a ledger row. 
 no deployment, no completion label. The gap line APS :10507-10508 stays fenced; the requester form
 attachment field is NOT reused as a carrier; instance-detail read scope (Lock-7 D-5) remains external.
 ```
+
+
+## 4.1 Amendment (2026-08-21) — Lock-10 §5.1 `L9-AMEND`, ruled arm (a), owner-authorized
+
+Lock-10 (`approval-lock10-instance-readability-20260821.md`, RATIFIED 2026-08-21) rules **OD-S1-10** (the
+attachment-EXISTS org pin is replaced by an instance-level org pin) and **OD-S1-16** (Lock-9's consumers
+call `canReadApprovalInstance`; `isInstanceParticipant` ceases to exist). Both contradict this document's
+ratified OD-L9-13(a) ("reuse `isInstanceParticipant` **UNCHANGED**") and gate G-4 ("Participant predicate
+reused unchanged"). Because an executing session may not amend ratified text the document did not
+delegate, Lock-10 escalated the conflict as §5.1 row `L9-AMEND` instead of editing this file. The owner
+ruled **arm (a)** by reference (「按建议执行」, 2026-08-21 — the second by-reference reply of that date;
+the six-item referenced list, its session authorship, and the provenance discipline are recorded verbatim
+in Lock-10 §5.1.1). This section executes that ruling. The original text above is retained for the
+record; where the original and this section conflict, **this section governs**.
+
+- **OD-L9-13(a) as amended.** Once S1 lands, this lock's attachment READ surfaces (`/download`,
+  `/refs` — the two the ratified scope clause names; bind/commit authority stays `actorCanAct` per G-5
+  and is untouched by this amendment) adopt **`canReadApprovalInstance`** (shape: Lock-10 OD-S1-1..8;
+  consumer ruling: OD-S1-16) in place of `isInstanceParticipant`, which **ceases to exist**. The
+  no-fourth-predicate invariant (Lock-7 §L7-A / D-4) is preserved and strengthened: the predicate count
+  goes DOWN, not up — there is still exactly one admission predicate, and it is the shared one. The
+  "org-pin EXISTS self-satisfied by the bound process row" rationale is **SUPERSEDED**: after OD-S1-10
+  the org pin is instance-level and cannot be defeated by attachment binding state at all, so the
+  tombstone-`410` property this lock relied on is preserved for free (Lock-10 OD-S1-10 states this).
+  The **scope clause added at ratification stays in force with its role inverted by events**: it confined
+  arm (a) to the attachment surfaces and forbade quoting it for TEXT surfaces; text surfaces now take the
+  SAME predicate under Lock-10's own authority (OD-S1-14/OD-S1-15), not under this OD, exactly as the
+  clause anticipated ("may adopt it once it lands").
+- **G-4 as amended.** The gate becomes "Participant predicate **adopted, not minted**": an instance
+  carrying ONLY process attachments resolves participants correctly via `canReadApprovalInstance`; the
+  mutation target is **re-pointed** — mutating `canReadApprovalInstance` reds the process-download test
+  too, proving the attachment path sits on the shared predicate and no attachment-local predicate was
+  minted. The gate's intent (no fourth predicate) is unchanged; only the named function moves.
+- **Sequencing.** An implementing slice of THIS lock that lands while `isInstanceParticipant` still
+  exists calls the shipped predicate as ratified. The S1 slice deletes `isInstanceParticipant`, so the
+  function's live call sites at that moment (today: the two C-1 consumers, `approval-attachment-storage.ts:275`
+  and `routes/approval-attachments.ts:406`, per Lock-10 §2.10) are re-pointed in the same PR — a deleted
+  function cannot retain callers; this is a compile-level necessity, not an OD-S1-16 ruling. Lock-9
+  slices that implement AFTER S1 call `canReadApprovalInstance` directly — Lock-10 §2.11(3) states the
+  C-1 consumer set gains Lock-9's process-attachment call sites when those slices implement. Nothing in
+  this amendment authorizes runtime work by itself; the Runtime authorization paragraph above stands.
 
 ## 5. Independent-review disposition (2026-08-19)
 

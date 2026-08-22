@@ -341,7 +341,7 @@ activation epoch. This is OD-L7-11's arm (a), and it is priced as new machinery,
 | D-2 | `approvals:admin-data` ("Approval Data Recovery Admin") is declared and seeded but has **zero** enforcement sites — a repo-wide sweep at this baseline (excluding `node_modules` and build output) returns exactly the two declaration sites and no guard, route, or check | `types/approval-product.ts:7`; `db/migrations/zzzz20260702110000_add_approval_reassign_and_admin_scopes.ts:16-19` | Declared-inert, **not** a vulnerability — granting it confers nothing, so the failure direction is closed. Recorded because it is the obvious carrier for a later admin data-repair surface and must not be adopted by inference |
 | D-3 | Two legacy terminal routes act outside the graph executor (pre-existing posture; details held in the private line inventory per the disclosure doctrine) | private inventory | Pre-existing, out of Lock-7's scope, and **cannot bypass a field mask today because they write no form data**. Locked forward: no field write may ever be added on these paths; a separate hardening slice owns the posture itself |
 | D-4 | Two divergent participant predicates with no shared helper | `approval-attachment-runtime.ts:201-243`; `routes/approval-metrics.ts:193-215` | Pre-existing divergence. Lock-7 adds no third; its authorization is the active-seat check |
-| D-5 | Instance-detail read surfaces are permission-scoped, not participant-scoped; one adjacent read surface's guard is being aligned to its siblings in a separate hardening slice (details held in the private line inventory per the disclosure doctrine) | private inventory | **EXTERNAL DEPENDENCY, OPEN owner question, deliberately not settled here.** Lock-7 does not narrow or widen the read scope; it only refuses to add a values channel to the wider of the read surfaces (OD-L7-7). Any later document must resolve read scope on its own authority |
+| D-5 | Instance-detail read surfaces are permission-scoped, not participant-scoped; one adjacent read surface's guard is being aligned to its siblings in a separate hardening slice (details held in the private line inventory per the disclosure doctrine) | private inventory | **EXTERNAL DEPENDENCY, OPEN owner question, deliberately not settled here.** Lock-7 does not narrow or widen the read scope; it only refuses to add a values channel to the wider of the read surfaces (OD-L7-7). Any later document must resolve read scope on its own authority. **RESOLVED-BY Lock-10** (`approval-lock10-instance-readability-20260821.md`, RATIFIED 2026-08-21), which rules the per-instance readability predicate on its own authority as D-5 required; Lock-7's own text is unchanged by that resolution — this annotation is the propagation edit Lock-10 §5.3 requires. Lock-10 does **not** close D-5 for `plm:`-prefixed ids, which it scopes out in v1 and declares as its residual §5.2 (iii) |
 
 ## 3. Acceptance gates
 
@@ -392,7 +392,9 @@ Decisions recorded: OD-L7-1 (a) shipped fieldPermissions/NodeFieldAccess enum, n
   authorization: NONE (design only; each contract still needs its own PR, required checks, adversarial
   gate, and ledger row; the handler-node write surface rides Lock-3; flags stay OFF). D-1 (fieldPermissions
   silently discarded on cc/start/end/condition/parallel nodes) is a confirmed shipped defect logged for a
-  separate fix slice; D-5 read-scope stays an OPEN owner question.
+  separate fix slice; D-5 read-scope was an OPEN owner question and is **RESOLVED-BY Lock-10**
+  (`approval-lock10-instance-readability-20260821.md`, RATIFIED 2026-08-21), except for `plm:` ids —
+  see that lock's §5.2 (iii).
 Independent review: independent adversarial review returned REQUEST-CHANGES at head 5c8eae9ec5 (2 P2:
   OD-L7-11 named a mechanism [nodeEntryEpoch reuse] that structurally cannot fire on same-round edits;
   G-13 routing-hint-correction premise inverted under the recommended OD-L7-8 arm — plus anchor/citation
@@ -500,7 +502,9 @@ Unverified at this baseline, recorded so no later document treats it as settled:
     (AGE:230-233) WERE re-read at this baseline and are exact here.
   - Whether the corpus's 编辑-without-可读 combination is accepted, rejected, or coerced by Feishu (§0
     Correction 1). Per M11 this is absence of evidence in the manual, not evidence of behavior.
-  - D-5's instance-detail read scope is an OPEN owner question and is NOT resolved by this document.
+  - D-5's instance-detail read scope was an OPEN owner question and is NOT resolved by this document; it
+    is **RESOLVED-BY Lock-10** (`approval-lock10-instance-readability-20260821.md`, RATIFIED 2026-08-21),
+    whose OD-S1-18 leaves `plm:` ids out of scope as a declared residual.
 
 Deltas:
 Runtime authorization: NONE unless explicitly stated — ratifying this document authorizes design only.

@@ -1297,6 +1297,9 @@ jobs:
             tests/integration/attendance-csv-export-bom.test.ts \
             tests/integration/attendance-notification-redelivery.db.test.ts \
             tests/integration/attendance-notification-redelivery-route.db.test.ts \
+            tests/integration/approval-instance-readability-s1.db.test.ts \
+            tests/integration/approval-comments.db.test.ts \
+            tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
@@ -1499,6 +1502,7 @@ jobs:
             tests/integration/attendance-w7-4-read-side-labeling.db.test.ts \
             tests/integration/attendance-soak-diff-families.db.test.ts \
             tests/integration/attendance-punch-org-resolution.db.test.ts \
+            tests/integration/attendance-org-resolution-shadow.db.test.ts \
             tests/integration/scratch-database-drain.db.test.ts \
             --reporter=dot
 
