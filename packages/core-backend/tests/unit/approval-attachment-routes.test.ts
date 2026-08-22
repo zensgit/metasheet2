@@ -83,7 +83,8 @@ function makeApp(over: {
   /** every (sql, params) the route issued — lets a test assert the SHAPE of a claim, not just its result. */
   const queries: Array<{ sql: string; params: unknown[] }> = []
   const deleted: string[] = []
-  const participantCalls: Array<{ viewerId: string; instanceId: string; orgId: string }> = []
+  // No `orgId` field any more (OD-S1-9(f): canReadApprovalInstance takes no caller-supplied org).
+  const participantCalls: Array<{ viewerId: string; instanceId: string }> = []
   let putCalls = 0
   const store: ApprovalAttachmentStore = {
     put: async (k, b) => {
@@ -116,8 +117,8 @@ function makeApp(over: {
     db,
     store,
     authChecks: {
-      isInstanceParticipant: async (viewerId, instanceId, orgId) => {
-        participantCalls.push({ viewerId, instanceId, orgId })
+      isInstanceParticipant: async (viewerId, instanceId) => {
+        participantCalls.push({ viewerId, instanceId })
         return over.participant ?? false
       },
       isFieldHiddenAtActiveNode: async (instanceId, fieldId) =>
@@ -352,8 +353,9 @@ describe('approval attachment routes (flag-gated)', () => {
     const good = await serve(ok.app).get('/api/approval/attachments/att_1/download')
     expect(good.status).toBe(200)
     expect(good.headers['content-type']).toContain('application/pdf')
-    // participant predicate is org-pinned (viewer org + row org)
-    expect(ok.participantCalls[0]).toEqual({ viewerId: 'u1', instanceId: 'i1', orgId: 'org1' })
+    // participant predicate (canReadApprovalInstance, OD-S1-16) — no orgId param; the row's org
+    // pin is enforced separately by authorizeAttachmentDownload's gate 0, before this call.
+    expect(ok.participantCalls[0]).toEqual({ viewerId: 'u1', instanceId: 'i1' })
     const deny = makeApp({ rows: [row], participant: false })
     expect((await serve(deny.app).get('/api/approval/attachments/att_1/download')).status).toBe(404)
     const missing = makeApp({ rows: [] })

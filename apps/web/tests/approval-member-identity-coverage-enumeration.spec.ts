@@ -40,7 +40,7 @@ import { describe, expect, it } from 'vitest'
  * owner-visible future item only) is a unified person-label rendering component every
  * viewer-facing identity display is required to route through, paired with an AST-level (not
  * text-grep) ban on any OTHER viewer-facing consumption of a member/role/dept id. Until that
- * lands, this file's green is scoped to "no untriaged hit among six known lexical shapes across two
+ * lands, this file's green is scoped to "no untriaged hit among six known lexical shapes across three
  * trees" — never "no raw id reaches the DOM anywhere".
  *
  * TWO TIERS now coexist, and (feedback_source_text_assertions_are_not_behaviour.md) neither one is
@@ -190,13 +190,43 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustNotContain: ['option.name?.trim() || option.id', 'option.name.trim() || option.id'],
     }],
   },
+  // S3b (2026-08-22): the census's own "GATE FOR THE NEXT SLICE" note (below, shared/comments
+  // group) required this BEFORE any approval consumer wired the shared/comments kit. Discharged
+  // as an approval-specific UPSTREAM guard (in the wrapper, never in the shared kit itself) —
+  // MetaCommentsPanel.vue's own :378/:384/:385 fallbacks are untouched; every comment this wrapper
+  // hands to the kit already carries a non-empty `authorName` (resolved name, or a values-free
+  // `成员 N` ordinal), so the kit's own `thread.authorName ?? thread.authorId` fallback path is
+  // structurally unreachable for this consumer.
+  {
+    site: 'ApprovalCommentsPanel.vue — comment author display name (shared/comments kit consumer, S3b)',
+    coverage: ['src/views/approval/ApprovalCommentsPanel.vue', 'approval-comments-panel.spec.ts', 'never renders a raw author id; an unresolved author gets a values-free 成员 N ordinal, a resolved one gets its real name'],
+    sourceChecks: [{
+      file: 'src/views/approval/ApprovalCommentsPanel.vue',
+      mustContain: [
+        'const authorDisplayName',
+        'getResolvedUserName(c.authorId)',
+        '`成员 ${ordinal}`',
+        'ensureUserNamesResolved(ids)',
+      ],
+      mustNotContain: ['c.authorName ?? c.authorId', "authorName: c.authorId,"],
+    }],
+  },
 ]
 
 // ---------------------------------------------------------------------------
 // TIER B — the mechanical pattern census.
 // ---------------------------------------------------------------------------
 
-const SCAN_ROOTS = ['src/approvals', 'src/views/approval']
+// S3a fix-round (2026-08-21, gate finding P3-1): apps/web/src/shared/comments/ (the S3a shared
+// comments FE kit -- MetaCommentsPanel/MetaCommentComposer/MetaCommentReactions + the
+// useMultitableComments composable) is added as a THIRD scan root. It carries no approval
+// consumer yet (S3a is kit-only), but it is the exact surface a future approval-native consumer
+// mounts, and its own mention/author label fallbacks are already the class this census exists to
+// catch -- deferring coverage until that consumer lands would repeat the class of gap the census
+// was rebuilt to close (see the TWO TIERS docstring above): a new site nobody remembered to add.
+// See the S3a gate report / multitable-w2-unified-record-inspector-design-lock-20260714.md §7 S4
+// follow-up note for the disposition of every hit this root produces (ALLOWLIST group below).
+const SCAN_ROOTS = ['src/approvals', 'src/views/approval', 'src/shared/comments']
 
 /** Recursively lists every non-test .ts/.vue file under `dir` (repo-relative), sorted. */
 function listSourceFiles(dir: string): string[] {
@@ -229,8 +259,8 @@ interface PatternDef {
 const PATTERNS: PatternDef[] = [
   {
     id: 'name-or-id-fallback',
-    label: '`||`/`??` falling back to a bare `.id`/`.userId`/`.roleId`/`.deptId`/`.departmentId`/`.memberId` expression',
-    regex: /(?:\|\||\?\?)\s*[A-Za-z_$][\w$.?[\]]*\.(id|userId|roleId|deptId|departmentId|memberId)\b/,
+    label: '`||`/`??` falling back to a bare `.id`/`.userId`/`.roleId`/`.deptId`/`.departmentId`/`.memberId`/`.authorId` expression',
+    regex: /(?:\|\||\?\?)\s*[A-Za-z_$][\w$.?[\]]*\.(id|userId|roleId|deptId|departmentId|memberId|authorId)\b/,
     positiveControl: { file: 'src/approvals/useApprovalDirectory.ts', lineContains: 'user.name.trim() || user.id' },
   },
   {
@@ -434,6 +464,98 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/quickPhrases.ts', '${KEY_PREFIX}${userId}:${action}'],
     ['src/approvals/recentTemplates.ts', '${KEY_PREFIX}${userId}'],
   ]),
+
+  // ---- shared/comments kit (S3a 2026-08-21; S3b 2026-08-22 UPDATE) -- SCAN_ROOTS extension, gate finding P3-1 ----
+  // Two consumers exist at this head: multitable (via the src/multitable/components/
+  // MetaCommentsPanel.vue re-export shim) and, as of S3b, approval
+  // (src/views/approval/ApprovalCommentsPanel.vue). Multitable's own comment UI legitimately
+  // shows real author/mention names sourced from its own directory data, so this raw-id FALLBACK
+  // is pre-existing, verbatim-carried-over behavior there (identical code lives at
+  // src/multitable/components/MetaCommentsPanel.vue on main today; S3a moved it, introduced
+  // nothing new) -- untouched by S3b.
+  // GATE DISCHARGED (was "GATE FOR THE NEXT SLICE" -- S3b is that next slice): rather than fixing
+  // these three kit-internal renders (MetaCommentsPanel.vue:378, :384, :385) -- which would touch
+  // multitable's own byte-identical behavior for zero multitable benefit -- S3b added an
+  // APPROVAL-SPECIFIC UPSTREAM GUARD in the wrapper (see the new TIER A REGRESSION_GUARDS entry
+  // "ApprovalCommentsPanel.vue -- comment author display name", above): every comment the wrapper
+  // hands to the kit already carries a non-empty `authorName` (a resolved directory name, or a
+  // values-free `成员 N` ordinal), so these three kit-internal fallback paths are structurally
+  // UNREACHABLE for the approval consumer specifically -- they still exist in the kit's source
+  // (this is why the three lines below still need their OWN triage entries; the mechanical
+  // pattern census scans source text, not reachability) and still describe real, correct,
+  // untouched multitable behavior. NOTE: only :378 is presently caught by a live PATTERN
+  // (name-or-id-fallback); :384's `.authorId` token and :385's ternary are outside every current
+  // regex's alternation/shape (the census's own "KNOWN EVASION" boundary documented at the top of
+  // this file) -- their entries below are pre-emptive triage, not something scanForViolations
+  // currently consults. Do not read their presence here as "the census also enforces these two"
+  // -- it does not, yet. The P3-A importer tripwire (below, TIER B) is the SEPARATE mechanism
+  // that would have caught a THIRD approval consumer mounting this kit without an equivalent
+  // guard -- it is keyed on the IMPORTING file, not on these three lines.
+  //
+  // SCOPE CORRECTION, SUPERSEDED (gate finding P3-3, residual sweep, 2026-08-22): the prior
+  // version of this note recorded the `authorId`-not-in-alternation blind spot as a DEFERRED
+  // blast-radius decision ("scans ALL THREE trees ... not a fix-round-scoped edit"). That premise
+  // was UNBOUNDED; the residual sweep measured it mechanically instead of re-deferring it: the
+  // widened regex (now including `authorId` in the alternation, see the pattern definition above)
+  // matches exactly 7 lines the prior regex missed, across this file's three scanned roots:
+  //   1. ApprovalCommentsPanel.vue:182 (a COMMENT line describing the fallback this file's own
+  //      upstream guard closes -- OUT-OF-SCOPE, the scan does not strip comments)
+  //   2. ApprovalCommentsPanel.vue:185 (`authorName: authorDisplayName.value[c.authorId] ||
+  //      c.authorId,` -- the S3b upstream guard itself; VALUES-FREE-FIXED, entered below)
+  //   3-6. MetaCommentsPanel.vue:76,130,365,370 (multitable kit-internal renders, byte-identical
+  //      shipped behavior -- OUT-OF-SCOPE, entered in the group below)
+  //   -- MetaCommentsPanel.vue:395 was ALREADY allowlisted pre-emptively (the group below); the
+  //      widening converts it from pre-emptive triage to LIVE coverage, not a new entry.
+  // So the real cost is 6 new ALLOWLIST entries (four of them in the shared multitable tree),
+  // zero behaviour change, zero production edit -- a decision bounded enough for the gate to rule
+  // on in one read rather than defer again. The *regex* change is monotonic (strictly adds
+  // matches, drops none -- MUT-N1 below pins that nothing previously caught is lost); the *six
+  // entries* are the narrowing component, and every one of those six lines was UNTRIAGED
+  // (invisible to the census) before this change, so net enforcement strictly increases. Verified
+  // this widens no RATIFIED text: `git grep name-or-id-fallback origin/main` returns hits in
+  // exactly one file (this census spec, 5 occurrences) and zero in `docs/` -- the grep key is
+  // the pattern id, not the item's name. CORRECTION (residual-sweep gate finding F-1,
+  // 2026-08-22): this is NOT the only prose asserting the deferral. On `origin/main`,
+  // `docs/development/approval-remaining-dev-design-report-20260820.md:1682-1683` also records
+  // it -- naming it "census `authorId` token" rather than the pattern id -- and marks the item
+  // on the owner 开放行 as `owner-scope`. Whether the owner's fourth by-reference reply
+  // "按建议执行" (2026-08-22) on the three-step plan (step 1 = this sweep) covers THAT SPECIFIC
+  // row is an outstanding owner call, recorded in the PR body, NOT closed by this comment or by
+  // this edit (`feedback_authorization_source_must_be_owner_authored`). The two ledger lines at
+  // :1682-1683 still need a sync once that call is made -- deferred to a later step, not this one.
+  ...group('VALUES-FREE-FIXED', 'ApprovalCommentsPanel.vue commentsForPanel mapper -- the S3b upstream guard itself (Always-set authorName closes the shared panel template fallback structurally); now in-alternation via the widened `authorId` arm', [
+    ['src/views/approval/ApprovalCommentsPanel.vue', 'authorName: authorDisplayName.value[c.authorId] || c.authorId,'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'a COMMENT line describing the shared-panel template fallback this file\'s own upstream guard closes -- prose, not a render/assignment site; the scan does not strip comments', [
+    ['src/views/approval/ApprovalCommentsPanel.vue', '// `thread.authorName ?? thread.authorId` when this is undefined, which is EXACTLY the raw-id'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'mention-candidate label / comment-author label+subtitle fallback to the raw id when displayName/authorName is absent (or, for the subtitle, rendered alongside a differing name) -- legitimate, byte-identical multitable behavior (a real directory-backed name producer); the approval consumer (S3b) discharges the census gate via its OWN upstream guard instead of touching this shared file -- see the group note above and the TIER A entry it names', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: candidate.displayName?.trim() || candidate.userId.trim(),'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'label: (comment.authorName ?? comment.authorId).trim() || comment.authorId,'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'subtitle: comment.authorName && comment.authorName !== comment.authorId ? comment.authorId : undefined,'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'comment-author drawer/banner render fallback to the raw id when authorName is absent -- legitimate, byte-identical multitable kit-internal behavior (the S3b approval consumer never mounts these particular render paths without its own upstream guard already having supplied a non-empty authorName); newly caught only because this round widened the pattern\'s alternation to include `.authorId`, not because the code changed', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ thread.authorName ?? thread.authorId }}</span>'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', '<span class="meta-comments-drawer__author">{{ reply.authorName ?? reply.authorId }}</span>'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return editingBanner(activeEditingComment.value.authorName ?? activeEditingComment.value.authorId, isZh.value)'],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', 'return replyingBanner(activeReplyComment.value.authorName ?? activeReplyComment.value.authorId, isZh.value)'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'mention-suggestion autocomplete FILTER comparison (query substring match against label/id) -- a boolean predicate, never rendered to the DOM', [
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'return suggestion.label.toLowerCase().includes(query) || suggestion.id.toLowerCase().includes(query)'],
+  ]),
+  ...group('OUT-OF-SCOPE', '@mention TOKEN serialization (`@[label](id)` wire format embedded in comment content, matched by a RegExp) -- the id is round-tripped through the content string as an encoding detail, never displayed as text', [
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const tokenMentionRegex = new RegExp(`@\\\\[${escapeRegex(mention.label)}\\\\]\\\\(${escapeRegex(mention.id)}\\\\)`)'],
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const token = `@[${mention.label}](${mention.id})`'],
+    ['src/shared/comments/components/MetaCommentComposer.vue', 'const tokenRegex = new RegExp(`@\\\\[${escapeRegex(mention.label)}\\\\]\\\\(${escapeRegex(mention.id)}\\\\)`)'],
+  ]),
+  ...group('OUT-OF-SCOPE', 'thread/reply id used only as a lookup key or comparison operand inside a mustache -- the mustache renders a derived STATE LABEL or COUNT (l(...)/formatReplyCount(...)), never the id itself', [
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ formatReplyCount(getReplyCount(thread.id)) }}</span>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ editingCommentId === thread.id ? l('comment.editing') : l('comment.edit') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ deletingIds.includes(thread.id) ? l('comment.deleting') : l('comment.delete') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ resolvingIds.includes(thread.id) ? l('comment.resolving') : l('comment.resolve') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ editingCommentId === reply.id ? l('comment.editing') : l('comment.edit') }}</button>"],
+    ['src/shared/comments/components/MetaCommentsPanel.vue', ">{{ deletingIds.includes(reply.id) ? l('comment.deleting') : l('comment.delete') }}</button>"],
+  ]),
 ]
 
 describe('member-display-identity coverage enumeration — TIER A (named regression guards)', () => {
@@ -478,16 +600,24 @@ describe('member-display-identity coverage enumeration — TIER A (named regress
 })
 
 describe('member-display-identity coverage enumeration — TIER B (mechanical pattern census)', () => {
-  it('the readdirSync-derived scan actually found files under both scan roots (a path typo scanning nothing must not pass green)', () => {
+  it('the readdirSync-derived scan actually found files under all three scan roots (a path typo scanning nothing must not pass green)', () => {
     expect(SCANNED_FILES.length).toBeGreaterThan(50)
     const basenames = new Set(SCANNED_FILES.map((f) => f.split('/').pop()))
     expect(basenames.has('ApprovalNewView.vue')).toBe(true)
     expect(basenames.has('ApprovalDetailView.vue')).toBe(true)
     expect(basenames.has('directoryResolve.ts')).toBe(true)
     expect(basenames.has('ApprovalUserPicker.vue')).toBe(true)
-    // Sanity: both roots actually contributed files, not just one.
+    // S3a fix-round (2026-08-21, P3-1): a third basename check for the shared/comments root, so
+    // a typo'd/reverted SCAN_ROOTS entry for that root is caught here too, not just silently
+    // scanning zero files.
+    expect(basenames.has('MetaCommentsPanel.vue')).toBe(true)
+    // S3b (P3-A): the new approval-side shared/comments importer — so a reverted/typo'd
+    // SCAN_ROOTS entry for src/views/approval can't hide this file from the scan either.
+    expect(basenames.has('ApprovalCommentsPanel.vue')).toBe(true)
+    // Sanity: all three roots actually contributed files, not just one or two.
     expect(SCANNED_FILES.some((f) => f.startsWith('src/approvals/'))).toBe(true)
     expect(SCANNED_FILES.some((f) => f.startsWith('src/views/approval/'))).toBe(true)
+    expect(SCANNED_FILES.some((f) => f.startsWith('src/shared/comments/'))).toBe(true)
   })
 
   it('each pattern still matches its named positive-control line (a rotted pattern silently matching nothing must fail HERE, not pass green -- this is the exact class of bug that made the census\'s own initial POSIX-ERE `\\b` grep silently match zero)', () => {
@@ -508,7 +638,7 @@ describe('member-display-identity coverage enumeration — TIER B (mechanical pa
     }
   })
 
-  it('every raw-id-render pattern occurrence across BOTH scanned trees has an explicit ALLOWLIST triage entry -- an untriaged hit (new, or a deleted allowlist entry) fails here', () => {
+  it('every raw-id-render pattern occurrence across ALL THREE scanned trees has an explicit ALLOWLIST triage entry -- an untriaged hit (new, or a deleted allowlist entry) fails here', () => {
     const violations: string[] = []
     for (const file of SCANNED_FILES) {
       const content = readSrc(file)
@@ -530,8 +660,8 @@ describe('member-display-identity coverage enumeration — TIER B (mechanical pa
   })
 
   // Scope-leak sweep (census §B pattern 8): no member-identity resolver/type reference should
-  // exist ANYWHERE in apps/web/src outside the two scanned trees, other than the shared type defs.
-  it('scope-leak sweep: no member-identity resolver/type reference exists outside the two scanned trees (except the allowlisted shared type defs)', () => {
+  // exist ANYWHERE in apps/web/src outside the three scanned trees, other than the shared type defs.
+  it('scope-leak sweep: no member-identity resolver/type reference exists outside the three scanned trees (except the allowlisted shared type defs)', () => {
     const SWEEP_ALLOWLIST = new Set(['src/types/approval.ts'])
     const SWEEP_PATTERN = /getResolvedUserName|ApprovalDirectoryUser|assigneeId/
     const allFiles = listSourceFiles('src')
@@ -571,6 +701,107 @@ describe('member-display-identity coverage enumeration — TIER B (mechanical pa
     // The allowlist entry must be FILE-scoped -- the same `contains` string under a DIFFERENT file
     // must NOT be silently covered by another file's entry.
     expect(scanLine(syntheticLeak, 'a-different-file.ts', triaged), 'an allowlist entry must not leak coverage across files').toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// P3-A (S3b, fail-closed importer tripwire): the ALLOWLIST above is FILE-KEYED, scoped to
+// src/shared/comments/** lines -- a new approval file that MOUNTS the kit inherits the SHARED
+// file's own exemption and reds nothing there (it never touches a line under
+// src/shared/comments/, so no ALLOWLIST entry is even consulted for it). This is a SEPARATE
+// assertion, keyed on the IMPORTING file, not an ALLOWLIST extension -- exactly what the S3a gate
+// report's own "GATE FOR THE NEXT SLICE" note (above) called for.
+// ---------------------------------------------------------------------------------------------
+
+/** Substring `shared/comments` inside an import/export line -- catches the relative form the
+ *  shims/consumers use (`'../../shared/comments/...'`) AND any alias form (`'@/shared/comments/
+ *  ...'`), since it keys on the substring, not a leading `../`. Anchored to the START of the
+ *  line (only `import`/`export` statements, never a comment mentioning the same words -- see the
+ *  DECOY test below, which proves both a real match and the comment-line non-match). */
+const SHARED_COMMENTS_IMPORT_RE = /^\s*(?:import|export)[^\n]*['"][^'"]*shared\/comments[^'"]*['"]/
+
+interface SharedCommentsApprovalConsumer {
+  file: string
+  /** Which upstream identity guard this consumer carries (or, for a non-rendering file, why none
+   *  is needed) -- see §5 of the S3b wiring contract. */
+  guard: string
+  reason: string
+}
+
+/**
+ * Every approval-side file that imports shared/comments, and its triage row. An UNTRIAGED
+ * importer (a new one nobody added a row for, or a row whose file got renamed out from under it)
+ * fails the set-equality test below -- this is the mechanism that makes "no approval consumer of
+ * shared/comments may be wired without first revisiting this disposition" (the S3a gate report's
+ * own words) fail-closed rather than a comment nobody re-reads.
+ */
+const SHARED_COMMENTS_APPROVAL_CONSUMERS: SharedCommentsApprovalConsumer[] = [
+  {
+    file: 'src/approvals/approvalCommentsClient.ts',
+    guard: 'N/A -- transport only, no identity rendering. Sets `authorName: undefined` on every mapped comment and carries NO dependency on directoryResolve.ts (see this file\'s own header note) -- the identity guard lives entirely in ApprovalCommentsPanel.vue, never here.',
+    reason: 'S3b CommentsApiClient adapter for the S2 approval-comments endpoints -- imports CommentsTarget/CommentsApiClient (api-client.ts) and MultitableComment (types.ts) as types only.',
+  },
+  {
+    file: 'src/views/approval/ApprovalCommentsPanel.vue',
+    guard: 'TWO surfaces, both covered. THREAD LIST: authorDisplayName computed -- `getResolvedUserName(c.authorId) || \\`成员 ${ordinal}\\`` -- unconditionally overwrites `authorName` on every comment BEFORE it reaches the kit (TIER A entry "ApprovalCommentsPanel.vue -- comment author display name" above). MENTION DROPDOWN (a SEPARATE kit render path, post-push adversarial-review finding): setting `authorName` above arms the kit\'s OWN `defaultMentionSuggestions` :385 subtitle leak (renders raw `authorId` whenever `authorName` differs from it, which is now always) and :378\'s candidate-label leak (blank `name` falls back to raw `userId`) -- discharged by NOT feeding `mentionCandidates` to the kit at all and supplying our own values-free `mentionSuggestionsForPanel` (via the shared `memberIdentity` computed, ONE ordinal counter across both halves -- gate finding P3-1, 2026-08-22) covering every author + candidate id, which supersedes the kit\'s internal derivation. Author entries carry `subtitle: undefined`; candidate entries carry `subtitle: candidate.email || undefined` -- a real S2 field (`ApprovalMentionCandidate.email`), not a raw-id fallback, so still values-free, just not universally `undefined` (corrected, gate finding P3-2 -- the prior wording here claimed `subtitle: undefined` for both halves, which was true only of the author half). See `approval-comments-panel.spec.ts`\'s dedicated dropdown-opening test.',
+    reason: 'S3b 全文评论 tab wrapper -- mounts MetaCommentsPanel.vue and useMultitableComments from shared/comments.',
+  },
+]
+
+function scanForSharedCommentsImporters(files: readonly string[]): string[] {
+  const importers: string[] = []
+  for (const file of files) {
+    const lines = readSrc(file).split('\n')
+    if (lines.some((line) => SHARED_COMMENTS_IMPORT_RE.test(line))) importers.push(file)
+  }
+  return importers
+}
+
+const SHARED_COMMENTS_APPROVAL_IMPORTERS = scanForSharedCommentsImporters(
+  SCANNED_FILES.filter((f) => f.startsWith('src/approvals/') || f.startsWith('src/views/approval/')),
+)
+
+describe('member-display-identity coverage enumeration — P3-A (fail-closed shared/comments importer tripwire)', () => {
+  it('non-empty: at least one approval file imports shared/comments (a rotted regex finding zero must fail HERE, not pass green -- the feedback_empty_read_is_not_absence class)', () => {
+    expect(SHARED_COMMENTS_APPROVAL_IMPORTERS.length).toBeGreaterThan(0)
+  })
+
+  it('every discovered importer has a triage row, and every triage row still names a real importer -- set-equality both directions (an untriaged importer reds; a stale row reds)', () => {
+    const discovered = new Set(SHARED_COMMENTS_APPROVAL_IMPORTERS)
+    const triaged = new Set(SHARED_COMMENTS_APPROVAL_CONSUMERS.map((c) => c.file))
+    expect(discovered).toEqual(triaged)
+  })
+
+  it('every triage row names a non-empty guard disposition', () => {
+    for (const consumer of SHARED_COMMENTS_APPROVAL_CONSUMERS) {
+      expect(consumer.guard.length, consumer.file).toBeGreaterThan(0)
+    }
+  })
+
+  it('positive control / DECOY: the regex matches the real import shape and an alias form, does NOT match a comment mentioning the same words or an unrelated approvals/comments-looking path, and a synthetic untriaged importer is flagged by the same set-equality mechanism', () => {
+    const realImportLine = "import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'"
+    expect(SHARED_COMMENTS_IMPORT_RE.test(realImportLine)).toBe(true)
+
+    // Alias-form import (not a relative path) still matches -- the regex keys on the substring
+    // `shared/comments`, not on a leading `../`.
+    const aliasForm = "import { useMultitableComments } from '@/shared/comments/composables/useMultitableComments'"
+    expect(SHARED_COMMENTS_IMPORT_RE.test(aliasForm)).toBe(true)
+
+    const lookalikeUnrelated = "import x from './approvals/comments'"
+    expect(SHARED_COMMENTS_IMPORT_RE.test(lookalikeUnrelated)).toBe(false)
+
+    // A COMMENT that merely mentions "shared/comments" (exactly what ApprovalDetailView.vue's own
+    // header note does, disclosing it is NOT a direct importer) must not match -- proves the
+    // anchor is real, not just a bare substring test.
+    const commentMentioningIt = "// ApprovalCommentsPanel.vue is the actual shared/comments importer"
+    expect(SHARED_COMMENTS_IMPORT_RE.test(commentMentioningIt)).toBe(false)
+
+    // A synthetic importer absent from the triage table must be flagged by the SAME set-equality
+    // mechanism the real test above uses -- proven against a fixture set, never against (or by
+    // mutating) real source.
+    const discoveredWithExtra = new Set([...SHARED_COMMENTS_APPROVAL_IMPORTERS, 'src/views/approval/SyntheticUntriaged.vue'])
+    const triaged = new Set(SHARED_COMMENTS_APPROVAL_CONSUMERS.map((c) => c.file))
+    expect(discoveredWithExtra).not.toEqual(triaged)
   })
 })
 

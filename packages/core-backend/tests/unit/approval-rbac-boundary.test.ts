@@ -464,6 +464,14 @@ describe('Approval RBAC boundary verification', () => {
           }
         }
 
+        // Lock-10 (S1): canReadApprovalInstance's own admission SELECT, run BEFORE this handler's
+        // getApproval — 'u-readonly' holds a real seat above (assignment_type='user',
+        // assignee_id='u-readonly'), which is exactly what admits them here too (arm 2); this
+        // mock just answers the SAME question the real predicate would answer TRUE.
+        if (sql.includes('SELECT 1 FROM approval_instances i')) {
+          return { rows: [{ '?column?': 1 }], rowCount: 1 }
+        }
+
         return { rows: [], rowCount: 0 }
       })
 

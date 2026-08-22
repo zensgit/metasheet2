@@ -110,7 +110,10 @@ function toOccurredAt(...values: Array<Date | string | null | undefined>): strin
   return null
 }
 
-function isPlmId(id: string): boolean {
+// Exported (additive-only; no behavior change) so a Lock-10 (S1) test can gate this hand-copied
+// detector's agreement with the other two shipped copies + the canonical form in
+// approval-instance-readability.ts (OD-S1-18(b): "the divergence of any one of them is a P1").
+export function isPlmId(id: string): boolean {
   return id.startsWith('plm:')
 }
 

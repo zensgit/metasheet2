@@ -99,6 +99,7 @@ describeIfDatabase('Lock-5 §1.3 — commentRequired: node-level, snapshot fallb
   const createdTemplateIds = new Set<string>()
   const createdApprovalIds = new Set<string>()
   const grantedUserIds = new Set<string>()
+  const createdUserIds = new Set<string>()
 
   const pool = () => poolManager.get()
 
@@ -130,6 +131,9 @@ describeIfDatabase('Lock-5 §1.3 — commentRequired: node-level, snapshot fallb
       }
       if (grantedUserIds.size > 0) {
         await pool().query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [[...grantedUserIds]])
+      }
+      if (createdUserIds.size > 0) {
+        await pool().query('DELETE FROM users WHERE id = ANY($1::text[])', [[...createdUserIds]])
       }
     } finally {
       await server?.stop()
@@ -441,6 +445,16 @@ describeIfDatabase('Lock-5 §1.3 — commentRequired: node-level, snapshot fallb
     )
     expect(approverResponse.status).toBe(200)
     const approverToken = ((await approverResponse.json()) as { token: string }).token
+    // Lock-10 (S1): the role-typed seat arm is DB-backed (OD-S1-17(a)) — the trusted `roles`
+    // JWT claim above satisfies rbacGuard but no longer, alone, satisfies canReadApprovalInstance's
+    // role match. Seed the real users.role row `viewerRoles` reads so this stays a role-seat test,
+    // not (accidentally, post-S1) a "nobody can read this" test.
+    createdUserIds.add(approverId)
+    await pool().query(
+      `INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $1||'@example.test', $1, 'x', $2, TRUE)
+       ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, is_active = TRUE`,
+      [approverId, roleId],
+    )
 
     const graph = {
       nodes: [
@@ -514,6 +528,17 @@ describeIfDatabase('Lock-5 §1.3 — commentRequired: node-level, snapshot fallb
       )
       expect(approverResponse.status).toBe(200)
       const approverToken = ((await approverResponse.json()) as { token: string }).token
+      // Lock-10 (S1): role-typed seat admission is DB-backed (OD-S1-17(a)) — seed the users.role
+      // row for the role branch so this stays a role-seat test post-S1 (the user branch already
+      // qualifies via arm 2's user-typed match on approverId itself, no DB row needed there).
+      if (seatKind === 'role') {
+        createdUserIds.add(approverId)
+        await pool().query(
+          `INSERT INTO users (id, email, name, password_hash, role, is_active) VALUES ($1, $1||'@example.test', $1, 'x', $2, TRUE)
+           ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, is_active = TRUE`,
+          [approverId, roleId],
+        )
+      }
 
       const graph = {
         nodes: [

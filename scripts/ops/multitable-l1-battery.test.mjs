@@ -42,6 +42,13 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
+  AUTHORITY_FUNCTION_SHADOW_QUERY,
+  AUTHORITY_FUNCTION_SNAPSHOT_QUERY,
+  EXPECTED_AUTHORITY_FUNCTIONS,
+  EXPECTED_AUTHORITY_TRIGGERS,
+  canonicalTrigger,
+} from './multitable-recovery-schema-containment.mjs'
+import {
   DRIVEN_SURFACES,
   ENABLED_TRIGGER_STATES,
   EXPECTED_TRIGGER_COUNT,
@@ -365,20 +372,82 @@ test('the exclusive/shared mechanism the battery depends on is the one the migra
 // 3. Fail-not-skip preflight
 // ---------------------------------------------------------------------------
 
-const EXPECTED_TRIGGER_NAMES = parseTupleBlock('export const RECOVERY_AUTHORITY_TRIGGERS').map(([, trigger]) => trigger)
-const fakeExpected = EXPECTED_TRIGGER_NAMES.map((triggerName, index) => ({
-  triggerName,
-  tableName: `t${index}`,
-}))
+const MIGRATION_TRIGGER_TUPLES = parseTupleBlock('export const RECOVERY_AUTHORITY_TRIGGERS')
+const EXPECTED_TRIGGER_NAMES = MIGRATION_TRIGGER_TUPLES.map(([, trigger]) => trigger)
 
-const postureRows = (enabled, overrides = {}) =>
-  fakeExpected.map((trigger) => ({
-    trigger_name: trigger.triggerName,
-    enabled: Object.hasOwn(overrides, trigger.triggerName) ? overrides[trigger.triggerName] : enabled,
+/**
+ * The posture expectations under test are the REAL canonical census rows, matched to the
+ * migration's own (table, trigger) tuples. Two properties come out of building the fixture this
+ * way rather than from `{ triggerName, tableName: 't<i>' }` placeholders:
+ *   1. the fixture carries every canonical identity field (table, function, event, args, update
+ *      columns), so a posture test can perturb any of them — with placeholder tables the fixture
+ *      shape simply did not contain the field the escape attacks (fixture形状须对齐点名场景);
+ *   2. the lookup itself drift-guards the migration against the containment census: a trigger the
+ *      migration installs on a table the census does not name fails here.
+ */
+const fakeExpected = MIGRATION_TRIGGER_TUPLES.map(([tableName, triggerName]) => {
+  const canonical = EXPECTED_AUTHORITY_TRIGGERS.find(
+    (trigger) => trigger.tableName === tableName && trigger.triggerName === triggerName,
+  )
+  assert.ok(
+    canonical,
+    `the containment census has no canonical row for the migration's ${tableName}.${triggerName} — census and migration have diverged`,
+  )
+  return canonical
+})
+
+/** Every canonical field name, read off the containment canonicalizer — never a second list. */
+const CANONICAL_TRIGGER_FIELDS = Object.keys(canonicalTrigger({}))
+
+/** The six authority functions, exactly as observed on a database that matches the census. */
+const functionRowsFixture = (overrides = {}) =>
+  EXPECTED_AUTHORITY_FUNCTIONS.map((fn) => ({
+    schema_name: fn.schemaName,
+    function_name: fn.functionName,
+    identity_arguments: fn.identityArguments,
+    result_type: fn.resultType,
+    language: fn.language,
+    security_definer: fn.securityDefiner,
+    volatility: fn.volatility,
+    config: fn.config,
+    body: fn.body,
+    ...(overrides[fn.functionName] ?? {}),
   }))
 
+/**
+ * Catalogue rows as the shared containment query returns them. `overrides` is keyed by trigger
+ * name; a STRING value overrides `enabled`, an OBJECT is a row patch (so a test can plant the
+ * wrong table / function / event / args without hand-writing nine rows).
+ */
+const postureRows = (enabled, overrides = {}) =>
+  fakeExpected.map((trigger) => {
+    const override = overrides[trigger.triggerName]
+    const patch = typeof override === 'string' ? { enabled: override } : (override ?? {})
+    return {
+      schema_name: trigger.schemaName,
+      table_name: trigger.tableName,
+      trigger_name: trigger.triggerName,
+      enabled,
+      trigger_type: trigger.triggerType,
+      function_schema: trigger.functionSchema,
+      function_name: trigger.functionName,
+      argument_hex: trigger.argumentHex,
+      when_clause: trigger.whenClause,
+      update_columns: [...trigger.updateColumns],
+      ...patch,
+    }
+  })
+
+/** Posture over a canonical fixture, with the observations the fail-closed checks require. */
+const evaluate = (rows, options = {}) =>
+  evaluatePosture(rows, fakeExpected, {
+    functionRows: functionRowsFixture(),
+    shadowFunctionRows: [],
+    ...options,
+  })
+
 test('a factory-inert posture is NOT armed and exits NON-ZERO', () => {
-  const posture = evaluatePosture(postureRows('D'), fakeExpected)
+  const posture = evaluate(postureRows('D'))
   assert.equal(posture.armed, false)
   assert.equal(posture.armedCount, 0)
   const report = notArmedReport(posture)
@@ -388,7 +457,7 @@ test('a factory-inert posture is NOT armed and exits NON-ZERO', () => {
 })
 
 test('a PARTIALLY armed posture (8/9) is NOT armed — partial enablement is not L1', () => {
-  const posture = evaluatePosture(postureRows('O', { [EXPECTED_TRIGGER_NAMES[0]]: 'D' }), fakeExpected)
+  const posture = evaluate(postureRows('O', { [EXPECTED_TRIGGER_NAMES[0]]: 'D' }))
   assert.equal(posture.armed, false)
   assert.equal(posture.armedCount, fakeExpected.length - 1)
   assert.equal(posture.offenders.length, 1)
@@ -397,7 +466,7 @@ test('a PARTIALLY armed posture (8/9) is NOT armed — partial enablement is not
 
 test('an ABSENT trigger is NOT armed (a missing trigger must not read as "not disabled")', () => {
   const rows = postureRows('O').slice(1)
-  const posture = evaluatePosture(rows, fakeExpected)
+  const posture = evaluate(rows)
   assert.equal(posture.armed, false)
   assert.match(posture.offenders.join(' '), /absent/)
   assert.equal(posture.fingerprint[EXPECTED_TRIGGER_NAMES[0]], null)
@@ -405,11 +474,341 @@ test('an ABSENT trigger is NOT armed (a missing trigger must not read as "not di
 
 test('a fully armed posture IS armed — for every tgenabled letter that means "fires"', () => {
   for (const letter of ENABLED_TRIGGER_STATES) {
-    const posture = evaluatePosture(postureRows(letter), fakeExpected)
+    const posture = evaluate(postureRows(letter))
     assert.equal(posture.armed, true, `tgenabled='${letter}' should count as armed`)
     assert.equal(posture.armedCount, fakeExpected.length)
     assert.deepEqual(posture.offenders, [])
+    assert.deepEqual(posture.functionOffenders, [])
   }
+})
+
+// ---------------------------------------------------------------------------
+// P2 (owner-constructed escape): ARMED is a claim about the trigger's CANONICAL IDENTITY, not
+// about a name and a tgenabled letter.
+//
+// The escape the owner built on a real database: DROP the authority trigger from `user_roles` and
+// CREATE a trigger of the SAME NAME on an unrelated table. The preflight keyed on `trigger_name`
+// and read only `tgenabled`, so it certified `PHASE 0 VERDICT: ARMED - 9/9` while `user_roles` —
+// one of the eight authority tables — carried no trigger at all. Every downstream 409 the battery
+// then reported would have been evidence about a posture that did not exist.
+//
+// These guards pin the property, not the one escape: the field set they perturb is read off the
+// containment canonicalizer itself, so a field added there is covered without editing this test
+// (枚举陷阱不收敛 — a hand-enumerated trap list never converges).
+// ---------------------------------------------------------------------------
+
+/** A value of the same shape as `value` but guaranteed to differ from it. */
+function perturb(value) {
+  if (Array.isArray(value)) return [...value, 'o2bat_perturbed_column']
+  if (typeof value === 'number') return value + 1
+  return `${value}_o2bat_perturbed`
+}
+
+test('P2: EVERY canonical trigger field is load-bearing — perturbing any one reads NOT armed', () => {
+  // The census the battery compares against publishes exactly these fields; narrowing the
+  // comparison to a subset (the defect this replaced) reds here for the dropped field.
+  assert.ok(
+    CANONICAL_TRIGGER_FIELDS.length >= 9,
+    `expected the containment canonicalizer to publish the full trigger identity; got ${CANONICAL_TRIGGER_FIELDS.join(', ')}`,
+  )
+  assert.deepEqual(
+    [...CANONICAL_TRIGGER_FIELDS].sort(),
+    [
+      'argumentHex',
+      'enabled',
+      'functionName',
+      'functionSchema',
+      'schemaName',
+      'tableName',
+      'triggerName',
+      'triggerType',
+      'updateColumns',
+      'whenClause',
+    ],
+    'the canonical trigger field set changed — confirm the posture check still compares ALL of it',
+  )
+
+  const victim = fakeExpected[0]
+  const snake = {
+    schemaName: 'schema_name',
+    tableName: 'table_name',
+    triggerName: 'trigger_name',
+    enabled: 'enabled',
+    triggerType: 'trigger_type',
+    functionSchema: 'function_schema',
+    functionName: 'function_name',
+    argumentHex: 'argument_hex',
+    whenClause: 'when_clause',
+    updateColumns: 'update_columns',
+  }
+  for (const field of CANONICAL_TRIGGER_FIELDS) {
+    // `enabled` is the ONE field where the battery's expectation differs from the containment
+    // census (fires, not factory-'D'), so its negative value is a non-firing letter.
+    const perturbed = field === 'enabled' ? 'D' : perturb(canonicalTrigger(victim)[field])
+    const rows = postureRows('O', { [victim.triggerName]: { [snake[field]]: perturbed } })
+    const posture = evaluate(rows)
+    assert.equal(
+      posture.armed,
+      false,
+      `a trigger whose ${field} diverges from the census must NOT certify ARMED`,
+    )
+    assert.ok(
+      posture.offenders.length > 0,
+      `a divergent ${field} must produce a named offender, not a silent count`,
+    )
+    assert.match(
+      posture.offenders.join(' '),
+      new RegExp(victim.triggerName),
+      `the offender for a divergent ${field} must name the trigger`,
+    )
+    assert.equal(notArmedReport(posture).exitCode, 2)
+  }
+})
+
+test('P2: the owner escape — right NAME, WRONG TABLE — is NOT armed and the offender names the table divergence', () => {
+  // Exactly the construction the owner ran against a real database: the authority table loses its
+  // trigger, and a trigger of that name turns up somewhere else. Everything else is identical.
+  const victim = fakeExpected.find((trigger) => trigger.tableName === 'user_roles') ?? fakeExpected[0]
+  const rows = postureRows('O', { [victim.triggerName]: { table_name: 'spreadsheets' } })
+  const posture = evaluate(rows)
+
+  assert.equal(posture.armed, false, 'a same-named trigger on a different table must never certify ARMED')
+  assert.equal(posture.armedCount, fakeExpected.length - 1, 'the unprotected table must not be counted as armed')
+  const offenders = posture.offenders.join('\n')
+  assert.match(offenders, /WRONG TABLE/, 'the offender must name the divergence as a wrong TABLE, not a bare absence')
+  assert.match(offenders, new RegExp(`${victim.schemaName}\\.${victim.tableName}`), 'the offender must name the authority table left unprotected')
+  assert.match(offenders, /spreadsheets/, 'the offender must name the table the impostor was found on')
+
+  const report = notArmedReport(posture)
+  assert.equal(report.exitCode, 2, 'the wrong-table escape must exit 2, never 0')
+  assert.match(report.output, /^VERDICT: NOT_ARMED/)
+  assert.match(report.output, /WRONG TABLE/)
+
+  // And the evidence fingerprint must not read ARMED-shaped: it records where the trigger really is.
+  assert.deepEqual(posture.fingerprint[victim.triggerName], {
+    observed_on: `${victim.schemaName}.spreadsheets`,
+    enabled: 'O',
+  })
+})
+
+test('P2: right name + right table but the WRONG FUNCTION is NOT armed', () => {
+  const victim = fakeExpected[0]
+  const rows = postureRows('O', { [victim.triggerName]: { function_name: 'metasheet_o2bat_impostor' } })
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false)
+  assert.match(posture.offenders.join(' '), /functionName/)
+  assert.match(posture.offenders.join(' '), /metasheet_o2bat_impostor/)
+})
+
+test('P2: right name + table + function but the WRONG EVENT (tgtype) is NOT armed', () => {
+  // tgtype packs BEFORE/AFTER and the INSERT/UPDATE/DELETE mask. 31 = BEFORE INSERT OR UPDATE OR
+  // DELETE (the census value for the row-level authority triggers); 29 drops UPDATE from the mask.
+  const victim = fakeExpected.find((trigger) => trigger.triggerType === 31) ?? fakeExpected[0]
+  const rows = postureRows('O', { [victim.triggerName]: { trigger_type: 29 } })
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false, 'a trigger that no longer fires on the census-named events is not L1 posture')
+  assert.match(posture.offenders.join(' '), /triggerType=29 expected 31/)
+})
+
+test('P2: right everything but the WRONG ARGUMENTS (tgargs) is NOT armed', () => {
+  const victim = fakeExpected.find((trigger) => trigger.argumentHex !== '') ?? fakeExpected[0]
+  const rows = postureRows('O', { [victim.triggerName]: { argument_hex: '6f326261745f77726f6e6700' } })
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false, 'a trigger reading a different column than the census names is not L1 posture')
+  assert.match(posture.offenders.join(' '), /argumentHex/)
+})
+
+test('P2: right everything but the WRONG UPDATE-OF COLUMNS is NOT armed', () => {
+  const victim = fakeExpected.find((trigger) => trigger.updateColumns.length > 0)
+  assert.ok(victim, 'the census must still contain an UPDATE OF trigger for this property to be testable')
+  const rows = postureRows('O', { [victim.triggerName]: { update_columns: ['role'] } })
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false, 'narrowing UPDATE OF leaves census-named columns unguarded')
+  assert.match(posture.offenders.join(' '), /updateColumns/)
+})
+
+test('P2: right everything but a WHEN clause that never fires is NOT armed', () => {
+  // Round-two escape, found by attacking the first fix rather than trusting it. A
+  // `WHEN (<never true>)` predicate leaves EVERY other canonical field identical to the census —
+  // right table, function, event, args, update columns, tgenabled='O' — while the trigger never
+  // runs. Verified behaviourally on a real database: with such a clause, an EXCLUSIVE
+  // recovery-authority lease no longer refuses the platform write at all, which is precisely the
+  // "trigger did not fire" outcome the battery's own header calls the WORSE failure.
+  const victim = fakeExpected[0]
+  assert.equal(victim.whenClause, '', 'the authority triggers are declared WITHOUT a WHEN clause')
+  const rows = postureRows('O', {
+    [victim.triggerName]: { when_clause: "(current_setting('server_version'::text) = 'never-this'::text)" },
+  })
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false, 'a trigger gated behind a never-true WHEN clause does not protect its table')
+  assert.match(posture.offenders.join(' '), /whenClause/)
+})
+
+test('P2: an EXTRA trigger carrying an authority NAME on an unnamed table is NOT armed', () => {
+  // The escape's sibling: the real trigger is present and firing, but a second trigger of the same
+  // authority name is planted elsewhere. A name collision is the escape signature, so it is fatal.
+  const rows = [
+    ...postureRows('O'),
+    { ...postureRows('O')[0], table_name: 'spreadsheets' },
+  ]
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, false)
+  assert.match(posture.offenders.join(' '), /NAME COLLISION/)
+})
+
+test('P2: an unrelated trigger calling an authority FUNCTION is recorded as drift, not a posture refusal', () => {
+  // Deliberate scope line: set-equality drift belongs to multitable-recovery-schema-containment.mjs
+  // (postdeploy-full runs it). Failing the battery on any stray catalogue row would fail-closed a
+  // genuinely armed staging host over an artefact that protects nothing and blocks nothing.
+  const rows = [
+    ...postureRows('O'),
+    {
+      ...postureRows('O')[0],
+      table_name: 'spreadsheets',
+      trigger_name: 'trg_o2bat_unrelated_artefact',
+    },
+  ]
+  const posture = evaluate(rows)
+  assert.equal(posture.armed, true, 'a stray non-authority-named trigger must not block a genuine L1 posture')
+  assert.deepEqual(posture.unexpectedTriggers, ['public.spreadsheets.trg_o2bat_unrelated_artefact'])
+})
+
+test('P2: the authority FUNCTION bodies are part of ARMED — a neutered body is NOT armed', () => {
+  // A canonically perfect trigger firing a `CREATE OR REPLACE`d no-op body is the same false-ARMED
+  // wearing a different hat: the write would sail through and the battery would read 2xx as "the
+  // trigger did not fire" — after already certifying the posture.
+  const victim = EXPECTED_AUTHORITY_FUNCTIONS[0]
+  const posture = evaluate(postureRows('O'), {
+    functionRows: functionRowsFixture({
+      [victim.functionName]: { body: 'BEGIN RETURN NEW; END;' },
+    }),
+  })
+  assert.equal(posture.armed, false, 'a neutered authority function body must not certify ARMED')
+  assert.match(posture.functionOffenders.join(' '), new RegExp(victim.functionName))
+  assert.match(posture.functionOffenders.join(' '), /body/)
+  assert.match(notArmedReport(posture).output, /authority function/)
+  // Discretion: the offender names the diverging FIELD, never echoes the body text.
+  assert.doesNotMatch(posture.functionOffenders.join(' '), /RETURN NEW/)
+})
+
+test('P2: the LEASE HELPER functions are covered too, not just the three trigger functions', () => {
+  // The trigger functions call metasheet_try_recovery_authority_{user,role,group}. Neutering a
+  // HELPER (always return TRUE) leaves all nine triggers canonically perfect AND all three trigger
+  // function bodies intact, while the refusal disappears. Checking only AUTHORITY_TRIGGER_FUNCTIONS
+  // would miss it, so the posture check must span all six.
+  const helpers = EXPECTED_AUTHORITY_FUNCTIONS.filter((fn) => fn.functionName.startsWith('metasheet_try_recovery_authority_'))
+  assert.equal(helpers.length, 3, 'the census must still carry the three lease helpers')
+  for (const helper of helpers) {
+    const posture = evaluate(postureRows('O'), {
+      functionRows: functionRowsFixture({
+        [helper.functionName]: { body: 'BEGIN RETURN TRUE; END;' },
+      }),
+    })
+    assert.equal(posture.armed, false, `a neutered ${helper.functionName} must not certify ARMED`)
+    assert.match(posture.functionOffenders.join(' '), new RegExp(helper.functionName))
+  }
+})
+
+test('P2: a MISSING authority function is NOT armed', () => {
+  const victim = EXPECTED_AUTHORITY_FUNCTIONS[0]
+  const posture = evaluate(postureRows('O'), {
+    functionRows: functionRowsFixture().filter((fn) => fn.function_name !== victim.functionName),
+  })
+  assert.equal(posture.armed, false)
+  assert.match(posture.functionOffenders.join(' '), /absent/)
+})
+
+test('P2: UNOBSERVED authority functions are NOT armed — the function check is fail-closed', () => {
+  // Positive control for the control: if the function comparison were inverted, every posture would
+  // read NOT_ARMED and the trigger guards above would still pass. The "fully armed" test above is
+  // that control; this one pins that omitting the observation cannot be mistaken for verifying it.
+  const posture = evaluate(postureRows('O'), { functionRows: null })
+  assert.equal(posture.armed, false, 'an unobserved function set must never read as a verified one')
+  assert.match(posture.functionOffenders.join(' '), /NOT observed/)
+  assert.equal(
+    evaluatePosture(postureRows('O'), fakeExpected).armed,
+    false,
+    'omitting the observations entirely must be fail-closed too',
+  )
+})
+
+test('P2: an authority function SHADOWED from another schema is NOT armed', () => {
+  // Round-three escape, found by attacking the round-two fix. HISTORICALLY this was live-exploitable:
+  // every `public` row matched the census exactly — nine canonical triggers, six correct function
+  // fingerprints — yet the definition that RAN was a same-signature function in another schema,
+  // because the trigger functions called the lease helpers by bare name with no `SET search_path`
+  // (default path `"$user", public`); with a `postgres.metasheet_try_recovery_authority_user` present
+  // an EXCLUSIVE lease no longer refused the write. That root cause is now FIXED at the source by
+  // zzzz20260821120000 (schema-qualified calls + fixed search_path), so such a shadow can no longer
+  // win resolution. The census stays as DEFENSE-IN-DEPTH and this preflight still fail-closes on any
+  // authority-named function outside `public` (it should not exist; its presence signals tampering).
+  const posture = evaluate(postureRows('O'), {
+    shadowFunctionRows: [
+      {
+        schema_name: 'postgres',
+        function_name: 'metasheet_try_recovery_authority_user',
+        identity_arguments: 'authority_user_id text, exclusive boolean',
+      },
+    ],
+  })
+  assert.equal(posture.armed, false, 'a shadowed authority function means the verified definition is not the one that runs')
+  assert.match(posture.shadowOffenders.join(' '), /postgres\.metasheet_try_recovery_authority_user/)
+  assert.match(posture.shadowOffenders.join(' '), /search_path/)
+  const report = notArmedReport(posture)
+  assert.equal(report.exitCode, 2)
+  assert.match(report.output, /SHADOWED authority function/)
+})
+
+test('P2: an UNSEARCHED shadow census is NOT armed — the shadow check is fail-closed too', () => {
+  const posture = evaluate(postureRows('O'), { shadowFunctionRows: null })
+  assert.equal(posture.armed, false, 'not looking for shadows must never read as having found none')
+  assert.match(posture.shadowOffenders.join(' '), /NOT searched/)
+  // Positive control: the same fixture WITH an empty (i.e. actually searched) shadow census arms.
+  assert.equal(evaluate(postureRows('O'), { shadowFunctionRows: [] }).armed, true)
+})
+
+test('P2: the shadow query is schema-complementary to the function query, and both are wired in', () => {
+  // The two function queries must PARTITION the schema space: one pins `public` field-by-field, the
+  // other refuses any authority name outside it. If both filtered to `public`, the shadow check
+  // would be vacuous and every guard above would still pass (被触发≠被验证).
+  assert.match(AUTHORITY_FUNCTION_SNAPSHOT_QUERY, /ns\.nspname = 'public'/)
+  assert.match(AUTHORITY_FUNCTION_SHADOW_QUERY, /ns\.nspname <> 'public'/)
+  assert.match(
+    BATTERY_CODE,
+    /const POSTURE_FUNCTION_SHADOW_QUERY = AUTHORITY_FUNCTION_SHADOW_QUERY/,
+    'the preflight must read the containment module\'s shadow query',
+  )
+  assert.match(
+    BATTERY_CODE,
+    /shadowFunctionRows: postureShadowRows/,
+    'the preflight must pass the observed shadow rows into the posture judgement',
+  )
+})
+
+test('P2: the battery preflight actually FEEDS evaluatePosture the shared catalogue rows', () => {
+  // The guards above test the judgement; this one tests the wiring — a correct judgement fed a
+  // narrow query would restore the escape (验证一环≠整条链可行). Both catalogue queries must be
+  // the containment module's, and the function rows must reach evaluatePosture.
+  assert.match(
+    BATTERY_CODE,
+    /const POSTURE_TRIGGER_QUERY = AUTHORITY_TRIGGER_SNAPSHOT_QUERY/,
+    'the preflight must read the containment module\'s trigger query, not a second narrower one',
+  )
+  assert.match(
+    BATTERY_CODE,
+    /const POSTURE_FUNCTION_QUERY = AUTHORITY_FUNCTION_SNAPSHOT_QUERY/,
+    'the preflight must read the containment module\'s function query',
+  )
+  assert.match(
+    BATTERY_CODE,
+    /evaluatePosture\(postureRows, EXPECTED_AUTHORITY_TRIGGERS, \{[^}]*functionRows: postureFunctionRows,[^}]*\}\)/,
+    'the preflight must pass the observed function rows into the posture judgement',
+  )
+  assert.doesNotMatch(
+    BATTERY_CODE,
+    /trg\.tgname = ANY\(\$1::text\[\]\)/,
+    'the battery must not carry its own posture SELECT — the census query is the single source',
+  )
 })
 
 // ---------------------------------------------------------------------------
@@ -424,8 +823,15 @@ test('P2-4: REPLICA (tgenabled=R) must NOT count as armed — reverting P2-1 red
   assert.equal(ENABLED_TRIGGER_STATES.has('R'), false, "tgenabled 'R' (replica-only) must not certify ARMED")
   assert.equal(ENABLED_TRIGGER_STATES.has('O'), true)
   assert.equal(ENABLED_TRIGGER_STATES.has('A'), true)
-  const posture = evaluatePosture(postureRows('R'), fakeExpected)
+  // Through `evaluate`, so the fixture is otherwise CANONICALLY ARMED (function rows supplied,
+  // every identity field correct): 'R' must be the only reason this reads NOT armed. Calling
+  // evaluatePosture bare would go NOT_ARMED on the fail-closed function check and this assertion
+  // would pass with 'R' re-added to the set (「不是错误X」≠结果断言).
+  const posture = evaluate(postureRows('R'))
   assert.equal(posture.armed, false, "a posture of all-'R' triggers must read NOT armed")
+  assert.equal(posture.armedCount, 0, "every 'R' trigger must be counted as NOT armed")
+  assert.deepEqual(posture.functionOffenders, [], "the fixture must be canonical apart from tgenabled — 'R' is the only defect under test")
+  assert.equal(evaluate(postureRows('O')).armed, true, 'positive control: the same fixture at O IS armed')
 })
 
 test('P2-4: user_invites is on BOTH the delete and scan lists, keyed by user_id — reverting P1-1/P2-3 reds here', () => {

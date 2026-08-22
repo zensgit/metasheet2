@@ -213,6 +213,15 @@
           @open-person-picker="(field) => emit('open-person-picker', field)"
           @run-button="(payload) => emit('run-button', payload)"
         />
+        <!-- 数据来源 / Provenance: read-only row lineage for integration-fed sheets. Self-gating —
+             it renders nothing unless the actor passes the integration read gate AND the sheet
+             carries a readable provenance key column, and it fetches only on first expand (no new
+             request on the record-open critical path). See the component's file header. -->
+        <MetaRecordProvenancePanel
+          :record="record"
+          :fields="fields"
+          :field-permissions="fieldPermissions"
+        />
       </div>
       <div
         v-else-if="activeTab === 'history'"
@@ -333,8 +342,11 @@ import { MtButton } from '../ui'
 import MetaCommentActionChip from './MetaCommentActionChip.vue'
 import MetaRecordPermissionManager from './MetaRecordPermissionManager.vue'
 import MetaRecordFieldsPanel from './MetaRecordFieldsPanel.vue'
+import MetaRecordProvenancePanel from './MetaRecordProvenancePanel.vue'
 import MetaRecordHistoryPanel from './MetaRecordHistoryPanel.vue'
-import MetaCommentsPanel from './MetaCommentsPanel.vue'
+// S3a: MetaCommentsPanel's real implementation now lives in shared/comments/components/ —
+// imported directly here rather than through the old-path re-export shim.
+import MetaCommentsPanel from '../../shared/comments/components/MetaCommentsPanel.vue'
 import MetaRecordAttachmentsPanel from './MetaRecordAttachmentsPanel.vue'
 import {
   resolveCommentAffordanceStateClass,

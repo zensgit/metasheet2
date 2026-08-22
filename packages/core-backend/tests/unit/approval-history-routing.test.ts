@@ -63,6 +63,14 @@ describe('approval history routing', () => {
 
   it('uses the canonical paginated approval history handler at the mounted route', async () => {
     pgState.pool.query
+      // Lock-10 (S1): canReadApprovalInstance runs BEFORE the history query, and its own
+      // implementation issues three queries when the org pin is off (default) — two inside
+      // viewerRoles (users.role, then user_roles ⋈ roles), then the admission SELECT itself.
+      // The first two contents are irrelevant here; the third must return a matching row so the
+      // fixture's admin-role principal is admitted (matches the pre-S1 200 this test asserts).
+      .mockResolvedValueOnce({ rows: [] }) // viewerRoles: users.role
+      .mockResolvedValueOnce({ rows: [] }) // viewerRoles: user_roles ⋈ roles
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] }) // canReadApprovalInstance admission SELECT
       .mockResolvedValueOnce({ rows: [{ c: 2 }] })
       .mockResolvedValueOnce({
         rows: [
@@ -113,19 +121,36 @@ describe('approval history routing', () => {
     // operation writes. They must exclude it with the SAME predicate — a count that still counts
     // denials would silently shift `total` and the page boundaries — so both parameter lists are
     // pinned here, and the real-DB suite proves the behavioural half end to end.
+    // Lock-10 (S1): canReadApprovalInstance's three admission-phase queries (mocked above) are
+    // Nth 1-3, so the pre-existing count/page queries this block pins shift from Nth 1/2 to Nth 4/5.
+    // Lock-10 (S2) HISTORY-TIMELINE arm (i) — both the count and page query add the
+    // `metadata->>'commentId' IS NULL` conjunct, binding NO parameter, so the parameter arrays
+    // pinned below stay unchanged from S1.
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      1,
-      'SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2',
+      4,
+      "SELECT COUNT(*)::int AS c FROM approval_records WHERE instance_id = $1 AND action <> $2 AND metadata->>'commentId' IS NULL",
       ['inst-1', 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      2,
+      5,
       expect.stringContaining('COALESCE(to_version, version) AS version'),
       ['inst-1', 1, 1, 'policy_denied'],
     )
     expect(pgState.pool.query).toHaveBeenNthCalledWith(
-      2,
+      5,
       expect.stringContaining('AND action <> $4'),
+      ['inst-1', 1, 1, 'policy_denied'],
+    )
+    // Lock-10 (S2) static pin — a future removal of the exclusion from either query reds here,
+    // even though the `stringContaining` checks above would still pass against the SAME literal.
+    expect(pgState.pool.query).toHaveBeenNthCalledWith(
+      4,
+      expect.stringContaining("metadata->>'commentId' IS NULL"),
+      ['inst-1', 'policy_denied'],
+    )
+    expect(pgState.pool.query).toHaveBeenNthCalledWith(
+      5,
+      expect.stringContaining("metadata->>'commentId' IS NULL"),
       ['inst-1', 1, 1, 'policy_denied'],
     )
   })

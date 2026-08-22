@@ -13,6 +13,7 @@ const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
+const { isTenantExtensionField } = require('./stock-preparation-extension-namespace.cjs')
 
 const DECISIONS = Object.freeze({
   ADD: 'add',
@@ -172,6 +173,246 @@ function plmRefreshFieldIds(template) {
 
 function fieldMapForTemplate(template) {
   return new Map((template.fields || []).map((field) => [field.id, field]))
+}
+
+// ── PACK-AWARE OWNERSHIP (#5074 follow-up) ────────────────────────────────────
+//
+// Until now this planner derived its writable set from the FROZEN template alone,
+// so a customer pack's `ext_` columns were never written — and "a refresh never
+// clobbers a human cell" held by OMISSION, not by decision. Once a pack installs
+// `ext_` plm_system columns the refresh has to write them, and the moment it does,
+// the human/plm boundary must come from what is ACTUALLY INSTALLED ON THE SHEET.
+//
+// The classification therefore reads back the `property.stockPreparation` stanza
+// the pack installer stamped (buildExtensionFieldProperty in
+// stock-preparation-customer-pack-installer.cjs) rather than trusting the pack
+// config, the caller, or the template.
+//
+// FAIL-CLOSED, in this precedence order:
+//   1. a `preserveOnRefresh: true` pin WINS over ownership — a deployer can pin a
+//      hand-maintained column without restating ownership, and the pin must bite.
+//   2. `ownership: 'human_preserved'` -> the HUMAN band (extends the wall).
+//   3. `ownership: 'plm_system'` AND `extension === true` -> the WRITABLE band.
+//      The extension stamp is REQUIRED: it is the installer's own mark, and
+//      without it the stanza did not come from a pack install.
+//   4. anything else — no stanza, a malformed stanza, a missing/unknown
+//      ownership, a plm_system claim with no extension stamp — is UNCLASSIFIED:
+//      NOT writable and NOT human. An unclassified column is a column nobody has
+//      decided about, and a refresh must not be the thing that decides.
+//
+// Only `ext_`-namespaced ids are considered at all. A canonical id appearing in the
+// installed set is TEMPLATE-GOVERNED and ignored here, so no installed property can
+// ever re-classify a frozen column (e.g. flip `procurementOwner` to plm_system).
+//
+// PURE: this reads an in-memory projection the CALLER supplies. It performs no I/O.
+
+const PACK_FIELD_OWNERSHIP_REASONS = Object.freeze([
+  'invalid_field_id',
+  'duplicate_field_id',
+  'template_governed',
+  'not_extension_namespace',
+  'missing_property_stanza',
+  'malformed_property_stanza',
+  'missing_ownership',
+  'unknown_ownership',
+  'missing_extension_stamp',
+  'human_preserved_ownership',
+  'preserve_on_refresh_pinned',
+])
+
+const PACK_FIELD_OWNERSHIP_PLM = 'plm_system'
+const PACK_FIELD_OWNERSHIP_HUMAN = 'human_preserved'
+
+function normalizeTemplateFieldList(templateFields) {
+  if (Array.isArray(templateFields)) return templateFields.filter(isPlainObject)
+  if (isPlainObject(templateFields) && Array.isArray(templateFields.fields)) {
+    return templateFields.fields.filter(isPlainObject)
+  }
+  throw new StockPreparationConflictPlannerError('templateFields must be an array of template field descriptors', {
+    field: 'templateFields',
+  })
+}
+
+// Accepts the shapes a caller can realistically hold without inventing a new read:
+//   - Array<{ id | fieldId | logicalId, property }>
+//   - Map<any, { id | fieldId | logicalId, property }>   (the host fields map, keyed physically)
+//   - plain object { [fieldId]: { property } | property-stanza-carrier }
+// Every entry is reduced to { fieldId, stanza } and nothing else is trusted.
+function normalizeInstalledFieldProperties(installedFieldProperties) {
+  if (installedFieldProperties === undefined || installedFieldProperties === null) return []
+  let entries
+  if (Array.isArray(installedFieldProperties)) {
+    entries = installedFieldProperties.map((row) => [undefined, row])
+  } else if (installedFieldProperties instanceof Map) {
+    entries = Array.from(installedFieldProperties.entries())
+  } else if (isPlainObject(installedFieldProperties)) {
+    entries = Object.entries(installedFieldProperties)
+  } else {
+    throw new StockPreparationConflictPlannerError('installedFieldProperties must be an array, Map, or object', {
+      field: 'installedFieldProperties',
+    })
+  }
+
+  return entries.map(([key, row]) => {
+    const carrier = isPlainObject(row) ? row : {}
+    const fieldId = optionalStringOrNull(carrier.logicalId)
+      || optionalStringOrNull(carrier.fieldId)
+      || optionalStringOrNull(carrier.id)
+      || (typeof key === 'string' ? optionalStringOrNull(key) : null)
+    const property = isPlainObject(carrier.property) ? carrier.property : undefined
+    const stanza = property && isPlainObject(property.stockPreparation)
+      ? property.stockPreparation
+      : (isPlainObject(carrier.stockPreparation) ? carrier.stockPreparation : undefined)
+    return {
+      fieldId,
+      hasProperty: property !== undefined || isPlainObject(carrier.stockPreparation),
+      stanza,
+      stanzaMalformed: property !== undefined
+        && property.stockPreparation !== undefined
+        && !isPlainObject(property.stockPreparation),
+    }
+  })
+}
+
+function optionalStringOrNull(value) {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+}
+
+/**
+ * Project the writable / human bands a pack-aware refresh must honour.
+ *
+ * @param {object} input
+ * @param {Array|object} input.templateFields  frozen template field descriptors (or the template).
+ * @param {Array|Map|object} [input.installedFieldProperties]  what is ACTUALLY installed on the
+ *        sheet. Omit it and the result is byte-identical to the pre-pack behaviour.
+ * @returns {{
+ *   plmWritableFieldIds: string[],       // template refresh band + qualifying pack columns
+ *   humanPreservedFieldIds: string[],    // template human band + declared pack human columns
+ *   packPlmWritableFieldIds: string[],
+ *   packHumanPreservedFieldIds: string[],
+ *   unclassifiedPackFieldIds: string[],
+ *   packAware: boolean,
+ *   reasons: Array<{fieldId: string, reason: string}>,  // VALUES-FREE (ids + frozen tokens only)
+ *   counts: object,
+ * }}
+ */
+function derivePackAwarePlmWritableFields(input = {}) {
+  const templateFieldList = normalizeTemplateFieldList(input.templateFields)
+  const templateIds = new Set(templateFieldList.map((field) => field.id))
+  const baseHuman = templateFieldList
+    .filter((field) => field.ownership === PACK_FIELD_OWNERSHIP_HUMAN)
+    .map((field) => field.id)
+  const basePlm = templateFieldList
+    .filter((field) => field.ownership === PACK_FIELD_OWNERSHIP_PLM)
+    .map((field) => field.id)
+    .filter((id) => !RUN_FIELD_IDS.includes(id))
+
+  const packAware = input.installedFieldProperties !== undefined && input.installedFieldProperties !== null
+  const installed = normalizeInstalledFieldProperties(input.installedFieldProperties)
+
+  const packPlm = []
+  const packHuman = []
+  const unclassified = []
+  const reasons = []
+  const seen = new Set()
+
+  for (const entry of installed) {
+    const { fieldId } = entry
+    if (!fieldId) {
+      reasons.push({ fieldId: '', reason: 'invalid_field_id' })
+      continue
+    }
+    if (seen.has(fieldId)) {
+      reasons.push({ fieldId, reason: 'duplicate_field_id' })
+      continue
+    }
+    seen.add(fieldId)
+
+    // The frozen template owns its own columns. An installed property may never move one.
+    if (templateIds.has(fieldId)) {
+      reasons.push({ fieldId, reason: 'template_governed' })
+      continue
+    }
+    if (!isTenantExtensionField(fieldId)) {
+      reasons.push({ fieldId, reason: 'not_extension_namespace' })
+      continue
+    }
+    if (entry.stanzaMalformed) {
+      unclassified.push(fieldId)
+      reasons.push({ fieldId, reason: 'malformed_property_stanza' })
+      continue
+    }
+    if (!isPlainObject(entry.stanza)) {
+      unclassified.push(fieldId)
+      reasons.push({ fieldId, reason: 'missing_property_stanza' })
+      continue
+    }
+
+    const stanza = entry.stanza
+    // (1) an explicit pin wins over ownership, in both directions.
+    if (stanza.preserveOnRefresh === true) {
+      packHuman.push(fieldId)
+      reasons.push({ fieldId, reason: 'preserve_on_refresh_pinned' })
+      continue
+    }
+    // (2) declared human -> the wall must now reject it BY NAME.
+    if (stanza.ownership === PACK_FIELD_OWNERSHIP_HUMAN) {
+      packHuman.push(fieldId)
+      reasons.push({ fieldId, reason: 'human_preserved_ownership' })
+      continue
+    }
+    // (3) the ONLY road into the writable band.
+    if (stanza.ownership === PACK_FIELD_OWNERSHIP_PLM) {
+      if (stanza.extension === true) {
+        packPlm.push(fieldId)
+        continue
+      }
+      unclassified.push(fieldId)
+      reasons.push({ fieldId, reason: 'missing_extension_stamp' })
+      continue
+    }
+    // (4) fail-closed.
+    unclassified.push(fieldId)
+    reasons.push({
+      fieldId,
+      reason: isBlank(stanza.ownership) ? 'missing_ownership' : 'unknown_ownership',
+    })
+  }
+
+  // Deterministic regardless of the caller's iteration order.
+  packPlm.sort()
+  packHuman.sort()
+  unclassified.sort()
+  reasons.sort((left, right) => (left.fieldId === right.fieldId
+    ? left.reason.localeCompare(right.reason)
+    : left.fieldId.localeCompare(right.fieldId)))
+
+  return {
+    plmWritableFieldIds: basePlm.concat(packPlm),
+    humanPreservedFieldIds: baseHuman.concat(packHuman),
+    packPlmWritableFieldIds: packPlm.slice(),
+    packHumanPreservedFieldIds: packHuman.slice(),
+    unclassifiedPackFieldIds: unclassified.slice(),
+    packAware,
+    reasons,
+    counts: {
+      inspected: installed.length,
+      packPlmWritable: packPlm.length,
+      packHumanPreserved: packHuman.length,
+      unclassified: unclassified.length,
+    },
+  }
+}
+
+// Values-free evidence for the plan summary: ids, frozen reason tokens, counts.
+function packAwareOwnershipEvidence(derived) {
+  return {
+    packPlmWritableFieldIds: derived.packPlmWritableFieldIds.slice(),
+    packHumanPreservedFieldIds: derived.packHumanPreservedFieldIds.slice(),
+    unclassifiedPackFieldIds: derived.unclassifiedPackFieldIds.slice(),
+    counts: { ...derived.counts },
+    reasons: derived.reasons.map((entry) => ({ ...entry })),
+  }
 }
 
 function keyOf(row) {
@@ -747,14 +988,20 @@ function planStockPreparationConflicts(input = {}) {
   const existingRows = normalizeRows(input.existingRows, 'existingRows')
   const rowErrors = normalizeRows(input.rowErrors, 'rowErrors')
 
-  const humanFields = HUMAN_PRESERVED_FIELD_IDS.slice()
   const templateHumanFields = fieldIdsByOwnership(template, 'human_preserved')
-  if (!sameStringSet(humanFields, templateHumanFields)) {
+  if (!sameStringSet(HUMAN_PRESERVED_FIELD_IDS.slice(), templateHumanFields)) {
     throw new StockPreparationConflictPlannerError('human field whitelist drifted from template', {
       field: 'template.fields',
     })
   }
-  const plmFields = plmRefreshFieldIds(template)
+  // Pack-aware bands. With no installedFieldProperties this returns exactly the
+  // template-derived sets, in template order — the pre-pack behaviour, unchanged.
+  const ownership = derivePackAwarePlmWritableFields({
+    templateFields: template.fields,
+    installedFieldProperties: input.installedFieldProperties,
+  })
+  const humanFields = ownership.humanPreservedFieldIds
+  const plmFields = ownership.plmWritableFieldIds
   const templateFields = fieldMapForTemplate(template)
   const counts = {
     [DECISIONS.ADD]: 0,
@@ -886,6 +1133,10 @@ function planStockPreparationConflicts(input = {}) {
     addDecision(decisions, counts, makeInactiveDecision(existingRow, runId, plannedAt, humanFields))
   }
 
+  // The key is ADDED ONLY when the caller supplied installed properties, so a
+  // legacy (pack-unaware) call still produces a byte-identical plan object.
+  const packAwareOwnership = ownership.packAware ? packAwareOwnershipEvidence(ownership) : undefined
+
   return {
     valid: counts[DECISIONS.MANUAL_CONFIRM] === 0,
     runId,
@@ -904,6 +1155,7 @@ function planStockPreparationConflicts(input = {}) {
       conflictTypes: Array.from(new Set(decisions.map((decision) => decision.conflictSummary && decision.conflictSummary.type).filter(Boolean))).sort(),
       duplicateExpandedKeyDiagnostics: duplicateExpandedKeyDiagnostics(expanded.keyed),
       duplicateExpandedKeyResolution: resolvedExpanded.resolution,
+      ...(packAwareOwnership ? { packAwareOwnership } : {}),
     },
   }
 }
@@ -927,6 +1179,9 @@ function summarizeConflictPlanForEvidence(plan = {}) {
     duplicateExpandedKeyResolution: isPlainObject(summary.duplicateExpandedKeyResolution)
       ? JSON.parse(JSON.stringify(summary.duplicateExpandedKeyResolution))
       : undefined,
+    packAwareOwnership: isPlainObject(summary.packAwareOwnership)
+      ? JSON.parse(JSON.stringify(summary.packAwareOwnership))
+      : undefined,
   }
 }
 
@@ -940,12 +1195,18 @@ module.exports = {
   DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON,
   IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   UNIMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
+  PACK_FIELD_OWNERSHIP_REASONS,
   StockPreparationConflictPlannerError,
+  derivePackAwarePlmWritableFields,
   duplicateExpandedKeyDiagnosticsForRows,
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
+    assertNoHumanFields,
     changedFields,
+    normalizeInstalledFieldProperties,
+    packAwareOwnershipEvidence,
+    pickFields,
     heldReasonForDuplicatePolicy,
     duplicateExpandedKeyDiagnosticsForRows,
     duplicateGroupDiscriminator,
