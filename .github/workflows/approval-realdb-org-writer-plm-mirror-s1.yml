@@ -1,13 +1,20 @@
 name: Approval real-DB acceptance (writers-stamp-org S1 slice 1 — G-W2 PLM mirror)
 
 # EVIDENCE LANE for the writers-stamp-org (S1 closeout slice 1) PLM mirror writer regression
-# (tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts, G-W2): the ONLY one of the six
-# approval_instances writers with a ruled derivation for this slice (OD-S1-18(b) / S1 lock §2.2(b)
-# class 5 — "write nothing"). Drives a PLM sync through the PUBLIC
+# (tests/integration/approval-org-writer-plm-mirror-s1.db.test.ts, G-W2): of the six
+# approval_instances writer sites reachable from a shipped runtime path, the ONLY one with a
+# derivation this slice treats as settled (OD-S1-18(b) / S1 lock §2.2(b) class 5 — "write
+# nothing"). NOTE: OD-S1-18 is recorded in the lock as SESSION DESIGN AUTHORITY (created by the
+# independent review; never put to the owner) -- not an owner ratification, unlike
+# OD-S1-9(f)/OD-S1-17(b). Drives a PLM sync through the PUBLIC
 # ApprovalBridgeService.syncPlmApprovals() entry point and asserts the resulting plm: row's
 # org_id stays NULL and satisfies the landed approval_instance_org_nonblank CHECK, alongside a
-# same-DB non-NULL-org control row. No production code changes ship in this PR; the other three
-# writers remain ESCALATE (see PR body).
+# same-DB non-NULL-org control row. This pins only this writer's fresh-INSERT path, not a
+# table-wide "plm: rows stay NULL" invariant -- no landed or planned constraint forbids a
+# non-NULL org_id on a plm: row (see the test file's docblock SCOPE note). No production code
+# changes ship in this PR; the other three writer sites (ApprovalProductService.ts, After-sales
+# bridge, attendance plugin) remain ESCALATE, and two further sites outside any runtime path
+# (seed-approvals.ts, test-approvals-contract.mjs) are tracked separately (see PR body).
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
@@ -39,6 +46,7 @@ on:
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/src/services/approval-bridge-types.ts'
       - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/federation/plm-approval-bridge.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
@@ -50,6 +58,7 @@ on:
       - 'packages/core-backend/src/services/ApprovalBridgeService.ts'
       - 'packages/core-backend/src/services/approval-bridge-types.ts'
       - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/federation/plm-approval-bridge.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
       - 'packages/core-backend/tests/helpers/approval-schema-bootstrap.ts'
       - 'packages/core-backend/vitest.config.ts'
