@@ -1704,11 +1704,15 @@ pre-squash head,落地为 squash——祖先关系按房例不可由 SHA 建立�
 | #5104 | **history attachmentIds 伴侣**:平台分支只加性投影 `metadata->'attachmentIds'` 单键(敌意键字节级扫描证不透出;flag-OFF 字节 parity 门控)——Lock-9 FE 读半边端到端打通 | gate FIX-ROUND → 修复(rebase 吸收 #5099)→ requal FIX-ROUND(注释级)→ 修复 → bind MERGE-CLEAN @ `c6deb9656d` | `d414022676` |
 | **#5103** | **Migration B**:有序多类 org_id backfill(前缀护栏、FAIL-LOUD、terminal-ABORT),SQL 四轮冻结(三 oracle 证字节不变);37 fixture + 37 mutation 载荷表(四类披露:载荷/惰性/log-only/语法承重) | gate→requal→修复轮 3→终绑 MERGE-CLEAN(条件绿)@ `e60eff45b3` | **OWNER-HELD 不合**(见 11.3) |
 
-### 11.2 证据链(生产实测,run 32552496622 + 32568321791)
+### 11.2 证据链(生产实测,三次 dispatch)
 
+三次 run,来源逐一具名:**32552496622**(main,首采 p01-p53)、**32568321791**(main,含 U1 探针,#5105 后)、
+**32562970891**(**#5103 分支 head `0bf9f4711c` dispatch**——c 类普查探针只存在于该分支;log 已归档
+soak-working/s1-org-evidence-run3-32562970891-from-5103-branch.log,与前两次同规耐久)。
 prod:S1 迁移 APPLIED(2026-08-21T17:03:38Z,事务性);271 实例全平台 id、全零附件 ⇒ class-2 覆盖 0 行,
-**p20=271 全 NULL**;**c6_terminal=269、c3_zero_membership=257、可 stamp 仅 2**;p22/p23=0(误盖章零人口);
-**u1a_distinct=1、u1a_multi=0、u1b=12、u1c_non_default=0**(单 org 世界确证)。staging:NOT_APPLIED(欠一次成功部署)。
+**p20=271 全 NULL**(run1/2);**c6_terminal=269、c3_zero_membership=257**(run3);「可 stamp 仅 2」是
+**由五探针推导的量,非直接观测**(migb-gate 自记);p22/p23=0(误盖章零人口);
+**u1a_distinct=1、u1a_multi=0、u1b=12、u1c_non_default=0**(run2,单 org 世界确证)。staging:NOT_APPLIED(欠一次成功部署)。
 
 ### 11.3 owner-held:#5103 与 269 行裁决
 
@@ -1719,8 +1723,7 @@ prod:S1 迁移 APPLIED(2026-08-21T17:03:38Z,事务性);271 实例全平台 id、
 ### 11.4 Lock-11(写入点 org 派生)—— RATIFY-READY,未 ratify
 
 `soak-working/approval-lock11-writer-org-derivation-draft-20260822.md`,sha256 `5222a094…0414bb8d`,
-1934 行:两轮独立审(r1 20 findings;r2 抓两个双轮未中的继承前提 P1——pin 在析取外、考勤边界已带
-subject-keyed 校验)+ 折叠核验至 **RATIFY-READY**。10 OD 全 `DRAFT — OWNER-CONFIRM`;11 项决策菜单
+1934 行:两轮独立审(r1 20 findings;r2 抓两个双轮未中的继承前提 P1——pin 在析取外;考勤边界的受验腿带 **actor∧subject 合取**校验,但该腿是**客户端可选**的(`operationId` 省略即绕过),且未验腿是当下每个 org 的默认姿态——U8 量其流量占比,仍 unknown)+ 折叠核验至 **RATIFY-READY**。10 OD 全 `DRAFT — OWNER-CONFIRM`;11 项决策菜单
 D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,本文不承载。
 
 ### 11.5 本波之后仍然悬着的

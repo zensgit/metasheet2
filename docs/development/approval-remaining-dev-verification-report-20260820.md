@@ -905,11 +905,11 @@ Postgres 中亲跑;判定绑 pre-squash head;报告文件具名。**没有任何
 | #5099(`99fd7b498a`) | bind MERGE-CLEAN @ `7e4ce66b32` | MUT-B 前后对照(修复回滚:5050 全绿→1 failed/5051,required 车道现在看得见);真 server 真 PG 信封亲采;敌意 payload 8 形全 fail-closed;census 双向 | /tmp/l9fe-gate-20260822.md + l9fe-requal |
 | #5105(`8f58f52cc7`) | bind MERGE-CLEAN @ `e524c609c1` | 判别半边在真 PG15.19 上四形矩阵证明;守卫行为学(stub docker 侧信道)四场景;values-free 敌意注入零泄漏 | /tmp/u1probes-gate-20260822.md |
 | #5104(`d414022676`) | bind MERGE-CLEAN @ `c6deb9656d` | 行级 wire 探针(敌意 metadata 键字节扫描;S2 指针行排除带走私 attachmentIds 仍除);flag-OFF cmp 字节 parity 带正控;#5099 归一化端到端复证 | /tmp/hist-gate-20260822.md + hist-requal(bind 段) |
-| #5103(**held**) | MERGE-CLEAN 条件绿 @ `e60eff45b3` | 37/37 双引擎(16 glibc + 15-alpine musl);37 mutation 表(m26 恰红 H27-29,H29 实测跨租户错配;m29/30/31 全绿证 log-only 类);merge=字节级并集证明(53/54 文件 byte-identical 归属父;差恰三条 marker 行);SQL 冻结 oracle O3=模板体 sha 五 head 同值 | /tmp/migb-gate-20260822.md + migb-requal(4 轮 660 行) |
+| #5103(**held**) | MERGE-CLEAN 条件绿 @ `e60eff45b3` | 37/37 双引擎(16 glibc + 15-alpine musl);37 mutation 表(m26 恰红 H27-29,H29 实测跨租户错配;m29/30/31 全绿证 log-only 类);merge=字节级并集证明(52/53 文件 byte-identical 归属父,1 文件手工并集;该文件与 git merge-file 输出差恰三条 marker 行,另含源报自记的空行子 NIT);SQL 冻结 oracle O3=模板体 sha 五 head 同值 | /tmp/migb-gate-20260822.md + migb-requal(4 轮 661 行) |
 
-### 13.2 生产证据(两次 dispatch,workflow 自身经门审:host-key 钉、只读、values-free)
+### 13.2 生产证据(三次 dispatch,workflow 自身经门审:host-key 钉、只读、values-free)
 
-run 32552496622 / 32568321791,log 耐久于 soak-working/。核心数:§设计报告 11.2。
+**三次** dispatch(32552496622 / 32568321791 自 main;**32562970891 自 #5103 分支 `0bf9f4711c`**,c 类探针唯一来源),三份 log 均耐久于 soak-working/。核心数:§设计报告 11.2。
 **判读约束**:c6=269 非缺陷,是 ruled FAIL-LOUD 在真实人口上的正确触发;u1b=12 与 c3=257 的差
 (245)指向历史实例的 requester 多为非活跃/缺失用户——这是激活裁决的输入,不是本文的结论。
 
@@ -917,6 +917,6 @@ run 32552496622 / 32568321791,log 耐久于 soak-working/。核心数:§设计�
 
 阶段 3 `SET NOT NULL` 的 ratified 断言半边(`is_nullable='NO'`)仍从未在任何库跑过;org pin 激活
 零 staging/prod 证据(staging 连 S1 迁移都未应用);`APPROVAL_ATTACHMENTS_ENABLED` ON 零 UAT;
-Lock-11 十 OD 零实现(四写入点仍不盖章,p31 继续增长);#5103 未合(owner-held),其 SQL 从未对
+Lock-11 十 OD 零实现(四写入点仍不盖章,p31 的漂移机制未闭合(两次采样均为 1,增长未被实测));#5103 未合(owner-held),其 SQL 从未对
 生产数据执行;G-S1-8 仍 expected-red;evidence workflow 的只读性无自动门(P3-1 随行);U2/U3'/U4/
 U5/U7/U8 仍 unknown(其中 U2/U7/U8 非仓内可解)。§12.3 全部条目不因本段减少。
