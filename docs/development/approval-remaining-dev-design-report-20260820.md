@@ -1650,3 +1650,35 @@ PR 过程中曾加入一条后端 `validateAndFreezeRequesterChoices` 的 identi
 ---
 
 *本文档终。它记录设计，不改变任何东西的状态。*
+
+---
+
+## 10. 2026-08-21 → 08-22 第二波 freshness pass —— 评论线四切片 + S1 + Lock-9 附件全部落地
+
+**本段与 §9 同规:只做锚点分层与事实追加,不改本文任何既有句子的 SHA 绑定;不重跑此前任何验证行;
+不批准任何东西、不开启任何开关。** 各 PR 的门审/复审判定一律绑各自 **pre-squash head**,落地为 squash
+提交——两者之间的祖先关系按房例不可由 SHA 建立,逐对具名如下。
+
+### 10.1 六个落地物(合并序)
+
+| PR | 内容 | 判定链(绑 pre-squash head) | squash 落地 |
+|---|---|---|---|
+| #5072 | S3a:共享评论 FE kit 抽取(`apps/web/src/shared/comments/`,CommentsApiClient 接口;multitable 行为冻结 4954 测试) | FIX-ROUND@`d95e2f05ba` → 修复 → requal MERGE-CLEAN@`7c16f33e3a`(冻结 HI-1 扫描换锚判**记账修复**——锁文无路径可抵触;发现 P3-A importer 豁免静默继承,绊线随 #5088 落地) | `25385331b8` |
+| #5078 | 六项 owner 裁决记录(第二次 by-reference)+ L9-AMEND arm (a) 执行(Lock-10 §5.1.1、Lock-9 §4.1、台账 §3) | FIX-ROUND@`9b6a80bc9a`(2P1:§4.1 曾越权列入 bind-time 面、§L9-C 站点级增注缺)→ CLEAN@`57cfc5508c` → 锚点校正 CLEAN@`e621f147fe` | `dd7fa8630248` |
+| #5070 | **S1**:`canReadApprovalInstance` 五臂谓词、`org_id` 六类有序 backfill 迁移(仅阶段 1-2)、detail/history 同切片 404(仅平台 id)、metrics 放宽、`isInstanceParticipant` 删除 | 门审 FIX-ROUND@`343377946e` → 修复@`75417497c7` → requal FIX-ROUND(P1-NEW 红 CI 等)→ 修复轮 2 + 第三次裁决记录 → requal round-3 MERGE-CLEAN@`f163ad708b` | `9fcccd69c3` |
+| #5087 | **S2**:`approval_comments`(真 FK+CASCADE、双墓碑 CHECK)、五函数 service、读写同谓词(OD-S1-14)、audit 指针行 + `/history` 双查询排除(HISTORY-TIMELINE arm (i))、mention seam fail-closed | 门审 FIX-ROUND@`87323c90d1`(P2-1 mentions-cleared 臂零载荷)→ 修复 → requal MERGE-CLEAN@`2911e3e4a0`(3-cell 矩阵证独立载荷) | `b2b4198e01` |
+| #5088 | **S3b**:审批评论页签(kit 适配器 + 包装面板)、census importer 绊线(P3-A 闭环)、S2 随行硬化(D-1 parity+级联门/fixture 拆分/幂等) | 门审 FIX-ROUND@`c9b058bc4a`(2P2:截断窗保错端、settle race)→ 修复@`6e1959be00` → requal FIX-ROUND(N-1 mock 队列位置型)→ 修复轮 2 → requal round-2 MERGE-CLEAN@`e7c5b29691` | `1efebe9504` |
+| #5089 | **Lock-9 附件**:放宽迁移(NULL-safe CHECK 再表达,亲探 Postgres 三值逻辑证明必要)、过程上传(真实办理席位判定,含并行区 frontier 修复)、staged→bind 提交(rowCount 等值回滚)、`/download`+`/refs` bind_kind 分支、过程域预算、G-1..G-16(G-4 用 §4.1 修正态) | 门审 FIX-ROUND@`a252cacad5`(P2-1 flag-OFF 非字节 no-op 违 G-12(b);P2-2 并行区上传全 403)→ 修复 → requal MERGE-CLEAN@`acff7eb754`(行级 parity:双 boot 三表快照 sha256 同值;16 门全重 mutation,15 载荷) | `f15b4252df` |
+
+### 10.2 三次 by-reference 裁决(均 2026-08-21,owner 亲写「按建议执行」,建议文全部会话作)
+
+第一次(§9 已录):§K2 不改 / G-14 accepted-as-amended / Lock-9 ratify / 评论 D 臂。
+**第二次**(Lock-10 §5.1.1 逐字引用):L9-AMEND arm (a)、OD-S1-12 确认、OD-S1-7/C-2 确认、OD-S1-17(c)=(c-i) 并集、OD-S1-8(d) KEEP、HISTORY-TIMELINE arm (i)。
+**第三次**(Lock-10 §5.1.2 逐字引用):P2-1 org pin **蛰伏态确认**(`APPROVAL_S1_ORG_PIN_ENABLED` 默认 OFF;激活=backfill 验证后独立授权步骤,需自己的台账行)、P2-2(b) **G-S1-12-PARTIAL**(落地测试钉 `is_nullable='YES'`;阶段 3 `SET NOT NULL` 为具名后续切片,独立授权)。
+
+### 10.3 本波之后仍然悬着的(不因本段而减少)
+
+- **owner 授权点(三,均未执行)**:org pin 激活;阶段 3 `SET NOT NULL`;`APPROVAL_ATTACHMENTS_ENABLED` 开启(其部署前置——放宽迁移——已随 #5089 落地,但开关仍 OFF,G-12 证 OFF=字节级 no-op)。
+- **owner 开放行**:Lock-10 §5.1 feed-branch 行(§5.2 (i)(i-b)(i-c))仍 OPEN,G-S1-8 expected-red 只记不落;S2 P3-1(arm-5→arm-3 铸造,首例路由)知会;S2 P3-2(mention CTE 无 org 合取,仅 pin-ON 可见);S3b census `authorId` token 缺口(记 PR body,owner-scope)。
+- **carried 非阻断残项(具名,防「全清」误读)**:S3b N2-1(截断守卫缺 2150 非对齐 total)、N2-2(短页分支端点未钉,今日不可达);Lock-9 P3-1(上传预算 TOCTOU——与 shipped form 路径同族,bind 权威成立)、P3-2(G-13 正控年龄混杂,mutation 存活)、P3-3(G-1 正控缺失)、NIT-1..4。
+- **C-5 plm: 姿态、§5.2(iii) 残留、#5024 披露约束**:全部照旧,本段不改。

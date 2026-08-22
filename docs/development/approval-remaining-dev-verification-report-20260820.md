@@ -851,3 +851,39 @@ multitable **7**、attendance 与 ops **3**。⚠️ **§1 抬头的原窗口（
 ---
 
 *本节终。它记录三条晚到的落地物，不改变任何一行的验证分层。*
+
+---
+
+## 12. 2026-08-21 → 08-22 第二波 freshness pass —— 六 PR 的验证事实(与 §11 同规:分层追加,不重跑既有行)
+
+**本段不重跑本文任何既有验证行;§1-§11 的全部 SHA 绑定原样成立。** 以下每行证据由其所属 PR 的独立
+门审/复审代理在**隔离 detached worktree + 一次性 postgres:16** 中亲跑产生,判定绑 **pre-squash head**
+(落地 squash 与之的祖先关系按房例不可由 SHA 建立);报告文件逐一具名。**本段没有任何一行是「上线判据」
+——三个开关(org pin / attachments / durable-delivery 族)全部 OFF,无一行 UAT。**
+
+### 12.1 判定链与电池数字(全部 mutation 实证,非读码)
+
+| PR(squash) | 终判(绑 head) | 关键电池 | 报告 |
+|---|---|---|---|
+| #5072(`25385331b8`) | MERGE-CLEAN@`7c16f33e3a` | 冻结 HI-1 扫描 Probe A 1 failed/12(反演恰好);census SCAN_ROOTS 13 条 triage 逐条对源码核真;Probe D 证豁免静默继承(→P3-A) | /tmp/s3a-requal-20260821.md |
+| #5078(`dd7fa8630248`) | MERGE-CLEAN@`e621f147fe` | 逐字引用 cmp=IDENTICAL;additive word-diff 0 内容删除 token;五处锚点落点亲核;12/12 台账↔锁 机械一致 | /tmp/s1-rulings-gate-20260821.md |
+| #5070(`9fcccd69c3`) | round-3 MERGE-CLEAN@`f163ad708b` | S1 lane 48/48;真库全量 74 files/729 passed(CI 步骤逐字复现);8 mutations(M8 证 CC 臂放行非 blanket-admin;M13 证回归门;MP31-b 构造 500-vs-404 oracle;MUT-D2 类前身);行级三表 parity 由 #5089 requal 补强;11 条 required 逐一 pass | /tmp/s1-gate-20260821.md + /tmp/s1-requal-20260821.md(3 轮同文件) |
+| #5087(`b2b4198e01`) | MERGE-CLEAN@`2911e3e4a0` | 47/47 PG16 fresh db:migrate;P2-1 3-cell 矩阵(CHECK 在场红在 500、CHECK 移除红在 mentions 断言、单独移除 CHECK 绿→NIT);/history 双查询排除 mutation 双侧红;677 files/10191 no-DB | /tmp/s2-gate-20260822.md + /tmp/s2-requal-20260822.md |
+| #5088(`1efebe9504`) | round-2 MERGE-CLEAN@`e7c5b29691` | MUT-D 红在 **id 断言**(offset-keyed mock;round-1 曾被队列位置型 mock+计数短路吞掉);MUT-A/C/R 三红;census 双向 set-equality+DECOY 正控;required web lane 394 files/5021;web-tests 无 paths 过滤亲核 | /tmp/s3b-gate-20260822.md + /tmp/s3b-requal-20260822.md(2 轮) |
+| #5089(`f15b4252df`) | MERGE-CLEAN@`acff7eb754` | 16 门全重 mutation、15 载荷(M15/G-13 存活→P3-2 具名);P2-1 关闭证据=双 boot(main vs head,flag 均未设)10-payload 三表快照 **sha256 同值 `8772e79d19fc…`** + 原始证伪 payload 复跑 400/400 同因;M1b 亲探证 NULL-safe CHECK 必要(字面 CHECK 在 SQL 三值逻辑下放行 form_field/NULL);Lock-9 真库 28/28 + 邻接 14 套件 197 passed | /tmp/lock9-gate-20260822.md + /tmp/lock9-requal-20260822.md(耐久副本:~/.claude/projects/<proj>/soak-working/) |
+
+### 12.2 门审拦下后又被复审拦下的(纪律承重的新证)
+
+- #5070:修复轮 1 的 requal 抓出 **P1-NEW**(required `test (20.x)` 红、PR 未披露、系「repo-wide grep 无其他处」被第四处证伪)——grep 自扫≠车道实跑,该句已在 PR body 撤回并换成车道证据。
+- #5088:round-1 requal 抓出 **N-1**——修复自带的测试因 mock 队列位置型 + 计数断言前置短路而对 MUT-D 失明;round-2 换 offset-keyed mock 并将 id 断言前移后,MUT-D/MUT-E/MUT-OVL 全部红在 id 断言。
+- #5089:门审抓出 **P2-1**(flag-OFF 下 reject/approve 带 rider 从 main 的 200 变 400——G-12(b) 的字面违背,且被自己的测试固化、PR body 标 ✅)——「fail-closed 且无客户端发该字段」不豁免 no-op 契约。
+- 判读教训(已记 memory):`gh pr checks --json name,state` 会把 pending 读成全绿;判别一律 `--json name,bucket` + `mergeStateStatus`。
+
+### 12.3 本段之后的「未验证」清单(防止本段被读成收尾)
+
+阶段 3 `SET NOT NULL` 未落(G-S1-12 处于 PARTIAL,ratified 断言的 `is_nullable='NO'` 半边从未在任何库上跑过);
+org pin 激活路径只在测试内 flag-ON 探过,无 staging/prod 证据;`APPROVAL_ATTACHMENTS_ENABLED` ON 的
+端到端 UAT 为零(G 门是真库合成 fixture,非租户数据);G-S1-8(feed ⊆ admission)从未落地为绿测试
+(expected-red,owner 行未裁);Lock-9 P3-2/P3-3 具名的两个门缺口(G-13 年龄混杂、G-1 正控缺失)在
+本波结束时仍在。V-1(§4.1)与 §7 的 36 行 PASS-POSITIVE-ONLY、§8 的 BLOCKED-ENV/OWNER-ONLY 清单
+不因本段而减少。
