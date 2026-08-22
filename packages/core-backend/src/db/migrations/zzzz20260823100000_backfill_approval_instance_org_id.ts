@@ -115,9 +115,29 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * specifically to exercise this predicate's `i.id NOT LIKE 'plm:%'` clause independent of the
  * `source_system` clause, since no real writer in this codebase is known to produce that
  * combination. As of this fix round every clause of every predicate and every UPDATE in this file
- * has a red-proving fixture that was actually run (whole-file, not name-filtered) and actually
- * reds under the corresponding single-line deletion — none are cited as load-bearing by inspection
- * alone. See the mutation table in this PR's body for the full re-measured cross-reference.
+ * has EITHER a red-proving fixture that was actually run (whole-file, not name-filtered) and
+ * actually reds under the corresponding single-line deletion, OR is documented below as PROVABLY
+ * INERT (not merely untested) — none are cited as load-bearing by inspection alone. A full 22-
+ * mutation sweep (up from the original 10) also re-measured the class-6 census's `org_id IS NULL`
+ * scope, its `NOT EXISTS (attachments)` clause, its `HAVING count(*) = 1`, the class-2 conflict
+ * census's `HAVING count(DISTINCT org_id) > 1`, and the class-3 UPDATE's `org_id IS NULL` scope —
+ * all five red under deletion, all five caught by EXISTING fixtures (H3, H12, H13, H14, H15, H17,
+ * and the H7/H9 positive controls) that were not previously credited with catching them. See the
+ * mutation table in this PR's body for the full re-measured cross-reference.
+ *
+ * TWO CLAUSES ARE PROVABLY INERT, not coverage gaps — no fixture will ever red them, because the
+ * query structure makes them logically unreachable, not merely untested:
+ *   - the class-2 conflict census's `a.instance_id IS NOT NULL` (line ~232): the surrounding join
+ *     is an INNER JOIN on `i.id = a.instance_id`; SQL's `NULL = x` is never TRUE, so a NULL
+ *     `instance_id` already fails the join and can never reach this filter. Deleting this line
+ *     (mutation m20 in the fix-round measurement) relocates the remaining `AND` clauses into the
+ *     JOIN's `ON` list, which is semantically identical for an INNER JOIN — confirmed empirically,
+ *     32/32 green, not a script artifact.
+ *   - `min(uo.org_id)` vs `max(uo.org_id)` in the class-3 subquery (mutation m22): `HAVING
+ *     count(*) = 1` forces every surviving group to be a singleton, so `min` and `max` of a
+ *     one-element set are always equal by definition — not merely equal in every fixture tried,
+ *     equal for ALL POSSIBLE inputs. Confirmed empirically, 32/32 green, consistent with the
+ *     in-file comment at the class-3 UPDATE explaining why `min()` is collation-safe here.
  *
  * ROWS THAT LEGITIMATELY STAY NULL AFTER THIS MIGRATION, NO ABORT (enumerated, not asserted as
  * exhaustive by a CHECK — Phase 3 is a separate slice):
