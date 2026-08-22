@@ -95,6 +95,14 @@ import { checkColumnExists, checkTableExists } from './_patterns'
  * The class-2 conflict abort and the class-6 abort are PROVABLY DISJOINT (conflict requires >= 1
  * attachment; class 6 requires zero), so the two messages can never be confused in an incident.
  *
+ * MUTATION-COVERAGE HONESTY NOTE: the gate suite's mutation battery (`.db.test.ts` docblock)
+ * red-proves every clause of this predicate except `i.id NOT LIKE 'plm:%'` — every `plm:` fixture
+ * in that suite also carries `source_system <> 'platform'`, so the `COALESCE(source_system,
+ * 'platform') = 'platform'` clause is what actually excludes a `plm:` row from class 6 at this
+ * baseline, not the id-prefix clause. The prefix clause is deliberate defense-in-depth (a `plm:`
+ * row with `source_system = 'platform'` is not known to occur anywhere in this codebase, but
+ * nothing enforces that it cannot), not a proven-load-bearing exclusion — do not cite it as such.
+ *
  * ROWS THAT LEGITIMATELY STAY NULL AFTER THIS MIGRATION, NO ABORT (enumerated, not asserted as
  * exhaustive by a CHECK — Phase 3 is a separate slice):
  *   - `plm:` / `afs:` prefixed ids (classes 5 / 4).
