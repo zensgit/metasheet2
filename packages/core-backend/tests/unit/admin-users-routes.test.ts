@@ -28,6 +28,7 @@ const auditMocks = vi.hoisted(() => ({
 
 const namespaceAdmissionMocks = vi.hoisted(() => ({
   deriveDelegatedAdminNamespace: vi.fn(),
+  grantNamespaceAdmissions: vi.fn(async () => [] as string[]),
   disableNamespaceAdmissionsWithoutRoles: vi.fn(),
   isNamespaceAdmissionControlledResource: vi.fn(),
   listRoleNamespaces: vi.fn(),
@@ -112,7 +113,16 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
-vi.mock('../../src/rbac/namespace-admission', () => ({
+vi.mock('../../src/rbac/namespace-admission', async () => ({
+  // `deriveGrantNamespaces` is deliberately NOT stubbed: provisioning's admission write must be
+  // driven by the SHIPPED derivation. A stub here could agree with a caller that derives the
+  // wrong namespaces, which is precisely the coupling this suite needs to observe.
+  deriveGrantNamespaces: (
+    await vi.importActual<typeof import('../../src/rbac/namespace-admission')>(
+      '../../src/rbac/namespace-admission',
+    )
+  ).deriveGrantNamespaces,
+  grantNamespaceAdmissions: namespaceAdmissionMocks.grantNamespaceAdmissions,
   deriveDelegatedAdminNamespace: namespaceAdmissionMocks.deriveDelegatedAdminNamespace,
   disableNamespaceAdmissionsWithoutRoles: namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles,
   isNamespaceAdmissionControlledResource: namespaceAdmissionMocks.isNamespaceAdmissionControlledResource,
@@ -263,6 +273,8 @@ describe('admin-users routes', () => {
     namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockResolvedValue([])
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockReset()
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockImplementation((namespace: string) => Boolean(namespace))
+    namespaceAdmissionMocks.grantNamespaceAdmissions.mockClear()
+    namespaceAdmissionMocks.grantNamespaceAdmissions.mockResolvedValue([])
     namespaceAdmissionMocks.listRoleNamespaces.mockReset()
     namespaceAdmissionMocks.listRoleNamespaces.mockResolvedValue([])
     namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockReset()
@@ -2994,6 +3006,52 @@ describe('admin-users routes', () => {
       '2026-05-29',
     ]))
     expect(auditMocks.auditLog).toHaveBeenCalled()
+    // The grant's two halves must land together: without the enabled admission row the
+    // permission codes written alongside it are filtered out of every effective-permission
+    // read, so the provisioned role would resolve to nothing. Asserted on the DERIVED
+    // namespaces and on the transaction client, not on a literal.
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).toHaveBeenCalledTimes(1)
+    const [admissionExecutor, admissionOptions] = namespaceAdmissionMocks.grantNamespaceAdmissions.mock.calls[0] as [
+      { query: unknown },
+      { userId: string; namespaces: string[]; source?: string },
+    ]
+    expect(typeof admissionExecutor?.query).toBe('function')
+    expect(admissionOptions.namespaces).toEqual(['attendance'])
+    const usersInsert = pgMocks.query.mock.calls.find((args) => String(args[0]).includes('INSERT INTO users ('))
+    expect(admissionOptions.userId).toBe(String((usersInsert?.[1] as unknown[])?.[0]))
+  })
+
+  it('POSITIVE CONTROL — provisioning a preset that derives no namespace writes no admission', async () => {
+    // Without this, the leg above would also pass against a route that enables an admission
+    // unconditionally — which would over-grant every platform preset.
+    rbacMocks.isAdmin.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue([])
+    bcryptMocks.hash.mockResolvedValue('hashed-initial-password')
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (statement.includes('FROM users\n     WHERE id = $1')) {
+        return {
+          rows: [{
+            id: 'user-plat', email: 'plat@example.com', name: 'Plat', role: 'user',
+            is_active: true, is_admin: false, created_at: '2026-03-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return { rows: [] }
+    })
+
+    const response = await invokeRoute('post', '/api/admin/users', {
+      body: {
+        email: 'plat@example.com',
+        name: 'Plat',
+        password: 'WelcomePass9A',
+        presetId: 'platform-viewer',
+        isActive: true,
+      },
+    })
+
+    expect(response.statusCode, JSON.stringify(response.body)).toBe(200)
+    expect(namespaceAdmissionMocks.grantNamespaceAdmissions).not.toHaveBeenCalled()
   })
 
   it('creates attendance group membership and default shift assignment during user provisioning', async () => {

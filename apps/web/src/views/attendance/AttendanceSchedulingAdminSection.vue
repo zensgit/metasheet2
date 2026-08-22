@@ -291,6 +291,7 @@
         :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
         :full-width="false"
         input-id="attendance-rotation-user"
+        endpoint="/api/attendance-admin/users/search"
       />
       <label class="attendance__field" for="attendance-rotation-rule">
         <span>{{ tr('Rotation rule', '轮班规则') }}</span>
@@ -594,6 +595,7 @@
         :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
         :full-width="false"
         input-id="attendance-assignment-user-id"
+        endpoint="/api/attendance-admin/users/search"
       />
       <label class="attendance__field" for="attendance-assignment-shift-id">
         <span>{{ tr('Shift', '班次') }}</span>

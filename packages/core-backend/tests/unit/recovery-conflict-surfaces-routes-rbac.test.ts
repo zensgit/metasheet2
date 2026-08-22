@@ -344,6 +344,13 @@ describe('routes/permissions.ts', () => {
   })
 })
 
+// Request bodies here name a role TEMPLATE rather than a raw role id. These cases assert
+// recovery-conflict classification (marker 40001 → uniform retryable 409; everything else
+// keeps its original 500) — the body is only ever the shortest one that gets past the
+// ROLE_REQUIRED 400, and was never an assertion that a raw role id is a supported request
+// contract. Now that this router constrains role ids to its own scope, a template is the
+// shortest such body. Every assertion below is unchanged, and the [recovery-census:…]
+// titles are byte-identical so the recorded census set is untouched.
 describe('routes/attendance-admin.ts', () => {
   function installUserRolesRejection(error: unknown): void {
     pgMocks.query.mockImplementation(async (sql: string) => {
@@ -371,7 +378,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/assign',
-      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      { params: { userId: 'user-1' }, body: { template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -386,7 +393,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/assign',
-      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      { params: { userId: 'user-1' }, body: { template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(500)
@@ -410,7 +417,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/batch/roles/assign',
-      { body: { userIds: [batchUserId], roleId: 'role-x' } },
+      { body: { userIds: [batchUserId], template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -437,7 +444,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/unassign',
-      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      { params: { userId: 'user-1' }, body: { template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -464,7 +471,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/unassign',
-      { params: { userId: 'user-1' }, body: { roleId: 'role-x' } },
+      { params: { userId: 'user-1' }, body: { template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(500)
@@ -488,7 +495,7 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/batch/roles/unassign',
-      { body: { userIds: [batchUserId], roleId: 'role-x' } },
+      { body: { userIds: [batchUserId], template: 'employee' } },
       res,
     )
     expect(res.statusCode).toBe(409)

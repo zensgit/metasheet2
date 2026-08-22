@@ -411,7 +411,9 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url.startsWith('/api/admin/users')) {
+      // The picker sites on this page are wired to the attendance-scoped user search; the
+      // platform route is kept here so this mock stays honest for either caller.
+      if (url.startsWith('/api/admin/users') || url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {

@@ -10,6 +10,13 @@ import { redeliverFailedAttendanceNotification } from '../services/AttendanceNot
 import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import {
+  assignUserRoles,
+  isRoleAssignable,
+  sendIfRoleAssignmentRefused,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../rbac/role-assignment'
+import {
   ATTENDANCE_SETUP_READINESS_PER_STEP,
   ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
   computeAttendanceSetupReadinessDeliveryRuntime,
@@ -195,7 +202,7 @@ function readStrictString(value: unknown): string | null {
 
 type AttendanceRoleTemplateId = 'employee' | 'approver' | 'importer' | 'admin'
 
-const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
+export const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
   id: AttendanceRoleTemplateId
   roleId: string
   permissions: string[]
@@ -225,6 +232,60 @@ const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
     permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
     description: 'Full attendance administration (rules, imports, holidays, groups).',
   },
+}
+
+/**
+ * The authority this router acts under when it changes role membership.
+ *
+ * It is the router's OWN rbac resource — the same literal named by the
+ * `rbacGuard('attendance', 'admin')` mount below — so every role write this router performs
+ * is bounded to the one namespace the mount itself admits, whatever shape the caller's grant
+ * takes. Deriving the list from the router keeps the bound identical for every caller the
+ * mount lets through. A router mounted behind `rbacGuard('foo', 'admin')` would pass `['foo']`.
+ */
+const ATTENDANCE_ROLE_ASSIGNMENT_SCOPE: RoleAssignmentScope = {
+  kind: 'namespaces',
+  namespaces: ['attendance'],
+}
+
+/** Single-object result: this package compiles with `strict: false`, where narrowing a
+ *  boolean-discriminated union is unreliable, so the error is a nullable field instead. */
+type AttendanceRoleResolution = {
+  roleId: string
+  error: { status: number; code: string; message: string } | null
+}
+
+/**
+ * Resolve which role id a role route will act on: a named template, or a caller-supplied
+ * role id constrained to this router's scope.
+ *
+ * One implementation for all four role routes, so the constraint lives in exactly one place
+ * per router and a fifth route gets it by construction, on top of the boundary's own
+ * assertion in `rbac/role-assignment.ts`.
+ */
+function resolveAttendanceRoleAssignment(body: unknown): AttendanceRoleResolution {
+  const record = (body ?? {}) as Record<string, unknown>
+  const templateId = String(record.template || '').trim() as AttendanceRoleTemplateId
+  const roleId = String(record.roleId || '').trim()
+  const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
+  const finalRoleId = resolved?.roleId || roleId
+  if (!finalRoleId) {
+    return {
+      roleId: '',
+      error: { status: 400, code: 'ROLE_REQUIRED', message: 'template or roleId is required' },
+    }
+  }
+  if (!isRoleAssignable(finalRoleId, ATTENDANCE_ROLE_ASSIGNMENT_SCOPE)) {
+    return {
+      roleId: finalRoleId,
+      error: {
+        status: 403,
+        code: 'ROLE_OUT_OF_SCOPE',
+        message: 'Role is outside the attendance role-assignment scope',
+      },
+    }
+  }
+  return { roleId: finalRoleId, error: null }
 }
 
 function csvCell(value: unknown): string {
@@ -903,11 +964,12 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolvedTemplate = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolvedTemplate?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
       await ensureAttendanceRoleTemplates()
 
@@ -929,17 +991,13 @@ export function attendanceAdminRouter(): Router {
         })
       }
 
-      const insert = await query<{ user_id: string }>(
-        `INSERT INTO user_roles (user_id, role_id)
-         SELECT unnest($1::text[]), $2
-         ON CONFLICT DO NOTHING
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const insert = await assignUserRoles({
+        userIds: eligibleUserIds,
+        roleId: finalRoleId,
+        scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+      })
 
-      const affectedUserIdsRaw = insert.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = insert.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
       const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
@@ -949,7 +1007,7 @@ export function attendanceAdminRouter(): Router {
         roleId: finalRoleId,
         requested: userIds.length,
         eligible: eligibleUserIds.length,
-        updated: insert.rowCount ?? insert.rows.length,
+        updated: insert.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -961,6 +1019,11 @@ export function attendanceAdminRouter(): Router {
     } catch (error) {
       // O2-S2: user_roles is a recovery-authority table — a marker 40001 under a held
       // recovery lease is a retryable 409, not a 500. Every other error keeps its path.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to batch assign role')
     }
@@ -975,11 +1038,12 @@ export function attendanceAdminRouter(): Router {
         return jsonError(res, 400, 'USER_IDS_INVALID', `Invalid UUID(s): ${invalidUserIds.slice(0, 5).join(', ')}`)
       }
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
       const resolvedUsers = await resolveBatchUsers(userIds)
       const eligibleUserIds = resolvedUsers.items.map((item) => item.id)
@@ -999,16 +1063,13 @@ export function attendanceAdminRouter(): Router {
         })
       }
 
-      const del = await query<{ user_id: string }>(
-        `DELETE FROM user_roles
-         WHERE role_id = $2 AND user_id = ANY($1::text[])
-         RETURNING user_id`,
-        [eligibleUserIds, finalRoleId],
-      )
+      const del = await unassignUserRoles({
+        userIds: eligibleUserIds,
+        roleId: finalRoleId,
+        scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+      })
 
-      const affectedUserIdsRaw = del.rows
-        .map((row) => String(row.user_id || '').trim())
-        .filter(Boolean)
+      const affectedUserIdsRaw = del.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
       const unchangedUserIdsRaw = eligibleUserIds.filter((id) => !affectedSet.has(id))
       const affectedUserIds = withLimit(affectedUserIdsRaw)
@@ -1018,7 +1079,7 @@ export function attendanceAdminRouter(): Router {
         roleId: finalRoleId,
         requested: userIds.length,
         eligible: eligibleUserIds.length,
-        updated: del.rowCount ?? del.rows.length,
+        updated: del.rowCount,
         affectedUserIds: affectedUserIds.items,
         affectedUserIdsTruncated: affectedUserIds.truncated,
         unchangedUserIds: unchangedUserIds.items,
@@ -1029,6 +1090,11 @@ export function attendanceAdminRouter(): Router {
       })
     } catch (error) {
       // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'BATCH_ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to batch unassign role')
     }
@@ -1064,23 +1130,23 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
       await ensureAttendanceRoleTemplates()
 
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `INSERT INTO user_roles (user_id, role_id)
-         VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, finalRoleId],
-      )
+      await assignUserRoles({
+        userIds: [userId],
+        roleId: finalRoleId,
+        scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -1096,6 +1162,11 @@ export function attendanceAdminRouter(): Router {
       })
     } catch (error) {
       // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_ASSIGN_FAILED', (error as Error)?.message || 'Failed to assign role')
     }
@@ -1106,20 +1177,21 @@ export function attendanceAdminRouter(): Router {
       const userId = String(req.params.userId || '').trim()
       if (!userId) return jsonError(res, 400, 'USER_ID_REQUIRED', 'userId is required')
 
-      const templateId = String(req.body?.template || '').trim() as AttendanceRoleTemplateId
-      const roleId = String(req.body?.roleId || '').trim()
-      const resolved = templateId && ATTENDANCE_ROLE_TEMPLATES[templateId]
-      const finalRoleId = resolved?.roleId || roleId
-      if (!finalRoleId) return jsonError(res, 400, 'ROLE_REQUIRED', 'template or roleId is required')
+      const roleResolution = resolveAttendanceRoleAssignment(req.body)
+      if (roleResolution.error) {
+        const { status, code, message } = roleResolution.error
+        return jsonError(res, status, code, message)
+      }
+      const finalRoleId = roleResolution.roleId
 
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await query(
-        `DELETE FROM user_roles
-         WHERE user_id = $1 AND role_id = $2`,
-        [userId, finalRoleId],
-      )
+      await unassignUserRoles({
+        userIds: [userId],
+        roleId: finalRoleId,
+        scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+      })
 
       const [roles, permissions, isAdmin] = await Promise.all([
         fetchUserRoleIds(userId),
@@ -1135,6 +1207,11 @@ export function attendanceAdminRouter(): Router {
       })
     } catch (error) {
       // O2-S2: marker 40001 → retryable 409 (see batch assign); all else unchanged.
+      // Defence in depth: the boundary asserts scope again at the write, so a future edit
+      // that drops the pre-check still answers 403 rather than falling through to a 500.
+      // Shared mapper, not a local instanceof arm: it keys on the error family's base class,
+      // so a refusal added to that family is answered here without an edit.
+      if (sendIfRoleAssignmentRefused(res, error)) return
       if (sendIfRecoveryConflict(res, error)) return
       return jsonError(res, 500, 'ROLE_UNASSIGN_FAILED', (error as Error)?.message || 'Failed to unassign role')
     }
