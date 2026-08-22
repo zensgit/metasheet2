@@ -400,6 +400,12 @@ jobs:
             if [[ "$PROBE_VALUE" == "1" ]]; then
               probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integration_distinct_orgs" \
                 "SELECT count(DISTINCT org_id) FROM directory_integrations" || rc=1
+              # The DISCRIMINATING half (gate P2-1): the draft's decision rule is "one non-'default'
+              # integration org ⇒ the multi-org population was already manufactured", which
+              # count(DISTINCT) cannot express ('default' is the repo-authored backfill constant,
+              # zzzz20260324150000:5 — a literal of the same class as the 'plm:%' prefixes).
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_non_default_integration_rows" \
+                "SELECT count(*) FROM directory_integrations WHERE org_id <> 'default'" || rc=1
             fi
 
             if [[ "$rc" == "0" ]]; then
