@@ -629,6 +629,7 @@ describe('attendance-admin user scope is explicit, org-bound and atomic with rol
     expect(seen.some((sql) => /FOR SHARE OF u, uo/.test(sql))).toBe(true)
     const orgListSql = seen.find((sql) => /SELECT u\.id, u\.email/.test(sql) && /JOIN user_orgs uo/.test(sql)) || ''
     expect(orgListSql).not.toMatch(/u\.role|u\.is_admin|u\.last_login_at/)
+    expect(orgListSql).toMatch(/WHERE u\.is_active = true/)
 
     const platformGlobal = mockResponse()
     await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {

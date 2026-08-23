@@ -14389,6 +14389,28 @@ attendanceIntegrationDescribe(
     )
     expect(inactiveAccess.status).toBe(404)
     expect(inactiveAccess.body).toEqual(foreignAccess.body)
+
+    const inactiveSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=${encodeURIComponent(localUserId)}&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveSearch.status).toBe(200)
+    expect((inactiveSearch.body as { data?: { items?: unknown[] } } | undefined)?.data?.items).toEqual([])
+
+    const hiddenUserId = randomUUID()
+    const inactiveResolve = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/resolve`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId, hiddenUserId], orgId: orgA }),
+    })
+    expect(inactiveResolve.status).toBe(200)
+    expect(inactiveResolve.body).toMatchObject({
+      data: {
+        items: [],
+        missingUserIds: [localUserId, foreignUserId, hiddenUserId],
+        inactiveUserIds: [],
+      },
+    })
     await settingsRowPool.query(`UPDATE users SET is_active = true WHERE id = $1`, [localUserId])
 
     const delegatedAssign = await requestJson(

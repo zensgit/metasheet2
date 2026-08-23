@@ -7187,9 +7187,9 @@
                      ensurePlatformAdmin instead — a strictly narrower authority a delegated
                      attendance admin does not have, which would 403 on mount and leave the
                      picker's <select> with no options and no way to set a value at all (single
-                     v-model setter in this file). Pointed at the attendance-scoped search route
-                     instead, which admits global admins too (attendance-admin.ts:556) and is
-                     strictly wider than the /api/admin/users default this replaces.
+                     v-model setter in this file). The attendance-admin route instead accepts
+                     delegated attendance admins while limiting them to active members of the
+                     selected organization; platform admins opt into global scope explicitly.
                      GATE-5097 P3-5: that route's gate and the data read's gate are NOT proven
                      byte-identical, despite sharing the `attendance:admin` permission name —
                      core-backend's rbacGuard('attendance','admin') resolves through
@@ -12212,7 +12212,9 @@ let calendarEffectiveCacheKey: string | null = null
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
 const auth = useAuth()
-const attendanceAdminGlobalUserScope = computed(() => auth.getAccessSnapshot().isAdmin)
+const attendanceAdminGlobalUserScope = computed(() => (
+  typeof auth.getAccessSnapshot === 'function' && auth.getAccessSnapshot().isAdmin
+))
 // Navigability audit fix 4: `useRouter()` resolves via Vue's provide/inject up to the app root
 // regardless of whether THIS component is the routed match — always available when the real app
 // mounts AttendanceView anywhere under its router-installed tree. Only `undefined` in isolated
@@ -14700,7 +14702,8 @@ const importPreviewSummaryCards = computed(() => [
   },
 ])
 
-const orgId = ref(String(auth.buildAuthHeaders()['x-tenant-id'] || '').trim())
+const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
+const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
 const targetUserId = ref('')
 
 const {

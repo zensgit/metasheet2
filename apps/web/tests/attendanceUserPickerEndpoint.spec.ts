@@ -354,6 +354,43 @@ describe('attendance user pickers — every picker searches through the attendan
     expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/access?orgId=default`)
     expect(calls.some((url) => url.startsWith('/api/permissions/user/'))).toBe(false)
   })
+
+  it('keeps real delegated role writes on the scoped endpoints when an old backend returns a bare 404', async () => {
+    const targetUserId = '11111111-1111-4111-8111-111111111111'
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === `/api/attendance-admin/users/${targetUserId}/roles/assign`
+        || url === `/api/attendance-admin/users/${targetUserId}/roles/unassign`) {
+        return jsonResponse(404, { message: 'Not Found' })
+      }
+      if (url.startsWith('/api/permissions/')) {
+        return jsonResponse(200, { ok: true, permissions: ['*:*'], isAdmin: true })
+      }
+      if (url.startsWith('/api/attendance/groups?') || url === '/api/attendance/groups') {
+        return attendanceGroupsResponse()
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = await mountAdminViewWithAllPickers(container!)
+    const input = container!.querySelector<HTMLInputElement>('#attendance-provision-user-id')!
+    input.value = targetUserId
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    const section = input.closest('.attendance__admin-section')!
+    const actionButtons = section.querySelectorAll<HTMLButtonElement>('.attendance__admin-section-header button')
+
+    actionButtons[1]!.click()
+    await flushUi(6)
+    actionButtons[2]!.click()
+    await flushUi(6)
+
+    const calls = vi.mocked(apiFetch).mock.calls.map(([requested]) => String(requested))
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/roles/assign`)
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/roles/unassign`)
+    expect(calls.some((url) => url.startsWith('/api/permissions/grant'))).toBe(false)
+    expect(calls.some((url) => url.startsWith('/api/permissions/revoke'))).toBe(false)
+  })
 })
 
 /* ─────────────────────────────── B. mechanical ─────────────────────────────── */

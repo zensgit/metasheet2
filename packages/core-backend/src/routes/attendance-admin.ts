@@ -705,6 +705,7 @@ async function resolveBatchUsers(
         AND uo.org_id = $2
         AND uo.is_active = true
        WHERE u.id = ANY($1::text[])
+         AND u.is_active = true
        ${lockClause}`,
       [userIds, scope.orgId],
     )
@@ -1123,7 +1124,7 @@ export function attendanceAdminRouter(): Router {
               AND uo.is_active = true`
           : 'FROM users u'
         const whereParams: unknown[] = scope.kind === 'org' ? [scope.orgId] : []
-        const clauses: string[] = []
+        const clauses: string[] = scope.kind === 'org' ? ['u.is_active = true'] : []
         if (q) {
           whereParams.push(term)
           const termIndex = whereParams.length
