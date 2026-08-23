@@ -101,6 +101,18 @@ const RECORDER_SPECIFIER = './lib/recovery-census-recorder'
  *
  * Fail-closed: a row registered on a token absent from this map is itself a violation, so a
  * new classifier entry point cannot be registered without declaring where it lives.
+ *
+ * DISCLOSURE (what a green here does and does NOT mean). Today the STABILITY branch is
+ * walked by exactly two files — routes/univer-meta.ts and auth/AuthService.ts, the two the
+ * O2-D1 denominator slice added. Nothing else reaches it. And routes/univer-meta.ts is
+ * precisely the file with the known 409-body divergence: the shared adapters answer through
+ * jsonError with `error.details.retryable = true`, while univer-meta's file-local responder
+ * (univer-meta.ts:4293) emits no `details` at all.
+ *
+ * So a green on this audit means "this surface routes through a RECOGNISED classification
+ * entry point". It does NOT mean "this surface emits the shared 409 contract". Making those
+ * two coincide is a response-contract change across five L1-armed routes — an owner call,
+ * deliberately not taken here.
  */
 const CLASSIFIER_DECL_MODULE = 'db/recovery-conflict'
 const STABILITY_DECL_MODULE = 'multitable/recovery-authorization-stability'

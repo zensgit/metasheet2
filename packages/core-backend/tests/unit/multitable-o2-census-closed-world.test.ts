@@ -121,6 +121,15 @@ function functionBody(source: string, name: string): string | null {
  * `ALLOWED_MULTI_TAG_SITE_SETS` entries, each needing its own mechanical rationale, and
  * would buy nothing the behaviour legs do not already assert (they pin the exact 409 body,
  * so deleting the responder reds them).
+ *
+ * DISCLOSED RESIDUAL — (c) is implemented NARROWER than the rule it states. The rule is
+ * "omitting it would hide a classification site"; the implementation is "non-exported AND
+ * exactly one unconditional delegation". A CONDITIONAL local alias —
+ *   function bail(res, err) { if (!err) return false; return sendIfRecoveryConflict(res, err) }
+ * — would hide sites (N surfaces route through it while the file counts 1) yet is not a
+ * token: it satisfies the implementation and violates the stated rule. Not live today (the
+ * derivation finds exactly one alias, unconditional). Widening the body test to "the body
+ * contains a delegation and nothing that classifies independently" is the fix if one appears.
  */
 function deriveAdapterTokens(srcRoot: string): readonly string[] {
   const classifierSource = readFileSync(path.join(srcRoot, CLASSIFIER_MODULE), 'utf8')
@@ -146,6 +155,7 @@ function deriveAdapterTokens(srcRoot: string): readonly string[] {
 
   const base = [...new Set([...exported, STABILITY_CLASSIFIER_TOKEN])]
   const aliases = new Set<string>()
+  const aliasDeclaringFiles = new Map<string, string[]>()
   for (const file of walkSourceFiles(srcRoot)) {
     const rel = path.relative(srcRoot, file).split(path.sep).join('/')
     if (rel === CLASSIFIER_MODULE) continue
@@ -155,13 +165,33 @@ function deriveAdapterTokens(srcRoot: string): readonly string[] {
     )) {
       if (match[1] !== undefined) continue // exported = module boundary, not a local alias
       const name = match[2]
-      if (base.includes(name) || aliases.has(name)) continue
+      if (base.includes(name)) continue
       const body = functionBody(stripped, name)
       if (body === null) continue
       const normalized = body.replace(/\s+/g, ' ').trim().replace(/;$/, '')
       if (base.some((token) => new RegExp(`^return\\s+${token}\\s*\\(`).test(normalized))) {
         aliases.add(name)
+        aliasDeclaringFiles.set(name, [...(aliasDeclaringFiles.get(name) ?? []), rel])
       }
+    }
+  }
+  // P3(b): an alias enters the token set as a BARE NAME, and scanAdapterCallSites counts
+  // `\b<token>\s*(` in EVERY file. A future alias with a generic name (`bail`, `send`)
+  // would therefore count same-named calls in unrelated files as classification sites and
+  // raise a phantom UNREGISTERED caller on a required lane. Fail-closed on the reachable
+  // half of that: an alias name declared in more than one file is a loud derivation error
+  // rather than a silent false positive.
+  //
+  // DISCLOSED RESIDUAL: this does not cover a same-named call in a file that never DECLARES
+  // it (an import of an unrelated export with the same name). Closing that needs per-file
+  // token scoping in scanAdapterCallSites, which is a wider change than this slice.
+  for (const alias of aliases) {
+    if (aliasDeclaringFiles.get(alias)!.length > 1) {
+      throw new Error(
+        `token derivation: local alias '${alias}' is declared in more than one file `
+        + `(${aliasDeclaringFiles.get(alias)!.join(', ')}) — a bare-name token would count `
+        + 'same-named calls across all of them; give the aliases distinct names',
+      )
     }
   }
   return [...new Set([...base, ...aliases])].sort()
