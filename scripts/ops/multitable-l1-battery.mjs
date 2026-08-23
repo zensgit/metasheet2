@@ -150,7 +150,7 @@ const DEFAULT_TIMEOUT_MS = 20_000
 // ---------------------------------------------------------------------------
 // THE SURFACE LEDGER
 //
-// Every one of the 48 census sites in
+// Every one of the 55 census sites in
 // packages/core-backend/tests/unit/lib/recovery-census-table.ts appears EXACTLY ONCE below —
 // either attached to a driven surface, or in NOT_DRIVEN_SITES with a concrete reason. The
 // hermetic guard re-parses that census file and asserts set-equality, so a newly-registered
@@ -510,6 +510,62 @@ export const NOT_DRIVEN_SITES = Object.freeze([
   { site: 'admin-directory:batch-unbind', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; refuses before any recovery-authority write unless a directory integration is configured.' },
   { site: 'admin-directory:deprovision-restore', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
   { site: 'admin-directory:compensate-deny', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
+  // --- O2-D1 denominator slice (2026-08-23): the seven sites added when
+  // routes/univer-meta.ts and auth/AuthService.ts entered the census denominator.
+  //
+  // The five univer-meta sites are NOT excused as unreachable: all three tables they write
+  // (spreadsheet_permissions / field_permissions / record_permissions) DO carry
+  // recovery-authority triggers, so a 40001 is constructible at every one of them and each
+  // already answers the exact uniform 409. They are excused on FIXTURE COST alone — the
+  // battery builds users/roles/permissions fixtures, not a univer spreadsheet with sheets,
+  // fields and records.
+  //
+  // Whether the battery SHOULD grow to drive them is deliberately NOT decided here: the
+  // driven-surface set is what an L1 battery PASS attests, and that set is cited by the
+  // RATIFIED enablement-ladder doc. Widening it changes the meaning of the L1 gate, which
+  // is an owner amendment, not a mechanical ledger edit. Raised on the owner sheet instead.
+  {
+    site: 'univer-meta:sheet-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT sheet permissions writes spreadsheet_permissions, guarded by trg_spreadsheet_permissions_recovery_authority_lock — a 40001 IS constructible here and the route already answers the uniform 409. Excused only because driving it needs a univer spreadsheet + sheet fixture this battery does not build.',
+  },
+  {
+    site: 'univer-meta:field-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT field permissions writes field_permissions, guarded by trg_field_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + field fixture cost.',
+  },
+  {
+    site: 'univer-meta:config-restore-execute',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'POST config-restore-execute reaches field_permissions / spreadsheet_permissions through applyPermissionDeEscalation, both trigger-guarded. This is the site whose outer catch did NOT classify until #5114 — its 40001 landed as an unmapped 500. Excused only on fixture cost: driving it needs a spreadsheet with a restorable config snapshot. Its behaviour leg asserts the 409 directly.',
+  },
+  {
+    site: 'univer-meta:record-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT record permissions writes record_permissions, guarded by trg_record_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + record fixture cost.',
+  },
+  {
+    site: 'univer-meta:record-permissions-delete',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'DELETE record permission deletes from record_permissions, same trigger and same lease key as univer-meta:record-permissions-put. Excused only on the same univer sheet + record fixture cost.',
+  },
+  {
+    site: 'auth-service:register-user-roles',
+    reason: 'unknowable-lease-key',
+    detail:
+      'Service half of the already-excused auth:register — AuthService.register mints the new user id with crypto.randomUUID() inside the transaction, so the battery cannot hold a lease on the subject the users/user_roles triggers key on. This site is the bounded in-transaction retry, which surfaces a typed UserRoleAssignmentRecoveryBusyError rather than a 409.',
+  },
+  {
+    site: 'auth-service:self-service-backfill',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'The read-path RBAC backfill in resolveRbacProfile writes user_roles — the SAME table and the SAME lease key as admin-users:role-assign, which IS driven. Excused because reaching it needs a user that is MISSING the self-service role while attendance self-service is enabled, a state the battery does not construct. Like the register site, it surfaces a typed throw, not a 409.',
+  },
 ])
 
 /**
