@@ -951,3 +951,34 @@ org pin 从未在任何环境开启(激活=owner 独立授权,前置=staging 验
 staging 人口从未被测(NOT_APPLIED 短路,深审 P2-2 探针未落);(β) 持续性准入步未实现(类会回灌——
 u1b=0 是当下事实非不变量;写入点 422 是回灌者的接触面);G-S1-8 仍 expected-red(feed-branch owner 行
 未裁);twin-write/OD-L11-10(iii) 张力未裁;证据作业只读性无自动门。§12.3/§13.3 全部条目不因本段减少。
+
+---
+
+## 15. 2026-08-23 收尾计划轮验证事实(与 §11-§14 同规:分层追加,不重跑既有行)
+
+**本段不重跑本文任何既有验证行。所有开关仍 OFF(org pin 蛰伏、附件 OFF);零 UAT;没有任何环境被翻转。**
+本段验证的是**一个切片(S0)与一次只读采集(S1)**,不是全线。
+
+### 15.1 S0 判定链(#5129,落地 `e6426bcd91`)
+
+| 轮次 | head | 判定 | 决定性证据 |
+|---|---|---|---|
+| gate | `ab3240ece5` | FIX-ROUND(1 P1 / 2 P2) | **P1**:考勤 W4C-0 DML 普查 **55/58**(fixture `.sql` 注入六个未分类站点;`collector.cjs:27-51` 扫 `.sql`、其排除段匹配 `.test.mjs` 而不匹配 `.sql`)——而该 head 的 `test (18.x)`/`test (20.x)` 在 main 上为绿、在此 head 为红,PR-attributable;**P2-1**:中和 U3′ 列守卫后重放门仍 64/64 绿,同一中和却把 prod APPLIED 翻成 INDETERMINATE(stub 实证);**P2-2**:`note=` 行在 14 行人口数据之后仍称「every population probe is N/A」 |
+| fix | `294d00262b` | MERGE-CLEAN | 普查 **55/58 → 58/58**;**四钉家族全跑**(s6a 1/1、W7-R10 12/12、CI corpus 259/259、DML 58/58);守卫覆盖以**词法包含**判据实现(`if true; then` 也算被移除);`verdict=`/`reason=` 逐字节不变(sha256 `80f5afe4…`) |
+| P3-6 fix | `609320e338` | **MERGE-CLEAN(终)** | 判据自身的洞:守卫断言用裸 token `indexOf`,新增 `NOT_MEASURED` echo 造成同名第二处 ⇒ **M11**(真 probe 移出守卫、echo 留内)在 `294d00262b` **通过**、在 `609320e338` **恰红**并点名该 probe;新加的 exactly-once 断言另证有牙(复制调用点 ⇒ 红在计数而非包含);还原 sha `67ed99dc…` 一致 |
+
+CI 终态 **19/19 pass / 0 fail**(`test (20.x)` 28m48s、`test (18.x)` 15m55s——两条在首 head 皆红,终 head 皆绿;两条新车道亦绿),`mergeStateStatus=CLEAN`。重放门 **68/68**(真库),本地 17/17(执行层因无 `DATABASE_URL` 跳过,CI realdb 车道覆盖)。
+
+**门审自跑的 mutation(节选,均 cp+sha256 还原)**:M1 守卫中和 → 覆盖前绿/覆盖后红;M2 删探针 → 地板 46/47 红;M3 加探针 → 65 测试(证解析器机械);M4 解析器返空 → 地板 0 红;M5 植入写入 → `25006`;M6 双行 → 单行断言红;M10b 错 `WORKFLOW_PATH` → 模块加载即 `ENOENT`(pass 0/fail 1,证不会静默空跑);M11 见上。
+
+### 15.2 S1 只读采集(run `32647875353`,log 归档 `soak-working/s1-org-evidence-run7-*.log`)
+
+staging 首次被测:`u1a_distinct_active_orgs=4`、`u1a_multi_org_active_users=0`、`u1b=6`(拆分 5 无行 + 1 仅停用行,恒等成立)、`u1c_non_default_integration_rows=0`、`p10_instances_total=31`、**`u3_attendance_{records,requests}_org_id_not_in_user_orgs=0/0`**、`verdict=NOT_APPLIED`。prod 同 run 复读:271/271、p20=0、u1b 及双拆分 0、u1a=1、`verdict=APPLIED`。
+
+**判读约束**:staging 的 `u1a=4` 不是缺陷,是 staging 的既有形态;它使那三个迁移的单 org 前提**在 staging 不成立**,故其 (i)-guard 会按设计 ABORT——这是 ruled 行为的正确触发,不是回归。**U3′=0/0 满足了 Lock-11 的那条 ratified 激活前置,但仅对 staging 与 prod 的当前人口成立,不是不变量。**
+
+### 15.3 本段未验证清单(与 §12.3/§13.3/§14.3 并存,不替代)
+
+S2–S11 的一切均未验证:staging 从未成功部署过携带审批线的 head(至今 NOT_APPLIED);那三个迁移从未在 staging 执行(且以当前人口会 ABORT);**org pin 从未在任何环境开启**;阶段 3 未起草未执行;附件 flag ON 零 UAT 且清单待 owner 亲写;(β) 持续性准入未实现——`u1b=0`(prod)与 `u1b=6`(staging)都是**测量而非不变量**;G-S1-8 仍 expected-red;A-2 `afs:`、A-4 mention-CTE、A-5 required-lane 提权、A-7 台账时效均未处置;S0 的 carried 残项(P3-2 地板漂移、P3-3 TOCTOU、NIT-3 嵌套 `if` 脆性、NIT-5 守卫名单为手列、**NIT-4:S5 前置审计判据必须写成「计数行在场且 =0」,绝不可写成「未见违规行」**、#5116 P3-2 内容不可恢复)全部在册。
+
+**禁止写入的绝对句**(本段自扫已遵守,后续任何一版 MD 同受约束):不得写「租户隔离已实施」或「org pin 保护了租户」——唯一安全表述是盖章使**激活变安全**,而非**租户被强制隔离**;不得在无 `plm:`/`afs:` 限定词的情况下写「读取按参与者范围」;不得使用台账 §8 的 ENGINEERING COMPLETE / CORE-PARITY / PRODUCT FINAL 标签;不得把 `u1b=0` 写成不变量;不得写「零成员类已关闭」;不得写「没有写入点能创建 NULL-org 行」(脚本 5/6 至 S8 前仍能,`afs:` 按设计如此)。
