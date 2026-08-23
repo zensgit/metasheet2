@@ -13,6 +13,7 @@ import { loadValidators } from '../types/validator'
 import { loadMulter, createUploadMiddleware, createOptionalUpload } from '../types/multer'
 import type { RequestWithFile } from '../types/multer'
 import { buildBpmnWorkflowEngineOptionsFromServerConfig } from '../workflow/bpmnHttpTaskEgressPolicy'
+import { isBpmnRuntimeEnabled, requireBpmnRuntimeEnabled } from '../workflow/bpmnRuntimeConfig'
 
 // Load validators (express-validator or no-op fallbacks)
 const { body, param, query } = loadValidators()
@@ -26,13 +27,23 @@ const router = Router()
 const logger = new Logger('WorkflowAPI')
 const workflowEngine = new BPMNWorkflowEngine(buildBpmnWorkflowEngineOptionsFromServerConfig())
 
-// Initialize engine unless explicitly disabled (e.g., CI smoke).
-if (process.env.DISABLE_WORKFLOW === 'true') {
-  logger.warn('Workflow engine disabled (DISABLE_WORKFLOW=true)')
-} else {
+// P0-S S1 — fail-closed BPMN runtime gate. The whole `/api/workflow` surface is
+// runtime (deploy/start/instances/tasks/message/signal/incidents) and lacks
+// per-task/tenant authorization, so it is closed by default and only served when
+// `ENABLE_BPMN_RUNTIME=true`. Every route below returns 503 while disabled;
+// closing the route surface is what removes the anonymous-access exposure.
+router.use(requireBpmnRuntimeEnabled)
+
+// Initialize the engine ONLY when the runtime is enabled (default OFF). This also
+// keeps the timer poller, `resumeActiveInstances`, metrics and health-check off —
+// runtime-off implies poller-off. (The legacy opt-out `DISABLE_WORKFLOW=true` is
+// still honored via `isBpmnRuntimeEnabled`.)
+if (isBpmnRuntimeEnabled()) {
   workflowEngine.initialize().catch(error => {
     logger.error('Failed to initialize Workflow Engine:', error)
   })
+} else {
+  logger.warn('BPMN workflow runtime disabled (set ENABLE_BPMN_RUNTIME=true to enable).')
 }
 
 /**

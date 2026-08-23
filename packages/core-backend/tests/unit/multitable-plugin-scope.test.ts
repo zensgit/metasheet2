@@ -549,4 +549,67 @@ describe('multitable plugin scope helper', () => {
       scoped.provisioning.runObjectFieldsRepairTransaction(async (tx: any) => tx.findObjectSheet({ projectId: 'tenant_42:other-plugin', objectId: 'x' })),
     ).rejects.toThrow()
   })
+  // P0-S S3: `overwriteMode` is the per-call opt-out of the fail-closed
+  // ensureFields default. plugin-scope forwards it two ways — spread into
+  // ensureObjectInScope when that hook exists, else straight through to
+  // multitable.provisioning.ensureObject. This pins the scope layer.
+  it('forwards overwriteMode through the scoped hook AND the no-hook fallback', async () => {
+    const ensureObjectInScope = vi.fn(async () => ({
+      baseId: 'base_legacy',
+      sheet: { id: 'sheet_scoped', baseId: 'base_legacy', name: 'Ticket', description: null },
+      fields: [],
+    }))
+    const ensureObject = vi.fn(async () => ({
+      baseId: 'base_legacy',
+      sheet: { id: 'sheet_direct', baseId: 'base_legacy', name: 'Ticket', description: null },
+      fields: [],
+    }))
+    const buildMultitable = () => ({
+      provisioning: { ensureObject, claimObjectScope: vi.fn(async () => {}) },
+    })
+    const input = {
+      projectId: 'tenant_42:after-sales',
+      descriptor: { id: 'serviceTicket', name: 'Ticket', fields: [] },
+      overwriteMode: 'overwrite' as const,
+    }
+
+    const withHook = createPluginScopedMultitableApi(buildMultitable() as any, 'plugin-after-sales', {
+      ensureObjectInScope,
+    } as any)
+    await withHook.provisioning.ensureObject(input as any)
+    expect(ensureObjectInScope).toHaveBeenCalledWith(expect.objectContaining({ overwriteMode: 'overwrite' }))
+
+    const withoutHook = createPluginScopedMultitableApi(buildMultitable() as any, 'plugin-after-sales', {} as any)
+    await withoutHook.provisioning.ensureObject(input as any)
+    expect(ensureObject).toHaveBeenCalledWith(expect.objectContaining({ overwriteMode: 'overwrite' }))
+  })
+
+  // The HOST wiring is the half a scope-layer mock cannot reach: both
+  // provisioning hooks in src/index.ts DESTRUCTURE their input, so an option
+  // absent from the destructure is silently dropped no matter what the scope
+  // layer forwarded. That wiring lives inline in the server bootstrap and
+  // cannot be imported without standing up the whole app, so it is pinned
+  // structurally here — this is what catches a regression that reverts the
+  // destructure, which a behavioural mock provably does not.
+  it('both host provisioning hooks destructure and forward overwriteMode (source contract)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { fileURLToPath } = await import('node:url')
+    const indexPath = fileURLToPath(new URL('../../src/index.ts', import.meta.url))
+    const source = readFileSync(indexPath, 'utf8')
+
+    const hooks = [...source.matchAll(/ensureObject(?:InScope)?: async \(\{([^}]*)\}\) =>/g)]
+    expect(hooks.length).toBeGreaterThanOrEqual(2)
+    for (const hook of hooks) {
+      expect(hook[1]).toContain('overwriteMode')
+    }
+
+    // …and each forwards it on to the provisioning primitive rather than
+    // destructuring it into oblivion.
+    const forwards = [...source.matchAll(/ensureMultitableObject\(\{[^}]*\}\)/g)]
+    expect(forwards.length).toBeGreaterThanOrEqual(1)
+    for (const call of forwards) {
+      expect(call[0]).toContain('overwriteMode')
+    }
+  })
+
 })

@@ -20,7 +20,7 @@ const attendanceGroupFixedScheduleEffectivenessServiceLib = require('./lib/atten
 // the FSER instance the /effective-policy route builds.
 const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-group-fixed-schedule-producer-key.cjs')
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
-const { resolvePunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
+const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -3008,9 +3008,19 @@ async function syncAttendanceReportRecords(context, db, orgId, logger, params) {
   // ensure value columns (stable superset) via the same ensureObject upsert (idempotent, never deletes)
   const valueColumns = buildAttendanceReportRecordsValueColumns(catalog.items)
   const baseDescriptor = getAttendanceReportRecordsDescriptor()
+  // P0-S S3: explicit destructive-reconcile opt-in. These value columns are DERIVED from the
+  // report-field catalog and their `order` is POSITIONAL (1000 + index), so adding, removing
+  // or reordering a single catalog item renumbers every column after it — under the
+  // fail-closed default that classifies as would_overwrite and throws. The columns are
+  // plugin-owned (the catalog is their source of truth), not tenant-authored, so overwriting
+  // is the intended behavior here; declaring it per-call keeps the guard armed for every
+  // OTHER plugin rather than disarming it process-wide via the env.
+  // Follow-up: derive `order` from the field id instead of the index so ordinary syncs stop
+  // producing an order diff at all, then drop this opt-in.
   await provisioning.ensureObject({
     projectId: ensured.projectId,
     descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...valueColumns] },
+    overwriteMode: 'overwrite',
   })
   const logicalIds = [
     ...Object.values(ATTENDANCE_REPORT_RECORDS_FIELDS),
@@ -4282,9 +4292,15 @@ async function syncAttendanceReportPeriodSummary(context, db, orgId, logger, par
   const fieldFingerprint = buildAttendanceReportFieldConfigFingerprint(valueFields).value
 
   const baseDescriptor = getAttendanceReportPeriodSummariesDescriptor()
+  // P0-S S3: explicit destructive-reconcile opt-in — same rationale as the report-records
+  // sync above. These value columns are derived from the catalog plus the dynamic-subtype
+  // definitions and carry a POSITIONAL `order`, so a catalog edit renumbers the tail and the
+  // fail-closed default would refuse. Plugin-owned columns, so overwrite is intended; the
+  // per-call flag keeps the guard armed for every other caller.
   await provisioning.ensureObject({
     projectId: ensured.projectId,
     descriptor: { ...baseDescriptor, fields: [...baseDescriptor.fields, ...allValueColumns] },
+    overwriteMode: 'overwrite',
   })
   const logicalIds = [
     ...Object.values(ATTENDANCE_REPORT_PERIOD_SUMMARIES_FIELDS),
@@ -14215,6 +14231,39 @@ function requireAttendanceActiveCurrentPort() {
   return attendanceW4ActiveCurrentPort
 }
 
+// Lock-11 §10 W-4 (docs/development/approval-lock11-writer-org-derivation-20260822.md §10 +
+// §10.3): the ONE place `upsertAttendanceApprovalInstance` (below) asks for the org_id it
+// stamps. Deliberately a NEW, distinctly-named function — never folded into an existing
+// reviewed closure (P26 nearest-symbol trap: a same-named local would fold this DML-adjacent
+// logic into whichever reviewed entry happens to sit nearest above it).
+//
+// Fail-closed tripwires (spec §3 step 1): a missing port / missing port method, or a payload
+// missing `orgDerivation` (the builder always sets it — this guards a hypothetical sixth call
+// site that forgets to), both throw before any DML. Named-vs-unnamed dispatch (arm (f) vs arm
+// (a)) is entirely the port's decision; this function only translates the result shape into
+// the writer's HttpError transport (values-free — no org id, no user id, no count).
+async function deriveAttendanceApprovalOrgStampV1(client, orgDerivation) {
+  if (!orgDerivation || typeof orgDerivation !== 'object') {
+    throw new HttpError(500, 'APPROVAL_ORG_DERIVATION_INPUT_MISSING', 'Approval org derivation input missing from payload')
+  }
+  const port = attendanceW4SegmentCalculationPortRef
+  if (!port || typeof port.deriveApprovalInstanceOrgIdForAttendanceSubjectV1 !== 'function') {
+    throw new HttpError(503, 'APPROVAL_ORG_DERIVATION_UNAVAILABLE', 'Approval org derivation service unavailable')
+  }
+  const result = await port.deriveApprovalInstanceOrgIdForAttendanceSubjectV1({
+    trxQuery: (sqlText, params) => client.query(sqlText, params ?? []),
+    subjectUserId: orgDerivation.subjectUserId,
+    requestNamedOrgId: orgDerivation.requestNamedOrgId ?? null,
+  })
+  if (result.ok === true) {
+    return result.orgId
+  }
+  if (result.reason === 'selector_not_permitted') {
+    throw new HttpError(422, 'APPROVAL_ORG_SELECTOR_NOT_PERMITTED', 'The named organization is not permitted for this request')
+  }
+  throw new HttpError(422, 'APPROVAL_ORG_UNRESOLVED', 'Approval instance org could not be resolved')
+}
+
 function pluginQueryAdapter(dbOrTrx) {
   return async (sqlText, params) => {
     const rows = await dbOrTrx.query(sqlText, params ? [...params] : [])
@@ -23967,6 +24016,7 @@ function buildAttendanceApprovalInstancePayload({
   requesterName,
   draft,
   orgRelations = null,
+  requestNamedOrgId = null,
 }) {
   const requestType = draft?.requestType
   const requestLabel = attendanceRequestTypeLabel(requestType)
@@ -24053,20 +24103,30 @@ function buildAttendanceApprovalInstancePayload({
     requestNo: `ATT-${requestId}`,
     formSnapshot,
     currentNodeKey: buildAttendanceApprovalNodeKey(0),
+    // Lock-11 §10 W-4: threaded so the writer (upsertAttendanceApprovalInstance) can derive
+    // org_id without re-deriving anything itself — a top-level payload key, deliberately
+    // outside every JSON-serialized snapshot/metadata field so it can never leak into a
+    // stored row column.
+    orgDerivation: Object.freeze({ subjectUserId: userId, requestNamedOrgId }),
   }
 }
 
 async function upsertAttendanceApprovalInstance(client, payload) {
+  // Lock-11 §10 W-4: derive the org to stamp BEFORE the INSERT, same transaction (TOCTOU
+  // discipline matching W-1/W-2). A refusal here throws (values-free HttpError) and the whole
+  // boundary transaction rolls back — no approval_instances row, no attendance_requests row,
+  // no assignments (see deriveAttendanceApprovalOrgStampV1 above for the fail-closed shape).
+  const stampOrgId = await deriveAttendanceApprovalOrgStampV1(client, payload.orgDerivation)
   await client.query(
     `INSERT INTO approval_instances
      (id, status, version, source_system, workflow_key, business_key, title,
       requester_snapshot, subject_snapshot, policy_snapshot, metadata,
       current_step, total_steps, request_no, form_snapshot, current_node_key,
-      sync_status, created_at, updated_at)
+      org_id, sync_status, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7,
              $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
              $12, $13, $14, $15::jsonb, $16,
-             'ok', now(), now())
+             $17, 'ok', now(), now())
      ON CONFLICT (id) DO UPDATE
        SET status = EXCLUDED.status,
            source_system = EXCLUDED.source_system,
@@ -24084,6 +24144,13 @@ async function upsertAttendanceApprovalInstance(client, payload) {
            current_node_key = EXCLUDED.current_node_key,
            sync_status = 'ok',
            updated_at = now()`,
+    // D-10 RETIRED BY EVIDENCE (u1a=1): the DO UPDATE SET list above is EXACTLY the 16 entries
+    // it was before this slice — org_id is NEVER re-derived on conflict, by construction. A
+    // successful re-upsert (e.g. request_pending_edit) leaves the STORED org untouched even
+    // when $17 below differs. If a second active org ever appears in production, D-10 reopens
+    // and must be answered before org-pin activation — the shipped DO UPDATE behavior here is
+    // NOT a de-facto ruling on that question (see approval-org-writer-w4-s1.db.test.ts's D-10
+    // pin for the mechanical proof).
     [
       payload.id,
       payload.status,
@@ -24101,8 +24168,10 @@ async function upsertAttendanceApprovalInstance(client, payload) {
       payload.requestNo,
       JSON.stringify(payload.formSnapshot),
       payload.currentNodeKey,
+      stampOrgId,
     ]
   )
+  return { orgId: stampOrgId }
 }
 
 async function replaceAttendanceApprovalAssignments(client, approvalId, assignments) {
@@ -30084,6 +30153,7 @@ module.exports = {
                     requirePhoto: outdoorPolicy.requirePhoto === true,
                     approvalFlowId: typeof outdoorPolicy.approvalFlowId === 'string' ? outdoorPolicy.approvalFlowId : '',
                   },
+                  requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
                 },
               })
               if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
@@ -32997,6 +33067,11 @@ module.exports = {
       orgId: z.string().min(1).nullable(),
       requestId: z.string().uuid().nullable(),
       requestBody: requestWriteSchema,
+      // Lock-11 §10 W-4 arm (f): the org the REQUEST named (body.orgId / query.orgId /
+      // x-org-id — extractRequestedPunchOrgIdV1's precedence, deliberately narrower than
+      // getOrgId's session-fallback chain). null when the request named no org — arm (a)
+      // fallback then applies at the writer.
+      requestNamedOrgId: z.string().min(1).nullable(),
     }).strict()
 
     function resolveRequestOperationId(parsedData) {
@@ -33088,6 +33163,7 @@ module.exports = {
         requirePhoto: z.boolean().optional(),
         approvalFlowId: z.string().optional(),
       }).passthrough(),
+      requestNamedOrgId: z.string().min(1).nullable(),
     }).strict()
 
     const scheduleDispatchCreateRouteInputSchema = z.object({
@@ -33106,6 +33182,7 @@ module.exports = {
         reason: z.string().nullable().optional(),
         approvalFlowId: z.string().nullable().optional(),
       }).passthrough(),
+      requestNamedOrgId: z.string().min(1).nullable(),
     }).strict()
 
     const shiftSwapCreateRouteInputSchema = z.object({
@@ -33117,6 +33194,7 @@ module.exports = {
       counterpartyAssignmentId: z.string().uuid(),
       approvalFlowId: z.string().uuid().nullable(),
       reason: z.string().nullable(),
+      requestNamedOrgId: z.string().min(1).nullable(),
     }).strict()
 
     const shiftSwapStoredSubjectScopeSchema = z.discriminatedUnion('kind', [
@@ -33307,6 +33385,7 @@ module.exports = {
         requesterName: route.requesterName,
         draft,
         orgRelations,
+        requestNamedOrgId: route.requestNamedOrgId,
       })
       const approvalAssignments = buildAttendanceApprovalAssignments(
         draft.metadata?.approvalFlow?.steps,
@@ -33353,7 +33432,12 @@ module.exports = {
         })
         draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
       }
-      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      // G-L11-8 (D-11(ii)): the twin attendance_requests.org_id row carries the SAME stamped
+      // org the writer just derived — never route.orgId directly — so the same-transaction
+      // equality gate holds by construction. Every OTHER route.orgId use in this function
+      // (the lock above, findDuplicateAttendanceRequest, lifecycle events below) is
+      // deliberately left unrewritten (spec §3 disclosure (a)) — prod-inert under u1a=1.
+      const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
@@ -33363,7 +33447,7 @@ module.exports = {
         [
           requestId,
           route.actorId,
-          route.orgId,
+          stampedOrgId,
           draft.workDate,
           draft.requestType,
           draft.requestedInAt,
@@ -33509,6 +33593,7 @@ module.exports = {
         requesterName: route.requesterName,
         draft,
         orgRelations,
+        requestNamedOrgId: route.requestNamedOrgId,
       })
       const approvalAssignments = buildAttendanceApprovalAssignments(
         draft.metadata.approvalFlow.steps,
@@ -33594,7 +33679,7 @@ module.exports = {
       if (dup.length > 0) {
         throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
       }
-      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
@@ -33604,7 +33689,7 @@ module.exports = {
         [
           requestId,
           route.actorId,
-          route.orgId,
+          stampedOrgId,
           workDate,
           'outdoor_punch',
           draft.requestedInAt,
@@ -33742,6 +33827,7 @@ module.exports = {
         requesterName: route.requesterName,
         draft,
         orgRelations,
+        requestNamedOrgId: route.requestNamedOrgId,
       })
       const approvalAssignments = buildAttendanceApprovalAssignments(
         draft.metadata?.approvalFlow?.steps,
@@ -33868,7 +33954,7 @@ module.exports = {
       if (duplicateRows.length) {
         throw new HttpError(409, 'DUPLICATE_SCHEDULE_DISPATCH_REQUEST', 'A schedule-dispatch request already exists for this user/group/date window')
       }
-      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
@@ -33878,7 +33964,7 @@ module.exports = {
         [
           requestId,
           input.userId,
-          route.orgId,
+          stampedOrgId,
           input.startDate,
           input.reason,
           approvalId,
@@ -34023,6 +34109,7 @@ module.exports = {
         requesterName: route.requesterName ?? requesterSource.userId,
         draft,
         orgRelations,
+        requestNamedOrgId: route.requestNamedOrgId,
       })
       const approvalAssignments = buildAttendanceApprovalAssignments(
         draft.metadata?.approvalFlow?.steps,
@@ -34152,7 +34239,7 @@ module.exports = {
       if (sourceConflict) {
         throw new HttpError(409, 'DUPLICATE_SHIFT_SWAP_SOURCE', 'A shift-swap request is already pending or approved for one of these source assignments')
       }
-      await upsertAttendanceApprovalInstance(trx, approvalPayload)
+      const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
@@ -34162,7 +34249,7 @@ module.exports = {
         [
           requestId,
           requesterSource.userId,
-          route.orgId,
+          stampedOrgId,
           requesterSource.workDate,
           route.reason,
           approvalId,
@@ -34414,6 +34501,7 @@ module.exports = {
           requesterName: existingRequest.user_id,
           draft,
           orgRelations,
+          requestNamedOrgId: route.requestNamedOrgId,
         })
         const approvalAssignments = buildAttendanceApprovalAssignments(
           draft.metadata?.approvalFlow?.steps,
@@ -36281,6 +36369,7 @@ module.exports = {
               orgId,
               requestId: null,
               requestBody: parsed.data,
+              requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
             },
           })
           if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
@@ -36530,6 +36619,7 @@ module.exports = {
                 reason: input.reason ?? null,
                 approvalFlowId: input.approvalFlowId ?? null,
               },
+              requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
             },
           })
           if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
@@ -36845,6 +36935,7 @@ module.exports = {
               counterpartyAssignmentId,
               approvalFlowId: approvalFlowId ?? null,
               reason: reason ?? null,
+              requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
             },
           })
           if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
@@ -37177,6 +37268,7 @@ module.exports = {
 	              orgId: null,
 	              requestId,
 	              requestBody: parsed.data,
+	              requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
 	            },
 	          })
 	          if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
