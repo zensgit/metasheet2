@@ -40,14 +40,96 @@ staging 现镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**�
 
 **因此:第 6/7/9 步(取证 / 建号 / 电池)在 staging 重部署到 ≥ `d3289945e1` 之前全部不可执行**,且失败形式具误导性(像是安全告警而非"镜像太旧")。`Dockerfile.backend` 的 `COPY scripts` 保证重部署即全部修复。
 
-## D2-F7 · X2 · `config-restore-execute` 的一条 unmapped-500 路径(L4 前须处置)
+## D2-F7 · X2 · `config-restore-execute` 的一条 unmapped-500 路径 —— ✅ 已修复(#5114),测试覆盖待 #5128
 
-`applyPermissionDeEscalation`(`src/routes/univer-meta.ts:6780`)写 `field_permissions` / `spreadsheet_permissions`——**两表的触发器在 L1 起都会 armed**。其唯一调用点在 `POST /sheets/:sheetId/config-restore-execute` 内,而该路由的外层 catch 只认 `SheetWriterBlockedError` / `TombstoneCaptureCapExceededError` / `DB_NOT_READY`,**不查 `isRecoveryAuthorityBusyError`** ⇒ 40001 落到 `500 INTERNAL`。
+`applyPermissionDeEscalation`(`src/routes/univer-meta.ts:6780`)写 `field_permissions` / `spreadsheet_permissions`——**两表的触发器在 L1 起都会 armed**。其唯一调用点在 `POST /sheets/:sheetId/config-restore-execute` 内。
 
-- **为何 L1 期不发作**:独占租约此时只有电池持有,且其主体全是 `o2bat_` 合成对象。
-- **L4+ 会激活**:真实主体的租约一旦存在,击中即产生 unmapped 500 —— 直接违反 L6 的「零 unmapped」判据。
-- **修法**:该 catch 加一行既有映射。**同文件已有 5 处这么做**(`isRecoveryAuthorityBusyError` 出现 5 次),所以这是**遗漏而非设计**。
-- **处置**:L4 前落地,或 owner 签字接受该风险。
+- **原缺陷**:该路由的外层 catch 曾只认 `SheetWriterBlockedError` / `TombstoneCaptureCapExceededError` / `DB_NOT_READY`,不查 `isRecoveryAuthorityBusyError` ⇒ 40001 落到 `500 INTERNAL`。
+- **已修复**:**#5114**(`da556a4f33`,2026-08-22 落 main)在该 catch 补上 `if (isRecoveryAuthorityBusyError(err)) return sendRecoveryAuthorityBusy(res)`,现位于 `src/routes/univer-meta.ts:9291`,映射方式与同文件其余 4 处调用点(现共 5 个调用点)一致。
+- **为何 L1 期原本不发作**:独占租约此时只有电池持有,且其主体全是 `o2bat_` 合成对象。
+- **L4+ 本会激活**:真实主体的租约一旦存在,击中即产生 unmapped 500——直接违反 L6 的「零 unmapped」判据;已在 L4 前修复,不再是阻断项。
+- **遗留缺口(#5114 自陈、#5128 处置中)**:修复落地时 `routes/univer-meta.ts` 从未进入 recovery-conflict census 分母(`tests/unit/lib/recovery-census-table.ts` 对该文件零登记)——即这行修复本身没有任何机械测试锚定。已实测复现(2026-08-23 本次核对):在当前 main 上删掉 #5114 那一行,`tsc --noEmit` 仍 clean,`test:unit` 全量(544 files / 8420 tests)仍**全绿**;复现后已把改动还原为 byte-identical。**PR #5128(仍 OPEN)**把 `routes/univer-meta.ts`(5 个站点)与 `auth/AuthService.ts`(2 个站点)一并纳入 census 分母(population 由 13 files/48 sites → 15 files/55 sites),合并后再删这行会被 census 守卫与新增的 `recovery-conflict-surfaces-routes-univer-meta.test.ts` 拦红。
+- **处置**:代码修复已完成,不再是 L4 前的阻断项;剩余只是 #5128 的合并节奏——合并前这条修复仍只靠人工审查兜底,没有机械回归保护。
+
+## D2-F8 · L1 电池 driven-surface 是否扩至 univer-meta 五路由(owner 裁量,不代拍板)
+
+**背景**(#5128,仍 OPEN,分母修正引出):该 PR 把 `routes/univer-meta.ts`(5 个站点)与
+`auth/AuthService.ts`(2 个站点)纳入 recovery-conflict census 分母,population 由 **13 files/48 sites**
+升至 **15 files/55 sites**。新增的 7 个站点里,5 个 univer-meta 站点(`sheet-permissions-put` /
+`field-permissions-put` / `config-restore-execute` / `record-permissions-put` /
+`record-permissions-delete`)登记进电池脚本的 `NOT_DRIVEN_SITES`,理由一律是 **`orthogonal-fixture-cost`**,
+且注释明文**不是**按不可达豁免——univer-meta 写入的三张表(`spreadsheet_permissions` /
+`field_permissions` / `record_permissions`)**都**挂 recovery-authority 触发器(见下方触发器机制)。
+(另外 2 个新增站点属于 `auth/AuthService.ts`:`auth-service:self-service-backfill` 同样是
+`orthogonal-fixture-cost`;`auth-service:register-user-roles` 的登记理由是 `unknowable-lease-key`,与
+univer-meta 五站点不同类,不在本项讨论范围。)
+
+**owner 需要拍的问题**:电池是否应该扩面去**驱动**(drive)这五个 univer-meta 路由?驱动集合是电池
+PASS 实际担保的范围,而这个集合被 RATIFIED 的 enablement-ladder 文档引用——扩大它会改变 L1 门的含义,
+是 owner 幅度的判断,不是机械编辑。成本侧是 fixture 工程:电池目前搭的是 users/roles/permissions 类
+fixture,不是带 sheets/fields/records 的 univer 表格,外加每次改动后要重跑电池自身的 head-scoped
+对抗门审。
+
+**两个与判断相关的既有事实(均已核实,不代表建议)**:
+
+- **(a) required 车道 `test (20.x)` 已经在真实 HTTP 层驱动了五个路由中的 3 个**,在真实持有的租约下产生
+  真实触发器抛出的 40001:`multitable-exact-anchor-route-wiring-realdb.test.ts` 的
+  `AUTHORITY-HTTP-RETRY`(~1311 行)并发调用 `PUT .../permissions/user/:userId`(sheet-permissions-put)、
+  `PUT .../field-permissions/:fieldId/user/:userId`(field-permissions-put)、
+  `PUT .../records/:recordId/permissions`(record-permissions-put)三个路由,在持锁期间断言三者均返回
+  409 `{code:'RECOVERY_AUTHORITY_BUSY', message:'Recovery is stabilizing permissions; retry this change.'}`。
+  同文件的 `AUTHORITY-SUBJECT-LOCKS`(~1204 行)另外对 `spreadsheet_permissions` /
+  `field_permissions` / `record_permissions` 三张表做**直接 SQL 写入**(非经 HTTP)验证同一持锁下抛
+  40001/`METASHEET_RECOVERY_AUTHORITY_BUSY`——证明三张表的触发器机制本身可靠,但不等于驱动了对应的
+  HTTP 路由。**未被上述任一测试覆盖的两个路由是 `config-restore-execute` 和
+  `record-permissions-delete`。**
+- **(b) `config-restore-execute` 路由唯一会产生 40001 的分支挡在 env flag `MULTITABLE_ENABLE_PERMISSION_REVERT`
+  之后**(`src/routes/univer-meta.ts:9100`:该 flag 不等于 `'true'` 时直接 403,不会走到
+  `applyPermissionDeEscalation`)。这个 flag **不在**阶梯 §0 列出的四个 flag(
+  `MULTITABLE_HISTORY_CONTIGUITY_STRICT` / `MULTITABLE_ENABLE_WRITER_FENCE` /
+  `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET`)之内。
+
+**触发器机制不是单一实现**:univer-meta 三张表(`spreadsheet_permissions` / `field_permissions` /
+`record_permissions`)用的是 `metasheet_recovery_authority_subject_trigger`(按 `subject_type` 在
+user/role/member-group 间多态分派);而 `users` / `user_roles` / `user_permissions` /
+`platform_member_group_members` 用 `metasheet_recovery_authority_user_trigger`,`role_permissions` 单独用
+`metasheet_recovery_role_permission_trigger`。三种函数由同一份迁移
+`packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts` 建立。
+
+**一个与成本估计相关的既存事实**:上面 (a) 提到的 realdb 集成测试套件本身就搭建了一份带
+sheet/field/record 的 univer 表格 fixture 去驱动这三个 HTTP 路由——这是**另一套 harness**(vitest 集成
+测试,不是电池脚本)已经做到的事,不代表把同类 fixture 移植进电池脚本的工程量必然低。
+
+## D2-F9 · `details.retryable` 响应契约分歧(owner 裁量,不代拍板)
+
+**背景**:同一 409 语义(recovery-authority 冲突)当前由两条独立的响应路径产出**不完全相同**的 body。
+
+- `src/routes/univer-meta.ts:4293` 的 `sendRecoveryAuthorityBusy` 产出
+  `{ ok: false, error: { code: 'RECOVERY_AUTHORITY_BUSY', message: '...' } }`——**没有** `details` 字段。
+- 共享适配器 `src/db/recovery-conflict.ts:122` 的 `sendIfRecoveryConflict` 经
+  `jsonError(res, 409, 'RECOVERY_AUTHORITY_BUSY', MESSAGE, { retryable: true })`
+  (`jsonError` 定义于 `src/util/response.ts:3`,把第五个参数原样塞进 `error.details`)产出的 body 带
+  `error.details.retryable === true`。
+
+status(409)、code、message 三者完全一致,唯独一侧有 `details`、另一侧没有。
+
+**现状核实**:对 `apps/web/src`、`plugins/`、`packages/*/src` 做过一次全仓扫描,**没有找到任何读取
+`error.details.retryable`(或等价路径)的消费端代码**——现有的其它 `.retryable` / `error.details` 命中
+均属无关字段(导入失败项的 `failure.retryable`、DingTalk 传输重试、考勤通知投递重试、
+`RecoveryConflictError` 自身在服务端读取抛出对象上的 `.retryable`,以及若干校验类路由把
+`error.details` 转发为字段级错误数组)。**因此这条分歧目前是潜伏的,不是一个活的用户可见 bug。**
+
+**owner 需要拍的问题**:是否要把两条路径的 body 对齐。这**不能作为顺手改动**去做——它是对五个
+L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字节钉住 univer-meta 侧**当前**(无
+`details`)的 body,一旦改动会直接变红:
+
+1. required 车道里的 `multitable-exact-anchor-route-wiring-realdb.test.ts`(`AUTHORITY-HTTP-RETRY`,
+   ~1337 行)用 `toEqual` 钉住不带 `details` 的 body;
+2. `packages/core-backend/tests/unit/recovery-conflict-surfaces-routes-univer-meta.test.ts`(#5128,
+   仍 OPEN)里的 `UNIFORM_409_BODY` 常量,被 5 处 `toEqual` 断言复用,同样钉住不带 `details` 的 body。
+
+若要对齐,响应函数与上述两处钉点必须在**同一个 PR** 里一起改,否则要么改完立即两处变红,要么钉点先
+改而生产代码未改,两者都不是安全的中间态。
 
 ## B1a · A1 ratify 的两处自伤(ratify 前须二选一处置)
 
@@ -96,6 +178,8 @@ staging 现镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**�
 
 ## D2. owner 复审(2026-08-21)新增的待办
 
+（F7/F8/F9 是同一 F 序列后续新增的独立小节，见文前 §D2-F7 / §D2-F8 / §D2-F9，不在此列表内重复。）
+
 - **F1 · 建号脚本(硬前置,✅ 已闭合)**:owner 复审历经四步——(1) battery workflow `docker cp` 密码进容器 → 停止容器假 PASS,**已修 #5076**;
   (2) 配套建号脚本 `create-l1-battery-admin-on-staging.sh` 重现同一泄漏 + 非原子提权,**已重写落 main #5080 `95318992ab`**(stdin-only+trap+单事务);
   (3) 第四轮发现该脚本提权漏洞:register 接受 409(预占邮箱)→ 先提升 → 后验密码,预占账号即得 admin。**已修并落 main #5084 `162679992e`**(login-first 拿服务端 user.id→按 id 原子提升;预占+错密码零提权 golden + mismatched-id 收敛行为 golden;独立复门 APPROVE)。
@@ -110,8 +194,13 @@ staging 现镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**�
 
 ## E. 阶梯执行(全 owner-gated,日历为瓶颈,非开发)
 
-L0(差 A1)→ L1 staging ENABLE triggers(≥1 天+电池,flag 全 OFF)→ L2 CONTIGUITY_STRICT → L3 WRITER_FENCE →
-L4/L5 canary → **L6 soak ≥7 日历日** → L7+ 生产重放全序。**每级你亲授 + 观察窗**。压缩后地板约 9 天。
+L0(差 A1)→ L1 staging ENABLE triggers(flag 全 OFF)→ L2 CONTIGUITY_STRICT → L3 WRITER_FENCE →
+L4/L5 canary → **L6 soak ≥7 日历日** → L7+ 生产重放全序。**每级你亲授 + 观察窗**。
+**L1 窗口现行已 ratify 判据是 `≥2 日历日`(电池在窗口内跑,不替代天数)**;修正案 A1 拟把窗口收窄为
+`≥1 日历日 + 电池 PASS`,但 **A1 目前 Status: PROPOSED,未 ratify 前上文 `≥2 天` 判据原样生效**(见 §B1、
+enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该数字假设 A1 已 ratify**(L1 记 ≥1 天);
+按**现行未 ratify** 的 `≥2 天` 判据,L1 段本身多占 1 个日历日,地板相应更高(其余各级观察窗的实际
+长度本文未逐级列出,不在此处折算)。
 另需:目标主机跑一次**回滚后 postdeploy-full**(L0 §5 的 owner-gated 半条,本地演练不覆盖)。
 
 ---
@@ -134,6 +223,6 @@ L4/L5 canary → **L6 soak ≥7 日历日** → L7+ 生产重放全序。**每�
 8. **owner 按现行 ≥2 天判据开 L1**:enable 9/9 → 立即 postdeploy-full(**trigger 腿预期红 = `505926e3…`**,flag 腿全绿)
 9. **窗口内** dispatch 电池(intent `L1-open-battery-run-1`)→ PASS(证据绑镜像 digest)
 10. **ratify A1 于 #5042**(建议绑 merge commit `5b2376bb49`,并在批注声明所用 SHA 形式)→ 出窗 → L2
-11. **L4 前**:X2 一行修复落地,或 owner 签字接受(见 §D2-F7)
+11. **L4 前 X2 一行修复 — ✅ 已修复(#5114)**;剩余是 #5128(census 覆盖该修复)的合并节奏(见 §D2-F7)
 
 **F1 已闭合;不再有"修复前不建号"的阻断——但第 5 步(staging 重部署+迁移)未完成前,第 6/7/9 步都会以难诊断的方式失败。**
