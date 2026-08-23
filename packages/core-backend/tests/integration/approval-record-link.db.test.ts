@@ -4,7 +4,7 @@ import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { loadDeniedRecordIds } from '../../src/multitable/permission-service'
 import { lockRecordLinkActorAuthorityRowsOnQuery } from '../../src/services/approval-record-link-txn-auth'
-import { ensureApprovalSchemaReady } from '../helpers/approval-schema-bootstrap'
+import { ensureApprovalSchemaReady, grantApprovalOrgMembership } from '../helpers/approval-schema-bootstrap'
 
 /**
  * FWB-0 Layer 2 — record-link form field real-DB contract.
@@ -40,6 +40,13 @@ async function tok(base: string, userId: string, roles = 'admin', perms = '*:*')
   const res = await fetch(
     `${base}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=${encodeURIComponent(roles)}&perms=${encodeURIComponent(perms)}`,
   )
+  // Lock-11 §10 arm (a) fixture delta (§11): `dev-token` writes NO `user_orgs` row (§11 root
+  // cause), and `tok()` is this file's ONE identity-minting choke point — every actor this suite
+  // uses is seeded with exactly one active membership here, matching the post-(D-8β) production
+  // shape, so this suite's own (record-link authorization) assertions are not masked by an
+  // unrelated org-derivation refusal. This file does not test org derivation itself — that lives
+  // in the dedicated Lock-11 gate suite.
+  await grantApprovalOrgMembership(userId)
   return ((await res.json()) as { token: string }).token
 }
 

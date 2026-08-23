@@ -86,6 +86,59 @@ function selectUserPicker(container: HTMLElement, selector: string, userId: stri
   select!.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+// GATE-5097 P2-1: selectUserPicker() (above) FABRICATES the <option> it then selects, which
+// makes the underlying search -> API -> render path invisible to the test — a mutation that
+// makes the picker render zero real options (e.g. a 403) survives every test that only uses
+// selectUserPicker. loadUserIntoPicker() drives the picker for real instead: types into the
+// search box, clicks "Search users", waits for the mocked endpoint's response to render, and
+// asserts a REAL <option> for the target id exists before selecting it — so an endpoint that
+// returns nothing (403, empty, wrong shape) fails this helper's own assertion, not silently.
+function userSearchResponse(users: Array<{ id: string; email?: string; name?: string | null }>) {
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      items: users.map((user) => ({
+        id: user.id,
+        email: user.email ?? `${user.id}@uiwalk.local`,
+        name: user.name ?? null,
+        role: 'user',
+        is_active: true,
+        is_admin: false,
+        last_login_at: null,
+        created_at: '',
+      })),
+      page: 1,
+      pageSize: 20,
+      total: users.length,
+    },
+  })
+}
+
+async function loadUserIntoPicker(container: HTMLElement, selector: string, userId: string): Promise<void> {
+  const searchInput = container.querySelector<HTMLInputElement>(selector)
+  expect(searchInput, `expected user picker ${selector}`).toBeTruthy()
+  const field = searchInput!.closest('.attendance__field')
+  expect(field, `expected user picker field ${selector}`).toBeTruthy()
+  // Locale-independent: the search button is the only <button> inside the picker's controls
+  // row (AttendanceUserPickerField.vue's `.attendance__user-picker-controls`); its label text
+  // is locale-routed ("Search users" / "搜索用户") so matching by text would break under zh-CN.
+  const searchButton = field!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')
+  expect(searchButton, `expected the picker's search button for ${selector}`).toBeTruthy()
+  searchInput!.value = userId
+  searchInput!.dispatchEvent(new Event('input'))
+  searchButton!.click()
+  await flushUi(4)
+  const select = field!.querySelector<HTMLSelectElement>('select')
+  expect(select, `expected user picker select ${selector}`).toBeTruthy()
+  const option = Array.from(select!.options).find((candidate) => candidate.value === userId)
+  expect(
+    option,
+    `expected a REAL <option value="${userId}"> in ${selector} after searching — the mocked search endpoint did not return it (this is the live data path, not a fabricated option)`,
+  ).toBeTruthy()
+  select!.value = userId
+  select!.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
 function selectMultipleOptions(container: HTMLElement, selector: string, values: string[]): void {
   const select = container.querySelector<HTMLSelectElement>(selector)
   expect(select, `expected multi-select ${selector}`).toBeTruthy()
@@ -1805,6 +1858,11 @@ describe('Attendance admin regressions', () => {
   it('clears a prior annual-leave balance when a new query fails (no stale balance from another user)', async () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA' }])
+        if (url.includes('q=userB')) return userSearchResponse([{ id: 'userB' }])
+        return userSearchResponse([])
+      }
       if (url.includes('/api/attendance/leave-balances')) {
         if (url.includes('userId=userA')) {
           return jsonResponse(200, {
@@ -1832,14 +1890,15 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
     expect(section).toBeTruthy()
-    const input = section!.querySelector<HTMLInputElement>('#attendance-annual-balance-user')
+    // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; drive it for real via
+    // loadUserIntoPicker (search -> mocked endpoint -> real <option> -> select), not a fabricated
+    // option, so a defect in that path (e.g. a 403) fails here instead of passing silently.
     const loadBtn = section!.querySelector<HTMLButtonElement>('.attendance__admin-actions button')
-    expect(input).toBeTruthy()
+    expect(section!.querySelector('#attendance-annual-balance-user')).toBeTruthy()
     expect(loadBtn).toBeTruthy()
 
     // (A) query userA → success → A's balance renders, tied to userA.
-    input!.value = 'userA'
-    input!.dispatchEvent(new Event('input'))
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'userA')
     await flushUi(2)
     loadBtn!.click()
     await flushUi(4)
@@ -1848,12 +1907,92 @@ describe('Attendance admin regressions', () => {
     expect(shown?.textContent || '').toContain('userA')
 
     // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
-    input!.value = 'userB'
-    input!.dispatchEvent(new Event('input'))
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'userB')
     await flushUi(2)
     loadBtn!.click()
     await flushUi(4)
     expect(section!.querySelector('.attendance__annual-balance')).toBeNull()
+  })
+
+  it('GATE-5097 P1-1/P2-1: a delegated attendance admin (attendance:admin, not platform admin) can still search and select a user for the annual-leave-balance picker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      // The picker is wired to the attendance-scoped search route, not the platform-admin one —
+      // if this regresses back to /api/admin/users, this mock returns nothing for it and the
+      // loadUserIntoPicker assertion below fails on a missing real <option>.
+      if (url.includes('/api/admin/users')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'Admin permissions required' } })
+      }
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return userSearchResponse([{ id: 'delegated-target-user', email: 'delegated-target@uiwalk.local' }])
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
+    expect(section).toBeTruthy()
+
+    // GATE-5097 P2-4: this used to also assert that /api/admin/users WAS called (i.e. that the
+    // other pre-existing AttendanceUserPickerField sites on the same page — all 34 admin sections
+    // mount simultaneously via v-show, not v-if — are still on the unfixed default endpoint).
+    // That encoded "the follow-up hasn't happened yet" as a passing precondition: applying this
+    // PR's own prescribed follow-up (adding the endpoint override to those sites too) turned it
+    // into a false assertion and failed this test for an unrelated reason. Removed — the
+    // load-bearing proof that THIS section's picker works is the real-<option> assertion inside
+    // loadUserIntoPicker() below plus the attendance-scoped-only assertion at the end of this test.
+    await loadUserIntoPicker(section!, '#attendance-annual-balance-user', 'delegated-target-user')
+    const select = section!.querySelector<HTMLSelectElement>('#attendance-annual-balance-user')?.closest('.attendance__field')?.querySelector('select')
+    expect(select?.value).toBe('delegated-target-user')
+    expect(section!.querySelector('.attendance__field-hint--error')).toBeNull()
+
+    // The annual-balance search itself never went through the platform-admin-only route.
+    const annualBalanceSearchCalls = vi.mocked(apiFetch).mock.calls
+      .map(([requested]) => String(requested))
+      .filter((requested) => requested.includes('/api/attendance-admin/users/search'))
+    expect(annualBalanceSearchCalls.length).toBeGreaterThan(0)
+  })
+
+  it('GATE-5097 P2-1: a 403 from the picker\'s search endpoint surfaces a visible error, never a silently empty picker', async () => {
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return jsonResponse(403, { ok: false, error: { code: 'FORBIDDEN', message: 'Admin permissions required' } })
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
+    await flushUi(4)
+    const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')
+    expect(section).toBeTruthy()
+
+    const searchInput = section!.querySelector<HTMLInputElement>('#attendance-annual-balance-user')
+    expect(searchInput).toBeTruthy()
+    const field = searchInput!.closest('.attendance__field')
+    const searchButton = field!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')
+    expect(searchButton).toBeTruthy()
+    searchInput!.value = 'anyone'
+    searchInput!.dispatchEvent(new Event('input'))
+    searchButton!.click()
+    await flushUi(4)
+
+    const select = field!.querySelector<HTMLSelectElement>('select')
+    // Only the placeholder "Select user" option remains — no real results, and (unlike the old
+    // selectUserPicker helper) nothing fabricated to paper over the failure.
+    expect(Array.from(select!.options).map((option) => option.value)).toEqual([''])
+    const errorHint = field!.querySelector('.attendance__field-hint--error')
+    expect(errorHint).toBeTruthy()
+    expect(errorHint!.textContent).toContain('Admin permissions required')
   })
 
   it('annual-leave policy: hydrates from first-screen settings; first save (no Reload) keeps the real policy; blocks malformed ladder', async () => {
@@ -2275,6 +2414,7 @@ describe('Attendance admin regressions', () => {
     it('byte-stable: admin lookup button click (zero args) issues the exact pre-parameterization query', async () => {
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
+        if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
         if (url.includes('/api/attendance/leave-balances')) return jsonResponse(200, balanceSummaryPayload('annual', 'u1'))
         return emptyAttendanceResponse()
       })
@@ -2284,9 +2424,8 @@ describe('Attendance admin regressions', () => {
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
       await flushUi(4)
       const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
-      input.value = 'u1'
-      input.dispatchEvent(new Event('input'))
+      // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; driven for real.
+      await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'u1')
       await flushUi(2)
       section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!.click()
       await flushUi(4)
@@ -2297,6 +2436,7 @@ describe('Attendance admin regressions', () => {
     it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact comp_time admin-lookup query (mock-layer assertion)', async () => {
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
+        if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
         if (url.includes('/api/attendance/leave-balances')) {
           const parsed = new URL(url, 'http://localhost')
           return jsonResponse(200, balanceSummaryPayload(parsed.searchParams.get('leaveTypeCode') || '', 'u1'))
@@ -2309,9 +2449,8 @@ describe('Attendance admin regressions', () => {
       container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-annual-leave-balance"]')!.click()
       await flushUi(4)
       const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-balance')!
-      const input = section.querySelector<HTMLInputElement>('#attendance-annual-balance-user')!
-      input.value = 'u1'
-      input.dispatchEvent(new Event('input'))
+      // A6 / GATE-5097 P2-1: swapped for AttendanceUserPickerField; driven for real.
+      await loadUserIntoPicker(section, '#attendance-annual-balance-user', 'u1')
       await flushUi(2)
       vi.mocked(apiFetch).mockClear()
       await vm.loadAnnualLeaveBalance('comp_time')
@@ -2977,23 +3116,23 @@ describe('Attendance admin regressions', () => {
     await flushUi()
 
     const settings = container!.querySelector<HTMLElement>('#attendance-admin-settings')
-    const groupMembers = container!.querySelector<HTMLElement>('#attendance-admin-group-members')
+    const attendanceGroups = container!.querySelector<HTMLElement>('#attendance-admin-groups')
     expect(settings).toBeTruthy()
-    expect(groupMembers).toBeTruthy()
+    expect(attendanceGroups).toBeTruthy()
     expect(window.getComputedStyle(settings!).display).not.toBe('none')
-    expect(window.getComputedStyle(groupMembers!).display).toBe('none')
+    expect(window.getComputedStyle(attendanceGroups!).display).toBe('none')
 
-    const groupMembersNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
-    expect(groupMembersNav).toBeTruthy()
-    groupMembersNav!.click()
+    const attendanceGroupsNav = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')
+    expect(attendanceGroupsNav).toBeTruthy()
+    attendanceGroupsNav!.click()
     await flushUi(2)
 
     expect(container!.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
     expect(window.getComputedStyle(settings!).display).toBe('none')
-    expect(window.getComputedStyle(groupMembers!).display).not.toBe('none')
-    expect(container!.querySelector('[data-admin-shortcut="attendance-admin-group-members"]')?.textContent).toContain('Organization · Group members')
-    expect(container!.textContent).toContain('Group members now live inside the selected attendance group detail.')
-    expect(container!.textContent).toContain('Open Attendance groups')
+    expect(window.getComputedStyle(attendanceGroups!).display).not.toBe('none')
+    expect(container!.querySelector('[data-admin-shortcut="attendance-admin-groups"]')?.textContent).toContain('Organization · Attendance groups')
+    expect(container!.querySelector('[data-attendance-group-manager]')).toBeTruthy()
+    expect(container!.textContent).toContain('New group')
   })
 
   it('blocks empty manual payroll cycles and selects a newly saved cycle for summary', async () => {
@@ -3156,6 +3295,14 @@ describe('Attendance admin regressions', () => {
     expect(rulePolicyCard?.querySelector('[data-attendance-group-policy-line="working-days"]')?.textContent).toContain('Mon')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="work-time"]')?.textContent).toContain('Fixed shift')
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(true)
+    // A2 (A-class batch 2, 2026-08-22): the server does not reject a timezone change on an
+    // existing group (unlike type, which 409s), so the field stays editable — locking it would be
+    // a product decision this task was told not to make unilaterally. A same-risk-class warning
+    // appears instead once a group is saved.
+    expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-timezone]')?.disabled).toBe(false)
+    // GATE-5097 P2-3: copy corrected to not claim shift times get reinterpreted (the live
+    // calculation path never reads attendance_groups.timezone — see the code comment).
+    expect(groupsSection!.querySelector('[data-attendance-group-timezone-change-warning]')?.textContent).toContain('does not retime existing shifts')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="scheduling-coverage"]')?.textContent).toContain('Advanced scheduling owns rotation and coverage checks')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="comprehensive-hours"]')?.textContent).toContain('Review and reporting live in their own admin surface')
     expect(summaryGrid!.querySelector('[data-attendance-group-summary-card="punch-method"]')?.textContent).toContain('applies to all attendance groups')
@@ -3196,7 +3343,12 @@ describe('Attendance admin regressions', () => {
     expect(savedDrawer!.querySelector('[data-attendance-group-work-time-selected]')?.textContent).toContain('Fixed shift')
     expect(savedDrawer!.querySelector('[data-attendance-group-work-time-lock]')?.textContent).toContain('Type changes are blocked')
     expect(savedDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-option="free_time"]')?.disabled).toBe(true)
-    expect(savedDrawer!.querySelectorAll('[data-attendance-group-work-time-week-day]').length).toBe(7)
+    // A8: the drawer used to duplicate the "schedule" stage's weekly shift matrix verbatim; that
+    // render is now removed from the drawer (the stage panel, covered separately below and in
+    // "restores the live user picker, structured rule builder, and holiday month calendar
+    // interactions", stays the single canonical place for it).
+    expect(savedDrawer!.querySelector('[data-attendance-group-work-time-week-matrix]')).toBeNull()
+    expect(savedDrawer!.querySelectorAll('[data-attendance-group-work-time-week-day]').length).toBe(0)
     expect(savedDrawer!.querySelector('[data-attendance-group-work-time-holidays]')?.textContent).toContain('Holiday calendar')
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeSavedDrawerCalls)).toHaveLength(0)
 
@@ -3212,6 +3364,10 @@ describe('Attendance admin regressions', () => {
 
     expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.disabled).toBe(false)
+    // A2: timezone stays editable while creating a new group, and the change-warning (which is
+    // scoped to editing an EXISTING group) does not show for a not-yet-saved one.
+    expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-timezone]')?.disabled).toBe(false)
+    expect(groupsSection!.querySelector('[data-attendance-group-timezone-change-warning]')).toBeNull()
     expect(groupsSection!.querySelector('[data-attendance-group-people]')?.textContent).toContain('Save the group before adding people.')
     expect(groupsSection!.querySelector('[data-attendance-group-managers]')?.textContent).toContain('Save the group before adding owners.')
     expect(groupsSection!.querySelector('[data-attendance-group-summary-card="rule-policy"]')?.textContent).toContain('Choose or save a group first')
@@ -3240,7 +3396,8 @@ describe('Attendance admin regressions', () => {
     expect(groupsSection!.querySelector<HTMLSelectElement>('[data-attendance-group-type]')?.value).toBe('free_time')
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-selected]')?.textContent).toContain('Free time')
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-draft]')?.textContent).toContain('selected type')
-    expect(draftDrawer!.querySelector('[data-attendance-group-work-time-week-matrix]')).toBeNull()
+    // A8: the week-matrix markup is gone from the drawer for every type now (see the fixed-shift
+    // assertion above), not just non-fixed-shift types — nothing left to assert null-for-type here.
     expect(draftDrawer!.querySelector('[data-attendance-group-work-time-holidays]')).toBeNull()
   })
 
@@ -4480,13 +4637,17 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     const enabled = section!.querySelector<HTMLInputElement>('[data-makeup-punch="enabled"]')
     const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
-    const cycleType = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="cycle-type"]')
+    // A9 (A-class batch 2, 2026-08-22): cycle type / quota principal / submit-window unit used to
+    // be disabled <select> elements with exactly one option and no v-model — pure decoration, since
+    // the save payload below always hardcodes their one legal enum value regardless of UI state.
+    // They are now plain read-only text (no <select>, nothing to be "disabled").
+    const cycleType = section!.querySelector<HTMLElement>('[data-makeup-punch="cycle-type-fixed"]')
     const cycleStartDay = section!.querySelector<HTMLInputElement>('[data-makeup-punch="cycle-start-day"]')
     const quotaMax = section!.querySelector<HTMLInputElement>('[data-makeup-punch="quota-max"]')
     const countPending = section!.querySelector<HTMLInputElement>('[data-makeup-punch-count-status="pending"]')
     const countApproved = section!.querySelector<HTMLInputElement>('[data-makeup-punch-count-status="approved"]')
-    const quotaPrincipal = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="quota-principal"]')
-    const windowUnit = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="window-unit"]')
+    const quotaPrincipal = section!.querySelector<HTMLElement>('[data-makeup-punch="quota-principal-fixed"]')
+    const windowUnit = section!.querySelector<HTMLElement>('[data-makeup-punch="window-unit-fixed"]')
     const windowDays = section!.querySelector<HTMLInputElement>('[data-makeup-punch="window-days"]')
     const missingCheckIn = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="missing_check_in"]')
     const earlyLeave = section!.querySelector<HTMLInputElement>('[data-makeup-punch-anomaly-type="early_leave"]')
@@ -4502,17 +4663,16 @@ describe('Attendance admin regressions', () => {
 
     expect(enabled!.checked).toBe(true)
     expect(timezone!.value).toBe('America/Los_Angeles')
-    expect(cycleType!.disabled).toBe(true)
-    expect(cycleType!.value).toBe('calendar_month')
+    expect(cycleType!.textContent).toContain('Calendar month')
     expect(cycleStartDay!.value).toBe('15')
     expect(quotaMax!.value).toBe('5')
     expect(countPending!.checked).toBe(true)
     expect(countApproved!.checked).toBe(true)
-    expect(quotaPrincipal!.disabled).toBe(true)
-    expect(quotaPrincipal!.value).toBe('self_service_user')
-    expect(windowUnit!.disabled).toBe(true)
-    expect(windowUnit!.value).toBe('calendar_day')
+    expect(quotaPrincipal!.textContent).toContain('Self-service user')
+    expect(windowUnit!.textContent).toContain('Calendar day')
     expect(windowDays!.value).toBe('14')
+    // No fake disabled <select> controls remain anywhere in this section (A9).
+    expect(section!.querySelectorAll('select[disabled]').length).toBe(0)
     expect(missingCheckIn!.checked).toBe(true)
     expect(earlyLeave!.checked).toBe(false)
     expect(normal!.checked).toBe(true)
@@ -5605,6 +5765,53 @@ describe('Attendance admin regressions', () => {
       surface: 'assignments',
     })
     expect(vi.mocked(apiFetch).mock.calls.slice(beforeCalls)).toHaveLength(0)
+  })
+
+  // A3 as originally worded (schedule STAGE silently does nothing on an unsaved group) is NOT
+  // REAL — a runtime UI walk confirmed the schedule stage already shows "Save basic info to
+  // unlock schedule preview and assignment actions" + a "Complete basic info" button for an
+  // unsaved group (see the placeholder assertion in "restores the live user picker..." above).
+  // A narrower, adjacent defect IS real: the group-editing DRAWERS (opened from the policies
+  // stage's summary-card actions, reachable even before the group is saved) have jump-off
+  // buttons — "Open Shifts" / "Open Assignments" / "Open Advanced scheduling" / "Open Rule
+  // sets" / "Open Holidays" — that silently did nothing on an unsaved group.
+  it('surfaces a visible message when a group-editing drawer jump-off button is used on an unsaved group (A3, narrowed)', async () => {
+    const openGroupRoute = vi.fn()
+    app = createApp(AttendanceView, { mode: 'admin', onOpenGroupRoute: openGroupRoute })
+    app.mount(container!)
+    await flushUi(8)
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-groups"]')!.click()
+    await flushUi(4)
+
+    const groupsSection = container!.querySelector<HTMLElement>('[data-attendance-group-manager]')
+    expect(groupsSection).toBeTruthy()
+    const newGroupButton = Array.from(groupsSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.includes('New group'))
+    expect(newGroupButton).toBeTruthy()
+    newGroupButton!.click()
+    await flushUi(2)
+    expect(groupsSection!.querySelector('[data-attendance-group-detail]')?.textContent).toContain('New attendance group')
+
+    // Before the fix, clicking any of these jump-off actions on an unsaved group returned early
+    // with zero feedback. Confirm the drawer path (work-time drawer's "Open Shifts").
+    const openWorkTime = groupsSection!.querySelector<HTMLButtonElement>(
+      '[data-attendance-group-summary-action="open-work-time-drawer"]',
+    )
+    expect(openWorkTime).toBeTruthy()
+    openWorkTime!.click()
+    await flushUi(2)
+    const draftDrawer = groupsSection!.querySelector<HTMLElement>('[data-attendance-group-work-time-drawer]')
+    expect(draftDrawer).toBeTruthy()
+
+    draftDrawer!.querySelector<HTMLButtonElement>('[data-attendance-group-work-time-shifts-open]')!.click()
+    await flushUi(2)
+
+    expect(openGroupRoute).not.toHaveBeenCalled()
+    const status = container!.querySelector('.attendance__status-block--admin .attendance__status')
+    expect(status).toBeTruthy()
+    expect(status!.classList.contains('attendance__status--error')).toBe(true)
+    expect(status!.textContent).toContain('Save the attendance group before opening this.')
   })
 
   it('routes the non-fixed schedule-stage control to advanced scheduling', async () => {

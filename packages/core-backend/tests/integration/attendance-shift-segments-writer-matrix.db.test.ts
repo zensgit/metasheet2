@@ -988,6 +988,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const multiId = await createMultiShift(token, orgId)
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is payload.userId (the dispatch
+    // target), which is orgId-scoped here via the x-org-id selector — seed it explicitly.
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
 
     const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
       userId: `${orgId}-worker`,
@@ -1565,6 +1568,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is payload.userId (the dispatch
+    // target), which is orgId-scoped here via the x-org-id selector — seed it explicitly.
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
 
     const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
       userId: `${orgId}-worker`,
@@ -1628,6 +1634,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is payload.userId (the dispatch
+    // target), which is orgId-scoped here via the x-org-id selector — seed it explicitly.
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
 
     const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
       userId: `${orgId}-worker`,
@@ -1699,6 +1708,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Lock order', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is payload.userId (the dispatch
+    // target), which is orgId-scoped here via the x-org-id selector — seed it explicitly.
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
 
     const create = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
       userId: `${orgId}-worker`,
@@ -1864,6 +1876,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const shiftD2 = (await createShiftViaApi(token, orgId, { name: 'Del D2', workStartTime: '14:00', workEndTime: '18:00' })).body.data.id as string
     const assignmentD1 = await seedPublishedAssignment(orgId, `${orgId}-da`, shiftD1, '2049-06-14')
     const assignmentD2 = await seedPublishedAssignment(orgId, `${orgId}-db`, shiftD2, '2049-06-15')
+    // Lock-11 §10 W-4: shift-swap's derivation subject is the requester assignment's userId
+    // (`${orgId}-da` here) — seed it explicitly (seedPublishedAssignment does not).
+    await seedActiveIdentity(`${orgId}-da`, orgId)
     const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
       requesterAssignmentId: assignmentD1,
       counterpartyAssignmentId: assignmentD2,
@@ -1886,6 +1901,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const shiftE = (await createShiftViaApi(token, orgId, { name: 'Del E', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
     await seedDispatchFlow(token, orgId)
     const scheduleGroupId = await seedScheduleGroup(orgId)
+    // Lock-11 §10 W-4: schedule-dispatch's derivation subject is payload.userId — seed it.
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const dispatch = await postJson('/api/attendance/schedule-dispatch-requests', token, orgId, {
       userId: `${orgId}-worker`,
       targetScheduleGroupId: scheduleGroupId,
@@ -1911,6 +1928,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const swapRequestId = randomUUID()
     const assignmentA = await seedPublishedAssignment(orgId, `${orgId}-a`, shiftB, '2049-06-14')
     const assignmentB = await seedPublishedAssignment(orgId, `${orgId}-b`, shiftB, '2049-06-15')
+    // Lock-11 §10 W-4: the dispatch create below names `${orgId}-a` as its subject — seed it.
+    await seedActiveIdentity(`${orgId}-a`, orgId)
     await pool.query(
       `INSERT INTO attendance_requests (id, user_id, org_id, work_date, request_type, reason, status)
        VALUES ($1, $2, $3, '2049-06-14', 'shift_swap', 'w3 evidence', 'rejected')`,

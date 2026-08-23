@@ -26,28 +26,30 @@
 
 ---
 
-## 2. 未合并 PR(全部 CI 绿、mergeState CLEAN)
+## 2. PR 状态(2026-08-22 更新)
 
-**接管的全部产出目前都不在 `main` 上。**
+> **本节曾在写下几小时后就自我推翻** —— 原文写着"接管的全部产出目前都不在 main 上",而同日下午 11 条即已合入。一份自称活文档的东西必须先守自己讲的更新纪律,故此处如实记录该失效并改为按状态分组。
 
-| PR | 内容 | 备注 |
+### 已合入 main(11)
+
+| PR | 内容 |
+|---|---|
+| #5044 | 演示 + AI 协作章程 |
+| #5100 | 生产上线门 + 本状态账本 |
+| #5102 | 通用化提案 stale 闸门声明更正 |
+| #5061 / #5062 / #5066 | 开表请求瘦身 · comments/summary 改 POST 并封顶 · WorkflowDesigner 懒加载 |
+| #5068 | 行级溯源面板 |
+| #5065 → #5074 → #5079 → #5101 | pack 契约与安装器 → 安装排演 → pack 感知刷新写集 → 安装 ledger + dry-run/install 路由(含 migration 076) |
+
+### 未合入(3)
+
+| PR | 状态 | 说明 |
 |---|---|---|
-| #5044 | 演示 + AI 协作章程 | 章程本身也未合并 |
-| #5061 | 开表请求瘦身(缓存代次 / 关键路径 / 懒加载) | |
-| #5062 | comments/summary 改 POST + 上限 | 部署顺序:先后端 |
-| #5065 | customer pack 契约 + 增量安装器 | 栈底 |
-| #5066 | WorkflowDesigner 懒加载 | 与 #5061 在 `viewRegistry.ts` 冲突,解法见合并配方 |
-| #5067 | 通用落表适配器所有权写守卫 | 与栈共用 `package.json`/pin |
-| #5068 | 行级溯源面板 | |
-| #5074 | pack 安装排演(五幕) | 叠 #5065 |
-| #5079 | pack 感知刷新写集 | 叠 #5074 |
-| #5100 | **生产上线门清单**(本目录) | 草案待 owner 裁定 |
-| #5101 | pack 安装 ledger + dry-run/install 路由 | 叠 #5079;**本批唯一带 migration(076)** |
-| #5034 | P0-S 安全加固(BPMN fail-closed + ensureFields 默认拒绝) | **建议单独合并**:改 `ensureFields` 默认,爆炸半径是全仓每个 provisioning 调用方 |
+| #5034 | OPEN | P0-S 安全加固。改 `ensureFields` 默认为拒绝,爆炸半径是全仓每个 provisioning 调用方,**建议单独合并、独享一次 CI** |
+| #5067 | OPEN / 冲突 | 通用落表适配器所有权写守卫。CI 曾全绿;复核方要求阻止合并,两条理由的修复证据已附在 PR 上,待在最新 main 上重跑复核 |
+| #5108 | OPEN | **catalog 接线修复**:宿主从未填充 `stockPreparationCustomerPacks`,导致 #5101 的安装路由在真实服务器上不可达(任何 packId 均被拒)。env 指向文件,两端 fail-closed |
 
-**合并顺序与两处冲突解法**见交付给 owner 的合并配方(未入库,属操作性文档)。
-
----
+**因此 §0 的"代码侧使能件已建成"需附一句限定:通用 C6 所有权守卫(#5067)与 P0-S 加固(#5034)尚未进入 main,`lib/adapters/` 下无 ownership guard —— "通用 insertRows/updateRows 已闭环保护人工列"在 main 上不成立。**
 
 ## 3. owner 决策队列(全部无代码依赖)
 
@@ -61,6 +63,23 @@
 | O-6 | 物料字典载体(203 项 > 200 上限) | `ext_materialCode` **在任何 pack 版本都不可能是 select**;推荐字典表 + link,需往冻结类型词表加 `link` → **改冻结模板,独立评审** | 未决 |
 
 ---
+
+## 3b. 接管形态已定案:(b) 新建 + 迁移(2026-08-22)
+
+**(a) 认领客户手搭表 —— 已确认不可行,不是"未实现"而是"违反公理"。**
+MetaSheet provisioning 用确定性 id(`stableMetaId` = 前缀 + `sha1(parts.join(':'))` 前 24 位,`packages/core-backend/src/multitable/provisioning.ts:130-136`),表与字段 id 均由 `(projectId, objectId[, fieldId])` 推导。客户实例上那张 47 列备料表是 **UUID 形 id 的手搭表**,不是 provisioned 对象,因此 `readObjectFieldsContent` 按逻辑 id 查询时**永远匹配不到**;全仓也**没有任何按名称/标签匹配的机制**。
+
+实际后果**不是**"同一张表里出现重复列":安装器根本看不见那张表。只有两种结局 —— canonical 表不存在则 409 `CUSTOMER_PACK_TARGET_ABSENT` 直接拒绝;canonical 表存在则 21 个 ext_ 列建在**另一张表**上,形成**平行两张表**。
+
+**选 (b) 的理由**(独立复核认可):切换判据量的是"与遗留 MySQL 零差异",那张手搭表在任何方案下都不在上线证据链里;它几乎肯定是遗留数据的手工镜像(22 行且全为合成/脱敏样例),迁移天然取代它;ADOPT 最难的部分——把 10 个已有数据的 all-string 活列转成 number/date/select——**是一次数据迁移藏在元数据安装器里**,位置错误;而**缺失的 MySQL 只读窗口在两种形态下都卡住上线**,用 ADOPT 绕开授权等于放弃切换判据。
+
+手搭表的处置:切换时按项目冻结为只读,不认领。
+
+## 3c. 三处经复核纠正的认知(2026-08-22)
+
+1. **"没有任何测试断言过 ext_ 值到达"—— 说过头了。** `__tests__/stock-preparation-pack-aware-refresh.test.cjs:377-378` 与 ~:600-604 确实把 ext_ 值推过了真实的 planner 与 apply。准确表述:**没有任何生产代码从任何源产出过 ext_ 值** —— planner→记录 这半段是真的且有测试,**源→planner 这半段不存在**。缺的是展开/导入边界上的一个 mapper,不是 planner 的工作。
+2. **未映射的 ext_ PLM 列是惰性失效,不是破坏性。** `pickFields` 只挑 `row[field] !== undefined` 的键(`lib/stock-preparation-conflict-planner.cjs:871-877`),所以那些列会静默陈旧,**不会被写 null**。
+3. **给安装器加严格类型校验,今天一条都不会触发** —— 手搭列根本读不到、全判 `missing`。该校验只在存在认领机制之后才 materialize;而彼时它会把"假成功"变成"硬拒绝",因此**类型协调策略必须与之同时定案**。
 
 ## 4. 已知缺口与债务
 

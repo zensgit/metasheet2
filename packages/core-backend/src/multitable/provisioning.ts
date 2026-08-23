@@ -1,4 +1,11 @@
 import { createHash } from 'crypto'
+import { Logger } from '../core/logger'
+import {
+  resolveEnsureFieldsOverwriteMode,
+  diffFieldOverwriteKinds,
+  MultitableEnsureFieldsRefusedError,
+  type EnsureFieldsOverwriteMode,
+} from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
@@ -64,6 +71,14 @@ export type EnsureFieldsInput = {
   query: MultitableProvisioningQueryFn
   sheetId: string
   fields: MultitableProvisioningFieldDescriptor[]
+  /**
+   * P0-S S3 per-call override of the destructive-reconcile mode. Omitted (the normal case)
+   * => the fail-closed env resolution, whose default is 'refuse'. A caller that genuinely
+   * OWNS the columns it re-ensures (a plugin re-deriving its own layout) may pass
+   * 'overwrite' HERE, in code, instead of forcing an operator to set the process-global env
+   * — which would disarm the guard for every other plugin on the server.
+   */
+  overwriteMode?: EnsureFieldsOverwriteMode
 }
 
 export type EnsureObjectInput = {
@@ -71,6 +86,8 @@ export type EnsureObjectInput = {
   projectId: string
   baseId?: string | null
   descriptor: MultitableProvisioningObjectDescriptor
+  /** See EnsureFieldsInput.overwriteMode — forwarded verbatim to ensureFields. */
+  overwriteMode?: EnsureFieldsOverwriteMode
 }
 
 export type EnsureViewInput = {
@@ -305,26 +322,82 @@ export async function ensureSheet(
   return sheet
 }
 
+const ensureFieldsLogger = new Logger('MultitableProvisioning')
+
 export async function ensureFields(
   input: EnsureFieldsInput,
 ): Promise<MultitableProvisioningField[]> {
   const fields = input.fields ?? []
+  // P0-S S3 — destructive-reconcile guard, FAIL-CLOSED by default (Codex round 2).
+  // Default 'refuse': an EXISTING field the descriptor would mutate aborts the whole
+  // ensureFields/ensureObject call with a typed, values-free error. Additive evolution
+  // (a field id that does not exist yet) and first installs are untouched. Only the exact
+  // literal MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE=overwrite restores the pre-P0-S SQL
+  // (and is then the ONLY mode that skips the per-field pre-read).
+  const overwriteMode = input.overwriteMode ?? resolveEnsureFieldsOverwriteMode()
   for (const [index, field] of fields.entries()) {
     const order = typeof field.order === 'number' ? field.order : index
-    await input.query(
-      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
-       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-       ON CONFLICT (id) DO UPDATE SET
+    const nextProperty = JSON.stringify(buildFieldProperty(field))
+
+    let conflictClause =
+      `ON CONFLICT (id) DO UPDATE SET
          name = EXCLUDED.name,
          type = EXCLUDED.type,
          property = EXCLUDED.property,
-         "order" = EXCLUDED."order"`,
+         "order" = EXCLUDED."order"`
+
+    if (overwriteMode !== 'overwrite') {
+      const existing = await input.query(
+        `SELECT name, type, property, "order" FROM meta_fields WHERE id = $1 AND sheet_id = $2`,
+        [field.id, input.sheetId],
+      )
+      const row = (existing.rows as any[])[0]
+      const stored = row
+        ? { name: String(row.name), type: String(row.type), property: row.property, order: Number(row.order) }
+        : null
+      const incoming = {
+        name: field.name.trim(),
+        type: field.type,
+        property: JSON.parse(nextProperty),
+        order,
+      }
+      const diffKinds = diffFieldOverwriteKinds(stored, incoming)
+      if (diffKinds.length > 0) {
+        // values-free: field id + sheet id + diff KINDS only, never names/values.
+        ensureFieldsLogger.warn(
+          `ensureFields destructive-reconcile: field ${field.id} on sheet ${input.sheetId} would be overwritten in [${diffKinds.join(', ')}] (mode=${overwriteMode})`,
+        )
+        // 'refuse' (default) aborts the whole call — an existing object is never silently
+        // reconciled. 'preserve' keeps the tenant's row untouched (add-only). 'observe'
+        // still overwrites but has now surfaced the event for audit/metrics.
+        //
+        // Partial-application note: fields EARLIER in this loop may already be written when
+        // the throw fires. Every one of them was classified 'create' or 'unchanged' (a diff
+        // would have thrown at that field instead), so whatever landed is additive-only —
+        // no tenant row was overwritten. The shipped plugin path (`ensureObjectInScope`,
+        // index.ts) additionally runs the whole ensureObject inside one transaction, so the
+        // refusal rolls those creates back too.
+        if (overwriteMode === 'refuse') {
+          throw new MultitableEnsureFieldsRefusedError({
+            fieldId: field.id,
+            sheetId: input.sheetId,
+            diffKinds,
+          })
+        }
+        if (overwriteMode === 'preserve') conflictClause = 'ON CONFLICT (id) DO NOTHING'
+      }
+    }
+
+    await input.query(
+      `INSERT INTO meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+       ${conflictClause}`,
       [
         field.id,
         input.sheetId,
         field.name.trim(),
         field.type,
-        JSON.stringify(buildFieldProperty(field)),
+        nextProperty,
         order,
       ],
     )
@@ -691,6 +764,7 @@ export async function ensureObject(
   const fields = await ensureFields({
     query: input.query,
     sheetId,
+    overwriteMode: input.overwriteMode,
     fields: (input.descriptor.fields ?? []).map((field) => ({
       ...field,
       id: stableMetaId('fld', input.projectId, input.descriptor.id, field.id),

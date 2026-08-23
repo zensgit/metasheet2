@@ -79,7 +79,16 @@ const ACCESS_PRESETS: AccessPresetDefinition[] = [
     name: '考勤管理员',
     description: '适用于规则、排班、导入与审批全量管理。',
     productMode: 'attendance',
-    role: 'admin',
+    // Delegated attendance administration is expressed by `roleId` + the attendance
+    // permission codes below. The platform-wide `role` column stays at its default here, as
+    // it does for every other scoped preset in this table.
+    //
+    // The capability this preset grants is carried by the namespace admission that
+    // provisioning writes for the namespaces these grants derive (see
+    // `rbac/namespace-admission.ts` `deriveGrantNamespaces` and the writer in
+    // `routes/admin-users.ts`). The rule is asserted over the whole table by
+    // `tests/unit/role-assignment-boundary.test.ts`.
+    role: 'user',
     roleId: 'attendance_admin',
     permissions: ['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:import', 'attendance:admin'],
     homePath: '/attendance',

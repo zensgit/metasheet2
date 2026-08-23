@@ -24,8 +24,11 @@
 //   e. values-free guard over the whole summary + log stream
 //
 // Hermetic: no DB, no network, no clock, no filesystem writes. Values-free: the
-// only literals are schema ids, business column labels, published material-grade
-// / shop-floor dictionary samples and synthetic cell contents.
+// only literals are schema ids, business column labels, published national-standard
+// material designations (GB/T grades — industry vocabulary, not anyone's data),
+// SYNTHETIC 示例* dictionary entries and synthetic cell contents. No customer's
+// internal id→name pair appears here; customer-dictionary-leak-guard.test.cjs
+// enforces that mechanically.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -356,7 +359,13 @@ function rehearsalPackNormalizes() {
 
   // Evidence stays counts-and-ids: no dictionary value ever reaches it.
   const evidence = JSON.stringify(summarizeCustomerPackForEvidence(FACTORY_A_REHEARSAL_PACK))
-  for (const leak of ['主体焊接', '历史值', 'S30408', '生产备料视图', '毛胚长度']) {
+  // Each literal is one the pack ACTUALLY carries, so the assertion bites: a
+  // leak guard naming strings absent from its own input proves nothing.
+  for (const leak of ['示例节点一', '示例历史桶', 'S30408', '生产备料视图', '毛胚长度']) {
+    assert.ok(
+      JSON.stringify(FACTORY_A_REHEARSAL_PACK).includes(leak),
+      `${leak} must be present in the pack, or this guard is vacuous`,
+    )
     assert.equal(evidence.includes(leak), false, `pack evidence must not echo ${leak}`)
   }
 
@@ -684,8 +693,8 @@ async function refreshPreservesHumanCells() {
     warehouseConfirmation: '待到货',
     // pack human band
     ext_stockPrepDate: '2026-08-18',
-    ext_pickingNode: '48 - 主体焊接',
-    ext_handoverSection: '53 - 主体',
+    ext_pickingNode: '10 - 示例节点一',
+    ext_handoverSection: '10 - 示例工段一',
     ext_blankLength: 1250,
     ext_blankWidth: 800,
     ext_blankThickness: 12,
@@ -836,7 +845,7 @@ async function summaryAndLogsAreValuesFree() {
   // Dictionary content and human-facing labels are the customer's data: counts
   // and ids only ever leave the installer.
   for (const leak of [
-    '主体焊接', '历史值', '交接工段', '生产备料视图', '仓库跟进视图',
+    '示例节点一', '示例历史桶', '交接工段', '生产备料视图', '仓库跟进视图',
     'Q345R', 'S30408', '毛胚长度', '按图纸复核后下单',
   ]) {
     assert.equal(serialized.includes(leak), false, `summary/logs must not echo ${leak}`)
@@ -852,6 +861,10 @@ async function summaryAndLogsAreValuesFree() {
     'alreadyStampedFields',
     'createdFields',
     'ensuredViews',
+    // F5 closure: the summary now carries the OWNERSHIP BAND per id, so a CLI/route no longer has to
+    // re-normalize the pack to say "13 PLM / 8 human columns added". `ledger` is absent here because
+    // this rehearsal installs without an install store — the ledger stays optional.
+    'installedFields',
     'objectId',
     'packId',
     'packVersion',
@@ -859,6 +872,18 @@ async function summaryAndLogsAreValuesFree() {
     'stampedExistingFields',
     'syncedOptionFields',
   ])
+
+  // The join is the point: every installed id carries the band the pack declared, and NOTHING else
+  // (no label, no option value, no free text) rides along.
+  assert.equal(summary.installedFields.length, PACK_FIELD_COUNT)
+  const declaredById = new Map(FACTORY_A_REHEARSAL_PACK.extensionFields.map((field) => [field.id, field]))
+  for (const entry of summary.installedFields) {
+    assert.deepEqual(Object.keys(entry).sort(), ['action', 'extension', 'fieldId', 'ownership', 'preserveOnRefresh'])
+    assert.equal(entry.ownership, declaredById.get(entry.fieldId).ownership)
+    assert.equal(entry.preserveOnRefresh, entry.ownership === 'human_preserved')
+    assert.equal(entry.extension, true)
+    assert.equal(entry.action, 'created')
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -79,6 +79,7 @@ import {
   MultitableObjectScopeError,
   MultitableSheetScopeError,
 } from './multitable/plugin-scope'
+import { resolvePluginSheetScopeMode } from './multitable/pluginSheetScopeMode'
 import {
   acquireStockPreparationPersistUnitOfWorkLocks,
   validateStockPreparationPersistUnitOfWorkInput,
@@ -153,6 +154,10 @@ import {
 } from './attendance/w4c3a-import-proof'
 import { createAttendanceImportRollbackBoundaryV1 } from './attendance/w4c3a-import-rollback-boundary'
 import { createAttendanceRequestOperationBoundaryV1 } from './attendance/w4c3b-request-operation-boundary'
+import {
+  deriveApprovalInstanceOrgIdWithSelector,
+  ApprovalOrgUnresolvedError,
+} from './services/approval-instance-org-derivation'
 import { appendApprovedLeaveCancellationCalculationV1 } from './attendance/w4c3b-approved-leave-cancellation'
 import { createAttendanceRecordOperationBoundaryV1 } from './attendance/w4c3c-record-operation-boundary'
 import { appendOperatorRetirementCalculationV1 } from './attendance/w4c3c-ops-retirement'
@@ -596,7 +601,14 @@ export class MetaSheetServer {
           resolveFieldIds: async ({ projectId, objectId, fieldIds }) => {
             return resolveProvisionedObjectFieldIds(projectId, objectId, fieldIds)
           },
-          ensureObject: async ({ projectId, baseId, descriptor }) => {
+          // `overwriteMode` must be destructured and forwarded explicitly: this
+          // hook is the FALLBACK that plugin-scope's ensureObject takes when no
+          // ensureObjectInScope hook is registered (multitable/plugin-scope.ts —
+          // the scoped branch spreads ...input, and index.ts's scoped hook does
+          // forward it). Dropping it here silently downgraded a caller's explicit
+          // opt-in to the fail-closed default, i.e. an advertised API option
+          // (types/plugin.ts EnsureObjectInput) was inert on this path.
+          ensureObject: async ({ projectId, baseId, descriptor, overwriteMode }) => {
             return poolManager.get().transaction(async ({ query }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                 const result = await query(sql, params)
@@ -611,6 +623,7 @@ export class MetaSheetServer {
                 projectId,
                 baseId,
                 descriptor,
+                overwriteMode,
               })
             })
           },
@@ -1778,7 +1791,11 @@ export class MetaSheetServer {
       ? {
           ...pluginBaseCoreApi,
           multitable: createPluginScopedMultitableApi(coreApi.multitable, manifest.name, {
-            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor }) => {
+            // P0-S S3: `overwriteMode` MUST stay in this destructure. It is the per-call
+            // destructive-reconcile opt-in, and this hook is the shipped host path for every
+            // plugin ensureObject — dropping it here would silently re-arm the fail-closed
+            // default for callers that legitimately own the columns they re-derive.
+            ensureObjectInScope: async ({ pluginName, projectId, baseId, descriptor, overwriteMode }) => {
               return poolManager.get().transaction(async ({ query }) => {
                 const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
                   const result = await query(sql, params)
@@ -1801,6 +1818,7 @@ export class MetaSheetServer {
                   projectId,
                   baseId,
                   descriptor,
+                  overwriteMode,
                 })
                 await claimPluginObjectScope(txQuery, {
                   pluginName,
@@ -1865,10 +1883,24 @@ export class MetaSheetServer {
                     : undefined,
                 }
               }
-              await assertPluginOwnsSheet(txQuery, {
+              // P0-S S4 — sheet-scope enforcement mode. `assertPluginOwnsSheet` throws on a
+              // DIFFERENT-owner sheet in every mode; for an UNREGISTERED sheet it returns
+              // false (test-pinned legacy tolerance). Default 'observe' logs+continues (zero
+              // functional change, adds visibility); 'enforce' rejects unregistered access
+              // (flipped per-deployment after registry backfill).
+              const ownsSheet = await assertPluginOwnsSheet(txQuery, {
                 pluginName,
                 sheetId,
               })
+              if (!ownsSheet) {
+                const scopeMode = resolvePluginSheetScopeMode()
+                this.logger.warn(
+                  `plugin ${pluginName} accessed unregistered sheet ${sheetId} via plugin-scope (mode=${scopeMode})`,
+                )
+                if (scopeMode === 'enforce') {
+                  throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+                }
+              }
             },
             runStockPreparationPersistUnitOfWork: async (
               { pluginName, ...rawInput },
@@ -2215,6 +2247,36 @@ export class MetaSheetServer {
                   return {
                     effectiveState: posture.effectiveState,
                     referenceSegments: posture.referenceSegments,
+                  }
+                },
+                // Lock-11 §10 W-4: least-privilege wrapper over the ONE shared org-derivation
+                // primitive (services/approval-instance-org-derivation.ts). Result-shaped —
+                // never lets an `ApprovalOrgUnresolvedError` instance cross the plugin boundary
+                // (feedback_attack_your_own_criterion: the plugin must never `instanceof` a
+                // host error class). `trxQuery` is supplied by the caller already bound to its
+                // own open transaction client; this wrapper only adapts the return shape
+                // ({rows: [...]} the derivation module expects) around the plugin's bare-rows
+                // `trx.query`.
+                deriveApprovalInstanceOrgIdForAttendanceSubjectV1: async (input: {
+                  trxQuery: (sql: string, params?: unknown[]) => Promise<unknown[]>
+                  subjectUserId: string
+                  requestNamedOrgId: string | null
+                }) => {
+                  const queryFn = async (sql: string, params?: unknown[]) => ({
+                    rows: await input.trxQuery(sql, params),
+                  })
+                  try {
+                    const orgId = await deriveApprovalInstanceOrgIdWithSelector(
+                      queryFn,
+                      input.subjectUserId,
+                      input.requestNamedOrgId,
+                    )
+                    return { ok: true as const, orgId }
+                  } catch (error) {
+                    if (error instanceof ApprovalOrgUnresolvedError) {
+                      return { ok: false as const, reason: error.reason }
+                    }
+                    throw error
                   }
                 },
                 // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second

@@ -974,13 +974,21 @@ export async function getApproval(id: string): Promise<UnifiedApprovalDTO> {
  * dance needed, since it takes no dependency on `USE_MOCK`).
  *
  * This does NOT fix the deeper drift the fix round found and disclosed rather than solved here: the
- * platform branch's rows are snake_case (`actor_id`/`occurred_at`/`from_status`/`to_status`) with no
- * `metadata` column at all, while `UnifiedApprovalHistoryDTO` (and the PLM branch, which already
- * returns the correct shape via `ApprovalBridgeService.loadLocalHistory`) expects camelCase +
- * `metadata`. Unwrapping the envelope stops the throw and restores the shipped form-field
- * attachment read path against the real wire; it does NOT make platform-instance timeline rows
- * render real actor names/timestamps or process-attachment refs — those still require a backend
- * companion to reconcile the platform branch's row shape with the DTO. See the PR body.
+ * platform branch's rows are snake_case (`actor_id`/`occurred_at`/`from_status`/`to_status`) with
+ * no `metadata` column at all (unwrapping the envelope stops the throw and restores the shipped
+ * form-field attachment read path against the real wire; it does NOT make platform-instance
+ * timeline rows render real actor names/timestamps), while `UnifiedApprovalHistoryDTO` (and the PLM
+ * branch, which already returns the correct shape via `ApprovalBridgeService.loadLocalHistory`)
+ * expects camelCase + `metadata`.
+ *
+ * STALE-COMMENT UPDATE (#5104): the platform branch now DOES project a `metadata` key, additively —
+ * `metadata: { attachmentIds }`, ONLY the one key, ONLY when a row's rider ids are non-empty — so
+ * process-attachment refs now DO render for a platform instance's rider row
+ * (`ApprovalDetailView.vue`'s `processAttachmentRefsForHistoryItem`). #5104 is scoped to exactly
+ * that one field: it does not add `actor_name`/`occurred_at` camelCase siblings, does not add
+ * `nodeKey` (so parallel-branch grouping stays PLM-only), and does not rename any existing
+ * snake_case field. The broader snake_case-row-vs-camelCase-DTO reconciliation this comment
+ * originally flagged is still open past that one field.
  */
 export function normalizeApprovalHistoryEnvelope(payload: unknown): UnifiedApprovalHistoryDTO[] {
   if (Array.isArray(payload)) return payload as UnifiedApprovalHistoryDTO[]

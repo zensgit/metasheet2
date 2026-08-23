@@ -33,7 +33,21 @@ const {
 const {
   applyStockPreparationPlan,
   summarizeApplyResultForEvidence,
+  // ONE definition of logical->physical translation, not two. This file used to
+  // carry its own byte-identical copy of `mapFieldName`, and the `pre_mapped`
+  // translation-mode contract depends on the two agreeing; sharing the writer's
+  // makes that agreement structural instead of a comment. It also means the
+  // writer's refusal to fall back on an unmapped `ext_` id applies here too.
+  __internals: { mapFieldName },
 } = require('./stock-preparation-apply-writer.cjs')
+const {
+  assertExtensionFieldIdValid,
+  isTenantExtensionField,
+} = require('./stock-preparation-extension-namespace.cjs')
+const {
+  extFieldMappingTargetIds,
+  isNormalizedExtFieldMapping,
+} = require('./stock-preparation-ext-field-mapping.cjs')
 const {
   normalizeStockPrepApplyProductionPolicy,
   assertProductionPolicyNotExpired,
@@ -155,6 +169,53 @@ function normalizeSource(input = {}) {
   }
 }
 
+/**
+ * The tenant `ext_` columns this action WRITES, and therefore the ones its
+ * target must bind a physical id for.
+ *
+ * Plain `string[]`, deliberately: an action config is snapshotted through
+ * `cloneJson` into a large-BOM job row (`actionSnapshot`), so anything that does
+ * not survive a JSON round-trip would silently vanish on the stored path and
+ * quietly weaken the completeness gate. The list is normally produced by
+ * `extFieldMappingTargetIds(mapping)` (stock-preparation-ext-field-mapping.cjs);
+ * the mapping object itself stays a runtime input and never enters this config.
+ *
+ * Fail-closed: every entry must be a valid tenant extension id that does not
+ * collide with the template catalog, and duplicates are an error rather than
+ * being deduped — a config that lists a column twice is a config someone should
+ * look at.
+ */
+function normalizeActionExtensionFieldIds(input, template) {
+  if (input === undefined || input === null) return []
+  if (!Array.isArray(input)) {
+    throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'extensionFieldIds must be an array', {
+      field: 'extensionFieldIds',
+    })
+  }
+  const templateIds = template.fields.map((field) => field.id)
+  const seen = new Set()
+  const out = []
+  for (let index = 0; index < input.length; index += 1) {
+    const id = input[index]
+    try {
+      assertExtensionFieldIdValid(id, { templateFieldIds: templateIds })
+    } catch (error) {
+      throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'extensionFieldIds entry is not a valid tenant extension field id', {
+        field: `extensionFieldIds[${index}]`,
+        namespaceReason: error && error.reason ? error.reason : 'UNKNOWN',
+      })
+    }
+    if (seen.has(id)) {
+      throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'extensionFieldIds must be unique', {
+        field: `extensionFieldIds[${index}]`,
+      })
+    }
+    seen.add(id)
+    out.push(id)
+  }
+  return out
+}
+
 function normalizeStockPreparationActionConfig(input = {}) {
   if (!isPlainObject(input)) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', 'action config must be an object', { field: 'action' })
@@ -167,6 +228,8 @@ function normalizeStockPreparationActionConfig(input = {}) {
   if (kind !== TABLE_ACTION_KIND) {
     throw new StockPreparationTableActionError(422, 'TABLE_ACTION_CONFIG_INVALID', `unsupported action kind: ${kind}`, { field: 'kind' })
   }
+  const template = normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE)
+  const extensionFieldIds = normalizeActionExtensionFieldIds(input.extensionFieldIds, template)
   return {
     actionId,
     kind,
@@ -174,7 +237,11 @@ function normalizeStockPreparationActionConfig(input = {}) {
     configured: true,
     source: normalizeSource(input.source),
     target: normalizeTarget(input.target),
-    template: normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE),
+    template,
+    // Spread CONDITIONALLY: an action config is snapshotted and hashed in
+    // several places, and an unconditional key would move every legacy shape
+    // for a feature that config did not ask for.
+    ...(extensionFieldIds.length ? { extensionFieldIds } : {}),
     conflictStrategy: isPlainObject(input.conflictStrategy) ? cloneJson(input.conflictStrategy) : {},
     pageLimit: positiveInteger(input.pageLimit, 'pageLimit', undefined),
     maxPages: positiveInteger(input.maxPages, 'maxPages', undefined),
@@ -197,7 +264,15 @@ function plmSystemFieldIds(template) {
 
 function assertTargetFieldMapCompleteness(action) {
   if (!targetFieldMapHasExplicitBindings(action.target.fieldIdMap)) return
-  const requiredFields = plmSystemFieldIds(action.template)
+  // The gate used to cover ONLY the frozen template's plm_system columns, which
+  // was complete for as long as no other column could be written. It no longer
+  // is: a source->`ext_` mapping puts tenant extension columns into the write
+  // payload, and an `ext_` id absent from the map is now a hard failure at the
+  // records-API boundary (apply-writer `mapFieldName`) rather than a silent
+  // fallback. Covering them HERE turns that late, per-row failure into an
+  // up-front, whole-config one — which is the only place a deployer can fix it.
+  const extensionFieldIds = Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : []
+  const requiredFields = plmSystemFieldIds(action.template).concat(extensionFieldIds)
   const missingFields = requiredFields.filter((field) => !optionalString(action.target.fieldIdMap[field]))
   if (missingFields.length === 0) return
   throw new StockPreparationTableActionError(
@@ -209,6 +284,49 @@ function assertTargetFieldMapCompleteness(action) {
       fieldMapMode: 'explicit',
       missingFields,
       requiredFields,
+      // Values-free split so a deployer can tell "the canonical schema drifted"
+      // from "a pack column is not bound yet" without diffing two lists.
+      ...(missingFields.some((field) => isTenantExtensionField(field))
+        ? { missingExtensionFields: missingFields.filter((field) => isTenantExtensionField(field)) }
+        : {}),
+    },
+  )
+}
+
+/**
+ * The two halves of "this action writes tenant columns" must agree.
+ *
+ * `action.extensionFieldIds` is the DURABLE half — it rides the JSON config and
+ * the stored job snapshot, and it is what the completeness gate above checks the
+ * target against. `extFieldMapping` is the RUNTIME half — the branded object
+ * that actually produces the values. A mapping that writes a column the config
+ * never declared would slip past the gate and only fail at the records-API
+ * boundary, so it is refused here instead.
+ *
+ * The reverse (a declared id that the mapping does not fill) is NOT an error: a
+ * deployer may legitimately bind a column ahead of wiring its source.
+ */
+function assertExtFieldMappingAgreesWithAction(action, extFieldMapping) {
+  if (extFieldMapping === undefined || extFieldMapping === null) return
+  if (!isNormalizedExtFieldMapping(extFieldMapping)) {
+    throw new StockPreparationTableActionError(
+      422,
+      'TABLE_ACTION_CONFIG_INVALID',
+      'extFieldMapping must be a normalized ext field mapping (normalizeExtFieldMapping)',
+      { field: 'extFieldMapping' },
+    )
+  }
+  const declared = new Set(Array.isArray(action.extensionFieldIds) ? action.extensionFieldIds : [])
+  const undeclared = extFieldMappingTargetIds(extFieldMapping).filter((id) => !declared.has(id))
+  if (undeclared.length === 0) return
+  throw new StockPreparationTableActionError(
+    422,
+    'TARGET_SCHEMA_INCOMPLETE',
+    'extFieldMapping writes extension columns the action config does not declare',
+    {
+      targetObjectId: action.target.objectId,
+      mappingId: extFieldMapping.mappingId,
+      undeclaredExtensionFields: undeclared,
     },
   )
 }
@@ -316,10 +434,6 @@ function ensureWriteRecordsApi(recordsApi) {
     throw new StockPreparationTableActionError(501, 'TABLE_ACTION_RECORDS_API_UNAVAILABLE', 'table action apply requires queryRecords/createRecord/patchRecord')
   }
   return recordsApi
-}
-
-function mapFieldName(field, fieldIdMap = {}) {
-  return fieldIdMap[field] || field
 }
 
 function unmapRecordFields(record, fieldIdMap = {}) {
@@ -686,14 +800,26 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 
 // `installedFieldProperties` (OPTIONAL) is the ownership projection of what is actually
 // installed on the target sheet — the `property.stockPreparation` stanza per column. It is
-// threaded through, never fetched here: this module has no fields-listing primitive
-// (multitable provisioning exposes only per-field getObjectField, and no pack-installation
-// registry exists to enumerate the pack's ids), so today's HTTP route supplies nothing and
-// the planner falls back to the frozen-template bands. That LEGACY POSTURE is safe by
-// construction — omission yields exactly the pre-pack writable set — and the parameter is
-// the seam a caller that can enumerate installed fields plugs into without touching the
-// pure planner. See derivePackAwarePlmWritableFields in the conflict planner.
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties }) {
+// threaded through, never fetched here: this module still has no fields-listing primitive
+// (multitable provisioning exposes only per-field reads, and adding an enumeration primitive
+// would be a plugin-API contract change handing every plugin whole-schema access).
+//
+// THE SEAM IS NOW PLUGGED IN. The gap this comment used to describe — "no pack-installation
+// registry exists to enumerate the pack's ids, so today's HTTP route supplies nothing" — was
+// closed by the customer-pack INSTALL LEDGER (integration_stock_prep_pack_installs, migration
+// 076) plus the read-back seam in stock-preparation-pack-installed-fields.cjs: the ledger names
+// the candidate `ext_` ids, readObjectFieldsContent says which of them are still live and how
+// they are classified, and the small-BOM dry-run/apply routes now supply the result here. The
+// large-BOM checkpoint path still supplies nothing and stays on the legacy bands; it plans into
+// a stored job, so wiring it is a separate change.
+//
+// The LEGACY POSTURE remains safe by construction and remains the fallback: omission yields
+// exactly the pre-pack writable set, and since the pack's `ext_` columns are then in neither
+// band, the refresh writes strictly FEWER columns rather than more. That is why the seam
+// degrades to `undefined` on any ledger/host read failure instead of failing the refresh.
+// See derivePackAwarePlmWritableFields in the conflict planner.
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping }) {
+  assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   const expansion = await expandPlmProjectBom({
     sourceAdapter,
     projectNo: parameters.projectNo,
@@ -704,6 +830,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     maxElapsedMs: action.maxElapsedMs,
     maxDepth: action.maxDepth,
     maxRows: action.maxRows,
+    extFieldMapping,
   })
   const hasGlobalErrors = Array.isArray(expansion.errors) && expansion.errors.length > 0
   const hasHardRowErrors = hasHardApplyBlockingRowErrors(expansion)
@@ -1065,10 +1192,13 @@ module.exports = {
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
   __internals: {
+    assertExtFieldMappingAgreesWithAction,
+    assertTargetFieldMapCompleteness,
     buildRevision,
     consumeDryRunToken,
     createDryRunToken,
     hashJson,
+    normalizeActionExtensionFieldIds,
     plmSystemFieldIds,
     readExistingStockPreparationRows,
     stableStringify,

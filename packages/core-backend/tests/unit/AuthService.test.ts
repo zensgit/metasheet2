@@ -322,10 +322,13 @@ describe('AuthService.verifyToken', () => {
 
     expect(user).toBeTruthy()
     expect(user?.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+    // The write now goes through the single role-assignment boundary, which takes a user-id
+    // ARRAY (one statement covers the single- and batch-caller shapes). Same table, same user,
+    // same role id — the assertion tracks the parameter shape, not a changed behaviour.
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining('INSERT INTO user_roles'),
-      ['u5', 'attendance_employee'],
+      [['u5'], 'attendance_employee'],
     )
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
   })

@@ -85,6 +85,10 @@ async function main() {
   const expected = [
     'ALLOWED_PREFIX', 'countRows', 'deleteRows', 'insertMany', 'insertOne',
     'select', 'selectOne', 'selectOneForUpdate', 'transaction', 'updateRow',
+    // upsertOne is the module header's sanctioned extension form ("added here as a new validated
+    // method"), NOT a raw-SQL hook: table, row columns and conflict columns all pass the same
+    // identifier whitelist, and every value stays parameterized.
+    'upsertOne',
   ]
   assert.deepEqual(publicKeys, expected, 'no rawQuery / execute / any raw SQL hook')
 
@@ -162,6 +166,52 @@ async function main() {
     ['p_json', '["sourceId","revision"]', '{"k3Template":{"id":"material","version":1}}'],
     'arrays/plain objects are serialized as JSON text before reaching node-postgres',
   )
+
+  // upsertOne: single-statement INSERT ... ON CONFLICT DO UPDATE on a UNIQUE key.
+  const mockDb6c = mockDatabase()
+  const db6c = createDb({ database: mockDb6c })
+  await db6c.upsertOne(
+    'integration_stock_prep_pack_installs',
+    { id: 'i1', tenant_id: 't1', project_id: 'p1', object_id: 'o1', pack_id: 'pk1', status: 'installed' },
+    { conflictColumns: ['tenant_id', 'project_id', 'object_id', 'pack_id'] },
+  )
+  const q6c = mockDb6c.calls[0]
+  assert.match(q6c.sql, /^INSERT INTO "integration_stock_prep_pack_installs" \("id", "tenant_id", "project_id", "object_id", "pack_id", "status"\) VALUES \(\$1, \$2, \$3, \$4, \$5, \$6\)/)
+  assert.match(q6c.sql, / ON CONFLICT \("tenant_id", "project_id", "object_id", "pack_id"\) DO UPDATE SET /)
+  // conflict columns are never in the SET list (updating a key column by EXCLUDED is a no-op at best)
+  assert.match(q6c.sql, /DO UPDATE SET "id" = EXCLUDED\."id", "status" = EXCLUDED\."status" RETURNING \*$/)
+  assert.deepEqual(q6c.params, ['i1', 't1', 'p1', 'o1', 'pk1', 'installed'])
+
+  // explicit updateColumns narrows what a conflict may overwrite, and may name a column the INSERT
+  // omits (EXCLUDED carries that column's DEFAULT for the proposed row).
+  await db6c.upsertOne(
+    'integration_stock_prep_pack_installs',
+    { id: 'i2', tenant_id: 't1', project_id: 'p1', object_id: 'o1', pack_id: 'pk1', status: 'partial' },
+    { conflictColumns: ['tenant_id', 'project_id', 'object_id', 'pack_id'], updateColumns: ['status', 'last_install_at'] },
+  )
+  assert.match(mockDb6c.calls[1].sql, /DO UPDATE SET "status" = EXCLUDED\."status", "last_install_at" = EXCLUDED\."last_install_at" RETURNING \*$/)
+
+  // an UNKEYED upsert is refused: without conflict columns it is just an INSERT that can duplicate.
+  for (const badOptions of [undefined, {}, { conflictColumns: [] }, { conflictColumns: 'tenant_id' }]) {
+    let upsertErr = null
+    try { await db6c.upsertOne('integration_pipelines', { id: 'x' }, badOptions) } catch (e) { upsertErr = e }
+    assert.ok(upsertErr && /conflictColumns/.test(upsertErr.message), 'unkeyed upsert refused')
+  }
+
+  // identifier injection through a conflict column is rejected by the same whitelist.
+  let upsertIdentErr = null
+  try {
+    await db6c.upsertOne('integration_pipelines', { id: 'x', name: 'y' }, { conflictColumns: ['id"; DROP TABLE users; --'] })
+  } catch (e) { upsertIdentErr = e }
+  assert.ok(upsertIdentErr instanceof ScopeViolationError, 'conflict column injection rejected')
+
+  // an upsert whose every column is a conflict column has nothing to update — refused, not silently
+  // turned into DO NOTHING (which would be a different statement than the caller asked for).
+  let upsertNoSetErr = null
+  try {
+    await db6c.upsertOne('integration_pipelines', { id: 'x' }, { conflictColumns: ['id'] })
+  } catch (e) { upsertNoSetErr = e }
+  assert.ok(upsertNoSetErr && /no updatable column/.test(upsertNoSetErr.message))
 
   // insertMany with consistent keys
   const mockDb7 = mockDatabase()
@@ -270,7 +320,7 @@ async function main() {
     const trxKeys = Object.keys(trx).sort()
     assert.deepEqual(
       trxKeys,
-      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForUpdate', 'updateRow'],
+      ['commit', 'countRows', 'deleteRows', 'insertMany', 'insertOne', 'rollback', 'select', 'selectOne', 'selectOneForUpdate', 'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
     await trx.insertOne('integration_runs', { id: 'rtx', status: 'running' })

@@ -127,7 +127,10 @@ describe('Attendance admin anchor navigation', () => {
     expect(groupLabels).toEqual(['Workspace', 'Scheduling', 'Organization', 'Policies', 'Annual leave', 'Data & Payroll'])
     // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
     // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
-    expect(labels).toHaveLength(35)
+    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" waystation
+    // section and its rail entry outright (redirecting UserManagementView.vue's deep link
+    // straight at Attendance groups instead).
+    expect(labels).toHaveLength(34)
     expect(labels).toEqual(
       expect.arrayContaining([
         'Setup readiness',
@@ -153,6 +156,7 @@ describe('Attendance admin anchor navigation', () => {
     )
     expect(labels).not.toContain('Holiday overrides')
     expect(labels).not.toContain('Template Versions')
+    expect(labels).not.toContain('Group members')
     expect(container!.querySelector('.attendance__admin-nav-current')).toBeNull()
     expect(container!.querySelector('#attendance-admin-nav-filter')).toBeNull()
     expect(container!.querySelector('.attendance__admin-nav-actions')).toBeNull()
@@ -198,10 +202,9 @@ describe('Attendance admin anchor navigation', () => {
     }
     // Navigability audit fix 5(b): the standalone "Members" task-home shortcut is gone — it
     // duplicated the "Attendance groups" entry right next to it and landed on a section whose
-    // only content was "open Attendance groups instead". The section itself (and its sidebar nav
-    // entry `[data-admin-anchor="attendance-admin-group-members"]`, exercised by
-    // attendance-admin-regressions.spec.ts's "keeps the clicked admin section focused…" test) is
-    // deliberately UNCHANGED — UserManagementView.vue's post-create-user deep link still needs it.
+    // only content was "open Attendance groups instead". A-class batch 2 (A4) removed the
+    // waystation section and its sidebar nav entry outright, and repointed
+    // UserManagementView.vue's post-create-user deep link straight at `attendance-admin-groups`.
     expect(taskHome!.querySelector('[data-admin-task-action="group-members"]')).toBeNull()
 
     const importButton = taskHome!.querySelector<HTMLButtonElement>('[data-admin-task-action="daily-import"]')
@@ -408,7 +411,9 @@ describe('Attendance admin anchor navigation', () => {
           },
         })
       }
-      if (url.startsWith('/api/admin/users')) {
+      // The picker sites on this page are wired to the attendance-scoped user search; the
+      // platform route is kept here so this mock stays honest for either caller.
+      if (url.startsWith('/api/admin/users') || url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -972,7 +977,8 @@ describe('Attendance admin anchor navigation', () => {
     expect(jumpSelect).toBeTruthy()
     // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
     // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(35)
+    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" section.
+    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(34)
 
     jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
     jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
@@ -1099,11 +1105,10 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('#attendance-group-member-user-picker')).toBeTruthy()
     expect(container!.textContent).toContain('Append selected user')
 
-    const groupMembersAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-group-members"]')
-    expect(groupMembersAnchor).toBeTruthy()
-    groupMembersAnchor!.click()
-    await flushUi(2)
-    expect(container!.querySelector('[data-attendance-group-members-redirect]')?.textContent).toContain('Group members now live inside')
+    // A4 (A-class batch 2, 2026-08-22): the "Group members" waystation section and its rail
+    // entry are deleted outright — confirm no dangling anchor or section remains.
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-group-members"]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-group-members-redirect]')).toBeNull()
 
     await ensureGroupVisible('Policies')
     const ruleSetsAnchor = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-rule-sets"]')

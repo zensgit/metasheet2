@@ -1682,3 +1682,80 @@ PR 过程中曾加入一条后端 `validateAndFreezeRequesterChoices` 的 identi
 - **owner 开放行**:Lock-10 §5.1 feed-branch 行(§5.2 (i)(i-b)(i-c))仍 OPEN,G-S1-8 expected-red 只记不落;S2 P3-1(arm-5→arm-3 铸造,首例路由)知会;S2 P3-2(mention CTE 无 org 合取,仅 pin-ON 可见);S3b census `authorId` token 缺口(记 PR body,owner-scope)。
 - **carried 非阻断残项(具名,防「全清」误读)**:S3b N2-1(截断守卫缺 2150 非对齐 total)、N2-2(短页分支端点未钉,今日不可达)+ census `authorId` token(上列 owner 行);S1 #5070 NEW-4(P3-1 路由重排未门控,implementer-closable)及其 requal 报的 NIT 组;S2 #5087 P3-5(PR body 可达性措辞,requal 以第三机械理由收束)——**注:S2 requal 具名的 P3-6(迁移 DDL 无护)不在本清单,因其已被 #5088 的 D-1 parity+级联门关闭,且 #5088 门审亲跑过反证(删 CASCADE → 恰红一测,1 failed/47 passed);**S3a #5072 NIT-1/3/4/5(shim 注释等化妆级);Lock-9 P3-1(上传预算 TOCTOU——与 shipped form 路径同族,bind 权威成立)、P3-2(G-13 正控年龄混杂,mutation 存活)、P3-3(G-1 正控缺失)、NIT-1..4。
 - **C-5 plm: 姿态、§5.2(iii) 残留、#5024 披露约束**:全部照旧,本段不改。
+
+---
+
+## 11. 2026-08-22 收尾冲刺(第五次 by-reference)—— 评论/S1 收尾 + Lock-9 全栈 + org 锚定链
+
+**与 §9/§10 同规:分层追加,不改既有 SHA 绑定;不开启任何开关;不宣告任何完成标签。**
+授权:owner 第五次 by-reference(/goal 「按建议执行…请完成这条审批及流程自动化的收尾」,2026-08-22),
+采纳会话呈报的收尾序(writers-stamp-org → Migration B(带前缀护栏)→ Lock-9 FE → 阶段 3)。判定绑
+pre-squash head,落地为 squash——祖先关系按房例不可由 SHA 建立。
+
+### 11.1 七个工程件(合并序;#5103 为 owner-held 例外)
+
+| PR | 内容 | 判定链(绑 pre-squash) | 落地 |
+|---|---|---|---|
+| #5096 | 残项清扫:8 项 carried 缺口(截断窗 2150、G-1 正控、G-13 去混杂、attachmentIds 显式 400 带 OFF-parity、role-resolver 提取、NEW-4 顺序门、census authorId 扩宽) | gate FIX-ROUND(F-1 文本)→ requal MERGE-CLEAN @ `5964c2d2d3` | `85b2dd30a5` |
+| #5095 | 三证据套件(S1/S2/Lock-9)进 required test (20.x):run-list + 官方 pin 重算(仅 `pluginTestsWorkflow` 一摘要动)+ census;**G-14 排序断言在提权前收窄到 ratified 锚**(全仓绊线拆除) | gate FIX-ROUND(P1=绊线)→ 修复+收窄 → requal MERGE-CLEAN @ `adc74954b5` | `2171b07fb3` |
+| #5098 | writers-stamp-org 改性切片:**四个运行时写入点全 ESCALATE(无 ruled org 源)**;落地=PLM mirror 零-org 钉(G-W2)+ 不可实现性证据;普查分区四轮修至「六站点=四 runtime(mirror 在内;automation bridge=同站点第二调用路径)+两脚本」 | gate/requal 四轮 → MERGE-CLEAN @ `c7300ea064` | `45490f57ec` |
+| #5099 | **Lock-9 FE**:评论动作对话框上传载体(OD-L9-10(a))+ rider + refs 读路径 + 时间线渲染;真线信封归一(normalizeApprovalHistoryEnvelope)+ call-site 钉(MUT-B 前后对照:同一回滚从全绿变 1 failed);卸载/导航回收;C1 unmount-mid-upload 永久泄漏残留具名(168h sweep 兜底) | gate FIX-ROUND(2P1)→ 修复 → requal MERGE-CLEAN → 钉补 → bind @ `7e4ce66b32` | `99fd7b498a` |
+| #5105 | 证据作业加 Lock-11 U1a/b/c 探针(counts-only;U1c 带表存在守卫+判别半边) | gate FIX-ROUND(P2=判别半边缺)→ 修复 → bind MERGE-CLEAN @ `e524c609c1` | `8f58f52cc7` |
+| #5104 | **history attachmentIds 伴侣**:平台分支只加性投影 `metadata->'attachmentIds'` 单键(敌意键字节级扫描证不透出;flag-OFF 字节 parity 门控)——Lock-9 FE 读半边端到端打通 | gate FIX-ROUND → 修复(rebase 吸收 #5099)→ requal FIX-ROUND(注释级)→ 修复 → bind MERGE-CLEAN @ `c6deb9656d` | `d414022676` |
+| **#5103** | **Migration B**:有序多类 org_id backfill(前缀护栏、FAIL-LOUD、terminal-ABORT),SQL 四轮冻结(三 oracle 证字节不变);37 fixture + 37 mutation 载荷表(四类披露:载荷/惰性/log-only/语法承重) | gate→requal→修复轮 3→终绑 MERGE-CLEAN(条件绿)@ `e60eff45b3` | **OWNER-HELD 不合**(见 11.3) |
+
+### 11.2 证据链(生产实测,三次 dispatch)
+
+三次 run,来源逐一具名:**32552496622**(main,首采 p01-p53)、**32568321791**(main,含 U1 探针,#5105 后)、
+**32562970891**(**#5103 分支 head `0bf9f4711c` dispatch**——c 类普查探针只存在于该分支;log 已归档
+soak-working/s1-org-evidence-run3-32562970891-from-5103-branch.log,与前两次同规耐久)。
+prod:S1 迁移 APPLIED(2026-08-21T17:03:38Z,事务性);271 实例全平台 id、全零附件 ⇒ class-2 覆盖 0 行,
+**p20=271 全 NULL**(run1/2);**c6_terminal=269、c3_zero_membership=257**(run3);「可 stamp 仅 2」是
+**由五探针推导的量,非直接观测**(migb-gate 自记);p22/p23=0(误盖章零人口);
+**u1a_distinct=1、u1a_multi=0、u1b=12、u1c_non_default=0**(run2,单 org 世界确证)。staging:NOT_APPLIED(欠一次成功部署)。
+
+### 11.3 owner-held:#5103 与 269 行裁决
+
+合并 #5103 触发 auto-deploy,其 class-6 pre-flight 在 prod 现状(269 terminal 行)下会 FAIL-LOUD 中止
+部署迁移步(设计使然;且 MIGRATE 在 DEPLOY END 后跑,新镜像先上线)。故 #5103 即使 MERGE-CLEAN 也
+持有不合,直至 owner 裁 269 行处置(菜单与建议随呈报交付,不在本文)。
+
+### 11.4 Lock-11(写入点 org 派生)—— RATIFY-READY,未 ratify
+
+`soak-working/approval-lock11-writer-org-derivation-draft-20260822.md`,sha256 `5222a094…0414bb8d`,
+1934 行:两轮独立审(r1 20 findings;r2 抓两个双轮未中的继承前提 P1——pin 在析取外;考勤边界的受验腿带 **actor∧subject 合取**校验,但该腿是**客户端可选**的(`operationId` 省略即绕过),且未验腿是当下每个 org 的默认姿态——U8 量其流量占比,仍 unknown)+ 折叠核验至 **RATIFY-READY**。10 OD 全 `DRAFT — OWNER-CONFIRM`;11 项决策菜单
+D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,本文不承载。
+
+### 11.5 本波之后仍然悬着的
+
+- owner:Lock-11 菜单(D-10 已退役)、269 行裁决(=#5103 合并闸)、staging 部署、org pin 激活序、
+  阶段 3、`APPROVAL_ATTACHMENTS_ENABLED`(其部署前置已全落:放宽迁移 #5089 + FE #5099 + 伴侣 #5104)。
+- 具名残留:C1 unmount-mid-upload 泄漏;approval-web-guard pull_request paths 一条冗余 token(与 7 条
+  既有 wart 同列);P2-2 成员资格 wiring 门(**记录措辞硬性要求:该门关闭未来漂移窗口,digest pin 不
+  覆盖此项**——移除 run-list 行并重算 pin 后全绿已被实证);证据作业无自动只读门(P3-1,姊妹先例
+  `multitable-o2-observation` 的 `default_transaction_read_only=on` 重放);#5098 P3-3 = Lock-10 `:412`
+  勘误(D-5)。
+
+---
+
+## 12. 2026-08-22 → 08-23 Lock-11 落地波 —— 写入点全成,org 锚定端到端闭合
+
+**与 §9-§11 同规:分层追加,不改既有 SHA 绑定。** 授权链:第六次 by-reference(Lock-11 十裁 + 269 行,
+#5109 ratification)与第七次(max 深审四修正)。判定绑 pre-squash head,落地为 squash。
+
+### 12.1 六件落地物(合并序)
+
+| 件 | 内容 | 判定链 | 落地 |
+|---|---|---|---|
+| #5109 | **Lock-11 RATIFIED**:锁文入库+§10 十裁记录((β) 排序=约束性;D-10 RETIRED 无日落;回灌=未来 owner 项)+§10.3 第七裁 | 三轮门审(P1=排序定义丢失→恢复)→ MERGE-CLEAN @ `c57dbbd39f`;body 与清单双 hash 三轮零扰动 | `fb9f559dc0` |
+| #5103 | **Migration B + D-8 修订**:provisioning 迁移(12 零成员活跃用户)+ class-6 (i)-guarded(单 org 自断言);SQL 四轮冻结后由裁决解除、差量=恰两新模板证明 | migb-revision 工作流 gate F0→fix→requal CLEAN @ `80bc374aaf`(musl 双引擎 52/52) | `6a2010cf8c`;**prod 执行成功 17:16:20Z(run 32586978396),无 ABORT** |
+| #5116 | u1b 拆分探针(no-row / only-deactivated——深审 P1-1 的不可见形) | gate MERGE-CLEAN 首轮 0P1/0P2 @ `6b09fcd98c`;分区恒等 no_row+only_deactivated≡u1b 以 5 形+2 非活跃控制+随机 400 用户实证,误写正控证判别力 | `8097d310eb` |
+| #5112 | **W-1/W-2 建线盖章**(requester 键/单活跃成员/值免 422/双调用路径)+ gap-closer 迁移(第七裁授权)+ (β) 绊线 + §10.3 落地 | gate P1(两语法枚举漏洞:actionType fixture)→ 修复 → requal STALE → 折入 rebase → MERGE-CLEAN @ `b8b87eec14`;**合并门=run-4 证据 u1b 双拆分 0 DISCHARGED** | `2a859ba4c1`;gap-closer prod 执行成功 19:29:25Z(经 GHCR blob flake 重跑 + **部署主机磁盘闸**:GC 回收 32.42GB 后过闸) |
+| #5121 | **W-4 考勤盖章**(arm (f) 验证选择器 SUBJECT 键 + arm (a) 回退,双腿含 legacy)+ G-L11-8 分脑门 + D-10 退役钉 + **G-W3 售后零写钉** + OpenAPI 422 契约 | fable-max gate P1(fixture 审计漏 attendance-files-acl)→ 修复 → requal 驳回 G-L11-9 缺格降级 → β/γ 格补齐 → 终绑 MERGE-CLEAN @ `f115541ad7`(β mutation 恰红;γ pin-差分证非空洞) | `3882dc80f7`;部署成功 |
+| (证据) | 六次成功生产采集(runs 32552496622/32568321791/32562970891/32588740066/32593179454/32593902401)全耐久归档 soak-working/ | — | p11=**271/271**、p20=0、p31=0、u1b 及双拆分=0、u1a=1 |
+
+### 12.2 本波之后的状态
+
+- **Lock-11 四写入点全部落成**:W-1/W-2(#5112)、W-4(#5121)盖章上线;W-3=(d) 零写钉;PLM=零-org 钉(#5098)。生产 org 数据面 271/271 全锚定,新行由写入点保证。
+- **激活链只剩 owner/ops 步骤**:①staging 补一次成功部署(NOT_APPLIED 依旧;evidence 短路会先测 staging 人口——深审 P2-2 探针未落,记为激活前置作业);②**org pin 激活授权**(前置:u1b=0 已实测、u1a=1 复核、staging 验证;独立台账行);③阶段 3(改名后的 OD-S1-18(b) CHECK 形,ratify-first);④附件 flag(UAT 执行人/环境/清单仍待 owner 亲定——第七裁 item 4 OPEN)。
+- **具名残留**:P3-1 twin-write 与 OD-L11-10(iii) 的张力(owner 台账知会);回灌未来项((β) 持续性准入步);staging U1 探针移出短路(深审 P2-2,未落);证据作业只读自动门(P3-3);W-4 NIT(user_orgs 残行/write-only 累加器);S2 P3-1/P3-2 知会项照旧。

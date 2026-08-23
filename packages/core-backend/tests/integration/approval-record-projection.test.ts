@@ -181,6 +181,10 @@ describeIfDatabase('T3-6 approval record projection (real DB)', () => {
       )
     }
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:write') ON CONFLICT DO NOTHING`, [REQUESTER])
+    // Lock-11 §10 arm (a) fixture delta: REQUESTER needs exactly one active
+    // user_orgs membership or the real createApproval/startApproval call below 422s
+    // (APPROVAL_ORG_UNRESOLVED) before this suite's own assertions run.
+    await q(`INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE) ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`, [REQUESTER])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'approvals:act') ON CONFLICT DO NOTHING`, [APPROVER])
     // isAdmin() is resolved from user_roles (not users.is_admin), so make ADMIN a real admin there.
     await q(`INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`, [ADMIN])

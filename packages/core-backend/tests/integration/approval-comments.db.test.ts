@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import net from 'net'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -15,7 +15,7 @@ import {
 } from '../../src/services/approval-comment-service'
 
 /**
- * Lock-10 (S2) `approval_comments` — real-DB acceptance for the FULL gate battery (C-1..C-17):
+ * Lock-10 (S2) `approval_comments` — real-DB acceptance for the FULL gate battery (C-1..C-21):
  * list/create/edit/delete/mention-candidates authorization (S1's `canReadApprovalInstance` reused,
  * never re-derived — OD-S1-14), D3 write widening (participant union, not acting-assignee-only),
  * D2(b1) mutable storage + tombstone, the pointer-row dual-write invariant
@@ -23,7 +23,15 @@ import {
  * `parentId` rejection, `plm:` refusal + spy-zero on `canReadApprovalInstance`, the `/history`
  * HISTORY-TIMELINE arm (i) exclusion (both the pointer-row negative AND the legacy-act-path-row
  * positive — the named §5.1 anti-pattern gate), the reply-refusal NOT-copied gate (C-15),
- * check-ordering (C-16), the G-S1-9 notify seam, and a mechanical FAIL-0 enumeration (C-17).
+ * check-ordering (C-16), the G-S1-9 notify seam, a mechanical FAIL-0 enumeration (C-17), and the
+ * Lock-9 FE read-half companion (#5099 gate P1-1): a rider row's `metadata.attachmentIds` surfaces
+ * for an admitted viewer, a non-participant still 404s, the S2 pointer-row exclusion is untouched
+ * even when the pointer row ALSO carries `attachmentIds`, no OTHER metadata key ever crosses the
+ * wire, and total/page/pageSize are unchanged by the new field (C-18). Fix-round follow-ups after
+ * the #5104 gate (head `567a3c96ac5e…`): the flag-OFF byte-for-byte-no-op claim, now actually
+ * enforced in code (P2-1, C-19), and the `extractRiderAttachmentIds` parser's two branches — the
+ * per-element string filter and the `JSON.parse` fallback for an already-stringified jsonb value —
+ * each proven load-bearing with a discriminating fixture (P3-1, C-20/C-21).
  *
  * `vi.mock` below wraps `canReadApprovalInstance` with a call-counting spy that ALWAYS calls
  * through to the real implementation (same pattern as the S1 consumers suite) — every assertion
@@ -984,6 +992,254 @@ describeIfDatabase('Lock-10 (S2) approval_comments — full gate battery, real D
 
       const replyToTombstone = await commentsPost(instanceId, token, { body: 'a reply to the tombstone', parentId: createdJson.data.comment.id })
       expect(replyToTombstone.status).toBe(201)
+    })
+  })
+
+  // -----------------------------------------------------------------------------------------------
+  // C-18 — Lock-9 rider row attachmentIds: additive `metadata.attachmentIds` field on
+  // GET /api/approvals/:id/history (backend companion to #5099 gate P1-1). A Lock-9 rider row is
+  // action:'comment', metadata:{nodeKey, attachmentIds}, and carries NO `commentId` — so unlike an
+  // S2 pointer row it is IN the timeline by design (arm (i) above only excludes on `commentId`
+  // presence). ADDITIVE ONLY: existing snake_case fields, the arm (i) exclusion, and total/page/
+  // pageSize are all pinned unchanged here; the new field is read-scoped to exactly the same
+  // S1-admitted viewers this route already gates, and carries ONLY the `attachmentIds` key — never
+  // the whole `metadata` object (which can carry `nodeKey` and future policy/internal keys).
+  // -----------------------------------------------------------------------------------------------
+  describe('C-18: Lock-9 rider row attachmentIds — additive field, scoped read, metadata redaction', () => {
+    // C-18's original six cases assume the feature is live (a Lock-9 rider row only exists once
+    // attachments are in use), so the flag is forced ON for every test in this describe block —
+    // C-19 below is the ONE case that deliberately overrides it back OFF mid-test to get the
+    // discriminating pair. Scoped to this nested describe only; the outer suite's ambient env is
+    // SAVED and RESTORED (never unconditionally deleted) around every test, so a job that sets
+    // APPROVAL_ATTACHMENTS_ENABLED at a wider scope than this file is left exactly as it found it
+    // for whatever runs after this describe block in the same worker.
+    let savedAttachmentsFlag: string | undefined
+    beforeEach(() => {
+      savedAttachmentsFlag = process.env.APPROVAL_ATTACHMENTS_ENABLED
+      process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+    })
+    afterEach(() => {
+      if (savedAttachmentsFlag === undefined) delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      else process.env.APPROVAL_ATTACHMENTS_ENABLED = savedAttachmentsFlag
+    })
+
+    async function seedRiderRow(instanceId: string, actorId: string, comment: string | null, metadata: Record<string, unknown>): Promise<void> {
+      await pool().query(
+        `INSERT INTO approval_records (instance_id, action, actor_id, actor_name, comment, from_status, to_status, from_version, to_version, metadata)
+         VALUES ($1, 'comment', $2, 'Requester', $3, 'pending', 'pending', 0, 0, $4::jsonb)`,
+        [instanceId, actorId, comment, JSON.stringify(metadata)],
+      )
+    }
+
+    it('a rider row surfaces metadata.attachmentIds for an admitted viewer — exactly the FE\'s read path (item.metadata.attachmentIds), not a top-level field', async () => {
+      const requesterId = freshId('c18-requester')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      const idA = freshId('c18-att-a')
+      const idB = freshId('c18-att-b')
+      const marker = `c18-comment-${freshId('marker')}`
+      await seedRiderRow(instanceId, requesterId, marker, { nodeKey: 'node-1', attachmentIds: [idA, idB] })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as {
+        data: { items: Array<{ comment: string | null; metadata?: { attachmentIds?: string[] }; attachmentIds?: unknown }> }
+      }
+      const item = json.data.items.find((it) => it.comment === marker)
+      expect(item).toBeTruthy()
+      expect(item!.metadata).toEqual({ attachmentIds: [idA, idB] })
+      // Positive control on the field PATH itself: a top-level `attachmentIds` is never emitted —
+      // only under `metadata`, matching `collectHistoryAttachmentRefIds`'s `item.metadata.attachmentIds` read.
+      expect(item!.attachmentIds).toBeUndefined()
+    })
+
+    it('a non-participant still 404s on an instance whose only row is a rider row — no attachment id leaks into the denial body', async () => {
+      const requesterId = freshId('c18-requester2')
+      const instanceId = await seedInstance(requesterId)
+      const idSecret = freshId('c18-att-secret')
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: [idSecret] })
+
+      const outsiderId = freshId('c18-outsider')
+      const outsiderToken = await participantToken(outsiderId)
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, outsiderToken)
+      expect(res.status).toBe(404)
+      const bodyText = await res.clone().text()
+      expect(bodyText).not.toContain(idSecret)
+      expect(await res.json()).toEqual({ ok: false, error: { code: 'APPROVAL_NOT_FOUND', message: 'Approval instance not found' } })
+    })
+
+    it('an S2 pointer row that ALSO carries attachmentIds stays EXCLUDED — the commentId discriminator (arm (i)) is untouched by this field addition', async () => {
+      const requesterId = freshId('c18-requester3')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+
+      const before = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      const beforeJson = (await before.json()) as { data: { total: number } }
+
+      const pointerCommentId = freshId('c18-pointer-commentid')
+      const smuggledAttachmentId = freshId('c18-att-smuggled')
+      await seedRiderRow(instanceId, requesterId, null, { commentId: pointerCommentId, attachmentIds: [smuggledAttachmentId] })
+
+      const after = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      const afterText = await after.clone().text()
+      const afterJson = JSON.parse(afterText) as { data: { total: number } }
+      expect(afterJson.data.total).toBe(beforeJson.data.total)
+      expect(afterText).not.toContain(smuggledAttachmentId)
+    })
+
+    it('hostile fixture: a rider row\'s metadata carrying OTHER keys never surfaces those keys — only attachmentIds crosses the wire (string-scan the raw body)', async () => {
+      const requesterId = freshId('c18-requester4')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      const idA = freshId('c18-att-hostile')
+      const secretPolicyValue = `secret-policy-value-${freshId('marker')}`
+      const secretInternalToken = `internal-token-${freshId('marker')}`
+      await seedRiderRow(instanceId, requesterId, null, {
+        nodeKey: 'node-1',
+        attachmentIds: [idA],
+        policySnapshot: secretPolicyValue,
+        internalToken: secretInternalToken,
+      })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(res.status).toBe(200)
+      const bodyText = await res.clone().text()
+      expect(bodyText).toContain(idA)
+      expect(bodyText).not.toContain(secretPolicyValue)
+      expect(bodyText).not.toContain(secretInternalToken)
+      expect(bodyText).not.toContain('policySnapshot')
+      expect(bodyText).not.toContain('internalToken')
+      expect(bodyText).not.toContain('nodeKey')
+    })
+
+    it('count/pagination are unchanged by the new field: total increments by exactly one for a rider row, page/pageSize echo the request', async () => {
+      const requesterId = freshId('c18-requester5')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+
+      const before = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history?page=1&pageSize=10`, token)
+      const beforeJson = (await before.json()) as { data: { total: number } }
+      expect(beforeJson.data.total).toBe(0)
+
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: [freshId('c18-att-count')] })
+
+      const after = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history?page=1&pageSize=10`, token)
+      const afterJson = (await after.json()) as { data: { total: number; page: number; pageSize: number; items: unknown[] } }
+      expect(afterJson.data.total).toBe(1)
+      expect(afterJson.data.page).toBe(1)
+      expect(afterJson.data.pageSize).toBe(10)
+      expect(afterJson.data.items.length).toBe(1)
+    })
+
+    it('a rider row with an EMPTY attachmentIds array gets no metadata key at all (omitted, not metadata:{attachmentIds:[]}) — matches the FE\'s absent/empty equivalence', async () => {
+      const requesterId = freshId('c18-requester6')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: [] })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      const json = (await res.json()) as { data: { items: Array<Record<string, unknown>> } }
+      expect(json.data.items.length).toBe(1)
+      expect(Object.prototype.hasOwnProperty.call(json.data.items[0], 'metadata')).toBe(false)
+    })
+
+    // ---------------------------------------------------------------------------------------------
+    // C-19 (fix-round P2-1) — the route's own SQL comment claims this field addition changes
+    // nothing else; the gate found that claim FALSE for the flag: with APPROVAL_ATTACHMENTS_ENABLED
+    // unset (the shipped default — see `packages/core-backend/.env`, `routes/approval-attachments.ts`
+    // D5), a rider row's attachmentIds still crossed the wire because the route had no flag check at
+    // all. This is now gated (`isApprovalAttachmentsEnabled()`, same flag `/refs`/`/download`/
+    // `dispatchAction` use). Discriminating pair on the SAME seeded row, SAME request path, to avoid
+    // the G-12(b)-style vacuity hazard (a test that would pass for a reason unrelated to the flag).
+    // ---------------------------------------------------------------------------------------------
+    it('fix-round P2-1: flag OFF makes the field a real byte-for-byte no-op (no metadata key, even though the DB row carries attachmentIds); flag ON on the SAME row still surfaces it', async () => {
+      const requesterId = freshId('c19-flagoff')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      const idSecret = freshId('c19-att-secret')
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: [idSecret] })
+
+      delete process.env.APPROVAL_ATTACHMENTS_ENABLED
+      const offRes = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(offRes.status).toBe(200)
+      const offText = await offRes.clone().text()
+      expect(offText).not.toContain(idSecret)
+      const offJson = JSON.parse(offText) as { data: { items: Array<Record<string, unknown>> } }
+      expect(offJson.data.items.length).toBe(1)
+      expect(Object.prototype.hasOwnProperty.call(offJson.data.items[0], 'metadata')).toBe(false)
+
+      // Positive control: the SAME row, flag ON, on the SAME already-booted server —
+      // `isApprovalAttachmentsEnabled()` is read fresh per request (never cached at boot/router
+      // construction), so flipping the env var here is enough; no second server needed.
+      process.env.APPROVAL_ATTACHMENTS_ENABLED = 'true'
+      const onRes = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      const onJson = (await onRes.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: string[] } }> } }
+      expect(onJson.data.items[0].metadata).toEqual({ attachmentIds: [idSecret] })
+    })
+
+    // ---------------------------------------------------------------------------------------------
+    // C-20 (fix-round P3-1) — MUT-D from the #5104 gate deleted `extractRiderAttachmentIds`'s
+    // `.filter((entry): entry is string => typeof entry === 'string')` and 128/128 of the required
+    // quartet stayed green: nothing exercised a heterogeneous array. This seeds exactly the mixed
+    // array the gate's report reproduced at the wire (`[1,{"nested":...},null,"...","...",["x"]]`)
+    // and pins that ONLY the two genuine string ids survive, in order, with every non-string value —
+    // including a string secret nested one level down — never reaching the response body.
+    // ---------------------------------------------------------------------------------------------
+    it('fix-round P3-1 (MUT-D): non-string entries inside attachmentIds are dropped — only genuine string ids reach the wire', async () => {
+      const requesterId = freshId('c20-requester')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      const idOk1 = freshId('c20-att-ok1')
+      const idOk2 = freshId('c20-att-ok2')
+      const nestedSecret = `GATE-SECRET-NESTED-${freshId('marker')}`
+      await seedRiderRow(instanceId, requesterId, null, {
+        nodeKey: 'node-1',
+        attachmentIds: [idOk1, 1, { nested: nestedSecret }, null, idOk2, ['x'], true],
+      })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(res.status).toBe(200)
+      const bodyText = await res.clone().text()
+      expect(bodyText).not.toContain(nestedSecret)
+      expect(bodyText).not.toContain('"nested"')
+      const json = (await res.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: unknown[] } }> } }
+      expect(json.data.items[0].metadata).toEqual({ attachmentIds: [idOk1, idOk2] })
+    })
+
+    // ---------------------------------------------------------------------------------------------
+    // C-21 (fix-round P3-1) — `extractRiderAttachmentIds`'s `JSON.parse` branch (the jsonb value
+    // arriving as an already-stringified array rather than a native array) was reachable but
+    // untested. Seeds `metadata.attachmentIds` as a STRING holding JSON array text (not an array) to
+    // exercise that branch on the genuine query path (`metadata->'attachmentIds'`, which for a jsonb
+    // string scalar comes back from `pg` as a plain JS string), plus a malformed-string sibling that
+    // must yield `[]` (no metadata key), never a 500 or a partially-parsed value.
+    // ---------------------------------------------------------------------------------------------
+    it('fix-round P3-1: a jsonb-string-encoded attachmentIds array is parsed via the JSON.parse branch', async () => {
+      const requesterId = freshId('c21-requester')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      const idStr = freshId('c21-att-str-ok')
+      // The VALUE at the `attachmentIds` key is itself a JSON-encoded string, not an array —
+      // `JSON.stringify` here double-encodes it exactly as a hostile/legacy producer might.
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: JSON.stringify([idStr]) })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as { data: { items: Array<{ metadata?: { attachmentIds?: string[] } }> } }
+      expect(json.data.items[0].metadata).toEqual({ attachmentIds: [idStr] })
+    })
+
+    it('fix-round P3-1: a malformed jsonb-string attachmentIds value fails closed to no metadata key (never a 500, never a partial parse)', async () => {
+      const requesterId = freshId('c21-requester2')
+      const instanceId = await seedInstance(requesterId)
+      const token = await participantToken(requesterId)
+      await seedRiderRow(instanceId, requesterId, null, { nodeKey: 'node-1', attachmentIds: 'not-valid-json[' })
+
+      const res = await jsonRequest(baseUrl, `/api/approvals/${instanceId}/history`, token)
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as { data: { items: Array<Record<string, unknown>> } }
+      expect(json.data.items.length).toBe(1)
+      expect(Object.prototype.hasOwnProperty.call(json.data.items[0], 'metadata')).toBe(false)
     })
   })
 })

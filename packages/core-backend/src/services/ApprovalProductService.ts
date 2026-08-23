@@ -164,6 +164,10 @@ import {
   resolveRecordLinkTargetAuthOnQuery,
   userHasApprovalsWriteOnQuery,
 } from './approval-record-link-txn-auth'
+import {
+  ApprovalOrgUnresolvedError,
+  deriveApprovalInstanceOrgId,
+} from './approval-instance-org-derivation'
 import { Logger } from '../core/logger'
 import { eventBus } from '../integration/events/event-bus'
 
@@ -7556,19 +7560,46 @@ export class ApprovalProductService {
         throw new ServiceError('Forbidden', 403, 'FORBIDDEN')
       }
 
+      // Lock-11 §10 D-3/D-4/D-9 — arm (a), keyed on the REQUESTER (`requesterSnapshot.id`, NOT
+      // `actor.userId` and NEVER `actor.tenantId`/`resolveApprovalTenantId` — the latter is
+      // header-forgeable, see routes/approvals.ts's `resolveApprovalTenantId` docblock and
+      // jwt-middleware.ts's `x-tenant-id` back-fill). Placed AFTER the 403 write-check and BEFORE
+      // the INSERT: a requester who fails both gets 403 (authorization first); 422 means
+      // specifically "authorized, but org unresolvable". Runs on the transaction client, matching
+      // the two guards above it — never the pool (TOCTOU against the just-locked authority rows).
+      let approvalOrgId: string
+      try {
+        approvalOrgId = await deriveApprovalInstanceOrgId(
+          (sqlText, params) => client!.query(sqlText, params),
+          typeof requesterSnapshot.id === 'string' ? requesterSnapshot.id : '',
+        )
+      } catch (error) {
+        if (error instanceof ApprovalOrgUnresolvedError) {
+          // Values-free (OD-L11-3 arm (i), D-3): no org id, no membership count, no user id in
+          // the thrown ServiceError — `details` is intentionally omitted so sendServiceError
+          // never surfaces it.
+          throw new ServiceError(
+            'Approval instance org could not be resolved',
+            422,
+            'APPROVAL_ORG_UNRESOLVED',
+          )
+        }
+        throw error
+      }
+
       await client.query(
         `INSERT INTO approval_instances
          (id, status, version, source_system, external_approval_id, workflow_key, business_key, title,
           requester_snapshot, subject_snapshot, policy_snapshot, metadata,
           current_step, total_steps, sync_status, sync_error,
           template_id, template_version_id, published_definition_id, request_no, form_snapshot, current_node_key,
-          created_at, updated_at)
+          created_at, updated_at, org_id)
          VALUES
          ($1, $2, 0, 'platform', NULL, 'approval-product-template', $3, $4,
           $5, $6, $7, $8,
           $9, $10, 'ok', NULL,
           $11, $12, $13, $14, $15, $16,
-          now(), now())`,
+          now(), now(), $17)`,
         [
           instanceId,
           initial.status,
@@ -7596,6 +7627,7 @@ export class ApprovalProductService {
           requestNo,
           JSON.stringify(normalizedFormData),
           initial.currentNodeKey,
+          approvalOrgId,
         ],
       )
 

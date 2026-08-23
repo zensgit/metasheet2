@@ -8185,6 +8185,37 @@
               }
             }
           },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the requester's org could not be resolved (Lock-11 arm (a)): the requester holds zero active organization memberships, or holds two or more. The request was authorized (approvals:write passed) but the org derivation refused; this is distinct from 403. The response body is values-free — it carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "example": "APPROVAL_ORG_UNRESOLVED"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
           }
@@ -10170,6 +10201,40 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Outdoor-approval leg only — reachable from POST /api/attendance/punch when an outdoor punch requires approval and enters the request_create boundary. Both refusals are values-free: the response carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "APPROVAL_ORG_UNRESOLVED",
+                            "APPROVAL_ORG_SELECTOR_NOT_PERMITTED"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -10931,6 +10996,40 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "APPROVAL_ORG_UNRESOLVED",
+                            "APPROVAL_ORG_SELECTOR_NOT_PERMITTED"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -11241,6 +11340,40 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "APPROVAL_ORG_UNRESOLVED",
+                            "APPROVAL_ORG_SELECTOR_NOT_PERMITTED"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -11658,6 +11791,40 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "APPROVAL_ORG_UNRESOLVED",
+                            "APPROVAL_ORG_SELECTOR_NOT_PERMITTED"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },
@@ -12165,6 +12332,40 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "description": "APPROVAL_ORG_UNRESOLVED — the request's SUBJECT could not be resolved to a single active organization (Lock-11 W-4 arm (a)): zero or two-or-more active user_orgs memberships. APPROVAL_ORG_SELECTOR_NOT_PERMITTED — the request named an organization (orgId / x-org-id) that is not one of the subject's active memberships (Lock-11 W-4 arm (f)). Both refusals are values-free: the response carries no org id, membership count, or user id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "object",
+                      "required": [
+                        "code",
+                        "message"
+                      ],
+                      "properties": {
+                        "code": {
+                          "type": "string",
+                          "enum": [
+                            "APPROVAL_ORG_UNRESOLVED",
+                            "APPROVAL_ORG_SELECTOR_NOT_PERMITTED"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       },

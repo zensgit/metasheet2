@@ -70,6 +70,14 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
   async function mintToken(userId: string, perms: string): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Lock-11 §10 W-4 fixture delta: every dev-token subject minted here may go on to create a
+    // shift-swap approval request with no org selector (arm a, falls back to getOrgId's
+    // 'default') — seed exactly one active 'default' membership so arm (a) resolves.
+    await pool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId],
+    )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
 
