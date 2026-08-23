@@ -1194,3 +1194,29 @@ test('the battery acts on the expired-exemption verdict rather than only computi
   assert.match(BATTERY_SOURCE, /not_driven_reason_expired/, 'the expired-exemption failure class is gone')
   assert.match(BATTERY_SOURCE, /if \(cascadePresent\) \{/, 'the cascade witness result is no longer branched on')
 })
+
+
+// ---- A1.3 provenance binding (deep review B4) --------------------------------------------------
+// A1.3 requires the exit evidence to name the head/image the PASS was produced against. Nothing
+// captured it, so every PASS was unbindable and the window would self-void by A1.3's own terms.
+// These guard the capture so it cannot be quietly dropped: the evidence must carry a `provenance`
+// object, the battery must self-hash THIS file (so the evidence names the exact battery that ran),
+// and the two caller-supplied identifiers must be read from env and default to null — a MISSING
+// binding has to be visible in the artifact, never silently absent.
+test('A1.3: the evidence carries a provenance object with a self-hash and env-supplied identifiers', () => {
+  assert.match(BATTERY_SOURCE, /provenance,/, 'evidence must include the provenance object')
+  assert.match(BATTERY_SOURCE, /script_sha256:/, 'provenance must carry the battery self-hash')
+  assert.match(
+    BATTERY_SOURCE,
+    /createHash\('sha256'\)[\s\S]{0,200}?import\.meta\.url/,
+    'script_sha256 must be a self-hash of THIS file, not a hardcoded or unrelated value',
+  )
+  assert.match(BATTERY_SOURCE, /env\.BATTERY_IMAGE_DIGEST/, 'image_digest must come from the caller env')
+  assert.match(BATTERY_SOURCE, /env\.BATTERY_BUILD_COMMIT/, 'build_commit must come from the caller env')
+  // Absent identifiers must become null (visible), never an empty string or a silent omission.
+  assert.match(
+    BATTERY_SOURCE,
+    /BATTERY_IMAGE_DIGEST[\s\S]{0,80}?\|\| null/,
+    'a missing image_digest must record null so an unbound PASS is visible in the evidence',
+  )
+})

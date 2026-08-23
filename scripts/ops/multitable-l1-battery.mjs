@@ -86,7 +86,8 @@
  *   2  VERDICT: NOT_ARMED  — posture/usage/precondition refusal; the battery did not run
  */
 
-import { writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
 
@@ -1115,10 +1116,36 @@ export async function runBattery({ env = process.env, options } = {}) {
   const batteryPassword = `Bat!${randomBytes(18).toString('base64url')}A9`
   const secrets = [databaseUrl, adminPassword, batteryPassword].filter((value) => typeof value === 'string' && value.length >= 4)
 
+  // A1.3 (deep review B4): the amendment requires the exit evidence to carry the head/image SHA the
+  // run was verified against. Nothing captured it, so every PASS was unbindable and the window would
+  // self-void by A1.3's own terms. Capture it HERE, in the evidence the battery itself writes, so the
+  // binding is produced by the tool rather than transcribed by hand:
+  //   * script_sha256 — self-hash of THIS file, so the evidence names the exact battery that ran
+  //     (the containment lane has an equivalent pin; this lane had none).
+  //   * image_digest / build_commit — supplied by the caller (the workflow reads them from the
+  //     running container); recorded as null when absent so a missing binding is VISIBLE in the
+  //     evidence rather than silently absent.
+  const provenance = (() => {
+    let scriptSha = null
+    try {
+      scriptSha = createHash('sha256')
+        .update(readFileSync(new URL(import.meta.url), 'utf8'))
+        .digest('hex')
+    } catch {
+      scriptSha = null
+    }
+    return {
+      script_sha256: scriptSha,
+      image_digest: String(env.BATTERY_IMAGE_DIGEST ?? '').trim() || null,
+      build_commit: String(env.BATTERY_BUILD_COMMIT ?? '').trim() || null,
+    }
+  })()
+
   const evidence = {
     tool: 'multitable-l1-battery',
     ladder_step: 'L1',
     run_stamp: stamp,
+    provenance,
     started_at: startedAt,
     finished_at: null,
     verdict: 'NOT_ARMED',
