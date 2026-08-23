@@ -1,5 +1,6 @@
 import { computed, reactive, ref, watch, type Ref } from 'vue'
 import { apiFetch } from '../../utils/api'
+import { isAttendanceAdminEndpointUnavailable } from './attendanceAdminEndpointCompatibility'
 
 type ProvisionRole = 'employee' | 'approver' | 'importer' | 'admin'
 type ProvisionStatusKind = 'info' | 'error'
@@ -54,6 +55,8 @@ interface AttendanceAdminBatchResolvePayload {
 
 interface UseAttendanceAdminProvisioningOptions {
   adminForbidden: Ref<boolean>
+  orgId: Ref<string>
+  globalScope?: Ref<boolean>
   tr: Translate
 }
 
@@ -166,7 +169,7 @@ export function normalizeAttendanceAdminBatchResolvePayload(
   }
 }
 
-export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttendanceAdminProvisioningOptions) {
+export function useAttendanceAdminProvisioning({ adminForbidden, orgId, globalScope, tr }: UseAttendanceAdminProvisioningOptions) {
   const provisionLoading = ref(false)
   const provisionHasLoaded = ref(false)
   const provisionStatusMessage = ref('')
@@ -201,6 +204,22 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
   const provisionBatchPreviewInactiveIds = ref<string[]>([])
   const provisionBatchAffectedIds = ref<string[]>([])
   const provisionBatchUnchangedIds = ref<string[]>([])
+
+  function userScopePayload(): { scope: 'global' } | { orgId: string } {
+    if (globalScope?.value === true) return { scope: 'global' }
+    const value = orgId.value.trim()
+    if (!value) throw new Error(tr('Select an organization first.', '请先选择组织。'))
+    return { orgId: value }
+  }
+
+  function userScopeQuery(): string {
+    return new URLSearchParams(userScopePayload()).toString()
+  }
+
+  function canUseLegacyGlobalFallback(status: number, payload: unknown): boolean {
+    return globalScope?.value === true
+      && isAttendanceAdminEndpointUnavailable(status, payload)
+  }
   const provisionBatchPreviewHasResult = computed(() => {
     return provisionBatchPreviewRequested.value > 0
       || provisionBatchPreviewItems.value.length > 0
@@ -285,6 +304,7 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
         page: String(page),
         pageSize: String(provisionSearchPageSize),
       })
+      Object.entries(userScopePayload()).forEach(([key, value]) => params.set(key, value))
       const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
       if (response.status === 403) {
         adminForbidden.value = true
@@ -355,8 +375,9 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
   }
 
   async function fetchProvisioningUserAccess(userId: string) {
-    const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access`)
-    if (response.status === 404) {
+    const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access?${userScopeQuery()}`)
+    const data = await response.json().catch(() => null) as Record<string, unknown> | null
+    if (canUseLegacyGlobalFallback(response.status, data)) {
       await fetchProvisioningUser(userId)
       return
     }
@@ -365,7 +386,6 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
 
-    const data = await response.json().catch(() => null) as Record<string, unknown> | null
     if (!response.ok || !data?.ok) {
       const error = data?.error as Record<string, unknown> | undefined
       throw new Error(String(error?.message || tr('Failed to load user access', '加载用户访问权限失败')))
@@ -407,14 +427,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
       const role = provisionForm.role
       const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
         method: 'POST',
-        body: JSON.stringify({ template: role }),
+        body: JSON.stringify({ template: role, ...userScopePayload() }),
       })
-      if (modern.status !== 404) {
+      const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
+      if (!canUseLegacyGlobalFallback(modern.status, modernData)) {
         if (modern.status === 403) {
           adminForbidden.value = true
           throw new Error(tr('Admin permissions required', '需要管理员权限'))
         }
-        const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
         if (!modern.ok || !modernData?.ok) {
           const error = modernData?.error as Record<string, unknown> | undefined
           throw new Error(String(error?.message || tr('Failed to assign role', '分配角色失败')))
@@ -460,14 +480,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
       const role = provisionForm.role
       const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
         method: 'POST',
-        body: JSON.stringify({ template: role }),
+        body: JSON.stringify({ template: role, ...userScopePayload() }),
       })
-      if (modern.status !== 404) {
+      const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
+      if (!canUseLegacyGlobalFallback(modern.status, modernData)) {
         if (modern.status === 403) {
           adminForbidden.value = true
           throw new Error(tr('Admin permissions required', '需要管理员权限'))
         }
-        const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
         if (!modern.ok || !modernData?.ok) {
           const error = modernData?.error as Record<string, unknown> | undefined
           throw new Error(String(error?.message || tr('Failed to remove role', '移除角色失败')))
@@ -523,9 +543,10 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
     try {
       const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
         method: 'POST',
-        body: JSON.stringify({ userIds: valid }),
+        body: JSON.stringify({ userIds: valid, ...userScopePayload() }),
       })
-      if (response.status === 404) {
+      const data = await response.json().catch(() => null) as Record<string, unknown> | null
+      if (canUseLegacyGlobalFallback(response.status, data)) {
         clearProvisionBatchPreview()
         provisionBatchPreviewRequested.value = valid.length
         setProvisionBatchStatus(tr('Batch preview API not available on this deployment.', '当前部署不支持批量预览 API。'), 'error')
@@ -536,7 +557,6 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
 
-      const data = await response.json().catch(() => null) as Record<string, unknown> | null
       if (!response.ok || !data?.ok) {
         const error = data?.error as Record<string, unknown> | undefined
         throw new Error(String(error?.message || tr('Failed to preview batch users', '批量预览用户失败')))
@@ -584,14 +604,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
     try {
       const batch = await apiFetch('/api/attendance-admin/users/batch/roles/assign', {
         method: 'POST',
-        body: JSON.stringify({ userIds: valid, template: role }),
+        body: JSON.stringify({ userIds: valid, template: role, ...userScopePayload() }),
       })
-      if (batch.status !== 404) {
+      const batchData = await batch.json().catch(() => null) as Record<string, unknown> | null
+      if (!canUseLegacyGlobalFallback(batch.status, batchData)) {
         if (batch.status === 403) {
           adminForbidden.value = true
           throw new Error(tr('Admin permissions required', '需要管理员权限'))
         }
-        const batchData = await batch.json().catch(() => null) as Record<string, unknown> | null
         if (!batch.ok || !batchData?.ok) {
           const error = batchData?.error as Record<string, unknown> | undefined
           throw new Error(String(error?.message || tr('Failed to batch assign role', '批量分配角色失败')))
@@ -620,14 +640,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
         try {
           const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
             method: 'POST',
-            body: JSON.stringify({ template: role }),
+            body: JSON.stringify({ template: role, ...userScopePayload() }),
           })
-          if (modern.status !== 404) {
+          const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
+          if (!canUseLegacyGlobalFallback(modern.status, modernData)) {
             if (modern.status === 403) {
               adminForbidden.value = true
               throw new Error(tr('Admin permissions required', '需要管理员权限'))
             }
-            const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
             if (!modern.ok || !modernData?.ok) {
               const error = modernData?.error as Record<string, unknown> | undefined
               throw new Error(String(error?.message || tr('Failed to assign role', '分配角色失败')))
@@ -693,14 +713,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
     try {
       const batch = await apiFetch('/api/attendance-admin/users/batch/roles/unassign', {
         method: 'POST',
-        body: JSON.stringify({ userIds: valid, template: role }),
+        body: JSON.stringify({ userIds: valid, template: role, ...userScopePayload() }),
       })
-      if (batch.status !== 404) {
+      const batchData = await batch.json().catch(() => null) as Record<string, unknown> | null
+      if (!canUseLegacyGlobalFallback(batch.status, batchData)) {
         if (batch.status === 403) {
           adminForbidden.value = true
           throw new Error(tr('Admin permissions required', '需要管理员权限'))
         }
-        const batchData = await batch.json().catch(() => null) as Record<string, unknown> | null
         if (!batch.ok || !batchData?.ok) {
           const error = batchData?.error as Record<string, unknown> | undefined
           throw new Error(String(error?.message || tr('Failed to batch remove role', '批量移除角色失败')))
@@ -729,14 +749,14 @@ export function useAttendanceAdminProvisioning({ adminForbidden, tr }: UseAttend
         try {
           const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
             method: 'POST',
-            body: JSON.stringify({ template: role }),
+            body: JSON.stringify({ template: role, ...userScopePayload() }),
           })
-          if (modern.status !== 404) {
+          const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
+          if (!canUseLegacyGlobalFallback(modern.status, modernData)) {
             if (modern.status === 403) {
               adminForbidden.value = true
               throw new Error(tr('Admin permissions required', '需要管理员权限'))
             }
-            const modernData = await modern.json().catch(() => null) as Record<string, unknown> | null
             if (!modern.ok || !modernData?.ok) {
               const error = modernData?.error as Record<string, unknown> | undefined
               throw new Error(String(error?.message || tr('Failed to remove role', '移除角色失败')))
