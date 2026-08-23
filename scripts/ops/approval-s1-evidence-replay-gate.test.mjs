@@ -235,7 +235,19 @@ function isGuardedByProbeValueCheck(remoteBody, needleIndex) {
 }
 
 function assertProbeIsGuarded(remoteBody, probeName) {
-  const idx = remoteBody.indexOf(`\${label}.${probeName}`)
+  // Anchor on the probe() CALL SITE, not the bare `${label}.<name>` token (gate P3-6 / M11):
+  // the NOT_MEASURED else-branch echoes the same token, so a bare indexOf can resolve to the echo
+  // while the real probe() call sits OUTSIDE its guard — M11 constructed exactly that and passed.
+  // The call-site form appears exactly once per probe; assert that before using the index.
+  const callSite = `probe "$pg_container" "$pg_user" "$pg_db" "\${label}.${probeName}"`
+  const occurrences = remoteBody.split(callSite).length - 1
+  assert.equal(
+    occurrences,
+    1,
+    `assertProbeIsGuarded: expected exactly ONE probe() call site for "${probeName}", found ${occurrences} — ` +
+      `the anchor must be unambiguous or the guard check can resolve to the wrong occurrence (gate P3-6)`,
+  )
+  const idx = remoteBody.indexOf(callSite)
   assert.ok(idx >= 0, `assertProbeIsGuarded: probe "${probeName}" not found in remote body at all`)
   assert.ok(
     isGuardedByProbeValueCheck(remoteBody, idx),
