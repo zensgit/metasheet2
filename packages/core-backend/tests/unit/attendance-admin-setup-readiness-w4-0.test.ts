@@ -621,6 +621,12 @@ function stripCommentsAndStrings(source: string): string {
     .replace(/"(?:[^"\\]|\\.)*"/g, '""')
 }
 
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
 describe('§9 W4-0-G2 negative meta-assertion: no first-word/regex read-only check anywhere', () => {
   it('the aggregate module contains no prefix/regex "is this SQL a SELECT" guard (code only, comments/strings stripped)', () => {
     const modulePath = path.resolve(__dirname, '../../src/services/AttendanceSetupReadinessAggregate.ts')
@@ -635,16 +641,12 @@ describe('§9 W4-0-G2 negative meta-assertion: no first-word/regex read-only che
 
   it('the route file contains no prefix/regex "is this SQL a SELECT" guard either (code only)', () => {
     const routePath = path.resolve(__dirname, '../../src/routes/attendance-admin.ts')
-    const code = stripCommentsAndStrings(readFileSync(routePath, 'utf8'))
-    // As strong as the aggregate-module leg above (not just the stripped-template-literal-arg
-    // shape): a re-introduced `sql.trim().toUpperCase().startsWith('SELECT')`-style guard using a
-    // quoted string literal (not a template literal) or any `.startsWith(` call at all — plus the
-    // three named helper functions the frozen predecessor used — must all red this test. The route
-    // file is production "implementation" exactly as much as the aggregate module (§9 W4-0-G2's ban
-    // covers "the implementation", not one file within it) and today's stripped code has zero
-    // legitimate `.startsWith(`/`toUpperCase()` occurrences, so there is no false-positive risk.
-    expect(code).not.toMatch(/\.startsWith\(/)
-    expect(code).not.toMatch(/toUpperCase\(\)/)
+    const code = stripComments(readFileSync(routePath, 'utf8'))
+    // Reject the predecessor's SQL-literal prefix check without treating unrelated domain
+    // predicates such as `role.startsWith('attendance:')` as SQL guards.
+    const selectPrefixGuard = /(?:trim\(\)\s*\.)?(?:toUpperCase\(\)\s*\.)?startsWith\(\s*['"`]SELECT/i
+    expect("sql.trim().toUpperCase().startsWith('SELECT')").toMatch(selectPrefixGuard)
+    expect(code).not.toMatch(selectPrefixGuard)
     expect(code).not.toMatch(/isSelectOnly|assertSelectOnly|isReadOnlySql/i)
   })
 })
