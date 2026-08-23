@@ -32,6 +32,7 @@ const PINNED_WORKFLOWS = [
   // canonical references (already pinned before this sweep)
   'attendance-remote-storage-prod.yml',
   'attendance-remote-docker-gc-prod.yml',
+  'multitable-role-cascade-witness.yml',
 ]
 
 // docker-build.yml pins TWO SSH steps (sync + deploy); the rest pin exactly one.
