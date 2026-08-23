@@ -1,0 +1,38 @@
+name: Approval S1 Evidence Replay Gate
+
+# Hermetic contract lane for scripts/ops/approval-s1-evidence-replay-gate.test.mjs — the self-test
+# for .github/workflows/approval-s1-org-backfill-evidence.yml's read-only claim. Mirrors the
+# two-lane shape of multitable-o2-observation-kit.yml / -kit-realdb.yml exactly (closeout-plan-
+# review A-9(iv)): this lane is the FAST, no-database, no-secrets STATIC layer (parses the
+# workflow, extracts every psql -c payload, asserts the statement-head SELECT census + the
+# parser-floor assertion); the DB-backed execution proof (real read-only replay against a seeded
+# Postgres) lives in the sibling approval-s1-evidence-replay-gate-realdb.yml.
+#
+# NO pull_request path filter, matching multitable-o2-observation-kit.yml's own reasoning
+# verbatim: a path-filtered REQUIRED check strands every PR that never triggers it at "Expected —
+# waiting for status". This job is hermetic (checkout + setup-node only, same standalone shape as
+# the o2 contract job) and runs in well under a minute, so running it on every PR is free. Not
+# wired into branch protection by this change — promoting it to an actual required context is a
+# later owner/infra choice (closeout-plan-review A-9(iv)); this workflow only makes that promotion
+# possible by existing as an unfiltered, always-green-or-red check.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: s1-evidence replay gate contract (static census — no DB, no secrets)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic replay-gate tests (no DB, no hosts)
+        run: node --test scripts/ops/approval-s1-evidence-replay-gate.test.mjs
