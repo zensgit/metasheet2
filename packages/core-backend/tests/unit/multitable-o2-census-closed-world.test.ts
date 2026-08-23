@@ -155,7 +155,7 @@ function deriveAdapterTokens(srcRoot: string): readonly string[] {
 
   const base = [...new Set([...exported, STABILITY_CLASSIFIER_TOKEN])]
   const aliases = new Set<string>()
-  const aliasDeclaringFiles = new Map<string, string[]>()
+  const aliasDeclaringFiles = new Map<string, Set<string>>()
   for (const file of walkSourceFiles(srcRoot)) {
     const rel = path.relative(srcRoot, file).split(path.sep).join('/')
     if (rel === CLASSIFIER_MODULE) continue
@@ -171,7 +171,12 @@ function deriveAdapterTokens(srcRoot: string): readonly string[] {
       const normalized = body.replace(/\s+/g, ' ').trim().replace(/;$/, '')
       if (base.some((token) => new RegExp(`^return\\s+${token}\\s*\\(`).test(normalized))) {
         aliases.add(name)
-        aliasDeclaringFiles.set(name, [...(aliasDeclaringFiles.get(name) ?? []), rel])
+        // A Set, not an array: the same name declared TWICE IN ONE FILE (four such pairs
+        // exist in src today, none of them aliases) must not read as "two files" — that
+        // would false-red a required lane with a message naming one file twice.
+        const declaredIn = aliasDeclaringFiles.get(name) ?? new Set<string>()
+        declaredIn.add(rel)
+        aliasDeclaringFiles.set(name, declaredIn)
       }
     }
   }
@@ -186,10 +191,11 @@ function deriveAdapterTokens(srcRoot: string): readonly string[] {
   // it (an import of an unrelated export with the same name). Closing that needs per-file
   // token scoping in scanAdapterCallSites, which is a wider change than this slice.
   for (const alias of aliases) {
-    if (aliasDeclaringFiles.get(alias)!.length > 1) {
+    const declaredIn = [...aliasDeclaringFiles.get(alias)!].sort()
+    if (declaredIn.length > 1) {
       throw new Error(
         `token derivation: local alias '${alias}' is declared in more than one file `
-        + `(${aliasDeclaringFiles.get(alias)!.join(', ')}) — a bare-name token would count `
+        + `(${declaredIn.join(', ')}) — a bare-name token would count `
         + 'same-named calls across all of them; give the aliases distinct names',
       )
     }
