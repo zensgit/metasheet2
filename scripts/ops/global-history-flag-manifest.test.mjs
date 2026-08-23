@@ -49,6 +49,9 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_AGGREGATE_MAX_ROWS', // read-aggregation row cap
   'MULTITABLE_CAPABILITY_KEYS', // capability registry
   'MULTITABLE_ENABLE_CROSSBASE_MIRROR_WRITE', // cross-base mirror write (separate line)
+  'MULTITABLE_ENSURE_FIELDS_OVERWRITE_MODE', // P0-S S3: provisioning destructive-reconcile guard mode (refuse[default]|overwrite|observe|preserve) — not a Global-History/recovery flag
+  'MULTITABLE_ENSURE_FIELDS_REFUSED', // P0-S S3 destructive-reconcile refusal error code, not a flag
+  'MULTITABLE_PLUGIN_SHEET_SCOPE_MODE', // P0-S S4: plugin sheet-scope enforcement mode (observe|enforce) — not a Global-History/recovery flag
   'MULTITABLE_ENABLE_PERSONAL_VIEWS', // personal views (separate line)
   'MULTITABLE_FIELD_INPUT_TYPES', // field-input-type registry
   'MULTITABLE_FIELD_TYPES', // field-type registry
