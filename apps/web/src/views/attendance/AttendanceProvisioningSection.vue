@@ -84,6 +84,8 @@
         :full-width="true"
         input-id="attendance-provision-user-id"
         endpoint="/api/attendance-admin/users/search"
+        :org-id="props.orgId"
+        :global-scope="props.globalScope"
       />
       <label class="attendance__field" for="attendance-provision-role">
         <span>{{ tr('Role template', '角色模板') }}</span>
@@ -305,6 +307,8 @@ interface ProvisioningBindings {
 const props = defineProps<{
   provisioning: ProvisioningBindings
   tr: Translate
+  orgId?: string
+  globalScope?: boolean
 }>()
 
 const tr = props.tr

@@ -560,6 +560,10 @@ attendanceIntegrationDescribe(
         [[...seededImportIdentityIds]],
       ).catch(() => undefined)
       await settingsRowPool.query(
+        `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
+        [[...seededImportIdentityIds]],
+      ).catch(() => undefined)
+      await settingsRowPool.query(
         `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
         [[...seededImportIdentityIds]],
       ).catch(() => undefined)
@@ -14091,7 +14095,7 @@ attendanceIntegrationDescribe(
     )
   })
 
-  it('supports batch user resolve and returns missing ids for batch role operations', async () => {
+  it('requires explicit global scope and refuses partial batch role writes', async () => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
@@ -14100,7 +14104,14 @@ attendanceIntegrationDescribe(
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
 
-    const userSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1`, {
+    const unscopedSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    })
+    expect(unscopedSearchRes.status).toBe(400)
+
+    const userSearchRes = await requestJson(`${baseUrl}/api/attendance-admin/users/search?q=@&pageSize=1&scope=global`, {
       headers: {
         Authorization: `Bearer ${token}`,
       },
@@ -14120,6 +14131,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({
         userIds: [existingUserId, missingUserId],
+        scope: 'global',
       }),
     })
     expect(resolveRes.status).toBe(200)
@@ -14147,10 +14159,25 @@ attendanceIntegrationDescribe(
       body: JSON.stringify({
         userIds: [existingUserId, missingUserId],
         template: 'employee',
+        scope: 'global',
       }),
     })
-    expect(assignRes.status).toBe(200)
-    const assignData = (assignRes.body as {
+    expect(assignRes.status).toBe(404)
+
+    const assignExactRes = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        userIds: [existingUserId],
+        template: 'employee',
+        scope: 'global',
+      }),
+    })
+    expect(assignExactRes.status).toBe(200)
+    const assignData = (assignExactRes.body as {
       data?: {
         requested?: number
         eligible?: number
@@ -14160,10 +14187,9 @@ attendanceIntegrationDescribe(
         unchangedUserIds?: string[]
       }
     } | undefined)?.data
-    expect(assignData?.requested).toBe(2)
+    expect(assignData?.requested).toBe(1)
     expect(assignData?.eligible).toBe(1)
-    expect(Array.isArray(assignData?.missingUserIds)).toBe(true)
-    expect(assignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect(assignData?.missingUserIds).toEqual([])
     expect((assignData?.updated ?? -1) >= 0).toBe(true)
     expect(Array.isArray(assignData?.affectedUserIds)).toBe(true)
     expect(Array.isArray(assignData?.unchangedUserIds)).toBe(true)
@@ -14176,8 +14202,9 @@ attendanceIntegrationDescribe(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        userIds: [existingUserId, missingUserId],
+        userIds: [existingUserId],
         template: 'employee',
+        scope: 'global',
       }),
     })
     expect(unassignRes.status).toBe(200)
@@ -14190,12 +14217,268 @@ attendanceIntegrationDescribe(
         unchangedUserIds?: string[]
       }
     } | undefined)?.data
-    expect(unassignData?.requested).toBe(2)
+    expect(unassignData?.requested).toBe(1)
     expect(unassignData?.eligible).toBe(1)
-    expect(unassignData?.missingUserIds?.includes(missingUserId)).toBe(true)
+    expect(unassignData?.missingUserIds).toEqual([])
     expect(Array.isArray(unassignData?.affectedUserIds)).toBe(true)
     expect(Array.isArray(unassignData?.unchangedUserIds)).toBe(true)
     expect((unassignData?.affectedUserIds?.length ?? 0) + (unassignData?.unchangedUserIds?.length ?? 0)).toBe(unassignData?.eligible)
+  })
+
+  it('keeps delegated reads attendance-scoped and global role writes platform-only', async () => {
+    if (!baseUrl || !settingsRowPool) return
+
+    const orgA = `attendance-scope-a-${randomUUID()}`
+    const orgB = `attendance-scope-b-${randomUUID()}`
+    const actorId = randomUUID()
+    const localUserId = randomUUID()
+    const foreignUserId = randomUUID()
+    const identities = [actorId, localUserId, foreignUserId]
+    identities.forEach((id) => seededImportIdentityIds.add(id))
+
+    await settingsRowPool.query(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES
+         ($1, $4, $1, 'Delegated Attendance Admin', 'x', 'user', '["attendance:admin"]'::jsonb, true, false, 'activated', now(), now()),
+         ($2, $5, $2, 'Local Attendance User', 'x', 'admin', '["attendance:read","users:read"]'::jsonb, true, true, 'activated', now(), now()),
+         ($3, $6, $3, 'Foreign Attendance User', 'x', 'user', '[]'::jsonb, true, false, 'activated', now(), now())`,
+      [
+        actorId,
+        localUserId,
+        foreignUserId,
+        `${actorId}@scope.test`,
+        `${localUserId}@scope.test`,
+        `${foreignUserId}@scope.test`,
+      ],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES
+         ($1, $4, true),
+         ($2, $4, true),
+         ($2, $5, true),
+         ($3, $5, true)`,
+      [actorId, localUserId, foreignUserId, orgA, orgB],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_namespace_admissions (user_id, namespace, enabled)
+       VALUES ($1, 'attendance', true), ($2, 'attendance', true)`,
+      [actorId, localUserId],
+    )
+    await settingsRowPool.query(
+      `INSERT INTO user_roles (user_id, role_id)
+       VALUES
+         ($1, 'attendance_admin'),
+         ($2, 'admin'),
+         ($2, 'attendance_employee')`,
+      [actorId, localUserId],
+    )
+
+    const delegatedTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(actorId)}&tenantId=${encodeURIComponent(orgA)}&roles=attendance_admin&perms=attendance:admin`,
+    )
+    const delegatedToken = (delegatedTokenRes.body as { token?: string } | undefined)?.token
+    expect(delegatedToken).toBeTruthy()
+    if (!delegatedToken) return
+    const delegatedHeaders = {
+      Authorization: `Bearer ${delegatedToken}`,
+      'Content-Type': 'application/json',
+    }
+
+    const localSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&pageSize=100&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(localSearch.status).toBe(200)
+    const localItems = (localSearch.body as { data?: { items?: Array<Record<string, unknown>> } } | undefined)?.data?.items ?? []
+    expect(localItems.some((item) => item.id === localUserId)).toBe(true)
+    expect(localItems.some((item) => item.id === foreignUserId)).toBe(false)
+    const localSearchItem = localItems.find((item) => item.id === localUserId) ?? {}
+    expect(localSearchItem).not.toHaveProperty('role')
+    expect(localSearchItem).not.toHaveProperty('is_admin')
+    expect(localSearchItem).not.toHaveProperty('last_login_at')
+
+    const localAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(localAccess.status).toBe(200)
+    const localAccessData = (localAccess.body as {
+      data?: { user?: Record<string, unknown>; roles?: string[]; permissions?: string[]; isAdmin?: boolean }
+    } | undefined)?.data ?? {}
+    expect(localAccessData.roles).toEqual(['attendance_employee'])
+    expect(localAccessData.permissions?.every((code) => code.startsWith('attendance:'))).toBe(true)
+    expect(localAccessData.permissions).not.toContain('users:read')
+    expect(localAccessData).not.toHaveProperty('isAdmin')
+    expect(localAccessData.user).not.toHaveProperty('role')
+    expect(localAccessData.user).not.toHaveProperty('is_admin')
+    expect(localAccessData.user).not.toHaveProperty('last_login_at')
+
+    await settingsRowPool.query(
+      `UPDATE user_orgs SET is_active = false WHERE user_id = $1 AND org_id = $2`,
+      [actorId, orgA],
+    )
+    const inactiveActorSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveActorSearch.status).toBe(403)
+    await settingsRowPool.query(
+      `UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`,
+      [actorId, orgA],
+    )
+
+    const foreignOrgSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&orgId=${encodeURIComponent(orgB)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(foreignOrgSearch.status).toBe(403)
+
+    const delegatedGlobalSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=scope.test&scope=global`,
+      { headers: delegatedHeaders },
+    )
+    expect(delegatedGlobalSearch.status).toBe(403)
+
+    const scopedResolve = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/resolve`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId], orgId: orgA }),
+    })
+    expect(scopedResolve.status).toBe(200)
+    const scopedResolveData = (scopedResolve.body as {
+      data?: { items?: Array<{ id?: string }>; missingUserIds?: string[] }
+    } | undefined)?.data
+    expect(scopedResolveData?.items?.map((item) => item.id)).toEqual([localUserId])
+    expect(scopedResolveData?.missingUserIds).toEqual([foreignUserId])
+
+    const mixedAssign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: delegatedHeaders,
+      body: JSON.stringify({ userIds: [localUserId, foreignUserId], template: 'admin', orgId: orgA }),
+    })
+    expect(mixedAssign.status).toBe(403)
+    expect(mixedAssign.body).toMatchObject({
+      ok: false,
+      error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' },
+    })
+    const afterMixed = await settingsRowPool.query(
+      `SELECT user_id FROM user_roles
+       WHERE user_id = ANY($1::text[]) AND role_id = 'attendance_admin'`,
+      [[localUserId, foreignUserId]],
+    )
+    expect(afterMixed.rows).toEqual([])
+
+    const foreignAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(foreignUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(foreignAccess.status).toBe(404)
+    const nonexistentAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(randomUUID())}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(nonexistentAccess.status).toBe(404)
+    expect(nonexistentAccess.body).toEqual(foreignAccess.body)
+
+    await settingsRowPool.query(`UPDATE users SET is_active = false WHERE id = $1`, [localUserId])
+    const inactiveAccess = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/access?orgId=${encodeURIComponent(orgA)}`,
+      { headers: delegatedHeaders },
+    )
+    expect(inactiveAccess.status).toBe(404)
+    expect(inactiveAccess.body).toEqual(foreignAccess.body)
+    await settingsRowPool.query(`UPDATE users SET is_active = true WHERE id = $1`, [localUserId])
+
+    const delegatedAssign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/assign`,
+      {
+        method: 'POST',
+        headers: delegatedHeaders,
+        body: JSON.stringify({ template: 'admin', orgId: orgA }),
+      },
+    )
+    expect(delegatedAssign.status).toBe(403)
+
+    const delegatedUnassign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/unassign`,
+      {
+        method: 'POST',
+        headers: delegatedHeaders,
+        body: JSON.stringify({ template: 'employee', orgId: orgA }),
+      },
+    )
+    expect(delegatedUnassign.status).toBe(403)
+    const preserved = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+      [localUserId],
+    )
+    expect(preserved.rows).toHaveLength(1)
+
+    const platformTokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:admin`,
+    )
+    const platformToken = (platformTokenRes.body as { token?: string } | undefined)?.token
+    expect(platformToken).toBeTruthy()
+    if (!platformToken) return
+    const platformHeaders = {
+      Authorization: `Bearer ${platformToken}`,
+      'Content-Type': 'application/json',
+    }
+    const platformGlobalSearch = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/search?q=${encodeURIComponent(foreignUserId)}&scope=global`,
+      { headers: platformHeaders },
+    )
+    expect(platformGlobalSearch.status).toBe(200)
+    const platformItems = (platformGlobalSearch.body as {
+      data?: { items?: Array<{ id?: string }> }
+    } | undefined)?.data?.items ?? []
+    expect(platformItems.map((item) => item.id)).toContain(foreignUserId)
+
+    const missingUserId = randomUUID()
+    const mixedGlobalAssign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/assign`, {
+      method: 'POST',
+      headers: platformHeaders,
+      body: JSON.stringify({ userIds: [localUserId, missingUserId], template: 'admin', scope: 'global' }),
+    })
+    expect(mixedGlobalAssign.status).toBe(404)
+    const afterMixedGlobal = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_admin'`,
+      [localUserId],
+    )
+    expect(afterMixedGlobal.rows).toHaveLength(0)
+
+    const mixedGlobalUnassign = await requestJson(`${baseUrl}/api/attendance-admin/users/batch/roles/unassign`, {
+      method: 'POST',
+      headers: platformHeaders,
+      body: JSON.stringify({ userIds: [localUserId, missingUserId], template: 'employee', scope: 'global' }),
+    })
+    expect(mixedGlobalUnassign.status).toBe(404)
+    const afterMixedGlobalUnassign = await settingsRowPool.query(
+      `SELECT 1 FROM user_roles WHERE user_id = $1 AND role_id = 'attendance_employee'`,
+      [localUserId],
+    )
+    expect(afterMixedGlobalUnassign.rows).toHaveLength(1)
+
+    const platformAssign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/assign`,
+      {
+        method: 'POST',
+        headers: platformHeaders,
+        body: JSON.stringify({ template: 'admin', scope: 'global' }),
+      },
+    )
+    expect(platformAssign.status).toBe(200)
+    const platformUnassign = await requestJson(
+      `${baseUrl}/api/attendance-admin/users/${encodeURIComponent(localUserId)}/roles/unassign`,
+      {
+        method: 'POST',
+        headers: platformHeaders,
+        body: JSON.stringify({ template: 'admin', scope: 'global' }),
+      },
+    )
+    expect(platformUnassign.status).toBe(200)
   })
 
   it('supports attendance admin audit log filters and summary endpoint', async () => {

@@ -1679,6 +1679,8 @@
                     :search-placeholder="tr('Search the subject user', '搜索主体用户')"
                     input-id="attendance-scheduler-scope-subject-ref"
                     endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                   />
                   <label v-else class="attendance__field" for="attendance-scheduler-scope-subject-ref">
                     <span>{{ tr('Subject (role / role tag)', '主体（角色 / 角色标签）') }}</span>
@@ -1787,6 +1789,8 @@
                       input-id="attendance-scheduler-scope-target-users"
                       full-width
                       endpoint="/api/attendance-admin/users/search"
+                      :org-id="orgId"
+                      :global-scope="attendanceAdminGlobalUserScope"
                     />
                     <button
                       type="button"
@@ -5131,6 +5135,8 @@
                           :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
                           input-id="attendance-group-member-user-picker"
                           endpoint="/api/attendance-admin/users/search"
+                          :org-id="orgId"
+                          :global-scope="attendanceAdminGlobalUserScope"
                         />
                         <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
                           <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
@@ -5275,6 +5281,8 @@
                           :search-placeholder="tr('Search users to add as owner', '搜索要添加为负责人的用户')"
                           input-id="attendance-group-manager-user-picker"
                           endpoint="/api/attendance-admin/users/search"
+                          :org-id="orgId"
+                          :global-scope="attendanceAdminGlobalUserScope"
                         />
                         <label class="attendance__field" for="attendance-group-manager-role">
                           <span>{{ tr('Role', '角色') }}</span>
@@ -7203,6 +7211,8 @@
                   :search-placeholder="tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索')"
                   input-id="attendance-annual-balance-user"
                   endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
                 />
                 <!-- W5-1 / OD-W5-7: leave-type select drives the #4562-parameterized read path.
                      Closed set only (annual | comp_time); the handler re-validates before any
@@ -7412,6 +7422,8 @@
                     :full-width="false"
                     input-id="attendance-annual-bulk-adjust-user-picker"
                     endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -7737,6 +7749,8 @@
                   <AttendanceApprovalFlowStepsEditor
                     v-model="approvalFlowSteps"
                     :tr="tr"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                     :max-manager-chain-levels="approvalMaxManagerChainLevels"
                   />
                   <p v-for="(warn, i) in approvalFlowStepWarnings" :key="i" class="attendance__hint attendance__hint--warning" data-testid="attendance-approval-flow-warning">
@@ -8780,6 +8794,8 @@
                   :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
                   input-id="attendance-rotation-user"
                   endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
                 />
                 <label class="attendance__field" for="attendance-rotation-rule">
                   <span>{{ tr('Rotation rule', '轮班规则') }}</span>
@@ -9202,6 +9218,8 @@
                   :search-placeholder="tr('Search users for shift assignment', '搜索班次分配用户')"
                   input-id="attendance-assignment-user-id"
                   endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
                 />
                 <label class="attendance__field" for="attendance-assignment-shift-id">
                   <span>{{ tr('Shift', '班次') }}</span>
@@ -9383,6 +9401,8 @@
                     :full-width="false"
                     input-id="attendance-bulk-apply-user-picker"
                     endpoint="/api/attendance-admin/users/search"
+                    :org-id="orgId"
+                    :global-scope="attendanceAdminGlobalUserScope"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -9997,6 +10017,7 @@ import { useRouter } from 'vue-router'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
+import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
 import AttendanceShiftSegmentsEditor from './attendance/AttendanceShiftSegmentsEditor.vue'
 import AttendanceShiftFlexPolicyEditor from './attendance/AttendanceShiftFlexPolicyEditor.vue'
 import AttendanceSetupReadiness from './attendance/AttendanceSetupReadiness.vue'
@@ -12191,6 +12212,7 @@ let calendarEffectiveCacheKey: string | null = null
 // overwrite newer chip data.
 let calendarEffectiveLoadVersion = 0
 const auth = useAuth()
+const attendanceAdminGlobalUserScope = computed(() => auth.getAccessSnapshot().isAdmin)
 // Navigability audit fix 4: `useRouter()` resolves via Vue's provide/inject up to the app root
 // regardless of whether THIS component is the routed match — always available when the real app
 // mounts AttendanceView anywhere under its router-installed tree. Only `undefined` in isolated
@@ -14678,7 +14700,7 @@ const importPreviewSummaryCards = computed(() => [
   },
 ])
 
-const orgId = ref('')
+const orgId = ref(String(auth.buildAuthHeaders()['x-tenant-id'] || '').trim())
 const targetUserId = ref('')
 
 const {
@@ -17067,6 +17089,27 @@ function buildQuery(params: Record<string, string | undefined>): URLSearchParams
 function normalizedOrgId(): string | undefined {
   const value = orgId.value.trim()
   return value.length > 0 ? value : undefined
+}
+
+function requiredAttendanceAdminOrgId(): string {
+  const value = normalizedOrgId()
+  if (!value) throw new Error(tr('Select an organization first.', '请先选择组织。'))
+  return value
+}
+
+function attendanceAdminUserScopePayload(): { scope: 'global' } | { orgId: string } {
+  return attendanceAdminGlobalUserScope.value
+    ? { scope: 'global' }
+    : { orgId: requiredAttendanceAdminOrgId() }
+}
+
+function attendanceAdminUserScopeQuery(): string {
+  return new URLSearchParams(attendanceAdminUserScopePayload()).toString()
+}
+
+function canUseAttendanceAdminLegacyGlobalFallback(status: number, payload: unknown): boolean {
+  return attendanceAdminGlobalUserScope.value
+    && isAttendanceAdminEndpointUnavailable(status, payload)
 }
 
 function normalizedUserId(): string | undefined {
@@ -20997,6 +21040,8 @@ async function searchProvisionUsers(page: number) {
       page: String(page),
       pageSize: String(provisionSearchPageSize),
     })
+    const scope = attendanceAdminUserScopePayload()
+    Object.entries(scope).forEach(([key, value]) => params.set(key, value))
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -21040,8 +21085,9 @@ async function fetchProvisioningUser(userId: string) {
 }
 
 async function fetchProvisioningUserAccess(userId: string) {
-  const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access`)
-  if (response.status === 404) {
+  const response = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/access?${attendanceAdminUserScopeQuery()}`)
+  const data = await response.json().catch(() => null)
+  if (canUseAttendanceAdminLegacyGlobalFallback(response.status, data)) {
     // Backward compatibility: old deployments only support /api/permissions/user/:id
     await fetchProvisioningUser(userId)
     return
@@ -21050,7 +21096,6 @@ async function fetchProvisioningUserAccess(userId: string) {
     adminForbidden.value = true
     throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
-  const data = await response.json().catch(() => null)
   if (!response.ok || !data?.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load user access', '加载用户访问权限失败')))
   }
@@ -21088,14 +21133,14 @@ async function grantProvisioningRole() {
     // Prefer attendance-scoped role assignment (role templates) when available.
     const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
       method: 'POST',
-      body: JSON.stringify({ template: role }),
+      body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (modern.status !== 404) {
+    const modernData = await modern.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
       if (modern.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
         throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
       }
@@ -21142,14 +21187,14 @@ async function revokeProvisioningRole() {
     // Prefer attendance-scoped role unassignment when available.
     const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
       method: 'POST',
-      body: JSON.stringify({ template: role }),
+      body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (modern.status !== 404) {
+    const modernData = await modern.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
       if (modern.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const modernData = await modern.json().catch(() => null)
       if (!modern.ok || !modernData?.ok) {
         throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
       }
@@ -21201,10 +21246,11 @@ async function previewProvisionBatchUsers() {
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid }),
+      body: JSON.stringify({ userIds: valid, ...attendanceAdminUserScopePayload() }),
     })
 
-    if (response.status === 404) {
+    const data = await response.json().catch(() => null)
+    if (canUseAttendanceAdminLegacyGlobalFallback(response.status, data)) {
       // Backward compatibility: old deployments may not expose this endpoint.
       clearProvisionBatchPreview()
       provisionBatchPreviewRequested.value = valid.length
@@ -21216,7 +21262,6 @@ async function previewProvisionBatchUsers() {
       throw new Error(tr('Admin permissions required', '需要管理员权限'))
     }
 
-    const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to preview batch users', '批量预览用户失败')))
     }
@@ -21251,14 +21296,14 @@ async function grantProvisioningRoleBatch() {
   try {
     const batch = await apiFetch('/api/attendance-admin/users/batch/roles/assign', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid, template: role }),
+      body: JSON.stringify({ userIds: valid, template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (batch.status !== 404) {
+    const batchData = await batch.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(batch.status, batchData)) {
       if (batch.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
         throw new Error(readErrorMessage(batchData, tr('Failed to batch assign role', '批量分配角色失败')))
       }
@@ -21280,14 +21325,14 @@ async function grantProvisioningRoleBatch() {
       try {
         const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/assign`, {
           method: 'POST',
-          body: JSON.stringify({ template: role }),
+          body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
         })
-        if (modern.status !== 404) {
+        const modernData = await modern.json().catch(() => null)
+        if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
           if (modern.status === 403) {
             adminForbidden.value = true
             throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
-          const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
             throw new Error(readErrorMessage(modernData, tr('Failed to assign role', '分配角色失败')))
           }
@@ -21344,14 +21389,14 @@ async function revokeProvisioningRoleBatch() {
   try {
     const batch = await apiFetch('/api/attendance-admin/users/batch/roles/unassign', {
       method: 'POST',
-      body: JSON.stringify({ userIds: valid, template: role }),
+      body: JSON.stringify({ userIds: valid, template: role, ...attendanceAdminUserScopePayload() }),
     })
-    if (batch.status !== 404) {
+    const batchData = await batch.json().catch(() => null)
+    if (!canUseAttendanceAdminLegacyGlobalFallback(batch.status, batchData)) {
       if (batch.status === 403) {
         adminForbidden.value = true
         throw new Error(tr('Admin permissions required', '需要管理员权限'))
       }
-      const batchData = await batch.json().catch(() => null)
       if (!batch.ok || !batchData?.ok) {
         throw new Error(readErrorMessage(batchData, tr('Failed to batch remove role', '批量移除角色失败')))
       }
@@ -21373,14 +21418,14 @@ async function revokeProvisioningRoleBatch() {
       try {
         const modern = await apiFetch(`/api/attendance-admin/users/${encodeURIComponent(userId)}/roles/unassign`, {
           method: 'POST',
-          body: JSON.stringify({ template: role }),
+          body: JSON.stringify({ template: role, ...attendanceAdminUserScopePayload() }),
         })
-        if (modern.status !== 404) {
+        const modernData = await modern.json().catch(() => null)
+        if (!canUseAttendanceAdminLegacyGlobalFallback(modern.status, modernData)) {
           if (modern.status === 403) {
             adminForbidden.value = true
             throw new Error(tr('Admin permissions required', '需要管理员权限'))
           }
-          const modernData = await modern.json().catch(() => null)
           if (!modern.ok || !modernData?.ok) {
             throw new Error(readErrorMessage(modernData, tr('Failed to remove role', '移除角色失败')))
           }
@@ -27946,7 +27991,7 @@ async function resolveAttendanceGroupMemberLabels(groupId: string, members: Atte
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403 || response.status === 404) {
@@ -27978,7 +28023,7 @@ async function resolveAttendanceGroupManagerLabels(groupId: string, managers: At
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (attendanceGroupMemberGroupId.value !== groupId) return
     if (response.status === 403 || response.status === 404) {
@@ -28009,7 +28054,7 @@ async function resolveAttendanceAssignmentUserLabels() {
   try {
     const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
       method: 'POST',
-      body: JSON.stringify({ userIds }),
+      body: JSON.stringify({ userIds, ...attendanceAdminUserScopePayload() }),
     })
     if (seq !== attendanceAssignmentResolveSeq) return
     if (response.status === 403 || response.status === 404) {

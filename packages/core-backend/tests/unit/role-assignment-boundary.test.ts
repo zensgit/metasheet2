@@ -354,7 +354,7 @@ function mockResponse() {
 }
 
 /** Invoke a route's FINAL handler directly — the router-level guard is not under test here. */
-function invokeHandler(router: Router, method: 'post', routePath: string, req: Partial<Request>, res: Response) {
+function invokeHandler(router: Router, method: 'get' | 'post', routePath: string, req: Partial<Request>, res: Response) {
   const layer = (router as unknown as {
     stack: Array<{
       route?: {
@@ -378,28 +378,30 @@ const ROLE_ROUTES: Array<{ path: string; body: (roleId: string) => Record<string
   {
     path: '/api/attendance-admin/users/:userId/roles/assign',
     body: (roleId) => ({ roleId }),
-    template: { template: 'employee' },
+    template: { template: 'employee', scope: 'global' },
   },
   {
     path: '/api/attendance-admin/users/:userId/roles/unassign',
     body: (roleId) => ({ roleId }),
-    template: { template: 'employee' },
+    template: { template: 'employee', scope: 'global' },
   },
   {
     path: '/api/attendance-admin/users/batch/roles/assign',
     body: (roleId) => ({ userIds: [BATCH_USER_ID], roleId }),
-    template: { userIds: [BATCH_USER_ID], template: 'employee' },
+    template: { userIds: [BATCH_USER_ID], template: 'employee', scope: 'global' },
   },
   {
     path: '/api/attendance-admin/users/batch/roles/unassign',
     body: (roleId) => ({ userIds: [BATCH_USER_ID], roleId }),
-    template: { userIds: [BATCH_USER_ID], template: 'employee' },
+    template: { userIds: [BATCH_USER_ID], template: 'employee', scope: 'global' },
   },
 ]
 
 describe('attendance role routes are bounded by the router scope', () => {
   function installPg(seen: string[]) {
     pgMocks.query.mockReset()
+    pgMocks.transaction.mockReset()
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query.mockImplementation(async (sql: string) => {
       seen.push(sql)
       if (/FROM users/.test(sql)) {
@@ -414,6 +416,9 @@ describe('attendance role routes are bounded by the router scope', () => {
       }
       return { rows: [], rowCount: 0 }
     })
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.query }) => unknown) => (
+      handler({ query: pgMocks.query })
+    ))
   }
 
   // Every one of the four routes, not just the assign pair: an unbounded unassign can strip
@@ -455,10 +460,15 @@ describe('attendance role routes are bounded by the router scope', () => {
     // ONLY at the write would let an out-of-scope request return 200 on that path.
     const seen: string[] = []
     pgMocks.query.mockReset()
+    pgMocks.transaction.mockReset()
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
     pgMocks.query.mockImplementation(async (sql: string) => {
       seen.push(sql)
       return { rows: [], rowCount: 0 } // no eligible users
     })
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.query }) => unknown) => (
+      handler({ query: pgMocks.query })
+    ))
     const res = mockResponse()
     await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/batch/roles/assign', {
       body: { userIds: [BATCH_USER_ID], roleId: PLATFORM_ADMIN_ROLE_ID },
@@ -467,13 +477,14 @@ describe('attendance role routes are bounded by the router scope', () => {
     expect(res.statusCode).toBe(403)
     expect(res.body).toMatchObject({ ok: false, error: { code: 'ROLE_OUT_OF_SCOPE' } })
 
-    // POSITIVE CONTROL — the same zero-eligible-user path returns 200 for an in-scope grant,
-    // so the 403 above is the scope refusal and not the empty-batch path failing generally.
+    // POSITIVE CONTROL — the same missing-user path reaches the target-scope boundary for an
+    // in-scope grant, so the 403 above is the role refusal rather than a generic route failure.
     const control = mockResponse()
     await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/batch/roles/assign', {
-      body: { userIds: [BATCH_USER_ID], template: 'employee' },
+      body: { userIds: [BATCH_USER_ID], template: 'employee', scope: 'global' },
     }, control)
-    expect(control.statusCode).toBe(200)
+    expect(control.statusCode).toBe(404)
+    expect(control.body).toMatchObject({ ok: false, error: { code: 'USER_TARGET_NOT_FOUND' } })
   })
 
   it('a template grant that names an in-namespace role id is still accepted directly', async () => {
@@ -485,10 +496,146 @@ describe('attendance role routes are bounded by the router scope', () => {
     const res = mockResponse()
     await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/:userId/roles/assign', {
       params: { userId: BATCH_USER_ID },
-      body: { roleId: 'attendance_importer' },
+      body: { roleId: 'attendance_importer', scope: 'global' },
     }, res)
     expect(res.statusCode).toBe(200)
     expect(seen.filter((sql) => /INSERT INTO\s+user_roles/i.test(sql))).toHaveLength(1)
+  })
+})
+
+describe('attendance-admin user scope is explicit, org-bound and atomic with role writes', () => {
+  const ACTOR_ID = '10000000-0000-4000-8000-000000000010'
+  const LOCAL_USER_ID = '10000000-0000-4000-8000-000000000011'
+  const FOREIGN_USER_ID = '10000000-0000-4000-8000-000000000012'
+  const ORG_ID = 'org-a'
+
+  function resolvedUser(id: string) {
+    return {
+      id,
+      email: `${id}@example.test`,
+      name: id === LOCAL_USER_ID ? 'Local' : 'Foreign',
+      employeeNo: null,
+      department: null,
+      is_active: true,
+    }
+  }
+
+  it('refuses delegated global-role writes and keeps explicit platform-global writes atomic', async () => {
+    const transactionSql: string[] = []
+    const poolSql: string[] = []
+    const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      transactionSql.push(sql)
+      if (/uo\.user_id = \$1/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 }
+      if (/u\.id = ANY\(\$1::text\[\]\)/.test(sql)) {
+        const requested = (params?.[0] ?? []) as string[]
+        return { rows: requested.filter((id) => id === LOCAL_USER_ID).map(resolvedUser), rowCount: 1 }
+      }
+      if (/INSERT INTO user_roles/i.test(sql)) {
+        const requested = (params?.[0] ?? []) as string[]
+        return { rows: requested.map((user_id) => ({ user_id })), rowCount: requested.length }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+    pgMocks.query.mockReset()
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      poolSql.push(sql)
+      return { rows: [], rowCount: 0 }
+    })
+    pgMocks.transaction.mockReset()
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof txQuery }) => unknown) => (
+      handler({ query: txQuery })
+    ))
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+
+    const delegated = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/batch/roles/assign', {
+      user: { id: ACTOR_ID, role: 'user' },
+      body: { userIds: [LOCAL_USER_ID], template: 'employee', orgId: ORG_ID },
+    }, delegated)
+    expect(delegated.statusCode).toBe(403)
+    expect(delegated.body).toMatchObject({ ok: false, error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' } })
+    expect(transactionSql.filter((sql) => /INSERT INTO user_roles/i.test(sql))).toEqual([])
+
+    transactionSql.length = 0
+    const mixedGlobal = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/batch/roles/assign', {
+      user: { id: 'platform-admin', role: 'admin' },
+      body: { userIds: [LOCAL_USER_ID, FOREIGN_USER_ID], template: 'employee', scope: 'global' },
+    }, mixedGlobal)
+    expect(mixedGlobal.statusCode).toBe(404)
+    expect(transactionSql.filter((sql) => /INSERT INTO user_roles/i.test(sql))).toEqual([])
+
+    transactionSql.length = 0
+    const global = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'post', '/api/attendance-admin/users/batch/roles/assign', {
+      user: { id: 'platform-admin', role: 'admin' },
+      body: { userIds: [LOCAL_USER_ID], template: 'employee', scope: 'global' },
+    }, global)
+    expect(global.statusCode).toBe(200)
+    expect(transactionSql.filter((sql) => /INSERT INTO user_roles/i.test(sql))).toHaveLength(1)
+    expect(transactionSql.filter((sql) => /FOR SHARE OF u, uo/i.test(sql))).toEqual([])
+    expect(transactionSql.filter((sql) => /FOR SHARE OF u(?!,)/i.test(sql))).toHaveLength(1)
+    expect(poolSql.filter((sql) => /INSERT INTO user_roles/i.test(sql))).toEqual([])
+  })
+
+  it('requires either active org membership or an explicit platform-admin global request', async () => {
+    const seen: string[] = []
+    pgMocks.query.mockReset()
+    const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+      seen.push(sql)
+      if (/uo\.user_id = \$1/.test(sql)) {
+        return { rows: params?.[1] === ORG_ID ? [{ '?column?': 1 }] : [], rowCount: 1 }
+      }
+      if (/COUNT\(\*\)/.test(sql)) return { rows: [{ c: 1 }], rowCount: 1 }
+      if (/SELECT u\.id, u\.email/.test(sql)) return { rows: [resolvedUser(LOCAL_USER_ID)], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    })
+    pgMocks.query.mockRejectedValue(new Error('user-directory reads must stay on the transaction client'))
+    pgMocks.transaction.mockReset()
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof txQuery }) => unknown) => (
+      handler({ query: txQuery })
+    ))
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+
+    const unscoped = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {
+      user: { id: ACTOR_ID, role: 'user' },
+      query: {},
+    }, unscoped)
+    expect(unscoped.statusCode).toBe(400)
+    expect(unscoped.body).toMatchObject({ ok: false, error: { code: 'USER_SCOPE_REQUIRED' } })
+
+    const foreign = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {
+      user: { id: ACTOR_ID, role: 'user' },
+      query: { orgId: 'org-b' },
+    }, foreign)
+    expect(foreign.statusCode).toBe(403)
+
+    const delegatedGlobal = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {
+      user: { id: ACTOR_ID, role: 'user' },
+      query: { scope: 'global' },
+    }, delegatedGlobal)
+    expect(delegatedGlobal.statusCode).toBe(403)
+
+    const local = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {
+      user: { id: ACTOR_ID, role: 'user' },
+      query: { orgId: ORG_ID },
+    }, local)
+    expect(local.statusCode).toBe(200)
+    expect(seen.some((sql) => /JOIN user_orgs uo/.test(sql) && /uo\.org_id = \$1/.test(sql))).toBe(true)
+    expect(seen.some((sql) => /FOR SHARE OF u, uo/.test(sql))).toBe(true)
+    const orgListSql = seen.find((sql) => /SELECT u\.id, u\.email/.test(sql) && /JOIN user_orgs uo/.test(sql)) || ''
+    expect(orgListSql).not.toMatch(/u\.role|u\.is_admin|u\.last_login_at/)
+
+    const platformGlobal = mockResponse()
+    await invokeHandler(attendanceAdminRouter(), 'get', '/api/attendance-admin/users/search', {
+      user: { id: 'platform-admin', role: 'admin' },
+      query: { scope: 'global' },
+    }, platformGlobal)
+    expect(platformGlobal.statusCode).toBe(200)
   })
 })
 
@@ -555,6 +702,7 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
   /** Serves the seam's reads by SQL shape, so neither leg depends on a call-ordering count. */
   function installDelegationPg(seen: string[], actorRoleId: string, targetRoleId: string) {
     pgMocks.query.mockReset()
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
     pgMocks.query.mockImplementation(async (sql: string) => {
       seen.push(sql)
       // `isUserWithinDelegatedScope` — also names the scopes table, so it is matched first.

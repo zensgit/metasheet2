@@ -28,6 +28,10 @@ interface UseAttendanceAdminUsersOptions {
    * delegated attendance admin who is not a platform admin can still search.
    */
   endpoint?: string
+  /** Required by the delegated attendance-admin directory; kept reactive as org selection changes. */
+  orgId?: Readonly<Ref<string | undefined>>
+  /** Platform administrators must opt into the wider directory explicitly. */
+  globalScope?: Readonly<Ref<boolean>>
 }
 
 function defaultTranslate(en: string): string {
@@ -62,6 +66,8 @@ export function useAttendanceAdminUsers({
   apiFetch = defaultApiFetch,
   tr = defaultTranslate,
   endpoint = '/api/admin/users',
+  orgId,
+  globalScope,
 }: UseAttendanceAdminUsersOptions = {}) {
   const users = ref<AttendanceAdminUserSearchItem[]>([])
   const searchQuery = ref('')
@@ -76,6 +82,19 @@ export function useAttendanceAdminUsers({
       const normalizedQuery = query.trim()
       if (normalizedQuery) {
         params.set('q', normalizedQuery)
+      }
+      if (endpoint === '/api/attendance-admin/users/search') {
+        if (globalScope?.value === true) {
+          params.set('scope', 'global')
+        } else {
+          const scopedOrgId = orgId?.value?.trim() || ''
+          if (!scopedOrgId) {
+            users.value = []
+            statusMessage.value = tr('Select an organization first', '请先选择组织')
+            return
+          }
+          params.set('orgId', scopedOrgId)
+        }
       }
       const response = await apiFetch(`${endpoint}${params.size ? `?${params.toString()}` : ''}`)
       if (response.status === 403) {
