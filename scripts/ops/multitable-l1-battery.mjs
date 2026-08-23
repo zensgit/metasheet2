@@ -150,7 +150,7 @@ const DEFAULT_TIMEOUT_MS = 20_000
 // ---------------------------------------------------------------------------
 // THE SURFACE LEDGER
 //
-// Every one of the 48 census sites in
+// Every one of the 55 census sites in
 // packages/core-backend/tests/unit/lib/recovery-census-table.ts appears EXACTLY ONCE below —
 // either attached to a driven surface, or in NOT_DRIVEN_SITES with a concrete reason. The
 // hermetic guard re-parses that census file and asserts set-equality, so a newly-registered
@@ -510,40 +510,117 @@ export const NOT_DRIVEN_SITES = Object.freeze([
   { site: 'admin-directory:batch-unbind', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; refuses before any recovery-authority write unless a directory integration is configured.' },
   { site: 'admin-directory:deprovision-restore', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
   { site: 'admin-directory:compensate-deny', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
+  // --- O2-D1 denominator slice (2026-08-23): the seven sites added when
+  // routes/univer-meta.ts and auth/AuthService.ts entered the census denominator.
+  //
+  // The five univer-meta sites are NOT excused as unreachable: all three tables they write
+  // (spreadsheet_permissions / field_permissions / record_permissions) DO carry
+  // recovery-authority triggers, so a 40001 is constructible at every one of them and each
+  // already answers the exact uniform 409. They are excused on FIXTURE COST alone — the
+  // battery builds users/roles/permissions fixtures, not a univer spreadsheet with sheets,
+  // fields and records.
+  //
+  // Whether the battery SHOULD grow to drive them is deliberately NOT decided here: the
+  // driven-surface set is what an L1 battery PASS attests, and that set is cited by the
+  // RATIFIED enablement-ladder doc. Widening it changes the meaning of the L1 gate, which
+  // is an owner amendment, not a mechanical ledger edit. Raised on the owner sheet instead.
+  {
+    site: 'univer-meta:sheet-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT sheet permissions writes spreadsheet_permissions, guarded by trg_spreadsheet_permissions_recovery_authority_lock — a 40001 IS constructible here and the route already answers the uniform 409. Excused only because driving it needs a univer spreadsheet + sheet fixture this battery does not build.',
+  },
+  {
+    site: 'univer-meta:field-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT field permissions writes field_permissions, guarded by trg_field_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + field fixture cost.',
+  },
+  {
+    site: 'univer-meta:config-restore-execute',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'POST config-restore-execute reaches field_permissions / spreadsheet_permissions through applyPermissionDeEscalation, both trigger-guarded. This is the site whose outer catch did NOT classify until #5114 — its 40001 landed as an unmapped 500. Excused only on fixture cost: driving it needs a spreadsheet with a restorable config snapshot. Its behaviour leg asserts the 409 directly.',
+  },
+  {
+    site: 'univer-meta:record-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT record permissions writes record_permissions, guarded by trg_record_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + record fixture cost.',
+  },
+  {
+    site: 'univer-meta:record-permissions-delete',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'DELETE record permission deletes from record_permissions, same trigger and same lease key as univer-meta:record-permissions-put. Excused only on the same univer sheet + record fixture cost.',
+  },
+  {
+    site: 'auth-service:register-user-roles',
+    reason: 'unknowable-lease-key',
+    detail:
+      'Service half of the already-excused auth:register — AuthService.register mints the new user id with crypto.randomUUID() inside the transaction, so the battery cannot hold a lease on the subject the users/user_roles triggers key on. This site is the bounded in-transaction retry, which surfaces a typed UserRoleAssignmentRecoveryBusyError rather than a 409.',
+  },
+  {
+    site: 'auth-service:self-service-backfill',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'The read-path RBAC backfill in resolveRbacProfile writes user_roles — the SAME table and the SAME lease key as admin-users:role-assign, which IS driven. Excused because reaching it needs a user that is MISSING the self-service role while attendance self-service is enabled, a state the battery does not construct. Like the register site, it surfaces a typed throw, not a 409.',
+  },
 ])
 
 /**
  * THE SECOND ANTI-DRIFT AXIS — trigger coverage.
  *
  * The census-site ledger above is anchored on `recovery-census-table.ts`, which registers WRITE
- * SURFACES. That axis has a hole its own construction guarantees: `field_permissions` and
- * `record_permissions` carry recovery-authority triggers but have NO census row at all, so no
- * amount of census set-equality can ever notice that the battery never touches them. L1 is a
- * statement about the NINE TRIGGERS, so the nine triggers get their own explicit accounting.
+ * SURFACES, and its set-equality only proves each site is ACCOUNTED FOR — driven or excused. It
+ * says nothing about whether a given TRIGGER ever fired: a table whose every census site sits in
+ * NOT_DRIVEN_SITES passes the census axis untouched, and that is exactly the state
+ * `field_permissions` and `record_permissions` are in today. L1 is a statement about the NINE
+ * TRIGGERS, so the nine triggers get their own explicit accounting.
  *
  * Every trigger in `EXPECTED_AUTHORITY_TRIGGERS` must be either exercised by a driven surface or
  * named here with a reason; the hermetic guard asserts that partition is exact and disjoint. The
  * battery therefore cannot silently claim trigger-level coverage it does not have — and the
  * verdict line prints the ratio rather than letting "11/11 surfaces" be misread as "9/9 triggers".
+ *
+ * ENTRY SHAPE — a machine-checkable claim, not just prose (the reason this shape exists):
+ * the first two entries below used to justify themselves with "the table has no row in
+ * recovery-census-table.ts, so there is no census-anchored HTTP surface to drive". That was true
+ * when written and became FALSE the moment `routes/univer-meta.ts` entered the census — and
+ * NOTHING failed, because nothing checked an exemption's justification. The excuse would have
+ * shipped verbatim into `trigger_coverage.not_exercised` of every future evidence artefact.
+ *
+ * So the census-anchoring half of each justification is no longer prose. `censusAnchoredSites`
+ * states, as data, exactly which registered census sites target this trigger's table; the hermetic
+ * guard checks that claim against the parsed census (and against NOT_DRIVEN_SITES) on every run,
+ * so an entry that stops being true reds instead of rotting. Prose stays in `detail`, where it can
+ * only ever ADD colour to a claim the machine already verified — mirroring the `reason` (enum) +
+ * `detail` (prose) shape NOT_DRIVEN_SITES already uses.
  */
 export const TRIGGER_COVERAGE_EXEMPTIONS = Object.freeze([
   {
     trigger: 'trg_field_permissions_recovery_authority_lock',
     table: 'field_permissions',
-    reason:
-      'No registered recovery-conflict write surface targets field_permissions — the table has no row in recovery-census-table.ts, so there is no census-anchored HTTP surface to drive. The trigger is installed and armed; it is simply never exercised end-to-end by this battery.',
+    reason: 'orthogonal-fixture-cost',
+    censusAnchoredSites: ['univer-meta:field-permissions-put', 'univer-meta:config-restore-execute'],
+    detail:
+      'REACHABLE, not inert — do not read this entry as "no surface exists". Two registered census sites write field_permissions: PUT field-permissions directly, and config-restore-execute through applyPermissionDeEscalation. Both go through the subject-dispatch trigger function (metasheet_recovery_authority_subject_trigger), so a 40001 is constructible at either and both routes already answer the uniform 409. Excused only on fixture cost: this battery builds users/roles/permissions fixtures, not a univer spreadsheet with sheets and fields — which is why both sites are ALSO carried in NOT_DRIVEN_SITES on the same orthogonal-fixture-cost reason. Note what is and is not missing: the trigger FUNCTION is exercised end-to-end by the driven spreadsheet_permissions surfaces, which fire the same function — though only down its subject_type "user" branch, so the role and member-group dispatch arms go unfired too. What is untested here is the installation of this trigger on this table.',
   },
   {
     trigger: 'trg_record_permissions_recovery_authority_lock',
     table: 'record_permissions',
-    reason:
-      'No registered recovery-conflict write surface targets record_permissions — the table has no row in recovery-census-table.ts, so there is no census-anchored HTTP surface to drive. The trigger is installed and armed; it is simply never exercised end-to-end by this battery.',
+    reason: 'orthogonal-fixture-cost',
+    censusAnchoredSites: ['univer-meta:record-permissions-put', 'univer-meta:record-permissions-delete'],
+    detail:
+      'REACHABLE, not inert — same posture as the field_permissions twin. Two registered census sites write record_permissions (PUT and DELETE record permissions), both dispatching through metasheet_recovery_authority_subject_trigger, both constructible, both already answering the uniform 409. Excused only on fixture cost: driving them needs a univer spreadsheet with sheets and records, which this battery does not build — so both sites are carried in NOT_DRIVEN_SITES on the same orthogonal-fixture-cost reason. As above, the trigger FUNCTION is exercised by the driven spreadsheet_permissions surfaces (subject_type "user" branch only); the installation of this trigger on this table is what goes untested.',
   },
   {
     trigger: 'trg_users_recovery_authority_lock_lifecycle',
     table: 'users',
-    reason:
-      'Fires on INSERT and DELETE of users. Every HTTP path that inserts a user mints its id server-side (crypto.randomUUID in AuthService.register and in POST /api/admin/users), so no lease can be pre-held on the subject the trigger keys on; and no admin HTTP endpoint DELETEs a user at all. Unlike the UPDATE-side twin (trg_users_..._lock_update, which IS driven), this one is not reachable with a knowable lease key.',
+    reason: 'unknowable-lease-key',
+    censusAnchoredSites: ['auth:register', 'admin-users:create-user'],
+    detail:
+      'Fires on INSERT and DELETE of users. Every HTTP path that inserts a user mints its id server-side (crypto.randomUUID in AuthService.register and in POST /api/admin/users), so no lease can be pre-held on the subject the trigger keys on; and no admin HTTP endpoint DELETEs a user at all. Unlike the UPDATE-side twin (trg_users_..._lock_update, which IS driven), this one is not reachable with a knowable lease key. Census-anchored surfaces DO exist — the two INSERT sites named above — which is precisely why the cap is the lease key and not the absence of a surface.',
   },
 ])
 
@@ -563,7 +640,12 @@ export function triggerCoverage(expected = EXPECTED_AUTHORITY_TRIGGERS) {
     exercised_count: exercised.length,
     total_count: expected.length,
     exercised,
-    not_exercised: TRIGGER_COVERAGE_EXEMPTIONS.map((entry) => ({ ...entry })),
+    not_exercised: TRIGGER_COVERAGE_EXEMPTIONS.map((entry) => ({
+      ...entry,
+      // Deep-copy the claim array: the module-level freeze is shallow, so a spread alone would
+      // hand every evidence consumer a live reference to the ledger's own array.
+      censusAnchoredSites: [...entry.censusAnchoredSites],
+    })),
   }
 }
 
