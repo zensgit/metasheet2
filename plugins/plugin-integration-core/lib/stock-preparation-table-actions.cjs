@@ -47,6 +47,7 @@ const {
 const {
   extFieldMappingTargetIds,
   isNormalizedExtFieldMapping,
+  summarizeExtFieldMappingForEvidence,
 } = require('./stock-preparation-ext-field-mapping.cjs')
 const {
   normalizeStockPrepApplyProductionPolicy,
@@ -818,6 +819,46 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // band, the refresh writes strictly FEWER columns rather than more. That is why the seam
 // degrades to `undefined` on any ledger/host read failure instead of failing the refresh.
 // See derivePackAwarePlmWritableFields in the conflict planner.
+//
+// `extFieldMapping` (OPTIONAL) is the third input of the same family and is threaded the same way:
+// produced once at route registration from server config (stock-preparation-ext-field-mapping-
+// config.cjs), never built here, never request-influenced. Absent -> `rowFromPart` adds no key.
+//
+// THE TWO MUST TRAVEL TOGETHER OR NOT AT ALL. `installedFieldProperties` decides whether an `ext_`
+// column is in the planner's writable band; `extFieldMapping` decides whether a row carries an
+// `ext_` value at all. Supply the mapping without the bands and the expansion produces values the
+// planner then drops on the floor — the same "built but never reached" defect one layer down.
+// Supply the bands without the mapping and the refresh widens over columns nothing fills. On the
+// SMALL route both are resolved per request, immediately before one in-process expansion, so they
+// cannot disagree, and they are wired together here.
+//
+// THE LARGE-BOM CHECKPOINT PATH IS STILL UNWIRED, AND THAT IS NOT "INERT". It supplies neither
+// input. Because `installedFieldProperties` is absent the planner's band is template-only
+// (derivePackAwarePlmWritableFields, packAware=false), so `pickFields` leaves every `ext_` id out of
+// the update patch — and a patch does not blank what it omits. Any `ext_` value an earlier SMALL-
+// path refresh wrote SURVIVES while every canonical column around it moves to today's source: the
+// row reads fresh and its tenant columns sit at an older epoch. Nor is the path an operator's
+// choice, or even stable — `read_time_limit_exceeded` is a bounded-expansion trigger, so one
+// unchanged project can go small one day and large the next because the source was slow. The two
+// large-BOM route families therefore stamp a conditional, values-free
+// `extFieldMappingConfiguredButNotAppliedOnThisPath` notice onto every response
+// (`largeBomJobResponse` in http-routes.cjs) so the divergence is announced rather than silent.
+//
+// WHAT ACTUALLY REMAINS OPEN, stated precisely, because the earlier version of this note overstated
+// it and risked deferring a small change forever:
+//   * the mapping does NOT need to enter `job.actionSnapshot`. `installedFieldProperties` does not
+//     either — `planLargeBomBackgroundExpansionJob` takes it as an ordinary runtime parameter — so
+//     "a branded object cannot survive `cloneJson`" was never the obstacle.
+//   * the mapping's OUTPUT is already revision-covered: `expansionArtifactRevision` hashes
+//     `expansion.rows`, so rows produced under a different mapping produce a different
+//     `artifactRevision`. Only the mapping's IDENTITY (mappingId/mappingVersion) is uncovered.
+//   * the one genuinely open item is that plan-time bands are read LIVE in a later request than the
+//     one that sealed the artifact. That is a PRE-EXISTING property of `installedFieldProperties` on
+//     this path, not something the mapping introduces — the same seam was already unwired here
+//     before any mapper existed.
+// So wiring this is threading two existing runtime parameters plus stamping the mapping id into the
+// job for evidence; it is not migration-shaped. It is out of scope here only because it needs its
+// own route-level tests for the stale-artifact case.
 async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   const expansion = await expandPlmProjectBom({
@@ -836,7 +877,11 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
   const hasHardRowErrors = hasHardApplyBlockingRowErrors(expansion)
   if (expansion.status === 'not_found') {
     const revision = buildRevision({ action, parameters, expansion, existingRows: [] })
-    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors }
+    // `extFieldMapping` rides this early return too. Without it the evidence stanza would appear or
+    // vanish according to whether the PROJECT exists in the source, which is a property of the data;
+    // whether a mapping is configured is a property of the deployment, and evidence should only ever
+    // report the second.
+    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
@@ -865,10 +910,15 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     canApply: !hasGlobalErrors && !hasHardRowErrors,
     hasGlobalErrors,
     conflictPolicyReview,
+    // Returned so evidence can name WHICH mapping produced the `ext_` half of these rows. It is not
+    // an input to `buildRevision`: the revision already covers the expansion the mapping produced,
+    // and hashing the mapping as well would move every stored revision for deployments that have
+    // none.
+    extFieldMapping,
   }
 }
 
-function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview }) {
+function evidenceForDryRun({ action, parameters, expansion, plan, revision, canApply, conflictPolicyReview, extFieldMapping }) {
   const planEvidence = summarizeConflictPlanForEvidence(plan)
   if (planEvidence && conflictPolicyReview) planEvidence.conflictPolicyReview = conflictPolicyReviewForEvidence(conflictPolicyReview, plan)
   return {
@@ -878,6 +928,10 @@ function evidenceForDryRun({ action, parameters, expansion, plan, revision, canA
     canApply: canApply === true,
     expansion: summarizeBomExpansionForEvidence(expansion),
     plan: planEvidence,
+    // CONDITIONAL, so a deployment with no mapping produces byte-identical evidence to the one it
+    // produced before this key existed. With a mapping the projection is the module's own
+    // values-free one: schema ids, coercion types and counts, never a source cell.
+    ...(extFieldMapping ? { extFieldMapping: summarizeExtFieldMappingForEvidence(extFieldMapping) } : {}),
   }
 }
 
@@ -916,6 +970,12 @@ async function dryRunStockPreparationAction(input = {}) {
     runOnlyReview,
     tableScopeReview,
     installedFieldProperties: input.installedFieldProperties,
+    // The RUNTIME half of "this action writes tenant columns". Server-held, resolved once at route
+    // registration (stock-preparation-ext-field-mapping-config.cjs) and threaded — never fetched
+    // here, and never request-influenced. Absent/null is the default and reproduces the pre-mapper
+    // row shape exactly; `computeDryRun` reconciles a present one against `action.extensionFieldIds`
+    // before a single row is read.
+    extFieldMapping: input.extFieldMapping,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -943,6 +1003,7 @@ async function dryRunStockPreparationAction(input = {}) {
       revision: dryRun.revision,
       canApply: dryRun.canApply,
       conflictPolicyReview: dryRun.conflictPolicyReview,
+      extFieldMapping: dryRun.extFieldMapping,
     }),
   }
 }
@@ -963,6 +1024,14 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     runId: input.runId,
     runOnlyReview: null,
     tableScopeReview: null,
+    // `extFieldMapping` is NOT wired here, deliberately, and for a different reason than the
+    // large-BOM path: this handoff never writes the canonical sheet. It feeds the MetaSheet-internal
+    // MVP snapshot tables through stock-preparation-expansion-snapshot-mapper.cjs, which projects
+    // each expansion row onto a CLOSED snapshot-line vocabulary (`toSnapshotLine` / `sourceIdentity`
+    // name every key they read). A tenant `ext_` key is not in it, so wiring the mapping here would
+    // coerce values that the very next function drops — production for no consumer, which is the
+    // defect this change exists to remove, not to reproduce. Carrying `ext_` into a snapshot line is
+    // a snapshot-schema change with its own migration.
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -986,6 +1055,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
       revision: dryRun.revision,
       canApply: dryRun.canApply,
       conflictPolicyReview: dryRun.conflictPolicyReview,
+      extFieldMapping: dryRun.extFieldMapping,
     }),
   }
 }
@@ -1116,6 +1186,10 @@ async function applyStockPreparationAction(input = {}) {
     runOnlyReview,
     tableScopeReview,
     installedFieldProperties: input.installedFieldProperties,
+    // Apply RE-EXPANDS the source and compares the recomputed revision against the token, so it must
+    // expand with the SAME mapping the dry-run used. Passing it on one path and not the other would
+    // turn every apply into a TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+    extFieldMapping: input.extFieldMapping,
   })
   if (tokenRecord.revision !== dryRun.revision) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
@@ -1164,6 +1238,7 @@ async function applyStockPreparationAction(input = {}) {
         revision: dryRun.revision,
         canApply: dryRun.canApply,
         conflictPolicyReview: dryRun.conflictPolicyReview,
+        extFieldMapping: dryRun.extFieldMapping,
       }),
       apply: summarizeApplyResultForEvidence(applyResult),
     },
