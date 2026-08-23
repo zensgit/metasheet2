@@ -973,7 +973,7 @@ CI 终态 **19/19 pass / 0 fail**(`test (20.x)` 28m48s、`test (18.x)` 15m55s—
 
 ### 15.2 S1 只读采集(run `32647875353`,log 归档 `soak-working/s1-org-evidence-run7-*.log`)
 
-staging 首次被测:`u1a_distinct_active_orgs=4`、`u1a_multi_org_active_users=0`、`u1b=6`(拆分 5 无行 + 1 仅停用行,恒等成立)、`u1c_non_default_integration_rows=0`、`p10_instances_total=31`、**`u3_attendance_{records,requests}_org_id_not_in_user_orgs=0/0`**、`verdict=NOT_APPLIED`。prod 同 run 复读:271/271、p20=0、u1b 及双拆分 0、u1a=1、`verdict=APPLIED`。
+staging 首次被测:`u1a_distinct_active_orgs=4`、`u1a_multi_org_active_users=0`、`u1b=6`(拆分 5 无行 + 1 仅停用行,恒等成立)、`u1c_non_default_integration_rows=0`、`p10_instances_total=31`、**`u3_attendance_{records,requests}_org_id_not_in_user_orgs=0/0`**、`verdict=NOT_APPLIED`。prod 同 run 复读:**274/274**(run 6 时为 271/271——三行新实例在此期间创建且**全部带 org 盖章**,这是写入点在生产上的活证据)、p20=0、u1b 及双拆分 0、u1a=1、`verdict=APPLIED`。
 
 **判读约束**:staging 的 `u1a=4` 不是缺陷,是 staging 的既有形态;它使那三个迁移的单 org 前提**在 staging 不成立**,故其 (i)-guard 会按设计 ABORT——这是 ruled 行为的正确触发,不是回归。**U3′=0/0 满足了 Lock-11 的那条 ratified 激活前置,但仅对 staging 与 prod 的当前人口成立,不是不变量。**
 

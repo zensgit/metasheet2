@@ -1770,8 +1770,7 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 ### 13.1 独立 max-effort 审阅(fable-5,max effort)
 
 对「收尾做法」本身的对抗审阅,报告耐久于 `soak-working/closeout-plan-review-20260823.md`
-(另一份更早的 `closeout-approach-review-20260822.md` 针对上一版计划)。裁定
-**PLAN-NEEDS-AMENDMENTS**,九条修正皆为加法。其中三条改变了计划形状:
+(另一份更早的 `closeout-approach-review-20260822.md` 针对上一版计划)。裁定 **NEEDS-AMENDMENTS**(0822 那份对上一版计划的报告用的是 `PLAN-NEEDS-AMENDMENTS`,两者不可混引),九条修正皆为加法。其中三条改变了计划形状:
 
 - **A-1(最高价值)**:**§8-U3′ 是 RATIFIED 的激活前置**(Lock-11 §5 激活行:「no gate detects field divergence」),却在计划里毫无排期;而当时正在改证据作业的 S0 是零边际成本载体。**已即刻课程纠正折入 S0**,并已实测(§13.3)。
 - **A-2**:`afs:` 处置必须进激活步。今日 prod 零 `afs:` 行,故激活不使任何现存单据变暗;但激活后**第一张退款单**会创建 NULL-org 的 `afs:` 行并对其审批人不可读(W-3 是零写臂)。**且阶段 3 的 CHECK 必须带 `OR id LIKE 'afs:%'`**,否则首张退款单 INSERT 即 500。owner 决策项。
@@ -1823,13 +1822,15 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 
 (a) **staging 归并至单 org**——与 prod 同构,迁移原样跑通,pin 可真实演练;代价=多 org 测试资产消失(须先盘点那 4 个 org 的归属与用量)。
 (b) **守卫放宽为逐 org 解析**——staging 保留多 org,且这是产品未来真形态;代价=**合同变更**,ratify-first + Migration B 全门重跑 + 需另证 prod 行为不变。
-(c) **只部署代码、不跑那三个迁移**——审批线大部分今日可测;代价=org pin 无法在 staging 激活,S1 可读性线无法验证。
+(c) **只部署代码、不跑那三个迁移**——**此选项无实现机制**:`migrate.ts` 只暴露只读的 `--list`/`--confirm`,没有「跑一部分」的入口;实际形态是 migrate 中途 ABORT、窗口以 `pending≠0` 收场。且新 head 的 pending 是 13 而非 3,「那三个」本身就是错的分母。保留在此仅为记录其不可行,不作为可选项。
 
 会话建议 (a),前提是那 4 个 org 无人在用;理由:staging 的价值在于同构演练激活,多 org 反而使其无法充当排练场,而多 org 支持应是产品线独立课题,不宜在收尾期借道 staging 改合同。
 
 ### 13.6 staging 迁移闸的真相(纠正三处既有误解)
 
-① pending 是 **6**(不是 05-19 审计的 77;该审计已完全过时);② `do_not_run_full_migrate` 由两个 `DROP CONSTRAINT IF EXISTS` 惯用法被扫描器判为高危触发,属**假阳性**,故 `action=deploy` 永远自停,设计正解是 `action=migrate`(pg_dump → 同容器克隆排练 → 排练绿才真应用);③ **owner 已批过一半**:AM105 裁决指定审批线为那 6 个迁移的唯一执行者并定了顺序,但 staging 冻结在 `5e9a15f02e`——推新 head 属 AM105 之外,需新授权。
+① pending 是 **6 —— 但这是镜像作用域的数**(`migrate.ts commandList()` 读的是**运行中容器**里的迁移文件,而 staging 冻结在 `5e9a15f02e`,故 6 被算术性冻结;05-19 审计的 77 已完全过时)。**一旦推到新 head,pending 变 13**(`comm -13` 实测:main 上另有 7 个迁移不在该镜像树内——S1 org_id、recovery search_path、approval_comments、attachments binding、provisioning、Migration B、gap-closer)。审阅原文说的是「all pending」,本文初稿丢了这个限定词——属 `finding_staging_pending_is_image_scoped` 记录过的同一类错误;② `do_not_run_full_migrate` 由两个 `DROP CONSTRAINT IF EXISTS` 惯用法被扫描器判为高危触发,属**假阳性**,故 `action=deploy` 永远自停——**但要注意它在闸之前已经 pull 并 `up -d backend web`**(镜像先落地,即 AM104 记录的那种伤害),设计正解是 `action=migrate`(pg_dump → 同容器克隆排练 → 排练绿才真应用);③ **owner 已批过一半**:AM105 裁决指定审批线为那 6 个迁移的唯一执行者并定了顺序,但 staging 冻结在 `5e9a15f02e`——推新 head 属 AM105 之外,需新授权。
+
+**S0 合并的副作用(A-9(v) 要求记录)**:#5129 的 squash 触发了 `docker-build.yml` 的自动部署(run `32647812986` @ `e6426bcd91`,deploy 作业 success,合并后 2 秒)——`paths-ignore` 只含 `docs/**`/`output/**`,故工作流/脚本改动照常触发 prod 部署。该 PR 不含任何运行时源码,迁移无新增,行为无变化;记录在此以免「docs 类改动不部署」的误读。
 
 ### 13.7 本段之后仍未执行的(防「收尾完成」误读)
 
