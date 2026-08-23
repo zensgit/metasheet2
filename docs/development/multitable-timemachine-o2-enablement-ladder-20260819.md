@@ -141,7 +141,16 @@ hermetic 守卫 13 测试在无 node_modules 纯净树 13/13,已接入 obs-kit c
 ### A1.1 修正内容（仅两处，其余判据一字不动）
 
 - **L1（staging）观察窗**：「≥2 日历日」→「**≥1 日历日 + L1 演练电池 PASS**」。
-- **生产 L1**（经 L7+「同判据」继承）：同上替代。
+- **生产 L1**:**A1 不覆盖生产**(2026-08-22 深审后收窄)。原文经 L7+「同判据」自动继承到生产,但该条款**今天不可满足**,
+  ratify 它等于批准一件做不到的事:
+  - 电池 workflow 的 `target` 是**硬 choice `[staging]`**,其头注明言生产需另立独立授权 workflow;
+  - 生产跑过 legacy `033_create_rbac_core.sql`,其中建了 `role_permissions.role_id → roles(id) ON DELETE CASCADE`,
+    而电池每次运行都用**自过期见证查询**重验"无此级联"这一 NOT-DRIVEN 前提 —— **级联存在即 exit 1
+    `not_driven_reason_expired`,拒产任何证据**。
+  ⇒ **生产 L1 仍按原 ≥2 日历日判据执行**;若日后要把压缩窗扩到生产,须先(a)扩展电池覆盖 `roles:delete` 那条路径、
+  (b)另立生产授权 workflow,然后**另行 ratify**,不由 A1 顺带继承。
+  > 生产那条级联 FK 目前是 **INFERRED-STRONG**(据生产迁移账);**一条只读 SQL 即可定案**——在生产库跑电池的
+  > `ROLE_CASCADE_WITNESS_QUERY`。建议 ratify 前顺手跑掉,以确认本条收窄的依据。
 - **明确不变**：L6 soak ≥7 日历日**不动**（它买的是一个完整周周期的日历节律——周末形态、
   weekly cron、备份窗——合成负载伪造不了；租约饥饿/死锁积累是慢显影病灶，soak 是唯一
   在真实节奏下行使它们的机会）；L2–L5 判据不变（本就无日历约束）。
@@ -159,7 +168,9 @@ L1 本身);释锁后 = 同写面 2xx(正控,证 409 确为租约所致)。保留
 ### A1.3 电池 PASS 的工件绑定(防口头 PASS)
 
 ratify 后,L1 出窗必须同时出示:L1 电池 workflow run URL、evidence JSON 工件、
-被验 head/镜像 SHA、驱动面清单(含**逐面点名的 NOT-DRIVEN 面**及原因——无静默上限)。
+被验 head/镜像 SHA(**2026-08-22 起由工具产出**:evidence JSON 的 `provenance` 字段带
+`script_sha256`(电池自哈希)+ `image_digest` + `build_commit`;缺失记 `null` 以使"未绑定"在工件里可见,
+而非静默缺席)、驱动面清单(含**逐面点名的 NOT-DRIVEN 面**及原因——无静默上限)。
 缺任一项 = 窗口未满足,回落到原 2 日历日判据。
 
 ### A1.4 记录但**不属于 A1**的激进选项(owner 独立裁量,默认不推荐)
