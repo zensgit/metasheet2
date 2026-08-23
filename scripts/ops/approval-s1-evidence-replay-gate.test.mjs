@@ -55,7 +55,7 @@ import { test } from 'node:test'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..', '..')
 const WORKFLOW_PATH = resolve(ROOT, '.github/workflows/approval-s1-org-backfill-evidence.yml')
-const FIXTURE_PATH = resolve(HERE, 'approval-s1-evidence-replay-gate-fixture.sql')
+const FIXTURE_PATH = resolve(HERE, '__fixtures__/approval-s1-evidence-replay-gate-fixture.sql')
 const workflowText = readFileSync(WORKFLOW_PATH, 'utf8')
 
 // ---------------------------------------------------------------------------------------------
@@ -157,6 +157,22 @@ const U1A_TWO_ROW_MUTATION = {
   to: `probe "$pg_container" "$pg_user" "$pg_db" "\${label}.u1a_multi_org_active_users" \\\n              "SELECT org_id, count(*) FROM user_orgs WHERE is_active GROUP BY org_id" || rc=1`,
 }
 
+// deep-review P3-1: a planted SINGLE-row, NON-INTEGER payload — read-only passes (it is a plain
+// literal SELECT) and the single-row assertion passes (exactly one row), so only a value-SHAPE
+// check distinguishes it from a real count. Positive control for the digit-shape assertion added
+// to the main replay loop below.
+const U1B_NON_INTEGER_MUTATION = {
+  probeName: 'u1b_zero_membership_active_users',
+  from:
+    'probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \\\n' +
+    '              "SELECT count(*) FROM users u\n' +
+    '                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo\n' +
+    '                  WHERE uo.user_id = u.id AND uo.is_active)" || rc=1',
+  to:
+    'probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \\\n' +
+    '              "SELECT \'not-an-integer\'" || rc=1',
+}
+
 function applyMutation(text, mutation) {
   const mutatedText = text.replace(mutation.from, mutation.to)
   assert.notEqual(mutatedText, text, `mutation fixture string for "${mutation.probeName}" did not match — source drifted from the real workflow`)
@@ -183,6 +199,74 @@ function assertPayloadFloor(payloads) {
       `(floor ${MIN_PROBE_PAYLOAD_COUNT}) — a refactor that empties or truncates the parsed ` +
       `payload set must RED here, not silently green`,
   )
+}
+
+// deep-review P2-1: the table/column-existence guards (u1c, p10, u3) are LOAD-BEARING — without
+// them, an existence-guarded dependent payload can ERROR on an environment where the guarded
+// table/column is absent, flipping that whole environment's verdict from APPLIED to INDETERMINATE
+// for a probe that has nothing to do with the S1 migration itself (M7 in the deep-review gate,
+// reproduced against a real stub environment). But neutering the guard IN THE TRACKED WORKFLOW
+// FILE left every existing assertion in this suite fully green (M1: 64/64 pass, gate-blind) — none
+// of layer 1 or layer 2 checks the guard structurally at all. This is a hermetic, LAYER-1 (no DB)
+// mechanical check: it does not need Postgres to prove a dependent payload is lexically guarded,
+// only the workflow's own text.
+//
+// Lexical, not merely "some enclosing if/fi exists": the check is for this EXACT literal guard
+// condition, not any if-wrapper — so replacing it with e.g. `if true; then` (which is still a
+// well-formed enclosing if/fi block) counts as "guard removed" exactly as much as deleting the
+// if/fi outright does. This is the same nearest-preceding-token heuristic class as the DML
+// collector's own "enclosingSymbol" attribution (scripts/attendance/w4c0-dml-inventory/collector.cjs).
+const PROBE_VALUE_GUARD_OPEN = 'if [[ "$PROBE_VALUE" == "1" ]]; then'
+
+function isGuardedByProbeValueCheck(remoteBody, needleIndex) {
+  const before = remoteBody.slice(0, needleIndex)
+  const lastOpenIdx = before.lastIndexOf(PROBE_VALUE_GUARD_OPEN)
+  if (lastOpenIdx < 0) return false
+  // Nearest preceding bare `fi` line (closing ANY if-block, guard or otherwise). If one of those
+  // falls AFTER the nearest guard-open, the guard has already been closed by the time execution
+  // reaches `needleIndex` — it is a sibling, not an ancestor.
+  const fiLineRe = /\n[ \t]*fi[ \t]*(?=\n)/g
+  let lastCloseIdx = -1
+  let m
+  while ((m = fiLineRe.exec(before))) {
+    lastCloseIdx = m.index
+  }
+  return lastOpenIdx > lastCloseIdx
+}
+
+function assertProbeIsGuarded(remoteBody, probeName) {
+  const idx = remoteBody.indexOf(`\${label}.${probeName}`)
+  assert.ok(idx >= 0, `assertProbeIsGuarded: probe "${probeName}" not found in remote body at all`)
+  assert.ok(
+    isGuardedByProbeValueCheck(remoteBody, idx),
+    `probe "${probeName}" is not lexically inside an "if [[ \\"$PROBE_VALUE\\" == \\"1\\" ]]; then … fi" ` +
+      `guard block — an existence-guarded dependent payload with its guard removed or neutered ` +
+      `(e.g. "if true; then") can ERROR on an environment where the guarded table/column is ` +
+      `absent, flipping that environment's verdict from APPLIED to INDETERMINATE (deep-review P2-1)`,
+  )
+}
+
+// Every probe() call site that this workflow itself guards behind a `*_table_present` /
+// `*_column_present` existence check — the exact set P2-1 flagged as untested.
+const GUARDED_DEPENDENT_PROBE_NAMES = [
+  'u1c_directory_integration_distinct_orgs',
+  'u1c_non_default_integration_rows',
+  'p10_instances_total',
+  'u3_attendance_records_org_id_not_in_user_orgs',
+  'u3_attendance_requests_org_id_not_in_user_orgs',
+]
+
+// Targets ONLY the u3-records guard (the probe-name line immediately after the guard-open makes
+// the match specific to that one guard, not a blind global replace of the shared literal
+// condition text — the sibling u3-requests guard, untouched, is the negative control below).
+const U3_RECORDS_GUARD_NEUTER_MUTATION = {
+  probeName: 'u3_attendance_records_org_id_not_in_user_orgs',
+  from:
+    'if [[ "$PROBE_VALUE" == "1" ]]; then\n' +
+    '              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_not_in_user_orgs" \\',
+  to:
+    'if true; then\n' +
+    '              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_not_in_user_orgs" \\',
 }
 
 // =================================================================================================
@@ -273,6 +357,48 @@ test('the staging pre-gate probes appear in the remote body BEFORE the NOT_APPLI
     assert.ok(idx >= 0, `${name} not found in remote body`)
     assert.ok(idx < notAppliedIdx, `${name} must be emitted BEFORE the NOT_APPLIED early return`)
   }
+})
+
+test('table/column-existence guards: every dependent payload is lexically inside its own PROBE_VALUE guard (deep-review P2-1)', () => {
+  const remoteBody = extractRemoteBody(workflowText)
+  for (const name of GUARDED_DEPENDENT_PROBE_NAMES) {
+    assertProbeIsGuarded(remoteBody, name)
+  }
+})
+
+test('negative control: assertProbeIsGuarded is not vacuously true — an UNGUARDED presence probe itself fails it', () => {
+  const remoteBody = extractRemoteBody(workflowText)
+  // The *_table_present / *_column_present probes are themselves NOT guarded (they are the guard
+  // condition) — proves the assertion actually discriminates guarded-from-unguarded rather than
+  // passing for anything found in the remote body.
+  for (const name of [
+    'u1c_directory_integrations_table_present',
+    'p10_instances_table_present',
+    'u3_attendance_records_org_id_column_present',
+    'u3_attendance_requests_org_id_column_present',
+  ]) {
+    assert.throws(
+      () => assertProbeIsGuarded(remoteBody, name),
+      /not lexically inside/,
+      `${name} is itself the guard condition and must NOT be reported as guarded`,
+    )
+  }
+})
+
+test('MUTATION PROOF: neutering the u3-records guard ("if true; then") is caught by the guard-containment assertion, sibling guard unaffected (deep-review P2-1)', () => {
+  const mutatedText = applyMutation(workflowText, U3_RECORDS_GUARD_NEUTER_MUTATION)
+  const mutatedRemoteBody = extractRemoteBody(mutatedText)
+  assert.throws(
+    () => assertProbeIsGuarded(mutatedRemoteBody, 'u3_attendance_records_org_id_not_in_user_orgs'),
+    /not lexically inside/,
+    'neutered u3-records guard was not caught — the assertion is gate-blind exactly like the shipped suite was under M1',
+  )
+  // Negative control: the SIBLING guard (u3 requests), untouched by this targeted mutation, must
+  // still pass — proves the assertion is precise, not "reds on anything once the file changed".
+  assertProbeIsGuarded(mutatedRemoteBody, 'u3_attendance_requests_org_id_not_in_user_orgs')
+  // And the OTHER guarded dependents (u1c, p10), also untouched, must still pass too.
+  assertProbeIsGuarded(mutatedRemoteBody, 'u1c_directory_integration_distinct_orgs')
+  assertProbeIsGuarded(mutatedRemoteBody, 'p10_instances_total')
 })
 
 test('parser floor: extracted payload count is at least MIN_PROBE_PAYLOAD_COUNT (closeout-plan-review A-9(ii))', () => {
@@ -429,6 +555,23 @@ if (canRunExecutionLayer) {
           `\`tr -d '[:space:]'\` + \`^[0-9]+$\` contract would silently concatenate a multi-row ` +
           `result into a plausible-looking wrong number. rows: ${JSON.stringify(rows)}`,
       )
+      // deep-review P3-1: layer 2 previously mirrored only HALF of probe()'s own contract (read-
+      // only + exactly one row) and never the SHAPE half (`^[0-9]+$`). A payload returning a
+      // single non-integer value (e.g. an org string) would pass every assertion above, then only
+      // get rejected by probe() itself at REAL runtime as "=ERROR" (env INDETERMINATE) — no value
+      // ever leaks (probe() suppresses it), so this was a gate-completeness gap, not a safety one.
+      // p03_migration_executed_at_raw is the one deliberate exception: it is the ONE non-integer
+      // output line by design (an ISO timestamp), asserted separately by its own caller via a
+      // DIFFERENT regex (`^[0-9T:.Z+-]+$`), not probe()'s `^[0-9]+$`.
+      if (name !== 'p03_migration_executed_at_raw') {
+        assert.match(
+          rows[0],
+          /^[0-9]+$/,
+          `payload "${name}" returned a non-integer single row (${JSON.stringify(rows[0])}) — ` +
+            `probe()'s own \`^[0-9]+$\` contract would reject this at real runtime as "=ERROR", ` +
+            `which this gate should catch by shape, not merely by row count`,
+        )
+      }
     })
   }
 
@@ -474,5 +617,26 @@ if (canRunExecutionLayer) {
     // The property under test: single-row assertion — reproduced inline, mirroring exactly what
     // the main replay loop above asserts — must be the thing that reds, not an incidental error.
     assert.notEqual(rows.length, 1, 'single-row assertion should have failed for this payload and did not')
+  })
+
+  // -----------------------------------------------------------------------------------------
+  // MUTATION 3 (deep-review P3-1) — a planted SINGLE-row, NON-INTEGER payload passes BOTH the
+  // read-only check and the single-row check; only the digit-shape assertion added to the main
+  // replay loop above catches it. Positive control that the new assertion is not vacuous.
+  // -----------------------------------------------------------------------------------------
+  test('MUTATION PROOF: a planted non-integer single-row payload, found by the real extractor, passes read-only+single-row but fails the digit-shape check (deep-review P3-1)', () => {
+    const mutatedText = applyMutation(workflowText, U1B_NON_INTEGER_MUTATION)
+    const { payloads: mutatedPayloads } = allPayloadsFrom(mutatedText)
+    const mutated = mutatedPayloads.find((p) => p.name === U1B_NON_INTEGER_MUTATION.probeName)
+    assert.match(mutated.sql, /^SELECT 'not-an-integer'$/)
+
+    const result = runReadOnly(mutated.sql)
+    assert.equal(result.status, 0, `planted literal SELECT unexpectedly failed: ${result.stderr}`)
+    const rows = rowsOf(result.stdout)
+    assert.equal(rows.length, 1, `expected exactly 1 row, got ${rows.length}: ${JSON.stringify(rows)}`)
+    // The gap P3-1 named: read-only passed, single-row passed — only shape distinguishes this
+    // from a real count. If this assertion ever passed (rows[0] happened to look like digits),
+    // the mutation itself would be vacuous, not the assertion under test broken.
+    assert.doesNotMatch(rows[0], /^[0-9]+$/, 'planted value must NOT look like an integer, or this mutation is vacuous')
   })
 }

@@ -288,6 +288,13 @@ jobs:
               probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_not_in_user_orgs" \
                 "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_records) a
                   WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            else
+              # deep-review P3-4: "no violation line appeared" is otherwise produced identically by
+              # measured-and-zero and by never-measured (column absent) — a scanning auditor cannot
+              # tell them apart from silence alone. This bare `echo` (not `probe()` — its own
+              # `^[0-9]+$` contract would reject a non-numeric token) makes the never-measured case
+              # an explicit, grep-able line instead of an absence.
+              echo "${label}.u3_attendance_records_org_id_not_in_user_orgs=NOT_MEASURED"
             fi
             probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_column_present" \
               "SELECT count(*) FROM information_schema.columns
@@ -297,13 +304,21 @@ jobs:
               probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_not_in_user_orgs" \
                 "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_requests) a
                   WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            else
+              # deep-review P3-4 (same reasoning as the records branch above).
+              echo "${label}.u3_attendance_requests_org_id_not_in_user_orgs=NOT_MEASURED"
             fi
 
             if [[ "$ledger" == "0" && "$column" == "0" ]]; then
               # NOT_APPLIED is a real, reportable verdict — never a skip and never a PASS.
               echo "verdict=NOT_APPLIED"
               echo "reason=no_ledger_row_and_no_org_id_column"
-              echo "note=every population probe is N/A for ${label} because the migration has not run there"
+              # deep-review P2-2: this line used to claim EVERY population probe was N/A, which was
+              # true before this slice but became false the moment u1a/u1b/u1c/p10/u3 moved above
+              # this early return — those probes above DID run and their values are real. Only the
+              # S1-DEPENDENT probes (p03 onward: p05/p06/p11-p23/b1-b4/p30-p53/c1/c3/c6), which this
+              # early return never reaches, are N/A for ${label}.
+              echo "note=the u1a/u1b/u1c/p10/u3 population lines above ARE measured for ${label} (S1-independent, emitted pre-gate); every S1-dependent probe below this line (p03, p05-p53, b1-b4, c1/c3/c6) is N/A because the migration has not run there"
               echo "=== S1 EVIDENCE END ${label} ==="
               return 0
             fi
@@ -686,6 +701,20 @@ jobs:
               val="$(get "${env_label}.${v}")"
               if [[ "$val" =~ ^[0-9]+$ ]] && [[ "$val" != "0" ]]; then
                 echo "- **RULED-POSTURE VIOLATION** \`${v}\` = ${val} on ${env_label} — the Phase-3 CHECK cannot detect this; owner decision required before activation" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            done
+            # deep-review P3-5: U3' (Lock-11 §8) is the named SOLE detector of outage class 4
+            # ("stamped but still dark") — A-1's own argument is that NO CHECK or gate can see field
+            # divergence, which is exactly the same "no CHECK can catch this" category as p22/p23
+            # above, so it is surfaced the same way rather than living only inside the fenced raw
+            # log block. NOT_MEASURED (P3-4's marker for an absent org_id column) is deliberately
+            # NOT a violation and does not match ^[0-9]+$, so it never fires this line — an
+            # unmeasured environment is a runbook escalation (see the S5 precondition-audit
+            # criterion), not a workflow-level violation.
+            for v in u3_attendance_records_org_id_not_in_user_orgs u3_attendance_requests_org_id_not_in_user_orgs; do
+              val="$(get "${env_label}.${v}")"
+              if [[ "$val" =~ ^[0-9]+$ ]] && [[ "$val" != "0" ]]; then
+                echo "- **RULED-POSTURE VIOLATION** \`${v}\` = ${val} on ${env_label} — no CHECK or gate can detect this (Lock-11 §8 U3', outage class 4: \"stamped but still dark\"); owner decision required before activation" >> "$GITHUB_STEP_SUMMARY"
               fi
             done
             echo "" >> "$GITHUB_STEP_SUMMARY"
