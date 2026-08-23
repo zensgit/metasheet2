@@ -1,0 +1,83 @@
+name: Approval S1 Evidence Replay Gate (real DB)
+
+# Execution layer of scripts/ops/approval-s1-evidence-replay-gate.test.mjs — the self-test for
+# .github/workflows/approval-s1-org-backfill-evidence.yml's read-only claim. Runs EVERY psql -c
+# payload the evidence workflow's remote script would run, inside a session pinned
+# `default_transaction_read_only = on`, against a small hand-authored, seeded fixture database
+# (NOT the real app schema/migrations — see the test file's own docblock for that explicit
+# non-claim). A write that the test's static SELECT-head census misses still aborts (SQLSTATE
+# 25006) and reds; a payload that returns more than one row (the shape `probe()`'s own
+# `tr -d '[:space:]'` + `^[0-9]+$` contract cannot see) also reds.
+#
+# Deliberately NOT wired through plugin-tests.yml or its pnpm-lock.yaml-pinned install step —
+# this lane needs no app dependencies at all (the test uses only Node built-ins plus the `psql`
+# CLI already present on the runner image), so it stays a small, standalone lane. Sibling to
+# approval-s1-evidence-replay-gate.yml (the hermetic STATIC contract lane — same test file, no DB,
+# unfiltered), mirroring multitable-o2-observation-kit(-realdb).yml's two-lane split exactly
+# (closeout-plan-review A-9(iv)): the fast hermetic layer can run on every PR for free; this lane
+# carries only the DB-backed EXECUTION layer.
+#
+# Path-filtered (dispatch + PR paths on the evidence workflow, this test file, the fixture, and
+# BOTH lane files) rather than unfiltered-required, same reasoning as
+# multitable-o2-observation-kit-realdb.yml: the expensive execution layer does not need to run on
+# every unrelated PR.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/approval-s1-org-backfill-evidence.yml'
+      - 'scripts/ops/approval-s1-evidence-replay-gate.test.mjs'
+      - 'scripts/ops/approval-s1-evidence-replay-gate-fixture.sql'
+      - '.github/workflows/approval-s1-evidence-replay-gate.yml'
+      - '.github/workflows/approval-s1-evidence-replay-gate-realdb.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/approval-s1-org-backfill-evidence.yml'
+      - 'scripts/ops/approval-s1-evidence-replay-gate.test.mjs'
+      - 'scripts/ops/approval-s1-evidence-replay-gate-fixture.sql'
+      - '.github/workflows/approval-s1-evidence-replay-gate.yml'
+      - '.github/workflows/approval-s1-evidence-replay-gate-realdb.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  execution-proof:
+    name: s1-evidence replay gate (workflow SQL is read-only + single-row against a seeded DB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: metasheet_s1_replay_gate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d metasheet_s1_replay_gate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/metasheet_s1_replay_gate
+      # Arms the suite's execution-layer sentinel: in THIS lane a missing DATABASE_URL must FAIL,
+      # never silently skip the read-only replay proof.
+      METASHEET_REAL_DB_TEST_STEP: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      - name: Seed the replay-gate fixture (hand-authored, NOT the real app schema)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/ops/approval-s1-evidence-replay-gate-fixture.sql
+
+      - name: Run S1 evidence replay-gate tests WITH the execution layer armed
+        run: node --test scripts/ops/approval-s1-evidence-replay-gate.test.mjs

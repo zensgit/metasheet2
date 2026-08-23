@@ -134,6 +134,7 @@ jobs:
           run_env() {
             local label="$1" pg_container="$2" backend_container="$3"
             local pg_user pg_db creds ledger column executed_at
+            local rc=0
 
             echo "=== S1 EVIDENCE START ${label} ==="
             echo "env=${label}"
@@ -177,6 +178,127 @@ jobs:
             fi
             column="$PROBE_VALUE"
 
+            # ---- STAGING PRE-GATE (deep-review P2-2): the U1/p10 population probes below do NOT
+            # depend on the S1 migration (org_id column) at all — they read `user_orgs`, `users`,
+            # `directory_integrations`, and `approval_instances`, none of which the migration
+            # creates. They are therefore emitted here, above BOTH early returns immediately below
+            # (NOT_APPLIED and the ledger/column-disagreement INDETERMINATE), rather than only after
+            # them — an environment where the migration has never run there previously (staging is
+            # exactly that environment today) got NONE of this population measured, and staging is
+            # where a second active org (dual-corp DingTalk) would make Migration B's single-org
+            # guard ABORT. A failure in any probe here still accumulates into `rc` for the
+            # APPLIED/INDETERMINATE paths reached further down, but `rc` is never consulted by the
+            # NOT_APPLIED return two blocks below (it is unconditional) — verdict=NOT_APPLIED stays
+            # byte-identical even when one of these probes errors; the probes are additional lines
+            # above it, not a precondition of it.
+            # ---- Lock-11 U1 probes (writer-org-derivation draft §8; all counts-only) ----------
+            # U1a: does ANY org other than the blanket-backfilled one exist on user_orgs, and how
+            # many active users hold >=2 active memberships (sizes Lock-11 outage class 1 / D-10's
+            # moot condition: u1a_distinct_active_orgs = 1 means "nowhere to move to").
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_distinct_active_orgs" \
+              "SELECT count(DISTINCT org_id) FROM user_orgs WHERE is_active" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_multi_org_active_users" \
+              "SELECT count(*) FROM (SELECT user_id FROM user_orgs WHERE is_active
+                 GROUP BY user_id HAVING count(*) > 1) t" || rc=1
+            # U1b: active users with NO active membership — outage class 1b, the class no arm
+            # serves (feeds D-8). The draft marks this the count most likely to be non-zero.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+
+            # U1b SPLIT (closeout deep-review P1-1): the provisioning migration's ON CONFLICT DO
+            # NOTHING does NOT resurrect a DEACTIVATED membership row, so a u1b user holding only
+            # deactivated rows is NOT provisioned — the aggregate above cannot see that shape.
+            # Both splits must be ZERO before any arm-(a) writer slice merges (W1W2 merge gate).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_no_row_at_all" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id)" || rc=1
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_only_deactivated_rows" \
+              "SELECT count(*) FROM users u
+                WHERE u.is_active
+                  AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                    WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+            # U1c: the second backfill's discriminator — distinct orgs on directory_integrations
+            # (a non-'default' integration org means the multi-org population was already
+            # manufactured, which changes how u1a reads). COUNT DISTINCT only, no org values.
+            # Guarded on table existence so an older schema cannot poison the whole env verdict:
+            # when the table is absent, the presence probe reports 0 and the count probe is
+            # deliberately NOT emitted (absence of the line + presence=0 is the honest record).
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integrations_table_present" \
+              "SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'directory_integrations'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integration_distinct_orgs" \
+                "SELECT count(DISTINCT org_id) FROM directory_integrations" || rc=1
+              # The DISCRIMINATING half (gate P2-1): the draft's decision rule is "one non-'default'
+              # integration org ⇒ the multi-org population was already manufactured", which
+              # count(DISTINCT) cannot express ('default' is the repo-authored backfill constant,
+              # zzzz20260324150000:5 — a literal of the same class as the 'plm:%' prefixes).
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_non_default_integration_rows" \
+                "SELECT count(*) FROM directory_integrations WHERE org_id <> 'default'" || rc=1
+            fi
+
+            # p10 (moved from the old "Population totals" section, deep-review P2-2): the
+            # environment's total instance count is itself a population probe with no S1
+            # dependency, so it belongs in this pre-gate block too. NEWLY guarded on table
+            # existence, mirroring u1c immediately above — unlike u1a/u1b/u1b_split (which read
+            # `users`/`user_orgs`, tables that predate this migration by months), running this
+            # probe THIS early means `approval_instances` existing at all is no longer guaranteed
+            # by an already-passed p02 check (p02 only proves the org_id COLUMN, and only when the
+            # column count is nonzero), so an unguarded query here could ERROR on a genuinely
+            # pre-approval-module deployment instead of reporting absence honestly.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_table_present" \
+              "SELECT count(*) FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_name = 'approval_instances'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_total" \
+                "SELECT count(*) FROM approval_instances" || rc=1
+            fi
+
+            # U3' (Lock-11 §8, RATIFIED — docs/development/approval-lock11-writer-org-derivation-
+            # 20260822.md:1624; the §5 activation row at :1382 states: "Activation additionally
+            # needs its own ledger row … and the §8-U3' probe as a precondition, since no gate
+            # detects field divergence"). Field question: do prod attendance rows carry `org_id`
+            # values ABSENT from `user_orgs`? A YES here is outage class 4, "stamped but still
+            # dark" — W-4's attendance-org derivation would treat the row as fixed while the pin
+            # denies every viewer, and no CHECK constraint or existing gate can see this shape
+            # (§4.2's own disclosure). SQL reproduced VERBATIM from the lock's own §8 U3' row (not
+            # re-derived here), for both attendance tables the lock names. Guarded on the org_id
+            # COLUMN's presence, NOT merely the table's — same idiom as p02 above
+            # (information_schema.columns, not .tables): `zzzz20260114100000_add_attendance_
+            # org_id.ts` adds `org_id` to `attendance_records`/`attendance_requests` as a SEPARATE,
+            # LATER migration than the one that creates the tables (`zzzz20260114090000_create_
+            # attendance_tables.ts`), and itself defensively re-checks `checkTableExists` before
+            # adding the column — a table-only guard would let a table-exists-but-column-absent
+            # deployment ERROR here, flipping that environment's verdict from APPLIED to
+            # INDETERMINATE and voiding the whole evidence pack for a probe that isn't even about
+            # the S1 migration. A missing column (or missing table — information_schema.columns
+            # returns empty for a nonexistent table too, never an error) reports absence honestly
+            # via the SAME single guarded count, strictly stronger than a table-only check.
+            # Activation PRECONDITION, not a merge gate — a nonzero count is a real, actionable
+            # finding for whoever runs the activation dispatch, not a workflow failure by itself.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_column_present" \
+              "SELECT count(*) FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'attendance_records'
+                  AND column_name = 'org_id'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_records_org_id_not_in_user_orgs" \
+                "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_records) a
+                  WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            fi
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_column_present" \
+              "SELECT count(*) FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'attendance_requests'
+                  AND column_name = 'org_id'" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u3_attendance_requests_org_id_not_in_user_orgs" \
+                "SELECT count(*) FROM (SELECT DISTINCT org_id FROM attendance_requests) a
+                  WHERE NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.org_id = a.org_id)" || rc=1
+            fi
+
             if [[ "$ledger" == "0" && "$column" == "0" ]]; then
               # NOT_APPLIED is a real, reportable verdict — never a skip and never a PASS.
               echo "verdict=NOT_APPLIED"
@@ -207,9 +329,6 @@ jobs:
             fi
             echo "${label}.p03_migration_executed_at=${executed_at}"
 
-
-            local rc=0
-
             # ---- Constraint shape ----------------------------------------------------------
             # p05 expected 1 (Phase-1 non-blank CHECK landed). p06 expected 0 — Phase 3
             # (`approval_instance_org_present`) must NOT be present; landing it before every writer
@@ -224,8 +343,8 @@ jobs:
                   AND conrelid = 'approval_instances'::regclass" || rc=1
 
             # ---- Population totals ---------------------------------------------------------
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_total" \
-              "SELECT count(*) FROM approval_instances" || rc=1
+            # p10_instances_total now lives in the staging pre-gate block above (deep-review P2-2
+            # move), guarded there by p10_instances_table_present.
             probe "$pg_container" "$pg_user" "$pg_db" "${label}.p11_org_present_total" \
               "SELECT count(*) FROM approval_instances WHERE org_id IS NOT NULL" || rc=1
             probe "$pg_container" "$pg_user" "$pg_db" "${label}.p12_org_null_total" \
@@ -449,55 +568,9 @@ jobs:
                      GROUP BY uo.user_id
                     HAVING count(*) = 1
                   )" || rc=1
-            # ---- Lock-11 U1 probes (writer-org-derivation draft §8; all counts-only) ----------
-            # U1a: does ANY org other than the blanket-backfilled one exist on user_orgs, and how
-            # many active users hold >=2 active memberships (sizes Lock-11 outage class 1 / D-10's
-            # moot condition: u1a_distinct_active_orgs = 1 means "nowhere to move to").
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_distinct_active_orgs" \
-              "SELECT count(DISTINCT org_id) FROM user_orgs WHERE is_active" || rc=1
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1a_multi_org_active_users" \
-              "SELECT count(*) FROM (SELECT user_id FROM user_orgs WHERE is_active
-                 GROUP BY user_id HAVING count(*) > 1) t" || rc=1
-            # U1b: active users with NO active membership — outage class 1b, the class no arm
-            # serves (feeds D-8). The draft marks this the count most likely to be non-zero.
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_zero_membership_active_users" \
-              "SELECT count(*) FROM users u
-                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
-                  WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
-
-            # U1b SPLIT (closeout deep-review P1-1): the provisioning migration's ON CONFLICT DO
-            # NOTHING does NOT resurrect a DEACTIVATED membership row, so a u1b user holding only
-            # deactivated rows is NOT provisioned — the aggregate above cannot see that shape.
-            # Both splits must be ZERO before any arm-(a) writer slice merges (W1W2 merge gate).
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_no_row_at_all" \
-              "SELECT count(*) FROM users u
-                WHERE u.is_active AND NOT EXISTS (SELECT 1 FROM user_orgs uo
-                  WHERE uo.user_id = u.id)" || rc=1
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1b_split_only_deactivated_rows" \
-              "SELECT count(*) FROM users u
-                WHERE u.is_active
-                  AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
-                  AND NOT EXISTS (SELECT 1 FROM user_orgs uo
-                    WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
-            # U1c: the second backfill's discriminator — distinct orgs on directory_integrations
-            # (a non-'default' integration org means the multi-org population was already
-            # manufactured, which changes how u1a reads). COUNT DISTINCT only, no org values.
-            # Guarded on table existence so an older schema cannot poison the whole env verdict:
-            # when the table is absent, the presence probe reports 0 and the count probe is
-            # deliberately NOT emitted (absence of the line + presence=0 is the honest record).
-            probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integrations_table_present" \
-              "SELECT count(*) FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name = 'directory_integrations'" || rc=1
-            if [[ "$PROBE_VALUE" == "1" ]]; then
-              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_directory_integration_distinct_orgs" \
-                "SELECT count(DISTINCT org_id) FROM directory_integrations" || rc=1
-              # The DISCRIMINATING half (gate P2-1): the draft's decision rule is "one non-'default'
-              # integration org ⇒ the multi-org population was already manufactured", which
-              # count(DISTINCT) cannot express ('default' is the repo-authored backfill constant,
-              # zzzz20260324150000:5 — a literal of the same class as the 'plm:%' prefixes).
-              probe "$pg_container" "$pg_user" "$pg_db" "${label}.u1c_non_default_integration_rows" \
-                "SELECT count(*) FROM directory_integrations WHERE org_id <> 'default'" || rc=1
-            fi
+            # u1a/u1b/u1b_split/u1c now live in the staging pre-gate block above (deep-review
+            # P2-2 move) — emitted before the NOT_APPLIED/INDETERMINATE early returns instead of
+            # only after them.
 
             if [[ "$rc" == "0" ]]; then
               echo "verdict=APPLIED"
@@ -584,6 +657,27 @@ jobs:
                 echo "- Bucket partition self-test: **OK** (b1+b2+b3+b4 == p10 == ${total})" >> "$GITHUB_STEP_SUMMARY"
               else
                 echo "- Bucket partition self-test: **FAILED** (sum=${sum} != p10=${total}) — the buckets are not a partition; do not trust the distribution" >> "$GITHUB_STEP_SUMMARY"
+              fi
+            fi
+
+            # u1b split self-test (#5116 gate P3-3): the two splits (no-row-at-all vs
+            # only-deactivated-rows) must partition the aggregate exactly, same discipline as the
+            # bucket partition self-test above. `get()` returns an EMPTY string for a key that
+            # never appeared in the log (no matching `awk` line ever prints), and `probe()` itself
+            # emits the literal string "ERROR" on a failed probe — the `-n` presence check plus the
+            # `^[0-9]+$` shape guard on the concatenation reject both alongside each other, so an
+            # errored OR a never-run probe (staging pre-gate line simply absent) renders NO
+            # self-test line at all, never a spurious FAILED or OK.
+            u1b_no_row="$(get "${env_label}.u1b_split_no_row_at_all")"
+            u1b_only_deactivated="$(get "${env_label}.u1b_split_only_deactivated_rows")"
+            u1b_zero_membership="$(get "${env_label}.u1b_zero_membership_active_users")"
+            if [[ "$u1b_no_row$u1b_only_deactivated$u1b_zero_membership" =~ ^[0-9]+$ ]] \
+               && [[ -n "$u1b_no_row" && -n "$u1b_only_deactivated" && -n "$u1b_zero_membership" ]]; then
+              u1b_sum=$(( u1b_no_row + u1b_only_deactivated ))
+              if [[ "$u1b_sum" == "$u1b_zero_membership" ]]; then
+                echo "- u1b split self-test: **OK** (u1b_split_no_row_at_all + u1b_split_only_deactivated_rows == u1b_zero_membership_active_users == ${u1b_zero_membership})" >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "- u1b split self-test: **FAILED** (no_row_at_all=${u1b_no_row} + only_deactivated_rows=${u1b_only_deactivated} = ${u1b_sum} != zero_membership_active_users=${u1b_zero_membership}) — the split identity broke; do not trust u1b_split_* against the aggregate" >> "$GITHUB_STEP_SUMMARY"
               fi
             fi
 
