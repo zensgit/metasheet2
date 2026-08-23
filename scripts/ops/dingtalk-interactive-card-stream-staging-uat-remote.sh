@@ -496,6 +496,7 @@ LEGACY_STAGING_COMPOSE_FILE="${STAGING_DIR}/docker-compose.app.staging.yml"
 ATTENDANCE_PERSIST_DIR="${HOME}/.metasheet2/window-runner"
 ATTENDANCE_OVERRIDE_FILE="${ATTENDANCE_PERSIST_DIR}/docker-compose.window-runner.override.yml"
 PERSISTENT_STAGING_COMPOSE_FILE="${ATTENDANCE_PERSIST_DIR}/docker-compose.app.staging.yml"
+ATTENDANCE_DEPLOY_IDENTITY_FILE="${ATTENDANCE_PERSIST_DIR}/deploy-identity.env"
 STAGING_COMPOSE_FILE="$LEGACY_STAGING_COMPOSE_FILE"
 if [[ -f "$PERSISTENT_STAGING_COMPOSE_FILE" ]]; then
   STAGING_COMPOSE_FILE="$PERSISTENT_STAGING_COMPOSE_FILE"
@@ -552,11 +553,30 @@ require_compose_v2() {
   fail "docker compose v2 plugin is required"
 }
 
+read_attendance_deploy_identity_field() {
+  local key="$1" value count
+  [[ -f "$ATTENDANCE_DEPLOY_IDENTITY_FILE" ]] || return 1
+  value="$(sed -n "s/^${key}=//p" "$ATTENDANCE_DEPLOY_IDENTITY_FILE" | head -n 1)"
+  count="$(sed -n "s/^${key}=//p" "$ATTENDANCE_DEPLOY_IDENTITY_FILE" | wc -l | tr -d '[:space:]')"
+  [[ "$count" == "1" && -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
 resolve_live_backend_image_pin() {
-  local live_image
+  local live_image image_owner recorded_sha recorded_digest
   live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
   if [[ "$live_image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend:([0-9a-f]{40})$ ]]; then
     printf '%s %s' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "$live_image" =~ ^ghcr\.io/([A-Za-z0-9._-]+)/metasheet2-backend@sha256:[0-9a-f]{64}$ ]]; then
+    image_owner="${BASH_REMATCH[1]}"
+    recorded_sha="$(read_attendance_deploy_identity_field deploy_sha)" || return 1
+    recorded_digest="$(read_attendance_deploy_identity_field backend_digest)" || return 1
+    [[ "$recorded_sha" =~ ^[0-9a-f]{40}$ && "$recorded_digest" == "$live_image" ]] || return 1
+    [[ -f "$ATTENDANCE_OVERRIDE_FILE" ]] || return 1
+    grep -Fqx "    image: ${recorded_digest}" "$ATTENDANCE_OVERRIDE_FILE" || return 1
+    printf '%s %s' "$image_owner" "$recorded_sha"
     return 0
   fi
   return 1
@@ -576,7 +596,7 @@ compose_staging_cmd() {
     image_tag="$PINNED_IMAGE_TAG"
   else
     if ! image_pin="$(resolve_live_backend_image_pin)"; then
-      echo "[stream-uat][error] running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing compose" >&2
+      echo "[stream-uat][error] running backend image lacks an exact full-SHA tag or matching immutable deploy identity; refusing compose" >&2
       return 1
     fi
     read -r image_owner image_tag <<< "$image_pin"
@@ -588,7 +608,7 @@ compose_staging_cmd() {
 pin_live_backend_image_for_transition() {
   local image_pin
   if ! image_pin="$(resolve_live_backend_image_pin)"; then
-    fail "running backend image is not an exact ghcr.io owner/metasheet2-backend:<40-sha> pin; refusing transition"
+    fail "running backend image lacks an exact full-SHA tag or matching immutable deploy identity; refusing transition"
   fi
   read -r PINNED_IMAGE_OWNER PINNED_IMAGE_TAG <<< "$image_pin"
   [[ "$PINNED_IMAGE_TAG" == "$DEPLOY_SHA" ]] \
@@ -628,10 +648,18 @@ except Exception:
 }
 
 resolve_deployed_sha() {
-  local live_image image_commit="" health_commit=""
+  local live_image image_commit="" health_commit="" image_pin=""
   live_image="$(docker inspect -f '{{.Config.Image}}' "$BACKEND_CONTAINER" 2>/dev/null || true)"
   if [[ "$live_image" =~ :([0-9a-f]{40})$ ]]; then
     image_commit="${BASH_REMATCH[1]}"
+  elif [[ "$live_image" == *@sha256:* ]]; then
+    if image_pin="$(resolve_live_backend_image_pin)"; then
+      read -r _ image_commit <<< "$image_pin"
+      printf '%s' "$image_commit"
+    else
+      printf 'unknown'
+    fi
+    return 0
   fi
   health_commit="$(fetch_health_commit)"
 
