@@ -56,5 +56,5 @@ jobs:
         with:
           node-version: 20
       - name: Run hermetic observation-kit tests (no DB, no hosts)
-        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs scripts/ops/recovery-fingerprint-cross-guard.test.mjs
 
