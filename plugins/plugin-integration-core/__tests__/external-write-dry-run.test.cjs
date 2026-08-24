@@ -1295,3 +1295,43 @@ main().catch((error) => {
   console.error(error)
   process.exitCode = 1
 })
+
+// --- Ownership-guard codes survive as themselves (Codex review follow-up) ---------------
+// The multitable ownership guard refuses to write a protected column, and refuses when it
+// cannot verify ownership at all. Both are TARGET-CONFIGURATION facts: an operator must be
+// able to tell "this target is misconfigured" from "this write flaked". Before these tokens
+// were registered in SAFE_WRITE_ERROR_CODES they collapsed into an opaque WRITE_FAILED.
+// The tokens are read from the guard module rather than retyped, so a rename over there
+// fails this test instead of silently un-registering the codes.
+{
+  const { __internals } = require('../lib/external-write-dry-run.cjs')
+  const guard = require('../lib/adapters/multitable-ownership-guard.cjs')
+  const { valuesFreeErrorCode } = __internals
+
+  const guardSource = require('node:fs').readFileSync(
+    require.resolve('../lib/adapters/multitable-ownership-guard.cjs'),
+    'utf8',
+  )
+  const declared = [...guardSource.matchAll(/'(METASHEET_MULTITABLE_OWNERSHIP_[A-Z_]+)'/g)].map((m) => m[1])
+  assert.ok(declared.length >= 2, 'expected the guard to declare its ownership refusal codes')
+
+  for (const code of new Set(declared)) {
+    assert.strictEqual(
+      valuesFreeErrorCode({ code }),
+      code,
+      `ownership refusal ${code} must survive as itself, not collapse to WRITE_FAILED`,
+    )
+  }
+
+  // Negative control: an unregistered code still collapses, so the assertion above is not
+  // passing because valuesFreeErrorCode became a pass-through.
+  assert.strictEqual(valuesFreeErrorCode({ code: 'METASHEET_MULTITABLE_OWNERSHIP_NOT_A_REAL_CODE' }), 'WRITE_FAILED')
+  assert.strictEqual(valuesFreeErrorCode({ code: 'SOME_UNREGISTERED_ERROR' }), 'WRITE_FAILED')
+
+  // Values-free: the codes carry no operator data by construction.
+  for (const code of new Set(declared)) {
+    assert.ok(/^[A-Z0-9_]+$/.test(code), `${code} must be a closed token`)
+  }
+  void guard
+  console.log('OK ownership refusal codes survive valuesFreeErrorCode')
+}
