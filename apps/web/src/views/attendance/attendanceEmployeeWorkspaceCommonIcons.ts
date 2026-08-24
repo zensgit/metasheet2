@@ -1,6 +1,7 @@
 // View-layer-only 常用 icon keys for the employee overview.
 // Original filled pictograms (面性 language, not Feishu trademark assets).
-// Admin persists { makeup, leave, overtime, swap } on attendance settings;
+// Admin persists { makeup, leave, overtime, swap } on attendance settings.
+// Employees read ONLY those four keys from GET /api/attendance/employee-quick-action-icons.
 // unknown/invalid keys fall back to these defaults.
 // Owner lock (2026-08-24): default glyphs are accepted — clock-plus / calendar /
 // moon / swap. Do not restyle or replace those defaults.

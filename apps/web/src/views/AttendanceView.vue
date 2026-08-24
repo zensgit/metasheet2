@@ -148,7 +148,7 @@
         :request-decision-comment-label="requestDecisionCommentLabel"
         :describe-request-status="describeRequestStatus"
         :self-service-quick-action-hint="selfServiceQuickActionHint"
-        :employee-quick-action-icons="employeeQuickActionIcons"
+        :employee-quick-action-icons="employeeOverviewQuickActionIcons"
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
@@ -2869,7 +2869,7 @@
                   />
                 </label>
                 <AttendanceEmployeeQuickActionIconsField
-                  v-model="settingsForm.employeeQuickActionIcons"
+                  v-model="adminConfig.settingsForm.employeeQuickActionIcons"
                   :tr="tr"
                 />
               </div>
@@ -10102,6 +10102,7 @@ import {
   resolveEmployeeQuickActionIcons,
   type EmployeeQuickActionIcons,
 } from './attendance/attendanceEmployeeWorkspaceCommonIcons'
+import { useAttendanceAdminConfig } from './attendance/useAttendanceAdminConfig'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -13381,9 +13382,10 @@ const selfServiceQuickActionHint = computed(() => {
   )
 })
 
-const employeeQuickActionIcons = computed(() =>
-  resolveEmployeeQuickActionIcons(attendanceSettings.value?.employeeQuickActionIcons),
-)
+// Employee overview icons come from the employee-readable channel, not admin settings.
+const employeeOverviewQuickActionIcons = ref<EmployeeQuickActionIcons>({
+  ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+})
 
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
@@ -15887,6 +15889,24 @@ const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
 const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
 const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
 
+const adminConfig = useAttendanceAdminConfig({
+  adminForbidden,
+  apiFetchWithTimeout,
+  buildQuery,
+  createApiError,
+  createForbiddenError,
+  defaultTimezone,
+  getOrgId: () => normalizedOrgId(),
+  setStatus,
+  setStatusFromError: (error, fallbackMessage, context) => {
+    const mapped = context === 'save-settings' || context === 'save-rule' || context === 'admin'
+      ? context
+      : 'admin'
+    setStatusFromError(error, fallbackMessage, mapped)
+  },
+  tr,
+})
+
 const settingsForm = reactive({
   autoAbsenceEnabled: false,
   autoAbsenceRunAt: '00:15',
@@ -15912,7 +15932,6 @@ const settingsForm = reactive({
   geoFenceLng: '',
   geoFenceRadius: '',
   minPunchIntervalMinutes: 1,
-  employeeQuickActionIcons: { ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS },
 })
 
 // 排班合规 (shift-compliance) config card — block-on-save day/week/month caps. Caps held as strings:
@@ -22329,6 +22348,7 @@ async function refreshAll(): Promise<boolean> {
     if (showOverview.value) {
       tasks.push(
         loadSelfAttendanceRules(),
+        loadEmployeeQuickActionIcons(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),
         loadShiftSwapRequests(),
@@ -23003,10 +23023,10 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
   settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
   const quickIcons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
-  settingsForm.employeeQuickActionIcons.makeup = quickIcons.makeup
-  settingsForm.employeeQuickActionIcons.leave = quickIcons.leave
-  settingsForm.employeeQuickActionIcons.overtime = quickIcons.overtime
-  settingsForm.employeeQuickActionIcons.swap = quickIcons.swap
+  adminConfig.settingsForm.employeeQuickActionIcons.makeup = quickIcons.makeup
+  adminConfig.settingsForm.employeeQuickActionIcons.leave = quickIcons.leave
+  adminConfig.settingsForm.employeeQuickActionIcons.overtime = quickIcons.overtime
+  adminConfig.settingsForm.employeeQuickActionIcons.swap = quickIcons.swap
 }
 
 function addHolidayOverride() {
@@ -24312,7 +24332,7 @@ async function saveSettings() {
       ipAllowlist,
       geoFence,
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
-      employeeQuickActionIcons: resolveEmployeeQuickActionIcons(settingsForm.employeeQuickActionIcons),
+      employeeQuickActionIcons: resolveEmployeeQuickActionIcons(adminConfig.settingsForm.employeeQuickActionIcons),
     }
 
     const response = await apiFetchWithTimeout('/api/attendance/settings', {
@@ -24331,6 +24351,7 @@ async function saveSettings() {
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
     applySettingsToForm(savedSettings)
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(savedSettings.employeeQuickActionIcons)
     setStatus(tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
@@ -24844,6 +24865,17 @@ async function loadAnnualSelfBalance(leaveTypeCode: string = 'annual'): Promise<
     annualSelfBalanceError.value = readErrorMessage(error, tr('Failed to load your leave balance', '加载您的休假余额失败'))
   } finally {
     annualSelfBalanceLoading.value = false
+  }
+}
+
+async function loadEmployeeQuickActionIcons(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/attendance/employee-quick-action-icons')
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) return
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(data.data)
+  } catch {
+    // Visual-only channel: keep last known / defaults. Do not fail overview refresh.
   }
 }
 

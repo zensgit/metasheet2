@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import { useAttendanceAdminConfig } from '../src/views/attendance/useAttendanceAdminConfig'
@@ -41,6 +43,13 @@ function createOptions(overrides: Partial<Parameters<typeof useAttendanceAdminCo
 }
 
 describe('useAttendanceAdminConfig', () => {
+  it('is a production import used by AttendanceView', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/views/AttendanceView.vue'), 'utf8')
+    expect(source).toMatch(/import \{ useAttendanceAdminConfig \} from '\.\/attendance\/useAttendanceAdminConfig'/)
+    expect(source).toContain('useAttendanceAdminConfig({')
+    expect(source).toContain('adminConfig.settingsForm.employeeQuickActionIcons')
+  })
+
   it('loads settings into the reactive form', async () => {
     const options = createOptions({
       apiFetchWithTimeout: vi.fn(async () => jsonResponse(200, {

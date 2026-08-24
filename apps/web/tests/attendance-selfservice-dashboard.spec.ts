@@ -247,6 +247,12 @@ function installOverviewMock(): void {
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
     }
+    if (url.includes('/api/attendance/employee-quick-action-icons')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' },
+      })
+    }
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
         ok: true,
@@ -379,6 +385,12 @@ function installZeroStateMock(): void {
     }
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
+    }
+    if (url.includes('/api/attendance/employee-quick-action-icons')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' },
+      })
     }
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
@@ -982,6 +994,10 @@ describe('Attendance self-service dashboard', () => {
     expect(actions!.textContent).toContain('Overtime')
     expect(actions!.textContent).toContain('Shift swap')
     expect(container!.querySelector('[data-selfservice-action="missing-punch"]')?.getAttribute('data-attendance-ew-icon')).toBe('clock-plus')
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => (
+      typeof url === 'string' && url.includes('/api/attendance/employee-quick-action-icons')
+    ))).toBe(true)
+    expect(settingsFetchCount()).toBe(0)
     expect(container!.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
     expect(container!.querySelector('[data-selfservice-action="overtime"]')?.getAttribute('data-attendance-ew-icon')).toBe('moon')
     expect(container!.querySelector('[data-selfservice-action="shift-swap"]')?.getAttribute('data-attendance-ew-icon')).toBe('swap')

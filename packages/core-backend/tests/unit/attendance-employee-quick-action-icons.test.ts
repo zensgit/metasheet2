@@ -12,6 +12,12 @@ const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests as {
     overtime: string
     swap: string
   }
+  pickEmployeeQuickActionIconsPublic: (settings: unknown) => {
+    makeup: string
+    leave: string
+    overtime: string
+    swap: string
+  }
 }
 const pluginSource = readFileSync(new URL('../../../../plugins/plugin-attendance/index.cjs', import.meta.url), 'utf8')
 
@@ -64,7 +70,24 @@ describe('employeeQuickActionIcons settings (visual-only)', () => {
     expect(sibling.minPunchIntervalMinutes).toBe(5)
   })
 
-  it('settingsSchema accepts employeeQuickActionIcons so PUT does not strip it', () => {
-    expect(pluginSource).toMatch(/employeeQuickActionIcons:\s*z\.object\(\{\s*\n\s*makeup:\s*z\.string\(\)/)
+  it('settingsSchema is enum-strict on write (illegal values 400 at the route)', () => {
+    expect(pluginSource).toMatch(/makeup:\s*z\.enum\(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES\)/)
+    expect(pluginSource).not.toMatch(/employeeQuickActionIcons:\s*z\.object\(\{\s*\n\s*makeup:\s*z\.string\(\)/)
+    expect(pluginSource).toContain("'/api/attendance/employee-quick-action-icons'")
+    expect(pluginSource).toContain("withPermission('attendance:read'")
+    expect(pluginSource).toMatch(/GET',\s*[\n\s]*'\/api\/attendance\/settings',\s*[\n\s]*withPermission\('attendance:admin'/)
+  })
+
+  it('employee-readable projection returns only the four icon keys', () => {
+    expect(helpers.pickEmployeeQuickActionIconsPublic({
+      ipAllowlist: ['10.0.0.1'],
+      geoFence: { lat: 1, lng: 2, radiusMeters: 3 },
+      employeeQuickActionIcons: { makeup: 'plus', leave: 'user' },
+    })).toEqual({
+      makeup: 'plus',
+      leave: 'user',
+      overtime: 'moon',
+      swap: 'swap',
+    })
   })
 })
