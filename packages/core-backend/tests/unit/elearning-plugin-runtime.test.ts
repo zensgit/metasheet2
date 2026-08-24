@@ -149,7 +149,24 @@ describe('elearning plugin runtime host (real addRoute seam)', () => {
     expect(parsed.pluginId).toBe('plugin-elearning')
     expect(parsed.runtimeModel).toBe('direct')
     expect(parsed.featureFlags).toEqual(['elearning'])
-    expect(parsed.navigation).toEqual([])
+    expect(parsed.navigation).toEqual([
+      {
+        id: 'elearning-learner',
+        title: '学习中心',
+        path: '/learn',
+        icon: 'book',
+        order: 70,
+        location: 'main-nav',
+      },
+      {
+        id: 'elearning-admin',
+        title: '云课堂管理',
+        path: '/admin/elearning',
+        icon: 'settings',
+        order: 10,
+        location: 'admin',
+      },
+    ])
     expect(parsed.objects).toEqual([])
     expect(parsed.workflows).toEqual([])
     expect(parsed.integrations).toEqual([])
@@ -169,8 +186,25 @@ describe('elearning plugin runtime host (real addRoute seam)', () => {
     expect(apps[0]?.id).toBe('elearning')
     expect(apps[0]?.pluginId).toBe('plugin-elearning')
     expect(apps[0]?.featureFlags).toEqual(['elearning'])
-    expect(apps[0]?.navigation).toEqual([])
-    expect(apps[0]?.entryPath).toBeNull()
+    expect(apps[0]?.navigation).toEqual([
+      {
+        id: 'elearning-learner',
+        title: '学习中心',
+        path: '/learn',
+        icon: 'book',
+        order: 70,
+        location: 'main-nav',
+      },
+      {
+        id: 'elearning-admin',
+        title: '云课堂管理',
+        path: '/admin/elearning',
+        icon: 'settings',
+        order: 10,
+        location: 'admin',
+      },
+    ])
+    expect(apps[0]?.entryPath).toBe('/learn')
   })
 
   it('catalog predicate hides the real elearning app unless master is exact true', async () => {
