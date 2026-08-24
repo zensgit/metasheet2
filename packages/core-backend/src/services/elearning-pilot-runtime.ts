@@ -1,8 +1,9 @@
 /**
- * E-learning V0.1 named-pilot runtime: flag-gated assignment + watch HTTP mount.
+ * E-learning V0.1 named-pilot runtime: flag-gated assignment + watch + exam HTTP mount.
  * Synchronous. Zero routes unless master+CONTENT+ASSIGNMENT+MEDIA are exact 'true'.
  * JWT identity wraps /api/elearning; inner full-path router then applies
  * authoritative org, RBAC, 16 KiB JSON, service. No startup DB I/O.
+ * Playback tickets use dedicated ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET.
  */
 import type { Request, RequestHandler } from 'express'
 import { Router, type Router as ExpressRouter } from 'express'
@@ -16,6 +17,22 @@ import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
 } from './elearning-direct-assignment'
+import {
+  startElearningExam,
+  submitElearningExam,
+  type ElearningExamDb,
+  type ElearningExamStartResult,
+  type ElearningExamSubmitResult,
+  type StartElearningExamInput,
+  type SubmitElearningExamInput,
+} from './elearning-exam'
+import {
+  ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
+  issueElearningMediaPlaybackTicket,
+  type ElearningMediaPlaybackTicket,
+  type ElearningPlaybackQueryable,
+  type IssueElearningMediaPlaybackInput,
+} from './elearning-media-playback'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -28,7 +45,7 @@ export interface ElearningPilotRuntime {
 }
 
 export interface ElearningPilotRuntimeOptions {
-  db: ElearningDirectAssignmentDb & ElearningWatchDb
+  db: ElearningDirectAssignmentDb & ElearningWatchDb & ElearningPlaybackQueryable & ElearningExamDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -47,6 +64,18 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningWatchDb,
     input: RecordElearningHeartbeatInput,
   ) => Promise<ElearningWatchState>
+  issueElearningMediaPlaybackTicket?: (
+    db: ElearningPlaybackQueryable,
+    input: IssueElearningMediaPlaybackInput,
+  ) => Promise<ElearningMediaPlaybackTicket>
+  startElearningExam?: (
+    db: ElearningExamDb,
+    input: StartElearningExamInput,
+  ) => Promise<ElearningExamStartResult>
+  submitElearningExam?: (
+    db: ElearningExamDb,
+    input: SubmitElearningExamInput,
+  ) => Promise<ElearningExamSubmitResult>
 }
 
 function viewerId(req: Request): string | null {
@@ -70,6 +99,17 @@ export function createElearningPilotRuntime(
   const env = opts.env ?? process.env
   if (!isElearningWatchSurfaceEnabled(env)) return null
 
+  const issuePlayback = opts.issueElearningMediaPlaybackTicket ?? ((
+    db: ElearningPlaybackQueryable,
+    input: IssueElearningMediaPlaybackInput,
+  ) => issueElearningMediaPlaybackTicket(db, {
+    orgId: input.orgId,
+    userId: input.userId,
+    itemId: input.itemId,
+    playbackSigningSecret: env[ELEARNING_MEDIA_PLAYBACK_SECRET_ENV],
+    jwtSecret: env.JWT_SECRET,
+  }))
+
   const inner = createElearningPilotRouter({
     db: opts.db,
     viewerId: opts.viewerId ?? viewerId,
@@ -80,6 +120,9 @@ export function createElearningPilotRuntime(
     assignElearningDirect: opts.assignElearningDirect,
     startElearningWatch: opts.startElearningWatch,
     recordElearningHeartbeat: opts.recordElearningHeartbeat,
+    issueElearningMediaPlaybackTicket: issuePlayback,
+    startElearningExam: opts.startElearningExam ?? startElearningExam,
+    submitElearningExam: opts.submitElearningExam ?? submitElearningExam,
   })
   if (!inner) return null
 

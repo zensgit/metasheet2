@@ -63,3 +63,11 @@ export function isElearningWatchSurfaceEnabled(env: NodeJS.ProcessEnv = process.
     isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
   )
 }
+
+/**
+ * Exam HTTP surface is live only when the watch gate AND ASSESSMENT are
+ * exact literal 'true'.
+ */
+export function isElearningExamSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isElearningWatchSurfaceEnabled(env) && isElearningFlagEnabled(ELEARNING_ASSESSMENT_ENABLED, env)
+}

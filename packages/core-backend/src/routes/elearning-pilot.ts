@@ -1,20 +1,38 @@
 /**
- * E-learning V0.1 named-pilot HTTP surface: direct assignment + watch start/heartbeat.
+ * E-learning V0.1 named-pilot HTTP surface: assignment, watch, playback ticket, exams.
  *
  * Unmounted factory. Registers nothing unless master+CONTENT+ASSIGNMENT+MEDIA are exact 'true'.
- * Playback is a later slice. Identity, authoritative org, then RBAC run before JSON/service.
- * Learner/actor/org are injected — never taken from the client. Errors are values-free.
+ * Exam routes additionally recheck ASSESSMENT. Identity, authoritative org, then RBAC run
+ * before JSON/service. Learner/actor/org are injected — never taken from the client.
+ * Errors are values-free. Ticket/exam JSON never includes storage keys or paper secrets.
  */
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import { json, Router } from 'express'
 
-import { isElearningWatchSurfaceEnabled } from '../elearning/feature-flags'
+import {
+  isElearningExamSurfaceEnabled,
+  isElearningWatchSurfaceEnabled,
+} from '../elearning/feature-flags'
 import {
   assignElearningDirect,
   ElearningDirectAssignmentError,
   type ElearningDirectAssignmentDb,
   type ElearningDirectAssignmentErrorCode,
 } from '../services/elearning-direct-assignment'
+import {
+  ElearningExamError,
+  startElearningExam,
+  submitElearningExam,
+  type ElearningExamDb,
+  type ElearningExamErrorCode,
+} from '../services/elearning-exam'
+import {
+  ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
+  ElearningPlaybackError,
+  issueElearningMediaPlaybackTicket,
+  type ElearningPlaybackErrorCode,
+  type ElearningPlaybackQueryable,
+} from '../services/elearning-media-playback'
 import {
   ElearningWatchError,
   recordElearningHeartbeat,
@@ -28,6 +46,8 @@ const UUID_RE =
 
 const ASSIGN_KEYS = new Set(['targetUserId', 'courseVersionId', 'sourceKey', 'deadline'])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
+const SUBMIT_KEYS = new Set(['answers'])
+const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
   invalid_input: 400,
@@ -51,10 +71,35 @@ const WATCH_STATUS: Record<ElearningWatchErrorCode, number> = {
   unavailable: 503,
 }
 
+const PLAYBACK_STATUS: Record<ElearningPlaybackErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  assignment_unavailable: 403,
+  course_withdrawn: 409,
+  unsupported_item: 400,
+  unavailable: 503,
+  invalid_token: 401,
+  token_expired: 401,
+  invalid_range: 400,
+  unsatisfiable_range: 416,
+}
+
+const EXAM_STATUS: Record<ElearningExamErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  assignment_unavailable: 403,
+  course_withdrawn: 409,
+  unsupported_item: 400,
+  prerequisite_incomplete: 409,
+  max_attempts: 409,
+  conflict: 409,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 
 export interface ElearningPilotRouteDeps {
-  db: ElearningDirectAssignmentDb & ElearningWatchDb
+  db: ElearningDirectAssignmentDb & ElearningWatchDb & ElearningPlaybackQueryable & ElearningExamDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -65,6 +110,9 @@ export interface ElearningPilotRouteDeps {
   assignElearningDirect?: typeof assignElearningDirect
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
+  issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
+  startElearningExam?: typeof startElearningExam
+  submitElearningExam?: typeof submitElearningExam
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -114,6 +162,9 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
   const assignDirect = deps.assignElearningDirect ?? assignElearningDirect
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
+  const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
+  const startExam = deps.startElearningExam ?? startElearningExam
+  const submitExam = deps.submitElearningExam ?? submitElearningExam
   const router = Router()
 
   const asyncHandler =
@@ -124,8 +175,16 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       })
     }
 
-  const requireFlags = (_req: Request, res: Response, next: NextFunction): void => {
+  const requireWatchFlags = (_req: Request, res: Response, next: NextFunction): void => {
     if (!isElearningWatchSurfaceEnabled(envOf(deps))) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
+  const requireExamFlags = (_req: Request, res: Response, next: NextFunction): void => {
+    if (!isElearningExamSurfaceEnabled(envOf(deps))) {
       res.status(404).json({ error: 'not_found' })
       return
     }
@@ -148,16 +207,23 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
     next()
   }
 
-  const gate = (guard: RequestHandler): RequestHandler[] => [
-    requireFlags,
+  const gate = (guard: RequestHandler, surface: 'watch' | 'exam' = 'watch'): RequestHandler[] => [
+    surface === 'exam' ? requireExamFlags : requireWatchFlags,
     requireIdentity,
     requireOrg,
     guard,
     parseJson,
   ]
 
-  const recheck = (req: Request, res: Response): { actorId: string; orgId: string } | null => {
-    if (!isElearningWatchSurfaceEnabled(envOf(deps))) {
+  const recheck = (
+    req: Request,
+    res: Response,
+    surface: 'watch' | 'exam' = 'watch',
+  ): { actorId: string; orgId: string } | null => {
+    const enabled = surface === 'exam'
+      ? isElearningExamSurfaceEnabled(envOf(deps))
+      : isElearningWatchSurfaceEnabled(envOf(deps))
+    if (!enabled) {
       res.status(404).json({ error: 'not_found' })
       return null
     }
@@ -232,7 +298,7 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       if (!ctx) return
       const itemId = uuidParam(req, 'itemId')
       const body = readObject(req.body)
-      if (!itemId || !body || rejectUnknownKeys(body, new Set())) {
+      if (!itemId || !body || rejectUnknownKeys(body, EMPTY_KEYS)) {
         invalid(res)
         return
       }
@@ -293,6 +359,101 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       } catch (error) {
         if (error instanceof ElearningWatchError) {
           res.status(WATCH_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/watch/items/:itemId/playback-ticket',
+    ...gate(deps.readGuard),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res)
+      if (!ctx) return
+      const itemId = uuidParam(req, 'itemId')
+      const body = readObject(req.body)
+      if (!itemId || !body || rejectUnknownKeys(body, EMPTY_KEYS)) {
+        invalid(res)
+        return
+      }
+      try {
+        const env = envOf(deps)
+        const result = await issuePlayback(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          itemId,
+          playbackSigningSecret: env[ELEARNING_MEDIA_PLAYBACK_SECRET_ENV],
+          jwtSecret: env.JWT_SECRET,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningPlaybackError) {
+          res.status(PLAYBACK_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/exams/items/:itemId/start',
+    ...gate(deps.readGuard, 'exam'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      const itemId = uuidParam(req, 'itemId')
+      const body = readObject(req.body)
+      if (!itemId || !body || rejectUnknownKeys(body, EMPTY_KEYS)) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await startExam(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          itemId,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningExamError) {
+          res.status(EXAM_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/exams/attempts/:attemptId/submit',
+    ...gate(deps.readGuard, 'exam'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      const attemptId = uuidParam(req, 'attemptId')
+      const body = readObject(req.body)
+      if (!attemptId || !body || rejectUnknownKeys(body, SUBMIT_KEYS)) {
+        invalid(res)
+        return
+      }
+      if (!Object.prototype.hasOwnProperty.call(body, 'answers')) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await submitExam(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          attemptId,
+          answers: body.answers,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningExamError) {
+          res.status(EXAM_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })

@@ -2,7 +2,10 @@ import express from 'express'
 import request from 'supertest'
 import { describe, expect, test } from 'vitest'
 
-import { isElearningWatchSurfaceEnabled } from '../../src/elearning/feature-flags'
+import {
+  isElearningExamSurfaceEnabled,
+  isElearningWatchSurfaceEnabled,
+} from '../../src/elearning/feature-flags'
 import { createElearningPilotRouter } from '../../src/routes/elearning-pilot'
 import {
   ElearningDirectAssignmentError,
@@ -11,6 +14,23 @@ import {
   type ElearningDirectAssignmentResult,
   type AssignElearningDirectInput,
 } from '../../src/services/elearning-direct-assignment'
+import {
+  ElearningExamError,
+  type ElearningExamDb,
+  type ElearningExamErrorCode,
+  type ElearningExamStartResult,
+  type ElearningExamSubmitResult,
+  type StartElearningExamInput,
+  type SubmitElearningExamInput,
+} from '../../src/services/elearning-exam'
+import {
+  ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
+  ElearningPlaybackError,
+  type ElearningMediaPlaybackTicket,
+  type ElearningPlaybackErrorCode,
+  type ElearningPlaybackQueryable,
+  type IssueElearningMediaPlaybackInput,
+} from '../../src/services/elearning-media-playback'
 import {
   ElearningWatchError,
   type ElearningWatchDb,
@@ -21,11 +41,21 @@ import {
 } from '../../src/services/elearning-watch-progress'
 import { usePinnedServer } from '../utils/pinned-server'
 
+const PLAYBACK_SECRET = 'playback-signing-secret-min-32chars!'
+const JWT_SECRET = 'jwt-secret-must-remain-unused-32b!!'
+
 const FLAG_ON = {
   ELEARNING_ENABLED: 'true',
   ELEARNING_CONTENT_ENABLED: 'true',
   ELEARNING_ASSIGNMENT_ENABLED: 'true',
   ELEARNING_MEDIA_ENABLED: 'true',
+  [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: PLAYBACK_SECRET,
+  JWT_SECRET,
+} as unknown as NodeJS.ProcessEnv
+
+const FLAG_EXAM_ON = {
+  ...FLAG_ON,
+  ELEARNING_ASSESSMENT_ENABLED: 'true',
 } as unknown as NodeJS.ProcessEnv
 
 const FLAG_NAMES = [
@@ -48,6 +78,10 @@ const ITEM = '22222222-2222-4222-8222-222222222222'
 const SESSION = '33333333-3333-4333-8333-333333333333'
 const ASSIGNMENT_ID = '44444444-4444-4444-8444-444444444444'
 const MEMBER_ID = '55555555-5555-4555-8555-555555555555'
+const MEDIA = '66666666-6666-4666-8666-666666666666'
+const ATTEMPT = '77777777-7777-4777-8777-777777777777'
+const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const STORAGE_KEY = 'elearning-media/2026-08/secret-object-key.mp4'
 
 const ASSIGN_BODY = {
   targetUserId: TARGET,
@@ -95,7 +129,75 @@ const WATCH_ERRORS: Array<[ElearningWatchErrorCode, number]> = [
   ['unavailable', 503],
 ]
 
+const PLAYBACK_ERRORS: Array<[ElearningPlaybackErrorCode, number]> = [
+  ['invalid_input', 400],
+  ['not_found', 404],
+  ['assignment_unavailable', 403],
+  ['course_withdrawn', 409],
+  ['unsupported_item', 400],
+  ['unavailable', 503],
+  ['invalid_token', 401],
+  ['token_expired', 401],
+  ['invalid_range', 400],
+  ['unsatisfiable_range', 416],
+]
+
+const EXAM_ERRORS: Array<[ElearningExamErrorCode, number]> = [
+  ['invalid_input', 400],
+  ['not_found', 404],
+  ['assignment_unavailable', 403],
+  ['course_withdrawn', 409],
+  ['unsupported_item', 400],
+  ['prerequisite_incomplete', 409],
+  ['max_attempts', 409],
+  ['conflict', 409],
+  ['unavailable', 503],
+]
+
 const HEARTBEAT_BODY = { sequence: 1, positionMs: 1000, playing: true }
+
+const TICKET_RESULT: ElearningMediaPlaybackTicket = {
+  token: 'playback.ticket.token',
+  expiresAt: '2026-08-25T12:10:00.000Z',
+  ttlSeconds: 600,
+  itemId: ITEM,
+  mediaId: MEDIA,
+}
+
+const EXAM_START_RESULT: ElearningExamStartResult = {
+  attemptId: ATTEMPT,
+  attemptNo: 1,
+  status: 'started',
+  paper: {
+    domain: 'elearning.exam.paper.v1',
+    version: 1,
+    questions: [{
+      position: 1,
+      questionRevisionId: Q1,
+      questionType: 'single_choice',
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      points: 10,
+    }],
+  },
+  duplicate: false,
+}
+
+const EXAM_SUBMIT_RESULT: ElearningExamSubmitResult = {
+  attemptId: ATTEMPT,
+  attemptNo: 1,
+  status: 'graded',
+  autoScore: 10,
+  totalScore: 10,
+  passed: true,
+  duplicate: false,
+}
+
+const ANSWERS = { [Q1]: ['a'] }
+const SUBMIT_BODY = { answers: ANSWERS }
 
 const pinned = usePinnedServer()
 function serve(app: express.Express) {
@@ -103,7 +205,7 @@ function serve(app: express.Express) {
   return request(pinned.url())
 }
 
-function dummyDb(): ElearningDirectAssignmentDb & ElearningWatchDb {
+function dummyDb(): ElearningDirectAssignmentDb & ElearningWatchDb & ElearningPlaybackQueryable & ElearningExamDb {
   return {
     query: async () => ({ rows: [], rowCount: 0 }),
     transaction: async (handler) => handler({ query: async () => ({ rows: [], rowCount: 0 }) }),
@@ -119,7 +221,23 @@ function assertValuesFree(body: unknown): void {
   expect(blob).not.toContain(VERSION)
   expect(blob).not.toContain(ITEM)
   expect(blob).not.toContain(SESSION)
+  expect(blob).not.toContain(ATTEMPT)
+  expect(blob).not.toContain(PLAYBACK_SECRET)
+  expect(blob).not.toContain(JWT_SECRET)
+  expect(blob).not.toContain(STORAGE_KEY)
+  expect(blob).not.toMatch(/storage_key|storageKey|answer_key|answerKey/)
   expect(blob).not.toMatch(/host|secret|stack|at /i)
+}
+
+function assertNoSecrets(body: unknown): void {
+  const blob = JSON.stringify(body)
+  expect(blob).not.toContain(PLAYBACK_SECRET)
+  expect(blob).not.toContain(JWT_SECRET)
+  expect(blob).not.toContain(STORAGE_KEY)
+  expect(blob).not.toMatch(/storage_key|storageKey/)
+  expect(blob).not.toMatch(/answer_key|answerKey/)
+  expect(blob).not.toContain('explanation')
+  expect(blob).not.toMatch(/"correct"/)
 }
 
 function makeApp(over: {
@@ -131,13 +249,22 @@ function makeApp(over: {
   assignError?: unknown
   startError?: unknown
   heartbeatError?: unknown
+  ticketError?: unknown
+  examStartError?: unknown
+  examSubmitError?: unknown
   assignResult?: ElearningDirectAssignmentResult
   startResult?: ElearningWatchState
   heartbeatResult?: ElearningWatchState
+  ticketResult?: ElearningMediaPlaybackTicket
+  examStartResult?: ElearningExamStartResult
+  examSubmitResult?: ElearningExamSubmitResult
 } = {}) {
   const assignCalls: AssignElearningDirectInput[] = []
   const startCalls: StartElearningWatchInput[] = []
   const heartbeatCalls: RecordElearningHeartbeatInput[] = []
+  const ticketCalls: IssueElearningMediaPlaybackInput[] = []
+  const examStartCalls: StartElearningExamInput[] = []
+  const examSubmitCalls: SubmitElearningExamInput[] = []
   const order: string[] = []
   let adminCalls = 0
   let readCalls = 0
@@ -190,6 +317,24 @@ function makeApp(over: {
       if (over.heartbeatError) throw over.heartbeatError
       return over.heartbeatResult ?? WATCH_STATE
     },
+    issueElearningMediaPlaybackTicket: async (_db, input) => {
+      ticketCalls.push(input)
+      order.push('service')
+      if (over.ticketError) throw over.ticketError
+      return over.ticketResult ?? TICKET_RESULT
+    },
+    startElearningExam: async (_db, input) => {
+      examStartCalls.push(input)
+      order.push('service')
+      if (over.examStartError) throw over.examStartError
+      return over.examStartResult ?? EXAM_START_RESULT
+    },
+    submitElearningExam: async (_db, input) => {
+      examSubmitCalls.push(input)
+      order.push('service')
+      if (over.examSubmitError) throw over.examSubmitError
+      return over.examSubmitResult ?? EXAM_SUBMIT_RESULT
+    },
   })
   const app = express()
   if (router) app.use(router)
@@ -199,6 +344,9 @@ function makeApp(over: {
     assignCalls,
     startCalls,
     heartbeatCalls,
+    ticketCalls,
+    examStartCalls,
+    examSubmitCalls,
     order,
     get adminCalls() { return adminCalls },
     get readCalls() { return readCalls },
@@ -227,6 +375,13 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
       ...deps,
       env: { ...FLAG_ON, ELEARNING_ASSESSMENT_ENABLED: 'false' } as unknown as NodeJS.ProcessEnv,
     })).not.toBeNull()
+    expect(isElearningExamSurfaceEnabled(FLAG_ON)).toBe(false)
+    expect(isElearningExamSurfaceEnabled(FLAG_EXAM_ON)).toBe(true)
+    for (const value of LOOKALIKES) {
+      const env = { ...FLAG_EXAM_ON, ELEARNING_ASSESSMENT_ENABLED: value } as unknown as NodeJS.ProcessEnv
+      expect(isElearningExamSurfaceEnabled(env)).toBe(false)
+      expect(createElearningPilotRouter({ ...deps, env })).not.toBeNull()
+    }
   })
 
   test('handler rechecks flags after registration and refuses ready', async () => {
@@ -248,6 +403,30 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(beat.status).toBe(404)
     expect(beat.body).toEqual({ error: 'not_found' })
     expect(app.heartbeatCalls).toHaveLength(0)
+    const ticket = await serve(app.app).post(`/api/elearning/watch/items/${ITEM}/playback-ticket`).send({})
+    expect(ticket.status).toBe(404)
+    expect(ticket.body).toEqual({ error: 'not_found' })
+    expect(app.ticketCalls).toHaveLength(0)
+
+    const examEnv = { ...FLAG_EXAM_ON } as unknown as NodeJS.ProcessEnv
+    const examApp = makeApp({ env: examEnv })
+    examEnv.ELEARNING_ASSESSMENT_ENABLED = 'false'
+    const examStart = await serve(examApp.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(examStart.status).toBe(404)
+    expect(examStart.body).toEqual({ error: 'not_found' })
+    expect(examApp.examStartCalls).toHaveLength(0)
+    expect(examApp.readCalls).toBe(0)
+    const examSubmit = await serve(examApp.app)
+      .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
+      .send(SUBMIT_BODY)
+    expect(examSubmit.status).toBe(404)
+    expect(examSubmit.body).toEqual({ error: 'not_found' })
+    expect(examApp.examSubmitCalls).toHaveLength(0)
+    const examTicket = await serve(examApp.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+      .send({})
+    expect(examTicket.status).toBe(200)
+    expect(examApp.ticketCalls).toHaveLength(1)
   })
 
   test('identity then org then RBAC occur before service calls', async () => {
@@ -297,6 +476,47 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(deniedWatch.adminCalls).toBe(0)
     expect(deniedWatch.startCalls).toHaveLength(0)
     expect(deniedWatch.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac'))
+      .toEqual(['identity', 'org', 'rbac'])
+
+    const anonTicket = await serve(anon.app).post(`/api/elearning/watch/items/${ITEM}/playback-ticket`).send({})
+    expect(anonTicket.status).toBe(401)
+    expect(anon.ticketCalls).toHaveLength(0)
+
+    const orgTicket = await serve(noOrg.app).post(`/api/elearning/watch/items/${ITEM}/playback-ticket`).send({})
+    expect(orgTicket.status).toBe(403)
+    expect(noOrg.ticketCalls).toHaveLength(0)
+
+    const deniedTicket = makeApp({ hasRead: false })
+    const rbacTicket = await serve(deniedTicket.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+      .send({})
+    expect(rbacTicket.status).toBe(403)
+    expect(deniedTicket.readCalls).toBe(1)
+    expect(deniedTicket.ticketCalls).toHaveLength(0)
+
+    const anonExam = makeApp({ viewer: null, org: null, hasRead: false, env: FLAG_EXAM_ON })
+    const anonExamStart = await serve(anonExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(anonExamStart.status).toBe(401)
+    expect(anonExam.examStartCalls).toHaveLength(0)
+    expect(anonExam.readCalls).toBe(0)
+    const anonExamSubmit = await serve(anonExam.app)
+      .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
+      .send(SUBMIT_BODY)
+    expect(anonExamSubmit.status).toBe(401)
+    expect(anonExam.examSubmitCalls).toHaveLength(0)
+
+    const noOrgExam = makeApp({ org: null, hasRead: false, env: FLAG_EXAM_ON })
+    const orgExamStart = await serve(noOrgExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(orgExamStart.status).toBe(403)
+    expect(noOrgExam.readCalls).toBe(0)
+    expect(noOrgExam.examStartCalls).toHaveLength(0)
+
+    const deniedExam = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
+    const rbacExam = await serve(deniedExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(rbacExam.status).toBe(403)
+    expect(deniedExam.readCalls).toBe(1)
+    expect(deniedExam.examStartCalls).toHaveLength(0)
+    expect(deniedExam.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac'))
       .toEqual(['identity', 'org', 'rbac'])
   })
 
@@ -356,6 +576,53 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     }])
     expect(beatApp.readCalls).toBe(1)
     expect(beatApp.adminCalls).toBe(0)
+
+    const ticketApp = makeApp()
+    const ticket = await serve(ticketApp.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket?userId=evil-user&orgId=evil-org`)
+      .set('x-user-id', 'header-user')
+      .set('x-tenant-id', 'header-org')
+      .send({})
+    expect(ticket.status).toBe(200)
+    expect(ticket.body).toEqual(TICKET_RESULT)
+    assertNoSecrets(ticket.body)
+    expect(ticketApp.ticketCalls).toEqual([{
+      orgId: ORG,
+      userId: ACTOR,
+      itemId: ITEM,
+      playbackSigningSecret: PLAYBACK_SECRET,
+      jwtSecret: JWT_SECRET,
+    }])
+    expect(ticketApp.readCalls).toBe(1)
+    expect(ticketApp.adminCalls).toBe(0)
+
+    const examStartApp = makeApp({ env: FLAG_EXAM_ON })
+    const examStart = await serve(examStartApp.app)
+      .post(`/api/elearning/exams/items/${ITEM}/start?userId=evil-user&orgId=evil-org`)
+      .set('x-user-id', 'header-user')
+      .send({})
+    expect(examStart.status).toBe(200)
+    expect(examStart.body).toEqual(EXAM_START_RESULT)
+    assertNoSecrets(examStart.body)
+    expect(examStartApp.examStartCalls).toEqual([{ orgId: ORG, userId: ACTOR, itemId: ITEM }])
+    expect(examStartApp.readCalls).toBe(1)
+    expect(examStartApp.adminCalls).toBe(0)
+
+    const examSubmitApp = makeApp({ env: FLAG_EXAM_ON })
+    const examSubmit = await serve(examSubmitApp.app)
+      .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit?userId=evil-user&orgId=evil-org`)
+      .set('x-user-id', 'header-user')
+      .send(SUBMIT_BODY)
+    expect(examSubmit.status).toBe(200)
+    expect(examSubmit.body).toEqual(EXAM_SUBMIT_RESULT)
+    assertNoSecrets(examSubmit.body)
+    expect(examSubmitApp.examSubmitCalls).toEqual([{
+      orgId: ORG,
+      userId: ACTOR,
+      attemptId: ATTEMPT,
+      answers: ANSWERS,
+    }])
+    expect(examSubmitApp.readCalls).toBe(1)
   })
 
   test('strict JSON body and path reject unknown keys, missing fields, and bad types before services', async () => {
@@ -429,6 +696,57 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(badSession.status).toBe(400)
     expect(badSession.body).toEqual({ error: 'invalid_input' })
     expect(extraBeat.heartbeatCalls).toHaveLength(0)
+
+    const extraTicket = makeApp()
+    for (const body of [
+      { userId: 'evil-user' },
+      { orgId: 'evil-org' },
+      { itemId: ITEM },
+      { token: 'x' },
+      { extra: true },
+    ]) {
+      extraTicket.ticketCalls.length = 0
+      const res = await serve(extraTicket.app)
+        .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+        .send(body)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_input' })
+      assertValuesFree(res.body)
+      expect(extraTicket.ticketCalls).toHaveLength(0)
+    }
+
+    const extraExam = makeApp({ env: FLAG_EXAM_ON })
+    for (const body of [
+      { userId: 'evil-user' },
+      { orgId: 'evil-org' },
+      { itemId: ITEM },
+      { extra: true },
+    ]) {
+      extraExam.examStartCalls.length = 0
+      const res = await serve(extraExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send(body)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_input' })
+      assertValuesFree(res.body)
+      expect(extraExam.examStartCalls).toHaveLength(0)
+    }
+
+    for (const body of [
+      { answers: ANSWERS, orgId: 'evil-org' },
+      { answers: ANSWERS, userId: 'evil-user' },
+      { answers: ANSWERS, attemptId: ATTEMPT },
+      { answers: ANSWERS, extra: 1 },
+      { selected: ANSWERS },
+      {},
+    ]) {
+      extraExam.examSubmitCalls.length = 0
+      const res = await serve(extraExam.app)
+        .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
+        .send(body)
+      expect(res.status).toBe(400)
+      expect(res.body).toEqual({ error: 'invalid_input' })
+      assertValuesFree(res.body)
+      expect(extraExam.examSubmitCalls).toHaveLength(0)
+    }
   })
 
   test('service-domain errors map to stable values-free status/body pairs', async () => {
@@ -464,6 +782,42 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
       assertValuesFree(beatRes.body)
       expect(beatApp.heartbeatCalls).toHaveLength(1)
     }
+
+    for (const [code, status] of PLAYBACK_ERRORS) {
+      const ticketApp = makeApp({ ticketError: new ElearningPlaybackError(code) })
+      const ticketRes = await serve(ticketApp.app)
+        .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+        .send({})
+      expect(ticketRes.status).toBe(status)
+      expect(ticketRes.body).toEqual({ error: code })
+      assertValuesFree(ticketRes.body)
+      expect(ticketApp.ticketCalls).toHaveLength(1)
+    }
+    const ticketBoom = makeApp({ ticketError: new Error('storage_key secret at /var/app') })
+    const ticketBoomRes = await serve(ticketBoom.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+      .send({})
+    expect(ticketBoomRes.status).toBe(500)
+    expect(ticketBoomRes.body).toEqual({ error: 'internal_error' })
+    assertValuesFree(ticketBoomRes.body)
+
+    for (const [code, status] of EXAM_ERRORS) {
+      const startApp = makeApp({ env: FLAG_EXAM_ON, examStartError: new ElearningExamError(code) })
+      const startRes = await serve(startApp.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+      expect(startRes.status).toBe(status)
+      expect(startRes.body).toEqual({ error: code })
+      assertValuesFree(startRes.body)
+      expect(startApp.examStartCalls).toHaveLength(1)
+
+      const submitApp = makeApp({ env: FLAG_EXAM_ON, examSubmitError: new ElearningExamError(code) })
+      const submitRes = await serve(submitApp.app)
+        .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
+        .send(SUBMIT_BODY)
+      expect(submitRes.status).toBe(status)
+      expect(submitRes.body).toEqual({ error: code })
+      assertValuesFree(submitRes.body)
+      expect(submitApp.examSubmitCalls).toHaveLength(1)
+    }
   })
 
   test('identity then org then RBAC precede body parsing on oversized JSON', async () => {
@@ -494,6 +848,26 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(denied.assignCalls).toHaveLength(0)
     expect(denied.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac'))
       .toEqual(['identity', 'org', 'rbac'])
+
+    const hugeTicket = `{${' '.repeat(20 * 1024)}}`
+    const deniedTicket = makeApp({ hasRead: false })
+    const rbacTicket = await serve(deniedTicket.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+      .set('content-type', 'application/json')
+      .send(hugeTicket)
+    expect(rbacTicket.status).toBe(403)
+    expect(deniedTicket.readCalls).toBe(1)
+    expect(deniedTicket.ticketCalls).toHaveLength(0)
+    expect(deniedTicket.order.includes('service')).toBe(false)
+
+    const deniedExam = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
+    const rbacExam = await serve(deniedExam.app)
+      .post(`/api/elearning/exams/items/${ITEM}/start`)
+      .set('content-type', 'application/json')
+      .send(hugeTicket)
+    expect(rbacExam.status).toBe(403)
+    expect(deniedExam.readCalls).toBe(1)
+    expect(deniedExam.examStartCalls).toHaveLength(0)
   })
 
   test('valid allowed-key body over 16 KiB is rejected before service even with a later 10 MB parser', async () => {
@@ -518,5 +892,53 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(start.body).toEqual({ error: 'invalid_input' })
     expect(startApp.startCalls).toHaveLength(0)
     expect(startApp.order.includes('service')).toBe(false)
+
+    const ticketApp = makeApp()
+    ticketApp.app.use(express.json({ limit: '10mb' }))
+    const ticket = await serve(ticketApp.app)
+      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
+      .set('content-type', 'application/json')
+      .send(`{${' '.repeat(20 * 1024)}}`)
+    expect(ticket.status).toBe(400)
+    expect(ticket.body).toEqual({ error: 'invalid_input' })
+    expect(ticketApp.ticketCalls).toHaveLength(0)
+    expect(ticketApp.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac' || step === 'service'))
+      .toEqual(['identity', 'org', 'rbac'])
+
+    const examApp = makeApp({ env: FLAG_EXAM_ON })
+    examApp.app.use(express.json({ limit: '10mb' }))
+    const examStart = await serve(examApp.app)
+      .post(`/api/elearning/exams/items/${ITEM}/start`)
+      .set('content-type', 'application/json')
+      .send(`{${' '.repeat(20 * 1024)}}`)
+    expect(examStart.status).toBe(400)
+    expect(examStart.body).toEqual({ error: 'invalid_input' })
+    expect(examApp.examStartCalls).toHaveLength(0)
+
+    const hugeAnswers = { answers: { [Q1]: ['x'.repeat(20 * 1024)] } }
+    const examSubmit = await serve(examApp.app)
+      .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
+      .send(hugeAnswers)
+    expect(examSubmit.status).toBe(400)
+    expect(examSubmit.body).toEqual({ error: 'invalid_input' })
+    expect(examApp.examSubmitCalls).toHaveLength(0)
+  })
+
+  test('assessment OFF 404s exam routes before identity/RBAC/service while watch ticket still works', async () => {
+    const app = makeApp({ env: FLAG_ON, hasRead: false, viewer: null })
+    const start = await serve(app.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(start.status).toBe(404)
+    expect(start.body).toEqual({ error: 'not_found' })
+    expect(app.readCalls).toBe(0)
+    expect(app.examStartCalls).toHaveLength(0)
+    expect(app.order.includes('identity')).toBe(false)
+
+    const ready = makeApp({ env: FLAG_ON })
+    const ticket = await serve(ready.app).post(`/api/elearning/watch/items/${ITEM}/playback-ticket`).send({})
+    expect(ticket.status).toBe(200)
+    expect(ready.ticketCalls).toHaveLength(1)
+    const exam = await serve(ready.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
+    expect(exam.status).toBe(404)
+    expect(ready.examStartCalls).toHaveLength(0)
   })
 })
