@@ -19,7 +19,7 @@
  * about ORDER, not an observation of the catalog).
  *
  * The premise is a CONJUNCTION, and the query that checks it says so: the foreign key must target
- * the session-resolved `roles` relation, the child table must carry a canonical recovery-authority
+ * the CANONICALLY-bound `roles` relation, the child table must carry a canonical recovery-authority
  * trigger, and the parent-delete action must actually write the child row. Widening any one conjunct
  * away produces a false ABSENT; narrowing to "cascading role_permissions FK" — which this witness
  * originally did — produced two of them at once. See `buildRoleCascadeWitnessQuery`'s docblock in the
@@ -83,7 +83,7 @@
  */
 
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
-import { CANONICAL_ROLES_SCHEMA, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
+import { CANONICAL_ROLES_SCHEMA, FK_DELETE_ACTION_LETTERS, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, readCatalogCount, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
 import { AUTHORITY_TRIGGER_FUNCTIONS } from './multitable-recovery-schema-containment.mjs'
 
 /**
@@ -369,37 +369,77 @@ export function parseWitnessObservation(text) {
   if (!Array.isArray(rows) || rows.some((row) => !row || typeof row !== 'object' || Array.isArray(row))) {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'ROWS payload is not an array of objects' }
   }
-  const normalisedRows = rows.map((row) => ({
-    child_schema: String(row.child_schema ?? ''),
-    child_table: String(row.child_table ?? ''),
-    conname: String(row.conname ?? ''),
-    confdeltype: String(row.confdeltype ?? ''),
-  }))
-  // Every field is load-bearing: the verdict is only auditable if each row names WHICH relation, in
-  // WHICH schema, was written by WHICH action. A row missing any of them is an unreadable
-  // observation, not a readable observation of nothing.
-  if (normalisedRows.some((row) => row.child_schema === '' || row.child_table === '' || row.conname === '' || row.confdeltype === '')) {
-    return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'a ROWS entry is missing child_schema, child_table, conname or confdeltype' }
+
+  // VALIDATE THE RAW JSON, THEN USE IT. This block used to be `String(row.child_schema ?? '')`,
+  // which is a coercion, and a coercion turns malformed input into a well-formed-looking
+  // observation: `{child_schema: 1, child_table: true, conname: 2, confdeltype: 7}` became four
+  // non-empty strings, sailed past the "a field is missing" check, and — because `'7'` is not in
+  // the child-write set — was reported as CASCADE ABSENT / exit 0. Verified against head
+  // cd0977e3c0. A value the catalog could not have produced is an UNREADABLE observation, never an
+  // observation of no-write.
+  const ROW_FIELDS = ['child_schema', 'child_table', 'conname', 'confdeltype']
+  for (const row of rows) {
+    for (const field of ROW_FIELDS) {
+      if (typeof row[field] !== 'string') {
+        return {
+          ok: false,
+          reason: INDETERMINATE_REASONS.unparseable,
+          detail: `a ROWS entry has a non-string ${field} (${typeof row[field]}); the catalog projection is all text, so this payload did not come from the probe`,
+        }
+      }
+    }
+    // Not merely "not a write action" — not an action AT ALL. Derived from the battery's legal
+    // letter set, so widening the catalog's vocabulary cannot leave this behind.
+    if (!FK_DELETE_ACTION_LETTERS.includes(row.confdeltype)) {
+      return {
+        ok: false,
+        reason: INDETERMINATE_REASONS.unparseable,
+        detail: `a ROWS entry has confdeltype ${JSON.stringify(row.confdeltype)}, which is not a legal foreign-key delete action (${FK_DELETE_ACTION_LETTERS.join(', ')}); treating it as "no child write" would report an unreadable observation as absence`,
+      }
+    }
   }
+  const normalisedRows = rows.map((row) => ({
+    child_schema: row.child_schema,
+    child_table: row.child_table,
+    conname: row.conname,
+    confdeltype: row.confdeltype,
+  }))
 
   if (!presence || typeof presence !== 'object' || Array.isArray(presence)) {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE payload is not an object' }
   }
   const canonicalSchema = typeof presence.canonical_schema === 'string' ? presence.canonical_schema : ''
-  const visibleRolesCount = Number(presence.visible_roles_relations)
-  const exactCarrierCount = Number(presence.canonical_exact_carriers)
-  const triggeredRelationCount = Number(presence.recovery_authority_relations)
-  const rolesReferencingFkCount = Number(presence.roles_referencing_fks)
+  // VALIDATED, NOT COERCED — `Number(true)` is 1, `Number(null)` is 0, `Number('')` is 0. Sending
+  // `true` for all four counts produced an observation with every door open and a CONFIRMED
+  // verdict. Verified against head cd0977e3c0. The probe emits real JSON numbers, so anything else
+  // did not come from the probe.
+  const visibleRolesCount = readCatalogCount(presence.visible_roles_relations)
+  const exactCarrierCount = readCatalogCount(presence.canonical_exact_carriers)
+  const triggeredRelationCount = readCatalogCount(presence.recovery_authority_relations)
+  const rolesReferencingFkCount = readCatalogCount(presence.roles_referencing_fks)
   if (canonicalSchema === '') {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE names no canonical_schema' }
   }
   if (typeof presence.canonical_roles_present !== 'boolean' || typeof presence.session_binds_canonical !== 'boolean') {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE binding flags are not booleans' }
   }
-  if (!Number.isFinite(visibleRolesCount) || !Number.isFinite(exactCarrierCount) || !Number.isFinite(triggeredRelationCount) || !Number.isFinite(rolesReferencingFkCount)) {
-    return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE counts are not numbers' }
+  const badCounts = [
+    ['visible_roles_relations', visibleRolesCount],
+    ['canonical_exact_carriers', exactCarrierCount],
+    ['recovery_authority_relations', triggeredRelationCount],
+    ['roles_referencing_fks', rolesReferencingFkCount],
+  ].filter(([, parsed]) => parsed === null).map(([name]) => name)
+  if (badCounts.length > 0) {
+    return {
+      ok: false,
+      reason: INDETERMINATE_REASONS.unparseable,
+      detail: `PRESENCE counts are not non-negative integers: ${badCounts.join(', ')}`,
+    }
   }
-  const sessionRolesSchema = presence.session_roles_schema == null ? null : String(presence.session_roles_schema)
+  if (presence.session_roles_schema != null && typeof presence.session_roles_schema !== 'string') {
+    return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE session_roles_schema is neither a string nor null' }
+  }
+  const sessionRolesSchema = presence.session_roles_schema ?? null
   const observed = {
     canonical_schema: canonicalSchema,
     canonical_roles_present: presence.canonical_roles_present,

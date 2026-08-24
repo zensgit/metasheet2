@@ -6,7 +6,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { CANONICAL_ROLES_SCHEMA, buildRoleCascadeWitnessQuery } from './multitable-l1-battery.mjs'
+import { CANONICAL_ROLES_SCHEMA, FK_DELETE_ACTION_LETTERS, ROLE_DELETE_CHILD_WRITE_ACTIONS, buildRoleCascadeWitnessQuery } from './multitable-l1-battery.mjs'
 import {
   HEADLINES,
   INDETERMINATE_REASONS,
@@ -291,6 +291,71 @@ const INDETERMINATE_CASES = [
     reason: INDETERMINATE_REASONS.unparseable,
   },
 ]
+
+test('the protocol is VALIDATED, not coerced — malformed payloads are unreadable, never absence', () => {
+  // `String()` and `Number()` manufacture a well-formed-looking observation out of junk:
+  // `Number(true)` is 1, `Number(null)` is 0, `String(7)` is a non-empty string. Against head
+  // cd0977e3c0, sending `true` for all four counts, and sending `{child_schema: 1, child_table:
+  // true, conname: 2, confdeltype: 7}` as a row, BOTH returned CASCADE ABSENT / exit 0. The parse
+  // has to reject the RAW JSON before anything is converted.
+  const counts = { visible_roles_relations: 1, canonical_exact_carriers: 9, recovery_authority_relations: 9, roles_referencing_fks: 1 }
+  const bound = { canonical_schema: 'public', canonical_roles_present: true, session_binds_canonical: true, session_roles_schema: 'public' }
+
+  // Counts: booleans, nulls, empty strings, floats, negatives, leading-zero and exponent strings.
+  for (const field of Object.keys(counts)) {
+    for (const junk of [true, false, null, '', ' 1', '01', '1e3', 1.5, -1, [], {}, '1 ']) {
+      const verdict = verdictFor(observation({ presence: { ...bound, ...counts, [field]: junk } }))
+      assert.equal(verdict.verdict, 'INDETERMINATE', `${field}=${JSON.stringify(junk)} was accepted`)
+      assert.equal(verdict.exitCode, 2, `${field}=${JSON.stringify(junk)} did not fail closed`)
+      assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `${field}=${JSON.stringify(junk)}`)
+      assert.match(verdict.detail, new RegExp(field), 'the detail must name the offending field')
+    }
+    // …and the strict decimal STRING form is still accepted, because node-postgres returns
+    // `count(*)` as a string and the shared classifier is fed straight from a pg row.
+    const ok = verdictFor(observation({ presence: { ...bound, ...counts, [field]: '3' }, rows: [] }))
+    assert.notEqual(ok.reason, INDETERMINATE_REASONS.unparseable, `${field} rejected the decimal string form pg actually returns`)
+  }
+
+  // Row fields: every non-string type, on every field.
+  for (const field of ['child_schema', 'child_table', 'conname', 'confdeltype']) {
+    for (const junk of [1, true, null, undefined, [], {}, 7.5]) {
+      const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'c', [field]: junk }
+      const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+      assert.equal(verdict.verdict, 'INDETERMINATE', `${field}=${JSON.stringify(junk)} was accepted`)
+      assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `${field}=${JSON.stringify(junk)}`)
+    }
+  }
+
+  // confdeltype must be a letter the CATALOG can produce. Anything else is unreadable — NOT
+  // "some action that happens not to write the child", which is how it used to read.
+  for (const junk of ['z', '7', '', 'C', 'cc', ' c']) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: junk }
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `confdeltype ${JSON.stringify(junk)} was accepted`)
+    assert.match(verdict.detail, /not a legal foreign-key delete action/)
+  }
+  // POSITIVE CONTROL for all of the above: the legal letters still classify, both ways.
+  for (const [letter, expected] of [['c', 'PRESENT'], ['n', 'PRESENT'], ['d', 'PRESENT'], ['a', 'ABSENT'], ['r', 'ABSENT']]) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: letter }
+    assert.equal(verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] })).verdict, expected, `confdeltype '${letter}'`)
+  }
+
+  // session_roles_schema is reported, so it must be a string or null — not coerced into one.
+  for (const junk of [1, true, [], {}]) {
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: junk } }))
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `session_roles_schema=${JSON.stringify(junk)}`)
+  }
+})
+
+test('the legal delete-action letters are a SUPERSET of the child-write letters', () => {
+  // Two sets with one job each: "is this an action at all" and "does it write the child". If the
+  // write set ever grew a letter the legal set does not have, every observation carrying it would
+  // be rejected as unreadable instead of classified — and the widening would look like it worked.
+  for (const letter of ROLE_DELETE_CHILD_WRITE_ACTIONS) {
+    assert.ok(FK_DELETE_ACTION_LETTERS.includes(letter), `write action '${letter}' is not in the legal letter set`)
+  }
+  assert.deepEqual([...FK_DELETE_ACTION_LETTERS].sort(), ['a', 'c', 'd', 'n', 'r'], 'the legal set no longer matches pg_constraint.confdeltype')
+})
 
 test('every failed observation is INDETERMINATE — never ABSENT, never exit 0', () => {
   for (const testCase of INDETERMINATE_CASES) {
@@ -600,7 +665,7 @@ test('the runner re-implements neither half of the witness', () => {
   // import line is pinned so a locally-defined shadow cannot quietly take over.
   assert.match(
     runnerRaw,
-    /import \{ CANONICAL_ROLES_SCHEMA, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
+    /import \{ CANONICAL_ROLES_SCHEMA, FK_DELETE_ACTION_LETTERS, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, readCatalogCount, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
   )
   // The battery's predicate must be the thing that DECIDES; a hand-rolled test anywhere in this
   // module (or in the probe source it generates) is a second, narrower definition.

@@ -59,8 +59,10 @@ import {
   CANONICAL_ROLES_SCHEMA,
   ROLE_CASCADE_BINDING_DOORS,
   buildRoleCascadeBindingSql,
+  FK_DELETE_ACTION_LETTERS,
   buildRoleCascadeWitnessQuery,
   classifyRoleCascadeBinding,
+  readCatalogCount,
   ROLE_DELETE_CHILD_WRITE_ACTIONS,
   RECOVERY_CONFLICT_HTTP_STATUS,
   STAMP_PREFIX,
@@ -1453,6 +1455,34 @@ const BINDING_ALL_OPEN = Object.freeze({
   session_roles_schema: 'public',
   visible_roles_relations: 1,
   canonical_exact_carriers: 9,
+})
+
+test('readCatalogCount VALIDATES, it does not coerce', () => {
+  // Defined here, so it is tested here — the witness suite exercising it does not make this module
+  // covered. `Number()` maps true->1, null->0, ''->0, so a payload of four `true`s became an
+  // observation with every door open and a CONFIRMED verdict (verified against head cd0977e3c0).
+  for (const good of [[0, 0], [1, 1], [9, 9], ['0', 0], ['1', 1], ['4294967296', 4294967296]]) {
+    assert.equal(readCatalogCount(good[0]), good[1], `rejected the valid count ${JSON.stringify(good[0])}`)
+  }
+  // The decimal STRING form is accepted on purpose: node-postgres returns `count(*)` (bigint) as a
+  // string, and the shared door classifier is fed straight from a pg row.
+  for (const bad of [true, false, null, undefined, '', ' 1', '1 ', '01', '+1', '1e3', '0x1', 1.5, -1, -0.0001, NaN, Infinity, [], {}, [1], '½']) {
+    assert.equal(readCatalogCount(bad), null, `accepted the invalid count ${JSON.stringify(bad)}`)
+  }
+  // …and a door actually closes on the null, rather than defaulting it to 0 or 1.
+  const bound = { canonical_roles_present: true, session_binds_canonical: true, session_roles_schema: 'public', visible_roles_relations: 1, canonical_exact_carriers: 9 }
+  assert.equal(classifyRoleCascadeBinding({ ...bound, visible_roles_relations: true }, { canonicalSchema: 'public' })?.door, ROLE_CASCADE_BINDING_DOORS.relationAmbiguous)
+  assert.equal(classifyRoleCascadeBinding({ ...bound, canonical_exact_carriers: true }, { canonicalSchema: 'public' })?.door, ROLE_CASCADE_BINDING_DOORS.relationsAbsent)
+})
+
+test('the legal delete-action letters are a SUPERSET of the child-write letters', () => {
+  // Two sets, one job each: "is this an action at all" and "does it write the child". A letter in
+  // the write set but not the legal set would be rejected as unreadable instead of classified, and
+  // the widening would look like it worked.
+  for (const letter of ROLE_DELETE_CHILD_WRITE_ACTIONS) {
+    assert.ok(FK_DELETE_ACTION_LETTERS.includes(letter), `write action '${letter}' is not a legal delete action`)
+  }
+  assert.deepEqual([...FK_DELETE_ACTION_LETTERS].sort(), ['a', 'c', 'd', 'n', 'r'], 'the legal set no longer matches pg_constraint.confdeltype')
 })
 
 test('the four binding doors are BEHAVIOURAL: each closes on its own input, and only on its own', () => {

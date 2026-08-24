@@ -215,3 +215,65 @@ Corrected at six sites, and the presence-control docblock rewritten rather than 
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
 | `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
 | `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |
+
+
+## Third review round — the protocol boundary coerced instead of validating
+
+Confirmed against head `cd0977e3c0`, both landing on **ABSENT / exit 0**:
+
+- **All four counts sent as `true`.** `Number(true)` is 1, which is finite, so the "counts are not
+  numbers" check passed and every door opened. (`Number(null)` is 0 and `Number('')` is 0 — the same
+  hole in two more directions.)
+- **`{child_schema: 1, child_table: true, conname: 2, confdeltype: 7}`.** `String()` turned all four
+  into non-empty strings, so the "a field is missing" check passed; `'7'` is not in the child-write
+  set, so it was read as *an action that does not write the child* rather than as *not an action*.
+
+Both are the same mistake: **converting before validating**. A coercion turns a malformed payload
+into a well-formed-looking observation, and a well-formed observation of nothing is CONFIRMED.
+
+**Fix.** The raw JSON is validated first.
+
+- `readCatalogCount` (battery, exported): a count must be a non-negative safe integer, or the strict
+  decimal *string* form — accepted on purpose, because node-postgres returns `count(*)` (bigint) as
+  a string and the shared door classifier is fed straight from a pg row. Everything else is `null`,
+  and `null` closes a door.
+- ROWS fields must be JSON strings. No `String()` anywhere on the path.
+- `confdeltype` must be one of `FK_DELETE_ACTION_LETTERS` (`a r c n d`), a new set kept deliberately
+  WIDER than `ROLE_DELETE_CHILD_WRITE_ACTIONS` (`c n d`). Two sets, one job each: "is this an action
+  at all" and "does it write the child". A test pins that the write set is a subset, so widening one
+  without the other cannot pass.
+- `session_roles_schema` must be a string or null; it is reported in the summary, so it is not
+  coerced into one.
+
+**Mutations** — each gate removed alone, restored byte-identical:
+
+| gate removed | reds |
+| --- | --- |
+| ROWS field type check | witness ×2 |
+| `confdeltype` enum check | witness |
+| PRESENCE count validation | witness ×2 |
+| `session_roles_schema` type check | witness |
+| `readCatalogCount` integer rejection | witness **and** battery |
+
+`readCatalogCount` initially reded only the witness suite, though it is defined and exported by the
+battery. Its own test now lives beside it — a module is not covered because something downstream
+happens to exercise it.
+
+**Positive control for the whole validation block**: all five legal letters still classify both ways
+(`c`/`n`/`d` → PRESENT, `a`/`r` → ABSENT), and the decimal-string count form is still accepted.
+
+### P3
+
+The top-of-file docblock still said the query targets the "session-resolved `roles`" relation.
+Corrected; that sentence would have pointed the next maintainer back at the defect.
+
+## Final state
+
+| lane | arming | result |
+| --- | --- | --- |
+| `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 69/69, 0 skipped |
+| `multitable-l1-battery.test.mjs` | — | 67/67 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
+| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |

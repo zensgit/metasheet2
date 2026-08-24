@@ -619,13 +619,15 @@ export function classifyRoleCascadeBinding(observed, { canonicalSchema } = {}) {
       detail: `this session's own \`roles\` resolves to schema ${JSON.stringify(seen)}, not the canonical \`${schema}\` — the observed environment is not the one being certified, so no verdict may be drawn from it`,
     }
   }
-  if (Number(row.visible_roles_relations) !== 1) {
+  const visible = readCatalogCount(row.visible_roles_relations)
+  if (visible !== 1) {
     return {
       door: ROLE_CASCADE_BINDING_DOORS.relationAmbiguous,
-      detail: `${Number(row.visible_roles_relations)} \`roles\` tables are visible on this session's search_path (expected exactly the canonical one); the binding cannot be uniquely confirmed`,
+      detail: `${visible === null ? 'an unreadable number of' : visible} \`roles\` tables are visible on this session's search_path (expected exactly the canonical one); the binding cannot be uniquely confirmed`,
     }
   }
-  if (!(Number(row.canonical_exact_carriers) >= 1)) {
+  const exactCarriers = readCatalogCount(row.canonical_exact_carriers)
+  if (exactCarriers === null || exactCarriers < 1) {
     return {
       door: ROLE_CASCADE_BINDING_DOORS.relationsAbsent,
       detail: `no relation in \`${schema}\` carries a canonical recovery-authority trigger at its EXPECTED identity (carrier table, trigger name, and function schema AND name all matching the containment census), so this is not the canonical recovery-authority surface and the witness query is structurally incapable of returning a meaningful row; zero rows there is not evidence of absence`,
@@ -680,6 +682,42 @@ export function buildRoleCascadeWitnessQuery(canonicalSchema) {
  * cascade" on a database where deleting a role demonstrably fires a recovery-authority trigger.
  */
 export const ROLE_DELETE_CHILD_WRITE_ACTIONS = Object.freeze(['c', 'n', 'd'])
+
+/**
+ * Every letter `pg_constraint.confdeltype` can legally hold for a foreign key.
+ *
+ * WHY THIS IS A SEPARATE, WIDER SET. `ROLE_DELETE_CHILD_WRITE_ACTIONS` answers "does this action
+ * write the child row"; anything outside it is treated as "no child write" — i.e. as evidence FOR
+ * the exemption. That is correct for `'a'` and `'r'`, and catastrophic for a letter that is not an
+ * action at all: an observation carrying `confdeltype: 7` was coerced to the string `'7'`, found
+ * absent from the write set, and reported as CASCADE ABSENT / exit 0. A value that cannot have come
+ * from the catalog is an UNREADABLE observation, not an observation of no-write.
+ *
+ * The write set must be a subset of this one; a test pins that, so widening one without the other
+ * cannot pass.
+ */
+export const FK_DELETE_ACTION_LETTERS = Object.freeze(['a', 'r', 'c', 'n', 'd'])
+
+/**
+ * A catalog COUNT, validated rather than coerced.
+ *
+ * `Number()` maps `true` to 1, `null` to 0 and `''` to 0 — so a malformed payload became a
+ * well-formed-looking observation with every door open. Accepts a real non-negative safe integer,
+ * or the strict decimal STRING form, because node-postgres returns `count(*)` (bigint) as a string
+ * and the shared door classifier is fed straight from a pg row.
+ *
+ * @returns {number|null} null means "not a count" — the caller must fail closed, never default.
+ */
+export function readCatalogCount(value) {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
+  }
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
+  return null
+}
 
 /**
  * @returns true when the observed rows show a foreign key whose parent-delete action writes into a
