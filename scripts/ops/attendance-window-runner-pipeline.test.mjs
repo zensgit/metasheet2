@@ -346,9 +346,36 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(remote, /org\.opencontainers\.image\.revision/)
   assert.match(remote, /\[\[ "\$revision" == "\$DEPLOY_SHA" \]\]/, 'target image revision must equal the requested SHA')
   assert.match(remote, /--network "container:\$\{BACKEND_CONTAINER\}"/)
+  // PINNED-ASSERTION CHANGE (2026-08-24, P1-1 hardening): this used to be a bare
+  // "--env-file is present" check — proving env PROPAGATION exists without proving it is
+  // SAFE, which is exactly what let the verbatim Config.Env copy (and any inherited
+  // MIGRATION_EXCLUDE riding along with it) ship invisibly under a green suite
+  // (staging-review-adjudication-20260824.md: "it pins the vector rather than guarding
+  // against it"). --env-file itself is kept (still the only safe "inherit another
+  // container's env" primitive docker offers) but the assertion now also requires the
+  // narrowing allowlist, the detect-and-abort hazard check, and the forced -e backstop to
+  // all be present alongside it — the HARDENED shape, not the old bare-propagation one.
   assert.match(remote, /--env-file "\$TARGET_MIGRATION_ENV_FILE"/)
   assert.match(remote, /chmod 0600 "\$TARGET_MIGRATION_ENV_FILE"/)
   assert.match(remote, /trap cleanup_target_migration_runtime EXIT/)
+  assert.match(remote, /trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM/, 'P2-4: HUP\\/INT\\/TERM must be trapped, not just EXIT')
+  assert.match(remote, /trap 'cleanup_rehearsal; cleanup_target_migration_runtime; exit 1' HUP INT TERM/, 'P2-4: the rehearsal DB cleanup must also survive a caught signal')
+  assert.match(remote, /^TARGET_MIGRATION_ENV_ALLOWLIST=\(/m, 'P1-1: the copied env must be narrowed to an explicit allowlist, not verbatim Config.Env')
+  for (const name of ['DATABASE_URL', 'NODE_ENV', 'DB_SSL', 'STORAGE_BASE_URL', 'SECRET_PROVIDER', 'SECRET_FILE_PATH']) {
+    assert.match(remote, new RegExp(`\\b${name}\\b`), `allowlist must carry ${name}`)
+  }
+  assert.doesNotMatch(
+    remote,
+    /handle\.write\("\\n"\.join\(values\)/,
+    'P1-1: must not regress to writing the FULL unfiltered Config.Env verbatim',
+  )
+  assert.match(remote, /raise SystemExit\(\s*$/m, 'P1-1: materialization must be able to abort (hazard-var detection)')
+  assert.match(remote, /hazards\.append\(name\)/, 'P1-1: hazard-var detection must actually collect offending names')
+  assert.match(remote, /-e "MIGRATION_EXCLUDE="/, 'P1-1: every migrate-family docker run must force MIGRATION_EXCLUDE empty')
+  assert.match(remote, /-e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false"/, 'P1-1: every migrate-family docker run must force this off')
+  assert.match(remote, /-e "ALLOW_DB_RESET=false"/, 'P1-1: every migrate-family docker run must force this off')
+  assert.match(remote, /^compute_in_play_migrations\(\) \{/m, 'P1-2: an in-play migration set must be mechanically computed')
+  assert.match(remote, /^confirm_in_play_migrations\(\) \{/m, 'P1-2: every in-play migration must be name-confirmed')
 
   const start = remote.indexOf('action_migrate() {')
   const end = remote.indexOf('\n# --- W4+W7 combined-soak', start)
@@ -405,6 +432,553 @@ test('MUTATION: falling back to the running backend for real apply turns the exa
     () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /real apply must not use the running old image/,
   )
+})
+
+test('MUTATION (pinned-assertion change): reverting the allowlist marker to the pre-hardening name turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('TARGET_MIGRATION_ENV_ALLOWLIST=(', 'NOT_AN_ALLOWLIST=(')
+  assert.throws(
+    () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /allowlist/,
+  )
+})
+
+// --- P1-1/P1-2/P2-4 hardening (2026-08-24, staging-review-adjudication-20260824.md) -----
+//
+// The tests below run the REAL committed functions (never paraphrased) under a FAKE
+// `docker` placed first on PATH, which intercepts exactly the three docker invocation
+// shapes these functions use (`inspect -f '{{json .Config.Env}}'`, `run ... sh -c '...'`
+// filesystem listing, `run ... node ... --confirm NAME`, and `exec ... psql ...`) and
+// nothing else — an unexpected shape is a hard failure (exit 96-99), so a test that
+// "passes" because the fake silently no-opped an unanticipated call is not possible here.
+// This proves BEHAVIOR (house doctrine: source-text assertions are not behavior
+// assertions), not just that certain strings appear in the script.
+
+function extractRunnerArray(name) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(new RegExp(`^${name}=\\([\\s\\S]*?\\n\\)`, 'm'))
+  assert.ok(m, `expected an array declaration: ${name}`)
+  return m[0]
+}
+
+// writeFakeDocker: one fake docker(1) script reused by every test below, its behavior
+// steered entirely by env vars set per-spawn (see callers) — never by which test invoked
+// it — so no test can accidentally get a different fake than the one every other test
+// exercises.
+const FAKE_DOCKER_DIR = mkdtempSync(join(tmpdir(), 'window-runner-fake-docker-'))
+writeFileSync(
+  join(FAKE_DOCKER_DIR, 'docker'),
+  `#!/bin/bash
+set -u
+if [[ "\${1:-}" == "inspect" ]]; then
+  cat "$FAKE_CONFIG_ENV_JSON"
+  exit 0
+fi
+if [[ "\${1:-}" == "run" ]]; then
+  shift
+  if [[ -n "\${FAKE_DOCKER_RUN_LOG:-}" ]]; then
+    printf '%s\\n' "$*" >> "$FAKE_DOCKER_RUN_LOG"
+  fi
+  while [[ "\${1:-}" == -* ]]; do
+    case "$1" in
+      --network|--env-file) shift 2 ;;
+      -e) shift 2 ;;
+      --rm) shift ;;
+      --pull=never) shift ;;
+      --pull) shift 2 ;;
+      *) echo "unhandled fake-docker run flag: $1" >&2; exit 96 ;;
+    esac
+  done
+  shift # image name, unused by the fake
+  if [[ "\${1:-}" == "sh" && "\${2:-}" == "-c" ]]; then
+    script="\${3//\\/app\\//$FAKE_APP_ROOT\\/}"
+    sh -c "$script"
+    exit $?
+  fi
+  if [[ "\${1:-}" == "node" ]]; then
+    shift; shift # node <script.js>
+    if [[ "\${1:-}" == "--confirm" ]]; then
+      name="$2"
+      IFS=',' read -ra applied_arr <<< "\${FAKE_CONFIRM_APPLIED:-}"
+      for a in "\${applied_arr[@]}"; do
+        if [[ "$a" == "$name" ]]; then
+          echo "migration \\"$name\\" is applied"
+          exit 0
+        fi
+      done
+      echo "migration \\"$name\\" not found among the known migrations" >&2
+      exit 2
+    fi
+    echo "fake-docker: unhandled node invocation: $*" >&2
+    exit 95
+  fi
+  echo "unexpected fake-docker run tail: $*" >&2
+  exit 98
+fi
+if [[ "\${1:-}" == "exec" ]]; then
+  cat "\${FAKE_APPLIED_NAMES:-/dev/null}"
+  exit 0
+fi
+echo "unexpected fake-docker call: $*" >&2
+exit 97
+`,
+  { mode: 0o755 },
+)
+
+/**
+ * buildMigrationEnvHarness: extracts materialize_target_migration_env,
+ * TARGET_MIGRATION_ENV_ALLOWLIST, target_migrate_exec, list_migration_name_universe,
+ * list_migration_names_applied, compute_in_play_migrations, confirm_in_play_migrations,
+ * and cleanup_target_migration_runtime VERBATIM from the shipped runner, applies an
+ * optional text transform to any one of them (mutation tests), and wraps them in a
+ * minimal, real, `set -euo pipefail` bash program with the fake docker above.
+ */
+function buildMigrationEnvHarness(transforms = {}) {
+  const pieces = {
+    allowlist: extractRunnerArray('TARGET_MIGRATION_ENV_ALLOWLIST'),
+    materialize: extractRunnerFunctions(['materialize_target_migration_env']),
+    targetExec: extractRunnerFunctions(['target_migrate_exec']),
+    universe: extractRunnerFunctions(['list_migration_name_universe']),
+    applied: extractRunnerFunctions(['list_migration_names_applied']),
+    inPlay: extractRunnerFunctions(['compute_in_play_migrations']),
+    countsAgree: extractRunnerFunctions(['assert_applied_counts_agree']),
+    confirm: extractRunnerFunctions(['confirm_in_play_migrations']),
+    cleanup: extractRunnerFunctions(['cleanup_target_migration_runtime']),
+  }
+  for (const [key, transform] of Object.entries(transforms)) {
+    assert.ok(key in pieces, `unknown harness piece: ${key}`)
+    pieces[key] = transform(pieces[key])
+  }
+  const failLine = extractRunnerLine('fail')
+  const logLine = extractRunnerLine('log')
+  return `#!/bin/bash
+set -euo pipefail
+BACKEND_CONTAINER="fake-backend"
+POSTGRES_CONTAINER="fake-postgres"
+MIGRATE_BACKUP_PG_USER="fakeuser"
+MIGRATE_JS="fake-migrate.js"
+TARGET_MIGRATION_IMAGE="fake-image:tag"
+${failLine}
+${logLine}
+${pieces.allowlist}
+${pieces.cleanup}
+${pieces.targetExec}
+${pieces.universe}
+${pieces.applied}
+${pieces.inPlay}
+${pieces.countsAgree}
+${pieces.confirm}
+${pieces.materialize}
+`
+}
+
+function runMigrationEnvHarness(script, driverTail, env = {}) {
+  const outDir = mkdtempSync(join(tmpdir(), 'window-runner-migrate-out-'))
+  const envFile = join(outDir, 'target-migrate-env')
+  writeFileSync(envFile, '')
+  const full = `${script}\nOUTPUT_DIR="${outDir}"\nTARGET_MIGRATION_ENV_FILE="${envFile}"\n${driverTail}\n`
+  const result = spawnSync('bash', ['-c', full], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${FAKE_DOCKER_DIR}:${process.env.PATH}`,
+      ...env,
+    },
+  })
+  return { ...result, outDir, envFile }
+}
+
+function configEnvFixture(dir, pairs) {
+  const file = join(dir, 'config-env.json')
+  writeFileSync(file, JSON.stringify(pairs.map(([k, v]) => `${k}=${v}`)))
+  return file
+}
+
+const REQUIRED_MIGRATE_ENV = [
+  ['DATABASE_URL', 'postgres://u:p@postgres:5432/metasheet'],
+  ['NODE_ENV', 'production'],
+  ['DB_SSL', 'false'],
+  ['DB_SSL_REJECT_UNAUTHORIZED', 'false'],
+  ['DB_SSL_CA', ''],
+  ['DB_SSL_CERT', ''],
+  ['DB_SSL_KEY', ''],
+  ['DB_POOL_MAX', '20'],
+  ['DB_POOL_MIN', '2'],
+  ['DB_IDLE_TIMEOUT', '30000'],
+  ['DB_CONNECT_TIMEOUT', '10000'],
+  ['DB_QUERY_TIMEOUT', '30000'],
+  ['DB_STATEMENT_TIMEOUT', '30000'],
+  ['DB_SLOW_MS', '500'],
+  ['APP_NAME', 'metasheet-backend'],
+  ['STORAGE_BASE_URL', 'http://localhost:8900/files'],
+  ['SECRET_PROVIDER', 'env'],
+]
+
+for (const [hazardName, hazardValue] of [
+  ['MIGRATION_EXCLUDE', '076_create_integration_stock_prep_pack_installs'],
+  ['MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL', 'true'],
+  ['ALLOW_DB_RESET', 'true'],
+]) {
+  test(`EXECUTABLE (P1-1 detect-and-abort): a hostile inherited ${hazardName} aborts materialization, values-free`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'window-runner-hazard-'))
+    const secretMarker = 'HAZARD_VALUE_MUST_NEVER_APPEAR_' + hazardName
+    const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, [hazardName, hazardValue === 'true' ? 'true' : secretMarker]])
+    const script = buildMigrationEnvHarness()
+    const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', {
+      FAKE_CONFIG_ENV_JSON: configEnv,
+    })
+    assert.notEqual(r.status, 0, `expected materialization to abort; stdout=${r.stdout}`)
+    assert.match(r.stderr, new RegExp(`ABORT.*${hazardName}`), 'must name the offending variable')
+    if (hazardValue !== 'true') {
+      assert.doesNotMatch(r.stdout + r.stderr, new RegExp(secretMarker), 'must never echo the hazardous value, only the name')
+    }
+    assert.equal(readFileSync(r.envFile, 'utf8'), '', 'must not have written anything to the env file before aborting')
+  })
+}
+
+test('EXECUTABLE (P1-1 detect-and-abort) MUTATION: removing the hazard-var scan turns all three hostile-env tests red — and ONLY changes the abort path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-hazard-mut-'))
+  const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, ['MIGRATION_EXCLUDE', '076_create_integration_stock_prep_pack_installs']])
+  const script = buildMigrationEnvHarness({
+    materialize: (text) => text.replace(/if hazards:\n[\s\S]*?\n    \)\n/, ''),
+  })
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected the mutated (unguarded) materialization to SUCCEED where the real one aborts; stderr=${r.stderr}`)
+  assert.doesNotMatch(r.stderr, /ABORT/, 'the mutation must actually remove the abort, not just reword it')
+  // Positive control that this is a targeted mutation, not a broken harness: the SAME
+  // mutated harness on a CLEAN env still materializes correctly.
+  const cleanConfigEnv = configEnvFixture(dir, REQUIRED_MIGRATE_ENV)
+  const clean = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: cleanConfigEnv })
+  assert.equal(clean.status, 0)
+  assert.match(readFileSync(clean.envFile, 'utf8'), /DATABASE_URL=/)
+})
+
+test('EXECUTABLE (P1-1 allowlist): a non-allowlisted secret-shaped var (JWT_SECRET) is silently dropped from the written env file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-drop-'))
+  const configEnv = configEnvFixture(dir, [
+    ...REQUIRED_MIGRATE_ENV,
+    ['JWT_SECRET', 'do-not-leak-this-jwt-secret'],
+    ['POSTGRES_PASSWORD', 'do-not-leak-this-pg-password'],
+    ['DINGTALK_CLIENT_SECRET', 'do-not-leak-this-dingtalk-secret'],
+  ])
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected clean materialization; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  assert.doesNotMatch(written, /do-not-leak-this/, 'non-allowlisted secrets must never reach the migration env file')
+  assert.match(written, /DATABASE_URL=/, 'the allowlisted vars must still be present')
+})
+
+test('EXECUTABLE (P1-1 allowlist) POSITIVE CONTROL: the full required migrate-path env surface survives materialization intact (nothing needed is silently dropped)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-positive-'))
+  const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, ['IRRELEVANT_NOISE', 'x']])
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected clean materialization; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  for (const [name] of REQUIRED_MIGRATE_ENV) {
+    assert.match(written, new RegExp(`^${name}=`, 'm'), `${name} must survive materialization — dropping it can break staging (e.g. DB_SSL absence + baked-in NODE_ENV=production flips SSL on against a non-SSL postgres)`)
+  }
+  assert.doesNotMatch(written, /IRRELEVANT_NOISE/, 'non-allowlisted noise must still be dropped even in the positive-control fixture')
+})
+
+test('MUTATION (P1-1 allowlist completeness): dropping DB_SSL from the allowlist turns the positive-control test red', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-mut-'))
+  const configEnv = configEnvFixture(dir, REQUIRED_MIGRATE_ENV)
+  const script = buildMigrationEnvHarness({
+    allowlist: (text) => text.replace('DB_SSL ', ''),
+  })
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `materialization itself should still succeed; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  assert.doesNotMatch(written, /^DB_SSL=/m, 'the mutated allowlist must actually have dropped DB_SSL, proving the positive-control test is discriminating')
+})
+
+test('EXECUTABLE (P1-1 layer 3): target_migrate_exec forces the three hazard vars off on every migrate-family docker run, winning over any earlier flag', () => {
+  const script = buildMigrationEnvHarness()
+  const runLog = join(mkdtempSync(join(tmpdir(), 'window-runner-runlog-')), 'run.log')
+  const r = runMigrationEnvHarness(
+    script,
+    'target_migrate_exec "MIGRATION_EXCLUDE=should-be-overridden" -- node "$MIGRATE_JS" --confirm somename',
+    { FAKE_DOCKER_RUN_LOG: runLog, FAKE_CONFIRM_APPLIED: 'somename' },
+  )
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const logged = readFileSync(runLog, 'utf8')
+  assert.match(logged, /-e MIGRATION_EXCLUDE=should-be-overridden.*-e MIGRATION_EXCLUDE=(?!should)/, 'the forced empty override must come AFTER the caller-supplied value (docker: last -e for a name wins)')
+  assert.match(logged, /-e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false/)
+  assert.match(logged, /-e ALLOW_DB_RESET=false/)
+})
+
+test('MUTATION (P1-1 layer 3): removing the forced -e overrides turns the previous test red', () => {
+  const script = buildMigrationEnvHarness({
+    targetExec: (text) => text
+      .replace('-e "MIGRATION_EXCLUDE=" \\\n', '')
+      .replace('-e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \\\n', '')
+      .replace('-e "ALLOW_DB_RESET=false" \\\n', ''),
+  })
+  const runLog = join(mkdtempSync(join(tmpdir(), 'window-runner-runlog-mut-')), 'run.log')
+  const r = runMigrationEnvHarness(
+    script,
+    'target_migrate_exec "MIGRATION_EXCLUDE=should-be-overridden" -- node "$MIGRATE_JS" --confirm somename',
+    { FAKE_DOCKER_RUN_LOG: runLog, FAKE_CONFIRM_APPLIED: 'somename' },
+  )
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const logged = readFileSync(runLog, 'utf8')
+  assert.match(logged, /MIGRATION_EXCLUDE=should-be-overridden/)
+  assert.doesNotMatch(logged, /-e MIGRATION_EXCLUDE=(?!should)/, 'with the mutation, the hazardous caller value is no longer overridden — proving the real code is what wins')
+})
+
+// fakeAppRootFixture: mirrors the REAL migrations layout, including the two file types
+// that co-exist inside src/db/migrations/ (verified in review, 2026-08-24 —
+// 20250925_create_view_tables.sql / 20250926_create_audit_tables.sql sit alongside the
+// .ts migrations, not just in the top-level migrations/ folder; missing that glob would
+// silently narrow the universe, exactly the failure mode this whole change exists to
+// prevent). Also plants a `_`-prefixed non-migration helper file (mirroring the real
+// _patterns.ts/_template.ts) to prove it is excluded, not merely absent from the fixture.
+function fakeAppRootFixture(names, { legacySqlInTsDir = [], underscorePrefixedNoise = true } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'window-runner-fake-app-'))
+  const tsDir = join(root, 'packages', 'core-backend', 'src', 'db', 'migrations')
+  const sqlDir = join(root, 'packages', 'core-backend', 'migrations')
+  mkdirSync(tsDir, { recursive: true })
+  mkdirSync(sqlDir, { recursive: true })
+  for (const name of names) {
+    if (name.startsWith('076')) {
+      writeFileSync(join(sqlDir, `${name}.sql`), '-- fixture\n')
+    } else {
+      writeFileSync(join(tsDir, `${name}.ts`), '// fixture\n')
+    }
+  }
+  for (const name of legacySqlInTsDir) {
+    writeFileSync(join(tsDir, `${name}.sql`), '-- legacy fixture\n')
+  }
+  if (underscorePrefixedNoise) {
+    writeFileSync(join(tsDir, '_patterns.ts'), '// shared helper, not a migration\n')
+  }
+  return root
+}
+
+test('EXECUTABLE (P1-2): compute_in_play_migrations = image filesystem manifest MINUS already-applied (both env-immune)', () => {
+  const appRoot = fakeAppRootFixture(['zzzz1_already_applied', 'zzzz2_pending_a', 'zzzz3_pending_b', '076_create_integration_stock_prep_pack_installs'])
+  const appliedFile = join(appRoot, 'applied.txt')
+  writeFileSync(appliedFile, 'zzzz1_already_applied\n076_create_integration_stock_prep_pack_installs\n')
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'compute_in_play_migrations fakerealdb', {
+    FAKE_APP_ROOT: appRoot,
+    FAKE_APPLIED_NAMES: appliedFile,
+  })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const inPlay = readFileSync(join(r.outDir, 'migration-in-play.txt'), 'utf8').trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(inPlay, ['zzzz2_pending_a', 'zzzz3_pending_b'])
+})
+
+test('EXECUTABLE (P1-2 universe fidelity): a legacy .sql file living INSIDE src/db/migrations/ (not just the top-level migrations/) is counted, and a `_`-prefixed shared-helper file is not', () => {
+  // Mirrors the real repo shape caught in review: 20250925_create_view_tables.sql /
+  // 20250926_create_audit_tables.sql sit next to the .ts migrations, and _patterns.ts /
+  // _template.ts are shared helper code the provider itself skips by name convention.
+  const appRoot = fakeAppRootFixture(['zzzz1_pending'], {
+    legacySqlInTsDir: ['20250925_create_view_tables', '20250926_create_audit_tables'],
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'list_migration_name_universe', { FAKE_APP_ROOT: appRoot })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const universe = r.stdout.trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(universe, ['20250925_create_view_tables', '20250926_create_audit_tables', 'zzzz1_pending'])
+  assert.doesNotMatch(r.stdout, /_patterns/, 'the underscore-prefixed helper file must never be mistaken for a migration name')
+})
+
+test('MUTATION (P1-2 universe fidelity): dropping the src/db/migrations *.sql glob turns the previous test red', () => {
+  const appRoot = fakeAppRootFixture(['zzzz1_pending'], {
+    legacySqlInTsDir: ['20250925_create_view_tables', '20250926_create_audit_tables'],
+  })
+  const script = buildMigrationEnvHarness({
+    universe: (text) => text.replace(
+      '/app/packages/core-backend/src/db/migrations/*.sql /app/packages/core-backend/migrations/*.sql',
+      '/app/packages/core-backend/migrations/*.sql',
+    ),
+  })
+  const r = runMigrationEnvHarness(script, 'list_migration_name_universe', { FAKE_APP_ROOT: appRoot })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const universe = r.stdout.trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(universe, ['zzzz1_pending'], 'with the mutation, the two legacy .sql migrations silently vanish from the universe')
+})
+
+function writeCountFixtures(dir, { psqlLines, providerAppliedLine }) {
+  const psqlFile = join(dir, 'psql-applied.txt')
+  const providerFile = join(dir, 'provider-list.txt')
+  writeFileSync(psqlFile, psqlLines.map((l) => `${l}\n`).join(''))
+  writeFileSync(providerFile, `${providerAppliedLine}\nPending: 0\n`)
+  return { psqlFile, providerFile }
+}
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree passes when the env-immune psql count matches the provider Applied:N', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-agree-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 3',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree FAILS LOUD on a zero-count psql read (the empty-read-is-not-absence class)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-zero-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: [],
+    providerAppliedLine: 'Applied: 321',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.notEqual(r.status, 0, 'a zero applied-count from psql must never be silently trusted for a live staging DB')
+  assert.match(r.stderr, /not a positive integer/)
+  assert.doesNotMatch(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree FAILS LOUD when the two independent sources disagree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-mismatch-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 4',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.notEqual(r.status, 0, 'a psql/provider disagreement must fail loud rather than silently pick one source')
+  assert.match(r.stderr, /count mismatch/)
+  assert.doesNotMatch(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('MUTATION (P2 sanity floor): removing the equality check turns the mismatch test red', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-mismatch-mut-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 4',
+  })
+  const script = buildMigrationEnvHarness({
+    countsAgree: (text) => text.replace(
+      /\[\[ "\$applied_count_psql" == "\$applied_count_provider" \][^\n]*\n[^\n]*\n/,
+      '',
+    ),
+  })
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.equal(r.status, 0, `expected the mutated (unguarded) check to wrongly pass a real mismatch; stderr=${r.stderr}`)
+  assert.match(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P1-2): confirm_in_play_migrations passes when every in-play migration name-confirms applied', () => {
+  const script = buildMigrationEnvHarness()
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a,zzzz3_pending_b',
+  })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /CONFIRM_LOOP_OK/)
+})
+
+test('EXECUTABLE (P1-2 exclusion canary): confirm_in_play_migrations FAILS LOUD, naming the migration, when one in-play name is not confirmable (kysely returns exit 2 for an excluded name)', () => {
+  const script = buildMigrationEnvHarness()
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-canary-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    // zzzz3_pending_b is NOT in the applied set — simulates it having been silently
+    // excluded from the provider's getMigrations() (MIGRATION_EXCLUDE-class exclusion).
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a',
+  })
+  assert.notEqual(r.status, 0, 'the loop must fail when any in-play migration cannot be confirmed')
+  assert.match(r.stderr, /'zzzz3_pending_b'/, 'must name the specific migration that failed confirmation')
+  assert.doesNotMatch(r.stdout, /CONFIRM_LOOP_OK/, 'must never report success past an unconfirmed in-play migration')
+})
+
+test('MUTATION (P1-2): weakening confirm_in_play_migrations to accept ANY output turns the exclusion-canary test red', () => {
+  const script = buildMigrationEnvHarness({
+    confirm: (text) => text.replace(
+      'grep -q "^migration \\"${name}\\" is applied\\$" <<< "$out" \\\n      || fail "named confirmation for in-play migration \'${name}\' did not pass (see confirm-in-play.txt): ${out}"',
+      'true',
+    ),
+  })
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-canary-mut-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a',
+  })
+  assert.equal(r.status, 0, 'the mutated (unguarded) loop must now wrongly report success')
+  assert.match(r.stdout, /CONFIRM_LOOP_OK/)
+})
+
+test('EXECUTABLE (P2-4): SIGTERM mid-run still removes the migration secret file, and the process actually terminates', async () => {
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-signal-'))
+  const envFile = join(dir, 'secret-env-file')
+  writeFileSync(envFile, 'DATABASE_URL=postgres://fake\n', { mode: 0o600 })
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE="${envFile}"
+${cleanupFn}
+trap cleanup_target_migration_runtime EXIT
+trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
+echo READY
+sleep 30
+`
+  const { spawn } = await import('node:child_process')
+  const proc = spawn('bash', ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+  await new Promise((resolve) => {
+    proc.stdout.once('data', () => resolve())
+  })
+  assert.ok(existsSync(envFile), 'precondition: the secret file exists before the signal')
+  proc.kill('SIGTERM')
+  const exitInfo = await new Promise((resolve) => proc.once('exit', (code, signal) => resolve({ code, signal })))
+  assert.ok(!existsSync(envFile), 'SIGTERM must trigger cleanup (shred/rm) of the migration secret file before the process exits')
+  assert.notEqual(exitInfo.code, 0, 'a signal-terminated run must not report a clean exit code')
+})
+
+// The registration test below (not the SIGTERM-delivery test above) carries this change's
+// mutation proof. Empirically (verified on both bash 3.2 and bash 5.3 here), a bare `trap
+// ... EXIT` ALSO runs on an uncaught SIGHUP/SIGINT/SIGTERM in these bash versions — so a
+// file-existence assertion after `kill -TERM` does not by itself discriminate the explicit
+// HUP/INT/TERM trap from EXIT-only (both left no file behind in that A/B check). That
+// behavior is bash's own signal-handling implementation detail, not a documented contract
+// (POSIX/the bash manual only guarantee EXIT fires "on exit from the shell"), so relying on
+// it is exactly the fragility this hardening avoids: explicit registration is the portable,
+// self-documenting contract. What DOES discriminate, deterministically, is whether HUP/INT/
+// TERM are actually REGISTERED (`trap -p`) — which is what "add HUP/INT/TERM traps" means.
+test('EXECUTABLE (P2-4 registration): the runner registers explicit HUP/INT/TERM handlers, not only EXIT', () => {
+  const trapLines = [
+    "trap cleanup_target_migration_runtime EXIT",
+    "trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM",
+  ]
+  for (const line of trapLines) {
+    assert.ok(readFileSync(REMOTE_SH, 'utf8').includes(line), `expected the runner to contain: ${line}`)
+  }
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE=""
+${cleanupFn}
+${trapLines.join('\n')}
+trap -p
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGHUP|HUP)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGINT|INT)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGTERM|TERM)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGEXIT|EXIT)/)
+})
+
+test('MUTATION (P2-4 registration): a runner registering only EXIT (pre-hardening shape) shows no HUP/INT/TERM in `trap -p`', () => {
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  // Pre-hardening shape: only EXIT is trapped.
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE=""
+${cleanupFn}
+trap cleanup_target_migration_runtime EXIT
+trap -p
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.doesNotMatch(r.stdout, /(SIGHUP|SIGINT|SIGTERM)/, 'proving the registration test above is discriminating: without the explicit trap call, trap -p shows nothing for HUP/INT/TERM')
 })
 
 // --- action=residue-sweep (bundle §7 "Consolidated final residue sweep") --------------
