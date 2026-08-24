@@ -360,38 +360,150 @@ export const DRIVEN_SURFACES = Object.freeze([
 ])
 
 /**
- * The cascade `roles:delete` would need in order to be blockable, expressed as a query the battery
- * RUNS — not as an assumption it states.
+ * The canonical recovery-authority trigger functions, rendered as a SQL literal list.
+ *
+ * DERIVED, NOT RE-TYPED. `AUTHORITY_TRIGGER_FUNCTIONS` is the containment census's own list (see
+ * `multitable-recovery-schema-containment.mjs`), which this module already imports for the phase-0
+ * canonical-trigger preflight, and which is itself drift-guarded against
+ * `packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts`.
+ * A hand-typed table list here would be the enumeration trap (枚举陷阱不收敛): it would go stale the
+ * first time the migration covers one more table, and nothing would say so.
+ */
+const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
+  .map((name) => `'${name}'`)
+  .join(', ')
+
+/**
+ * The child write `roles:delete` would need in order to be blockable, expressed as a query the
+ * battery RUNS — not as an assumption it states.
  *
  * `routes/roles.ts` documents the mechanism as "The FK cascade from roles → role_permissions
- * deletes recovery-authority rows, so this DELETE can also surface the marker 40001". On a
- * database migrated by this repo's chain that cascade DOES NOT EXIST: `role_permissions` is created
- * by `20250924190000_create_rbac_tables.ts` with `varchar(255)` columns and only a
- * `permission_code → permissions(code)` foreign key; `033_create_rbac_core.sql`'s version — the one
- * that carries `role_id … REFERENCES roles(id) ON DELETE CASCADE` — is a `CREATE TABLE IF NOT
- * EXISTS` and therefore a no-op by the time it runs. `user_roles` likewise ends up with no FK to
- * `roles`. So `DELETE FROM roles` cascades into nothing, reaches no triggered table, and answers
- * 2xx even under a held role lease. The battery discovered this by driving it (a 2xx where a 409
- * was expected); it is recorded as NOT-DRIVEN rather than papered over.
+ * deletes recovery-authority rows, so this DELETE can also surface the marker 40001". On the
+ * local/test schema no such foreign key exists: `role_permissions` is created by
+ * `20250924190000_create_rbac_tables.ts` with `varchar(255)` columns and only a
+ * `permission_code → permissions(code)` foreign key, and `033_create_rbac_core.sql`'s cascading
+ * version (`role_id … REFERENCES roles(id) ON DELETE CASCADE`, :17) is a `CREATE TABLE IF NOT
+ * EXISTS` and therefore a no-op by the time it runs. The battery discovered this by DRIVING it (a
+ * 2xx where a 409 was expected); it is recorded as NOT-DRIVEN rather than papered over.
  *
- * A different deployment could still have the 033 shape. So the reason is not merely asserted: it
- * is RE-VERIFIED on every run (判据本身也要被攻击). If the cascade is present on the target
+ * A different deployment can still have the 033 shape. So the reason is not merely asserted: it is
+ * RE-VERIFIED on every run (判据本身也要被攻击). If the premise has stopped holding on the target
  * database, the excuse has stopped being true and the battery FAILS demanding the surface be
  * driven — the NOT-DRIVEN entry can never quietly outlive its justification.
+ *
+ * WHAT COUNTS — THE CONJUNCTION, AND WHY IT IS NEITHER NARROWER NOR WIDER
+ * ----------------------------------------------------------------------
+ * The question is not "is there a cascade into role_permissions". It is: **does deleting a role row
+ * write into a table that carries a recovery-authority trigger?** Three conjuncts, each of which
+ * has to be there:
+ *
+ *  1. **The FK targets the session-resolved `roles` relation** (`con.confrelid = to_regclass(...)`).
+ *  2. **The child table carries a canonical recovery-authority trigger.** Derived from the catalog
+ *     via the census's function list, never from a hand-typed table list. This conjunct is what
+ *     keeps the predicate from over-widening: `20250925_create_view_tables.sql:261` conditionally
+ *     adds `view_permissions_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id)` and
+ *     `view_permissions` carries NO recovery-authority trigger, so a cascade there fires nothing.
+ *     Counting it would produce a FALSE PRESENT — and a false PRESENT is not noise: it makes this
+ *     battery exit 1 `not_driven_reason_expired` and refuse to produce ANY evidence, blocking the
+ *     L1 evidence path on a premise that was never refuted.
+ *  3. **The FK's ON-parent-delete action performs child DML** — see `roleDeleteCascadeExists`.
+ *
+ * `033_create_rbac_core.sql` creates BOTH `role_permissions.role_id` (:17) and `user_roles.role_id`
+ * (:36) as `REFERENCES roles(id) ON DELETE CASCADE`, each under its own `CREATE TABLE IF NOT
+ * EXISTS`, so the two outcomes are INDEPENDENT: a database can have one without the other. Both
+ * tables carry a canonical trigger (`trg_role_permissions_recovery_authority_lock` and
+ * `trg_user_roles_recovery_authority_lock`; the latter is installed by the migration's
+ * `USER_TRIGGERS` loop), so both expire the excuse. An earlier version of this query inspected only
+ * `role_permissions` and would have answered ABSENT on a database whose `user_roles` cascade was
+ * live.
+ *
+ * DELIBERATELY NOT NARROWED TO `roles.id`. Postgres fires the referential action when the
+ * REFERENCED ROW is deleted, whichever unique column the FK points at, so an `AND … attname = 'id'`
+ * conjunct could only ever manufacture a false ABSENT. It is also moot in practice:
+ * `033_create_rbac_core.sql:5` makes `id` the primary key of `roles`.
+ *
+ * SCHEMA/OID BINDING. `to_regclass` resolves through the SESSION's `search_path`, and the result is
+ * an OID compared against `con.confrelid` — so a decoy `roles` in a schema that is not on the path
+ * can neither be mistaken for the real one nor hide it. It is deliberately UNQUALIFIED: hard-coding
+ * `public.` would blind every real-DB golden this repo runs in a per-run random schema. The
+ * witness runner's relation-presence control (`RELATION_PRESENCE_QUERY`) resolves the SAME relation
+ * the same way; the two are coupled and must be narrowed in lockstep, or a database this query
+ * cannot even see would report as "no cascade" instead of "wrong database".
  */
 export const ROLE_CASCADE_WITNESS_QUERY = `
-  SELECT con.conname, con.confdeltype
+  SELECT
+    child_ns.nspname AS child_schema,
+    child.relname AS child_table,
+    con.conname AS conname,
+    con.confdeltype AS confdeltype
   FROM pg_catalog.pg_constraint con
   JOIN pg_catalog.pg_class child ON child.oid = con.conrelid
-  JOIN pg_catalog.pg_class parent ON parent.oid = con.confrelid
+  JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
   WHERE con.contype = 'f'
-    AND child.relname = 'role_permissions'
-    AND parent.relname = 'roles'
+    AND con.confrelid = to_regclass('roles')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger tg
+      JOIN pg_catalog.pg_proc fn ON fn.oid = tg.tgfoid
+      WHERE tg.tgrelid = con.conrelid
+        AND NOT tg.tgisinternal
+        AND fn.proname IN (${RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST})
+    )
+  ORDER BY child_ns.nspname, child.relname, con.conname
 `
 
-/** @returns true when a cascading role_permissions → roles FK exists (confdeltype 'c' = CASCADE). */
+/**
+ * The `confdeltype` letters that make a parent delete WRITE INTO THE CHILD ROW.
+ *
+ * The nine recovery-authority triggers are `BEFORE INSERT OR UPDATE OR DELETE` (see
+ * `zzzz20260721121000_add_recovery_authority_locks.ts` — the `USER_TRIGGERS` loop, the
+ * `role_permissions` trigger, and the three subject-keyed ones). So the question is not "is it
+ * CASCADE" but "does the child row get touched at all":
+ *
+ *   'c' CASCADE     → the child row is DELETEd      → trigger fires
+ *   'n' SET NULL    → the child row is UPDATEd      → trigger fires
+ *   'd' SET DEFAULT → the child row is UPDATEd      → trigger fires
+ *   'a' NO ACTION   → no child DML (the parent delete is refused instead) → nothing fires
+ *   'r' RESTRICT    → no child DML (the parent delete is refused instead) → nothing fires
+ *
+ * Accepting only 'c' — as this predicate originally did — leaves 'n' and 'd' classified as "no
+ * cascade" on a database where deleting a role demonstrably fires a recovery-authority trigger.
+ */
+export const ROLE_DELETE_CHILD_WRITE_ACTIONS = Object.freeze(['c', 'n', 'd'])
+
+/**
+ * @returns true when the observed rows show a foreign key whose parent-delete action writes into a
+ * recovery-authority-triggered child of `roles` — i.e. when the `roles:delete` NOT-DRIVEN excuse has
+ * expired on the observed database.
+ *
+ * The rows are already conjunct-1 and conjunct-2 filtered by `ROLE_CASCADE_WITNESS_QUERY` (FK →
+ * `roles`, child carries a canonical trigger); this decides conjunct 3. The delete-action letters
+ * live HERE and not in the SQL on purpose: the witness ships the SQL verbatim to the target host,
+ * and the host program must observe without classifying.
+ *
+ * Kept under its original name because it is pinned by the witness runner, the witness workflow and
+ * three test files; "cascade" now reads as "any parent-delete action that writes the child row".
+ */
 export function roleDeleteCascadeExists(rows = []) {
-  return rows.some((row) => String(row?.confdeltype ?? '') === 'c')
+  return roleDeleteChildWrites(rows).length > 0
+}
+
+/**
+ * The SAME predicate, returning the offending rows instead of a boolean, so a REFUTED verdict can
+ * name what refuted it. Not a second definition: `roleDeleteCascadeExists` is defined in terms of
+ * this, so the two can never disagree.
+ */
+export function roleDeleteChildWrites(rows = []) {
+  return (rows ?? []).filter((row) => ROLE_DELETE_CHILD_WRITE_ACTIONS.includes(String(row?.confdeltype ?? '')))
+}
+
+/** Human-readable `schema.table (conname, action)` for a witness row — evidence, not a decision. */
+export function describeRoleCascadeRow(row) {
+  const schema = String(row?.child_schema ?? '?')
+  const table = String(row?.child_table ?? '?')
+  const conname = String(row?.conname ?? '?')
+  const action = String(row?.confdeltype ?? '?')
+  return `${schema}.${table} (${conname}, confdeltype=${action})`
 }
 
 /**
@@ -424,7 +536,7 @@ export const NOT_DRIVEN_SITES = Object.freeze([
     site: 'roles:delete',
     reason: 'no-trigger-on-target-table',
     detail:
-      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is the FK cascade into role_permissions — and that FK DOES NOT EXIST on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading version is a no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY — if the cascade ever exists on the target database, the battery FAILS rather than keep this excuse.",
+      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is a foreign-key cascade into a triggered child — and no such FK EXISTS on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading role_permissions (:17) and user_roles (:36) versions are both no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY over EVERY recovery-authority-triggered child of roles, for every parent-delete action that writes the child row (CASCADE / SET NULL / SET DEFAULT) — if any of them exists on the target database, the battery FAILS rather than keep this excuse.",
   },
   {
     site: 'auth:register',
@@ -1363,17 +1475,35 @@ export async function runBattery({ env = process.env, options } = {}) {
     // The NOT-DRIVEN excuses are not taken on trust. The one that is a SCHEMA claim rather than an
     // architectural one is re-verified here; if it has stopped being true on this database, the
     // battery fails and demands the surface be driven, instead of carrying a stale exemption.
+    //
+    // THIS PREMISE CHECK IS STRICTER THAN IT USED TO BE, deliberately. It now covers EVERY
+    // recovery-authority-triggered child of `roles` (not only `role_permissions` — `user_roles`
+    // carries `trg_user_roles_recovery_authority_lock` and 033_create_rbac_core.sql:36 gives it its
+    // own independent cascading FK) and EVERY parent-delete action that writes the child row
+    // (SET NULL and SET DEFAULT UPDATE the child and fire the same BEFORE INSERT OR UPDATE OR
+    // DELETE trigger, not just CASCADE). So this battery will now expire the `roles:delete` excuse
+    // — and exit 1 rather than produce evidence — in strictly MORE situations than before. That is
+    // the point: every one of those situations is a database on which `roles:delete` really is
+    // blockable and therefore really must be driven.
     const cascadeRows = (await admin.client.query(ROLE_CASCADE_WITNESS_QUERY)).rows
     const cascadePresent = roleDeleteCascadeExists(cascadeRows)
     evidence.posture.role_delete_cascade_present = cascadePresent
+    // Auditable, not a bare boolean: the exact rows the predicate decided on.
+    evidence.posture.role_delete_triggered_children = cascadeRows.map((row) => ({
+      child_schema: String(row?.child_schema ?? ''),
+      child_table: String(row?.child_table ?? ''),
+      conname: String(row?.conname ?? ''),
+      confdeltype: String(row?.confdeltype ?? ''),
+    }))
     if (cascadePresent) {
-      log(lines, "VERDICT: FAIL - this database HAS a cascading role_permissions → roles foreign key, so roles:delete IS blockable here; the ledger's NOT-DRIVEN exemption for it no longer holds and the surface must be driven")
-      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: 'roles:delete is drivable on this schema (cascading FK present) but is listed NOT-DRIVEN' })
+      const offenders = roleDeleteChildWrites(cascadeRows).map((row) => describeRoleCascadeRow(row)).join('; ')
+      log(lines, `VERDICT: FAIL - deleting a role on this database writes into a recovery-authority-triggered table [${offenders}], so roles:delete IS blockable here; the ledger's NOT-DRIVEN exemption for it no longer holds and the surface must be driven`)
+      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: `roles:delete is drivable on this schema (parent-delete writes a triggered child: ${offenders}) but is listed NOT-DRIVEN` })
       evidence.verdict = 'FAIL'
       evidence.finished_at = new Date().toISOString()
       return { exitCode: 1, evidence, lines }
     }
-    log(lines, 'PHASE 0 VERDICT: EXEMPTION-VALID - no cascading role_permissions → roles FK, so the roles:delete NOT-DRIVEN reason still holds on this database')
+    log(lines, 'PHASE 0 VERDICT: EXEMPTION-VALID - no foreign key writes a recovery-authority-triggered child of roles on a role delete, so the roles:delete NOT-DRIVEN reason still holds on this database')
 
     // ---------------- Phase 1 — seed (no lease held) ----------------------
     log(lines, '── phase 1 · seed synthetic subjects (no lease held) ──────────')

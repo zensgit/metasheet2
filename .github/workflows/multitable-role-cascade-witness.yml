@@ -4,23 +4,32 @@ name: Multitable Role-Cascade Witness
 #
 # The O-2 L1 exercise battery excuses census site `roles:delete` with reason
 # `no-trigger-on-target-table`. That excuse depends on a factual claim about the TARGET DATABASE:
-# that no cascading `role_permissions → roles` foreign key exists there, so `DELETE FROM roles`
-# reaches no triggered table and no 409 can be constructed for it. On the local/test schema the
-# claim was verified empirically. On PRODUCTION it is only INFERRED-STRONG — deduced from the prod
-# migration ledger, which additionally ran the legacy `033_create_rbac_core.sql` (the migration that
-# creates exactly that FK with ON DELETE CASCADE). That is an inference about migration ORDER, not
-# an observation of the catalog.
+# that deleting a role writes into NO table carrying a recovery-authority trigger, so
+# `DELETE FROM roles` reaches no triggered table and no 409 can be constructed for it. On the
+# local/test schema the claim was verified empirically. On PRODUCTION it is only INFERRED-STRONG —
+# deduced from the prod migration ledger, which additionally ran the legacy
+# `033_create_rbac_core.sql` (the migration that creates exactly those FKs with ON DELETE CASCADE:
+# `role_permissions.role_id` at :17 AND `user_roles.role_id` at :36, independently of each other).
+# That is an inference about migration ORDER, not an observation of the catalog.
 #
-# It matters because the battery RE-CHECKS the premise at runtime: if the cascade exists it exits 1
-# with `not_driven_reason_expired` and refuses to produce any evidence at all — which would
+# The premise is a CONJUNCTION and the witness checks all three conjuncts: the foreign key targets
+# the session-resolved `roles` relation, the child table carries a canonical recovery-authority
+# trigger, and the parent-delete action actually writes the child row (CASCADE deletes it; SET NULL
+# and SET DEFAULT update it — all three fire a `BEFORE INSERT OR UPDATE OR DELETE` trigger, while
+# NO ACTION and RESTRICT refuse the parent delete and touch nothing). Dropping the trigger conjunct
+# would count `view_permissions` — which has such an FK and no such trigger — and report a FALSE
+# REFUTED.
+#
+# It matters because the battery RE-CHECKS the premise at runtime: if any such write exists it exits
+# 1 with `not_driven_reason_expired` and refuses to produce any evidence at all — which would
 # invalidate amendment A1's production-inheritance clause. This workflow settles it with a single
 # catalog-only read.
 #
 # ONE DEFINITION OF THE WITNESS
 # -----------------------------
-# The SQL is NOT re-typed here, and the "is it a cascade" predicate is NOT re-implemented here.
-# `scripts/ops/multitable-role-cascade-witness.mjs` imports BOTH from the battery
-# (`ROLE_CASCADE_WITNESS_QUERY`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
+# The SQL is NOT re-typed here, and the "does a role delete write a triggered child" predicate is
+# NOT re-implemented here. `scripts/ops/multitable-role-cascade-witness.mjs` imports BOTH from the
+# battery (`ROLE_CASCADE_WITNESS_QUERY`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
 # probe that runs on the host, and applies the battery's own predicate to the observed rows back on
 # this runner. Two divergent copies of a witness query is precisely the "second, narrower artifact"
 # failure this repository has been bitten by. This workflow file therefore contains no SQL at all —
@@ -69,8 +78,10 @@ name: Multitable Role-Cascade Witness
 #   • CASCADE PRESENT (premise REFUTED — battery would exit 1 …reason_expired)    → exit 1
 #   • INDETERMINATE (failed to observe)                                           → exit 2
 # A missing container, an unreadable DATABASE_URL, an unresolvable `pg`, a failed connection, a
-# non-zero probe exit, an unparseable result, or a database that does not even carry the two
-# relations (the positive control) ALL land in INDETERMINATE. None of them may read as ABSENT.
+# non-zero probe exit, an unparseable result, or a database whose session can resolve no `roles`
+# table / that carries no canonical recovery-authority trigger at all (the positive control — the
+# query is structurally incapable of returning a row there, so its zero rows say nothing) ALL land
+# in INDETERMINATE. None of them may read as ABSENT.
 # The remote step is `continue-on-error` and the verdict step is `if: always()` precisely so that a
 # hard ssh failure still writes INDETERMINATE to the summary instead of redding the job with no
 # verdict at all. REFUTED is a first-class outcome here, not an exception path: production ran the
@@ -134,7 +145,7 @@ jobs:
           printf '%s' "$probe_b64" > output/role-cascade-witness/probe.b64
           echo "probe generated: $(wc -c < output/role-cascade-witness/probe.cjs) bytes source, $(wc -c < output/role-cascade-witness/probe.b64) bytes base64"
 
-      - name: Observe the role_permissions → roles foreign key on the target database
+      - name: Observe the recovery-authority-triggered children of roles on the target database
         id: observe
         # continue-on-error so the verdict step below always gets its turn: a hard ssh failure must
         # still be REPORTED as INDETERMINATE in the job summary, not vanish behind a red step.
