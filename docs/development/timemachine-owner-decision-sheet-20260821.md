@@ -200,10 +200,21 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 **B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**代码侧已闭合;仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审;F2 状态已随 2026-08-24 复核更新)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)、电池 digest/sha 证据绑定(#5125)。**F2(设 required)已完成**(2026-08-24 经 `gh api .../branches/main/protection/required_status_checks` 核实,`contexts` 含 `recovery-schema-drift`)。**未满足的是 owner/ops**:F3 双主机新指纹证据、staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)、建号 + 电池实跑 PASS。三者齐备才可 ratify。已闭合缺陷存档:
+- 前置:**代码侧已闭合(范围限定:A1 电池基础设施这组——P1 凭据生命周期 / P2 canonical posture 校验 / F1 建号脚本 / F2 required check / F3 search_path 代码修复;不含 role-cascade witness 谓词,那是独立的另一产物,见下一条);仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审;F2 状态已随 2026-08-24 复核更新)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)、电池 digest/sha 证据绑定(#5125)。**F2(设 required)已完成**(2026-08-24 经 `gh api .../branches/main/protection/required_status_checks` 核实,`contexts` 含 `recovery-schema-drift`)。**未满足的是 owner/ops**:F3 双主机新指纹证据、staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)、建号 + 电池实跑 PASS。三者齐备才可 ratify。已闭合缺陷存档:
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`。**已闭合**(#5069 workflow always() 清理 → #5076 停止容器诚实枚举 → #5080/#5084 建号脚本 stdin-only+trap;全过独立复门)。
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
+- **⚠️ 与本条剩余前置"建号 + 电池实跑 PASS"交界的缺口(证据见 §B1a,role-cascade witness;不是重复劳动,是同一份证据在两处的排期含义)**:
+  上面"代码侧已闭合"这组不含 role-cascade witness 谓词的宽化——该谓词的宽版本目前**只存在于 #5131 分支
+  (未合并,head `d8b6a2e933`)**;main 上(本清单所在 worktree 已核实,`scripts/ops/multitable-l1-battery.mjs:382-394`)
+  电池脚本里的 `ROLE_CASCADE_WITNESS_QUERY` 仍是窄谓词(硬编码只查 `role_permissions`,`roleDeleteCascadeExists`
+  只认字面值 `confdeltype === 'c'`)。**现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",
+  电池会用这份窄谓词复核 `roles:delete` 站点的 NOT-DRIVEN 豁免——若目标库上实际存在 `user_roles` 级联,
+  或 `role_permissions`/`user_roles` 任一边的 parent-delete 动作是 `SET NULL`/`SET DEFAULT`(而非窄谓词
+  唯一认的 `CASCADE`),电池会**放行一个已经失效的豁免**,而不是按设计 `exit 1 not_driven_reason_expired`。
+  这不是纯理论:#5131 分支上的真库 golden(`user_roles-only CASCADE`、`SET NULL`、`SET DEFAULT` 三条)已经
+  证明这条路径会被触发。排期含义:这一步电池实跑要么等 #5131 先合并,要么 owner 明确接受"本次 PASS 不
+  覆盖 `roles:delete` 谓词的宽化版本"这一限定——二选一,不由本清单代为决定。
 - 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
   owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
 - 门审边界(修好后仍适用):干净电池只观测 **12/55 census 站点(分母已随 #5128 由 48 升至 55,见 §D2-F8;driven 集合本身未变,仍是 12)+ 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
