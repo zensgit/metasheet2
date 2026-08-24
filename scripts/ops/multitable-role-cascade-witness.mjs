@@ -78,7 +78,7 @@
  */
 
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
-import { ROLE_CASCADE_WITNESS_QUERY, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
+import { ROLES_RELATION_PRESENT_SQL, ROLE_CASCADE_WITNESS_QUERY, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
 import { AUTHORITY_TRIGGER_FUNCTIONS } from './multitable-recovery-schema-containment.mjs'
 
 /**
@@ -126,12 +126,7 @@ const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
  */
 export const RELATION_PRESENCE_QUERY = `
   SELECT
-    (
-      SELECT count(*)
-      FROM pg_catalog.pg_class rel
-      WHERE rel.oid = to_regclass('roles')
-        AND rel.relkind IN ('r', 'p')
-    ) AS roles_relations,
+    (CASE WHEN ${ROLES_RELATION_PRESENT_SQL} THEN 1 ELSE 0 END) AS roles_relations,
     (
       SELECT count(DISTINCT trg.tgrelid)
       FROM pg_catalog.pg_trigger trg

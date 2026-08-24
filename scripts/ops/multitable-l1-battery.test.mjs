@@ -56,6 +56,7 @@ import {
   LEASE_FUNCTION_BY_KIND,
   NOT_DRIVEN_SITES,
   RECOVERY_CONFLICT_HTTP_CODE,
+  ROLES_RELATION_PRESENT_SQL,
   ROLE_CASCADE_WITNESS_QUERY,
   ROLE_DELETE_CHILD_WRITE_ACTIONS,
   RECOVERY_CONFLICT_HTTP_STATUS,
@@ -1434,6 +1435,26 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   for (const column of ['child_schema', 'child_table', 'confdeltype']) {
     assert.match(ROLE_CASCADE_WITNESS_QUERY, new RegExp(`AS ${column}\\b`), `the witness query stopped publishing ${column}`)
   }
+})
+
+test('the battery pairs the witness query with the SAME relation-presence control (P3 lockstep)', () => {
+  // The query resolves `roles` through the session's search_path. Zero rows from a session that
+  // cannot see a `roles` table would read as EXEMPTION-VALID — a false ABSENT, and a silently kept
+  // exemption. The battery is a consumer of that query and needs the pairing as much as the witness
+  // runner does; `users` resolving in the same-DB proof does not establish it.
+  assert.match(ROLES_RELATION_PRESENT_SQL, /to_regclass\('roles'\)/)
+  assert.match(ROLES_RELATION_PRESENT_SQL, /relkind IN \('r', 'p'\)/)
+  assert.ok(!/to_regclass\('public\./.test(ROLES_RELATION_PRESENT_SQL), 'a hard-coded schema blinds the per-random-schema goldens')
+  // …and it is USED, before the query it guards, with its own fail-closed refusal.
+  const presenceIdx = BATTERY_SOURCE.indexOf('SELECT ${ROLES_RELATION_PRESENT_SQL} AS present')
+  const queryIdx = BATTERY_SOURCE.indexOf('admin.client.query(ROLE_CASCADE_WITNESS_QUERY)')
+  assert.ok(presenceIdx > 0, 'the battery no longer runs the relation-presence control')
+  assert.ok(queryIdx > presenceIdx, 'the presence control must run BEFORE the query whose zero rows it makes meaningful')
+  assert.match(BATTERY_SOURCE, /failure: 'role_cascade_premise_unobservable'/, 'the unobservable-premise refusal is gone')
+  // Fail-closed: the refusal is a NOT_ARMED exit, never a log line the run continues past.
+  const guard = BATTERY_SOURCE.slice(presenceIdx, queryIdx)
+  assert.match(guard, /VERDICT: NOT_ARMED/)
+  assert.match(guard, /return \{ exitCode: 2, evidence, lines \}/)
 })
 
 test('the widened premise check is WIRED, so the battery expires the excuse in the new situations too', () => {

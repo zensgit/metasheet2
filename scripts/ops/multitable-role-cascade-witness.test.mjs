@@ -448,7 +448,6 @@ const WITNESS_SQL_SIGNATURES = [
   // the auditable projection the output protocol depends on
   'child_ns.nspname AS child_schema',
 ]
-const WITNESS_SQL_SIGNATURE = WITNESS_SQL_SIGNATURES[0]
 
 function nonTestSources() {
   const files = []
@@ -531,7 +530,7 @@ test('the runner re-implements neither half of the witness', () => {
   // import line is pinned so a locally-defined shadow cannot quietly take over.
   assert.match(
     runnerRaw,
-    /import \{ ROLE_CASCADE_WITNESS_QUERY, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
+    /import \{ ROLES_RELATION_PRESENT_SQL, ROLE_CASCADE_WITNESS_QUERY, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
   )
   // The battery's predicate must be the thing that DECIDES; a hand-rolled test anywhere in this
   // module (or in the probe source it generates) is a second, narrower definition.

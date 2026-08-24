@@ -430,6 +430,24 @@ const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
  * the same way; the two are coupled and must be narrowed in lockstep, or a database this query
  * cannot even see would report as "no cascade" instead of "wrong database".
  */
+/**
+ * "This session can resolve a `roles` TABLE" — as a SQL boolean expression, so every consumer of
+ * `ROLE_CASCADE_WITNESS_QUERY` can pair the query with the SAME presence check.
+ *
+ * ONE DEFINITION, because the two must be narrowed in lockstep or the pair manufactures a false
+ * ABSENT: the query resolves `roles` through the session's `search_path`, so a session that cannot
+ * see `roles` at all returns zero rows — which reads as "nothing writes a triggered child" while
+ * actually meaning "we are looking somewhere that has no roles table". `relkind IN ('r','p')`
+ * because `con.confrelid` can only ever be an ordinary or partitioned table; a VIEW named `roles`
+ * would otherwise report presence for a query that is guaranteed to return nothing.
+ */
+export const ROLES_RELATION_PRESENT_SQL = `EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_class rel
+      WHERE rel.oid = to_regclass('roles')
+        AND rel.relkind IN ('r', 'p')
+    )`
+
 export const ROLE_CASCADE_WITNESS_QUERY = `
   SELECT
     child_ns.nspname AS child_schema,
@@ -1485,6 +1503,19 @@ export async function runBattery({ env = process.env, options } = {}) {
     // — and exit 1 rather than produce evidence — in strictly MORE situations than before. That is
     // the point: every one of those situations is a database on which `roles:delete` really is
     // blockable and therefore really must be driven.
+    // SCHEMA/OID BINDING — the presence control this query must be paired with. The witness
+    // resolves `roles` through the SESSION's search_path, so zero rows from a session that cannot
+    // see a `roles` table would read as "nothing writes a triggered child" and quietly keep the
+    // exemption. `users` resolving in the same-DB proof above does NOT establish this: the two
+    // tables could sit in different schemas. Same client, same session, same resolution as the
+    // query it guards — that is the whole point.
+    const rolesPresence = await sqlOne(`SELECT ${ROLES_RELATION_PRESENT_SQL} AS present`)
+    if (rolesPresence[0]?.present !== true) {
+      log(lines, "VERDICT: NOT_ARMED - this session cannot resolve a `roles` table through its search_path, so the roles:delete premise cannot be re-checked here; zero rows from the witness query would not be evidence of absence")
+      failures.push({ phase: 'preflight', failure: 'role_cascade_premise_unobservable', reason: "to_regclass('roles') resolved no ordinary table on the battery's own session" })
+      evidence.finished_at = new Date().toISOString()
+      return { exitCode: 2, evidence, lines }
+    }
     const cascadeRows = (await admin.client.query(ROLE_CASCADE_WITNESS_QUERY)).rows
     const cascadePresent = roleDeleteCascadeExists(cascadeRows)
     evidence.posture.role_delete_cascade_present = cascadePresent
