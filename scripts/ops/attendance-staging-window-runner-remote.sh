@@ -128,6 +128,10 @@ STAGING_WEB_HEALTH_URL="http://127.0.0.1:8082/api/health"
 STAGING_BACKEND_HEALTH_URL="http://127.0.0.1:18900/health"
 IN_CONTAINER_BASE_URL="http://127.0.0.1:8900"
 MIGRATE_JS="packages/core-backend/dist/src/db/migrate.js"
+TARGET_MIGRATION_IMAGE=""
+TARGET_MIGRATION_IMAGE_ID=""
+TARGET_MIGRATION_REPO_DIGEST=""
+TARGET_MIGRATION_ENV_FILE=""
 # Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
 # postgres container/server as staging, never on a different host, and is always dropped
 # (created fresh each run — never assumed to persist).
@@ -266,6 +270,76 @@ staging_exec_env() {
   done
   [[ "${1:-}" == "--" ]] && shift
   docker exec "${env_flags[@]}" "$BACKEND_CONTAINER" "$@"
+}
+
+cleanup_target_migration_runtime() {
+  # Config.Env contains credentials. It is materialized only because docker run has no safe
+  # "inherit another container's env" primitive; never copy it to OUTPUT_DIR or print it.
+  if [[ -n "${TARGET_MIGRATION_ENV_FILE:-}" ]]; then
+    rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    TARGET_MIGRATION_ENV_FILE=""
+  fi
+}
+
+prepare_target_migration_image() {
+  require_sha
+  TARGET_MIGRATION_IMAGE="ghcr.io/${IMAGE_OWNER}/metasheet2-backend:${DEPLOY_SHA}"
+
+  log "target migration universe: pulling exact image ${TARGET_MIGRATION_IMAGE} (running application is not changed)"
+  docker pull "$TARGET_MIGRATION_IMAGE" 2>&1 | tee "${OUTPUT_DIR}/target-image-pull.log"
+
+  local revision
+  revision="$(docker image inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$TARGET_MIGRATION_IMAGE" 2>/dev/null || true)"
+  [[ "$revision" == "$DEPLOY_SHA" ]] \
+    || fail "target migration image revision mismatch: expected ${DEPLOY_SHA}, got '${revision:-<missing>}'"
+  TARGET_MIGRATION_IMAGE_ID="$(docker image inspect -f '{{.Id}}' "$TARGET_MIGRATION_IMAGE")"
+  TARGET_MIGRATION_REPO_DIGEST="$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$TARGET_MIGRATION_IMAGE" | grep '/metasheet2-backend@' | head -n 1 || true)"
+  [[ -n "$TARGET_MIGRATION_REPO_DIGEST" ]] \
+    || fail "target migration image has no metasheet2-backend repo digest after pull; refusing an unattested migration run"
+
+  mkdir -p "$RUNNER_PERSIST_DIR"
+  TARGET_MIGRATION_ENV_FILE="$(mktemp "${RUNNER_PERSIST_DIR}/.target-migrate-env.XXXXXX")"
+  chmod 0600 "$TARGET_MIGRATION_ENV_FILE"
+  # Reject multiline/NUL values: Docker's env-file grammar cannot preserve them byte-for-byte.
+  # The JSON and resulting secret file are never emitted to logs or artifacts.
+  docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" \
+    | TARGET_ENV_FILE="$TARGET_MIGRATION_ENV_FILE" python3 -c '
+import json, os, sys
+values = json.load(sys.stdin)
+if not isinstance(values, list) or not values:
+    raise SystemExit("running backend has no Config.Env")
+for value in values:
+    if not isinstance(value, str) or "=" not in value or any(c in value for c in ("\n", "\r", "\0")):
+        raise SystemExit("running backend has an env entry incompatible with a secure env-file")
+path = os.environ["TARGET_ENV_FILE"]
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    handle.write("\n".join(values) + "\n")
+'
+
+  {
+    echo "image=${TARGET_MIGRATION_IMAGE}"
+    echo "revision=${revision}"
+    echo "image_id=${TARGET_MIGRATION_IMAGE_ID}"
+    echo "repo_digest=${TARGET_MIGRATION_REPO_DIGEST}"
+    echo "running_application_changed=no"
+  } > "${OUTPUT_DIR}/target-migration-image.txt"
+}
+
+target_migrate_exec() {
+  # target_migrate_exec ["A=1" ...] -- command args...
+  local -a env_flags=()
+  while [[ "$#" -gt 0 && "$1" != "--" ]]; do
+    env_flags+=(-e "$1")
+    shift
+  done
+  [[ "${1:-}" == "--" ]] && shift
+  [[ -n "$TARGET_MIGRATION_IMAGE" && -r "$TARGET_MIGRATION_ENV_FILE" ]] \
+    || fail "target migration runtime was not prepared"
+  docker run --rm --pull=never \
+    --network "container:${BACKEND_CONTAINER}" \
+    --env-file "$TARGET_MIGRATION_ENV_FILE" \
+    "${env_flags[@]}" \
+    "$TARGET_MIGRATION_IMAGE" "$@"
 }
 
 require_sha() {
@@ -991,6 +1065,100 @@ action_status() {
   return "$status_rc"
 }
 
+assert_migration_rollout_flags_off() {
+  # Values are intentionally never printed. Include the two #4556 gates explicitly and any
+  # future env whose name advertises ROLLOUT/SHADOW, so a newly-added flag fails closed too.
+  local phase="$1" name value
+  local -a names=(
+    ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED
+  )
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && names+=("$name")
+  done < <(
+    docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$BACKEND_CONTAINER" \
+      | sed 's/=.*//' | grep -Ei '(ROLLOUT|SHADOW)' || true
+  )
+
+  : > "${OUTPUT_DIR}/rollout-shadow-flags-${phase}.txt"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null || true)"
+    case "${value,,}" in
+      ''|0|false|off) echo "${name}=OFF" >> "${OUTPUT_DIR}/rollout-shadow-flags-${phase}.txt" ;;
+      *) fail "rollout/shadow flag ${name} is enabled during ${phase}; action=migrate requires every rollout/shadow flag OFF" ;;
+    esac
+  done < <(printf '%s\n' "${names[@]}" | sort -u)
+}
+
+action_migrate_read_only_prechecks() {
+  # Values-free prechecks for the target's data-dependent fail-loud arms. Only action names and
+  # cardinalities enter the artifact; no ids, org labels, tenant data, DSNs, or credentials.
+  local pg_user="$MIGRATE_BACKUP_PG_USER" pg_db="$MIGRATE_BACKUP_PG_DB"
+  local has_org_id org_null_predicate=''
+  has_org_id="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 \
+    -c "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public' AND table_name='approval_instances' AND column_name='org_id');" | tr -d '[:space:]')"
+  [[ "$has_org_id" == "t" || "$has_org_id" == "f" ]] \
+    || fail "could not determine whether approval_instances.org_id exists"
+  [[ "$has_org_id" == "t" ]] && org_null_predicate='AND i.org_id IS NULL'
+
+  docker exec -i "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$pg_db" -tA -v ON_ERROR_STOP=1 <<SQL \
+    | tee "${OUTPUT_DIR}/target-read-only-prechecks.txt"
+SELECT 'approval_action_histogram=' || COALESCE(jsonb_object_agg(action, n ORDER BY action), '{}'::jsonb)::text
+  FROM (SELECT action, count(*) AS n FROM approval_records GROUP BY action) h;
+SELECT 'invalid_approval_action_count=' || count(*)::text
+  FROM approval_records
+ WHERE action NOT IN ('created','approve','reject','return','revoke','transfer','sign','comment','cc','remind','jump','add_sign','reduce_sign','reassign','handle','policy_denied');
+SELECT 'attachment_org_conflict_count=' || count(*)::text FROM (
+  SELECT a.instance_id
+    FROM approval_attachments a
+    JOIN approval_instances i ON i.id = a.instance_id
+   WHERE a.instance_id IS NOT NULL
+     ${org_null_predicate}
+   GROUP BY a.instance_id
+  HAVING count(DISTINCT a.org_id) > 1
+) c;
+SELECT 'zero_membership_active_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
+SELECT 'distinct_active_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE) o;
+SELECT 'class6_candidate_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id'
+        AND uo.is_active = TRUE
+      GROUP BY uo.user_id
+     HAVING count(*) = 1
+   );
+SQL
+
+  local invalid conflicts zero_membership active_orgs class6 value
+  invalid="$(sed -n 's/^invalid_approval_action_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_membership="$(sed -n 's/^zero_membership_active_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  active_orgs="$(sed -n 's/^distinct_active_org_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  class6="$(sed -n 's/^class6_candidate_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  for value in "$invalid" "$conflicts" "$zero_membership" "$active_orgs" "$class6"; do
+    [[ "$value" =~ ^[0-9]+$ ]] || fail "target read-only precheck returned a non-numeric cardinality"
+  done
+  [[ "$invalid" == "0" ]] || fail "target precheck: ${invalid} approval_records rows carry an action outside the target constraint"
+  [[ "$conflicts" == "0" ]] || fail "target precheck: ${conflicts} attachment-bearing approval instances have cross-org conflicts"
+  if [[ "$zero_membership" -gt 0 || "$class6" -gt 0 ]]; then
+    [[ "$active_orgs" == "1" ]] \
+      || fail "target precheck: provisioning/backfill population exists but distinct active org count is ${active_orgs}, not exactly 1"
+  fi
+  log "target read-only prechecks OK"
+}
+
 action_migrate_backup() {
   # Step 2 of the runbook-compliant sequence: pg_dump the REAL staging DB to a HOST file
   # (never the staging repo dir — not writable by this SSH user; never uploaded as a CI
@@ -1050,7 +1218,7 @@ action_migrate_rehearse() {
 
   log "rehearsal: dropping any prior ${REHEARSAL_DB} left by an aborted run"
   cleanup_rehearsal
-  trap cleanup_rehearsal EXIT
+  trap 'cleanup_rehearsal; cleanup_target_migration_runtime' EXIT
 
   log "rehearsal: creating ${REHEARSAL_DB} (clearly-synthetic fixed name; same postgres server as staging)"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
@@ -1102,7 +1270,7 @@ action_migrate_rehearse() {
   log "rehearsal isolation baseline: applied(real ${real_db})=${real_before} applied(${REHEARSAL_DB})=${rehearsal_before}"
 
   log "rehearsal: running migrate.js against the REHEARSAL DB only (staging DB untouched so far)"
-  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
+  target_migrate_exec "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/rehearsal-migrate-run.log"
 
   real_after="$(count_applied "$real_db")"
@@ -1118,7 +1286,7 @@ action_migrate_rehearse() {
     || fail "rehearsal DB applied count did not advance (${rehearsal_before}->${rehearsal_after}) — the rehearsal migrate did not actually run against ${REHEARSAL_DB}; refusing to treat rehearsal as green"
 
   log "rehearsal: confirming pending=0 against the rehearsal DB"
-  staging_exec_env "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
+  target_migrate_exec "DATABASE_URL=${rehearsal_dsn}" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/rehearsal-migrate-list-after.txt" \
     || fail "rehearsal migrate run did not leave the rehearsal DB at pending=0 (see rehearsal-migrate-list-after.txt); staging DB was NOT touched, stopping per the runbook"
@@ -1133,21 +1301,39 @@ action_migrate_apply() {
   # Step 4: only reached if action_migrate_rehearse fully succeeded. Same before/after
   # pending-list discipline as action_deploy's migration step, against the REAL staging DB.
   log "apply: migrate-list BEFORE (real staging DB)"
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
 
   log "apply: running migrate.js against the REAL staging DB (rehearsal was green)"
-  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
+  target_migrate_exec -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
 
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/apply-migrate-list-after.txt" \
     || fail "staging migrate did not end at pending=0 after apply (see apply-migrate-list-after.txt); restore from ${MIGRATE_BACKUP_PATH} if needed (runbook §Failure modes)"
+  target_migrate_exec -- node "$MIGRATE_JS" --confirm 076_create_integration_stock_prep_pack_installs < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/confirm-076.txt"
+  grep -q '^migration "076_create_integration_stock_prep_pack_installs" is applied$' "${OUTPUT_DIR}/confirm-076.txt" \
+    || fail "named confirmation for 076_create_integration_stock_prep_pack_installs.sql did not pass"
   log "apply OK: staging migrate ended at pending=0"
 }
 
 action_migrate() {
+  require_sha
+  trap cleanup_target_migration_runtime EXIT
   prepare_container_runner
+  prepare_target_migration_image
+  assert_migration_rollout_flags_off before
+
+  log "target migration inventory BEFORE (exact deploy_sha image; read-only)"
+  target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 \
+    | tee "${OUTPUT_DIR}/target-migrate-list-before.txt"
+
+  # Resolve credentials for the read-only gates without creating a backup yet. The backup helper
+  # repeats this resolution and remains the first retentive step.
+  read -r MIGRATE_BACKUP_PG_USER MIGRATE_BACKUP_PG_DB <<< "$(resolve_postgres_creds)"
+  action_migrate_read_only_prechecks
   action_migrate_backup
   action_migrate_rehearse
+  trap cleanup_target_migration_runtime EXIT
   action_migrate_apply
 
   # Step 5: post-checks.
@@ -1157,17 +1343,28 @@ action_migrate() {
     || fail "post-apply health check did not report ok:true (see health-web.json)"
   auth_round_trip
   snapshot_staging_ps
+  assert_migration_rollout_flags_off after
 
   {
     echo "action=migrate"
+    echo "migration_image=${TARGET_MIGRATION_IMAGE}"
+    echo "migration_image_id=${TARGET_MIGRATION_IMAGE_ID}"
+    echo "migration_repo_digest=${TARGET_MIGRATION_REPO_DIGEST}"
+    echo "migration_revision=${DEPLOY_SHA}"
     echo "backup_path=${MIGRATE_BACKUP_PATH}"
     echo "backup_sha256=${MIGRATE_BACKUP_SHA256}"
     echo "backup_bytes=${MIGRATE_BACKUP_BYTES}"
     echo "rehearsal_db=${REHEARSAL_DB}"
     echo "rehearsal_result=ok"
     echo "apply_result=ok"
+    echo "target_pending_after=0"
+    echo "076_create_integration_stock_prep_pack_installs.sql=applied"
+    echo "rollout_shadow_flags=OFF"
+    echo "application_deployed=no"
     echo "result=ok"
   } > "${OUTPUT_DIR}/summary.txt"
+  cleanup_target_migration_runtime
+  trap - EXIT
   log "migrate OK: backup=${MIGRATE_BACKUP_PATH} rehearsal=ok apply=ok"
 }
 
