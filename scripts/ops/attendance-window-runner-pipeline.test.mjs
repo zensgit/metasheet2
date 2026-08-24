@@ -297,7 +297,7 @@ test('staging-only contract: the remote script names only staging containers', (
 
 test('rehearsal restore keeps the replica-role trigger suppression (load-bearing: partition-inherited row triggers fire during COPY without it — runs 29340321213/29347058494; --disable-triggers is inert in full restores)', () => {
   const remote = readFileSync(REMOTE_SH, 'utf8')
-  const restoreIdx = remote.indexOf('pg_restore -j 2 -U')
+  const restoreIdx = remote.indexOf('pg_restore -j 2 --exit-on-error --section=pre-data -U')
   assert.notEqual(restoreIdx, -1, 'expected the rehearsal pg_restore invocation to exist')
   const setIdx = remote.indexOf("SET session_replication_role = 'replica'")
   const resetIdx = remote.indexOf('RESET session_replication_role')
@@ -305,6 +305,35 @@ test('rehearsal restore keeps the replica-role trigger suppression (load-bearing
   assert.notEqual(resetIdx, -1, 'rehearsal lost the RESET after restore (rehearsal migrate must run under normal trigger semantics)')
   assert.ok(setIdx < restoreIdx, 'replica-role SET must come BEFORE the pg_restore invocation')
   assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
+})
+
+test('rehearsal restore splits archive sections around a clone-only legacy function compatibility shim', () => {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const rehearseStart = remote.indexOf('action_migrate_rehearse() {')
+  const rehearseEnd = remote.indexOf('\naction_migrate_apply() {', rehearseStart)
+  assert.ok(rehearseStart >= 0 && rehearseEnd > rehearseStart, 'expected rehearsal function bounds')
+  const rehearse = remote.slice(rehearseStart, rehearseEnd)
+
+  const preData = rehearse.indexOf('--section=pre-data')
+  const shim = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} SET search_path = pg_catalog, public')
+  const data = rehearse.indexOf('--section=data')
+  const postData = rehearse.indexOf('--section=post-data')
+  const reset = rehearse.indexOf('ALTER FUNCTION ${legacy_fn_signature} RESET search_path')
+  assert.ok(preData >= 0 && shim > preData && data > shim && postData > data && reset > postData,
+    'restore must run pre-data -> clone shim -> data -> post-data -> clone reset')
+
+  assert.match(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB" -tA[\s\S]*SELECT pg_get_functiondef/,
+    'legacy-shape detection must query the source DB read-only')
+  assert.match(rehearse, /-d "\$REHEARSAL_DB" -v ON_ERROR_STOP=1[\s\S]*ALTER FUNCTION \$\{legacy_fn_signature\} SET search_path/,
+    'compatibility ALTER must target only the fixed rehearsal DB')
+  assert.doesNotMatch(rehearse, /-d "\$MIGRATE_BACKUP_PG_DB"[^\n]*ALTER FUNCTION/,
+    'compatibility shim must never alter the real staging DB')
+  assert.match(rehearse, /legacy_fn_def.*attendance_w4_canonical_date_text\(work_date\)/s,
+    'shim must be gated on the exact known unqualified legacy call shape')
+  assert.match(rehearse, /legacy_fn_config.*search_path=/s,
+    'shim must not override a source function that already pins its search_path')
+  assert.equal((rehearse.match(/pg_restore -j 2 --exit-on-error --section=/g) || []).length, 3,
+    'all three archive sections must fail closed on the first restore error')
 })
 
 function assertExactTargetMigrationContract({ remote, workflow }) {

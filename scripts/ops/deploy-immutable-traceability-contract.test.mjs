@@ -43,6 +43,8 @@ test('docker images carry commit trace metadata for backend and web', () => {
 test('docker-build workflow deploys exact commit images and verifies served backend/web commits', () => {
   const raw = readRepoFile('.github', 'workflows', 'docker-build.yml')
 
+  assertContains(raw, 'deploy_production:', 'docker-build workflow explicit production authorization input')
+  assertContains(raw, "github.event_name == 'workflow_dispatch' && inputs.deploy_production == true", 'docker-build workflow production deploy gate')
   assertContains(raw, '--build-arg VCS_REF="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_TAG="${GITHUB_SHA}"', 'docker-build workflow')
   assertContains(raw, '--build-arg BUILD_IMAGE_SOURCE="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"', 'docker-build workflow')

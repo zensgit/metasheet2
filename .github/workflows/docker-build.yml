@@ -8,6 +8,11 @@ on:
       - 'output/**'
   workflow_dispatch:
     inputs:
+      deploy_production:
+        description: 'Explicit authorization required to deploy the built commit to production'
+        required: true
+        type: boolean
+        default: false
       drill_fail_stage:
         description: 'Optional: intentionally fail deploy at a stage for summary drill (none|deploy|migrate|smoke)'
         required: false
@@ -75,7 +80,7 @@ jobs:
 
   deploy:
     needs: build
-    if: ${{ github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy_production == true && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
