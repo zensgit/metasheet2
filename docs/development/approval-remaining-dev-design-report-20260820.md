@@ -1776,7 +1776,7 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 - **A-2**:`afs:` 处置必须进激活步。今日 prod 零 `afs:` 行,故激活不使任何现存单据变暗;但激活后**第一张退款单**会创建 NULL-org 的 `afs:` 行并对其审批人不可读(W-3 是零写臂)。**且阶段 3 的 CHECK 必须带 `OR id LIKE 'afs:%'`**,否则首张退款单 INSERT 即 500。owner 决策项。
 - **A-6**:(β) 持续性准入从「carried」升为**激活前强烈建议**——`u1b=0` 是测量不是不变量,一次钉钉 JIT 登录即回灌该类,而一次性 provisioning 迁移不能重跑。ratify-first(推翻一条被测试钉死的既有策略)。
 
-其余六条:A-3 staging 激活需回滚演练(台账规则 5 的 rollback 证据);A-4 mention-CTE 无 org 合取在 pin-ON 时成为分歧,须在激活步处置而非漂着;A-5 required-lane 提权(pin 激活倚赖的 G-L11-5/G-L11-8 只在非 required 车道)——碰 `plugin-tests.yml` ⇒ s6a pin 重算 ⇒ 需安静窗口;A-7 台账时效(P4-C 仍写「未开工」,#5070→#5121 整弧零台账行);A-8 附件优先启用与既录 flag 顺序冲突,须修台账行;A-9 S0 的门审判据(已用于 §13.3 的门审)。
+其余六条:A-3 staging 激活需回滚演练(台账规则 5 的 rollback 证据);A-4 mention-CTE 无 org 合取在 pin-ON 时成为分歧,须在激活步处置而非漂着;A-5 required-lane 提权(pin 激活倚赖的 G-L11-5/G-L11-8 只在非 required 车道)——碰 `plugin-tests.yml` ⇒ s6a pin 重算 ⇒ 需安静窗口(已排期,见 §13.2 S4b 行;新增 2026-08-24,外部审阅裁定 F3);A-7 台账时效(P4-C 仍写「未开工」,#5070→#5121 整弧零台账行);A-8 附件优先启用与既录 flag 顺序冲突,须修台账行;A-9 S0 的门审判据(已用于 §13.3 的门审)。
 
 ### 13.2 十二切片计划(难度 × 模型分层)
 
@@ -1789,8 +1789,9 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 | S2 | staging 迁移+部署追平 | **hazardous** | fable-max 预检 / ops | ⛔ **岔路命中,待 owner 选向** |
 | S3 | mention-CTE org 合取 | trivial–bounded | sonnet / sonnet / opus | 未开工 |
 | S4 | (β) 准入 mini-lock + 切片 | **subtle**(ratify-first) | fable-max 锁 / sonnet / **opus** | 未开工 |
-| S5 | pin 激活(staging) | subtle | fable-max 运行手册+审计 / ops | **owner 授权** |
-| S6 | pin 激活(prod) | subtle | fable-max / ops / opus | **owner-only** |
+| S4b | required-lane 提权:`approval-org-writer-w4-s1`(G-L11-5/G-L11-8)+ `s1-consumers`/`p1c` 按 #5095 三点程序进 required `test (20.x)`;碰 `plugin-tests.yml` ⇒ s6a pin 重算,需安静窗口 | bounded | sonnet / opus 门审 | **A-5 owner 决策后、S5 之前**(新增 2026-08-24,外部审阅裁定 F3) |
+| S5 | pin 激活(staging) | subtle | fable-max 运行手册+审计 / ops | **owner 授权**;**前置决策:A-6 回灌窗口**(新增 2026-08-24,外部审阅裁定 F2) |
+| S6 | pin 激活(prod) | subtle | fable-max / ops / opus | **owner-only**;**前置决策:A-6 回灌窗口**(新增 2026-08-24,外部审阅裁定 F2) |
 | S7 | 阶段 3 锁起草+ratify | subtle(ratify 级) | fable-max / **opus** / **opus** | 未开工 |
 | S8 | 阶段 3 实现(CHECK+afs 逃逸、bootstrap 对等、约 30 文件 fixture 清扫、脚本 5/6、p06 翻转、G-S1-12-FULL) | bounded-wide | sonnet / sonnet / **opus** / opus | 未开工 |
 | S9 | feed-branch 菜单 → G-S1-8 | **subtle**(收窄已发布收件箱) | fable-max / sonnet / **opus** | **owner 裁后** |
@@ -1816,15 +1817,16 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 | `u3_attendance_{records,requests}_org_id_not_in_user_orgs` | **0 / 0** | (列同在,同为 0) |
 | verdict | NOT_APPLIED | APPLIED |
 
-**决定性后果**:Migration B / provisioning / gap-closer 的单 org (i)-guard 在 staging **会按设计 ABORT**——这正是 §13.1 审阅预判的「唯一可能吃掉一天的岔路」,实测命中。**U3′ 在 staging 已满足**(0/0),这是 A-1 折入当天即兑现的价值。
+**决定性后果**【更正 2026-08-24(外部审阅裁定 F1):原句为『Migration B / provisioning / gap-closer 的单 org (i)-guard 在 staging 会按设计 ABORT——这正是 §13.1 审阅预判的「唯一可能吃掉一天的岔路」,实测命中。』,该句把三个守卫的 ABORT 当作已发生的既成事实,而实测中只有 provisioning 一个守卫被触达】:以 staging 当前人口,迁移链会在 **provisioning 迁移的 (i)-guard 处 ABORT**(`zzzz20260823050000:161-168`,由 `u1b=6>0` 触发前提断言、`u1a=4` 使前提不成立);Migration B 与 gap-closer **不会被执行到**。三个守卫全部是「人口先行、前提后断」——人口为 0 时前提根本不被评估(:153 / `:419` / `:188`),故 ABORT 由**残留不可归属人口**驱动,而非多 org 本身。Migration B 在 staging 是否会 ABORT 取决于其 class-6 普查数,该数至今未测(run 7 的 c 探针因 org_id 列不存在全为 N/A)。**U3′ 在 staging 已满足**(0/0),这是 A-1 折入当天即兑现的价值。
 
-### 13.5 S2 的三条出路(owner 选向,本文不裁)
+### 13.5 S2 的出路(owner 选向,本文不裁)——更正:原三条漏了一条
 
+(t) **只读分类 + 定点修复人口,再重跑链**——先只读分类那 6 个零成员活跃用户(目录绑定/管理员建/JIT(`dingtalk_%@placeholder.local`)/自注册/测试孤儿;其中 1 个是仅停用行)与 31 张单据的 class-6 类比普查(谓词去掉 `org_id IS NULL` 合取)及 class-2 附件冲突普查;可归属者经产品级准入写入器(admin-users.ts:3874-3878 / directory-sync.ts:5648 / user-activate.ts:210)定点入 org,孤儿停用;之后 `u1b=0` ⇒ provisioning 迁移在 :153 早返、单 org 前提**不被评估**,class-3 按 requester 逐一盖章横跨 4 个 org,class-6 若为 0 则 Migration B 亦不触前提,gap-closer 窗口为空。**仅当分类后仍有不可归属残留时才回落到 (a)/(b)**。代价=一次只读普查作业 + 若干管理员操作;保留多 org 测试资产,且多 org staging 是 pin 唯一能做出判别性演练的环境(单 org prod 上 pin 对全员放行)。
 (a) **staging 归并至单 org**——与 prod 同构,迁移原样跑通,pin 可真实演练;代价=多 org 测试资产消失(须先盘点那 4 个 org 的归属与用量)。
 (b) **守卫放宽为逐 org 解析**——staging 保留多 org,且这是产品未来真形态;代价=**合同变更**,ratify-first + Migration B 全门重跑 + 需另证 prod 行为不变。
-(c) **只部署代码、不跑那三个迁移**——**此选项无实现机制**:`migrate.ts` 的子命令里只有 `--list`/`--confirm` 是只读的(`latest`/`rollback`/`reset` 都是变更型),而**没有任何一个提供「跑一个子集」的入口**;实际形态是 migrate 中途 ABORT、窗口以 `pending≠0` 收场。且新 head 的 pending 是 13 而非 3,「那三个」本身就是错的分母。保留在此仅为记录其不可行,不作为可选项。
+(c) **只部署代码、不跑那三个迁移**——【更正 2026-08-24(外部审阅裁定 F4):原句为『此选项无实现机制:`migrate.ts` 的子命令里只有 `--list`/`--confirm` 是只读的(`latest`/`rollback`/`reset` 都是变更型),而没有任何一个提供「跑一个子集」的入口;实际形态是 migrate 中途 ABORT、窗口以 `pending≠0` 收场。』——「无机制」与「窗口以 pending≠0 收场」两处均被证伪】**有实现机制,但属 owner-裁级且账面隐形**:`migrate.ts` 的 CLI 确无子集入口(只有 `--list`/`--confirm` 只读),但 provider 支持 `MIGRATION_EXCLUDE` 环境变量(`migration-provider.ts:267-272/:309-311`),`migrate.ts:33-37` 不覆盖该 env,故 staging 容器 env 携带它即生效(runner 的 `staging_exec node migrate.js` 继承容器 env;2026-05-19 审计实测 staging「supported but unset」)。**副作用**:被排除迁移从 `getMigrations()` 整体消失——`--list` 的 Pending 归零,runner 的 `Pending: 0` 门(remote.sh:544)会**绿着通过**,漂移从此帐面不可见;这是比「跑不了」更危险的形态。治理:排除表变更按 #4228 先例属 owner 裁决、单独 PR;staging 审计明文「未经显式接受不得用 MIGRATION_EXCLUDE 掩盖失配」;三个守卫迁移的 docblock 均钉「不进任何 MIGRATION_EXCLUDE」。runner 现有输入(`set_window_env` 闭集 [none, rd-window])不能携带它,需 host 侧 compose env 变更或 runner PR。且新 head 的 pending 是 13 而非 3,「那三个」本身就是错的分母。**结论:不推荐,但错因是「隐形+违治理」,不是「无机制」。**
 
-会话建议 (a),前提是那 4 个 org 无人在用;理由:staging 的价值在于同构演练激活,多 org 反而使其无法充当排练场,而多 org 支持应是产品线独立课题,不宜在收尾期借道 staging 改合同。
+【更正 2026-08-24(外部审阅裁定 F1):原句为『会话建议 (a),前提是那 4 个 org 无人在用;理由:staging 的价值在于同构演练激活,多 org 反而使其无法充当排练场,而多 org 支持应是产品线独立课题,不宜在收尾期借道 staging 改合同。』】会话建议先执行 (t) 的只读分类步(与 S1 同 trivial 级,零写入),以实测数字供 owner 在 (t)/(a)/(b) 间选向;原「多 org 使 staging 无法充当排练场」的理由撤回——守卫不因多 org 本身触发,判别性演练反而只有多 org 环境给得出。
 
 ### 13.6 staging 迁移闸的真相(纠正三处既有误解)
 
@@ -1834,4 +1836,6 @@ D-1..D-11;U1 实测已使 **D-10 MOOT**(u1a=1)。ratification 是 owner 行为,�
 
 ### 13.7 本段之后仍未执行的(防「收尾完成」误读)
 
-S2–S11 全部未执行(S1 完成、S0 落地)。owner-only 或 owner-gated 的有:S2 选向、S5/S6 激活授权、S7/S9 ratify、S10 UAT 内容与每一次 flag 翻转、A-2/A-5/A-8 决策、S4 的 ratify。**没有任何开关被翻转;没有任何 UAT 被执行。**
+S2–S11 全部未执行(S1 完成、S0 落地)。owner-only 或 owner-gated 的有:S2 选向、S5/S6 激活授权(**每次激活授权必须显式记录对 A-6 回灌窗口的处置:S4 先行、或封停两个准入口(AuthService.ts:444 自注册 / dingtalk-oauth.ts:790 JIT)、或 owner 亲笔接受「激活后新注册用户在 S4 落地前处于 fail-closed 锁外(422 建单 + 参与单据不可读)」——三者取一,缺任一记录则默认视 S4 为阻断**;新增 2026-08-24,外部审阅裁定 F2)、S7/S9 ratify、S10 UAT 内容与每一次 flag 翻转、A-2/A-5/A-8 决策、S4 的 ratify。**没有任何开关被翻转;没有任何 UAT 被执行。**
+
+【新增 2026-08-24,外部审阅裁定 F2 框架更正】上述处置要求不构成「S5/S6 由 S4 硬阻断」的裁决,「S4 先行」只是三选一里的一项,不是默认路径:写侧伤害(422 建单失败)与 pin 激活状态**无关**、今日已存在——`ApprovalProductService.ts:7570-7588` 对 `ApprovalOrgUnresolvedError` 的 422 映射**无 flag 门控**,回灌类用户建单今天就会 422,与 S5/S6 是否激活无关;且 ratified `docs/development/approval-lock11-writer-org-derivation-20260822.md` §10.1 D-8 行(`:1977`)已将「使 (β) 持续化(准入步代码修复)」列为 **FUTURE OWNER ITEM**,该锁自身的激活前置行(`:1382`)也不含「持续准入」一项;单方把 S5/S6 定为「BLOCKED BY S4」将构成对该 ratified 分配的单方修改,故正确形状是本节的具名前置决策 + owner 豁免姿态,而非静默留白,也不是强制硬阻断。
