@@ -18,7 +18,7 @@
 > **本轮新增两条 owner 待办**:ratified 阶梯 L2 判据的可产出性(新增 §D2-F10)、role-cascade witness
 > PR #5131 held Draft(见 §B1a)。下方各节据此更新;历史记录原样保留,不做回溯改写。
 
-> 一页看全:两条线(O-2 启用加固 + 阶梯加速)的**开发已全部落 main 并验证**;下面全是**只有 owner 能拍的板**。
+> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;**role-cascade witness 的判据修复目前落在 open PR #5131(Draft)上,其 real-DB golden 尚未接入 CI**(见 §B1a),本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;
 > 下方 run 记录里的 `8c1be0b0…`/`14c180aa…` 是**当时**实测值,epoch-bound,今天重跑不会复现)(双主机 run
@@ -150,32 +150,50 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
    同步更新)。即:今天不会 ratify 一条不可满足的生产条款,因为该条款已被移出 A1 的 ratify 范围。
 
 > prod 那条 `role_permissions → roles` cascade FK 依旧是 **INFERRED-STRONG**(未被只读见证证实或证伪)。
-> 见证查询 `ROLE_CASCADE_WITNESS_QUERY` 已经在电池脚本里(`multitable-l1-battery.mjs:382`,#5125 落地),
-> 但唯一 dispatch 它的 workflow —— **PR #5131**(`multitable-role-cascade-witness.yml`;只读:仅
-> `docker ps` + 一次 `docker exec` 跑 `pg_catalog`-only `SELECT`,无写入)—— 目前是 **Draft**,owner 在其上
-> 明文标注"holding as draft — the witness predicate is too narrow"。两处判据过窄(均已核实):
-> (a) owner 复审指出该 PR 只查 `role_permissions → roles`,漏了 `user_roles`——`033_create_rbac_core.sql`
-> 同时给两张表建了 `ON DELETE CASCADE`(`role_permissions.role_id` 第 17 行、`user_roles.role_id` 第 36 行),
-> 且 `user_roles` 也挂了 recovery-authority 触发器(`trg_user_roles_recovery_authority_lock`,由
-> `zzzz20260721121000_add_recovery_authority_locks.ts` 的 `USER_TRIGGERS` 模板建出,`BEFORE INSERT OR UPDATE
-> OR DELETE`);两个 cascade 各自独立(各自 `CREATE TABLE IF NOT EXISTS`),漏一个就可能假 CONFIRMED。
-> (b) 本次复核独立发现的第二处窄,**已用真库反例证实**(PG15:`NOT NULL` 子列 + `ON DELETE SET NULL` +
-> 同形 `BEFORE INSERT OR UPDATE OR DELETE` 触发器):witness 的判据只问"`confdeltype` 是否等于字面值
-> `'c'`",而不是"这个 FK 动作会不会对挂了触发器的子表发出一条会触发的 DML"。`'n'`(SET NULL)与 `'d'`
-> (SET DEFAULT)**同样会对子表发出一条 `UPDATE`**——这是 FK 动作本身的语义,与该列是否 `NOT NULL`、
-> 是否声明 `DEFAULT` 无关。`role_permissions`/`user_roles` 的触发器都是 `BEFORE INSERT OR UPDATE OR
-> DELETE`(函数体 `zzzz20260821120000_recovery_authority_functions_fix_search_path.ts:156-180`,对
-> UPDATE 不按列过滤),而 **BEFORE ROW 触发器先于该行的约束检查执行**——真库反例显示:对一个
-> `NOT NULL` 子列声明 `ON DELETE SET NULL` 时 DDL 照样接受,`DELETE FROM roles` 级联出的
-> `UPDATE ... SET role_id = NULL` 在触发器里就抛出 `METASHEET_RECOVERY_AUTHORITY_BUSY`(40001),
-> **NOT NULL 约束从未有机会被检查到**。`'d'` 同理(FK 动作同样是 UPDATE)。相对地,`confdeltype`
-> 为 `'a'`(NO ACTION)/`'r'`(RESTRICT)不产生任何子表 DML,PR 现有测试把它们判 ABSENT 是对的,不使
-> 豁免过期。**结论:witness 的判据从不读取 nullability/`DEFAULT`,但这不是"在今天这两张表上恰好正确"
-> ——是真实漏检**:`'n'`/`'d'` 都是活的假 CONFIRMED 路径,若 prod 的这条 FK 声明成 `'n'`/`'d'`,witness
-> 会报 `ABSENT/CONFIRMED`,而真删角色会抛 40001、电池会 `exit 1`。在 #5131 把 `user_roles` 遗漏与这处
-> "只认字面值、不认 FK 动作是否产生 DML"的窄都修完且配真库 golden + mutation 证明前,没有任何一次
-> dispatch 能对 B5 的这条级联前提给出可依赖的判定;ladder §A1.1 末段"建议在 ratify 前顺手跑掉"这条只读
-> SQL 目前没有可信的载体可跑。
+> 见证查询 `ROLE_CASCADE_WITNESS_QUERY` 最初由 #5045(`4bacc27ccc`)引入电池脚本,早于 #5125 即已在
+> main 上;唯一 dispatch 它的 workflow —— **PR #5131**(`multitable-role-cascade-witness.yml`;只读:仅 `docker ps` + 一次
+> `docker exec` 跑 `pg_catalog`-only `SELECT`,无写入)—— 目前仍是 **OPEN / Draft**(`gh pr view 5131`
+> 核实,head `d8b6a2e933`,2026-08-24)。
+>
+> **⚠️ 下面 (a)(b) 的修复只存在于 #5131 分支(head `d8b6a2e933`),尚未落 main**:本清单所在 worktree
+> 基于 main(`5aabffe0e7`),其上的 `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据
+> (`ROLE_CASCADE_WITNESS_QUERY` 硬编码 `child.relname = 'role_permissions'`,`roleDeleteCascadeExists`
+> 只认字面值 `confdeltype === 'c'`——main 上的 `multitable-l1-battery.mjs:382-394` 已核实),
+> `multitable-role-cascade-witness.*` 三个见证文件在 main 上根本不存在。也就是说,今天从 main
+> dispatch 的 L1 电池,`roles:delete` 站点的 NOT-DRIVEN 豁免复检用的仍是这份窄判据——这是"PR 仍是
+> Draft"的可操作后果,不只是纸面状态。
+>
+> **owner 复审在更早的 head(`c0c83e2534`)上指出的两处窄,已在 #5131 分支后续提交里修复,以该分支
+> 当前 head `d8b6a2e933` 核实(以下行号均属 #5131 分支,不是 main)**:
+> (a) 原判据只查 `role_permissions → roles`,漏了 `user_roles`。widen 提交
+> `9bce95b4dd fix(multitable): widen the role-cascade witness predicate to the real premise` 把
+> `ROLE_CASCADE_WITNESS_QUERY`(#5131 分支 `multitable-l1-battery.mjs:451-469`)改写为对 `roles` 的
+> **任意**外键判断——不再硬编码表名——只要子表挂了 canonical recovery-authority 触发器(谓词由该文件
+> 的 census 触发器函数列表派生),`role_permissions`/`user_roles` 两条 cascade 均落在判定范围内。
+> (b) 判据原只认字面值 `confdeltype = 'c'`,未把 `'n'`(SET NULL)/`'d'`(SET DEFAULT)算作会对子表发
+> DML 的动作。同一提交把 `ROLE_DELETE_CHILD_WRITE_ACTIONS`(#5131 分支同文件 :490)定义为
+> `['c','n','d']`,三者都计入"child row gets touched"的判定,`'a'`/`'r'` 仍判 ABSENT(不产生子表
+> DML,判定不变)。
+>
+> **现状:#5131 分支上真库 golden 手动 arm 后通过;CI 未接入**。该分支的
+> `scripts/ops/multitable-role-cascade-witness.test.mjs` 有 10 条 `real-DB golden` 用例,默认
+> `skip`,门槛是 `ROLE_CASCADE_WITNESS_DB_GOLDENS === '1'`(同文件 :973-977)。本轮在该分支上把该
+> 变量设为 `1` 并指向一个真实 admin 连接(PostgreSQL 15.18,本地 docker),本地核实全部 55 项
+> (45 hermetic + 10 real-DB golden)通过、0 skip、0 fail——其中 `user_roles-only CASCADE`(原判据
+> 看不见的那条腿)与 `SET NULL`/`SET DEFAULT` 三条 golden 直接验证了上面 (a)(b) 两处修复。**但 CI 未
+> 设置这个 env var**:该分支唯一执行该测试文件的车道 `multitable-o2-observation-kit.yml`(`:66`)不带
+> `ROLE_CASCADE_WITNESS_DB_GOLDENS`,这 10 条 real-DB golden 在 CI 上恒 `skip`,CI 只跑 45 条
+> hermetic 用例;`multitable-role-cascade-witness.yml` 本身也只有 `workflow_dispatch` 一种触发方式
+> (`:93`),不随 PR 自动跑。**PR #5131 仍处 Draft、其修复尚未落 main、real-DB golden 的 CI 接入仍是
+> 缺口,尚不构成可 ratify 的证据。**ladder §A1.1 末段"建议在 ratify 前顺手跑掉"那条只读 SQL:载体
+> 现已存在(#5131)且判据已在该分支上修完,但分支未合并、CI 未覆盖 real-DB golden,依旧不是一个
+> 可信的可 dispatch 载体。
+>
+> **`INDETERMINATE` 提醒**:见证脚本把结果分三类——`ABSENT`(premise CONFIRMED,exit 0)、
+> `PRESENT`(premise REFUTED,exit 1)、`INDETERMINATE`(未能观测,**exit 2**)
+> (`multitable-role-cascade-witness.mjs` 头注 HEADLINES 定义)。`INDETERMINATE` 是**证据缺口失败**,
+> 不是通过——容器缺失、`DATABASE_URL` 不可读、查询失败等都归入这一类而非 `ABSENT`,诊断上合法,
+> 但任何一次 dispatch 落在这一类都不能读成"这一轮见证过关"。
 
 ## B. 前置满足、随时可拍(压缩真正落袋的动作)
 
@@ -233,43 +251,71 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 
 ## D2-F10 · ratified 阶梯 L2 判据不可产出(需 owner 对阶梯做出更正;非代码缺陷,不在任何 open PR 范围内)
 
-**机制**(均已对照当前 main 逐条核实):
+**机制**(均已对照当前 main 逐条核实;下面按代码实际命中判据的先后顺序排列,不按发现顺序排列)——
+
+**主要发现:两旗标合取门抢在任何 checkpoint 判据之前拒绝,这是 L2 不可产出、最先命中的原因**:
+
+- `checkExactAnchorRecoveryTrust()`(`packages/core-backend/src/multitable/exact-anchor-recovery-route.ts:343-348`)
+  只有 `isWriterFenceEnabled()` **与** `isContiguityStrictMode()` **同时**为真才返回 `{ok:true}`,否则返回
+  `{ok:false, reason:'recovery-trust-required'}`。
+- Revert/Reset 的两个生产入口都把这个合取门排在 checkpoint 判据**之前**:预览入口
+  `previewExactAnchorRecovery` 在第 3 步调用它(`exact-anchor-recovery-route.ts:443`),第 4 步才调用
+  `precheckSheetHistoryIntegrity`(`:451`,即下面的 checkpoint 判据所在函数);执行入口
+  `applyExactAnchorRecovery` 同序:同一合取判据在第 2 步(`exact-anchor-recovery-execute.ts:899`),
+  `precheckSheetHistoryIntegrity` 在第 4 步才被调用(`:913`)。已用
+  `grep -rn "precheckSheetHistoryIntegrity\b" packages/core-backend/src/ | grep -v "\.test\.ts"` 核实
+  (排除测试文件):生产代码里 `precheckSheetHistoryIntegrity` 唯一的两个调用点就是这两处,没有第三条
+  路径能绕过前面的合取门去问 checkpoint 判据。
+- ladder §2 把 `MULTITABLE_HISTORY_CONTIGUITY_STRICT` 排在 **L2**,把 `MULTITABLE_ENABLE_WRITER_FENCE`
+  排在**更晚的 L3**(`multitable-timemachine-o2-enablement-ladder-20260819.md` §2:分别是
+  "L2 — staging `MULTITABLE_HISTORY_CONTIGUITY_STRICT=1`" 与 "L3 — staging
+  `MULTITABLE_ENABLE_WRITER_FENCE=1`" 两段)。
+- **后果**:在 L2,fence 尚未开、strict 已开——`checkExactAnchorRecoveryTrust()` 对任何 sheet 的任何
+  preview/execute 调用都返回 `recovery-trust-required`,代码根本不会走到 `precheckSheetHistoryIntegrity`。
+  **即便该表恰好存在一个 ACTIVE trust checkpoint,这道更早的合取门也会无条件拒绝它**——ladder §2 给
+  L2 写的验收证据「strict 拒绝率 = 预期(合成断链演练拒绝、正常表通过),无误伤」因此产不出,且原因与
+  checkpoint 是否存在无关。
+
+**次要发现(更深一层的 checkpoint 判据;只有在上面这道合取门被跳过或阶梯改序之后才有机会被实际问到)**:
 
 - `RECONSTRUCTION_CAUSALITY_LANDED = true`(`packages/core-backend/src/multitable/history-trust-precondition.ts:37`)。
-- 该常量与"是否存在 ACTIVE trust checkpoint"共同构成 strict-enablement 的两条件门:`checkStrictEnablementPrecondition`
-  (同文件 :68-77)读 `hasActiveTrustCheckpoint`;唯一的生产入口 `precheckSheetHistoryIntegrity`
-  (`history-integrity-precheck.ts:459`)在 `MULTITABLE_HISTORY_CONTIGUITY_STRICT` 打开时(`:463`)**委托给这个
-  两条件门**——`!canEnable` 无条件拒绝,返回 `strict_enablement_unmet`(`:477`),**不会**进入下方的 strict
-  比较器。一张没有 checkpoint 的表(包括"正常表")在 strict 打开时永远走不到比较器。
+  该常量与"是否存在 ACTIVE trust checkpoint"共同构成 strict-enablement 的两条件门:
+  `checkStrictEnablementPrecondition`(同文件 :68-77)读 `hasActiveTrustCheckpoint`;
+  `precheckSheetHistoryIntegrity`(`history-integrity-precheck.ts:459`)在 `MULTITABLE_HISTORY_CONTIGUITY_STRICT`
+  打开时(`:463`)**委托给这个两条件门**——`!canEnable` 无条件拒绝,返回 `strict_enablement_unmet`
+  (`:477`),**不会**进入下方的 strict 比较器。一张没有 checkpoint 的表(包括"正常表")在 strict 打开时
+  永远走不到比较器——但如上所述,这是**第二道门**,L2 期间第一道合取门已先行拒绝,这道 checkpoint 门在
+  L2 从未被实际触达。
 - trust-checkpoint 的**激活**另挂一个第五 env flag `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION`
   (`src/routes/univer-meta.ts:10159-10160`,`POST /sheets/:sheetId/trust-checkpoint-activate` 路由的 flag 检查
   在 `:10163`)——该 flag **不在**阶梯 §0 列出的四个 flag 之内(已读 §0:只列 `MULTITABLE_HISTORY_CONTIGUITY_STRICT`
   / `MULTITABLE_ENABLE_WRITER_FENCE` / `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET` 四个)。
 - 激活还**额外要求 writer fence 已开**:该路由在 flag 检查之后立即检查 `isWriterFenceEnabled()`
   (`univer-meta.ts:10171-10172`;该函数读 `MULTITABLE_ENABLE_WRITER_FENCE`,`canonical-sheet-fence.ts:136-138`),
-  不满足则 409 `TRUST_CHECKPOINT_FENCE_REQUIRED`。writer fence 在阶梯里排在 **L3**,晚于 strict 所在的 **L2**
-  (ladder §2)。
-- **后果(L2)**:按 ladder §2 的写法执行,L1→L2→L3 逐级开,写 fence 要到 L3 才开;而激活 checkpoint 的
-  路由又强制要求 fence 已开(上一条)。也就是说,只要各级按文档所写的顺序走,L2 期间就不会有 active
-  trust checkpoint(本节未查询任何主机上的 `meta_history_trust_checkpoints`,这是从阶梯自身文本推出的
-  结论,不是运行时观测)。ladder §2 给 L2 写的验收证据「strict 拒绝率 = 预期
-  (合成断链演练拒绝、正常表通过),无误伤」按当前代码**产不出**:任何表,包括正常表,在 L2 都会因
-  `strict_enablement_unmet` 被拒,不会走到"通过"这个分支。
-- **后果(L4/L5)**:revert/reset 共用的预览入口 `previewExactAnchorRecovery`(`exact-anchor-recovery-route.ts:411`)
-  依序做:trust 旗标检查(`:443`,仅查 fence+strict 两个 flag,env-only)→ `precheckSheetHistoryIntegrity`
-  (`:451`,同一两条件门)→ `resolveExactAnchor`(`:455`)。`resolveExactAnchor` 内部**再独立查一次** checkpoint
-  (`exact-anchor-recovery.ts:261-262`:`selectCheckpointByAnchorSeq` 查不到即 `return { ok: false, reason:
-  'no-covering-checkpoint' }`);执行侧的 in-txn 复检有同一形状的拒绝(`exact-anchor-recovery-execute.ts:930`)。
-  也就是说,没有 checkpoint 时,revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L5 命名合成
-  org 上的 canary 演练同样会在到达"precise-anchor 成功"这一步之前就被拒。
-- **ladder 全文没有安排建立 checkpoint 这一步**:通读 `multitable-timemachine-o2-enablement-ladder-20260819.md`
-  全文(§0–§5,含演练记录与指纹表)对"checkpoint"零命中——当前 ratified 阶梯的任何一级都没有写"在此级建立
-  trust checkpoint"。
+  不满足则 409 `TRUST_CHECKPOINT_FENCE_REQUIRED`。writer fence 在阶梯里排在 **L3**,晚于 strict 所在的 **L2**。
+
+**关于 L2 期间是否"没有" active checkpoint 这件事本身**:阶梯既不在任何一级安排建立 trust checkpoint,
+也不校验这个前提——通读 `multitable-timemachine-o2-enablement-ladder-20260819.md` 全文(§0–§5,含演练
+记录与指纹表)对"checkpoint"零命中。**本节未查询任何主机上的 `meta_history_trust_checkpoints` 表**,
+历史遗留的或手工建立的 checkpoint 无法排除,因此"L2 期间没有 active checkpoint"不是一个可以断言的事实
+——阶梯没有能力保证这份证据可产出。但这件事对上面的主要结论没有影响:即便某张表在 L2 期间恰好存在
+一个 checkpoint,`checkExactAnchorRecoveryTrust()` 这道更早的合取门依旧会无条件拒绝它,L2 的验收证据
+照样产不出。
+
+**后果(L4/L5)**:revert/reset 共用的预览入口 `previewExactAnchorRecovery`(`exact-anchor-recovery-route.ts:411`)
+依序做:trust 旗标检查(`:443`,即上面的合取门,env-only)→ `precheckSheetHistoryIntegrity`
+(`:451`,同一两条件门)→ `resolveExactAnchor`(`:455`)。到 L4/L5 时两个 flag(含 writer fence)均已开,
+合取门会通过;`resolveExactAnchor` 内部**再独立查一次** checkpoint(`exact-anchor-recovery.ts:261-262`:
+`selectCheckpointByAnchorSeq` 查不到即 `return { ok: false, reason: 'no-covering-checkpoint' }`);执行侧的
+in-txn 复检有同一形状的拒绝(`exact-anchor-recovery-execute.ts:930`)。也就是说,没有 checkpoint 时,
+revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L5 命名合成 org 上的 canary 演练同样会在
+到达"precise-anchor 成功"这一步之前就被拒。
 
 **定性**:这是对已 ratified 阶梯文档(该文档本身冻结,本次不改动)的一处更正需求,不是代码缺陷——代码
-按其自身注释记录的 owner 裁决(2026-07-16/17)行为正确;缺口在于阶梯的级序与 §0 的 flag 清单没有跟上这个
-两条件门 + 第五个 flag 的设计。是否调整级序、是否把第五个 flag 补进 §0、由谁在哪一级安排 checkpoint 激活,
-均属 owner 裁量。本节只记录机制,不建议排序,不代拍板。
+按其自身注释记录的 owner 裁决(2026-07-16/17)行为正确;缺口在于阶梯的级序与 §0 的 flag 清单没有跟上
+`checkExactAnchorRecoveryTrust()` 的两旗标合取门、两条件 checkpoint 门、以及第五个 flag 的设计。是否调整
+级序、是否把第五个 flag 补进 §0、由谁在哪一级安排 checkpoint 激活,均属 owner 裁量。本节只记录机制,
+不建议排序,不代拍板。
 
 ## E. 阶梯执行(全 owner-gated,日历为瓶颈,非开发)
 
