@@ -18,7 +18,7 @@
 > **本轮新增两条 owner 待办**:ratified 阶梯 L2 判据的可产出性(新增 §D2-F10)、role-cascade witness
 > PR #5131 held Draft(见 §B1a)。下方各节据此更新;历史记录原样保留,不做回溯改写。
 
-> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;**role-cascade witness 的判据修复目前落在 open PR #5131(Draft)上,其 real-DB golden 尚未接入 CI**(见 §B1a),本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
+> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;**role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词**(见 §B1a/§B1),本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;
 > 下方 run 记录里的 `8c1be0b0…`/`14c180aa…` 是**当时**实测值,epoch-bound,今天重跑不会复现)(双主机 run
@@ -153,18 +153,21 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > 见证查询 `ROLE_CASCADE_WITNESS_QUERY` 最初由 #5045(`4bacc27ccc`)引入电池脚本,早于 #5125 即已在
 > main 上;唯一 dispatch 它的 workflow —— **PR #5131**(`multitable-role-cascade-witness.yml`;只读:仅 `docker ps` + 一次
 > `docker exec` 跑 `pg_catalog`-only `SELECT`,无写入)—— 目前仍是 **OPEN / Draft**(`gh pr view 5131`
-> 核实,head `d8b6a2e933`,2026-08-24)。
+> 核实,head `1d8f0708de`,2026-08-24;该 PR 当天已推进三次,下面每条陈述都对这个 head 重新核实过)。
 >
-> **⚠️ 下面 (a)(b) 的修复只存在于 #5131 分支(head `d8b6a2e933`),尚未落 main**:本清单所在 worktree
-> 基于 main(`5aabffe0e7`),其上的 `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据
-> (`ROLE_CASCADE_WITNESS_QUERY` 硬编码 `child.relname = 'role_permissions'`,`roleDeleteCascadeExists`
-> 只认字面值 `confdeltype === 'c'`——main 上的 `multitable-l1-battery.mjs:382-394` 已核实),
-> `multitable-role-cascade-witness.*` 三个见证文件在 main 上根本不存在。也就是说,今天从 main
-> dispatch 的 L1 电池,`roles:delete` 站点的 NOT-DRIVEN 豁免复检用的仍是这份窄判据——这是"PR 仍是
-> Draft"的可操作后果,不只是纸面状态。
+> **⚠️ 下面 (a)(b) 的谓词修复只存在于 #5131 分支(head `1d8f0708de`),尚未落 main**:origin/main 现在
+> `136be5f1f5`(`gh api repos/zensgit/metasheet2/branches/main --jq '.commit.sha'` 核实),其上的
+> `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据(`ROLE_CASCADE_WITNESS_QUERY` 硬编码
+> `child.relname = 'role_permissions'`,`roleDeleteCascadeExists` 只认字面值 `confdeltype === 'c'`——
+> origin/main 上的 `multitable-l1-battery.mjs:382-394` 已核实),`multitable-role-cascade-witness.*`
+> 三个见证文件在 main 上根本不存在。**main 上的这份窄判据不是电池之外的旁路检查,电池自身在运行时就
+> 消费它**:`multitable-l1-battery.mjs:1366-1371`(main 上已核实)用同一个 `ROLE_CASCADE_WITNESS_QUERY`
+> 查目标库,`roleDeleteCascadeExists` 判真则把 `not_driven_reason_expired` 推进 `failures`——今天从
+> main dispatch 的 L1 电池,`roles:delete` 站点的 NOT-DRIVEN 豁免复检用的就是这份窄判据。
 >
 > **owner 复审在更早的 head(`c0c83e2534`)上指出的两处窄,已在 #5131 分支后续提交里修复,以该分支
-> 当前 head `d8b6a2e933` 核实(以下行号均属 #5131 分支,不是 main)**:
+> 当前 head `1d8f0708de` 核实(以下行号均属 #5131 分支,不是 main;`1d8f0708de` 未再改动
+> `multitable-l1-battery.mjs`,行号与上一轮核实时一致)**:
 > (a) 原判据只查 `role_permissions → roles`,漏了 `user_roles`。widen 提交
 > `9bce95b4dd fix(multitable): widen the role-cascade witness predicate to the real premise` 把
 > `ROLE_CASCADE_WITNESS_QUERY`(#5131 分支 `multitable-l1-battery.mjs:451-469`)改写为对 `roles` 的
@@ -175,19 +178,34 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > `['c','n','d']`,三者都计入"child row gets touched"的判定,`'a'`/`'r'` 仍判 ABSENT(不产生子表
 > DML,判定不变)。
 >
-> **现状:#5131 分支上真库 golden 手动 arm 后通过;CI 未接入**。该分支的
-> `scripts/ops/multitable-role-cascade-witness.test.mjs` 有 10 条 `real-DB golden` 用例,默认
-> `skip`,门槛是 `ROLE_CASCADE_WITNESS_DB_GOLDENS === '1'`(同文件 :973-977)。本轮在该分支上把该
-> 变量设为 `1` 并指向一个真实 admin 连接(PostgreSQL 15.18,本地 docker),本地核实全部 55 项
-> (45 hermetic + 10 real-DB golden)通过、0 skip、0 fail——其中 `user_roles-only CASCADE`(原判据
-> 看不见的那条腿)与 `SET NULL`/`SET DEFAULT` 三条 golden 直接验证了上面 (a)(b) 两处修复。**但 CI 未
-> 设置这个 env var**:该分支唯一执行该测试文件的车道 `multitable-o2-observation-kit.yml`(`:66`)不带
-> `ROLE_CASCADE_WITNESS_DB_GOLDENS`,这 10 条 real-DB golden 在 CI 上恒 `skip`,CI 只跑 45 条
-> hermetic 用例;`multitable-role-cascade-witness.yml` 本身也只有 `workflow_dispatch` 一种触发方式
-> (`:93`),不随 PR 自动跑。**PR #5131 仍处 Draft、其修复尚未落 main、real-DB golden 的 CI 接入仍是
-> 缺口,尚不构成可 ratify 的证据。**ladder §A1.1 末段"建议在 ratify 前顺手跑掉"那条只读 SQL:载体
-> 现已存在(#5131)且判据已在该分支上修完,但分支未合并、CI 未覆盖 real-DB golden,依旧不是一个
-> 可信的可 dispatch 载体。
+> **现状(以 head `1d8f0708de` 核实,2026-08-24;晚于上一轮核实时的 `d8b6a2e933`):real-DB golden
+> 现已接入 CI 并实际执行通过,这一轮之前"仅手动 arm 才过、CI 未接入"的现状已被这个新提交取代**。这
+> 10 条 golden 默认门槛是 `ROLE_CASCADE_WITNESS_DB_GOLDENS === '1'`(`multitable-role-cascade-witness.test.mjs:1160-1170`
+> 的 `dbGoldenSkipReason()`),不设即 SKIP——`1d8f0708de` 之前没有任何 CI 车道设置这个变量。`1d8f0708de`
+> 在 `.github/workflows/multitable-o2-observation-kit-realdb.yml` 新增了一个 armed step(`:152-164`:
+> env 里 `ROLE_CASCADE_WITNESS_DB_GOLDENS='1'` + 一个指向该 job 自身 `postgres:16` service 的
+> `ROLE_CASCADE_WITNESS_ADMIN_URL`),该 job 的 `paths:` 过滤器也新增了见证脚本、见证测试文件、电池
+> 文件本身与这个 workflow 文件,编辑其中任一个都会触发这条车道去执行 golden。这条接线由 always-on、
+> 无 path 过滤的 hermetic 车道("observation-kit contract",已用 `gh api
+> repos/zensgit/metasheet2/branches/main/protection/required_status_checks` 核实其 context 名在
+> `required_status_checks.contexts` 里)中的用例钉住(`multitable-role-cascade-witness.test.mjs:1175`
+> 的 fail-not-skip sentinel + cross-file 断言),删掉那个 armed step 会在 required 车道里变红。**已用
+> GitHub 上的真实执行核实**:PR #5131 run `32682499617`,job "observation-kit execution proof (SQL
+> is read-only against a real DB)"(`gh api repos/zensgit/metasheet2/actions/jobs/97301471543/logs`),
+> `node --test scripts/ops/multitable-role-cascade-witness.test.mjs` 打印 `# tests 59` `# pass 59`
+> `# fail 0` `# skipped 0`(该 job 用 `postgres:16` service)。**精度说明**:实际执行这些 golden 的
+> job("observation-kit execution proof (SQL is read-only against a real DB)")本身**不在**
+> `required_status_checks.contexts` 列表里——列表里的是钉住其接线的 hermetic 车道("observation-kit
+> contract"),不是执行车道本身;`paths:` 过滤器保证"改到见证/电池/该 workflow 就会跑",但这与
+> GitHub 分支保护意义上的 required check 是两回事。同一提交也把 `workflow_dispatch` 的默认目标从
+> `production` 改成了 `staging`(`multitable-role-cascade-witness.yml:113-114`),并把
+> `default == options[0] == staging` 钉进了同一份 hermetic 套件。
+>
+> **但这不改变 PR #5131 仍是 Draft、main 上谓词仍未修复这件事**——CI 接入解决的是"这些 golden 会不会
+> 被执行"这个缺口,不是"main 上电池用的是不是宽谓词"这个缺口;后者只有合并才能解决(见 §B1 的排期
+> 结论)。ladder §A1.1 末段"建议在 ratify 前顺手跑掉"那条只读 SQL:载体已存在(#5131)、判据已在该
+> 分支修完、CI 现已覆盖 real-DB golden——三者都不再是缺口;唯一剩的缺口是**分支未合并**,main 上电池
+> 实跑时用的仍是窄谓词。
 >
 > **`INDETERMINATE` 提醒**:见证脚本把结果分三类——`ABSENT`(premise CONFIRMED,exit 0)、
 > `PRESENT`(premise REFUTED,exit 1)、`INDETERMINATE`(未能观测,**exit 2**)
@@ -206,15 +224,25 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
 - **⚠️ 与本条剩余前置"建号 + 电池实跑 PASS"交界的缺口(证据见 §B1a,role-cascade witness;不是重复劳动,是同一份证据在两处的排期含义)**:
   上面"代码侧已闭合"这组不含 role-cascade witness 谓词的宽化——该谓词的宽版本目前**只存在于 #5131 分支
-  (未合并,head `d8b6a2e933`)**;main 上(本清单所在 worktree 已核实,`scripts/ops/multitable-l1-battery.mjs:382-394`)
-  电池脚本里的 `ROLE_CASCADE_WITNESS_QUERY` 仍是窄谓词(硬编码只查 `role_permissions`,`roleDeleteCascadeExists`
-  只认字面值 `confdeltype === 'c'`)。**现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",
-  电池会用这份窄谓词复核 `roles:delete` 站点的 NOT-DRIVEN 豁免——若目标库上实际存在 `user_roles` 级联,
-  或 `role_permissions`/`user_roles` 任一边的 parent-delete 动作是 `SET NULL`/`SET DEFAULT`(而非窄谓词
+  (未合并,head `1d8f0708de`)**;origin/main 现在 `136be5f1f5`,其上(已核实,
+  `scripts/ops/multitable-l1-battery.mjs:382-394`)电池脚本里的 `ROLE_CASCADE_WITNESS_QUERY` 仍是窄
+  谓词(硬编码只查 `role_permissions`,`roleDeleteCascadeExists` 只认字面值 `confdeltype === 'c'`)。
+  **现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",电池会用这份窄谓词复核
+  `roles:delete` 站点的 NOT-DRIVEN 豁免——若目标库上实际存在 `user_roles` 级联,或
+  `role_permissions`/`user_roles` 任一边的 parent-delete 动作是 `SET NULL`/`SET DEFAULT`(而非窄谓词
   唯一认的 `CASCADE`),电池会**放行一个已经失效的豁免**,而不是按设计 `exit 1 not_driven_reason_expired`。
-  这不是纯理论:#5131 分支上的真库 golden(`user_roles-only CASCADE`、`SET NULL`、`SET DEFAULT` 三条)已经
-  证明这条路径会被触发。排期含义:这一步电池实跑要么等 #5131 先合并,要么 owner 明确接受"本次 PASS 不
-  覆盖 `roles:delete` 谓词的宽化版本"这一限定——二选一,不由本清单代为决定。
+  这不是纯理论:#5131 分支上的真库 golden(`user_roles-only CASCADE`、`SET NULL`、`SET DEFAULT` 三条)
+  已经证明这条路径会被触发,且这些 golden 现已在 CI 里实际执行通过(见 §B1a)。
+  **排期含义(2026-08-24 更正,替换上一轮"二选一"的定性)**:上一轮把"owner 明确接受本次 PASS 不覆盖
+  宽谓词"列为与"等 #5131 合并"并列的选项,这个定性**技术上不成立**——#5131 修的不是一份独立的
+  golden 覆盖率,而是**电池自身在运行时消费的判据**(见上,`multitable-l1-battery.mjs:1366-1371`):
+  窄版本在目标库存在 `user_roles` 级联或 SET NULL/SET DEFAULT 时会**假放行** `roles:delete` 豁免——
+  这不是"证据覆盖窄一点",是**电池报出的 PASS 本身不成立**,它在本该 `exit 1
+  not_driven_reason_expired` 的地方给出了 PASS。因此:窄谓词下的电池实跑**可以做诊断用途**(例如
+  验证凭据、建号、其余 census 站点是否正常),**但不得计入 A1 证据**;**#5131 合并是下一次"可计入
+  A1 证据的 L1 电池实跑"的硬前置**。owner 仍可决定何时合并 #5131、要不要先跑一次仅供诊断的电池——
+  但"接受窄 PASS 当作 A1 证据"这一项不存在,因为它产出的东西本身无效,不是本清单可以代 owner 放行
+  的选项。
 - 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
   owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
 - 门审边界(修好后仍适用):干净电池只观测 **12/55 census 站点(分母已随 #5128 由 48 升至 55,见 §D2-F8;driven 集合本身未变,仍是 12)+ 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
@@ -330,8 +358,12 @@ revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L
 
 ## E. 阶梯执行(全 owner-gated,日历为瓶颈,非开发)
 
-L0(差 A1)→ L1 staging ENABLE triggers(flag 全 OFF)→ L2 CONTIGUITY_STRICT(其验收证据的可产出性见 §D2-F10)
-→ L3 WRITER_FENCE → L4/L5 canary(同受 §D2-F10 影响)→ **L6 soak ≥7 日历日** → L7+ 生产重放全序。
+L0(差 A1)→ L1 staging ENABLE triggers(flag 全 OFF)→ **⚠️ L2 及其之后 HOLD**(CONTIGUITY_STRICT;
+验收证据不可产出,见 §D2-F10;HOLD 直至 owner 就阶梯 erratum 三点 ratify:(a) 新顺序——fence 不晚于
+strict、(b) 把第五个 flag `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 的 flag 清单、
+(c) 明确由哪一级负责 provision trust checkpoint;三点未 ratify 前,L2 按当前级序的验收证据产不出,见 §D2-F10)→ L3
+WRITER_FENCE(同处 HOLD 范围)→ L4/L5 canary(同受 §D2-F10 影响,同处 HOLD 范围)→ **L6 soak ≥7 日历日**
+→ L7+ 生产重放全序。
 **每级你亲授 + 观察窗**。
 **L1 窗口现行已 ratify 判据是 `≥2 日历日`(电池在窗口内跑,不替代天数)**;修正案 A1 拟把窗口收窄为
 `≥1 日历日 + 电池 PASS`,但 **A1 目前 Status: PROPOSED,未 ratify 前上文 `≥2 天` 判据原样生效**(见 §B1、
