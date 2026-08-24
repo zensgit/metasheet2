@@ -111,4 +111,17 @@ describe('attendance web guard workflow contract', () => {
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
     }
   })
+
+  it('keeps attendance-admin tenant-boundary specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'attendanceUserPickerEndpoint',
+      'attendanceAdminEndpointCompatibility',
+      'useAttendanceAdminProvisioning',
+      'useAttendanceAdminUsers',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
 })

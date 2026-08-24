@@ -7,7 +7,9 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #   deploy         — pin staging backend+web to a full-SHA GHCR tag, migrate, verify build+auth
 #   smoke          — run one window smoke (ae4 / rd45 / otbank-v18 / mp6 / hmr5) in-container
 #   status         — read-only staging snapshot
-#   migrate        — backup + clone-rehearsal + apply, per docs/operations/staging-migration-
+#   migrate        — pull the exact deploy_sha backend image WITHOUT switching the running app,
+#                    then backup + clone-rehearsal + apply its migration universe, per
+#                    docs/operations/staging-migration-
 #                    alignment-runbook.md. The only path forward from action=deploy's migration-
 #                    alignment gate reporting `do_not_run_full_migrate`: pg_dump the real staging
 #                    DB to a host file (metadata-only in the artifact — never the dump itself),
@@ -63,7 +65,7 @@ on:
         options: [deploy, smoke, status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
         default: status
       deploy_sha:
-        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, smoke, and soak-flags (there it must equal the RUNNING image tags — soak-flags flips env only, never images).'
+        description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, migrate, smoke, and soak-flags. Migrate runs that exact image migration universe without switching the app; soak-flags must equal the RUNNING image tags.'
         required: false
         default: ''
       soak_orgs:
@@ -134,7 +136,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$ACTION" in deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
-          if [[ "$ACTION" == "deploy" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
+          if [[ "$ACTION" == "deploy" || "$ACTION" == "migrate" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
               exit 2

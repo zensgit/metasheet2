@@ -1856,6 +1856,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('clears a prior annual-leave balance when a new query fails (no stale balance from another user)', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance-admin/users/search')) {
@@ -1915,6 +1916,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('GATE-5097 P1-1/P2-1: a delegated attendance admin (attendance:admin, not platform admin) can still search and select a user for the annual-leave-balance picker', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       // The picker is wired to the attendance-scoped search route, not the platform-admin one —
@@ -1959,6 +1961,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('GATE-5097 P2-1: a 403 from the picker\'s search endpoint surfaces a visible error, never a silently empty picker', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance-admin/users/search')) {
@@ -2411,7 +2414,8 @@ describe('Attendance admin regressions', () => {
 
     // -- site 2: loadAnnualLeaveBalance (admin console lookup) --
 
-    it('byte-stable: admin lookup button click (zero args) issues the exact pre-parameterization query', async () => {
+    it('admin lookup button click (zero args) issues the exact organization-scoped annual query', async () => {
+      window.localStorage.setItem('tenantId', 'default')
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
         if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
@@ -2430,10 +2434,11 @@ describe('Attendance admin regressions', () => {
       section.querySelector<HTMLButtonElement>('.attendance__admin-actions button')!.click()
       await flushUi(4)
       const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
-      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=annual'])
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?orgId=default&userId=u1&leaveTypeCode=annual'])
     })
 
-    it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact comp_time admin-lookup query (mock-layer assertion)', async () => {
+    it('comp_time channel: loadAnnualLeaveBalance(\'comp_time\') issues the exact organization-scoped comp_time query', async () => {
+      window.localStorage.setItem('tenantId', 'default')
       vi.mocked(apiFetch).mockImplementation(async (input) => {
         const url = String(input)
         if (url.includes('/api/attendance-admin/users/search')) return userSearchResponse([{ id: 'u1' }])
@@ -2456,7 +2461,7 @@ describe('Attendance admin regressions', () => {
       await vm.loadAnnualLeaveBalance('comp_time')
       await flushUi(4)
       const balanceCalls = vi.mocked(apiFetch).mock.calls.map(c => String(c[0])).filter(u => u.startsWith('/api/attendance/leave-balances?'))
-      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?userId=u1&leaveTypeCode=comp_time'])
+      expect(balanceCalls).toEqual(['/api/attendance/leave-balances?orgId=default&userId=u1&leaveTypeCode=comp_time'])
     })
 
     // -- site 3: previewAnnualAdjust (manual-adjustment card, client preview) --
@@ -2740,7 +2745,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = String(input)
       const method = String((init as { method?: string } | undefined)?.method || 'GET').toUpperCase()
-      if (url.startsWith('/api/admin/users')) {
+      if (url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -3402,6 +3407,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('manages attendance group owners separately from attendance members', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     const managerUserId = 'manager-user-1'
     const existingOwnerId = 'owner-user-1'
     const managerPostBodies: Array<Record<string, unknown>> = []
@@ -3420,7 +3426,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : input.toString()
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url.startsWith('/api/admin/users')) {
+      if (url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -4071,6 +4077,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('keeps attendance setup flows on user pickers and resolved labels instead of UUID handoffs', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     const memberUserId = '11111111-1111-4111-8111-111111111111'
     const shiftUserId = '22222222-2222-4222-8222-222222222222'
     const rotationUserId = '33333333-3333-4333-8333-333333333333'
@@ -4085,7 +4092,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url.startsWith('/api/admin/users')) {
+      if (url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -4807,7 +4814,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
       const method = String(init?.method || 'GET').toUpperCase()
-      if (url.startsWith('/api/admin/users')) {
+      if (url.startsWith('/api/attendance-admin/users/search')) {
         return jsonResponse(200, {
           ok: true,
           data: {

@@ -7,6 +7,13 @@ name: Multitable O2 Observation Kit (real DB)
 # request (and thus be a required check) without paying for a postgres service + full migrations
 # on unrelated PRs. This lane keeps the original path filters; the drift-guard test that pins
 # runbook-cited paths to those filters now targets THIS file.
+#
+# It is ALSO the execution lane for the role-cascade witness's real-DB goldens
+# (scripts/ops/multitable-role-cascade-witness.test.mjs, opt-in behind
+# ROLE_CASCADE_WITNESS_DB_GOLDENS=1). Those goldens run in no other lane — the required hermetic
+# contract lane keeps them unarmed on purpose — so the armed step below is the only place the
+# catalog proof executes in CI, and the hermetic suite pins the step's existence, its env var and
+# its command so removing it reds the required lane rather than silently returning to skip-green.
 
 on:
   pull_request:
@@ -45,6 +52,17 @@ on:
       - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
       - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
       - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
+      # Role-cascade witness real-DB goldens (PR #5131). The 10 catalog goldens — the
+      # `user_roles`-only counterexample, the SET NULL / SET DEFAULT legs and the
+      # `view_permissions`-shape over-widen guard — are OPT-IN (ROLE_CASCADE_WITNESS_DB_GOLDENS=1)
+      # and therefore run in NO other lane: the required hermetic `observation-kit contract` lane
+      # deliberately does not arm them. Without these entries a change to the witness, to its
+      # goldens, or to the ONE query definition in the battery would never trigger the lane that
+      # actually executes them — the repo's named skip-green shape (被触发≠被验证).
+      - 'scripts/ops/multitable-role-cascade-witness.mjs'
+      - 'scripts/ops/multitable-role-cascade-witness.test.mjs'
+      - 'scripts/ops/multitable-l1-battery.mjs'
+      - '.github/workflows/multitable-o2-observation-kit-realdb.yml'
   push:
     branches: [main]
     paths:
@@ -79,6 +97,17 @@ on:
       - 'packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts'
       - 'packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts'
       - 'packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts'
+      # Role-cascade witness real-DB goldens (PR #5131). The 10 catalog goldens — the
+      # `user_roles`-only counterexample, the SET NULL / SET DEFAULT legs and the
+      # `view_permissions`-shape over-widen guard — are OPT-IN (ROLE_CASCADE_WITNESS_DB_GOLDENS=1)
+      # and therefore run in NO other lane: the required hermetic `observation-kit contract` lane
+      # deliberately does not arm them. Without these entries a change to the witness, to its
+      # goldens, or to the ONE query definition in the battery would never trigger the lane that
+      # actually executes them — the repo's named skip-green shape (被触发≠被验证).
+      - 'scripts/ops/multitable-role-cascade-witness.mjs'
+      - 'scripts/ops/multitable-role-cascade-witness.test.mjs'
+      - 'scripts/ops/multitable-l1-battery.mjs'
+      - '.github/workflows/multitable-o2-observation-kit-realdb.yml'
 
 permissions:
   contents: read
@@ -115,6 +144,24 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20.x
+
+      # Deliberately BEFORE `pnpm install` and the migrations: these goldens build their own
+      # throwaway databases from DDL and need nothing but node + psql + the postgres service, so
+      # running them first means a dependency or migration break cannot mask the strongest
+      # evidence this lane carries.
+      - name: Run the role-cascade witness real-DB goldens (ARMED)
+        env:
+          # ARMS the opt-in goldens. Unset (the hermetic contract lane) they skip LOUDLY; here the
+          # suite's own sentinel turns an armed-but-unrunnable lane into a hard FAILURE rather than
+          # a silent skipped-green. scripts/ops/multitable-role-cascade-witness.test.mjs pins this
+          # step — name, env var and command — so dropping it reds the required hermetic lane
+          # instead of quietly restoring skip-green.
+          ROLE_CASCADE_WITNESS_DB_GOLDENS: '1'
+          # Maintenance connection on the SAME postgres service the job's DATABASE_URL points at
+          # (the goldens CREATE/DROP their own `rcw_golden_*` databases, so they cannot use the
+          # migrated application database).
+          ROLE_CASCADE_WITNESS_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: node --test scripts/ops/multitable-role-cascade-witness.test.mjs
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

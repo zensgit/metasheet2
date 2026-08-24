@@ -1,0 +1,328 @@
+name: Multitable Role-Cascade Witness
+
+# Turns ONE inferred premise into an observed one.
+#
+# The O-2 L1 exercise battery excuses census site `roles:delete` with reason
+# `no-trigger-on-target-table`. That excuse depends on a factual claim about the TARGET DATABASE:
+# that deleting a role writes into NO table carrying a recovery-authority trigger, so
+# `DELETE FROM roles` reaches no triggered table and no 409 can be constructed for it. On the
+# local/test schema the claim was verified empirically. On PRODUCTION it is only INFERRED-STRONG —
+# deduced from the prod migration ledger, which additionally ran the legacy
+# `033_create_rbac_core.sql` (the migration that creates exactly those FKs with ON DELETE CASCADE:
+# `role_permissions.role_id` at :17 AND `user_roles.role_id` at :36, independently of each other).
+# That is an inference about migration ORDER, not an observation of the catalog.
+#
+# The premise is a CONJUNCTION and the witness checks all three conjuncts: the foreign key targets
+# the session-resolved `roles` relation, the child table carries a canonical recovery-authority
+# trigger, and the parent-delete action actually writes the child row (CASCADE deletes it; SET NULL
+# and SET DEFAULT update it — all three fire a `BEFORE INSERT OR UPDATE OR DELETE` trigger, while
+# NO ACTION and RESTRICT refuse the parent delete and touch nothing). Dropping the trigger conjunct
+# would count `view_permissions` — which has such an FK and no such trigger — and report a FALSE
+# REFUTED.
+#
+# It matters because the battery RE-CHECKS the premise at runtime: if any such write exists it exits
+# 1 with `not_driven_reason_expired` and refuses to produce any evidence at all — which would
+# invalidate amendment A1's production-inheritance clause. This workflow settles it with a single
+# catalog-only read.
+#
+# ONE DEFINITION OF THE WITNESS
+# -----------------------------
+# The SQL is NOT re-typed here, and the "does a role delete write a triggered child" predicate is
+# NOT re-implemented here. `scripts/ops/multitable-role-cascade-witness.mjs` imports BOTH from the
+# battery (`ROLE_CASCADE_WITNESS_QUERY`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
+# probe that runs on the host, and applies the battery's own predicate to the observed rows back on
+# this runner. Two divergent copies of a witness query is precisely the "second, narrower artifact"
+# failure this repository has been bitten by. This workflow file therefore contains no SQL at all —
+# scripts/ops/multitable-role-cascade-witness.test.mjs asserts that as a set-equality census.
+#
+# The probe is GENERATED on the runner from the reviewed checkout, not `docker exec`'d out of the
+# deployed image (the shape multitable-recovery-flag-containment-check.yml uses for its schema
+# helper, gated on that helper's exact sha256). Production runs an OLDER image that predates this
+# witness, so the image path cannot observe production today; generating here also binds the
+# observation to the reviewed source rather than to whatever happens to be deployed.
+#
+# READ-ONLY BY CONSTRUCTION
+# -------------------------
+# The only remote operations are `docker ps` (locate/verify the container) and ONE `docker exec`
+# running catalog-only SELECTs. Both statements read `pg_catalog` and nothing else. No writes, no
+# restarts, no config edits, no migrations, no files created on the host or in the container.
+# DATABASE_URL is read inside the backend container — the same one the running service uses — and is
+# never printed: every probe diagnostic is routed through a redactor that strips URI-shaped text.
+#
+# INPUT SAFETY
+# ------------
+# `target` is a fixed `choice` (staging | production) — NEVER free text — and it DEFAULTS to
+# staging, the positive control, so a mis-click on the dispatch form cannot reach production.
+# `choice` is a UI-only guardrail (the REST dispatch API can still send an arbitrary string), so
+# TARGET is re-validated with an exact-match `case` whose default branch fails closed BEFORE it is
+# interpolated onto the ssh command line — that local check is the real injection boundary. The
+# target → container-name mapping is then redone, independently, INSIDE the remote heredoc, so no
+# space-containing constant is ever passed as an env-assignment: ssh concatenates all trailing
+# arguments into one string and re-parses it through the remote login shell, and a space there
+# previously became "run this as a second, bogus command"
+# (multitable-recovery-flag-containment-check.yml's `both` path failed at runtime with exit 127
+# before that fix). The probe travels the same way, as a single base64 word
+# whose alphabet is validated locally before interpolation.
+#
+# HOST IDENTITY IS PINNED
+# -----------------------
+# StrictHostKeyChecking=yes against a `DEPLOY_KNOWN_HOSTS`-derived known_hosts file, never
+# StrictHostKeyChecking=no — an unauthenticated responder (a MITM, or simply the wrong host) could
+# otherwise answer and produce a meaningless "premise CONFIRMED". A missing or unrecognizable
+# DEPLOY_KNOWN_HOSTS fails the job closed with an explicit error; it is never silently treated as
+# "skip verification". Required secrets: DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY_B64 (base64 private
+# key), DEPLOY_KNOWN_HOSTS (base64 or raw, e.g. `ssh-keyscan -H <host>`).
+#
+# FAIL-CLOSED: "NOTHING OBSERVED" IS NEVER "NO CASCADE"
+# ----------------------------------------------------
+# Three outcomes, kept explicitly distinct in the job summary and in the exit code:
+#   • CASCADE ABSENT (premise CONFIRMED)                                          → exit 0
+#   • CASCADE PRESENT (premise REFUTED — battery would exit 1 …reason_expired)    → exit 1
+#   • INDETERMINATE (failed to observe)                                           → exit 2
+# INDETERMINATE carries exit code 2 and the job FAILS. It IS a failure of the evidence gate —
+# legitimate and diagnosable (the reason codes discriminate, so one dispatch is enough to say
+# which half broke), but it is never "not a failure": nothing about the premise may be inherited
+# from a run that ends there, and the ladder gets no evidence out of it.
+# A missing container, an unreadable DATABASE_URL, an unresolvable `pg`, a failed connection, a
+# non-zero probe exit, an unparseable result, or a database whose session can resolve no `roles`
+# table / that carries no canonical recovery-authority trigger at all (the positive control — the
+# query is structurally incapable of returning a row there, so its zero rows say nothing) ALL land
+# in INDETERMINATE. None of them may read as ABSENT.
+# The remote step is `continue-on-error` and the verdict step is `if: always()` precisely so that a
+# hard ssh failure still writes INDETERMINATE to the summary instead of redding the job with no
+# verdict at all. REFUTED is a first-class outcome here, not an exception path: production ran the
+# 033 migration, so it is a live possibility.
+#
+# Intentionally NOT scheduled. Dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which database to witness (fixed choices only — never free text). Staging first: it is the positive control.'
+        required: true
+        type: choice
+        # STAGING IS FIRST, AND IS THE DEFAULT, ON PURPOSE.
+        # Staging's answer is independently known (no cascade), so a staging dispatch is the
+        # positive control for the witness itself: anything other than CASCADE ABSENT there
+        # indicts the witness, not the database. Defaulting to `production` meant one mis-click
+        # on the dispatch form reached the production host — a read-only reach, but still an
+        # un-rehearsed one, and the guidance that staging MUST go first would have been silently
+        # inverted by the form's own default. scripts/ops/multitable-role-cascade-witness.test.mjs
+        # pins `default == options[0] == staging` so this cannot drift back unnoticed.
+        options: [staging, production]
+        default: staging
+
+concurrency:
+  group: multitable-role-cascade-witness-${{ github.event.inputs.target }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  witness:
+    name: role-cascade witness (catalog-only, read-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Generate the catalog probe from the ONE witness definition
+        # Deliberately NOT continue-on-error: a failure here is a repository-side defect (the
+        # witness definition moved, the runner broke), not a failure to observe the host. It must
+        # red loudly under its own name rather than be laundered into INDETERMINATE.
+        run: |
+          set -euo pipefail
+          mkdir -p output/role-cascade-witness
+          node scripts/ops/multitable-role-cascade-witness.mjs emit-probe > output/role-cascade-witness/probe.cjs
+          node --check output/role-cascade-witness/probe.cjs
+          probe_b64="$(base64 < output/role-cascade-witness/probe.cjs | tr -d '\n')"
+          # The probe crosses the ssh command line as an env-assignment, so it must be a single
+          # word: no spaces, no shell metacharacters. base64's alphabet is exactly that — assert it
+          # rather than assume it, and fail closed if it is ever not.
+          case "$probe_b64" in
+            '')
+              echo "::error::probe base64 is empty — refusing to dispatch a witness with no probe"
+              exit 1
+              ;;
+            *[!A-Za-z0-9+/=]*)
+              echo "::error::probe base64 contains characters outside the base64 alphabet — refusing to interpolate it onto an ssh command line"
+              exit 1
+              ;;
+          esac
+          printf '%s' "$probe_b64" > output/role-cascade-witness/probe.b64
+          echo "probe generated: $(wc -c < output/role-cascade-witness/probe.cjs) bytes source, $(wc -c < output/role-cascade-witness/probe.b64) bytes base64"
+
+      - name: Observe the recovery-authority-triggered children of roles on the target database
+        id: observe
+        # continue-on-error so the verdict step below always gets its turn: a hard ssh failure must
+        # still be REPORTED as INDETERMINATE in the job summary, not vanish behind a red step.
+        continue-on-error: true
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          TARGET: ${{ github.event.inputs.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+
+          # --- Host authentication (fail-closed) ---------------------------------------------
+          # Without a pinned known_hosts entry there is no way to prove the ssh responder on
+          # DEPLOY_HOST is actually the deploy host, and a "premise CONFIRMED" from an
+          # unauthenticated responder is worth nothing. Never fall back to no-verify.
+          if [ -z "${DEPLOY_KNOWN_HOSTS:-}" ]; then
+            echo "::error::DEPLOY_KNOWN_HOSTS is required to pin the deploy-host identity — refusing to fall back to no-verify"
+            exit 1
+          fi
+          # Accept a base64-encoded or a raw known_hosts blob: decode first, keep the decoded form
+          # only if it looks like known_hosts content, else write the secret through unmodified.
+          # Either way the resulting file is re-checked below, so a garbled secret fails closed
+          # instead of silently producing an unusable (no-verify-equivalent) file.
+          decoded_known_hosts="$(printf '%s' "$DEPLOY_KNOWN_HOSTS" | base64 -d 2>/dev/null || true)"
+          if printf '%s' "$decoded_known_hosts" | grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss'; then
+            printf '%s\n' "$decoded_known_hosts" > ~/.ssh/known_hosts
+          else
+            printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          fi
+          chmod 644 ~/.ssh/known_hosts
+          if ! grep -Eq 'ssh-ed25519|ssh-rsa|ecdsa-sha2|ssh-dss' ~/.ssh/known_hosts; then
+            echo "::error::DEPLOY_KNOWN_HOSTS did not resolve to a recognizable key — refusing to fall back to no-verify"
+            exit 1
+          fi
+
+          if [ -z "${DEPLOY_SSH_KEY_B64:-}" ]; then
+            echo "::error::DEPLOY_SSH_KEY_B64 is required"
+            exit 1
+          fi
+          printf '%s' "$DEPLOY_SSH_KEY_B64" | base64 -d > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh_opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o GlobalKnownHostsFile=/dev/null -o IdentitiesOnly=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -i $HOME/.ssh/deploy_key"
+
+          # --- Input re-validation (the real injection boundary) -----------------------------
+          # `choice` only constrains the UI; the REST dispatch API can send anything. Every branch
+          # here is a no-op pass-through and the unmapped default fails closed, so only a validated,
+          # space-free, metacharacter-free TARGET token can ever reach the ssh command line.
+          case "$TARGET" in
+            production|staging)
+              ;;
+            *)
+              echo "::error::unexpected target '${TARGET}' (expected production|staging) — refusing to proceed"
+              exit 1
+              ;;
+          esac
+          echo "target='${TARGET}'"
+
+          probe_b64="$(cat output/role-cascade-witness/probe.b64)"
+
+          # Remote script (single-quoted heredoc — nothing expands locally). TARGET and PROBE_B64
+          # are the only input-derived tokens on the ssh command line, and both are validated
+          # single words. The target -> container-name mapping is redone INDEPENDENTLY inside the
+          # heredoc below; no space-containing constant is passed as an env-assignment, because ssh
+          # concatenates all trailing arguments into one string and re-parses it through the remote
+          # login shell.
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" PROBE_B64="$probe_b64" 'bash -s' <<'REMOTE' 2>&1 | tee output/role-cascade-witness/observation.txt
+          set -uo pipefail
+          echo "== multitable role-cascade witness (read-only) =="
+
+          # Independent, second mapping of the already-validated single-word TARGET to a hard-coded
+          # container name (the real `container_name:` values from docker-compose.app.yml /
+          # docker-compose.app.staging.yml). Every branch yields a fixed constant; the unmapped
+          # default fails closed rather than falling through to a container-less "no rows" read.
+          case "${TARGET:-}" in
+            production)
+              CONTAINER="metasheet-backend"
+              ;;
+            staging)
+              CONTAINER="metasheet-staging-backend"
+              ;;
+            *)
+              echo "OBSERVATION: FAIL — unexpected target '${TARGET:-}' (expected production|staging) — refusing to proceed"
+              exit 2
+              ;;
+          esac
+          echo "target='${TARGET}' -> container='${CONTAINER}'"
+
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "OBSERVATION: FAIL — docker not available on host (observation broken)"
+            exit 2
+          fi
+
+          # Read #1 of 2: locate and VERIFY the container. An exact-name match, never a substring:
+          # observing some unrelated container is not observing the target database.
+          running="$(docker ps --format '{{.Names}}' 2>/dev/null || true)"
+          if ! printf '%s\n' "$running" | grep -qxF "$CONTAINER"; then
+            echo "OBSERVATION: FAIL — expected container '${CONTAINER}' is NOT running; nothing observed is not evidence that no cascade exists"
+            exit 2
+          fi
+
+          if [ -z "${PROBE_B64:-}" ]; then
+            echo "OBSERVATION: FAIL — no probe source was delivered to the host"
+            exit 2
+          fi
+          PROBE_SRC="$(printf '%s' "$PROBE_B64" | base64 -d 2>/dev/null || true)"
+          if [ -z "$PROBE_SRC" ]; then
+            echo "OBSERVATION: FAIL — the probe source did not base64-decode on the host"
+            exit 2
+          fi
+
+          # Read #2 of 2: the ONE docker exec. It runs the catalog-only SELECTs inside the backend
+          # container, so it observes the service's own DATABASE_URL without exporting or printing
+          # it. Nothing is written to the container: the program is passed on argv (`node -e`), no
+          # file is created, and the SQL touches only pg_catalog.
+          docker exec "$CONTAINER" node -e "$PROBE_SRC"
+          probe_rc=$?
+          echo "probe exit code: ${probe_rc}"
+          if [ "$probe_rc" -ne 0 ]; then
+            echo "OBSERVATION: FAIL — the catalog probe exited ${probe_rc} inside ${CONTAINER}"
+            exit 2
+          fi
+          echo "OBSERVATION: COMPLETE"
+          REMOTE
+
+      - name: Verdict — CONFIRMED / REFUTED / INDETERMINATE
+        # always(): the verdict step OWNS the job's exit code. If the step above died (ssh refused,
+        # host unreachable, container missing) the observation is absent or truncated and this step
+        # reports INDETERMINATE — the job still fails, but with a stated verdict rather than a bare
+        # red step that a reader could mistake for "nothing found, so no cascade".
+        if: always()
+        env:
+          TARGET: ${{ github.event.inputs.target }}
+        run: |
+          set -uo pipefail
+          mkdir -p output/role-cascade-witness
+          # GitHub Actions runs `run:` under `bash -e {0}`, so the non-zero verdict exits (1 =
+          # REFUTED, 2 = INDETERMINATE) must be captured through an OR-list rather than read from
+          # `$?` after the fact — otherwise `-e` aborts the step before the code is ever printed.
+          rc=0
+          node scripts/ops/multitable-role-cascade-witness.mjs verdict \
+            output/role-cascade-witness/observation.txt \
+            --target "$TARGET" \
+            --out output/role-cascade-witness/verdict.md || rc=$?
+          echo "verdict exit code: ${rc}"
+          # A runner that silently no-ops (the CLI entry guard stops matching, an argument is
+          # dropped) would print nothing and exit 0 — and `rc=0` would publish a GREEN witness run
+          # with an empty summary, which a reader takes for CONFIRMED. That is the very failure this
+          # workflow exists to prevent, so assert the artefact instead of trusting the exit code:
+          # the verdict file is written on ALL THREE outcomes, so it is missing only when the
+          # verdict never ran at all.
+          if [ ! -s output/role-cascade-witness/verdict.md ]; then
+            echo "::error::the witness produced no verdict file — refusing to let a silent no-op read as CONFIRMED"
+            exit 2
+          fi
+          exit "$rc"
+
+      - name: Upload witness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: role-cascade-witness-${{ github.event.inputs.target }}
+          path: output/role-cascade-witness/
+          retention-days: 90

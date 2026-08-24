@@ -35,6 +35,8 @@ export const AUTH = 'recovery-conflict-surfaces-routes-auth.test.ts'
 export const ADMDIR = 'recovery-conflict-surfaces-routes-admin-directory.test.ts'
 export const ADMUSR = 'admin-users-routes.test.ts'
 export const ACT = 'recovery-conflict-activate-mapping.test.ts'
+export const UNIVER = 'recovery-conflict-surfaces-routes-univer-meta.test.ts'
+export const AUTHSVC = 'AuthService.test.ts'
 
 /**
  * The census table. The first 11 rows are the O2-S2 taskbook's enumerated write
@@ -206,6 +208,49 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
         { site: 'admin-directory:batch-unbind', testFile: ADMDIR },
         { site: 'admin-directory:deprovision-restore', testFile: ADMDIR },
         { site: 'admin-directory:compensate-deny', testFile: ADMDIR },
+      ],
+    }],
+  },
+  {
+    // O2-D1 (denominator slice, 2026-08-23). This file scored ZERO on the census's former
+    // four-token set — its classification goes through `isRecoveryAuthorityBusyError`,
+    // which was not a token — so univer-meta sat OUTSIDE the closed-world denominator
+    // entirely. That is how #5114 happened: `config-restore-execute` writes
+    // field_permissions / spreadsheet_permissions (both carrying a recovery-authority
+    // trigger armed from ladder rung L1) and its outer catch did not classify, so a 40001
+    // landed as an unmapped 500 — found by an independent review, not by the census.
+    //
+    // Registered on the DETECTOR token, not on the file-local responder
+    // `sendRecoveryAuthorityBusy`: the responder classifies nothing and every one of its
+    // sites is the same line as a detector. Deleting the responder is caught by the legs,
+    // which pin the exact 409 body.
+    file: 'routes/univer-meta.ts',
+    calls: [{
+      token: 'isRecoveryAuthorityBusyError',
+      legs: [
+        { site: 'univer-meta:sheet-permissions-put', testFile: UNIVER },
+        { site: 'univer-meta:field-permissions-put', testFile: UNIVER },
+        { site: 'univer-meta:config-restore-execute', testFile: UNIVER },
+        { site: 'univer-meta:record-permissions-put', testFile: UNIVER },
+        { site: 'univer-meta:record-permissions-delete', testFile: UNIVER },
+      ],
+    }],
+  },
+  {
+    // O2-D1 (denominator slice, 2026-08-23). Also zero on the former four-token set.
+    //
+    // These two sites are NOT HTTP mapping boundaries and the legs do not pretend they
+    // are: user_roles is a recovery-authority table, so both writers classify the marker
+    // 40001 and RETRY a bounded number of times, then surface a typed
+    // UserRoleAssignmentRecoveryBusyError rather than a 409 — the caller's boundary maps
+    // it. The legs assert exactly that (bounded retry exhausted -> typed throw, and no
+    // silent warn-and-swallow), which is what these call sites actually guarantee.
+    file: 'auth/AuthService.ts',
+    calls: [{
+      token: 'isRecoveryAuthorityBusyError',
+      legs: [
+        { site: 'auth-service:self-service-backfill', testFile: AUTHSVC },
+        { site: 'auth-service:register-user-roles', testFile: AUTHSVC },
       ],
     }],
   },

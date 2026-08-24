@@ -372,6 +372,25 @@ jobs:
 
           port="$(docker exec "$CONTAINER" printenv PORT 2>/dev/null || true)"
           port="${port:-8900}"
+          # A1.3 provenance capture (deep review B4). NON-SECRET identifiers, captured from the RUNNING
+          # container so the evidence names exactly what was exercised — not what we think is deployed:
+          #   image_digest — the image's repo digest (falls back to the image id when a digest is absent,
+          #                  e.g. a locally-built image that was never pushed);
+          #   build_commit — the commit the container itself reports, when the image records one.
+          # Both are best-effort: an empty value flows through as null in evidence.provenance, which makes
+          # a MISSING binding visible in the artifact rather than silently absent. Never fail the run on
+          # these — a battery PASS must not be lost because a label was unset; A1.3's binding requirement
+          # is then judged from the evidence, where its absence is explicit.
+          image_digest="$(docker inspect --format '{{ index .RepoDigests 0 }}' "$CONTAINER" 2>/dev/null || true)"
+          if [ -z "$image_digest" ]; then
+            image_digest="$(docker inspect --format '{{ .Image }}' "$CONTAINER" 2>/dev/null || true)"
+          fi
+          build_commit="$(docker exec "$CONTAINER" printenv BUILD_COMMIT 2>/dev/null || true)"
+          if [ -z "$build_commit" ]; then
+            build_commit="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$CONTAINER" 2>/dev/null || true)"
+          fi
+          log "provenance: image=${image_digest:-<unset>} commit=${build_commit:-<unset>}"
+
           app_url="http://127.0.0.1:${port}"
 
           evidence_in_container="/tmp/o2bat-evidence-${RUN_STAMP}.json"
@@ -462,10 +481,16 @@ jobs:
             unset line_email line_password e_b64 p_b64
             export BATTERY_ADMIN_EMAIL BATTERY_ADMIN_PASSWORD
             export APP_URL="$1"
+            # A1.3 provenance (deep review B4): the amendment requires the exit evidence to name the
+            # image/head the PASS was produced against. These are NON-SECRET identifiers passed as
+            # argv (unlike the credentials, which never touch argv); the battery records them under
+            # evidence.provenance, and records null when absent so a missing binding is VISIBLE.
+            export BATTERY_IMAGE_DIGEST="$3"
+            export BATTERY_BUILD_COMMIT="$4"
             # </dev/null: the battery must take its credentials from the environ this
             # wrapper just set, and must never be able to read the credential stream.
             exec node scripts/ops/multitable-l1-battery.mjs --out "$2" </dev/null
-          ' sh "$app_url" "$evidence_in_container" \
+          ' sh "$app_url" "$evidence_in_container" "$image_digest" "$build_commit" \
             > "${OUTPUT_DIR}/battery-stdout.log" 2>&1
           # `set -o pipefail` is in force, so this is the rightmost non-zero status in the
           # pipeline: a broken blob assembly on the host side cannot be reported as a pass.

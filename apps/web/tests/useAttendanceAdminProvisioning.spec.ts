@@ -37,19 +37,21 @@ describe('useAttendanceAdminProvisioning', () => {
     })
   })
 
-  it('falls back to the legacy permissions endpoint when access snapshot is unavailable', async () => {
+  it('lets an explicit platform-global caller use the legacy permissions endpoint when access is unavailable', async () => {
     const validUserId = '11111111-1111-4111-8111-111111111111'
     const adminForbidden = ref(false)
-    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const provisioning = useAttendanceAdminProvisioning({
+      adminForbidden,
+      orgId: ref(''),
+      globalScope: ref(true),
+      tr,
+    })
     const apiFetchMock = vi.mocked(apiFetch)
 
     apiFetchMock.mockImplementation(async (path: string) => {
       const url = String(path)
-      if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access`) {
-        return jsonResponse(404, {
-          ok: false,
-          error: { message: 'not found' },
-        })
+      if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access?scope=global`) {
+        return jsonResponse(404, { message: 'Not Found' })
       }
       if (url === `/api/permissions/user/${encodeURIComponent(validUserId)}`) {
         return jsonResponse(200, {
@@ -72,20 +74,121 @@ describe('useAttendanceAdminProvisioning', () => {
     expect(adminForbidden.value).toBe(false)
   })
 
+  it('does not fall back when the scoped access endpoint returns a structured not-found response', async () => {
+    const validUserId = '11111111-1111-4111-8111-111111111111'
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
+    const apiFetchMock = vi.mocked(apiFetch)
+
+    apiFetchMock.mockResolvedValue(jsonResponse(404, {
+      ok: false,
+      error: { code: 'USER_TARGET_NOT_FOUND', message: 'User not found in requested scope' },
+    }))
+
+    provisioning.provisionForm.userId = validUserId
+    await provisioning.loadProvisioningUser()
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access?orgId=org-a`,
+    )
+    expect(provisioning.provisionPermissions.value).toEqual([])
+    expect(provisioning.provisionStatusKind.value).toBe('error')
+    expect(provisioning.provisionStatusMessage.value).toContain('User not found in requested scope')
+  })
+
+  it('also refuses a legacy global fallback for an unstructured 404 in delegated org scope', async () => {
+    const validUserId = '11111111-1111-4111-8111-111111111111'
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
+    const apiFetchMock = vi.mocked(apiFetch)
+
+    apiFetchMock.mockResolvedValue(jsonResponse(404, { message: 'Not Found' }))
+    provisioning.provisionForm.userId = validUserId
+    await provisioning.loadProvisioningUser()
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access?orgId=org-a`,
+    )
+    expect(provisioning.provisionStatusKind.value).toBe('error')
+  })
+
+  it('uses explicit global scope for platform-admin access and role writes', async () => {
+    const validUserId = '11111111-1111-4111-8111-111111111111'
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({
+      adminForbidden,
+      orgId: ref(''),
+      globalScope: ref(true),
+      tr,
+    })
+    const apiFetchMock = vi.mocked(apiFetch)
+
+    apiFetchMock.mockImplementation(async (path: string) => {
+      const url = String(path)
+      if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access?scope=global`) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { user: { id: validUserId }, roles: [], permissions: [], isAdmin: false },
+        })
+      }
+      if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/roles/assign`) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { user: { id: validUserId }, roles: ['attendance_employee'], permissions: ['attendance:read'], isAdmin: false },
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+
+    provisioning.provisionForm.userId = validUserId
+    await provisioning.loadProvisioningUser()
+    provisioning.provisionForm.role = 'employee'
+    await provisioning.grantProvisioningRole()
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/access?scope=global`,
+    )
+    const assignCall = apiFetchMock.mock.calls.find(([url]) => String(url).endsWith('/roles/assign'))
+    expect(JSON.parse(String(assignCall?.[1]?.body))).toEqual({ template: 'employee', scope: 'global' })
+    expect(adminForbidden.value).toBe(false)
+  })
+
+  it('does not turn a delegated role-write 404 into legacy global permission grants', async () => {
+    const validUserId = '11111111-1111-4111-8111-111111111111'
+    const adminForbidden = ref(false)
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
+    const apiFetchMock = vi.mocked(apiFetch)
+    apiFetchMock.mockResolvedValue(jsonResponse(404, { message: 'Not Found' }))
+
+    provisioning.provisionForm.userId = validUserId
+    provisioning.provisionForm.role = 'importer'
+    await provisioning.grantProvisioningRole()
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1)
+    const assignCall = apiFetchMock.mock.calls[0]
+    expect(String(assignCall?.[0])).toBe(`/api/attendance-admin/users/${validUserId}/roles/assign`)
+    expect(JSON.parse(String(assignCall?.[1]?.body))).toEqual({ template: 'importer', orgId: 'org-a' })
+    expect(provisioning.provisionStatusKind.value).toBe('error')
+  })
+
   it('grants importer permissions through the legacy fallback endpoint', async () => {
     const validUserId = '11111111-1111-4111-8111-111111111111'
     const adminForbidden = ref(false)
-    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const provisioning = useAttendanceAdminProvisioning({
+      adminForbidden,
+      orgId: ref(''),
+      globalScope: ref(true),
+      tr,
+    })
     const apiFetchMock = vi.mocked(apiFetch)
     const grantedPermissions: string[] = []
 
     apiFetchMock.mockImplementation(async (path: string, init?: RequestInit) => {
       const url = String(path)
       if (url === `/api/attendance-admin/users/${encodeURIComponent(validUserId)}/roles/assign`) {
-        return jsonResponse(404, {
-          ok: false,
-          error: { message: 'not found' },
-        })
+        return jsonResponse(404, { message: 'Not Found' })
       }
       if (url === '/api/permissions/grant') {
         const body = JSON.parse(String(init?.body || '{}')) as { permission?: string }
@@ -107,6 +210,8 @@ describe('useAttendanceAdminProvisioning', () => {
     await provisioning.grantProvisioningRole()
 
     expect(grantedPermissions).toEqual(['attendance:read', 'attendance:import'])
+    const assignCall = apiFetchMock.mock.calls.find(([url]) => String(url).endsWith('/roles/assign'))
+    expect(JSON.parse(String(assignCall?.[1]?.body))).toEqual({ template: 'importer', scope: 'global' })
     expect(provisioning.provisionPermissions.value).toEqual(['attendance:read', 'attendance:import'])
     expect(provisioning.provisionStatusMessage.value).toContain("Role 'importer' granted")
     expect(adminForbidden.value).toBe(false)
@@ -116,7 +221,7 @@ describe('useAttendanceAdminProvisioning', () => {
     const validA = '11111111-1111-4111-8111-111111111111'
     const validB = '22222222-2222-4222-8222-222222222222'
     const adminForbidden = ref(false)
-    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
     const apiFetchMock = vi.mocked(apiFetch)
 
     apiFetchMock.mockResolvedValue(
@@ -164,7 +269,7 @@ describe('useAttendanceAdminProvisioning', () => {
 
   it('clears stale single-user access state when the selected user changes', () => {
     const adminForbidden = ref(false)
-    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
 
     provisioning.provisionForm.userId = '11111111-1111-4111-8111-111111111111'
     provisioning.provisionPermissions.value = ['attendance:read']
@@ -189,7 +294,7 @@ describe('useAttendanceAdminProvisioning', () => {
 
   it('adds searched users to the batch UUID list without duplicating ids', () => {
     const adminForbidden = ref(false)
-    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, tr })
+    const provisioning = useAttendanceAdminProvisioning({ adminForbidden, orgId: ref('org-a'), tr })
     const validA = '11111111-1111-4111-8111-111111111111'
     const validB = '22222222-2222-4222-8222-222222222222'
 

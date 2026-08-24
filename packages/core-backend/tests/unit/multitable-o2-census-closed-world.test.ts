@@ -48,22 +48,177 @@ const SRC_ROOT = path.resolve(__dirname, '../../src')
 // emptied path throws instead of silently yielding an empty registry.
 const CENSUS_TEST_PATH = path.resolve(__dirname, 'lib/recovery-census-table.ts')
 
-/** The four adapter tokens whose call sites define the census population. */
-const ADAPTER_TOKENS = [
-  'sendIfRecoveryConflict',
-  'translateRecoveryConflict',
-  'classifyRecoveryConflict',
-  'sendIfRecoveryAuthorityBusy',
-] as const
-
 /** The declaration/delegation module — the single file excluded from both derivations. */
 const CLASSIFIER_MODULE = 'db/recovery-conflict.ts'
 
-// Population floors from the #5018 adversarial gate's independent denominator sweep
-// (2026-08-19, head 1721b45e98): 13 files / 48 sites. Floors so growth is frictionless
-// but a both-sides-empty vacuity or a silent census shrink is red.
-const GATE_VERIFIED_MIN_FILES = 13
-const GATE_VERIFIED_MIN_SITES = 48
+/**
+ * The stability module owns ONE classification entry point but also exports lease
+ * acquisition and authority resolution, which classify nothing. So that one token is
+ * pinned BY NAME rather than derived from the module's export surface — deriving the
+ * whole surface would silently widen what the census MEANS (every lease caller would
+ * suddenly owe a census row). The pin is fail-loud: if the export is renamed or removed,
+ * derivation throws instead of quietly dropping the token.
+ */
+const STABILITY_MODULE = 'multitable/recovery-authorization-stability.ts'
+const STABILITY_CLASSIFIER_TOKEN = 'isRecoveryAuthorityBusyError'
+
+/**
+ * Brace-balanced body of a top-level `function <name>(...) { ... }`, or null when the
+ * declaration is absent. Balanced rather than lazy-regex so a nested `{ }` cannot
+ * truncate the body early and make a long function look like a one-line delegation.
+ */
+function functionBody(source: string, name: string): string | null {
+  const declRe = new RegExp(`\\bfunction\\s+${name}\\s*\\([^)]*\\)[^{]*\\{`)
+  const match = declRe.exec(source)
+  if (match === null) return null
+  const start = match.index + match[0].length
+  let depth = 1
+  let i = start
+  while (depth > 0 && i < source.length) {
+    const ch = source[i]
+    if (ch === '{') depth += 1
+    else if (ch === '}') depth -= 1
+    i += 1
+  }
+  return depth === 0 ? source.slice(start, i - 1) : null
+}
+
+/**
+ * DERIVED token set (was a hardcoded list of four until this slice).
+ *
+ * The hardcoded list is what let `routes/univer-meta.ts` and `auth/AuthService.ts` sit
+ * outside the denominator entirely — both score ZERO on the old four, so the closed-world
+ * check was closed over the wrong world. A hand-maintained mirror of a token surface is a
+ * claim, not a check (枚举陷阱不收敛), so the set is derived from the source of truth.
+ *
+ * The rule: **a token belongs iff OMITTING it would hide a classification site.**
+ *
+ *   (a) every exported function of the ONE classifier module — its whole exported
+ *       function surface IS the classification API;
+ *   (b) `isRecoveryAuthorityBusyError`, pinned by name (see STABILITY_MODULE above);
+ *   (c) every NON-EXPORTED file-local function whose body is EXACTLY one unconditional
+ *       delegation to an (a)/(b) token — a local alias for a classifier call.
+ *
+ * (c) is narrow on purpose, in both directions:
+ *
+ *   - "exactly one unconditional delegation", not "the body mentions a token somewhere":
+ *     the loose form promotes every ENCLOSING function (whole router factories like
+ *     `rolesRouter`) to a token and inflates the population to nonsense.
+ *   - "non-exported", because an exported function is a MODULE BOUNDARY: its callers
+ *     consume an already-classified API and the classification site inside it is already
+ *     counted. `directory/deprovision-ledger.ts`'s exported
+ *     `applyDirectoryDeprovisionCandidate` is exactly this shape — a one-line
+ *     `translateRecoveryConflict(...)` delegation whose single site is already registered.
+ *     Counting it would make every consumer of every classified service owe a leg.
+ *     `routes/admin-users.ts`'s non-exported `sendIfRecoveryAuthorityBusy` is the opposite:
+ *     `sendIfRecoveryConflict` appears there only ONCE (inside the wrapper) while SIX real
+ *     HTTP surfaces route through it, so omitting the alias hides six sites.
+ *
+ * A pure RESPONDER is not a token. `routes/univer-meta.ts`'s `sendRecoveryAuthorityBusy`
+ * is `res.status(409).json(...)` — it classifies nothing and calls no classifier, and all
+ * five of its sites are already visible through the `isRecoveryAuthorityBusyError` on the
+ * same line. Registering it would demand a second leg per behaviour plus five new
+ * `ALLOWED_MULTI_TAG_SITE_SETS` entries, each needing its own mechanical rationale, and
+ * would buy nothing the behaviour legs do not already assert (they pin the exact 409 body,
+ * so deleting the responder reds them).
+ *
+ * DISCLOSED RESIDUAL — (c) is implemented NARROWER than the rule it states. The rule is
+ * "omitting it would hide a classification site"; the implementation is "non-exported AND
+ * exactly one unconditional delegation". A CONDITIONAL local alias —
+ *   function bail(res, err) { if (!err) return false; return sendIfRecoveryConflict(res, err) }
+ * — would hide sites (N surfaces route through it while the file counts 1) yet is not a
+ * token: it satisfies the implementation and violates the stated rule. Not live today (the
+ * derivation finds exactly one alias, unconditional). Widening the body test to "the body
+ * contains a delegation and nothing that classifies independently" is the fix if one appears.
+ */
+function deriveAdapterTokens(srcRoot: string): readonly string[] {
+  const classifierSource = readFileSync(path.join(srcRoot, CLASSIFIER_MODULE), 'utf8')
+  const exported = [
+    ...classifierSource.matchAll(/^export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/gm),
+  ].map((m) => m[1])
+  if (exported.length < 3) {
+    throw new Error(
+      `token derivation: ${CLASSIFIER_MODULE} yielded ${exported.length} exported function(s) — `
+      + 'refusing a collapsed token set (the classifier API cannot have shrunk below its '
+      + 'classify/translate/send surface without this guard being reconsidered)',
+    )
+  }
+
+  const stabilitySource = readFileSync(path.join(srcRoot, STABILITY_MODULE), 'utf8')
+  if (!new RegExp(`export\\s+function\\s+${STABILITY_CLASSIFIER_TOKEN}\\b`).test(stabilitySource)) {
+    throw new Error(
+      `token derivation: ${STABILITY_CLASSIFIER_TOKEN} is no longer exported from `
+      + `${STABILITY_MODULE} — the by-name pin is stale, so the census would silently stop `
+      + 'seeing every surface that classifies through it',
+    )
+  }
+
+  const base = [...new Set([...exported, STABILITY_CLASSIFIER_TOKEN])]
+  const aliases = new Set<string>()
+  const aliasDeclaringFiles = new Map<string, Set<string>>()
+  for (const file of walkSourceFiles(srcRoot)) {
+    const rel = path.relative(srcRoot, file).split(path.sep).join('/')
+    if (rel === CLASSIFIER_MODULE) continue
+    const stripped = stripComments(readFileSync(file, 'utf8'))
+    for (const match of stripped.matchAll(
+      /(export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g,
+    )) {
+      if (match[1] !== undefined) continue // exported = module boundary, not a local alias
+      const name = match[2]
+      if (base.includes(name)) continue
+      const body = functionBody(stripped, name)
+      if (body === null) continue
+      const normalized = body.replace(/\s+/g, ' ').trim().replace(/;$/, '')
+      if (base.some((token) => new RegExp(`^return\\s+${token}\\s*\\(`).test(normalized))) {
+        aliases.add(name)
+        // A Set, not an array: the same name declared TWICE IN ONE FILE (four such pairs
+        // exist in src today, none of them aliases) must not read as "two files" — that
+        // would false-red a required lane with a message naming one file twice.
+        const declaredIn = aliasDeclaringFiles.get(name) ?? new Set<string>()
+        declaredIn.add(rel)
+        aliasDeclaringFiles.set(name, declaredIn)
+      }
+    }
+  }
+  // P3(b): an alias enters the token set as a BARE NAME, and scanAdapterCallSites counts
+  // `\b<token>\s*(` in EVERY file. A future alias with a generic name (`bail`, `send`)
+  // would therefore count same-named calls in unrelated files as classification sites and
+  // raise a phantom UNREGISTERED caller on a required lane. Fail-closed on the reachable
+  // half of that: an alias name declared in more than one file is a loud derivation error
+  // rather than a silent false positive.
+  //
+  // DISCLOSED RESIDUAL: this does not cover a same-named call in a file that never DECLARES
+  // it (an import of an unrelated export with the same name). Closing that needs per-file
+  // token scoping in scanAdapterCallSites, which is a wider change than this slice.
+  for (const alias of aliases) {
+    const declaredIn = [...aliasDeclaringFiles.get(alias)!].sort()
+    if (declaredIn.length > 1) {
+      throw new Error(
+        `token derivation: local alias '${alias}' is declared in more than one file `
+        + `(${declaredIn.join(', ')}) — a bare-name token would count `
+        + 'same-named calls across all of them; give the aliases distinct names',
+      )
+    }
+  }
+  return [...new Set([...base, ...aliases])].sort()
+}
+
+/**
+ * Derived ONCE against the REAL src tree, never against the scan root: the negative
+ * controls below call scanAdapterCallSites() with synthetic makeFixtureTree() roots whose
+ * `db/recovery-conflict.ts` is a stub, and deriving from those would yield a bogus or
+ * EMPTY token list — the precise vacuity this file exists to prevent.
+ */
+const ADAPTER_TOKENS: readonly string[] = deriveAdapterTokens(SRC_ROOT)
+
+// Population floors. #5018's adversarial gate independently swept 13 files / 48 sites
+// (2026-08-19, head 1721b45e98) against the then-hardcoded four tokens; this slice's
+// derived five-token set was swept to 15 files / 55 sites by three independent scanners
+// (2026-08-23, head b2dc438a42) — the two NEW files being routes/univer-meta.ts (5) and
+// auth/AuthService.ts (2), which scored ZERO on the old four. Floors so growth is
+// frictionless but a both-sides-empty vacuity or a silent census shrink is red.
+const GATE_VERIFIED_MIN_FILES = 15
+const GATE_VERIFIED_MIN_SITES = 55
 
 /** Same comment-stripping semantics as the census (a comment must never count). */
 function stripComments(source: string): string {

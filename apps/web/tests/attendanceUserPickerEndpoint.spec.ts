@@ -3,6 +3,7 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import fs from 'node:fs'
 import path from 'node:path'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import { useAuth } from '../src/composables/useAuth'
 import { apiFetch } from '../src/utils/api'
 
 /**
@@ -166,6 +167,9 @@ describe('attendance user pickers — every picker searches through the attendan
 
   beforeEach(() => {
     vi.mocked(apiFetch).mockReset()
+    localStorage.setItem('tenantId', 'default')
+    localStorage.removeItem('user_roles')
+    localStorage.removeItem('auth_token')
     container = document.createElement('div')
     document.body.appendChild(container)
   })
@@ -175,6 +179,9 @@ describe('attendance user pickers — every picker searches through the attendan
     app = null
     container?.remove()
     container = null
+    localStorage.removeItem('tenantId')
+    localStorage.removeItem('user_roles')
+    localStorage.removeItem('auth_token')
   })
 
   it('renders real results in every picker on the admin page when only the attendance-scoped route answers', async () => {
@@ -213,6 +220,44 @@ describe('attendance user pickers — every picker searches through the attendan
       .map(([requested]) => String(requested))
       .filter((requested) => requested.startsWith(PLATFORM_USER_ROUTE))
     expect(platformCalls).toEqual([])
+    const attendanceCalls = vi.mocked(apiFetch).mock.calls
+      .map(([requested]) => String(requested))
+      .filter((requested) => requested.startsWith(ATTENDANCE_USER_SEARCH))
+    expect(attendanceCalls.length).toBeGreaterThanOrEqual(EXPECTED_MOUNTED_PICKER_IDS.length)
+    expect(attendanceCalls.every((requested) => new URLSearchParams(requested.split('?')[1]).get('orgId') === 'default')).toBe(true)
+  })
+
+  it('makes the real platform-admin page request global scope explicitly for every mounted picker', async () => {
+    localStorage.setItem('auth_token', 'eyJhbGciOiJub25lIn0.eyJyb2xlcyI6WyJhZG1pbiJdfQ.')
+    expect(useAuth().getAccessSnapshot().isAdmin).toBe(true)
+    const targetUserId = 'platform-global-target'
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.includes(ATTENDANCE_USER_SEARCH)) return userSearchResponse(targetUserId)
+      if (url.startsWith('/api/attendance/groups?') || url === '/api/attendance/groups') {
+        return attendanceGroupsResponse()
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = await mountAdminViewWithAllPickers(container!)
+    expect(useAuth().getAccessSnapshot().isAdmin).toBe(true)
+    const pickers = pickerFields(container!)
+    expect(pickers.map((picker) => picker.id).sort()).toEqual([...EXPECTED_MOUNTED_PICKER_IDS].sort())
+
+    for (const { field, input } of pickers) {
+      expect(await pickerRendersRealOption(field, input, targetUserId)).toBe(true)
+    }
+
+    const attendanceCalls = vi.mocked(apiFetch).mock.calls
+      .map(([requested]) => String(requested))
+      .filter((requested) => requested.startsWith(ATTENDANCE_USER_SEARCH))
+    expect(attendanceCalls.length).toBeGreaterThanOrEqual(EXPECTED_MOUNTED_PICKER_IDS.length)
+    const nonGlobalCalls = attendanceCalls.filter((requested) => {
+      const params = new URLSearchParams(requested.split('?')[1])
+      return params.get('scope') !== 'global' || params.has('orgId')
+    })
+    expect(nonGlobalCalls).toEqual([])
   })
 
   it('POSITIVE CONTROL — the same driver reports no results when the attendance-scoped route answers nothing', async () => {
@@ -240,6 +285,111 @@ describe('attendance user pickers — every picker searches through the attendan
       if (await pickerRendersRealOption(field, input, targetUserId)) withResults.push(id || '(unnamed picker)')
     }
     expect(withResults, 'no picker can produce a result when its endpoint returns none').toEqual([])
+  })
+
+  it('does not let the real user-access panel fall back globally after a scoped not-found response', async () => {
+    const targetUserId = '11111111-1111-4111-8111-111111111111'
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === `/api/attendance-admin/users/${targetUserId}/access?orgId=default`) {
+        return jsonResponse(404, {
+          ok: false,
+          error: { code: 'USER_TARGET_NOT_FOUND', message: 'User not found in requested scope' },
+        })
+      }
+      if (url.startsWith('/api/permissions/user/')) {
+        return jsonResponse(200, { permissions: ['*:*'], isAdmin: true })
+      }
+      if (url.startsWith('/api/attendance/groups?') || url === '/api/attendance/groups') {
+        return attendanceGroupsResponse()
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = await mountAdminViewWithAllPickers(container!)
+    const input = container!.querySelector<HTMLInputElement>('#attendance-provision-user-id')
+    expect(input).not.toBeNull()
+    input!.value = targetUserId
+    input!.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    const section = input!.closest('.attendance__admin-section')
+    const loadButton = section?.querySelector<HTMLButtonElement>('.attendance__admin-section-header button')
+    expect(loadButton).not.toBeNull()
+    loadButton!.click()
+    await flushUi(6)
+
+    const calls = vi.mocked(apiFetch).mock.calls.map(([requested]) => String(requested))
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/access?orgId=default`)
+    expect(calls.some((url) => url.startsWith('/api/permissions/user/'))).toBe(false)
+    expect(section?.textContent).toContain('User not found in requested scope')
+  })
+
+  it('keeps the real delegated page fail-closed when an old backend returns a bare 404', async () => {
+    const targetUserId = '11111111-1111-4111-8111-111111111111'
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === `/api/attendance-admin/users/${targetUserId}/access?orgId=default`) {
+        return jsonResponse(404, { message: 'Not Found' })
+      }
+      if (url.startsWith('/api/permissions/user/')) {
+        return jsonResponse(200, { permissions: ['*:*'], isAdmin: true })
+      }
+      if (url.startsWith('/api/attendance/groups?') || url === '/api/attendance/groups') {
+        return attendanceGroupsResponse()
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = await mountAdminViewWithAllPickers(container!)
+    const input = container!.querySelector<HTMLInputElement>('#attendance-provision-user-id')!
+    input.value = targetUserId
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    const section = input.closest('.attendance__admin-section')
+    section?.querySelector<HTMLButtonElement>('.attendance__admin-section-header button')?.click()
+    await flushUi(6)
+
+    const calls = vi.mocked(apiFetch).mock.calls.map(([requested]) => String(requested))
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/access?orgId=default`)
+    expect(calls.some((url) => url.startsWith('/api/permissions/user/'))).toBe(false)
+  })
+
+  it('keeps real delegated role writes on the scoped endpoints when an old backend returns a bare 404', async () => {
+    const targetUserId = '11111111-1111-4111-8111-111111111111'
+    vi.mocked(apiFetch).mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === `/api/attendance-admin/users/${targetUserId}/roles/assign`
+        || url === `/api/attendance-admin/users/${targetUserId}/roles/unassign`) {
+        return jsonResponse(404, { message: 'Not Found' })
+      }
+      if (url.startsWith('/api/permissions/')) {
+        return jsonResponse(200, { ok: true, permissions: ['*:*'], isAdmin: true })
+      }
+      if (url.startsWith('/api/attendance/groups?') || url === '/api/attendance/groups') {
+        return attendanceGroupsResponse()
+      }
+      return emptyAttendanceResponse()
+    })
+
+    app = await mountAdminViewWithAllPickers(container!)
+    const input = container!.querySelector<HTMLInputElement>('#attendance-provision-user-id')!
+    input.value = targetUserId
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    const section = input.closest('.attendance__admin-section')!
+    const actionButtons = section.querySelectorAll<HTMLButtonElement>('.attendance__admin-section-header button')
+
+    actionButtons[1]!.click()
+    await flushUi(6)
+    actionButtons[2]!.click()
+    await flushUi(6)
+
+    const calls = vi.mocked(apiFetch).mock.calls.map(([requested]) => String(requested))
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/roles/assign`)
+    expect(calls).toContain(`/api/attendance-admin/users/${targetUserId}/roles/unassign`)
+    expect(calls.some((url) => url.startsWith('/api/permissions/grant'))).toBe(false)
+    expect(calls.some((url) => url.startsWith('/api/permissions/revoke'))).toBe(false)
   })
 })
 
@@ -288,6 +438,20 @@ describe('attendance user pickers — the endpoint is stated at every usage', ()
     ).toEqual([])
   })
 
+  it('every usage passes its current org to the attendance-scoped endpoint', () => {
+    const missing = usages
+      .filter((usage) => !/:org-id\s*=/.test(usage.element))
+      .map((usage) => `${usage.file}#${usage.index}`)
+    expect(missing, 'these picker usages could query outside their visible organization').toEqual([])
+  })
+
+  it('every usage forwards the platform-admin global-scope decision', () => {
+    const missing = usages
+      .filter((usage) => !/:global-scope\s*=/.test(usage.element))
+      .map((usage) => `${usage.file}#${usage.index}`)
+    expect(missing, 'these picker usages cannot opt into explicit global scope for platform admins').toEqual([])
+  })
+
   it('POSITIVE CONTROL — the same collector flags a usage that omits it', () => {
     const decoy = collectPickerUsages(
       `<template>
@@ -299,5 +463,16 @@ describe('attendance user pickers — the endpoint is stated at every usage', ()
     expect(decoy).toHaveLength(2)
     expect(decoy.filter((usage) => !usage.element.includes(ATTENDANCE_USER_SEARCH)).map((usage) => usage.index))
       .toEqual([1])
+  })
+
+  it('POSITIVE CONTROL — the org-scope rule flags an endpoint usage without org-id', () => {
+    const decoy = collectPickerUsages(
+      `<template>
+         <AttendanceUserPickerField v-model="a" :tr="tr" label="x" endpoint="${ATTENDANCE_USER_SEARCH}" :org-id="orgId" />
+         <AttendanceUserPickerField v-model="b" :tr="tr" label="y" endpoint="${ATTENDANCE_USER_SEARCH}" />
+       </template>`,
+      'decoy.vue',
+    )
+    expect(decoy.filter((usage) => !/:org-id\s*=/.test(usage.element)).map((usage) => usage.index)).toEqual([1])
   })
 })

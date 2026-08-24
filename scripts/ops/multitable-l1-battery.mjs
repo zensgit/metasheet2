@@ -86,7 +86,8 @@
  *   2  VERDICT: NOT_ARMED  — posture/usage/precondition refusal; the battery did not run
  */
 
-import { writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { randomBytes } from 'node:crypto'
 
@@ -149,7 +150,7 @@ const DEFAULT_TIMEOUT_MS = 20_000
 // ---------------------------------------------------------------------------
 // THE SURFACE LEDGER
 //
-// Every one of the 48 census sites in
+// Every one of the 55 census sites in
 // packages/core-backend/tests/unit/lib/recovery-census-table.ts appears EXACTLY ONCE below —
 // either attached to a driven surface, or in NOT_DRIVEN_SITES with a concrete reason. The
 // hermetic guard re-parses that census file and asserts set-equality, so a newly-registered
@@ -359,38 +360,168 @@ export const DRIVEN_SURFACES = Object.freeze([
 ])
 
 /**
- * The cascade `roles:delete` would need in order to be blockable, expressed as a query the battery
- * RUNS — not as an assumption it states.
+ * The canonical recovery-authority trigger functions, rendered as a SQL literal list.
+ *
+ * DERIVED, NOT RE-TYPED. `AUTHORITY_TRIGGER_FUNCTIONS` is the containment census's own list (see
+ * `multitable-recovery-schema-containment.mjs`), which this module already imports for the phase-0
+ * canonical-trigger preflight, and which is itself drift-guarded against
+ * `packages/core-backend/src/db/migrations/zzzz20260721121000_add_recovery_authority_locks.ts`.
+ * A hand-typed table list here would be the enumeration trap (枚举陷阱不收敛): it would go stale the
+ * first time the migration covers one more table, and nothing would say so.
+ */
+const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
+  .map((name) => `'${name}'`)
+  .join(', ')
+
+/**
+ * The child write `roles:delete` would need in order to be blockable, expressed as a query the
+ * battery RUNS — not as an assumption it states.
  *
  * `routes/roles.ts` documents the mechanism as "The FK cascade from roles → role_permissions
- * deletes recovery-authority rows, so this DELETE can also surface the marker 40001". On a
- * database migrated by this repo's chain that cascade DOES NOT EXIST: `role_permissions` is created
- * by `20250924190000_create_rbac_tables.ts` with `varchar(255)` columns and only a
- * `permission_code → permissions(code)` foreign key; `033_create_rbac_core.sql`'s version — the one
- * that carries `role_id … REFERENCES roles(id) ON DELETE CASCADE` — is a `CREATE TABLE IF NOT
- * EXISTS` and therefore a no-op by the time it runs. `user_roles` likewise ends up with no FK to
- * `roles`. So `DELETE FROM roles` cascades into nothing, reaches no triggered table, and answers
- * 2xx even under a held role lease. The battery discovered this by driving it (a 2xx where a 409
- * was expected); it is recorded as NOT-DRIVEN rather than papered over.
+ * deletes recovery-authority rows, so this DELETE can also surface the marker 40001". On the
+ * local/test schema no such foreign key exists: `role_permissions` is created by
+ * `20250924190000_create_rbac_tables.ts` with `varchar(255)` columns and only a
+ * `permission_code → permissions(code)` foreign key, and `033_create_rbac_core.sql`'s cascading
+ * version (`role_id … REFERENCES roles(id) ON DELETE CASCADE`, :17) is a `CREATE TABLE IF NOT
+ * EXISTS` and therefore a no-op by the time it runs. The battery discovered this by DRIVING it (a
+ * 2xx where a 409 was expected); it is recorded as NOT-DRIVEN rather than papered over.
  *
- * A different deployment could still have the 033 shape. So the reason is not merely asserted: it
- * is RE-VERIFIED on every run (判据本身也要被攻击). If the cascade is present on the target
+ * A different deployment can still have the 033 shape. So the reason is not merely asserted: it is
+ * RE-VERIFIED on every run (判据本身也要被攻击). If the premise has stopped holding on the target
  * database, the excuse has stopped being true and the battery FAILS demanding the surface be
  * driven — the NOT-DRIVEN entry can never quietly outlive its justification.
+ *
+ * WHAT COUNTS — THE CONJUNCTION, AND WHY IT IS NEITHER NARROWER NOR WIDER
+ * ----------------------------------------------------------------------
+ * The question is not "is there a cascade into role_permissions". It is: **does deleting a role row
+ * write into a table that carries a recovery-authority trigger?** Three conjuncts, each of which
+ * has to be there:
+ *
+ *  1. **The FK targets the session-resolved `roles` relation** (`con.confrelid = to_regclass(...)`).
+ *  2. **The child table carries a canonical recovery-authority trigger.** Derived from the catalog
+ *     via the census's function list, never from a hand-typed table list. This conjunct is what
+ *     keeps the predicate from over-widening: `20250925_create_view_tables.sql:261` conditionally
+ *     adds `view_permissions_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id)` and
+ *     `view_permissions` carries NO recovery-authority trigger, so a cascade there fires nothing.
+ *     Counting it would produce a FALSE PRESENT — and a false PRESENT is not noise: it makes this
+ *     battery exit 1 `not_driven_reason_expired` and refuse to produce ANY evidence, blocking the
+ *     L1 evidence path on a premise that was never refuted.
+ *  3. **The FK's ON-parent-delete action performs child DML** — see `roleDeleteCascadeExists`.
+ *
+ * `033_create_rbac_core.sql` creates BOTH `role_permissions.role_id` (:17) and `user_roles.role_id`
+ * (:36) as `REFERENCES roles(id) ON DELETE CASCADE`, each under its own `CREATE TABLE IF NOT
+ * EXISTS`, so the two outcomes are INDEPENDENT: a database can have one without the other. Both
+ * tables carry a canonical trigger (`trg_role_permissions_recovery_authority_lock` and
+ * `trg_user_roles_recovery_authority_lock`; the latter is installed by the migration's
+ * `USER_TRIGGERS` loop), so both expire the excuse. An earlier version of this query inspected only
+ * `role_permissions` and would have answered ABSENT on a database whose `user_roles` cascade was
+ * live.
+ *
+ * DELIBERATELY NOT NARROWED TO `roles.id`. Postgres fires the referential action when the
+ * REFERENCED ROW is deleted, whichever unique column the FK points at, so an `AND … attname = 'id'`
+ * conjunct could only ever manufacture a false ABSENT. It is also moot in practice:
+ * `033_create_rbac_core.sql:5` makes `id` the primary key of `roles`.
+ *
+ * SCHEMA/OID BINDING. `to_regclass` resolves through the SESSION's `search_path`, and the result is
+ * an OID compared against `con.confrelid` — so a decoy `roles` in a schema that is not on the path
+ * can neither be mistaken for the real one nor hide it. It is deliberately UNQUALIFIED: hard-coding
+ * `public.` would blind every real-DB golden this repo runs in a per-run random schema. The
+ * witness runner's relation-presence control (`RELATION_PRESENCE_QUERY`) resolves the SAME relation
+ * the same way; the two are coupled and must be narrowed in lockstep, or a database this query
+ * cannot even see would report as "no cascade" instead of "wrong database".
  */
+/**
+ * "This session can resolve a `roles` TABLE" — as a SQL boolean expression, so every consumer of
+ * `ROLE_CASCADE_WITNESS_QUERY` can pair the query with the SAME presence check.
+ *
+ * ONE DEFINITION, because the two must be narrowed in lockstep or the pair manufactures a false
+ * ABSENT: the query resolves `roles` through the session's `search_path`, so a session that cannot
+ * see `roles` at all returns zero rows — which reads as "nothing writes a triggered child" while
+ * actually meaning "we are looking somewhere that has no roles table". `relkind IN ('r','p')`
+ * because `con.confrelid` can only ever be an ordinary or partitioned table; a VIEW named `roles`
+ * would otherwise report presence for a query that is guaranteed to return nothing.
+ */
+export const ROLES_RELATION_PRESENT_SQL = `EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_class rel
+      WHERE rel.oid = to_regclass('roles')
+        AND rel.relkind IN ('r', 'p')
+    )`
+
 export const ROLE_CASCADE_WITNESS_QUERY = `
-  SELECT con.conname, con.confdeltype
+  SELECT
+    child_ns.nspname AS child_schema,
+    child.relname AS child_table,
+    con.conname AS conname,
+    con.confdeltype AS confdeltype
   FROM pg_catalog.pg_constraint con
   JOIN pg_catalog.pg_class child ON child.oid = con.conrelid
-  JOIN pg_catalog.pg_class parent ON parent.oid = con.confrelid
+  JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
   WHERE con.contype = 'f'
-    AND child.relname = 'role_permissions'
-    AND parent.relname = 'roles'
+    AND con.confrelid = to_regclass('roles')
+    AND EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_trigger tg
+      JOIN pg_catalog.pg_proc fn ON fn.oid = tg.tgfoid
+      WHERE tg.tgrelid = con.conrelid
+        AND NOT tg.tgisinternal
+        AND fn.proname IN (${RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST})
+    )
+  ORDER BY child_ns.nspname, child.relname, con.conname
 `
 
-/** @returns true when a cascading role_permissions → roles FK exists (confdeltype 'c' = CASCADE). */
+/**
+ * The `confdeltype` letters that make a parent delete WRITE INTO THE CHILD ROW.
+ *
+ * The nine recovery-authority triggers are `BEFORE INSERT OR UPDATE OR DELETE` (see
+ * `zzzz20260721121000_add_recovery_authority_locks.ts` — the `USER_TRIGGERS` loop, the
+ * `role_permissions` trigger, and the three subject-keyed ones). So the question is not "is it
+ * CASCADE" but "does the child row get touched at all":
+ *
+ *   'c' CASCADE     → the child row is DELETEd      → trigger fires
+ *   'n' SET NULL    → the child row is UPDATEd      → trigger fires
+ *   'd' SET DEFAULT → the child row is UPDATEd      → trigger fires
+ *   'a' NO ACTION   → no child DML (the parent delete is refused instead) → nothing fires
+ *   'r' RESTRICT    → no child DML (the parent delete is refused instead) → nothing fires
+ *
+ * Accepting only 'c' — as this predicate originally did — leaves 'n' and 'd' classified as "no
+ * cascade" on a database where deleting a role demonstrably fires a recovery-authority trigger.
+ */
+export const ROLE_DELETE_CHILD_WRITE_ACTIONS = Object.freeze(['c', 'n', 'd'])
+
+/**
+ * @returns true when the observed rows show a foreign key whose parent-delete action writes into a
+ * recovery-authority-triggered child of `roles` — i.e. when the `roles:delete` NOT-DRIVEN excuse has
+ * expired on the observed database.
+ *
+ * The rows are already conjunct-1 and conjunct-2 filtered by `ROLE_CASCADE_WITNESS_QUERY` (FK →
+ * `roles`, child carries a canonical trigger); this decides conjunct 3. The delete-action letters
+ * live HERE and not in the SQL on purpose: the witness ships the SQL verbatim to the target host,
+ * and the host program must observe without classifying.
+ *
+ * Kept under its original name because it is pinned by the witness runner, the witness workflow and
+ * three test files; "cascade" now reads as "any parent-delete action that writes the child row".
+ */
 export function roleDeleteCascadeExists(rows = []) {
-  return rows.some((row) => String(row?.confdeltype ?? '') === 'c')
+  return roleDeleteChildWrites(rows).length > 0
+}
+
+/**
+ * The SAME predicate, returning the offending rows instead of a boolean, so a REFUTED verdict can
+ * name what refuted it. Not a second definition: `roleDeleteCascadeExists` is defined in terms of
+ * this, so the two can never disagree.
+ */
+export function roleDeleteChildWrites(rows = []) {
+  return (rows ?? []).filter((row) => ROLE_DELETE_CHILD_WRITE_ACTIONS.includes(String(row?.confdeltype ?? '')))
+}
+
+/** Human-readable `schema.table (conname, action)` for a witness row — evidence, not a decision. */
+export function describeRoleCascadeRow(row) {
+  const schema = String(row?.child_schema ?? '?')
+  const table = String(row?.child_table ?? '?')
+  const conname = String(row?.conname ?? '?')
+  const action = String(row?.confdeltype ?? '?')
+  return `${schema}.${table} (${conname}, confdeltype=${action})`
 }
 
 /**
@@ -423,7 +554,7 @@ export const NOT_DRIVEN_SITES = Object.freeze([
     site: 'roles:delete',
     reason: 'no-trigger-on-target-table',
     detail:
-      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is the FK cascade into role_permissions — and that FK DOES NOT EXIST on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading version is a no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY — if the cascade ever exists on the target database, the battery FAILS rather than keep this excuse.",
+      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is a foreign-key cascade into a triggered child — and no such FK EXISTS on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading role_permissions (:17) and user_roles (:36) versions are both no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY over EVERY recovery-authority-triggered child of roles, for every parent-delete action that writes the child row (CASCADE / SET NULL / SET DEFAULT) — if any of them exists on the target database, the battery FAILS rather than keep this excuse.",
   },
   {
     site: 'auth:register',
@@ -509,40 +640,117 @@ export const NOT_DRIVEN_SITES = Object.freeze([
   { site: 'admin-directory:batch-unbind', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; refuses before any recovery-authority write unless a directory integration is configured.' },
   { site: 'admin-directory:deprovision-restore', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
   { site: 'admin-directory:compensate-deny', reason: 'external-provider-required', detail: 'Directory admin HTTP endpoint; needs deprovision evidence rows, which only directory deprovisioning creates.' },
+  // --- O2-D1 denominator slice (2026-08-23): the seven sites added when
+  // routes/univer-meta.ts and auth/AuthService.ts entered the census denominator.
+  //
+  // The five univer-meta sites are NOT excused as unreachable: all three tables they write
+  // (spreadsheet_permissions / field_permissions / record_permissions) DO carry
+  // recovery-authority triggers, so a 40001 is constructible at every one of them and each
+  // already answers the exact uniform 409. They are excused on FIXTURE COST alone — the
+  // battery builds users/roles/permissions fixtures, not a univer spreadsheet with sheets,
+  // fields and records.
+  //
+  // Whether the battery SHOULD grow to drive them is deliberately NOT decided here: the
+  // driven-surface set is what an L1 battery PASS attests, and that set is cited by the
+  // RATIFIED enablement-ladder doc. Widening it changes the meaning of the L1 gate, which
+  // is an owner amendment, not a mechanical ledger edit. Raised on the owner sheet instead.
+  {
+    site: 'univer-meta:sheet-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT sheet permissions writes spreadsheet_permissions, guarded by trg_spreadsheet_permissions_recovery_authority_lock — a 40001 IS constructible here and the route already answers the uniform 409. Excused only because driving it needs a univer spreadsheet + sheet fixture this battery does not build.',
+  },
+  {
+    site: 'univer-meta:field-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT field permissions writes field_permissions, guarded by trg_field_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + field fixture cost.',
+  },
+  {
+    site: 'univer-meta:config-restore-execute',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'POST config-restore-execute reaches field_permissions / spreadsheet_permissions through applyPermissionDeEscalation, both trigger-guarded. This is the site whose outer catch did NOT classify until #5114 — its 40001 landed as an unmapped 500. Excused only on fixture cost: driving it needs a spreadsheet with a restorable config snapshot. Its behaviour leg asserts the 409 directly.',
+  },
+  {
+    site: 'univer-meta:record-permissions-put',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'PUT record permissions writes record_permissions, guarded by trg_record_permissions_recovery_authority_lock. Constructible and already mapped; excused only on the univer sheet + record fixture cost.',
+  },
+  {
+    site: 'univer-meta:record-permissions-delete',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'DELETE record permission deletes from record_permissions, same trigger and same lease key as univer-meta:record-permissions-put. Excused only on the same univer sheet + record fixture cost.',
+  },
+  {
+    site: 'auth-service:register-user-roles',
+    reason: 'unknowable-lease-key',
+    detail:
+      'Service half of the already-excused auth:register — AuthService.register mints the new user id with crypto.randomUUID() inside the transaction, so the battery cannot hold a lease on the subject the users/user_roles triggers key on. This site is the bounded in-transaction retry, which surfaces a typed UserRoleAssignmentRecoveryBusyError rather than a 409.',
+  },
+  {
+    site: 'auth-service:self-service-backfill',
+    reason: 'orthogonal-fixture-cost',
+    detail:
+      'The read-path RBAC backfill in resolveRbacProfile writes user_roles — the SAME table and the SAME lease key as admin-users:role-assign, which IS driven. Excused because reaching it needs a user that is MISSING the self-service role while attendance self-service is enabled, a state the battery does not construct. Like the register site, it surfaces a typed throw, not a 409.',
+  },
 ])
 
 /**
  * THE SECOND ANTI-DRIFT AXIS — trigger coverage.
  *
  * The census-site ledger above is anchored on `recovery-census-table.ts`, which registers WRITE
- * SURFACES. That axis has a hole its own construction guarantees: `field_permissions` and
- * `record_permissions` carry recovery-authority triggers but have NO census row at all, so no
- * amount of census set-equality can ever notice that the battery never touches them. L1 is a
- * statement about the NINE TRIGGERS, so the nine triggers get their own explicit accounting.
+ * SURFACES, and its set-equality only proves each site is ACCOUNTED FOR — driven or excused. It
+ * says nothing about whether a given TRIGGER ever fired: a table whose every census site sits in
+ * NOT_DRIVEN_SITES passes the census axis untouched, and that is exactly the state
+ * `field_permissions` and `record_permissions` are in today. L1 is a statement about the NINE
+ * TRIGGERS, so the nine triggers get their own explicit accounting.
  *
  * Every trigger in `EXPECTED_AUTHORITY_TRIGGERS` must be either exercised by a driven surface or
  * named here with a reason; the hermetic guard asserts that partition is exact and disjoint. The
  * battery therefore cannot silently claim trigger-level coverage it does not have — and the
  * verdict line prints the ratio rather than letting "11/11 surfaces" be misread as "9/9 triggers".
+ *
+ * ENTRY SHAPE — a machine-checkable claim, not just prose (the reason this shape exists):
+ * the first two entries below used to justify themselves with "the table has no row in
+ * recovery-census-table.ts, so there is no census-anchored HTTP surface to drive". That was true
+ * when written and became FALSE the moment `routes/univer-meta.ts` entered the census — and
+ * NOTHING failed, because nothing checked an exemption's justification. The excuse would have
+ * shipped verbatim into `trigger_coverage.not_exercised` of every future evidence artefact.
+ *
+ * So the census-anchoring half of each justification is no longer prose. `censusAnchoredSites`
+ * states, as data, exactly which registered census sites target this trigger's table; the hermetic
+ * guard checks that claim against the parsed census (and against NOT_DRIVEN_SITES) on every run,
+ * so an entry that stops being true reds instead of rotting. Prose stays in `detail`, where it can
+ * only ever ADD colour to a claim the machine already verified — mirroring the `reason` (enum) +
+ * `detail` (prose) shape NOT_DRIVEN_SITES already uses.
  */
 export const TRIGGER_COVERAGE_EXEMPTIONS = Object.freeze([
   {
     trigger: 'trg_field_permissions_recovery_authority_lock',
     table: 'field_permissions',
-    reason:
-      'No registered recovery-conflict write surface targets field_permissions — the table has no row in recovery-census-table.ts, so there is no census-anchored HTTP surface to drive. The trigger is installed and armed; it is simply never exercised end-to-end by this battery.',
+    reason: 'orthogonal-fixture-cost',
+    censusAnchoredSites: ['univer-meta:field-permissions-put', 'univer-meta:config-restore-execute'],
+    detail:
+      'REACHABLE, not inert — do not read this entry as "no surface exists". Two registered census sites write field_permissions: PUT field-permissions directly, and config-restore-execute through applyPermissionDeEscalation. Both go through the subject-dispatch trigger function (metasheet_recovery_authority_subject_trigger), so a 40001 is constructible at either and both routes already answer the uniform 409. Excused only on fixture cost: this battery builds users/roles/permissions fixtures, not a univer spreadsheet with sheets and fields — which is why both sites are ALSO carried in NOT_DRIVEN_SITES on the same orthogonal-fixture-cost reason. Note what is and is not missing: the trigger FUNCTION is exercised end-to-end by the driven spreadsheet_permissions surfaces, which fire the same function — though only down its subject_type "user" branch, so the role and member-group dispatch arms go unfired too. What is untested here is the installation of this trigger on this table.',
   },
   {
     trigger: 'trg_record_permissions_recovery_authority_lock',
     table: 'record_permissions',
-    reason:
-      'No registered recovery-conflict write surface targets record_permissions — the table has no row in recovery-census-table.ts, so there is no census-anchored HTTP surface to drive. The trigger is installed and armed; it is simply never exercised end-to-end by this battery.',
+    reason: 'orthogonal-fixture-cost',
+    censusAnchoredSites: ['univer-meta:record-permissions-put', 'univer-meta:record-permissions-delete'],
+    detail:
+      'REACHABLE, not inert — same posture as the field_permissions twin. Two registered census sites write record_permissions (PUT and DELETE record permissions), both dispatching through metasheet_recovery_authority_subject_trigger, both constructible, both already answering the uniform 409. Excused only on fixture cost: driving them needs a univer spreadsheet with sheets and records, which this battery does not build — so both sites are carried in NOT_DRIVEN_SITES on the same orthogonal-fixture-cost reason. As above, the trigger FUNCTION is exercised by the driven spreadsheet_permissions surfaces (subject_type "user" branch only); the installation of this trigger on this table is what goes untested.',
   },
   {
     trigger: 'trg_users_recovery_authority_lock_lifecycle',
     table: 'users',
-    reason:
-      'Fires on INSERT and DELETE of users. Every HTTP path that inserts a user mints its id server-side (crypto.randomUUID in AuthService.register and in POST /api/admin/users), so no lease can be pre-held on the subject the trigger keys on; and no admin HTTP endpoint DELETEs a user at all. Unlike the UPDATE-side twin (trg_users_..._lock_update, which IS driven), this one is not reachable with a knowable lease key.',
+    reason: 'unknowable-lease-key',
+    censusAnchoredSites: ['auth:register', 'admin-users:create-user'],
+    detail:
+      'Fires on INSERT and DELETE of users. Every HTTP path that inserts a user mints its id server-side (crypto.randomUUID in AuthService.register and in POST /api/admin/users), so no lease can be pre-held on the subject the trigger keys on; and no admin HTTP endpoint DELETEs a user at all. Unlike the UPDATE-side twin (trg_users_..._lock_update, which IS driven), this one is not reachable with a knowable lease key. Census-anchored surfaces DO exist — the two INSERT sites named above — which is precisely why the cap is the lease key and not the absence of a surface.',
   },
 ])
 
@@ -562,7 +770,12 @@ export function triggerCoverage(expected = EXPECTED_AUTHORITY_TRIGGERS) {
     exercised_count: exercised.length,
     total_count: expected.length,
     exercised,
-    not_exercised: TRIGGER_COVERAGE_EXEMPTIONS.map((entry) => ({ ...entry })),
+    not_exercised: TRIGGER_COVERAGE_EXEMPTIONS.map((entry) => ({
+      ...entry,
+      // Deep-copy the claim array: the module-level freeze is shallow, so a spread alone would
+      // hand every evidence consumer a live reference to the ledger's own array.
+      censusAnchoredSites: [...entry.censusAnchoredSites],
+    })),
   }
 }
 
@@ -1115,10 +1328,36 @@ export async function runBattery({ env = process.env, options } = {}) {
   const batteryPassword = `Bat!${randomBytes(18).toString('base64url')}A9`
   const secrets = [databaseUrl, adminPassword, batteryPassword].filter((value) => typeof value === 'string' && value.length >= 4)
 
+  // A1.3 (deep review B4): the amendment requires the exit evidence to carry the head/image SHA the
+  // run was verified against. Nothing captured it, so every PASS was unbindable and the window would
+  // self-void by A1.3's own terms. Capture it HERE, in the evidence the battery itself writes, so the
+  // binding is produced by the tool rather than transcribed by hand:
+  //   * script_sha256 — self-hash of THIS file, so the evidence names the exact battery that ran
+  //     (the containment lane has an equivalent pin; this lane had none).
+  //   * image_digest / build_commit — supplied by the caller (the workflow reads them from the
+  //     running container); recorded as null when absent so a missing binding is VISIBLE in the
+  //     evidence rather than silently absent.
+  const provenance = (() => {
+    let scriptSha = null
+    try {
+      scriptSha = createHash('sha256')
+        .update(readFileSync(new URL(import.meta.url), 'utf8'))
+        .digest('hex')
+    } catch {
+      scriptSha = null
+    }
+    return {
+      script_sha256: scriptSha,
+      image_digest: String(env.BATTERY_IMAGE_DIGEST ?? '').trim() || null,
+      build_commit: String(env.BATTERY_BUILD_COMMIT ?? '').trim() || null,
+    }
+  })()
+
   const evidence = {
     tool: 'multitable-l1-battery',
     ladder_step: 'L1',
     run_stamp: stamp,
+    provenance,
     started_at: startedAt,
     finished_at: null,
     verdict: 'NOT_ARMED',
@@ -1254,17 +1493,48 @@ export async function runBattery({ env = process.env, options } = {}) {
     // The NOT-DRIVEN excuses are not taken on trust. The one that is a SCHEMA claim rather than an
     // architectural one is re-verified here; if it has stopped being true on this database, the
     // battery fails and demands the surface be driven, instead of carrying a stale exemption.
+    //
+    // THIS PREMISE CHECK IS STRICTER THAN IT USED TO BE, deliberately. It now covers EVERY
+    // recovery-authority-triggered child of `roles` (not only `role_permissions` — `user_roles`
+    // carries `trg_user_roles_recovery_authority_lock` and 033_create_rbac_core.sql:36 gives it its
+    // own independent cascading FK) and EVERY parent-delete action that writes the child row
+    // (SET NULL and SET DEFAULT UPDATE the child and fire the same BEFORE INSERT OR UPDATE OR
+    // DELETE trigger, not just CASCADE). So this battery will now expire the `roles:delete` excuse
+    // — and exit 1 rather than produce evidence — in strictly MORE situations than before. That is
+    // the point: every one of those situations is a database on which `roles:delete` really is
+    // blockable and therefore really must be driven.
+    // SCHEMA/OID BINDING — the presence control this query must be paired with. The witness
+    // resolves `roles` through the SESSION's search_path, so zero rows from a session that cannot
+    // see a `roles` table would read as "nothing writes a triggered child" and quietly keep the
+    // exemption. `users` resolving in the same-DB proof above does NOT establish this: the two
+    // tables could sit in different schemas. Same client, same session, same resolution as the
+    // query it guards — that is the whole point.
+    const rolesPresence = await sqlOne(`SELECT ${ROLES_RELATION_PRESENT_SQL} AS present`)
+    if (rolesPresence[0]?.present !== true) {
+      log(lines, "VERDICT: NOT_ARMED - this session cannot resolve a `roles` table through its search_path, so the roles:delete premise cannot be re-checked here; zero rows from the witness query would not be evidence of absence")
+      failures.push({ phase: 'preflight', failure: 'role_cascade_premise_unobservable', reason: "to_regclass('roles') resolved no ordinary table on the battery's own session" })
+      evidence.finished_at = new Date().toISOString()
+      return { exitCode: 2, evidence, lines }
+    }
     const cascadeRows = (await admin.client.query(ROLE_CASCADE_WITNESS_QUERY)).rows
     const cascadePresent = roleDeleteCascadeExists(cascadeRows)
     evidence.posture.role_delete_cascade_present = cascadePresent
+    // Auditable, not a bare boolean: the exact rows the predicate decided on.
+    evidence.posture.role_delete_triggered_children = cascadeRows.map((row) => ({
+      child_schema: String(row?.child_schema ?? ''),
+      child_table: String(row?.child_table ?? ''),
+      conname: String(row?.conname ?? ''),
+      confdeltype: String(row?.confdeltype ?? ''),
+    }))
     if (cascadePresent) {
-      log(lines, "VERDICT: FAIL - this database HAS a cascading role_permissions → roles foreign key, so roles:delete IS blockable here; the ledger's NOT-DRIVEN exemption for it no longer holds and the surface must be driven")
-      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: 'roles:delete is drivable on this schema (cascading FK present) but is listed NOT-DRIVEN' })
+      const offenders = roleDeleteChildWrites(cascadeRows).map((row) => describeRoleCascadeRow(row)).join('; ')
+      log(lines, `VERDICT: FAIL - deleting a role on this database writes into a recovery-authority-triggered table [${offenders}], so roles:delete IS blockable here; the ledger's NOT-DRIVEN exemption for it no longer holds and the surface must be driven`)
+      failures.push({ phase: 'preflight', failure: 'not_driven_reason_expired', reason: `roles:delete is drivable on this schema (parent-delete writes a triggered child: ${offenders}) but is listed NOT-DRIVEN` })
       evidence.verdict = 'FAIL'
       evidence.finished_at = new Date().toISOString()
       return { exitCode: 1, evidence, lines }
     }
-    log(lines, 'PHASE 0 VERDICT: EXEMPTION-VALID - no cascading role_permissions → roles FK, so the roles:delete NOT-DRIVEN reason still holds on this database')
+    log(lines, 'PHASE 0 VERDICT: EXEMPTION-VALID - no foreign key writes a recovery-authority-triggered child of roles on a role delete, so the roles:delete NOT-DRIVEN reason still holds on this database')
 
     // ---------------- Phase 1 — seed (no lease held) ----------------------
     log(lines, '── phase 1 · seed synthetic subjects (no lease held) ──────────')

@@ -307,6 +307,67 @@ test('rehearsal restore keeps the replica-role trigger suppression (load-bearing
   assert.ok(restoreIdx < resetIdx, 'RESET must come AFTER the pg_restore invocation')
 })
 
+function assertExactTargetMigrationContract({ remote, workflow }) {
+  assert.match(
+    workflow,
+    /"\$ACTION" == "deploy" \|\| "\$ACTION" == "migrate" \|\| "\$ACTION" == "smoke" \|\| "\$ACTION" == "soak-flags"/,
+    'workflow must require a full deploy_sha for action=migrate',
+  )
+  assert.match(remote, /TARGET_MIGRATION_IMAGE="ghcr\.io\/\$\{IMAGE_OWNER\}\/metasheet2-backend:\$\{DEPLOY_SHA\}"/)
+  assert.match(remote, /org\.opencontainers\.image\.revision/)
+  assert.match(remote, /\[\[ "\$revision" == "\$DEPLOY_SHA" \]\]/, 'target image revision must equal the requested SHA')
+  assert.match(remote, /--network "container:\$\{BACKEND_CONTAINER\}"/)
+  assert.match(remote, /--env-file "\$TARGET_MIGRATION_ENV_FILE"/)
+  assert.match(remote, /chmod 0600 "\$TARGET_MIGRATION_ENV_FILE"/)
+  assert.match(remote, /trap cleanup_target_migration_runtime EXIT/)
+
+  const start = remote.indexOf('action_migrate() {')
+  const end = remote.indexOf('\n# --- W4+W7 combined-soak', start)
+  assert.ok(start !== -1 && end > start, 'expected action_migrate() bounds')
+  const migrate = remote.slice(start, end)
+  const inventory = migrate.indexOf('target-migrate-list-before.txt')
+  const prechecks = migrate.indexOf('action_migrate_read_only_prechecks')
+  const backup = migrate.indexOf('action_migrate_backup')
+  const rehearsal = migrate.indexOf('action_migrate_rehearse')
+  const apply = migrate.indexOf('action_migrate_apply')
+  assert.ok(inventory >= 0 && inventory < prechecks, 'exact target inventory must precede read-only data prechecks')
+  assert.ok(prechecks < backup, 'read-only prechecks must precede the host backup and all migration writes')
+  assert.ok(backup < rehearsal && rehearsal < apply, 'backup -> clone rehearsal -> real apply order must be fixed')
+  assert.doesNotMatch(migrate, /(?:compose_staging|docker compose)/, 'action=migrate must never switch or recreate an application image')
+
+  const rehearsalStart = remote.indexOf('action_migrate_rehearse() {')
+  const applyStart = remote.indexOf('action_migrate_apply() {', rehearsalStart)
+  const migrateStart = remote.indexOf('action_migrate() {', applyStart)
+  const rehearsalBody = remote.slice(rehearsalStart, applyStart)
+  const applyBody = remote.slice(applyStart, migrateStart)
+  assert.doesNotMatch(rehearsalBody, /staging_exec_env[^\n]+MIGRATE_JS/, 'clone rehearsal must not use the running old image')
+  assert.doesNotMatch(applyBody, /staging_exec[^\n]+MIGRATE_JS/, 'real apply must not use the running old image')
+  assert.ok((rehearsalBody.match(/target_migrate_exec/g) || []).length >= 2, 'rehearsal run + list must use the target image')
+  assert.ok((applyBody.match(/target_migrate_exec/g) || []).length >= 4, 'real list/run/list/confirm must use the target image')
+  assert.match(applyBody, /--confirm 076_create_integration_stock_prep_pack_installs/)
+  assert.match(migrate, /rollout_shadow_flags=OFF/)
+  assert.match(migrate, /application_deployed=no/)
+}
+
+test('action=migrate runs the exact target-SHA migration universe without switching the running app', () => {
+  assertExactTargetMigrationContract({
+    remote: readFileSync(REMOTE_SH, 'utf8'),
+    workflow: readFileSync(WORKFLOW, 'utf8'),
+  })
+})
+
+test('MUTATION: falling back to the running backend for real apply turns the exact-target contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace(
+    'target_migrate_exec -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"',
+    'staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"',
+  )
+  assert.throws(
+    () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /real apply must not use the running old image/,
+  )
+})
+
 // --- action=residue-sweep (bundle §7 "Consolidated final residue sweep") --------------
 
 function extractResidueSweepAction() {
@@ -562,8 +623,8 @@ function assertSoakContract({ remote, workflow }) {
   )
   assert.match(
     workflow,
-    /"\$ACTION" == "deploy" \|\| "\$ACTION" == "smoke" \|\| "\$ACTION" == "soak-flags"/,
-    'deploy_sha must be required for soak-flags (env-only action still pins the RUNNING image tags)',
+    /"\$ACTION" == "deploy" \|\| "\$ACTION" == "migrate" \|\| "\$ACTION" == "smoke" \|\| "\$ACTION" == "soak-flags"/,
+    'deploy_sha must be required for migrate and soak-flags (both are exact-image acts)',
   )
   assert.match(workflow, /export SOAK_ORGS='\$\{SOAK_ORGS\}'/, 'validated soak_orgs must reach the remote script')
   assert.match(workflow, /export SOAK_OPTS='\$\{SOAK_OPTS\}'/, 'validated soak_opts must reach the remote script')
