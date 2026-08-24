@@ -198,12 +198,36 @@ async function insertItem(input: {
   position: number
   mediaId?: string | null
   examId?: string | null
+  completionPolicyVersion?: string | null
+  completionThresholdBps?: number | null
 }): Promise<void> {
+  const policyVersion =
+    input.completionPolicyVersion !== undefined
+      ? input.completionPolicyVersion
+      : input.itemType === 'video'
+        ? 'video-v1-90pct'
+        : null
+  const threshold =
+    input.completionThresholdBps !== undefined
+      ? input.completionThresholdBps
+      : input.itemType === 'video'
+        ? 9000
+        : null
   await pool.query(
     `INSERT INTO elearning_course_version_items
-       (org_id, course_version_id, item_type, position, media_id, exam_id)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [input.org, input.versionId, input.itemType, input.position, input.mediaId ?? null, input.examId ?? null],
+       (org_id, course_version_id, item_type, position, media_id, exam_id,
+        completion_policy_version, completion_threshold_bps)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [
+      input.org,
+      input.versionId,
+      input.itemType,
+      input.position,
+      input.mediaId ?? null,
+      input.examId ?? null,
+      policyVersion,
+      threshold,
+    ],
   )
 }
 
@@ -829,6 +853,62 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     expect(startedWithScore?.code).toBe('23514')
     expect(startedWithScore?.constraint).toBe('elearning_exam_attempts_started_no_grade_chk')
 
+    const videoMissingPolicy = await reject(() =>
+      insertItem({
+        org,
+        versionId: graph.versionId,
+        itemType: 'video',
+        position: 11,
+        mediaId: graph.mediaId,
+        completionPolicyVersion: null,
+        completionThresholdBps: null,
+      }),
+    )
+    expect(videoMissingPolicy?.code).toBe('23514')
+    expect(videoMissingPolicy?.constraint).toBe('elearning_course_version_items_completion_policy_chk')
+
+    const videoZeroThreshold = await reject(() =>
+      insertItem({
+        org,
+        versionId: graph.versionId,
+        itemType: 'video',
+        position: 12,
+        mediaId: graph.mediaId,
+        completionPolicyVersion: 'video-v1-90pct',
+        completionThresholdBps: 0,
+      }),
+    )
+    expect(videoZeroThreshold?.code).toBe('23514')
+    expect(videoZeroThreshold?.constraint).toBe('elearning_course_version_items_completion_policy_chk')
+
+    const videoOverThreshold = await reject(() =>
+      insertItem({
+        org,
+        versionId: graph.versionId,
+        itemType: 'video',
+        position: 13,
+        mediaId: graph.mediaId,
+        completionPolicyVersion: 'video-v1-90pct',
+        completionThresholdBps: 10001,
+      }),
+    )
+    expect(videoOverThreshold?.code).toBe('23514')
+    expect(videoOverThreshold?.constraint).toBe('elearning_course_version_items_completion_policy_chk')
+
+    const examWithPolicy = await reject(() =>
+      insertItem({
+        org,
+        versionId: graph.versionId,
+        itemType: 'exam',
+        position: 14,
+        examId: graph.examId,
+        completionPolicyVersion: 'video-v1-90pct',
+        completionThresholdBps: 9000,
+      }),
+    )
+    expect(examWithPolicy?.code).toBe('23514')
+    expect(examWithPolicy?.constraint).toBe('elearning_course_version_items_completion_policy_chk')
+
     const gradedIncompleteId = await insertAttempt({
       org,
       examId: graph.examId,
@@ -1058,6 +1138,26 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       ),
     )
     expect(String(itemUpdate?.message)).toMatch(/parent course version is draft/)
+
+    const policyUpdate = await reject(() =>
+      pool.query(
+        `UPDATE elearning_course_version_items
+            SET completion_threshold_bps = 8000
+          WHERE org_id = $1 AND course_version_id = $2 AND position = 1`,
+        [org, graph.versionId],
+      ),
+    )
+    expect(String(policyUpdate?.message)).toMatch(/parent course version is draft/)
+
+    const policyVersionUpdate = await reject(() =>
+      pool.query(
+        `UPDATE elearning_course_version_items
+            SET completion_policy_version = 'video-v1-80pct'
+          WHERE org_id = $1 AND course_version_id = $2 AND position = 1`,
+        [org, graph.versionId],
+      ),
+    )
+    expect(String(policyVersionUpdate?.message)).toMatch(/parent course version is draft/)
 
     const itemDelete = await reject(() =>
       pool.query(

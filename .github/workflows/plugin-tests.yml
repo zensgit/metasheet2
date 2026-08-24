@@ -886,9 +886,10 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
 
-      # E-learning V0.1 L0-F3A content/assessment schema gate. Migrations above must
-      # already have applied the two zzzz20260824* files; this suite does not mutate
-      # kysely_migration. DATABASE_URL is required (bash :? and the suite throws).
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates.
+      # Migrations above must already have applied the zzzz20260824* and
+      # zzzz20260825120000 files; these suites do not mutate kysely_migration.
+      # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate
         if: matrix.node-version == '20.x'
@@ -898,6 +899,7 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 content/assessment schema gate}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
+            tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

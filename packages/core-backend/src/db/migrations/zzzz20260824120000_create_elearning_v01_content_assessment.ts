@@ -22,6 +22,11 @@ import { sql } from 'kysely'
  *   - draft UPDATE may change business fields only; version/created_by/created_at
  *     (course_versions) and created_by/created_at (exams) are immutable
  *   - items / exam_questions mutate only while the parent is draft; no cross-parent move
+ *   - video items require completion_policy_version + completion_threshold_bps
+ *     (threshold 1..10000); exam items require both NULL. Writers pass explicit
+ *     values (V0.1 video uses video-v1-90pct / 9000). No column DEFAULT.
+ *   - course_version_items UNIQUE(org_id, course_version_id, id) is the parent
+ *     key for later same-version item composite FKs
  *   - parent-status reads take SELECT ... FOR UPDATE so publish/retire cannot
  *     race a child insert into a frozen parent; retire locks the matching course
  *     FOR UPDATE. The active-pointer trigger reads version status with a plain
@@ -344,7 +349,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       position integer NOT NULL,
       media_id uuid,
       exam_id uuid,
+      completion_policy_version text,
+      completion_threshold_bps integer,
       CONSTRAINT elearning_course_version_items_org_id_id_uniq UNIQUE (org_id, id),
+      CONSTRAINT elearning_course_version_items_org_version_id_uniq
+        UNIQUE (org_id, course_version_id, id),
       CONSTRAINT elearning_course_version_items_org_version_position_uniq
         UNIQUE (org_id, course_version_id, position),
       CONSTRAINT elearning_course_version_items_item_type_chk
@@ -356,6 +365,23 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           (item_type = 'video' AND media_id IS NOT NULL AND exam_id IS NULL)
           OR
           (item_type = 'exam' AND exam_id IS NOT NULL AND media_id IS NULL)
+        ),
+      CONSTRAINT elearning_course_version_items_completion_policy_chk
+        CHECK (
+          (
+            item_type = 'video'
+            AND completion_policy_version IS NOT NULL
+            AND btrim(completion_policy_version) <> ''
+            AND completion_threshold_bps IS NOT NULL
+            AND completion_threshold_bps >= 1
+            AND completion_threshold_bps <= 10000
+          )
+          OR
+          (
+            item_type = 'exam'
+            AND completion_policy_version IS NULL
+            AND completion_threshold_bps IS NULL
+          )
         ),
       CONSTRAINT elearning_course_version_items_version_fk
         FOREIGN KEY (org_id, course_version_id)
