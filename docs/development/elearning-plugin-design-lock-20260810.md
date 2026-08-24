@@ -7,7 +7,7 @@
   - `elearning-plugin-hybrid-architecture-20260810.md`（Codex 混合架构稿，吸收其架构图/责任矩阵/投影矩阵/流程/媒体子架构/验收门）
   - 两轮独立对抗审（v1→审1：5×P1+2×P2；复审→审2：范围冻结 P1、管理范围门、ACL、抑制合同、幂等三态、**org 默认值 P1**）——全部意见已吸收，处置记录 §13。
 - 基准参照：钉钉云课堂公开手册（54 篇全文蒸馏；原始在线入口：https://alidocs.dingtalk.com/i/p/Y7kmbokZp3pgGLq2/docs/lo1YvX0prG98keNkLP1bVPw7xzbmLdEZ ）。本地离线镜像是**未入库研究材料**（`tmp/` 被 .gitignore 排除），不作为可复核路径、不构成仓库合同（审7 P2）。
-- ⚠️ 基线注记：写稿时检出 `chore/approval-wave3-base` 落后本地 `origin/main` **19 个提交**（实测，且仍在增长——此数字本身证明 ratify 前必须重测）。本文 file:line 以当前工作区为准，**ratify 前必须 rebase 至最新 main 并逐条重核**。
+- ⚠️ 基线注记：写稿时检出落后 main；**ratify 前必须 rebase 至最新 main 并逐条重核**。本稿 citation 第四跳已对 `origin/main` `@96b6416717`（2026-08-24）重核，见 §14-③ / §13 审8。
 - 命名约定（ratify 后变更须走 design-lock amendment）：命名空间 `elearning` —— 插件 `plugin-elearning`、权限 `elearning:*`、表前缀 `elearning_`；**前端产品 feature `elearning`（单个，仅管导航/路由展示）+ 服务端 1 个 master `ELEARNING_ENABLED` + 6 个能力 flag `ELEARNING_{CONTENT,ASSIGNMENT,ASSESSMENT,INCENTIVE,ANALYTICS,MEDIA}_ENABLED`**（已裁：采用 ASSIGNMENT/ANALYTICS 命名；canonical 名单 = 此 7 个，环境变量/后端 capability payload/前端 store/测试不得出现别名）。产品显示名（审5 裁决 #9）：**员工端「学习中心」、管理端「云课堂管理」**。
 
 ---
@@ -18,7 +18,7 @@
 
 1. **视频课件管线（M 轨）**：现有文件上限 20MB/100MB，无分片/流播/转码——独立媒体轨在 core 新建（§8）；L1 先行 文章/文档/系列/外链视频（弱判定），受控 MP4 随 M 轨接入。
 2. **调度不能借考勤的**：`AttendanceScheduler` 对所有插件开放注册，但默认 OFF、小时级单周期、串行、同名静默替换、leader 锁另需考勤 env（§6.5 逐条核实）——不当承重底座。自建 `elearning_jobs` due_at + claim-lease worker；**一切正确性判定在 API 路径同步裁决，调度只做异步物化**。
-3. **站内信无可靠持久化实现**：`plugin_notification_history` 迁移存在（`20250924180000:103` 起）但服务是内存态（`NotificationService.ts:536-540`）——不建收件箱，「首页任务列表（SoR 生成的持久化触达面）+ 推送通道」组合。
+3. **站内信无可靠持久化实现**：`plugin_notification_history` 迁移存在（`20250924180000:105` 起）但服务是内存态（`NotificationService.ts:536-540`）——不建收件箱，「首页任务列表（SoR 生成的持久化触达面）+ 推送通道」组合。
 
 规模警告：钉钉这份 54 页手册背后是一条产品线。**必须 L0–L6 分阶段、能力 flag 默认 OFF + 需求门 + 验收门**。L1+L2 即交付可用的企业培训 MVP。
 
@@ -124,7 +124,7 @@ flowchart LR
 
 - 每张 SoR/台账/事件/媒体/投影映射表携带 `org_id`（**审5 裁决 #1：org_id**，附 §14-③ 举证义务；若举证发现组织与平台租户非一一对应，直接升级为显式 `(tenant_id, org_id)` 并成文两者关系，禁止不同表混用而不成文）。
 - **权威组织字段（审6 P1 锁定）**：HTTP 路径的唯一权威来源 = `req.authenticatedTenantId`（`auth/jwt-middleware.ts:101-103`@775d537e：仅当 JWT 本身携带 tenantId 时置位）；**禁止**以 `req.user.tenantId`、全局 tenantContext、或任何可被 `x-tenant-id` 回填的取值路径作为学习域组织来源——tenant-less 旧 token 的 header 回填通道（`jwt-middleware.ts:106-108`：`user.tenantId = headerTenantId`，亲验）对学习域必须不可达。字段缺失 → `403 ORG_CONTEXT_REQUIRED`。worker/作业路径只使用创建时已持久化并校验过的 `job.org_id`，不重新解析请求上下文。
-- **`org_id NOT NULL` 且不设数据库默认值（审2 P1）**：组织值只能由认证上下文显式写入；缺少组织上下文的写入 **fail-closed 拒绝**。`DEFAULT_ORG_ID`（= `'default'`，attendance 历史兼容模式，`zzzz20260612130000:5,59`）**仅允许出现在显式旧数据迁移语句中，不得用于新域运行时写入**——DB 默认值会把「漏传组织」从错误变成静默写入默认组织。
+- **`org_id NOT NULL` 且不设数据库默认值（审2 P1）**：组织值只能由认证上下文显式写入；缺少组织上下文的写入 **fail-closed 拒绝**。`DEFAULT_ORG_ID`（= `'default'`，attendance 历史兼容模式，`zzzz20260612130000_create_attendance_schedule_dispatch_requests.ts:5,59`）**仅允许出现在显式旧数据迁移语句中，不得用于新域运行时写入**——DB 默认值会把「漏传组织」从错误变成静默写入默认组织。
 - 唯一键一律按组织复合：`(org_id, source_key)`、`(org_id, user_id, behavior, ref)`、`(org_id, exam_id, user_id, attempt_no)`……
 - **same-org 外键链必须整链可建（审6 P1）**：每张被引用表显式声明复合父键 `UNIQUE(org_id, id)`——本锁点名 `elearning_assignment_members`、`elearning_scope_revisions`、`elearning_scope_revision_rules`、`elearning_course_versions`；子表引用一律 `(org_id, ref_id)` → 父 `(org_id, id)` 复合 FK 且 `ON DELETE RESTRICT`。head 指针类引用用**三列复合 FK** 钉「同组织且同父对象」：`elearning_scopes(org_id, id, active_revision_id)` → `elearning_scope_revisions(org_id, scope_id, id)`（latest 同构）、`elearning_courses(org_id, id, active_version_id)` → `elearning_course_versions(org_id, course_id, id)`（latest 同构）；规则行 → revision 亦为复合 FK。**门 10 的删除负控必须在真实迁移生成的这条链上执行**（迁移过 migration-replay；任一父键/复合 FK 缺失即门失败）。
 - **幂等三态语义（审2 修订）**：同组织+同 source_key+同规范化载荷（request_hash）→ 幂等重放返回原结果；同组织+同 source_key+不同载荷 → `409 IDEMPOTENCY_CONFLICT`；不同组织+同 source_key → 相互隔离各自独立成功。承载表需存 `request_hash`。
@@ -138,7 +138,7 @@ flowchart LR
 - `elearning_categories`（树）、`elearning_lecturers` + `elearning_lecturer_levels`。
 - **范围对象三表规范化（审3 闭合，审4 消双模型）**：`elearning_scopes`（稳定 head：`active_revision_id`/`latest_revision_id`，各经三列复合 FK `(org_id, id, *_revision_id)` → revisions`(org_id, scope_id, id)` 钉同组织同 scope）+ `elearning_scope_revisions`（revision 元数据：org_id、scope_id、revision、actor_id、reason、created_at；UNIQUE(org_id, scope_id, revision) + 复合父键 UNIQUE(org_id, id)、UNIQUE(org_id, scope_id, id)——分别供规则行复合 FK 与 head 三列复合 FK）+ `elearning_scope_revision_rules`（**随 revision 不可变的规则行**：id PK、org_id、scope_revision_id、subject_type、subject_ref、include_children；索引 (org_id, scope_revision_id, subject_type, subject_ref)；**UNIQUE(org_id, id) 供完成证据建 same-org 复合外键；复合 FK `(org_id, scope_revision_id)` → revisions`(org_id, id)` ON DELETE RESTRICT**）。**运行时可见性查询走 active_revision 的规则行索引 join——审计快照与运行时查询同一存储，无 JSONB 双模型，保住方案 A「索引化 scope join」的原始理由**。改范围 = 写新 revision+规则行 + 移 active 指针，立即生效、不要求重新发布课程；旧 revision 及其规则行永不改写；被 `published_scope_revision_id` 引用的 revision、被完成证据 `scope_revision_rule_id` 外键引用的规则行及其 revision，**由 ON DELETE RESTRICT 在数据库层强制不可删（审5）——引用守卫是可执行约束，不是文档句子**。
 - `elearning_courses`：head 行——分类、讲师、`scope_id`（引用 scopes head；运行时访问判定只读其 active_revision）、**`status` 只表达 head 生命周期：`active|archived|withdrawn`**、`active_version_id`/`latest_version_id` 双指针。
-- `elearning_course_versions`：UNIQUE(org_id, course_id, version) + 复合父键 UNIQUE(org_id, id)、UNIQUE(org_id, course_id, id)（head 双指针经三列复合 FK 钉同组织同课程；引用方 same-org FK 走 (org_id, id)）；**`status: draft|published|retired`（审7 收口：v1 无发布审批 ⇒ 不设 in_review 态，未来审批端口立项时随之新增并列明迁移）；允许迁移仅 draft→published（发布即冻结）、published→retired（停新引用）；retired 不可逆回——重新上架 = 发新版本。版本编辑态在版本层，不在 head**；只冻结 正文引用、内容项、媒体引用、顺序、duration、完成策略版本；已发布版本不可原地修改。**新建草稿只移动 `latest_version_id`，绝不使当前 published 版本下线**——「线上版本在服务 + 新草稿在编辑」是双指针下的常态，单一状态字段无需（也不能）表达它。至多保存 `published_scope_revision_id` 作为发布时点审计指针，**绝不参与当前访问判定**。照抄审批版本冻结模式（`zzzz20260411120100:28-38` versions 表+head 双指针；`:106-110` 实例钉 version_id+snapshot）。
+- `elearning_course_versions`：UNIQUE(org_id, course_id, version) + 复合父键 UNIQUE(org_id, id)、UNIQUE(org_id, course_id, id)（head 双指针经三列复合 FK 钉同组织同课程；引用方 same-org FK 走 (org_id, id)）；**`status: draft|published|retired`（审7 收口：v1 无发布审批 ⇒ 不设 in_review 态，未来审批端口立项时随之新增并列明迁移）；允许迁移仅 draft→published（发布即冻结）、published→retired（停新引用）；retired 不可逆回——重新上架 = 发新版本。版本编辑态在版本层，不在 head**；只冻结 正文引用、内容项、媒体引用、顺序、duration、完成策略版本；已发布版本不可原地修改。**新建草稿只移动 `latest_version_id`，绝不使当前 published 版本下线**——「线上版本在服务 + 新草稿在编辑」是双指针下的常态，单一状态字段无需（也不能）表达它。至多保存 `published_scope_revision_id` 作为发布时点审计指针，**绝不参与当前访问判定**。照抄审批版本冻结模式（`zzzz20260411120100:22-38` templates head 双指针 + versions 表；`:106-110` 实例钉 version_id+snapshot）。
 - `elearning_course_version_items`（版本内子项）、`elearning_media`（storage_key/mime/魔数结果/size/sha256/**服务端探测时长**/status: uploading|probing|ready|rejected）。
 - **访问规则（成文，审2+审3+审7 修正）**：`可访问课程 = head.status ≠ withdrawn AND ( 存在有效 assignment_member（针对某已发布版本，含已 retired 的钉住版本） OR ( head.status = active AND 当前用户命中 scope 的 active_revision ) )`（外层另有 flag/RBAC 门）。**archived 经可见范围的放行归零——新自学与续自学皆被挡，仅有效指派可继续**（审7 修正：旧公式只排 withdrawn，archived 仍会向无指派用户放行，与 archived 语义及门 15 冲突）；withdrawn 全局阻断。范围收缩阻止新自学与续自学，但不破坏有效指派——已指派必修的员工永不因范围收缩或 archived 陷入「有义务但无法学习」死锁。
 - **有效指派定义**：未被显式撤销即有效；**deadline 过期 ≠ 撤销**（逾期仍可学，完成标记逾期）；终止学习义务的唯一途径是显式撤销/终止操作（带审计）。
@@ -148,7 +148,7 @@ flowchart LR
 ### 4.3 范围与指派
 
 - 范围存储 = §4.2 三表规范化模型（**无独立 `elearning_scope_rules` 表**——审4 消除的双模型残留）；`subject_type` 封闭集 **all|department|position|role|user** 与 `include_children` 落在 `elearning_scope_revision_rules` 行上。position 双数据源：`users.position`（`migrations/060`）/ `directory_accounts.title`（`zzzz20260324150000:82-83`）——覆盖率因租户而异，启用职位指派前做数据就绪检查，未达标 UI 明示。
-- `elearning_assignments`（target/deadline/assigned_by/(org_id, source_key)+request_hash 幂等/**course_version_id**，形状抄排班派发表 `zzzz20260612130000`）。
+- `elearning_assignments`（target/deadline/assigned_by/(org_id, source_key)+request_hash 幂等/**course_version_id**，形状抄排班派发表 `zzzz20260612130000_create_attendance_schedule_dispatch_requests.ts`）。
 - `elearning_assignment_members`（**指派时点材料化事实**，source: manual|rule|import；后入部门者不自动追加——连续性由 auto_assign_rules 承担，不重写原始指派快照）。复合父键 **UNIQUE(org_id, id)**（供完成证据 same-org FK）；自身 FK `(org_id, assignment_id)` → assignments`(org_id, id)`。
 - `elearning_auto_assign_rules`（部门/职位谓词 → 目标计划；周报配置）。
 - 完成归类不只存 `required_at_completion` 布尔：证据行用**双可空外键**记访问依据（§4.4 审5 模型）——必修完成置 `assignment_member_id`（产生义务的指派成员行），选修完成置 `scope_revision_rule_id`（**记录服务端完成时采用的命中规则行**，经 revision 可回溯当时规则内容）；`access_basis_kind` 由非空列推导，**不作为独立真相存储**。命中多条规则时求值器取确定性首条（按规则行 id 排序）。**证明力边界（审6 P2 收窄）**：规则行证明的是「服务端按当时目录状态求值命中此规则」，不独立证明用户当时确属该部门/角色——v1 不另存成员关系快照，争议时以目录同步审计与事件时间线佐证。
@@ -185,7 +185,7 @@ L1–L2 需 ~18 张，其余随阶段建。
 ## 5. 权限、范围与前端
 
 ### 5.1 权限码与角色
-`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin-elearning_viewer|operator|admin`（`buildPluginPermissionCode`/`buildPluginRoleId`）。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23180-23283` 样板）。
+`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin-elearning_viewer|operator|admin`（`buildPluginPermissionCode`/`buildPluginRoleId`）。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23529-23614` 样板）。
 
 ### 5.2 管理范围
 `elearning_admin_scopes(user_id, dept_id, include_children)`；**所有管理面 详情/列表/统计/导出 查询强制携带范围谓词，默认拒绝**；列表不得返回范围外行。design-lock 评审时评估与 `delegated_role_admin_scopes` 合并。
@@ -287,7 +287,7 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 - 服务端：`ELEARNING_ENABLED` 总闸 + `ELEARNING_{CONTENT,ASSIGNMENT,ASSESSMENT,INCENTIVE,ANALYTICS,MEDIA}_ENABLED` 能力闸，**全部默认 OFF**（对齐 `src/config/flags.ts:5` 成文约定），在插件路由注册与 handler 双点 fail-closed。L6 扩展逐项独立 flag，不设总 EXTENSIONS 开关。
 - **flag OFF 语义**：新写入与后台任务全部停止；读路径按阶段定义为不可见或只读；**回退语义成文——关 flag 不得留下仍在发送的催学任务**（作业排空进回退清单）。
 - **后端 API 是权威执行门；前端只消费后端返回的有效能力。** flag 不是权限：过 flag 后仍必须过 RBAC、组织与管理范围检查（flag 管发布，RBAC 管授权，互不替代）。
-- 前端产品 feature `elearning` 走五处联动（`config/flags.ts` → `auth.ts buildFeaturePayload`（成文纪律：不从 admin 角色/产品模式/插件状态推断，`auth.ts:281,299-301`@b55c6827——所引为 approvalCanvas 的「never inferred」先例）→ `stores/featureFlags.ts` → `router/types.ts:303` 封闭联合 → `guardPolicy.ts` 白名单），仅管导航/路由展示。
+- 前端产品 feature `elearning` 走五处联动（`config/flags.ts` → `src/routes/auth.ts buildFeaturePayload`（成文纪律：不从 admin 角色/产品模式/插件状态推断，`src/routes/auth.ts:283` 起函数；Canvas V2「never inferred」先例 `:301-303`@96b6416717）→ `stores/featureFlags.ts` → `router/types.ts:303` 封闭联合 → `guardPolicy.ts` 白名单），仅管导航/路由展示。
 - **能力 payload（canonical 结构，审3）**：`GET /api/elearning/capabilities` → `{ enabled: boolean, capabilities: { content, assignment, assessment, incentive, analytics, media } }`；服务端按 master AND 各能力闸计算；前端只消费此结构，不读 env、不自行推断。
 - **flag 与权限的映射示例（审3 确认）**：统计面可用 = `ELEARNING_ANALYTICS_ENABLED` AND (`elearning:stats` OR `elearning:admin`)——前者是发布能力门、后者是 RBAC 授权，分属两个命名空间；权限码保留 `elearning:stats`，不改名。
 
@@ -362,13 +362,14 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 | 审7 P2×3 | 基准 tmp/ 路径不可复核；证明力前半仍称「可证明访问权」；in_review 与「v1 无审批」未闭合 | 采纳；改在线入口+未入库声明；前半改「记录服务端完成时采用的命中规则」；版本态收为 draft\|published\|retired 并列明迁移 | 文首、附录、§4.3、§4.2 |
 | 审7 机械 | 「owner 可整体替换」；「审1–审5」；auth.ts 行号精度 | 改「ratify 后变更须走 design-lock amendment」；审1–审7；`auth.ts:281,299-301`@b55c6827 并注明 approvalCanvas 先例 | 文首、§10、§14 |
 | 审7 追补 P2 | §7.4「owner 在 ratify 批注中覆盖硬下限」与 amendment 纪律冲突——合同逃生口 | 采纳；硬下限 5 锁定、org 只能上调，任何修改走 design-lock amendment；提交说明 six→seven | §7.4、commit message |
+| 审8 机械 | 第四跳 rebase 到 `origin/main` `@96b6416717`（约 280 提交）后 citation 漂移 | 纯机械重钉，不改合同：`AuthService.resolveSessionTenantId` `:387-426`；`buildFeaturePayload` → `src/routes/auth.ts:283`（Canvas never-inferred `:301-303`）；attendance `withPermission` `:23529-23614`；`20250924180000:105`；dispatch 迁移文件名补全；`zzzz20260411120100:22-38`。裁决 #1 实质仍成立（见 §14-③）。状态仍 DRAFT | 文首、§0、§4.1、§4.2、§4.3、§5.1、§10、§14 |
 
 ## 14. Ratify 前置（顺序执行）
 
 1. ✅ 全部审阅意见落稿（审1–审7，处置记录 §13）。
 2. ✅ Owner 九项裁决全部落槌（审5，§9 全 ACCEPTED / DEFERRED TO L6，无「待确认」残留）。
-3. ✅ 基线刷新（三跳完成，ratify 分支 `claude/elearning-design-lock-ratify` rebase 至 `0e1e1778ba`）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，`auth.ts` 重钉 `:281,299-301`，权威组织字段新钉 `jwt-middleware.ts:101-108`，其余锚点（含 `20250924180000:103`）逐一在位；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集（逐文件亲核）；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，**与锚点零交集（逐文件亲核）**，锚点全部继承有效。**裁决 #1 举证完成：会话租户经 `user_orgs` 校验解析（`AuthService.ts:331,345` 亲验）且 `authenticatedTenantId` 仅源于 JWT 自带值——org_id 单键成立，以 §4.1 权威字段锁定为强制前提**。
-4. ⏳ 对 rebase 后的新 commit 做最后一次 exact-commit 复核（审7 令）；通过后才依次执行：状态改 RATIFIED → amend → push → 开 PR 走九门入库。复核通过前三者一律不做。
+3. ✅ 基线刷新（四跳完成；工作分支 `grok/elearning-plugin-20260824` cherry-pick 在 `96b6416717` 之上）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。其余承重锚点亲核仍在位：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`migrations/060_add_users_hr_profile_fields.sql` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
+4. ⏳ 对**本 citation 修订之后的新 commit**做最后一次 exact-commit 复核（审7 令；对象不再是 `b7b5f725e4`）。通过后才依次执行：状态改 RATIFIED → amend → push → 开 PR 走九门入库。复核通过前三者一律不做。
 
 ## 15. 风险登记
 
