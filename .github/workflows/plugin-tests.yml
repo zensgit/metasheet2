@@ -392,8 +392,10 @@ jobs:
       - name: E-learning V0.1 content/assessment CI wiring contract
         run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
 
-      # E-learning V0.1 M1 media ingest: focused unit/route suites must stay in the no-DB
-      # vitest job (not excluded) and named as whole-file args of the media canary step.
+      # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
+      # excluded) and named as a whole-file arg of the unit canary; real-DB
+      # suites stay in the post-migrate 20.x steps; frontend specs stay in
+      # elearning-web-guard.yml and run-required-web-tests.sh.
       - name: E-learning V0.1 media CI wiring contract
         run: node --test scripts/ops/elearning-media-ci-wiring.test.mjs
 
@@ -817,21 +819,35 @@ jobs:
             tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
-      - name: Run elearning V0.1 media ingestion canaries
-        # M1 one-shot upload: flags, auth/org/RBAC/config-before-body, MIME/magic,
-        # probe/codec, quotas, S3 production fail-close, containment, cleanup.
+      - name: Run elearning V0.1 unit canaries
+        id: elearning-v01-unit-canaries
+        # V0.1 units: flags/plugin runtime, content/watch/assignment/exam/publish,
+        # media ingest/playback, pilot routes/runtime, migration contract.
         # Whole-file args so a name filter matching zero tests cannot skip-green.
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
-            tests/unit/elearning-media-validation.test.ts \
-            tests/unit/elearning-media-probe.test.ts \
-            tests/unit/elearning-media-storage.test.ts \
-            tests/unit/elearning-media-quota.test.ts \
-            tests/unit/elearning-media-runtime.test.ts \
-            tests/unit/elearning-media-routes.test.ts \
+            tests/unit/elearning-course-publish.test.ts \
+            tests/unit/elearning-direct-assignment.test.ts \
+            tests/unit/elearning-exam.test.ts \
+            tests/unit/elearning-flags.test.ts \
+            tests/unit/elearning-learner-courses.test.ts \
             tests/unit/elearning-media-ingest.test.ts \
+            tests/unit/elearning-media-playback-routes.test.ts \
+            tests/unit/elearning-media-playback-runtime.test.ts \
+            tests/unit/elearning-media-playback.test.ts \
+            tests/unit/elearning-media-probe.test.ts \
+            tests/unit/elearning-media-quota.test.ts \
             tests/unit/elearning-media-reconciler.test.ts \
+            tests/unit/elearning-media-routes.test.ts \
+            tests/unit/elearning-media-runtime.test.ts \
             tests/unit/elearning-media-s3.test.ts \
+            tests/unit/elearning-media-storage.test.ts \
+            tests/unit/elearning-media-validation.test.ts \
+            tests/unit/elearning-pilot-routes.test.ts \
+            tests/unit/elearning-pilot-runtime.test.ts \
+            tests/unit/elearning-plugin-runtime.test.ts \
+            tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
+            tests/unit/elearning-watch-progress.test.ts \
             --reporter=dot
 
       - name: Start Postgres

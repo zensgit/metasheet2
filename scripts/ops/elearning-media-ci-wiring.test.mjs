@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import yaml from 'js-yaml'
 import {
   isQuotedInTestExclude,
   isSuiteWiredInRealDbStep,
@@ -15,23 +16,92 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
+const WEB_GUARD = join(repoRoot, '.github/workflows/elearning-web-guard.yml')
+const REQUIRED_WEB = join(repoRoot, 'apps/web/scripts/run-required-web-tests.sh')
 const DOCKERFILE = join(repoRoot, 'Dockerfile.backend')
 const ENV_EXAMPLE = join(repoRoot, '.env.example')
 const PROBE_SRC = join(repoRoot, 'packages/core-backend/src/services/elearning-media-probe.ts')
 const RUNTIME_SRC = join(repoRoot, 'packages/core-backend/src/services/elearning-media-runtime.ts')
 const ROUTES_SRC = join(repoRoot, 'packages/core-backend/src/routes/elearning-media.ts')
 const INDEX_SRC = join(repoRoot, 'packages/core-backend/src/index.ts')
+const UNIT_DIR = join(repoRoot, 'packages/core-backend/tests/unit')
+const INTEGRATION_DIR = join(repoRoot, 'packages/core-backend/tests/integration')
+const WEB_TEST_DIR = join(repoRoot, 'apps/web/tests')
 
-const SUITES = [
-  'tests/unit/elearning-media-validation.test.ts',
-  'tests/unit/elearning-media-probe.test.ts',
-  'tests/unit/elearning-media-storage.test.ts',
-  'tests/unit/elearning-media-quota.test.ts',
-  'tests/unit/elearning-media-runtime.test.ts',
-  'tests/unit/elearning-media-routes.test.ts',
-  'tests/unit/elearning-media-ingest.test.ts',
-  'tests/unit/elearning-media-reconciler.test.ts',
-  'tests/unit/elearning-media-s3.test.ts',
+const SUITES = readdirSync(UNIT_DIR)
+  .filter((name) => /^elearning-.*\.test\.ts$/.test(name))
+  .map((name) => `tests/unit/${name}`)
+  .sort()
+
+const DB_SUITES = readdirSync(INTEGRATION_DIR)
+  .filter((name) => /^elearning-.*\.db\.test\.ts$/.test(name))
+  .map((name) => `tests/integration/${name}`)
+  .sort()
+
+const WEB_SPECS = [
+  'tests/elearning-client.spec.ts',
+  'tests/elearning-learner-view.spec.ts',
+  'tests/elearning-admin-view.spec.ts',
+  'tests/elearning-routes.spec.ts',
+]
+
+const WEB_GUARD_PATHS = [
+  'apps/web/src/services/elearning.ts',
+  'apps/web/src/views/ElearningAdminView.vue',
+  'apps/web/src/views/ElearningLearnerView.vue',
+  'apps/web/src/router/appRoutes.ts',
+  'apps/web/src/router/types.ts',
+  'apps/web/src/router/guardPolicy.ts',
+  'apps/web/src/stores/featureFlags.ts',
+  'plugins/plugin-elearning/app.manifest.json',
+  'apps/web/tests/elearning-client.spec.ts',
+  'apps/web/tests/elearning-learner-view.spec.ts',
+  'apps/web/tests/elearning-admin-view.spec.ts',
+  'apps/web/tests/elearning-routes.spec.ts',
+  '.github/workflows/elearning-web-guard.yml',
+]
+
+const SCHEMA_DB_FILES = [
+  'tests/integration/elearning-v01-content-assessment-schema.db.test.ts',
+  'tests/integration/elearning-v01-watch-progress-schema.db.test.ts',
+  'tests/integration/elearning-watch-progress-service.db.test.ts',
+  'tests/integration/elearning-direct-assignment.db.test.ts',
+  'tests/integration/elearning-course-publish.db.test.ts',
+  'tests/integration/elearning-exam-service.db.test.ts',
+  'tests/integration/elearning-learner-courses.db.test.ts',
+  'tests/integration/elearning-media-playback.db.test.ts',
+]
+
+const SCHEMA_DB_STEP_ID = 'elearning-v01-content-assessment-schema-gate'
+const EXISTING_REQUIRED_WEB_TOKENS = [
+  'tests/api.spec.ts',
+  'approval-canvas-commands',
+  'featureFlagsApprovalAttachments',
+  'tests/App.spec.ts',
+  'approval-comments-panel',
+]
+
+const CANONICAL_ELEARNING_FLAGS = [
+  'ELEARNING_ENABLED',
+  'ELEARNING_CONTENT_ENABLED',
+  'ELEARNING_ASSIGNMENT_ENABLED',
+  'ELEARNING_ASSESSMENT_ENABLED',
+  'ELEARNING_INCENTIVE_ENABLED',
+  'ELEARNING_ANALYTICS_ENABLED',
+  'ELEARNING_MEDIA_ENABLED',
+]
+
+const V01_REQUIRED_FLAGS = [
+  'ELEARNING_ENABLED',
+  'ELEARNING_CONTENT_ENABLED',
+  'ELEARNING_ASSIGNMENT_ENABLED',
+  'ELEARNING_ASSESSMENT_ENABLED',
+  'ELEARNING_MEDIA_ENABLED',
+]
+
+const V01_PARKED_FLAGS = [
+  'ELEARNING_INCENTIVE_ENABLED',
+  'ELEARNING_ANALYTICS_ENABLED',
 ]
 
 const MEDIA_CLAIM_UNIT_FILES = [
@@ -69,6 +139,69 @@ function namedStepContaining(wf, pos) {
   return wf.slice(start, end === -1 ? wf.length : end)
 }
 
+function refusesNameFilters(run, label) {
+  assert.equal(/\s-t(?:\s|=|$)/.test(run), false, `${label} must not use a -t filter`)
+  assert.equal(run.includes('--testNamePattern'), false, `${label} must not use --testNamePattern`)
+  assert.equal(/\s--name(?:\s|=|$)/.test(run), false, `${label} must not use a --name filter`)
+}
+
+function refusesSkipShapedGreen(text, label) {
+  const executable = uncommentedLines(text)
+  assert.equal(executable.includes('continue-on-error'), false, `${label} must not set continue-on-error`)
+  assert.equal(/\|\|\s*true\b/.test(executable), false, `${label} must not swallow vitest failures with || true`)
+  assert.doesNotMatch(executable, /if:\s*false\b/, `${label} must not disable itself with if: false`)
+}
+
+function joinContinuedLines(text) {
+  const logical = []
+  let pending = null
+  for (const line of uncommentedLines(text).split('\n')) {
+    const continued = /\\\s*$/.test(line)
+    const body = continued ? line.replace(/\\\s*$/, ' ') : line
+    pending = pending === null ? body : `${pending}${body}`
+    if (!continued) {
+      logical.push(pending)
+      pending = null
+    }
+  }
+  if (pending !== null) logical.push(pending)
+  return logical
+}
+
+function vitestRunInvocations(text) {
+  return joinContinuedLines(text)
+    .map((line) => line.trim())
+    .filter((line) => /\bvitest\b/.test(line) && /\brun\b/.test(line))
+}
+
+function invocationFileArgs(line) {
+  return line
+    .split(/\s+/)
+    .filter((token) => /^tests\/\S+\.(?:test|spec)\.[tj]sx?$/.test(token))
+}
+
+function parseYaml(text) {
+  const doc = yaml.load(text)
+  assert.ok(doc && typeof doc === 'object', 'workflow YAML must parse')
+  return doc
+}
+
+function workflowOn(doc) {
+  return doc.on ?? doc.true
+}
+
+function commentBlockStarting(text, headingRe, label) {
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => headingRe.test(line))
+  assert.ok(start >= 0, `.env.example must keep the ${label} contract`)
+  const block = [lines[start]]
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (!/^#\s{2,}\S/.test(lines[i])) break
+    block.push(lines[i])
+  }
+  return block.join('\n')
+}
+
 test('elearning media focused suites exist and are not excluded from the no-DB vitest job', () => {
   const cfg = readFileSync(VITEST_CFG, 'utf8')
   for (const file of SUITES) {
@@ -82,19 +215,20 @@ test('elearning media focused suites exist and are not excluded from the no-DB v
   }
 })
 
-test('plugin-tests.yml keeps the core-backend test job and an explicit media canary', () => {
+test('plugin-tests.yml keeps the core-backend test job and an explicit unit canary', () => {
+  assert.ok(SUITES.length > 0, 'at least one elearning unit file must exist on disk')
   const wf = readFileSync(WORKFLOW, 'utf8')
   assert.match(wf, /pnpm --filter @metasheet\/core-backend test/)
-  assert.match(wf, /Run elearning V0\.1 media ingestion canaries/)
-  const canaryAt = wf.indexOf('Run elearning V0.1 media ingestion canaries')
-  assert.ok(canaryAt >= 0, 'media canary step must exist')
+  assert.match(wf, /id: elearning-v01-unit-canaries/)
+  const canaryAt = wf.indexOf('Run elearning V0.1 unit canaries')
+  assert.ok(canaryAt >= 0, 'unit canary step must exist')
   const canary = namedStepContaining(wf, canaryAt)
+  refusesSkipShapedGreen(canary, 'unit canary')
   const runAt = canary.search(/^\s+run:/m)
-  assert.ok(runAt >= 0, 'media canary must have a run script')
+  assert.ok(runAt >= 0, 'unit canary must have a run script')
   const run = canary.slice(runAt)
   assert.match(run, /\bvitest\b/)
-  assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'media canary must not use a -t filter')
-  assert.equal(run.includes('--testNamePattern'), false, 'media canary must not use --testNamePattern')
+  refusesNameFilters(run, 'unit canary')
   for (const file of SUITES) {
     assert.ok(wholeFileArg(run, file), `plugin-tests.yml canary must name ${file} as a whole-file vitest arg`)
   }
@@ -153,9 +287,7 @@ test('quota DB suite exists, is excluded, and is a post-Postgres whole-file vite
     new RegExp(`(?:^|\\s)${DB_SUITE.replace(/\./g, '\\.')}(?:\\s|$)`),
     `${DB_SUITE} must be an exact whole-file vitest argument`,
   )
-  assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'DB step must not use a -t filter')
-  assert.equal(run.includes('--testNamePattern'), false, 'DB step must not use --testNamePattern')
-  assert.equal(/\s--name(?:\s|=|$)/.test(run), false, 'DB step must not use a --name filter')
+  refusesNameFilters(run, 'quota DB step')
   assert.match(
     step,
     /DATABASE_URL:\s*postgresql:\/\/postgres@localhost:5432\/metasheet_test/,
@@ -286,6 +418,67 @@ test('env example documents media flags, explicit quotas, and S3/local storage',
   ]) {
     assert.ok(env.includes(key), `.env.example must document ${key}`)
   }
+  for (const key of [
+    'ELEARNING_MEDIA_MAX_OBJECT_BYTES',
+    'ELEARNING_MEDIA_ORG_QUOTA_BYTES',
+    'ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET',
+  ]) {
+    assert.match(
+      env,
+      new RegExp(`^#\\s*${key}=\\s*$`, 'm'),
+      `.env.example must keep ${key} empty (no invented quota/secret default)`,
+    )
+  }
+})
+
+test('env example documents the seven canonical flags default false and V0.1 required vs parked contract', () => {
+  const env = readFileSync(ENV_EXAMPLE, 'utf8')
+  assert.equal(CANONICAL_ELEARNING_FLAGS.length, 7)
+  assert.equal(V01_REQUIRED_FLAGS.length, 5)
+  assert.equal(V01_PARKED_FLAGS.length, 2)
+  assert.deepEqual(
+    [...V01_REQUIRED_FLAGS, ...V01_PARKED_FLAGS].sort(),
+    [...CANONICAL_ELEARNING_FLAGS].sort(),
+  )
+  assert.match(
+    env,
+    /seven canonical flags default false/,
+    '.env.example must keep the seven-flag default-false contract',
+  )
+  for (const key of CANONICAL_ELEARNING_FLAGS) {
+    assert.match(
+      env,
+      new RegExp(`^#\\s*${key}=false\\s*$`, 'm'),
+      `.env.example must keep the canonical ${key}=false line`,
+    )
+  }
+  const requiredBlock = commentBlockStarting(env, /V0\.1 required flags/, 'V0.1 required flags')
+  for (const key of V01_REQUIRED_FLAGS) {
+    assert.ok(requiredBlock.includes(key), `V0.1 required contract must name ${key}`)
+  }
+  for (const key of V01_PARKED_FLAGS) {
+    assert.equal(
+      requiredBlock.includes(key),
+      false,
+      `${key} must stay parked and must not appear in the V0.1 required contract`,
+    )
+  }
+  const parkedBlock = commentBlockStarting(env, /Parked for V0\.1/, 'parked/default')
+  assert.match(
+    parkedBlock,
+    /remain default false/,
+    '.env.example must keep the parked flags remain-default-false contract',
+  )
+  for (const key of V01_PARKED_FLAGS) {
+    assert.ok(parkedBlock.includes(key), `parked/default contract must name ${key}`)
+  }
+  for (const key of V01_REQUIRED_FLAGS) {
+    assert.equal(
+      parkedBlock.includes(key),
+      false,
+      `${key} is V0.1 required and must not appear in the parked/default contract`,
+    )
+  }
 })
 
 test('probe invokes ffprobe without a shell; runtime uses rbacGuard elearning write', () => {
@@ -298,4 +491,164 @@ test('probe invokes ffprobe without a shell; runtime uses rbacGuard elearning wr
   const routes = readFileSync(ROUTES_SRC, 'utf8')
   assert.match(routes, /isElearningMediaSurfaceEnabled/)
   assert.match(routes, /ORG_CONTEXT_REQUIRED/)
+})
+
+test('schema/service real-DB step keeps prior files and the four missing V0.1 suites as whole-file args', () => {
+  for (const file of SCHEMA_DB_FILES) {
+    const abs = join(repoRoot, 'packages/core-backend', file)
+    assert.ok(existsSync(abs), `suite ${file} must exist on disk`)
+  }
+  const wf = readFileSync(WORKFLOW, 'utf8')
+  const step = requireExecutableRealDbStep(wf, SCHEMA_DB_STEP_ID)
+  refusesSkipShapedGreen(typeof step.run === 'string' ? step.run : '', 'schema/service real-DB step')
+  refusesNameFilters(typeof step.run === 'string' ? step.run : '', 'schema/service real-DB step')
+  for (const file of SCHEMA_DB_FILES) {
+    assert.ok(
+      isSuiteWiredInRealDbStep(wf, SCHEMA_DB_STEP_ID, file),
+      `plugin-tests.yml real-DB step id "${SCHEMA_DB_STEP_ID}" must run ${file} as a whole-file vitest arg`,
+    )
+    assert.equal(
+      realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval).includes(file),
+      false,
+      `${file} must not be wired into the approval real-DB step`,
+    )
+    assert.equal(
+      realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(file),
+      false,
+      `${file} must not be wired into the multitable real-DB step`,
+    )
+    assert.equal(
+      realDbStepWholeFileArgs(wf, MEDIA_DB_STEP_ID).includes(file),
+      false,
+      `${file} must stay in the schema/service step, not the quota/reconciler step`,
+    )
+  }
+  const wired = realDbStepWholeFileArgs(wf, SCHEMA_DB_STEP_ID)
+  for (const file of SCHEMA_DB_FILES) {
+    assert.equal(wired.includes(file), true, `${file} must be present in ${SCHEMA_DB_STEP_ID}`)
+  }
+})
+
+test('every on-disk elearning real-DB suite is a whole-file arg of exactly one post-migrate step', () => {
+  assert.ok(DB_SUITES.length > 0, 'at least one elearning real-DB suite must exist on disk')
+  const cfg = readFileSync(VITEST_CFG, 'utf8')
+  const wf = readFileSync(WORKFLOW, 'utf8')
+  const schemaWired = realDbStepWholeFileArgs(wf, SCHEMA_DB_STEP_ID)
+  const mediaWired = realDbStepWholeFileArgs(wf, MEDIA_DB_STEP_ID)
+  assert.equal(mediaWired.includes(DB_SUITE), true)
+  assert.equal(mediaWired.includes(RECONCILER_DB), true)
+  const union = new Set([...schemaWired, ...mediaWired])
+  const startPg = wf.indexOf('- name: Start Postgres')
+  const migrateAt = wf.indexOf('pnpm --filter @metasheet/core-backend db:migrate')
+  assert.ok(startPg >= 0, 'workflow must contain Start Postgres')
+  assert.ok(migrateAt >= 0, 'workflow must contain db:migrate')
+  assert.ok(startPg < migrateAt, 'Start Postgres must precede db:migrate')
+  const approvalWired = realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval)
+  const multitableWired = realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable)
+  for (const file of DB_SUITES) {
+    assert.ok(
+      isQuotedInTestExclude(cfg, file),
+      `test.exclude must contain the exact quoted entry '${file}'`,
+    )
+    assert.equal(
+      union.has(file),
+      true,
+      `${file} must be a whole-file arg of the schema/service or quota/reconciler real-DB step`,
+    )
+    assert.equal(
+      schemaWired.includes(file) && mediaWired.includes(file),
+      false,
+      `${file} must not be duplicated across both elearning real-DB steps`,
+    )
+    const inSchema = schemaWired.includes(file) ? 1 : 0
+    const inMedia = mediaWired.includes(file) ? 1 : 0
+    assert.equal(
+      inSchema + inMedia,
+      1,
+      `${file} must appear in exactly one elearning post-migrate real-DB step`,
+    )
+    assert.equal(
+      approvalWired.includes(file),
+      false,
+      `${file} must not be wired into the approval real-DB step`,
+    )
+    assert.equal(
+      multitableWired.includes(file),
+      false,
+      `${file} must not be wired into the multitable real-DB step`,
+    )
+    const hits = []
+    for (let from = 0; ; ) {
+      const at = wf.indexOf(file, from)
+      if (at < 0) break
+      hits.push(at)
+      from = at + file.length
+    }
+    assert.equal(hits.length, 1, `${file} must appear exactly once in plugin-tests.yml`)
+    for (const at of hits) {
+      assert.ok(at > startPg, `${file} must appear only after Start Postgres`)
+      assert.ok(at > migrateAt, `${file} must appear only after db:migrate`)
+    }
+  }
+})
+
+test('elearning V0.1 frontend specs exist on disk', () => {
+  const onDisk = readdirSync(WEB_TEST_DIR)
+    .filter((name) => /^elearning-.*\.spec\.ts$/.test(name))
+    .map((name) => `tests/${name}`)
+    .sort()
+  assert.deepEqual(onDisk, [...WEB_SPECS].sort())
+  for (const file of WEB_SPECS) {
+    assert.ok(existsSync(join(repoRoot, 'apps/web', file)), `${file} must exist on disk`)
+  }
+})
+
+test('elearning-web-guard.yml parses, installs frozen deps, and runs the four whole spec files', () => {
+  assert.ok(existsSync(WEB_GUARD), 'elearning-web-guard.yml must exist')
+  const yaml = readFileSync(WEB_GUARD, 'utf8')
+  const doc = parseYaml(yaml)
+  const on = workflowOn(doc)
+  assert.ok(on?.pull_request?.paths, 'web guard must be a path-filtered pull_request workflow')
+  const paths = on.pull_request.paths
+  for (const path of WEB_GUARD_PATHS) {
+    assert.equal(paths.includes(path), true, `web guard pull_request.paths must include ${path}`)
+  }
+  refusesSkipShapedGreen(yaml, 'elearning-web-guard.yml')
+  assert.match(yaml, /pnpm install --frozen-lockfile/)
+  const runStepAt = yaml.indexOf('Run elearning V0.1 web guard specs (targeted)')
+  assert.ok(runStepAt >= 0, 'web guard must have a targeted spec step')
+  const runStep = namedStepContaining(yaml, runStepAt)
+  const runAt = runStep.search(/^\s+run:/m)
+  assert.ok(runAt >= 0, 'web guard spec step must have a run script')
+  const run = runStep.slice(runAt)
+  assert.match(run, /\bvitest\b/)
+  refusesNameFilters(run, 'elearning web guard')
+  for (const file of WEB_SPECS) {
+    assert.ok(wholeFileArg(run, file), `web guard must name ${file} as a whole-file vitest arg`)
+  }
+  const invocations = vitestRunInvocations(run)
+  assert.equal(invocations.length, 1, 'web guard must use exactly one vitest run invocation')
+  assert.deepEqual(invocationFileArgs(invocations[0]).sort(), [...WEB_SPECS].sort())
+})
+
+test('run-required-web-tests.sh keeps existing tokens and adds a distinct four-file elearning invocation', () => {
+  assert.ok(existsSync(REQUIRED_WEB), 'run-required-web-tests.sh must exist')
+  const src = readFileSync(REQUIRED_WEB, 'utf8')
+  for (const token of EXISTING_REQUIRED_WEB_TOKENS) {
+    assert.ok(src.includes(token), `run-required-web-tests.sh must preserve existing token ${token}`)
+  }
+  refusesNameFilters(src, 'run-required-web-tests.sh')
+  const invocations = vitestRunInvocations(src)
+  const targeted = invocations.filter((line) => WEB_SPECS.every((file) => wholeFileArg(line, file)))
+  assert.equal(
+    targeted.length,
+    1,
+    'run-required-web-tests.sh must have exactly one distinct invocation that names all four elearning specs',
+  )
+  assert.deepEqual(
+    invocationFileArgs(targeted[0]).sort(),
+    [...WEB_SPECS].sort(),
+    'the targeted elearning invocation must run exactly the four whole spec files',
+  )
+  assert.equal(targeted[0].includes('exec '), false, 'the targeted elearning invocation must not be the final exec batch')
 })
