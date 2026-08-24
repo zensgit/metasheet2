@@ -2,6 +2,8 @@
 // Original filled pictograms (面性 language, not Feishu trademark assets).
 // Admin persists { makeup, leave, overtime, swap } on attendance settings;
 // unknown/invalid keys fall back to these defaults.
+// Owner lock (2026-08-24): default glyphs are accepted — clock-plus / calendar /
+// moon / swap. Do not restyle or replace those defaults.
 
 export const COMMON_ICON_IDS = [
   'clock-plus',

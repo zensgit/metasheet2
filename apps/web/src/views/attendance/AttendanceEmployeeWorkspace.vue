@@ -20,6 +20,12 @@
 
   Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
   DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
+
+  Owner lock (2026-08-24): first-viewport IA is frozen.
+  Desktop: punch|待办 + compact 申请 footer; 常用 full-width below.
+  Mobile: punch → 待办+申请 footer → 常用.
+  缺卡 row uses the makeup 面性 icon; never the character 缺.
+  No employee 自定义. Admin-only icon settings. Do not restyle further.
 -->
 <template>
   <div class="attendance-ew">
@@ -31,11 +37,9 @@
     </div>
 
     <!--
-      Lock §7 first viewport: daily workspace (punch + status) is the dominant
-      column; the one canonical attention item is the supporting column. Status
-      banner stays in the today column (lock §4.1 / §5: below the daily
-      workspace, never inside the history disclosure). Tools stay below this
-      primary row so they cannot compete with today's work.
+      Owner lock 2026-08-24 + lock §7: desktop punch | 待办+申请 footer;
+      常用 is a full-width band below. Status banner stays in the today
+      column. History filters stay below this primary row.
     -->
     <div class="attendance-ew__primary" data-attendance-overview-primary>
     <div class="attendance-ew__today">
