@@ -4593,7 +4593,523 @@ components:
             evaluatedAt:
               type: string
               format: date-time
+    # E-learning V0.1 named-pilot public HTTP DTOs. Closed objects: no storage keys,
+    # signing material, answer keys, explanations, or paper snapshots on learner reads.
+    ElearningUuid:
+      type: string
+      format: uuid
+      pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    ElearningError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Values-free error code. No hosts, secrets, storage keys, or flag names.
+    ElearningEmptyObject:
+      type: object
+      additionalProperties: false
+    ElearningQuestionType:
+      type: string
+      enum: [single_choice, multiple_choice, true_false]
+    ElearningCapabilityFlags:
+      type: object
+      additionalProperties: false
+      required: [content, assignment, assessment, incentive, analytics, media]
+      properties:
+        content: { type: boolean }
+        assignment: { type: boolean }
+        assessment: { type: boolean }
+        incentive:
+          type: boolean
+          description: Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness.
+        analytics:
+          type: boolean
+          description: Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness.
+        media: { type: boolean }
+    ElearningCapabilities:
+      type: object
+      additionalProperties: false
+      required: [enabled, capabilities]
+      description: |
+        Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
+        plus content, assignment, assessment, and media all true. Incentive and
+        analytics stay parked and must not be treated as readiness inputs.
+      properties:
+        enabled: { type: boolean }
+        capabilities:
+          $ref: '#/components/schemas/ElearningCapabilityFlags'
+    ElearningMediaRejectCode:
+      type: string
+      enum:
+        - file_too_large
+        - too_many_files
+        - mime_not_allowed
+        - extension_not_allowed
+        - extension_mime_mismatch
+        - content_mime_mismatch
+        - invalid_size
+        - org_quota_exceeded
+        - upload_rejected
+    ElearningMediaReject:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        code:
+          $ref: '#/components/schemas/ElearningMediaRejectCode'
+    ElearningMediaRejectError:
+      type: object
+      additionalProperties: false
+      required: [error, rejected]
+      properties:
+        error:
+          type: string
+          enum: [rejected]
+        rejected:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ElearningMediaReject'
+    ElearningMediaUploadResult:
+      type: object
+      additionalProperties: false
+      required: [id, status, durationMs, sizeBytes, sha256]
+      description: Values-free media metadata. Never includes storageKey or client duration.
+      properties:
+        id:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [ready, rejected]
+        durationMs:
+          type: integer
+          nullable: true
+          description: Server-probed duration in milliseconds. Null when status is rejected.
+        sizeBytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    ElearningPublishOption:
+      type: object
+      additionalProperties: false
+      required: [id, text]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 64
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+    ElearningPublishQuestion:
+      type: object
+      additionalProperties: false
+      required: [questionType, prompt, options, correctOptionIds, points]
+      properties:
+        questionType:
+          $ref: '#/components/schemas/ElearningQuestionType'
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        options:
+          type: array
+          minItems: 2
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/ElearningPublishOption'
+        correctOptionIds:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            minLength: 1
+          description: Admin-only write field. Never returned on learner exam start/submit.
+        points:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+          description: Optional admin write field. Never returned on learner exam surfaces.
+    ElearningCoursePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, title, mediaId, passScore, maxAttempts, questions]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        mediaId:
+          $ref: '#/components/schemas/ElearningUuid'
+        passScore:
+          type: number
+          minimum: 0
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        questions:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/ElearningPublishQuestion'
+    ElearningCoursePublishResult:
+      type: object
+      additionalProperties: false
+      required: [courseId, courseVersionId, videoItemId, examItemId, examId, status, questionCount, totalScore]
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        videoItemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        examItemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        examId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [published]
+        questionCount:
+          type: integer
+          minimum: 1
+        totalScore:
+          type: integer
+          minimum: 1
+    ElearningDirectAssignmentRequest:
+      type: object
+      additionalProperties: false
+      required: [targetUserId, courseVersionId, sourceKey]
+      properties:
+        targetUserId:
+          type: string
+          minLength: 1
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        sourceKey:
+          type: string
+          minLength: 1
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+    ElearningDirectAssignmentResult:
+      type: object
+      additionalProperties: false
+      required: [assignmentId, memberId, duplicate]
+      properties:
+        assignmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        memberId:
+          $ref: '#/components/schemas/ElearningUuid'
+        duplicate: { type: boolean }
+    ElearningLearnerAssignment:
+      type: object
+      additionalProperties: false
+      required: [deadline, assignedAt]
+      properties:
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+        assignedAt:
+          type: string
+          format: date-time
+    ElearningLearnerVideo:
+      type: object
+      additionalProperties: false
+      required: [itemId, durationMs, status, effectiveMs, maxPositionMs, completedAt]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        durationMs:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [not_started, in_progress, completed]
+        effectiveMs:
+          type: integer
+          minimum: 0
+        maxPositionMs:
+          type: integer
+          minimum: 0
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+    ElearningLearnerExamAttempt:
+      type: object
+      additionalProperties: false
+      required: [attemptId, attemptNo, status, autoScore, totalScore, passed, startedAt, submittedAt, gradedAt]
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        attemptNo:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [started, submitted, graded, expired]
+        autoScore:
+          type: number
+          nullable: true
+        totalScore:
+          type: number
+          nullable: true
+        passed:
+          type: boolean
+          nullable: true
+        startedAt:
+          type: string
+          format: date-time
+        submittedAt:
+          type: string
+          format: date-time
+          nullable: true
+        gradedAt:
+          type: string
+          format: date-time
+          nullable: true
+    ElearningLearnerExam:
+      type: object
+      additionalProperties: false
+      required: [itemId, latestAttempt]
+      properties:
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        latestAttempt:
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerExamAttempt'
+          nullable: true
+    ElearningLearnerCourse:
+      type: object
+      additionalProperties: false
+      required: [courseId, courseVersionId, title, assignment, video, exam, completed]
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+        assignment:
+          $ref: '#/components/schemas/ElearningLearnerAssignment'
+        video:
+          $ref: '#/components/schemas/ElearningLearnerVideo'
+        exam:
+          $ref: '#/components/schemas/ElearningLearnerExam'
+        completed: { type: boolean }
+    ElearningLearnerCourseList:
+      type: object
+      additionalProperties: false
+      required: [courses]
+      properties:
+        courses:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningLearnerCourse'
+    ElearningWatchState:
+      type: object
+      additionalProperties: false
+      required:
+        - sessionId
+        - status
+        - lastSequence
+        - lastClientPositionMs
+        - effectiveMs
+        - maxPositionMs
+        - durationMs
+        - creditedMs
+        - duplicate
+      properties:
+        sessionId:
+          allOf:
+            - $ref: '#/components/schemas/ElearningUuid'
+          nullable: true
+        status:
+          type: string
+          enum: [in_progress, completed]
+        lastSequence:
+          type: integer
+          minimum: 0
+        lastClientPositionMs:
+          type: integer
+          minimum: 0
+        effectiveMs:
+          type: integer
+          minimum: 0
+        maxPositionMs:
+          type: integer
+          minimum: 0
+        durationMs:
+          type: integer
+          minimum: 0
+        creditedMs:
+          type: integer
+          minimum: 0
+        duplicate: { type: boolean }
+    ElearningHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [sequence, positionMs, playing]
+      properties:
+        sequence:
+          type: integer
+          minimum: 1
+        positionMs:
+          type: integer
+          minimum: 0
+        playing: { type: boolean }
+    ElearningPlaybackTicket:
+      type: object
+      additionalProperties: false
+      required: [token, expiresAt, ttlSeconds, itemId, mediaId]
+      description: Opaque HMAC playback ticket. Never includes storage keys or signing secrets.
+      properties:
+        token:
+          type: string
+          minLength: 1
+        expiresAt:
+          type: string
+          format: date-time
+        ttlSeconds:
+          type: integer
+          minimum: 1
+          maximum: 600
+        itemId:
+          $ref: '#/components/schemas/ElearningUuid'
+        mediaId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningPublicOption:
+      type: object
+      additionalProperties: false
+      required: [id, text]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        text:
+          type: string
+          minLength: 1
+    ElearningPublicQuestion:
+      type: object
+      additionalProperties: false
+      required: [position, questionRevisionId, questionType, prompt, options, points]
+      description: Learner-visible question. No answerKey, correct ids, or explanation.
+      properties:
+        position:
+          type: integer
+          minimum: 1
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionType:
+          $ref: '#/components/schemas/ElearningQuestionType'
+        prompt:
+          type: string
+          minLength: 1
+        options:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ElearningPublicOption'
+        points:
+          type: integer
+          minimum: 0
+    ElearningPublicPaper:
+      type: object
+      additionalProperties: false
+      required: [domain, version, questions]
+      description: Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot secrets.
+      properties:
+        domain:
+          type: string
+          enum: [elearning.exam.paper.v1]
+        version:
+          type: integer
+          enum: [1]
+        questions:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ElearningPublicQuestion'
+    ElearningExamStartResult:
+      type: object
+      additionalProperties: false
+      required: [attemptId, attemptNo, status, paper, duplicate]
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        attemptNo:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [started]
+        paper:
+          $ref: '#/components/schemas/ElearningPublicPaper'
+        duplicate: { type: boolean }
+    ElearningExamSubmitRequest:
+      type: object
+      additionalProperties: false
+      required: [answers]
+      properties:
+        answers:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+              minLength: 1
+          description: Map of questionRevisionId to selected option ids. Unknown keys are invalid_input.
+    ElearningExamSubmitResult:
+      type: object
+      additionalProperties: false
+      required: [attemptId, attemptNo, status, autoScore, totalScore, passed, duplicate]
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        attemptNo:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [graded]
+        autoScore: { type: number }
+        totalScore: { type: number }
+        passed: { type: boolean }
+        duplicate: { type: boolean }
   responses:
+    ElearningError:
+      description: 'Values-free e-learning error `{ error: "<code>" }`'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ElearningError'
+    ElearningAuthError:
+      description: 'Missing/invalid JWT ErrorResponse or route-level `{ error: unauthenticated }`'
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: '#/components/schemas/ErrorResponse'
+              - $ref: '#/components/schemas/ElearningError'
     Unauthorized:
       description: Unauthorized - Missing or invalid JWT token
       content:

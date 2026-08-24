@@ -8297,6 +8297,264 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report e-learning master and capability flags
+         * @description Plugin route. JWT session is required by the global `/api` gate.
+         *     Returns `{ enabled, capabilities }` with keys content, assignment,
+         *     assessment, incentive, analytics, media. V0.1 readiness is enabled
+         *     plus content/assignment/assessment/media only; incentive and analytics
+         *     stay parked. Secondary master-off after registration is a values-free
+         *     404 FEATURE_DISABLED (no flag names, no capabilities object).
+         */
+        get: operations["getElearningCapabilities"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/media": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * One-shot authenticated MP4 upload
+         * @description Multipart field `file` only (one file part; no client metadata).
+         *     Duration is server-probed. RBAC `elearning:write`. Identity, org, RBAC,
+         *     storage, and quotas are checked before multipart ingest. 201 may be
+         *     `ready` or probe-rejected `rejected`; storage keys never appear.
+         */
+        post: operations["uploadElearningMedia"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/courses/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish a one-video plus one-exam course
+         * @description Admin composite publish. RBAC `elearning:admin`. Requires watch gate plus
+         *     ASSESSMENT. JSON limit 1 MiB (just over is values-free 413 payload_too_large).
+         *     Actor/org are injected from JWT, never from the body. Unknown top-level
+         *     keys are invalid_input. Learner responses never echo answer keys.
+         */
+        post: operations["publishElearningCourse"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/direct": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Direct-assign a published course version to one user
+         * @description Admin named-pilot assignment. RBAC `elearning:admin`. JSON limit 16 KiB.
+         *     Allowed keys: targetUserId, courseVersionId, sourceKey, optional deadline.
+         *     Actor/org injected from JWT.
+         */
+        post: operations["assignElearningDirect"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/me/courses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the current learner's assigned V0.1 courses
+         * @description RBAC `elearning:read`. Requires exam surface flags (watch gate plus
+         *     ASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.
+         */
+        get: operations["listMyElearningCourses"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/items/{itemId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start or resume a verified watch session for a video item
+         * @description RBAC `elearning:read`. Empty JSON object only. itemId is the course
+         *     version video item, not a media id. JSON limit 16 KiB.
+         */
+        post: operations["startElearningWatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/sessions/{sessionId}/heartbeat": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record a verified watch heartbeat
+         * @description RBAC `elearning:read`. Required keys sequence (>=1), positionMs (>=0),
+         *     playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
+         */
+        post: operations["recordElearningWatchHeartbeat"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/watch/items/{itemId}/playback-ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Issue a short-lived media playback ticket
+         * @description RBAC `elearning:read`. Empty JSON object. Returns an opaque HMAC token
+         *     (not a session JWT). Token TTL is at most 600 seconds. Storage keys and
+         *     signing secrets never appear. JSON limit 16 KiB.
+         */
+        post: operations["issueElearningPlaybackTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/media/playback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream MP4 bytes for a playback ticket
+         * @description Token-auth GET. No session JWT, cookies, or bearer. Credential is the
+         *     single `token` query parameter issued by playback-ticket. Mounted before
+         *     the authenticated e-learning routers and the global JWT gate.
+         *
+         *     Range is a single `bytes=` range (commas are invalid_range). Server cap
+         *     is 8388608 bytes (8 MiB).
+         *
+         *     - No Range and object size ≤ cap and the returned span is the full object → 200.
+         *     - No Range and object size > cap → 206 of the first cap bytes with Content-Range.
+         *     - Range present and satisfiable → 206 with Content-Range (even if the range covers the whole object).
+         *     - Unsatisfiable range → 416 JSON `{ error: unsatisfiable_range }` (no Content-Range header).
+         *     - Malformed Range → 400 `{ error: invalid_range }`.
+         *
+         *     Successful bodies are video/mp4 with Accept-Ranges: bytes, Cache-Control:
+         *     private, no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer.
+         *     Storage keys never appear.
+         */
+        get: operations["getElearningMediaPlayback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/items/{itemId}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start an objective exam attempt
+         * @description RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.
+         *     itemId is the course version exam item. Returned paper is redacted
+         *     (no answerKey, correct ids, explanation, examId, or passScore).
+         *     JSON limit 16 KiB.
+         */
+        post: operations["startElearningExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/attempts/{attemptId}/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit and auto-grade an exam attempt
+         * @description RBAC `elearning:read`. Body key `answers` only (map of questionRevisionId
+         *     to selected option ids). Auto-grade result has no per-question key,
+         *     selected answers echo, or paper snapshot. JSON limit 16 KiB.
+         */
+        post: operations["submitElearningExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -17043,8 +17301,237 @@ export interface components {
                 evaluatedAt: string;
             };
         };
+        /** Format: uuid */
+        ElearningUuid: string;
+        ElearningError: {
+            /** @description Values-free error code. No hosts, secrets, storage keys, or flag names. */
+            error: string;
+        };
+        ElearningEmptyObject: Record<string, never>;
+        /** @enum {string} */
+        ElearningQuestionType: "single_choice" | "multiple_choice" | "true_false";
+        ElearningCapabilityFlags: {
+            content: boolean;
+            assignment: boolean;
+            assessment: boolean;
+            /** @description Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness. */
+            incentive: boolean;
+            /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
+            analytics: boolean;
+            media: boolean;
+        };
+        /**
+         * @description Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled
+         *     plus content, assignment, assessment, and media all true. Incentive and
+         *     analytics stay parked and must not be treated as readiness inputs.
+         */
+        ElearningCapabilities: {
+            enabled: boolean;
+            capabilities: components["schemas"]["ElearningCapabilityFlags"];
+        };
+        /** @enum {string} */
+        ElearningMediaRejectCode: "file_too_large" | "too_many_files" | "mime_not_allowed" | "extension_not_allowed" | "extension_mime_mismatch" | "content_mime_mismatch" | "invalid_size" | "org_quota_exceeded" | "upload_rejected";
+        ElearningMediaReject: {
+            code: components["schemas"]["ElearningMediaRejectCode"];
+        };
+        ElearningMediaRejectError: {
+            /** @enum {string} */
+            error: "rejected";
+            rejected: components["schemas"]["ElearningMediaReject"][];
+        };
+        /** @description Values-free media metadata. Never includes storageKey or client duration. */
+        ElearningMediaUploadResult: {
+            id: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "ready" | "rejected";
+            /** @description Server-probed duration in milliseconds. Null when status is rejected. */
+            durationMs: number | null;
+            sizeBytes: number;
+            sha256: string;
+        };
+        ElearningPublishOption: {
+            id: string;
+            text: string;
+        };
+        ElearningPublishQuestion: {
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Admin-only write field. Never returned on learner exam start/submit. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Optional admin write field. Never returned on learner exam surfaces. */
+            explanation?: string | null;
+        };
+        ElearningCoursePublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            mediaId: components["schemas"]["ElearningUuid"];
+            passScore: number;
+            maxAttempts: number;
+            questions: components["schemas"]["ElearningPublishQuestion"][];
+        };
+        ElearningCoursePublishResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            videoItemId: components["schemas"]["ElearningUuid"];
+            examItemId: components["schemas"]["ElearningUuid"];
+            examId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            questionCount: number;
+            totalScore: number;
+        };
+        ElearningDirectAssignmentRequest: {
+            targetUserId: string;
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+        };
+        ElearningDirectAssignmentResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberId: components["schemas"]["ElearningUuid"];
+            duplicate: boolean;
+        };
+        ElearningLearnerAssignment: {
+            /** Format: date-time */
+            deadline: string | null;
+            /** Format: date-time */
+            assignedAt: string;
+        };
+        ElearningLearnerVideo: {
+            itemId: components["schemas"]["ElearningUuid"];
+            durationMs: number;
+            /** @enum {string} */
+            status: "not_started" | "in_progress" | "completed";
+            effectiveMs: number;
+            maxPositionMs: number;
+            /** Format: date-time */
+            completedAt: string | null;
+        };
+        ElearningLearnerExamAttempt: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "started" | "submitted" | "graded" | "expired";
+            autoScore: number | null;
+            totalScore: number | null;
+            passed: boolean | null;
+            /** Format: date-time */
+            startedAt: string;
+            /** Format: date-time */
+            submittedAt: string | null;
+            /** Format: date-time */
+            gradedAt: string | null;
+        };
+        ElearningLearnerExam: {
+            itemId: components["schemas"]["ElearningUuid"];
+            latestAttempt: components["schemas"]["ElearningLearnerExamAttempt"] | null;
+        };
+        ElearningLearnerCourse: {
+            courseId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            title: string;
+            assignment: components["schemas"]["ElearningLearnerAssignment"];
+            video: components["schemas"]["ElearningLearnerVideo"];
+            exam: components["schemas"]["ElearningLearnerExam"];
+            completed: boolean;
+        };
+        ElearningLearnerCourseList: {
+            courses: components["schemas"]["ElearningLearnerCourse"][];
+        };
+        ElearningWatchState: {
+            sessionId: components["schemas"]["ElearningUuid"] | null;
+            /** @enum {string} */
+            status: "in_progress" | "completed";
+            lastSequence: number;
+            lastClientPositionMs: number;
+            effectiveMs: number;
+            maxPositionMs: number;
+            durationMs: number;
+            creditedMs: number;
+            duplicate: boolean;
+        };
+        ElearningHeartbeatRequest: {
+            sequence: number;
+            positionMs: number;
+            playing: boolean;
+        };
+        /** @description Opaque HMAC playback ticket. Never includes storage keys or signing secrets. */
+        ElearningPlaybackTicket: {
+            token: string;
+            /** Format: date-time */
+            expiresAt: string;
+            ttlSeconds: number;
+            itemId: components["schemas"]["ElearningUuid"];
+            mediaId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningPublicOption: {
+            id: string;
+            text: string;
+        };
+        /** @description Learner-visible question. No answerKey, correct ids, or explanation. */
+        ElearningPublicQuestion: {
+            position: number;
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+        };
+        /** @description Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot secrets. */
+        ElearningPublicPaper: {
+            /** @enum {string} */
+            domain: "elearning.exam.paper.v1";
+            /** @enum {integer} */
+            version: 1;
+            questions: components["schemas"]["ElearningPublicQuestion"][];
+        };
+        ElearningExamStartResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "started";
+            paper: components["schemas"]["ElearningPublicPaper"];
+            duplicate: boolean;
+        };
+        ElearningExamSubmitRequest: {
+            /** @description Map of questionRevisionId to selected option ids. Unknown keys are invalid_input. */
+            answers: {
+                [key: string]: string[];
+            };
+        };
+        ElearningExamSubmitResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "graded";
+            autoScore: number;
+            totalScore: number;
+            passed: boolean;
+            duplicate: boolean;
+        };
     };
     responses: {
+        /** @description Values-free e-learning error `{ error: "<code>" }` */
+        ElearningError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ElearningError"];
+            };
+        };
+        /** @description Missing/invalid JWT ErrorResponse or route-level `{ error: unauthenticated }` */
+        ElearningAuthError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"] | components["schemas"]["ElearningError"];
+            };
+        };
         /** @description Unauthorized - Missing or invalid JWT token */
         Unauthorized: {
             headers: {
@@ -18156,6 +18643,507 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    getElearningCapabilities: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Flag snapshot. Does not imply every HTTP surface is mounted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCapabilities"];
+                };
+            };
+            /** @description Missing or invalid JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description Master flag is not exact 'true' after registration */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example {
+                     *       "ok": false,
+                     *       "error": {
+                     *         "code": "FEATURE_DISABLED",
+                     *         "message": "Feature is disabled"
+                     *       }
+                     *     }
+                     */
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    uploadElearningMedia: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    /**
+                     * Format: binary
+                     * @description Exactly one `file` part. MIME must be video/mp4; extension mp4; ISO-BMFF ftyp.
+                     */
+                    file: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Ingest finished. `ready` after successful probe; `rejected` after probe/codec failure (no blob kept as ready). */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaUploadResult"];
+                };
+            };
+            /** @description file_required, upload_failed, upload_rejected, or rejected/invalid_size */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] | components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:write`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Media surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description file_too_large, too_many_files (extra parts/fields), or org_quota_exceeded */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description MIME, extension, or ISO-BMFF ftyp rejected */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningMediaRejectError"];
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description media_unavailable (missing quotas or storage) */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCourse: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCoursePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published course pointers. No paper snapshot or answer keys. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCoursePublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Exam/publish surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description media_unavailable or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] & {
+                        /** @enum {string} */
+                        error?: "payload_too_large";
+                    };
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningDirect: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningDirectAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Assignment and member ids. duplicate true on idempotent replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningDirectAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or course/user missing as mapped by service) */
+            404: components["responses"]["ElearningError"];
+            /** @description target_unavailable, course_unavailable, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listMyElearningCourses: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Assigned courses with video progress and latest exam attempt. No answer keys. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningLearnerCourseList"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:read`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Exam/learner-list surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningWatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Current watch state. Completion is server-derived. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input, unsupported_item, or unsupported_policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    recordElearningWatchHeartbeat: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningHeartbeatRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated watch state. Credit and completion are server-derived. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningWatchState"];
+                };
+            };
+            /** @description invalid_input, unsupported_item, or unsupported_policy */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, conflict, sequence_gap, or session_inactive */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    issueElearningPlaybackTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Opaque ticket for GET /api/elearning/media/playback?token= */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPlaybackTicket"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated, missing JWT, invalid_token, or token_expired */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningMediaPlayback: {
+        parameters: {
+            query: {
+                /** @description Opaque playback ticket. Multiple token values are invalid_input. */
+                token: string;
+            };
+            header?: {
+                /** @description Single HTTP byte range, e.g. bytes=0-1023 or bytes=-500. Multipart ranges are refused. */
+                Range?: string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Full object when Range is absent and the object fits in the 8 MiB cap. */
+            200: {
+                headers: {
+                    "Accept-Ranges"?: "bytes";
+                    "Content-Type"?: "video/mp4";
+                    "Content-Length"?: number;
+                    "Cache-Control"?: "private, no-store";
+                    "X-Content-Type-Options"?: "nosniff";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
+                };
+            };
+            /** @description Partial content. Used for every satisfiable Range header, and for absent Range when the object exceeds the 8 MiB cap. */
+            206: {
+                headers: {
+                    "Accept-Ranges"?: "bytes";
+                    "Content-Type"?: "video/mp4";
+                    "Content-Length"?: number;
+                    "Content-Range"?: string;
+                    "Cache-Control"?: "private, no-store";
+                    "X-Content-Type-Options"?: "nosniff";
+                    "Referrer-Policy"?: "no-referrer";
+                    [name: string]: unknown;
+                };
+                content: {
+                    "video/mp4": string;
+                };
+            };
+            /** @description invalid_input, invalid_range, or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description invalid_token or token_expired */
+            401: components["responses"]["ElearningError"];
+            /** @description assignment_unavailable */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or watch flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn */
+            409: components["responses"]["ElearningError"];
+            /** @description Unsatisfiable range. JSON only; Content-Range is not set. */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningError"] & {
+                        /** @enum {string} */
+                        error?: "unsatisfiable_range";
+                    };
+                };
+            };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable (no range store) */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    startElearningExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                itemId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ElearningEmptyObject"];
+            };
+        };
+        responses: {
+            /** @description Attempt plus public paper. duplicate true on replay of an open attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamStartResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningExamSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Graded attempt totals only. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamSubmitResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
         };
     };
 }

@@ -7345,9 +7345,896 @@
             }
           }
         }
+      },
+      "ElearningUuid": {
+        "type": "string",
+        "format": "uuid",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "ElearningError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Values-free error code. No hosts, secrets, storage keys, or flag names."
+          }
+        }
+      },
+      "ElearningEmptyObject": {
+        "type": "object",
+        "additionalProperties": false
+      },
+      "ElearningQuestionType": {
+        "type": "string",
+        "enum": [
+          "single_choice",
+          "multiple_choice",
+          "true_false"
+        ]
+      },
+      "ElearningCapabilityFlags": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "content",
+          "assignment",
+          "assessment",
+          "incentive",
+          "analytics",
+          "media"
+        ],
+        "properties": {
+          "content": {
+            "type": "boolean"
+          },
+          "assignment": {
+            "type": "boolean"
+          },
+          "assessment": {
+            "type": "boolean"
+          },
+          "incentive": {
+            "type": "boolean",
+            "description": "Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness."
+          },
+          "analytics": {
+            "type": "boolean",
+            "description": "Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness."
+          },
+          "media": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningCapabilities": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "enabled",
+          "capabilities"
+        ],
+        "description": "Plugin GET /api/elearning/capabilities payload. V0.1 readiness is enabled\nplus content, assignment, assessment, and media all true. Incentive and\nanalytics stay parked and must not be treated as readiness inputs.\n",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "$ref": "#/components/schemas/ElearningCapabilityFlags"
+          }
+        }
+      },
+      "ElearningMediaRejectCode": {
+        "type": "string",
+        "enum": [
+          "file_too_large",
+          "too_many_files",
+          "mime_not_allowed",
+          "extension_not_allowed",
+          "extension_mime_mismatch",
+          "content_mime_mismatch",
+          "invalid_size",
+          "org_quota_exceeded",
+          "upload_rejected"
+        ]
+      },
+      "ElearningMediaReject": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ElearningMediaRejectCode"
+          }
+        }
+      },
+      "ElearningMediaRejectError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error",
+          "rejected"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "enum": [
+              "rejected"
+            ]
+          },
+          "rejected": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ElearningMediaReject"
+            }
+          }
+        }
+      },
+      "ElearningMediaUploadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "status",
+          "durationMs",
+          "sizeBytes",
+          "sha256"
+        ],
+        "description": "Values-free media metadata. Never includes storageKey or client duration.",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready",
+              "rejected"
+            ]
+          },
+          "durationMs": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Server-probed duration in milliseconds. Null when status is rejected."
+          },
+          "sizeBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "ElearningPublishOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "ElearningPublishQuestion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "questionType",
+          "prompt",
+          "options",
+          "correctOptionIds",
+          "points"
+        ],
+        "properties": {
+          "questionType": {
+            "$ref": "#/components/schemas/ElearningQuestionType"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublishOption"
+            }
+          },
+          "correctOptionIds": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Admin-only write field. Never returned on learner exam start/submit."
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "nullable": true,
+            "description": "Optional admin write field. Never returned on learner exam surfaces."
+          }
+        }
+      },
+      "ElearningCoursePublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "title",
+          "mediaId",
+          "passScore",
+          "maxAttempts",
+          "questions"
+        ],
+        "properties": {
+          "requestId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "mediaId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "passScore": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maxAttempts": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "questions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublishQuestion"
+            }
+          }
+        }
+      },
+      "ElearningCoursePublishResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseId",
+          "courseVersionId",
+          "videoItemId",
+          "examItemId",
+          "examId",
+          "status",
+          "questionCount",
+          "totalScore"
+        ],
+        "properties": {
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "videoItemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "examItemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "examId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "published"
+            ]
+          },
+          "questionCount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "totalScore": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "ElearningDirectAssignmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "targetUserId",
+          "courseVersionId",
+          "sourceKey"
+        ],
+        "properties": {
+          "targetUserId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "sourceKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ElearningDirectAssignmentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignmentId",
+          "memberId",
+          "duplicate"
+        ],
+        "properties": {
+          "assignmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "memberId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningLearnerAssignment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deadline",
+          "assignedAt"
+        ],
+        "properties": {
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "assignedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningLearnerVideo": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "durationMs",
+          "status",
+          "effectiveMs",
+          "maxPositionMs",
+          "completedAt"
+        ],
+        "properties": {
+          "itemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "in_progress",
+              "completed"
+            ]
+          },
+          "effectiveMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxPositionMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "completedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ElearningLearnerExamAttempt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "attemptNo",
+          "status",
+          "autoScore",
+          "totalScore",
+          "passed",
+          "startedAt",
+          "submittedAt",
+          "gradedAt"
+        ],
+        "properties": {
+          "attemptId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "attemptNo": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "started",
+              "submitted",
+              "graded",
+              "expired"
+            ]
+          },
+          "autoScore": {
+            "type": "number",
+            "nullable": true
+          },
+          "totalScore": {
+            "type": "number",
+            "nullable": true
+          },
+          "passed": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "submittedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "gradedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "ElearningLearnerExam": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "latestAttempt"
+        ],
+        "properties": {
+          "itemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "latestAttempt": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerExamAttempt"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "ElearningLearnerCourse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseId",
+          "courseVersionId",
+          "title",
+          "assignment",
+          "video",
+          "exam",
+          "completed"
+        ],
+        "properties": {
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "assignment": {
+            "$ref": "#/components/schemas/ElearningLearnerAssignment"
+          },
+          "video": {
+            "$ref": "#/components/schemas/ElearningLearnerVideo"
+          },
+          "exam": {
+            "$ref": "#/components/schemas/ElearningLearnerExam"
+          },
+          "completed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningLearnerCourseList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courses"
+        ],
+        "properties": {
+          "courses": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ElearningLearnerCourse"
+            }
+          }
+        }
+      },
+      "ElearningWatchState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sessionId",
+          "status",
+          "lastSequence",
+          "lastClientPositionMs",
+          "effectiveMs",
+          "maxPositionMs",
+          "durationMs",
+          "creditedMs",
+          "duplicate"
+        ],
+        "properties": {
+          "sessionId": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningUuid"
+              }
+            ],
+            "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "completed"
+            ]
+          },
+          "lastSequence": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lastClientPositionMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "effectiveMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxPositionMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "creditedMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningHeartbeatRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sequence",
+          "positionMs",
+          "playing"
+        ],
+        "properties": {
+          "sequence": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "positionMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "playing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningPlaybackTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "token",
+          "expiresAt",
+          "ttlSeconds",
+          "itemId",
+          "mediaId"
+        ],
+        "description": "Opaque HMAC playback ticket. Never includes storage keys or signing secrets.",
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "ttlSeconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600
+          },
+          "itemId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "mediaId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          }
+        }
+      },
+      "ElearningPublicOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "ElearningPublicQuestion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "position",
+          "questionRevisionId",
+          "questionType",
+          "prompt",
+          "options",
+          "points"
+        ],
+        "description": "Learner-visible question. No answerKey, correct ids, or explanation.",
+        "properties": {
+          "position": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "questionRevisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "questionType": {
+            "$ref": "#/components/schemas/ElearningQuestionType"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublicOption"
+            }
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ElearningPublicPaper": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "domain",
+          "version",
+          "questions"
+        ],
+        "description": "Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot secrets.",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "enum": [
+              "elearning.exam.paper.v1"
+            ]
+          },
+          "version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "questions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublicQuestion"
+            }
+          }
+        }
+      },
+      "ElearningExamStartResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "attemptNo",
+          "status",
+          "paper",
+          "duplicate"
+        ],
+        "properties": {
+          "attemptId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "attemptNo": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "started"
+            ]
+          },
+          "paper": {
+            "$ref": "#/components/schemas/ElearningPublicPaper"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningExamSubmitRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "answers"
+        ],
+        "properties": {
+          "answers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "description": "Map of questionRevisionId to selected option ids. Unknown keys are invalid_input."
+          }
+        }
+      },
+      "ElearningExamSubmitResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "attemptNo",
+          "status",
+          "autoScore",
+          "totalScore",
+          "passed",
+          "duplicate"
+        ],
+        "properties": {
+          "attemptId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "attemptNo": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "graded"
+            ]
+          },
+          "autoScore": {
+            "type": "number"
+          },
+          "totalScore": {
+            "type": "number"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
       }
     },
     "responses": {
+      "ElearningError": {
+        "description": "Values-free e-learning error `{ error: \"<code>\" }`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ElearningError"
+            }
+          }
+        }
+      },
+      "ElearningAuthError": {
+        "description": "Missing/invalid JWT ErrorResponse or route-level `{ error: unauthenticated }`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                {
+                  "$ref": "#/components/schemas/ElearningError"
+                }
+              ]
+            }
+          }
+        }
+      },
       "Unauthorized": {
         "description": "Unauthorized - Missing or invalid JWT token",
         "content": {
@@ -21638,6 +22525,925 @@
         "responses": {
           "200": {
             "description": "OK"
+          }
+        }
+      }
+    },
+    "/api/elearning/capabilities": {
+      "x-plugin": "plugin-elearning",
+      "get": {
+        "operationId": "getElearningCapabilities",
+        "summary": "Report e-learning master and capability flags",
+        "description": "Plugin route. JWT session is required by the global `/api` gate.\nReturns `{ enabled, capabilities }` with keys content, assignment,\nassessment, incentive, analytics, media. V0.1 readiness is enabled\nplus content/assignment/assessment/media only; incentive and analytics\nstay parked. Secondary master-off after registration is a values-free\n404 FEATURE_DISABLED (no flag names, no capabilities object).\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flag snapshot. Does not imply every HTTP surface is mounted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCapabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "404": {
+            "description": "Master flag is not exact 'true' after registration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "ok": false,
+                  "error": {
+                    "code": "FEATURE_DISABLED",
+                    "message": "Feature is disabled"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/elearning/media": {
+      "post": {
+        "operationId": "uploadElearningMedia",
+        "summary": "One-shot authenticated MP4 upload",
+        "description": "Multipart field `file` only (one file part; no client metadata).\nDuration is server-probed. RBAC `elearning:write`. Identity, org, RBAC,\nstorage, and quotas are checked before multipart ingest. 201 may be\n`ready` or probe-rejected `rejected`; storage keys never appear.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "file"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "Exactly one `file` part. MIME must be video/mp4; extension mp4; ISO-BMFF ftyp."
+                  }
+                }
+              },
+              "encoding": {
+                "file": {
+                  "contentType": "video/mp4"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Ingest finished. `ready` after successful probe; `rejected` after probe/codec failure (no blob kept as ready).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningMediaUploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "file_required, upload_failed, upload_rejected, or rejected/invalid_size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/ElearningError"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ElearningMediaRejectError"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:write`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Media surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "413": {
+            "description": "file_too_large, too_many_files (extra parts/fields), or org_quota_exceeded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningMediaRejectError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "MIME, extension, or ISO-BMFF ftyp rejected",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningMediaRejectError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "media_unavailable (missing quotas or storage)",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/courses/publish": {
+      "post": {
+        "operationId": "publishElearningCourse",
+        "summary": "Publish a one-video plus one-exam course",
+        "description": "Admin composite publish. RBAC `elearning:admin`. Requires watch gate plus\nASSESSMENT. JSON limit 1 MiB (just over is values-free 413 payload_too_large).\nActor/org are injected from JWT, never from the body. Unknown top-level\nkeys are invalid_input. Learner responses never echo answer keys.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCoursePublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Published course pointers. No paper snapshot or answer keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCoursePublishResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Exam/publish surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "media_unavailable or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "413": {
+            "description": "JSON body exceeds 1 MiB",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ElearningError"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "payload_too_large"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/assignments/direct": {
+      "post": {
+        "operationId": "assignElearningDirect",
+        "summary": "Direct-assign a published course version to one user",
+        "description": "Admin named-pilot assignment. RBAC `elearning:admin`. JSON limit 16 KiB.\nAllowed keys: targetUserId, courseVersionId, sourceKey, optional deadline.\nActor/org injected from JWT.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningDirectAssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Assignment and member ids. duplicate true on idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningDirectAssignmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found (flags off or course/user missing as mapped by service)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "target_unavailable, course_unavailable, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/me/courses": {
+      "get": {
+        "operationId": "listMyElearningCourses",
+        "summary": "List the current learner's assigned V0.1 courses",
+        "description": "RBAC `elearning:read`. Requires exam surface flags (watch gate plus\nASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assigned courses with video progress and latest exam attempt. No answer keys.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningLearnerCourseList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:read`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Exam/learner-list surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/watch/items/{itemId}/start": {
+      "post": {
+        "operationId": "startElearningWatch",
+        "summary": "Start or resume a verified watch session for a video item",
+        "description": "RBAC `elearning:read`. Empty JSON object only. itemId is the course\nversion video item, not a media id. JSON limit 16 KiB.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "itemId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningEmptyObject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current watch state. Completion is server-derived.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningWatchState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input, unsupported_item, or unsupported_policy",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/watch/sessions/{sessionId}/heartbeat": {
+      "post": {
+        "operationId": "recordElearningWatchHeartbeat",
+        "summary": "Record a verified watch heartbeat",
+        "description": "RBAC `elearning:read`. Required keys sequence (>=1), positionMs (>=0),\nplaying (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "sessionId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningHeartbeatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated watch state. Credit and completion are server-derived.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningWatchState"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input, unsupported_item, or unsupported_policy",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn, conflict, sequence_gap, or session_inactive",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/watch/items/{itemId}/playback-ticket": {
+      "post": {
+        "operationId": "issueElearningPlaybackTicket",
+        "summary": "Issue a short-lived media playback ticket",
+        "description": "RBAC `elearning:read`. Empty JSON object. Returns an opaque HMAC token\n(not a session JWT). Token TTL is at most 600 seconds. Storage keys and\nsigning secrets never appear. JSON limit 16 KiB.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "itemId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningEmptyObject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Opaque ticket for GET /api/elearning/media/playback?token=",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningPlaybackTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported_item",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated, missing JWT, invalid_token, or token_expired",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/media/playback": {
+      "get": {
+        "operationId": "getElearningMediaPlayback",
+        "summary": "Stream MP4 bytes for a playback ticket",
+        "description": "Token-auth GET. No session JWT, cookies, or bearer. Credential is the\nsingle `token` query parameter issued by playback-ticket. Mounted before\nthe authenticated e-learning routers and the global JWT gate.\n\nRange is a single `bytes=` range (commas are invalid_range). Server cap\nis 8388608 bytes (8 MiB).\n\n- No Range and object size ≤ cap and the returned span is the full object → 200.\n- No Range and object size > cap → 206 of the first cap bytes with Content-Range.\n- Range present and satisfiable → 206 with Content-Range (even if the range covers the whole object).\n- Unsatisfiable range → 416 JSON `{ error: unsatisfiable_range }` (no Content-Range header).\n- Malformed Range → 400 `{ error: invalid_range }`.\n\nSuccessful bodies are video/mp4 with Accept-Ranges: bytes, Cache-Control:\nprivate, no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer.\nStorage keys never appear.\n",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Opaque playback ticket. Multiple token values are invalid_input."
+          },
+          {
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Single HTTP byte range, e.g. bytes=0-1023 or bytes=-500. Multipart ranges are refused."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Full object when Range is absent and the object fits in the 8 MiB cap.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "bytes"
+                  ]
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "video/mp4"
+                  ]
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "nosniff"
+                  ]
+                }
+              },
+              "Referrer-Policy": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-referrer"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Partial content. Used for every satisfiable Range header, and for absent Range when the object exceeds the 8 MiB cap.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "bytes"
+                  ]
+                }
+              },
+              "Content-Type": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "video/mp4"
+                  ]
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 8388608
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string",
+                  "description": "bytes START-END/SIZE"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "private, no-store"
+                  ]
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "nosniff"
+                  ]
+                }
+              },
+              "Referrer-Policy": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "no-referrer"
+                  ]
+                }
+              }
+            },
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input, invalid_range, or unsupported_item",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "invalid_token or token_expired",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "403": {
+            "description": "assignment_unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or watch flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "416": {
+            "description": "Unsatisfiable range. JSON only; Content-Range is not set.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/ElearningError"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "unsatisfiable_range"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable (no range store)",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/exams/items/{itemId}/start": {
+      "post": {
+        "operationId": "startElearningExam",
+        "summary": "Start an objective exam attempt",
+        "description": "RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.\nitemId is the course version exam item. Returned paper is redacted\n(no answerKey, correct ids, explanation, examId, or passScore).\nJSON limit 16 KiB.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "itemId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningEmptyObject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Attempt plus public paper. duplicate true on replay of an open attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningExamStartResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported_item",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or exam flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn, prerequisite_incomplete, max_attempts, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/exams/attempts/{attemptId}/submit": {
+      "post": {
+        "operationId": "submitElearningExam",
+        "summary": "Submit and auto-grade an exam attempt",
+        "description": "RBAC `elearning:read`. Body key `answers` only (map of questionRevisionId\nto selected option ids). Auto-grade result has no per-question key,\nselected answers echo, or paper snapshot. JSON limit 16 KiB.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "attemptId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningExamSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Graded attempt totals only.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningExamSubmitResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported_item",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or exam flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn, prerequisite_incomplete, max_attempts, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
           }
         }
       }
