@@ -352,6 +352,11 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(remote, /recovery09_unsupported_class6_count/)
   assert.match(remote, /directory_integration_non_default_count/)
   assert.match(remote, /legacy_anchor_active_membership_witness_count/)
+  assert.match(
+    remote,
+    /if \[\[ "\$zero_no_row" -gt 0 \|\| "\$class6" -gt 0 \]\]/,
+    'a safe retry must gate on executable no-row users, not the disclosed deactivated-only residue',
+  )
 }
 
 test('action=migrate runs the exact target-SHA migration universe without switching the running app', () => {

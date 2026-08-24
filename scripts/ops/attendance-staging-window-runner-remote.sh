@@ -1194,7 +1194,11 @@ SQL
   done
   [[ "$invalid" == "0" ]] || fail "target precheck: ${invalid} approval_records rows carry an action outside the target constraint"
   [[ "$conflicts" == "0" ]] || fail "target precheck: ${conflicts} attachment-bearing approval instances have cross-org conflicts"
-  if [[ "$zero_membership" -gt 0 || "$class6" -gt 0 ]]; then
+  # Deactivated-only rows are an explicitly disclosed non-resurrection residue. Recovery09 and
+  # the corrected provisioning migration intentionally do not write them, so they must not make a
+  # safe retry demand that the already-applied Recovery09 migration still be pending. Only the
+  # executable no-row population and unresolved class-6 rows require the repair gate.
+  if [[ "$zero_no_row" -gt 0 || "$class6" -gt 0 ]]; then
     if [[ "$active_orgs" != "1" ]]; then
       grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
         || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
