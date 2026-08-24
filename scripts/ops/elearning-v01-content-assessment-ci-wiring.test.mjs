@@ -15,11 +15,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/elearning-v01-content-assessment-schema.db.test.ts'
 const WATCH_FILE = 'tests/integration/elearning-v01-watch-progress-schema.db.test.ts'
+const SERVICE_FILE = 'tests/integration/elearning-watch-progress-service.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const SUITE = join(repoRoot, 'packages/core-backend', FILE)
 const WATCH_SUITE = join(repoRoot, 'packages/core-backend', WATCH_FILE)
+const SERVICE_SUITE = join(repoRoot, 'packages/core-backend', SERVICE_FILE)
+const GATE_FILES = [FILE, WATCH_FILE, SERVICE_FILE]
 const CONTENT_MIGRATION = join(
   repoRoot,
   'packages/core-backend/src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment.ts',
@@ -33,9 +36,9 @@ const WATCH_MIGRATION = join(
   'packages/core-backend/src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress.ts',
 )
 
-test('vitest.config.ts excludes both elearning V0.1 schema gates from the no-DB job', () => {
+test('vitest.config.ts excludes elearning V0.1 schema and watch-service gates from the no-DB job', () => {
   const cfg = readFileSync(VITEST_CFG, 'utf8')
-  for (const file of [FILE, WATCH_FILE]) {
+  for (const file of GATE_FILES) {
     assert.ok(
       isQuotedInTestExclude(cfg, file),
       `test.exclude must contain the exact quoted entry '${file}'`,
@@ -43,10 +46,10 @@ test('vitest.config.ts excludes both elearning V0.1 schema gates from the no-DB 
   }
 })
 
-test('plugin-tests.yml runs both schema gates as whole-file siblings on the 20.x real-DB step after migrate', () => {
+test('plugin-tests.yml runs schema and watch-service gates as whole-file siblings on the 20.x real-DB step after migrate', () => {
   const wf = readFileSync(WORKFLOW, 'utf8')
   const step = requireExecutableRealDbStep(wf, STEP_ID)
-  for (const file of [FILE, WATCH_FILE]) {
+  for (const file of GATE_FILES) {
     assert.ok(
       isSuiteWiredInRealDbStep(wf, STEP_ID, file),
       `plugin-tests.yml real-DB step id "${STEP_ID}" (if 20.x + env.DATABASE_URL + ` +
@@ -66,6 +69,7 @@ test('plugin-tests.yml runs both schema gates as whole-file siblings on the 20.x
   const wired = realDbStepWholeFileArgs(wf, STEP_ID)
   assert.equal(wired.includes(FILE), true)
   assert.equal(wired.includes(WATCH_FILE), true)
+  assert.equal(wired.includes(SERVICE_FILE), true)
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'schema gate step must not use a -t filter')
@@ -85,18 +89,21 @@ test('plugin-tests.yml runs both schema gates as whole-file siblings on the 20.x
 test('wired suites and content/watch migrations exist on disk', () => {
   assert.ok(existsSync(SUITE), `wired suite packages/core-backend/${FILE} must exist on disk`)
   assert.ok(existsSync(WATCH_SUITE), `wired suite packages/core-backend/${WATCH_FILE} must exist on disk`)
+  assert.ok(existsSync(SERVICE_SUITE), `wired suite packages/core-backend/${SERVICE_FILE} must exist on disk`)
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
 })
 
-test('schema gate sources throw when DATABASE_URL is missing (no describe.skip)', () => {
+test('schema and watch-service gate sources throw when DATABASE_URL is missing (no describe.skip)', () => {
   for (const [label, path] of [
     ['content/assessment', SUITE],
     ['watch-progress', WATCH_SUITE],
+    ['watch-progress-service', SERVICE_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)
+    assert.equal(src.includes('.skip('), false, `${label} must not skip`)
     assert.match(src, /if \(!DATABASE_URL\)/)
     assert.match(src, /throw new Error/)
     assert.match(src, /refusing skip-shaped green/)
@@ -115,6 +122,26 @@ test('schema gate uses dual PoolClient pg_locks barriers rather than sleep races
   assert.match(src, /lock_timeout/)
   assert.match(src, /pg_blocking_pids/)
   assert.match(src, /runLockBarrier/)
+  assert.equal(src.includes('new Client('), false)
+  assert.equal(src.includes('playwright'), false)
+  assert.equal(src.includes('setTimeout(res, 500)'), false)
+  assert.equal(src.includes('setTimeout(resolve, 500)'), false)
+})
+
+test('watch-service gate uses dual PoolClient pg_locks barriers for start and heartbeat withdrawal', () => {
+  const src = readFileSync(SERVICE_SUITE, 'utf8')
+  assert.match(src, /type PoolClient/)
+  assert.match(src, /pool\.connect\(\)/)
+  assert.match(src, /holder: PoolClient/)
+  assert.match(src, /waiter: PoolClient/)
+  assert.match(src, /pg_locks/)
+  assert.match(src, /lock_timeout/)
+  assert.match(src, /pg_blocking_pids/)
+  assert.match(src, /runLockBarrier/)
+  assert.match(src, /watchDbFromClient/)
+  assert.match(src, /startElearningWatch\(watchDbFromClient/)
+  assert.match(src, /recordElearningHeartbeat\(watchDbFromClient/)
+  assert.match(src, /elearning-watch:insert-evidence/)
   assert.equal(src.includes('new Client('), false)
   assert.equal(src.includes('playwright'), false)
   assert.equal(src.includes('setTimeout(res, 500)'), false)

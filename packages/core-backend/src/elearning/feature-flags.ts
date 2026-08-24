@@ -50,3 +50,16 @@ export function resolveElearningCatalogFeature(
 export function isElearningMediaSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
 }
+
+/**
+ * Watch surface is live only when master AND CONTENT AND ASSIGNMENT AND MEDIA
+ * are exact literal 'true'. Assessment is not part of this gate.
+ */
+export function isElearningWatchSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    isElearningEnabled(env) &&
+    isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED, env) &&
+    isElearningFlagEnabled(ELEARNING_ASSIGNMENT_ENABLED, env) &&
+    isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
+  )
+}

@@ -900,6 +900,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
             tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
+            tests/integration/elearning-watch-progress-service.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.
