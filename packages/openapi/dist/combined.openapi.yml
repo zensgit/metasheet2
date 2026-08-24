@@ -2652,6 +2652,54 @@ components:
               type: integer
         minPunchIntervalMinutes:
           type: integer
+        employeeQuickActionIcons:
+          type: object
+          additionalProperties: false
+          properties:
+            makeup:
+              type: string
+              enum:
+                - clock-plus
+                - calendar
+                - moon
+                - swap
+                - plus
+                - user
+                - briefcase
+                - pin
+            leave:
+              type: string
+              enum:
+                - clock-plus
+                - calendar
+                - moon
+                - swap
+                - plus
+                - user
+                - briefcase
+                - pin
+            overtime:
+              type: string
+              enum:
+                - clock-plus
+                - calendar
+                - moon
+                - swap
+                - plus
+                - user
+                - briefcase
+                - pin
+            swap:
+              type: string
+              enum:
+                - clock-plus
+                - calendar
+                - moon
+                - swap
+                - plus
+                - user
+                - briefcase
+                - pin
     Spreadsheet:
       type: object
       properties:
@@ -9906,6 +9954,82 @@ paths:
                     $ref: '#/components/schemas/AttendanceSettings'
         '400':
           $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/attendance/employee-quick-action-icons:
+    x-plugin: plugin-attendance
+    get:
+      summary: Employee-readable 常用 pictogram keys (icon ids only)
+      description: >-
+        Returns only the four icon keys. Does not expose the admin settings
+        document.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - makeup
+                      - leave
+                      - overtime
+                      - swap
+                    properties:
+                      makeup:
+                        type: string
+                        enum:
+                          - clock-plus
+                          - calendar
+                          - moon
+                          - swap
+                          - plus
+                          - user
+                          - briefcase
+                          - pin
+                      leave:
+                        type: string
+                        enum:
+                          - clock-plus
+                          - calendar
+                          - moon
+                          - swap
+                          - plus
+                          - user
+                          - briefcase
+                          - pin
+                      overtime:
+                        type: string
+                        enum:
+                          - clock-plus
+                          - calendar
+                          - moon
+                          - swap
+                          - plus
+                          - user
+                          - briefcase
+                          - pin
+                      swap:
+                        type: string
+                        enum:
+                          - clock-plus
+                          - calendar
+                          - moon
+                          - swap
+                          - plus
+                          - user
+                          - briefcase
+                          - pin
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
