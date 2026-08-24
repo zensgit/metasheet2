@@ -4,6 +4,7 @@ import { Pool } from 'pg'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { up as recovery09GapUp } from '../../src/db/migrations/zzzz20260823149900_recovery09_close_approval_org_gap'
 import { up as gapCloserUp } from '../../src/db/migrations/zzzz20260823150000_close_approval_instance_org_id_gap_window'
 
 /**
@@ -58,6 +59,7 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
         id text PRIMARY KEY,
         status text NOT NULL DEFAULT 'pending',
         source_system text NOT NULL DEFAULT 'platform',
+        requester_snapshot jsonb NOT NULL DEFAULT '{}'::jsonb,
         org_id text,
         created_at timestamptz NOT NULL DEFAULT now()
       )
@@ -68,6 +70,21 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
         org_id text NOT NULL,
         is_active boolean NOT NULL DEFAULT true,
         PRIMARY KEY (user_id, org_id)
+      )
+    `.execute(testDb)
+    await sql`CREATE TABLE users (id text PRIMARY KEY, is_active boolean NOT NULL DEFAULT true)`.execute(testDb)
+    await sql`
+      CREATE TABLE approval_attachments (
+        id text PRIMARY KEY,
+        instance_id text REFERENCES approval_instances(id) ON DELETE CASCADE,
+        org_id text NOT NULL
+      )
+    `.execute(testDb)
+    await sql`
+      CREATE TABLE directory_integrations (
+        id text PRIMARY KEY,
+        org_id text NOT NULL,
+        status text NOT NULL DEFAULT 'active'
       )
     `.execute(testDb)
     await sql`
@@ -94,12 +111,14 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
     id: string
     createdAt: string
     sourceSystem?: string
+    requesterId?: string | null
     orgId?: string | null
   }): Promise<void> {
-    const { id, createdAt, sourceSystem = 'platform', orgId = null } = opts
+    const { id, createdAt, sourceSystem = 'platform', requesterId = null, orgId = null } = opts
+    const requesterSnapshot = requesterId ? { id: requesterId } : {}
     await sql`
-      INSERT INTO approval_instances (id, status, source_system, org_id, created_at)
-      VALUES (${id}, 'pending', ${sourceSystem}, ${orgId}, ${createdAt}::timestamptz)
+      INSERT INTO approval_instances (id, status, source_system, requester_snapshot, org_id, created_at)
+      VALUES (${id}, 'pending', ${sourceSystem}, ${JSON.stringify(requesterSnapshot)}::jsonb, ${orgId}, ${createdAt}::timestamptz)
     `.execute(testDb)
   }
 
@@ -111,6 +130,44 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
     const r = await sql<{ org_id: string | null }>`SELECT org_id FROM approval_instances WHERE id = ${id}`.execute(testDb)
     return r.rows[0]?.org_id ?? null
   }
+
+  it('R09-G1: multi-org window is closed source-first, then the older single-org closer sees zero work', async () => {
+    await seedBackfillRecord()
+    await sql`INSERT INTO directory_integrations (id, org_id) VALUES ('r09_di', 'default')`.execute(testDb)
+    await sql`INSERT INTO users (id, is_active) VALUES ('r09_default', TRUE), ('r09_member', TRUE)`.execute(testDb)
+    await seedUserOrg('r09_default', 'default')
+    await seedUserOrg('r09_member', 'synth_a')
+    await seedUserOrg('r09_synth_b', 'synth_b')
+    await seedUserOrg('r09_synth_c', 'synth_c')
+
+    await seedInstance({ id: 'r09_gap_member', createdAt: AFTER_BOUNDARY, requesterId: 'r09_member' })
+    await seedInstance({ id: 'r09_gap_attachment', createdAt: AFTER_BOUNDARY, requesterId: 'missing_attachment_actor' })
+    await seedInstance({ id: 'r09_gap_fallback', createdAt: AFTER_BOUNDARY, requesterId: 'missing_fallback_actor' })
+    await sql`
+      INSERT INTO approval_attachments (id, instance_id, org_id)
+      VALUES ('r09_att', 'r09_gap_attachment', 'synth_b')
+    `.execute(testDb)
+
+    await expect(recovery09GapUp(testDb)).resolves.toBeUndefined()
+    await expect(gapCloserUp(testDb)).resolves.toBeUndefined()
+    expect(await orgIdOf('r09_gap_member')).toBe('synth_a')
+    expect(await orgIdOf('r09_gap_attachment')).toBe('synth_b')
+    expect(await orgIdOf('r09_gap_fallback')).toBe('default')
+  })
+
+  it('R09-G2: unsupported deactivated-only requester aborts before any source-resolvable row is updated', async () => {
+    await seedBackfillRecord()
+    await sql`INSERT INTO directory_integrations (id, org_id) VALUES ('r09_di_g2', 'default')`.execute(testDb)
+    await sql`INSERT INTO users (id, is_active) VALUES ('r09_default_g2', TRUE), ('r09_deactivated_g2', TRUE)`.execute(testDb)
+    await seedUserOrg('r09_default_g2', 'default')
+    await seedUserOrg('r09_deactivated_g2', 'default', false)
+    await seedInstance({ id: 'r09_gap_unsupported', createdAt: AFTER_BOUNDARY, requesterId: 'r09_deactivated_g2' })
+    await seedInstance({ id: 'r09_gap_missing', createdAt: AFTER_BOUNDARY, requesterId: 'missing_r09_g2' })
+
+    await expect(recovery09GapUp(testDb)).rejects.toThrow(/outside the bounded legacy fallback/i)
+    expect(await orgIdOf('r09_gap_unsupported')).toBeNull()
+    expect(await orgIdOf('r09_gap_missing')).toBeNull()
+  })
 
   // ---- G1: the core positive — window row, single active org -> stamped ---------------------
 

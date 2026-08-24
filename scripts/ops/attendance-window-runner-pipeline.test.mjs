@@ -347,6 +347,11 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(applyBody, /--confirm 076_create_integration_stock_prep_pack_installs/)
   assert.match(migrate, /rollout_shadow_flags=OFF/)
   assert.match(migrate, /application_deployed=no/)
+  assert.match(remote, /zzzz20260823040000_recovery09_prepare_legacy_default_org/)
+  assert.match(remote, /zzzz20260823149900_recovery09_close_approval_org_gap/)
+  assert.match(remote, /recovery09_unsupported_class6_count/)
+  assert.match(remote, /directory_integration_non_default_count/)
+  assert.match(remote, /legacy_anchor_active_membership_witness_count/)
 }
 
 test('action=migrate runs the exact target-SHA migration universe without switching the running app', () => {
