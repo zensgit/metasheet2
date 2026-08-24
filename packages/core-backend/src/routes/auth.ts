@@ -36,6 +36,7 @@ import { activatePendingUser } from '../auth/user-activate'
 import { createUserSession, getUserSession, listUserSessions, revokeUserSession, touchUserSession } from '../auth/session-registry'
 import { revokeUserSessions } from '../auth/session-revocation'
 import { FEATURE_FLAGS } from '../config/flags'
+import { isElearningEnabled } from '../elearning/feature-flags'
 import { Logger } from '../core/logger'
 import { isApprovalAttachmentsEnabled } from './approval-attachments'
 import { isApprovalCanvasV2Enabled } from '../services/approval-canvas-flag'
@@ -309,6 +310,9 @@ function buildFeaturePayload(authUser: User) {
     // (master env switch AND per-org exact allowlist — see w6-group-effective-policy-panel-flag.ts).
     // Never inferred from role/mode/plugin state.
     attendanceGroupEffectivePolicyPanel: isAttendanceGroupEffectivePolicyPanelEnabledForOrgV1(authUser.tenantId),
+    // E-learning V0.1 named pilot: master flag only. Never inferred from admin
+    // role, product mode, or plugin state.
+    elearning: isElearningEnabled(),
     mode,
   }
 }

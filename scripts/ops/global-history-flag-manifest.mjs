@@ -396,6 +396,83 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     enablementEnforcedVia:
       'packages/core-backend/src/multitable/history-integrity-precheck.ts precheckSheetHistoryIntegrity (strict branch) — refuses strict_enablement_unmet UNCONDITIONALLY when canEnable is false (no no-checkpoint exemption)',
   },
+  {
+    key: 'ELEARNING_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      'Master gate for the elearning V0.1 named pilot (video upload → viewing verification → objective exam → automatic grading). Default OFF; exact literal \'true\' only. Session feature `elearning` is this flag and is never inferred from admin role, product mode, or plugin state.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:28-30',
+  },
+  {
+    key: 'ELEARNING_CONTENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning content capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSIGNMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assignment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ASSESSMENT_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning assessment capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_INCENTIVE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning incentive capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_ANALYTICS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning analytics capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
+  {
+    key: 'ELEARNING_MEDIA_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['ELEARNING_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'E-learning media capability gate. Default OFF; exact literal \'true\' only. Independent env read; product surface still requires ELEARNING_ENABLED.',
+    source: 'packages/core-backend/src/elearning/feature-flags.ts:21-26',
+  },
 ])
 
 /** Flat lookup by key, built once. */

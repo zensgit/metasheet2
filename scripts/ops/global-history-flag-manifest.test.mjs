@@ -64,23 +64,29 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
 ])
 
-function globalHistoryFlagsInSource() {
+function grepFlagTokens(pattern) {
   const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
   let out = ''
   try {
-    out = execSync(`grep -rhoE 'MULTITABLE_[A-Z_0-9]+' ${srcDir} --include='*.ts'`, {
+    out = execSync(`grep -rhoE '${pattern}' ${srcDir} --include='*.ts'`, {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch (err) {
-    throw new Error(`could not grep MULTITABLE_ flags under ${srcDir}: ${err.message}`)
+    throw new Error(`could not grep ${pattern} under ${srcDir}: ${err.message}`)
   }
-  const tokens = [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
-  return tokens
+  return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
+}
+
+function globalHistoryFlagsInSource() {
+  const tokens = grepFlagTokens('MULTITABLE_[A-Z_0-9]+')
     .filter((t) => !t.endsWith('_')) // drop concatenation-prefix artifacts (MULTITABLE_ENABLE_, ..._SMTP_)
     .filter((t) => !NON_GH_PREFIXES.some((p) => t.startsWith(p)))
     .filter((t) => !NON_GH_EXACT.has(t))
-    .sort()
+  // E-learning V0.1 flags live in this same operator registry (AGENTS.md: every new env flag).
+  // Restrict to *_ENABLED so constant names such as ELEARNING_FLAG_NAMES are not treated as flags.
+  const elearning = grepFlagTokens('ELEARNING_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning])].sort()
 }
 
 test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {

@@ -46,6 +46,12 @@ export interface ProductFeatures {
    * inference: OFF keeps `AttendanceGroupContextHost.vue` byte-identical to before this slice.
    */
   attendanceGroupEffectivePolicyPanel: boolean
+  /**
+   * E-learning V0.1 named-pilot navigation/route gate. Default OFF. True only when
+   * the backend session payload (or the existing authorized dev override) supplies
+   * an explicit boolean — never inferred from admin role, product mode, or plugin state.
+   */
+  elearning: boolean
   mode: ProductMode
 }
 
@@ -81,6 +87,7 @@ const DEFAULT_FEATURES: ProductFeatures = {
   approvalCanvasV2: false,
   approvalFwbWriteback: false,
   attendanceGroupEffectivePolicyPanel: false,
+  elearning: false,
   mode: 'platform',
 }
 
@@ -267,6 +274,7 @@ export function extractFeaturesFromPayload(payload: any): Partial<ProductFeature
         : typeof featuresNode.attendance_group_effective_policy_panel === 'boolean'
           ? featuresNode.attendance_group_effective_policy_panel
           : undefined,
+    elearning: typeof featuresNode.elearning === 'boolean' ? featuresNode.elearning : undefined,
     mode: normalizeMode(
       featuresNode.mode ??
       featuresNode.productMode ??
@@ -394,6 +402,13 @@ function resolveFeatures(
     backend.attendanceGroupEffectivePolicyPanel,
   )
 
+  // E-learning V0.1: default OFF. Only an explicit backend/override boolean enables
+  // it — no inference from admin role, product mode, or plugin state.
+  const elearning = boolOrDefault(
+    override.elearning,
+    backend.elearning,
+  )
+
   return {
     attendance,
     workflow,
@@ -405,6 +420,7 @@ function resolveFeatures(
     approvalCanvasV2,
     approvalFwbWriteback,
     attendanceGroupEffectivePolicyPanel,
+    elearning,
     mode,
   }
 }

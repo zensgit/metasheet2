@@ -56,7 +56,7 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/stock-prep',
 ])
 
-const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm'] as const
+const KNOWN_REQUIRED_FEATURES = ['attendance', 'workflow', 'attendanceAdmin', 'attendanceImport', 'plm', 'elearning'] as const
 type KnownRequiredFeature = (typeof KNOWN_REQUIRED_FEATURES)[number]
 
 export type RouteGuardDecision = { action: 'allow' } | { action: 'redirect'; target: string }
