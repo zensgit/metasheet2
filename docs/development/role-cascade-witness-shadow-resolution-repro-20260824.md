@@ -143,3 +143,75 @@ Mutations, each reverted in isolation and the file restored byte-identical
 Two pinned tests had their invariant **inverted, not widened** — one in each test file — because the
 invariant they pinned (that both queries session-resolve `roles`, and that neither hard-codes a
 schema) WAS the defect. Widening would have left the old assertions standing and both shapes green.
+
+
+## Second review round — two more holes, both confirmed on PG 15
+
+### The positive control could be fed by an IMPOSTOR carrier
+
+Scoping the carrier count to the canonical schema constrained the carrier table's schema and the
+trigger function's NAME — but not the function's SCHEMA, nor the trigger's identity. Constructed:
+
+- `canon.roles`, `canon.user_roles` with a live CASCADE and no trigger
+- `canon.decoy_carrier` carrying a trigger that calls `evil.metasheet_recovery_authority_user_trigger`
+
+All four doors opened, `ROWS []`, **ABSENT / exit 0** — on a catalog whose recovery-authority surface
+is not the canonical one at all. The verdict happens to be defensible for that fixture; what is not
+defensible is the control, whose entire job is to establish that this database can answer the
+question. A database whose real triggers had been dropped and replaced would have read as CONFIRMED.
+
+**Fix**: `canonical_exact_carriers` counts how many of the census's EXACT identities are present —
+carrier schema + table, trigger name, and function schema + name — derived from
+`EXPECTED_AUTHORITY_TRIGGERS` and rebased onto the bound schema. One exact match is enough; "is all
+of it intact" is the battery's Phase-0 `triggerCoverage`, which the witness deliberately does not
+re-implement. Door 4 now decides on this. The loose count stays as audit-only.
+
+**The witness query stays wide.** Narrowing it to the census's table list would be the enumeration
+trap: stale the first time the migration covers one more table, silently. A test pins that it never
+grows the exact-identity tuple list.
+
+Re-run of the reviewer's own fixture against the fixed head: **INDETERMINATE / exit 2 /
+`relations_absent`**.
+
+### The four doors were source-text guarded, not behaviour guarded
+
+Replacing the battery's `if (bindingRow.session_binds_canonical !== true)` with `if (false)` left its
+contract suite green at **63/63**. The tests scanned the source for the failure strings.
+
+**Fix**: the doors moved into one exported pure function, `classifyRoleCascadeBinding`, shared by the
+battery's preflight and the witness's classifier — each mapping a door to its own vocabulary. The
+battery's preflight is now a single delegation with no inline conditions, and a negative pin fails if
+one reappears. The doors are tested with real inputs, including order-of-doors and fail-closed-on-junk.
+
+Re-run of that same mutation against the fixed head: battery **64/65**, witness **46/49** — reds.
+Each of the four doors, neutered alone, now reds both suites.
+
+### Mutation results, round two
+
+| mutation | reds |
+| --- | --- |
+| any one of the four doors neutered in the shared classifier | battery + witness |
+| function SCHEMA unconstrained in the exact-carrier control | impostor-function golden + static pin |
+| trigger NAME unconstrained | renamed-trigger golden + static pin |
+
+The trigger-name conjunct initially survived its mutation at 66/66 — asserted in source, exercised by
+nothing. A golden was added for it rather than the claim being kept. An unexercised conjunct is a
+claim, not a check.
+
+### Comment drift
+
+Live comments still described the removed binding as the contract. The worst was the battery
+contract suite's own failure message, which told whoever red it that the query "must resolve through
+the session search_path" — it would have walked the next maintainer straight back into the defect.
+Corrected at six sites, and the presence-control docblock rewritten rather than patched.
+
+## Final state
+
+| lane | arming | result |
+| --- | --- | --- |
+| `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 67/67, 0 skipped |
+| `multitable-l1-battery.test.mjs` | — | 65/65 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
+| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |

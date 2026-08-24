@@ -57,8 +57,10 @@ import {
   NOT_DRIVEN_SITES,
   RECOVERY_CONFLICT_HTTP_CODE,
   CANONICAL_ROLES_SCHEMA,
+  ROLE_CASCADE_BINDING_DOORS,
   buildRoleCascadeBindingSql,
   buildRoleCascadeWitnessQuery,
+  classifyRoleCascadeBinding,
   ROLE_DELETE_CHILD_WRITE_ACTIONS,
   RECOVERY_CONFLICT_HTTP_STATUS,
   STAMP_PREFIX,
@@ -1408,7 +1410,7 @@ test('roles:delete is excused only while its schema premise holds — and the pr
     ['b'],
   )
 
-  // The query is the CONJUNCTION, mechanically: FK → session-resolved `roles`, AND the child table
+  // The query is the CONJUNCTION, mechanically: FK → the CANONICALLY-bound `roles`, AND the child table
   // carries a canonical recovery-authority trigger. Both conjuncts asserted; over-widening to
   // "every FK pointing at roles" would classify `view_permissions` (which carries no such trigger)
   // as a refutation and block the L1 evidence path on a false PRESENT.
@@ -1416,11 +1418,16 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   assert.match(WITNESS_SQL, /con\.confrelid = to_regclass\('public\.roles'\)/)
   assert.match(WITNESS_SQL, /pg_catalog\.pg_trigger/)
   assert.match(WITNESS_SQL, /NOT tg\.tgisinternal/)
-  // Schema binding: unqualified `to_regclass`, never a hard-coded `public.` literal (which would
-  // blind every real-DB golden this repo runs inside a per-run random schema).
+  // Schema binding: the query binds `<canonical>.roles` and must NEVER go back to the bare
+  // session-resolved name — that is the shadow-schema false ABSENT. The schema is a PARAMETER, not
+  // a hard-coded literal, so the per-random-schema real-DB goldens still render (asserted above).
+  //
+  // THE FAILURE MESSAGE HERE USED TO SAY THE OPPOSITE ("it must resolve through the session
+  // search_path"), which would have walked the next person who reds this test straight back into
+  // the defect.
   assert.ok(
     !/con\.confrelid = to_regclass\('roles'\)/.test(WITNESS_SQL),
-    'the witness query hard-codes the public schema; it must resolve through the session search_path',
+    'the witness query went back to the bare session-resolved `roles` — that is the shadow-schema false ABSENT',
   )
   // The trigger set is DERIVED from the containment census, not hand-typed: every canonical trigger
   // function the census names must appear in the query, and no other proname may.
@@ -1437,6 +1444,78 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   for (const column of ['child_schema', 'child_table', 'confdeltype']) {
     assert.match(WITNESS_SQL, new RegExp(`AS ${column}\\b`), `the witness query stopped publishing ${column}`)
   }
+})
+
+/** Every door open. Each case below closes exactly one. */
+const BINDING_ALL_OPEN = Object.freeze({
+  canonical_roles_present: true,
+  session_binds_canonical: true,
+  session_roles_schema: 'public',
+  visible_roles_relations: 1,
+  canonical_exact_carriers: 9,
+})
+
+test('the four binding doors are BEHAVIOURAL: each closes on its own input, and only on its own', () => {
+  // THIS TEST EXISTS BECAUSE THE PREVIOUS ONE DID NOT DO ITS JOB. The doors used to be four inline
+  // `if`s in the preflight, guarded only by a source scan for their failure strings — so replacing
+  // `if (bindingRow.session_binds_canonical !== true)` with `if (false)` left this whole file green
+  // at 63/63. Verified against head b3bdb23d8b. A source-text assertion is not a behaviour
+  // assertion; this one drives real inputs through the real decision.
+  const opts = { canonicalSchema: 'public' }
+  assert.equal(classifyRoleCascadeBinding(BINDING_ALL_OPEN, opts), null, 'a fully-bound observation must yield no door')
+
+  const cases = [
+    { close: { canonical_roles_present: false }, door: ROLE_CASCADE_BINDING_DOORS.canonicalRelationAbsent, says: /no ordinary table `public\.roles`/ },
+    { close: { session_binds_canonical: false, session_roles_schema: 'metasheet' }, door: ROLE_CASCADE_BINDING_DOORS.bindingMismatch, says: /resolves to schema "metasheet", not the canonical `public`/ },
+    { close: { visible_roles_relations: 2 }, door: ROLE_CASCADE_BINDING_DOORS.relationAmbiguous, says: /2 `roles` tables are visible/ },
+    { close: { visible_roles_relations: 0 }, door: ROLE_CASCADE_BINDING_DOORS.relationAmbiguous, says: /0 `roles` tables are visible/ },
+    { close: { canonical_exact_carriers: 0 }, door: ROLE_CASCADE_BINDING_DOORS.relationsAbsent, says: /at its EXPECTED identity/ },
+  ]
+  for (const testCase of cases) {
+    const result = classifyRoleCascadeBinding({ ...BINDING_ALL_OPEN, ...testCase.close }, opts)
+    assert.ok(result, `no door closed for ${JSON.stringify(testCase.close)}`)
+    assert.equal(result.door, testCase.door, JSON.stringify(testCase.close))
+    assert.match(result.detail, testCase.says)
+  }
+
+  // ORDER IS PART OF THE CONTRACT: a database missing the canonical relation must not be reported
+  // as a binding mismatch, and a mismatch must not be reported as ambiguity.
+  assert.equal(
+    classifyRoleCascadeBinding({ ...BINDING_ALL_OPEN, canonical_roles_present: false, session_binds_canonical: false, visible_roles_relations: 4, canonical_exact_carriers: 0 }, opts).door,
+    ROLE_CASCADE_BINDING_DOORS.canonicalRelationAbsent,
+  )
+  assert.equal(
+    classifyRoleCascadeBinding({ ...BINDING_ALL_OPEN, session_binds_canonical: false, visible_roles_relations: 4, canonical_exact_carriers: 0 }, opts).door,
+    ROLE_CASCADE_BINDING_DOORS.bindingMismatch,
+  )
+
+  // FAIL-CLOSED ON JUNK: a missing or non-numeric field must close a door, never sail through.
+  for (const junk of [{}, null, undefined, { ...BINDING_ALL_OPEN, canonical_exact_carriers: 'many' }, { ...BINDING_ALL_OPEN, visible_roles_relations: null }]) {
+    assert.ok(classifyRoleCascadeBinding(junk, opts), `a door must close for ${JSON.stringify(junk)}`)
+  }
+})
+
+test('the exact-carrier control checks the FUNCTION schema, not only its name', () => {
+  // The impostor-carrier hole: scoping the carrier COUNT to the canonical schema constrained the
+  // carrier table's schema and the function's NAME, but not the function's SCHEMA. A relation in
+  // the canonical schema carrying a trigger that called `evil.metasheet_recovery_authority_user_trigger`
+  // satisfied it, and all four doors opened on a catalog whose recovery-authority surface is not
+  // the canonical one. Verified on PG 15 against head b3bdb23d8b.
+  const sql = buildRoleCascadeBindingSql(CANONICAL_ROLES_SCHEMA).canonicalExactCarriersSql
+  assert.match(sql, /fn_ns\.nspname = 'public'/, 'the function SCHEMA is unconstrained again — a same-named function elsewhere feeds the control')
+  assert.match(sql, /rel_ns\.nspname = 'public'/, 'the carrier table schema is unconstrained')
+  assert.match(sql, /trg\.tgname = want\.trigger_name/, 'the trigger IDENTITY is unchecked — any trigger on the right table would do')
+  // DERIVED, NOT RETYPED: every expected identity is rendered, and the rendering is non-vacuous.
+  for (const trigger of EXPECTED_AUTHORITY_TRIGGERS) {
+    assert.ok(
+      sql.includes(`('${trigger.tableName}', '${trigger.triggerName}', '${trigger.functionName}')`),
+      `the exact-carrier control lost ${trigger.schemaName}.${trigger.tableName} / ${trigger.triggerName}`,
+    )
+  }
+  // …and it rebases onto a golden's schema rather than hard-coding the canonical one.
+  const golden = buildRoleCascadeBindingSql('rcw_golden_schema').canonicalExactCarriersSql
+  assert.match(golden, /rel_ns\.nspname = 'rcw_golden_schema'/)
+  assert.match(golden, /fn_ns\.nspname = 'rcw_golden_schema'/)
 })
 
 test('the battery pairs the witness query with the SAME canonical binding, fail-closed (P3 lockstep)', () => {
@@ -1459,13 +1538,18 @@ test('the battery pairs the witness query with the SAME canonical binding, fail-
   // All four doors are present, each with its own reason, and each is a NOT_ARMED exit — never a
   // log line the run continues past. Same doors, same names as the independent witness runner's.
   const guard = BATTERY_SOURCE.slice(presenceIdx, queryIdx)
-  for (const failure of [
-    'role_cascade_canonical_relation_absent',
-    'role_cascade_binding_mismatch',
-    'role_cascade_relation_ambiguous',
-    'role_cascade_premise_unobservable',
-  ]) {
-    assert.match(guard, new RegExp(`failure: '${failure}'`), `the battery lost the ${failure} door`)
+  // The doors themselves are tested BEHAVIOURALLY above, on the shared classifier. What is left to
+  // pin here is exactly the part a behaviour test cannot reach without a live battery run: that
+  // this file DELEGATES rather than re-deciding. Stated as the residual it is, not as coverage.
+  assert.match(guard, /classifyRoleCascadeBinding\(bindingRow, \{ canonicalSchema: binding\.schema \}\)/, 'the battery stopped delegating to the shared door classifier')
+  assert.match(guard, /role_cascade_\$\{bindingDoor\.door\}/, 'the battery stopped deriving its failure name from the door')
+  assert.ok(
+    !/bindingRow\.(canonical_roles_present|session_binds_canonical|visible_roles_relations|canonical_exact_carriers)\s*(!==|===|<|>)/.test(guard),
+    'an inline binding condition reappeared in the battery — the doors must have exactly one implementation',
+  )
+  // Every door the shared classifier can return is reachable as a battery failure name.
+  for (const door of Object.values(ROLE_CASCADE_BINDING_DOORS)) {
+    assert.ok(typeof door === 'string' && door.length > 0, 'a door has no name')
   }
   assert.match(guard, /VERDICT: NOT_ARMED/)
   assert.match(guard, /return \{ exitCode: 2, evidence, lines \}/)

@@ -83,7 +83,7 @@
  */
 
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
-import { CANONICAL_ROLES_SCHEMA, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
+import { CANONICAL_ROLES_SCHEMA, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites } from './multitable-l1-battery.mjs'
 import { AUTHORITY_TRIGGER_FUNCTIONS } from './multitable-recovery-schema-containment.mjs'
 
 /**
@@ -105,23 +105,31 @@ const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
  * Positive control, not scope creep.
  *
  * `buildRoleCascadeWitnessQuery` answers "which foreign keys write a recovery-authority-triggered
- * child of `roles` when a role is deleted"; on a database that has no `roles` relation the session
- * can resolve, or no recovery-authority triggers at all, it answers "none" — which would read as
- * ABSENT/CONFIRMED while actually meaning "we are looking at the wrong database". A witness whose
- * CONFIRMED verdict is indistinguishable from a wrong-target dispatch is not a witness.
+ * child of `roles` when a role is deleted". On a database that is not the one we think we are
+ * observing it answers "none" — which would read as ABSENT/CONFIRMED while actually meaning "we
+ * looked somewhere else". A witness whose CONFIRMED verdict is indistinguishable from a wrong-target
+ * dispatch is not a witness.
  *
- * COUPLED TO THE QUERY IT GUARDS — narrow one and you MUST narrow the other. Both halves of the
- * relation set the query consults are counted here, resolved the SAME way the query resolves them:
+ * DELIBERATELY NOT COUPLED TO THE QUERY'S OWN RESOLUTION — that coupling WAS the defect. The
+ * control used to resolve `roles` the same way the query did (`to_regclass('roles')`, through the
+ * session's `search_path`), so a decoy reached first satisfied the control AND retargeted the query,
+ * and the two failed together. Everything published here is now bound to the canonical schema, and
+ * the session's own resolution appears only as something to DISAGREE with.
  *
- *   • `roles_relations` — `to_regclass('roles')`, session-resolved through `search_path`, exactly as
- *     `con.confrelid = to_regclass('roles')` resolves it. Deliberately UNQUALIFIED: a hard-coded
- *     `public.` literal would blind every real-DB golden this repo runs in a per-run random schema.
- *     `relkind IN ('r','p')` because `con.confrelid` can only ever be an ordinary or partitioned
- *     table — without it, a VIEW named `roles` would report presence for a query that returns zero.
- *   • `recovery_authority_relations` — how many relations carry a canonical recovery-authority
- *     trigger. This is the set the query's `EXISTS (…)` conjunct can match; if it is empty the query
- *     is STRUCTURALLY incapable of returning a row, so zero rows carries no information about the
- *     premise.
+ *   • `canonical_roles_present` / `session_binds_canonical` / `session_roles_schema` /
+ *     `visible_roles_relations` — the binding, and whether this session agrees with it.
+ *   • `canonical_exact_carriers` — how many of the census's EXACT carrier identities (carrier
+ *     table, trigger name, and function schema AND name) are present in the canonical schema. This
+ *     is the control the verdict depends on. Counting carriers loosely — by function NAME and
+ *     carrier schema only — let a trigger calling `evil.metasheet_recovery_authority_user_trigger`
+ *     from another schema satisfy it on a catalog whose recovery-authority surface is not the
+ *     canonical one.
+ *   • `recovery_authority_relations` — the loose carrier count, kept AUDIT-ONLY since the exact
+ *     control took over the decision, so a summary reader can see the gap between "something that
+ *     looks like a carrier" and "a census identity".
+ *
+ * The doors themselves are NOT implemented here: `classifyRoleCascadeBinding` in the battery module
+ * is the one implementation, shared with the battery's own preflight so the two cannot drift.
  *
  * `roles_referencing_fks` is AUDIT-ONLY and decides nothing: it counts every FK pointing at `roles`,
  * including ones on tables that carry no recovery-authority trigger (e.g. `view_permissions`, whose
@@ -137,6 +145,7 @@ export function buildRelationPresenceQuery(canonicalSchema) {
     ${binding.sessionBindsCanonicalSql} AS session_binds_canonical,
     ${binding.sessionRolesSchemaSql} AS session_roles_schema,
     ${binding.visibleRolesRelationsSql} AS visible_roles_relations,
+    ${binding.canonicalExactCarriersSql} AS canonical_exact_carriers,
     ${binding.canonicalTriggerCarriersSql} AS recovery_authority_relations,
     ${binding.rolesReferencingFksSql} AS roles_referencing_fks
 `
@@ -164,6 +173,17 @@ export const INDETERMINATE_REASONS = Object.freeze({
   canonicalRelationAbsent: 'canonical_relation_absent',
   bindingMismatch: 'binding_mismatch',
   relationAmbiguous: 'relation_ambiguous',
+})
+
+/**
+ * Door -> reason, as DATA rather than a chain of `if`s, so a door added to the shared classifier
+ * without a reason here fails loudly (`undefined` reason) instead of silently degrading to ABSENT.
+ */
+const DOOR_TO_INDETERMINATE_REASON = Object.freeze({
+  [ROLE_CASCADE_BINDING_DOORS.canonicalRelationAbsent]: INDETERMINATE_REASONS.canonicalRelationAbsent,
+  [ROLE_CASCADE_BINDING_DOORS.bindingMismatch]: INDETERMINATE_REASONS.bindingMismatch,
+  [ROLE_CASCADE_BINDING_DOORS.relationAmbiguous]: INDETERMINATE_REASONS.relationAmbiguous,
+  [ROLE_CASCADE_BINDING_DOORS.relationsAbsent]: INDETERMINATE_REASONS.relationsAbsent,
 })
 
 /**
@@ -252,6 +272,7 @@ async function main() {
       session_binds_canonical: p.session_binds_canonical === true,
       session_roles_schema: p.session_roles_schema == null ? null : String(p.session_roles_schema),
       visible_roles_relations: Number(p.visible_roles_relations),
+      canonical_exact_carriers: Number(p.canonical_exact_carriers),
       recovery_authority_relations: Number(p.recovery_authority_relations),
       roles_referencing_fks: Number(p.roles_referencing_fks),
     }))
@@ -366,6 +387,7 @@ export function parseWitnessObservation(text) {
   }
   const canonicalSchema = typeof presence.canonical_schema === 'string' ? presence.canonical_schema : ''
   const visibleRolesCount = Number(presence.visible_roles_relations)
+  const exactCarrierCount = Number(presence.canonical_exact_carriers)
   const triggeredRelationCount = Number(presence.recovery_authority_relations)
   const rolesReferencingFkCount = Number(presence.roles_referencing_fks)
   if (canonicalSchema === '') {
@@ -374,7 +396,7 @@ export function parseWitnessObservation(text) {
   if (typeof presence.canonical_roles_present !== 'boolean' || typeof presence.session_binds_canonical !== 'boolean') {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE binding flags are not booleans' }
   }
-  if (!Number.isFinite(visibleRolesCount) || !Number.isFinite(triggeredRelationCount) || !Number.isFinite(rolesReferencingFkCount)) {
+  if (!Number.isFinite(visibleRolesCount) || !Number.isFinite(exactCarrierCount) || !Number.isFinite(triggeredRelationCount) || !Number.isFinite(rolesReferencingFkCount)) {
     return { ok: false, reason: INDETERMINATE_REASONS.unparseable, detail: 'PRESENCE counts are not numbers' }
   }
   const sessionRolesSchema = presence.session_roles_schema == null ? null : String(presence.session_roles_schema)
@@ -384,52 +406,18 @@ export function parseWitnessObservation(text) {
     session_binds_canonical: presence.session_binds_canonical,
     session_roles_schema: sessionRolesSchema,
     visible_roles_relations: visibleRolesCount,
+    canonical_exact_carriers: exactCarrierCount,
     recovery_authority_relations: triggeredRelationCount,
     roles_referencing_fks: rolesReferencingFkCount,
   }
 
-  // FOUR DOORS, IN THIS ORDER. Each one is a distinct way for zero rows to mean something other
-  // than "no cascade", and each has its OWN reason so a first dispatch is diagnosable and so a
-  // mutation can be paired to the case it is supposed to catch. None of them may read as ABSENT.
-  //
-  // WHAT CONVERGES IS THE QUERY'S BINDING, NOT A DOOR. `buildRoleCascadeWitnessQuery` binds
-  // `<canonical>.roles` directly, so every shadow vector — `"$user"` schema, `SET search_path`, DSN
-  // `options=`, `ALTER ROLE … SET`, `CREATE TEMP TABLE roles` — is answered without being
-  // enumerated. Measured: with door 2 disabled, the one-wrong-schema case returns PRESENT (exit 1),
-  // not a false ABSENT, because the query was still looking at the right relation.
-  //
-  // Door 2 therefore earns its place as REFUSAL, not correction: when the session's own view
-  // disagrees with the canonical binding, the environment is not the one we believe we are
-  // certifying, and no verdict — not even a correct-looking one — should be drawn from it. Doors 1,
-  // 3 and 4 are counts, and counts do not converge on their own: a session looking at exactly ONE
-  // wrong schema satisfies all of them. If door 2 ever conflicts with door 3, weaken door 3.
-  if (!observed.canonical_roles_present) {
-    return {
-      ok: false,
-      reason: INDETERMINATE_REASONS.canonicalRelationAbsent,
-      detail: `the observed database has no ordinary table \`${canonicalSchema}.roles\`, so the witness query binds to nothing; zero rows there is not evidence of absence`,
-    }
-  }
-  if (!observed.session_binds_canonical) {
-    return {
-      ok: false,
-      reason: INDETERMINATE_REASONS.bindingMismatch,
-      detail: `this session's own \`roles\` resolves to schema ${JSON.stringify(sessionRolesSchema)}, not the canonical \`${canonicalSchema}\` — the observed environment is not the one being certified, so no verdict may be drawn from it`,
-    }
-  }
-  if (visibleRolesCount !== 1) {
-    return {
-      ok: false,
-      reason: INDETERMINATE_REASONS.relationAmbiguous,
-      detail: `${visibleRolesCount} \`roles\` tables are visible on this session's search_path (expected exactly the canonical one); the binding cannot be uniquely confirmed`,
-    }
-  }
-  if (triggeredRelationCount < 1) {
-    return {
-      ok: false,
-      reason: INDETERMINATE_REASONS.relationsAbsent,
-      detail: `no relation in \`${canonicalSchema}\` carries a canonical recovery-authority trigger, so the witness query is structurally incapable of returning a row; zero rows there is not evidence of absence`,
-    }
+  // THE DOORS ARE NOT IMPLEMENTED HERE. `classifyRoleCascadeBinding` is the single implementation,
+  // shared with the battery's preflight, so the two can never drift into one certifying what the
+  // other refuses — and so a neutered door reds a real input/output test instead of only a source
+  // scan. This file's job is to map a door to THIS surface's vocabulary: an INDETERMINATE reason.
+  const door = classifyRoleCascadeBinding(observed, { canonicalSchema })
+  if (door) {
+    return { ok: false, reason: DOOR_TO_INDETERMINATE_REASON[door.door], detail: door.detail }
   }
 
   return { ok: true, rows: normalisedRows, presence: observed }
