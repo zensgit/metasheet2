@@ -142,6 +142,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
        AND i.created_at > ${boundary}::timestamptz
   `.execute(db)
 
+  let membershipsInserted = 0
+  if (legacyOrgId) {
+    const memberships = await sql`
+      INSERT INTO user_orgs (user_id, org_id, is_active)
+      SELECT u.id, ${legacyOrgId}, TRUE
+        FROM users u
+       WHERE u.is_active = TRUE
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+      ON CONFLICT (user_id, org_id) DO NOTHING
+    `.execute(db)
+    membershipsInserted = Number(memberships.numAffectedRows ?? 0)
+  }
+
   const class3 = await sql`
     UPDATE approval_instances i
        SET org_id = r.org_id
@@ -193,7 +206,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // eslint-disable-next-line no-console
   console.log(
     `[recovery09-org-gap] attachment_stamped=${Number(class2.numAffectedRows ?? 0)} ` +
-    `membership_stamped=${Number(class3.numAffectedRows ?? 0)} fallback_stamped=${fallbackStamped}`,
+    `memberships_inserted=${membershipsInserted} membership_stamped=${Number(class3.numAffectedRows ?? 0)} ` +
+    `fallback_stamped=${fallbackStamped}`,
   )
 }
 

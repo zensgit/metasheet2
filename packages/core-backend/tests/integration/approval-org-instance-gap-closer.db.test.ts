@@ -134,13 +134,17 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
   it('R09-G1: multi-org window is closed source-first, then the older single-org closer sees zero work', async () => {
     await seedBackfillRecord()
     await sql`INSERT INTO directory_integrations (id, org_id) VALUES ('r09_di', 'default')`.execute(testDb)
-    await sql`INSERT INTO users (id, is_active) VALUES ('r09_default', TRUE), ('r09_member', TRUE)`.execute(testDb)
+    await sql`
+      INSERT INTO users (id, is_active)
+      VALUES ('r09_default', TRUE), ('r09_member', TRUE), ('r09_new_user', TRUE)
+    `.execute(testDb)
     await seedUserOrg('r09_default', 'default')
     await seedUserOrg('r09_member', 'synth_a')
     await seedUserOrg('r09_synth_b', 'synth_b')
     await seedUserOrg('r09_synth_c', 'synth_c')
 
     await seedInstance({ id: 'r09_gap_member', createdAt: AFTER_BOUNDARY, requesterId: 'r09_member' })
+    await seedInstance({ id: 'r09_gap_new_user', createdAt: AFTER_BOUNDARY, requesterId: 'r09_new_user' })
     await seedInstance({ id: 'r09_gap_attachment', createdAt: AFTER_BOUNDARY, requesterId: 'missing_attachment_actor' })
     await seedInstance({ id: 'r09_gap_fallback', createdAt: AFTER_BOUNDARY, requesterId: 'missing_fallback_actor' })
     await sql`
@@ -151,8 +155,14 @@ describeIfDatabase('Lock-11 §10.3 gap-closer — org_id backfill over the Migra
     await expect(recovery09GapUp(testDb)).resolves.toBeUndefined()
     await expect(gapCloserUp(testDb)).resolves.toBeUndefined()
     expect(await orgIdOf('r09_gap_member')).toBe('synth_a')
+    expect(await orgIdOf('r09_gap_new_user')).toBe('default')
     expect(await orgIdOf('r09_gap_attachment')).toBe('synth_b')
     expect(await orgIdOf('r09_gap_fallback')).toBe('default')
+    const newUserMembership = await sql<{ n: string }>`
+      SELECT count(*)::text AS n FROM user_orgs
+       WHERE user_id = 'r09_new_user' AND org_id = 'default' AND is_active = TRUE
+    `.execute(testDb)
+    expect(newUserMembership.rows[0]?.n).toBe('1')
   })
 
   it('R09-G2: unsupported deactivated-only requester aborts before any source-resolvable row is updated', async () => {
