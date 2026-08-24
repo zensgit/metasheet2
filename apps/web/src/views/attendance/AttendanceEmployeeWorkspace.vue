@@ -44,10 +44,6 @@
           <div class="attendance__hero-clock">
             <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
             <p class="attendance-ew__clock-status">{{ clockStatusLine }}</p>
-            <p v-if="shiftLine" class="attendance-ew__shift">
-              <span class="attendance-ew__shift-dot" aria-hidden="true" />
-              {{ shiftLine }}
-            </p>
           </div>
           <div class="attendance__actions attendance__hero-actions">
             <button
@@ -93,21 +89,6 @@
           class="attendance-ew__metrics"
           data-selfservice-card="status"
         >
-          <p class="attendance__selfservice-lead">{{ workbenchStatusDescription }}</p>
-          <span
-            v-if="workbenchRecordStatus"
-            class="attendance__status-chip"
-            :class="`attendance__status-chip--${workbenchRecordStatus}`"
-          >
-            {{ formatStatus(workbenchRecordStatus) }}
-          </span>
-          <small
-            v-if="refreshingAfterPunch"
-            class="attendance__field-hint"
-            data-testid="attendance-refreshing-indicator"
-          >
-            {{ tr('Updating...', '更新中...') }}
-          </small>
           <div
             v-if="workbenchRecordStatus"
             class="attendance__summary attendance__summary--workbench attendance__summary--stat"
@@ -143,6 +124,21 @@
               >{{ lateEarlyDisplay }}</strong>
             </div>
           </div>
+          <p class="attendance__selfservice-lead">{{ workbenchStatusDescription }}</p>
+          <span
+            v-if="workbenchRecordStatus"
+            class="attendance__status-chip"
+            :class="`attendance__status-chip--${workbenchRecordStatus}`"
+          >
+            {{ formatStatus(workbenchRecordStatus) }}
+          </span>
+          <small
+            v-if="refreshingAfterPunch"
+            class="attendance__field-hint"
+            data-testid="attendance-refreshing-indicator"
+          >
+            {{ tr('Updating...', '更新中...') }}
+          </small>
           <p
             v-if="selfServiceNeedsSetupHint"
             class="attendance__field-hint attendance__field-hint--strong"
@@ -215,12 +211,6 @@
           {{ tr('Go handle', '去处理') }}
         </button>
       </div>
-      <p
-        v-if="attentionItem.key !== 'all_clear' && attentionItem.key !== 'setup_needed'"
-        class="attendance-ew__todo-more"
-      >
-        {{ tr('No more items', '没有更多事项') }}
-      </p>
 
       <div class="attendance-ew__request-footer" data-selfservice-card="requests">
         <div class="attendance-ew__request-footer-row">
@@ -319,17 +309,6 @@
             <span>{{ tile.label }}</span>
           </button>
         </div>
-        <button
-          class="attendance-ew__records-link"
-          type="button"
-          data-selfservice-action="records"
-          @click="$emit('selfServiceAction', 'records')"
-        >
-          {{ tr('Review records', '查看记录') }}
-        </button>
-        <p class="attendance__field-hint attendance__field-hint--strong">
-          {{ selfServiceQuickActionHint }}
-        </p>
       </div>
 
     <div class="attendance-ew__tools">
@@ -653,15 +632,9 @@ const greetingSubline = computed(() => {
   const datePart = props.heroClockDate
   const window = windowShort.value
   if (window) {
-    return props.tr(`${datePart}, working ${window} today`, `${datePart}，今天按 ${window} 出勤`)
+    return props.tr(`${datePart}, ${window}`, `${datePart}, ${window}`)
   }
   return datePart
-})
-
-const shiftLine = computed(() => {
-  const window = windowShort.value
-  if (!window) return ''
-  return props.tr(`Fixed shift ${window}`, `固定班次 ${window}`)
 })
 
 const clockedIn = computed(() => isClockedIn(props.heroTimeline, props.workbenchLatestPunchLabel))
@@ -760,22 +733,6 @@ const hasRequestBody = computed(() =>
   color: #646a73;
 }
 
-.attendance-ew__shift {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 8px 0 0;
-  font-size: 12px;
-  color: #8f959e;
-}
-
-.attendance-ew__shift-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #3370ff;
-}
-
 .attendance-ew__metrics {
   display: flex;
   flex-direction: column;
@@ -784,6 +741,13 @@ const hasRequestBody = computed(() =>
   padding-top: 14px;
   margin-top: 4px;
   border-top: 1px solid rgba(31, 35, 41, 0.06);
+}
+
+.attendance-ew__metrics .attendance__selfservice-lead {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .attendance-ew__metrics .attendance__field-hint--strong {
@@ -895,12 +859,6 @@ const hasRequestBody = computed(() =>
   min-width: 0;
 }
 
-.attendance-ew__todo-more {
-  margin: 0;
-  font-size: 12px;
-  color: #bbbfc4;
-}
-
 .attendance-ew__request-footer {
   margin-top: auto;
   padding-top: 12px;
@@ -998,16 +956,6 @@ const hasRequestBody = computed(() =>
 
 .attendance-ew__tile-icon--swap {
   background: linear-gradient(180deg, #9b8af0 0%, #7b67ee 100%);
-}
-
-.attendance-ew__records-link {
-  align-self: flex-start;
-  border: none;
-  background: none;
-  padding: 0;
-  color: #8f959e;
-  font-size: 12px;
-  cursor: pointer;
 }
 
 .attendance-ew__history-filters {
