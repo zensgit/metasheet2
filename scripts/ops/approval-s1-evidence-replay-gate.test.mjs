@@ -261,6 +261,12 @@ function assertProbeIsGuarded(remoteBody, probeName) {
 // Every probe() call site that this workflow itself guards behind a `*_table_present` /
 // `*_column_present` existence check — the exact set P2-1 flagged as untested.
 const GUARDED_DEPENDENT_PROBE_NAMES = [
+  'r09_u1b_unique_linked_directory_org',
+  'r09_u1b_no_linked_directory_org',
+  'r09_u1b_multi_linked_directory_org',
+  'r09_u1b_unique_attendance_org',
+  'r09_u1b_no_attendance_org',
+  'r09_u1b_multi_attendance_org',
   'u1c_directory_integration_distinct_orgs',
   'u1c_non_default_integration_rows',
   'p10_instances_total',
@@ -323,6 +329,14 @@ test('extracted payload set contains every name this hardening slice specificall
     'u1b_zero_membership_active_users',
     'u1b_split_no_row_at_all',
     'u1b_split_only_deactivated_rows',
+    'r09_directory_source_schema_present',
+    'r09_u1b_unique_linked_directory_org',
+    'r09_u1b_no_linked_directory_org',
+    'r09_u1b_multi_linked_directory_org',
+    'r09_attendance_source_schema_present',
+    'r09_u1b_unique_attendance_org',
+    'r09_u1b_no_attendance_org',
+    'r09_u1b_multi_attendance_org',
     'u1c_directory_integrations_table_present',
     'u1c_directory_integration_distinct_orgs',
     'u1c_non_default_integration_rows',
@@ -360,6 +374,8 @@ test('the staging pre-gate probes appear in the remote body BEFORE the NOT_APPLI
     'u1b_zero_membership_active_users',
     'u1b_split_no_row_at_all',
     'u1b_split_only_deactivated_rows',
+    'r09_directory_source_schema_present',
+    'r09_attendance_source_schema_present',
     'u1c_directory_integrations_table_present',
     'p10_instances_table_present',
     'u3_attendance_records_org_id_column_present',
@@ -384,6 +400,8 @@ test('negative control: assertProbeIsGuarded is not vacuously true — an UNGUAR
   // condition) — proves the assertion actually discriminates guarded-from-unguarded rather than
   // passing for anything found in the remote body.
   for (const name of [
+    'r09_directory_source_schema_present',
+    'r09_attendance_source_schema_present',
     'u1c_directory_integrations_table_present',
     'p10_instances_table_present',
     'u3_attendance_records_org_id_column_present',

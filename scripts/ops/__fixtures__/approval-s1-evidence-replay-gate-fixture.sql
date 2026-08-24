@@ -29,7 +29,21 @@ CREATE TABLE user_orgs (
 );
 
 CREATE TABLE directory_integrations (
-  org_id text NOT NULL
+  id text PRIMARY KEY,
+  org_id text NOT NULL,
+  status text NOT NULL
+);
+
+CREATE TABLE directory_accounts (
+  id text PRIMARY KEY,
+  integration_id text NOT NULL,
+  is_active boolean NOT NULL DEFAULT true
+);
+
+CREATE TABLE directory_account_links (
+  local_user_id text NOT NULL,
+  directory_account_id text NOT NULL,
+  link_status text NOT NULL
 );
 
 CREATE TABLE approval_instances (
@@ -50,11 +64,13 @@ CREATE TABLE approval_attachments (
 -- org-derivation-20260822.md:1624): minimal shape for the two attendance tables the probe reads.
 CREATE TABLE attendance_records (
   id text PRIMARY KEY,
+  user_id text,
   org_id text
 );
 
 CREATE TABLE attendance_requests (
   id text PRIMARY KEY,
+  user_id text,
   org_id text
 );
 
@@ -75,9 +91,9 @@ INSERT INTO user_orgs (user_id, org_id, is_active) VALUES
   ('u-member-org2', 'org-two', true),
   ('u-only-deactivated', 'default', false);
 
-INSERT INTO directory_integrations (org_id) VALUES
-  ('default'),
-  ('org-two');
+INSERT INTO directory_integrations (id, org_id, status) VALUES
+  ('di-default', 'default', 'active'),
+  ('di-org-two', 'org-two', 'active');
 
 INSERT INTO approval_instances (id, org_id, source_system, template_id, requester_snapshot, created_at) VALUES
   ('plm:PLM-1', NULL, 'plm', NULL, '{}', now()),
