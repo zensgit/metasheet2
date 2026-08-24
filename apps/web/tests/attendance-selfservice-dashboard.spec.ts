@@ -963,30 +963,27 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
   })
 
-  it('lets the employee customize a 常用 pictogram in localStorage without firing the action', async () => {
+  it('renders four read-only 常用 tiles with default pictograms and no employee customize control', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
 
-    const leave = container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')
-    const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
-    const customize = container!.querySelector<HTMLButtonElement>('[data-attendance-ew-customize]')
-    expect(leave?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
-    expect(customize?.textContent).toContain('Customize')
-    const typeBefore = requestType?.value
-
-    customize!.click()
-    await flushUi()
-    expect(customize?.textContent).toContain('Done')
-    leave!.click()
-    await flushUi()
-    expect(container!.querySelector('[data-attendance-ew-icon-picker]')).toBeTruthy()
-    expect(requestType?.value).toBe(typeBefore)
-
-    container!.querySelector<HTMLButtonElement>('[data-attendance-ew-icon-option="briefcase"]')!.click()
-    await flushUi()
-    expect(leave?.getAttribute('data-attendance-ew-icon')).toBe('briefcase')
-    expect(JSON.parse(window.localStorage.getItem('metasheet.attendance.ew.common-icons.v1') ?? '{}').leave).toBe('briefcase')
+    const actions = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(actions).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-ew-customize]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-ew-icon-picker]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-employee-quick-icons]')).toBeNull()
+    expect(actions!.textContent).toContain('Makeup punch')
+    expect(actions!.textContent).toContain('Leave')
+    expect(actions!.textContent).toContain('Overtime')
+    expect(actions!.textContent).toContain('Shift swap')
+    expect(container!.querySelector('[data-selfservice-action="missing-punch"]')?.getAttribute('data-attendance-ew-icon')).toBe('clock-plus')
+    expect(container!.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
+    expect(container!.querySelector('[data-selfservice-action="overtime"]')?.getAttribute('data-attendance-ew-icon')).toBe('moon')
+    expect(container!.querySelector('[data-selfservice-action="shift-swap"]')?.getAttribute('data-attendance-ew-icon')).toBe('swap')
+    for (const icon of container!.querySelectorAll('.attendance-ew__tile-icon')) {
+      expect(icon.textContent?.trim(), 'tiles use filled pictograms, not 补/假/加/换 glyphs').toBe('')
+    }
   })
 
   it('W2/4355 late/early without anomaly: attention offers a records review action', async () => {

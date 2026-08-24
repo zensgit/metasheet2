@@ -549,6 +549,14 @@ const DEFAULT_SETTINGS = {
   workDateAttribution: {
     postShiftTailMinutes: DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   },
+  // Employee overview 常用 tiles — admin-chosen filled pictogram keys only (visual).
+  // Unknown/invalid keys fall back to these defaults in normalizeSettings.
+  employeeQuickActionIcons: {
+    makeup: 'clock-plus',
+    leave: 'calendar',
+    overtime: 'moon',
+    swap: 'swap',
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -13450,6 +13458,31 @@ function normalizeCalendarPolicyOverrides(rawOverrides) {
     .filter(Boolean)
 }
 
+const EMPLOYEE_QUICK_ACTION_ICON_IDS = Object.freeze([
+  'clock-plus',
+  'calendar',
+  'moon',
+  'swap',
+  'plus',
+  'user',
+  'briefcase',
+  'pin',
+])
+
+function normalizeEmployeeQuickActionIconsSetting(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const defaults = DEFAULT_SETTINGS.employeeQuickActionIcons
+  const pick = (key, fallback) => (
+    EMPLOYEE_QUICK_ACTION_ICON_IDS.includes(source[key]) ? source[key] : fallback
+  )
+  return {
+    makeup: pick('makeup', defaults.makeup),
+    leave: pick('leave', defaults.leave),
+    overtime: pick('overtime', defaults.overtime),
+    swap: pick('swap', defaults.swap),
+  }
+}
+
 function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
@@ -13576,6 +13609,7 @@ function normalizeSettings(raw) {
     workDateAttribution: normalizeWorkDateAttributionSetting(
       raw.workDateAttribution ?? raw.work_date_attribution,
     ),
+    employeeQuickActionIcons: normalizeEmployeeQuickActionIconsSetting(raw.employeeQuickActionIcons),
   }
 }
 
@@ -14721,6 +14755,11 @@ function mergeSettings(base, update) {
     workDateAttribution: {
       ...(base?.workDateAttribution || {}),
       ...(update?.workDateAttribution || {}),
+    },
+    // Visual-only employee 常用 icon keys. Partial PUT (e.g. report digest) must not wipe them.
+    employeeQuickActionIcons: {
+      ...(base?.employeeQuickActionIcons || {}),
+      ...(update?.employeeQuickActionIcons || {}),
     },
   })
 }
@@ -24641,6 +24680,7 @@ module.exports = {
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,
+    normalizeEmployeeQuickActionIconsSetting,
     ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CADENCES,
     isAttendanceReportSyncScheduledTriggerRuntimeEnabled,
     normalizeAttendanceReportSyncScheduledTriggerSetting,
@@ -26479,6 +26519,14 @@ module.exports = {
       // W2 / #4556: bounded post-shift attribution tail (default 120). Separate from grace.
       workDateAttribution: z.object({
         postShiftTailMinutes: z.number().int().min(0).max(MAX_ATTRIBUTION_TAIL_MINUTES).optional(),
+      }).optional(),
+      // Employee overview 常用 pictogram keys (visual only). Strings so unknown/invalid
+      // values are not 400'd — normalizeSettings falls back to the built-in defaults.
+      employeeQuickActionIcons: z.object({
+        makeup: z.string().optional(),
+        leave: z.string().optional(),
+        overtime: z.string().optional(),
+        swap: z.string().optional(),
       }).optional(),
     })
 

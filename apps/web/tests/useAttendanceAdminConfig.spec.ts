@@ -81,6 +81,12 @@ describe('useAttendanceAdminConfig', () => {
           ipAllowlist: ['10.0.0.1'],
           geoFence: { lat: 31.2, lng: 121.5, radiusMeters: 150 },
           minPunchIntervalMinutes: 5,
+          employeeQuickActionIcons: {
+            makeup: 'plus',
+            leave: 'briefcase',
+            overtime: 'not-an-icon',
+            swap: 'pin',
+          },
         },
       })),
     })
@@ -99,7 +105,30 @@ describe('useAttendanceAdminConfig', () => {
     expect(config.settingsForm.holidaySyncBaseUrl).toBe('https://example.com')
     expect(config.settingsForm.ipAllowlist).toBe('10.0.0.1')
     expect(config.holidaySyncLastRun.value?.totalApplied).toBe(3)
+    expect(config.settingsForm.employeeQuickActionIcons).toEqual({
+      makeup: 'plus',
+      leave: 'briefcase',
+      overtime: 'moon',
+      swap: 'pin',
+    })
     expect(options.adminForbidden.value).toBe(false)
+  })
+
+  it('loads default 常用 icon keys when settings omit the optional field', async () => {
+    const options = createOptions({
+      apiFetchWithTimeout: vi.fn(async () => jsonResponse(200, {
+        ok: true,
+        data: { minPunchIntervalMinutes: 2 },
+      })),
+    })
+    const config = useAttendanceAdminConfig(options)
+    await config.loadSettings()
+    expect(config.settingsForm.employeeQuickActionIcons).toEqual({
+      makeup: 'clock-plus',
+      leave: 'calendar',
+      overtime: 'moon',
+      swap: 'swap',
+    })
   })
 
   it('saves settings with normalized payload fields', async () => {
@@ -117,6 +146,7 @@ describe('useAttendanceAdminConfig', () => {
     config.settingsForm.geoFenceLat = '31.2'
     config.settingsForm.geoFenceLng = '121.5'
     config.settingsForm.geoFenceRadius = '200'
+    config.settingsForm.employeeQuickActionIcons.leave = 'user'
     config.settingsForm.holidayOverrides.push({
       name: 'Ops',
       match: 'contains',
@@ -192,6 +222,12 @@ describe('useAttendanceAdminConfig', () => {
     expect(payload.holidaySync.years).toEqual([2026, 2027])
     expect(payload.ipAllowlist).toEqual(['10.0.0.1', '10.0.0.2'])
     expect(payload.geoFence).toEqual({ lat: 31.2, lng: 121.5, radiusMeters: 200 })
+    expect(payload.employeeQuickActionIcons).toEqual({
+      makeup: 'clock-plus',
+      leave: 'user',
+      overtime: 'moon',
+      swap: 'swap',
+    })
     expect(options.setStatus).toHaveBeenCalledWith('Settings updated.')
   })
 

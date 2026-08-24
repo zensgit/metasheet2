@@ -148,6 +148,7 @@
         :request-decision-comment-label="requestDecisionCommentLabel"
         :describe-request-status="describeRequestStatus"
         :self-service-quick-action-hint="selfServiceQuickActionHint"
+        :employee-quick-action-icons="employeeQuickActionIcons"
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
@@ -2867,6 +2868,10 @@
                     min="1"
                   />
                 </label>
+                <AttendanceEmployeeQuickActionIconsField
+                  v-model="settingsForm.employeeQuickActionIcons"
+                  :tr="tr"
+                />
               </div>
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
@@ -10091,6 +10096,12 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
+import {
+  DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+  resolveEmployeeQuickActionIcons,
+  type EmployeeQuickActionIcons,
+} from './attendance/attendanceEmployeeWorkspaceCommonIcons'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -10817,6 +10828,7 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  employeeQuickActionIcons?: EmployeeQuickActionIcons
   multiShiftDay?: {
     enabled?: boolean
     maxSlots?: number
@@ -13369,6 +13381,10 @@ const selfServiceQuickActionHint = computed(() => {
   )
 })
 
+const employeeQuickActionIcons = computed(() =>
+  resolveEmployeeQuickActionIcons(attendanceSettings.value?.employeeQuickActionIcons),
+)
+
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
   || requestReportTypeFilter.value !== 'all'
@@ -15896,6 +15912,7 @@ const settingsForm = reactive({
   geoFenceLng: '',
   geoFenceRadius: '',
   minPunchIntervalMinutes: 1,
+  employeeQuickActionIcons: { ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS },
 })
 
 // 排班合规 (shift-compliance) config card — block-on-save day/week/month caps. Caps held as strings:
@@ -22985,6 +23002,11 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
   settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
   settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
+  const quickIcons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
+  settingsForm.employeeQuickActionIcons.makeup = quickIcons.makeup
+  settingsForm.employeeQuickActionIcons.leave = quickIcons.leave
+  settingsForm.employeeQuickActionIcons.overtime = quickIcons.overtime
+  settingsForm.employeeQuickActionIcons.swap = quickIcons.swap
 }
 
 function addHolidayOverride() {
@@ -24290,6 +24312,7 @@ async function saveSettings() {
       ipAllowlist,
       geoFence,
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
+      employeeQuickActionIcons: resolveEmployeeQuickActionIcons(settingsForm.employeeQuickActionIcons),
     }
 
     const response = await apiFetchWithTimeout('/api/attendance/settings', {
