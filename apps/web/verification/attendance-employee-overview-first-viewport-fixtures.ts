@@ -3,22 +3,22 @@ import { resolveAttendanceOverviewAttention } from '../src/views/attendance/atte
 
 export type OverviewHarnessState = 'normal' | 'late' | 'missing' | 'pending' | 'empty'
 
-const tr = (en: string, _zh: string) => en
+const tr = (_en: string, zh: string) => zh
 
 const requestFollowup = {
-  title: 'Pending follow-up',
-  detail: 'Leave request for Apr 15, 2026 is still waiting for approval.',
+  title: '待跟进申请',
+  detail: '4月15日的请假申请仍在等待审批。',
   status: 'pending' as string | null,
   action: 'request-report' as const,
-  actionLabel: 'Open request report',
+  actionLabel: '打开申请报表',
 }
 
 const emptyFollowup = {
-  title: 'No recent requests',
-  detail: 'No request follow-up in this range.',
+  title: '暂无申请',
+  detail: '这个区间里没有待跟进的申请。',
   status: null,
   action: 'request-report' as const,
-  actionLabel: 'Open request report',
+  actionLabel: '打开申请报表',
 }
 
 function attentionFor(state: OverviewHarnessState): AttendanceOverviewAttentionItem {
@@ -27,12 +27,12 @@ function attentionFor(state: OverviewHarnessState): AttendanceOverviewAttentionI
       punchFailureActive: false,
       punchFailureMessage: '',
       anomalyCount: 1,
-      focusDateLabel: 'Apr 15, 2026',
+      focusDateLabel: '4月15日',
       latestRequestStatus: null,
       pendingRequestCount: 0,
       focusRecordStatus: 'late_early',
-      focusRecordStatusLabel: 'Late + Early',
-      focusRecordDateLabel: 'Apr 15, 2026',
+      focusRecordStatusLabel: '迟到早退',
+      focusRecordDateLabel: '4月15日',
       needsSetup: false,
       setupHint: '',
     }, tr)
@@ -42,12 +42,12 @@ function attentionFor(state: OverviewHarnessState): AttendanceOverviewAttentionI
       punchFailureActive: false,
       punchFailureMessage: '',
       anomalyCount: 0,
-      focusDateLabel: 'Apr 15, 2026',
+      focusDateLabel: '4月15日',
       latestRequestStatus: 'pending',
       pendingRequestCount: 1,
       focusRecordStatus: 'normal',
-      focusRecordStatusLabel: 'Normal',
-      focusRecordDateLabel: 'Apr 15, 2026',
+      focusRecordStatusLabel: '正常',
+      focusRecordDateLabel: '4月15日',
       needsSetup: false,
       setupHint: '',
     }, tr)
@@ -57,12 +57,12 @@ function attentionFor(state: OverviewHarnessState): AttendanceOverviewAttentionI
       punchFailureActive: false,
       punchFailureMessage: '',
       anomalyCount: 0,
-      focusDateLabel: 'Apr 15, 2026',
+      focusDateLabel: '4月15日',
       latestRequestStatus: null,
       pendingRequestCount: 0,
       focusRecordStatus: 'late',
-      focusRecordStatusLabel: 'Late',
-      focusRecordDateLabel: 'Apr 15, 2026',
+      focusRecordStatusLabel: '迟到',
+      focusRecordDateLabel: '4月15日',
       needsSetup: false,
       setupHint: '',
     }, tr)
@@ -79,19 +79,19 @@ function attentionFor(state: OverviewHarnessState): AttendanceOverviewAttentionI
       focusRecordStatusLabel: null,
       focusRecordDateLabel: null,
       needsSetup: true,
-      setupHint: 'If you recently joined or expected a schedule here, you may not be assigned to an attendance group yet. Ask an attendance admin to confirm your group and shift setup.',
+      setupHint: '如果刚入职或按预期应有排班，可能还没有被分配到考勤组。请让考勤管理员确认分组和班次。',
     }, tr)
   }
   return resolveAttendanceOverviewAttention({
     punchFailureActive: false,
     punchFailureMessage: '',
     anomalyCount: 0,
-    focusDateLabel: 'Apr 15, 2026',
+    focusDateLabel: '4月15日',
     latestRequestStatus: null,
     pendingRequestCount: 0,
     focusRecordStatus: 'normal',
-    focusRecordStatusLabel: 'Normal',
-    focusRecordDateLabel: 'Apr 15, 2026',
+    focusRecordStatusLabel: '正常',
+    focusRecordDateLabel: '4月15日',
     needsSetup: false,
     setupHint: '',
   }, tr)
@@ -103,26 +103,31 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
   return {
     tr,
     heroClockTime: '09:18',
-    heroClockDate: 'Wed, Apr 15',
+    heroClockDate: '周三 · 4月15日',
     punching: false,
     refreshingAfterPunch: false,
     heroTimeline: isEmpty ? { checkIn: null, checkOut: null } : { checkIn: '09:18', checkOut: state === 'normal' ? '18:00' : '17:42' },
     punchOutdoorNoteRequired: false,
     punchOutdoorNoteDraft: '',
     workbenchStatusDescription: isEmpty
-      ? 'No attendance data is available in this range yet.'
+      ? '这个区间里还没有考勤数据。'
       : isLate
-        ? 'Both a late arrival and an early departure were recorded.'
-        : 'The workday looks normal.',
+        ? '当天同时记录了迟到和早退。'
+        : '当天出勤正常。',
     workbenchRecordStatus: isEmpty ? null : isLate ? (state === 'missing' ? 'late_early' : 'late') : 'normal',
-    workbenchFocusDateLabel: isEmpty ? null : 'Apr 15, 2026',
+    workbenchFocusDateLabel: isEmpty ? null : '2026年4月15日',
     workbenchLatestPunchLabel: isEmpty ? '--:--' : '09:18',
     workbenchWorkMinutes: isEmpty ? 0 : 444,
     workbenchLateEarlyLabel: isLate ? '18 / 18' : '0 / 0',
     workbenchHasLateEarly: isLate,
     selfServiceNeedsSetupHint: isEmpty,
-    selfServiceSetupFollowupHint: 'If you recently joined or expected a schedule here, you may not be assigned to an attendance group yet. Ask an attendance admin to confirm your group and shift setup.',
-    formatStatus: (value: string) => value,
+    selfServiceSetupFollowupHint: '如果刚入职或按预期应有排班，可能还没有被分配到考勤组。请让考勤管理员确认分组和班次。',
+    formatStatus: (value: string) => ({
+      late_early: '迟到早退',
+      late: '迟到',
+      normal: '正常',
+      pending: '待审批',
+    }[value] ?? value),
     statusMessage: '',
     statusKind: 'info' as const,
     statusCode: '',
@@ -132,9 +137,9 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
     attentionItem: attentionFor(state),
     requestsTotal: state === 'pending' ? 1 : 0,
     selfServiceRequestStatusItems: [
-      { key: 'pending', label: 'Pending', count: state === 'pending' ? 1 : 0 },
-      { key: 'approved', label: 'Approved', count: 0 },
-      { key: 'rejected', label: 'Rejected', count: 0 },
+      { key: 'pending', label: '待审批', count: state === 'pending' ? 1 : 0 },
+      { key: 'approved', label: '已通过', count: 0 },
+      { key: 'rejected', label: '已驳回', count: 0 },
     ],
     selfServiceRequestFollowup: state === 'pending' ? requestFollowup : emptyFollowup,
     selfServiceRecentRequests: [],
@@ -145,7 +150,9 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
     requestDecisionCommentText: () => '',
     requestDecisionCommentLabel: () => 'Comment',
     describeRequestStatus: () => '',
-    selfServiceQuickActionHint: 'Jump into the request form or records table without leaving overview.',
+    selfServiceQuickActionHint: isEmpty
+      ? '如果刚入职或按预期应有排班，可能还没有被分配到考勤组。请让考勤管理员确认分组和班次。'
+      : '无需离开总览，直接进入申请或记录。',
     annualSelfBalanceLoading: false,
     annualSelfBalanceError: null,
     annualSelfBalanceSummary: null,
@@ -156,7 +163,7 @@ export function buildEmployeeWorkspaceProps(state: OverviewHarnessState) {
     selfRulesHasData: false,
     selfRulesAttendanceGroupSummary: '—',
     selfRulesScheduleGroupSummary: '—',
-    selfRulesWorkWindowSummary: '—',
+    selfRulesWorkWindowSummary: isEmpty ? '—' : '09:00–18:00',
     selfRulesPunchPolicySummary: '—',
     selfRulesWorkingDaysSummary: '—',
     selfRulesGraceSummary: '—',

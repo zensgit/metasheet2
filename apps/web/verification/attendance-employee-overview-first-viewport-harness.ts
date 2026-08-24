@@ -32,19 +32,19 @@ createApp({
     return () => h('div', { class: 'harness-app' }, [
       h('nav', { class: 'app-nav', 'data-harness-nav': '' }, [
         h('span', { class: 'brand-text' }, 'MetaSheet'),
-        h('span', { class: 'nav-link' }, 'Attendance'),
+        h('span', { class: 'nav-link' }, '考勤'),
       ]),
       h('main', { class: 'app-main' }, [
         h('div', { class: 'attendance-shell' }, [
           h('nav', { class: 'attendance-shell__tabs', 'data-harness-tabs': '' }, [
-            h('button', { class: 'attendance-shell__tab attendance-shell__tab--active', type: 'button' }, 'Overview'),
-            h('button', { class: 'attendance-shell__tab', type: 'button' }, 'Reports'),
+            h('button', { class: 'attendance-shell__tab attendance-shell__tab--active', type: 'button' }, '总览'),
+            h('button', { class: 'attendance-shell__tab', type: 'button' }, '报表'),
           ]),
           h('div', { class: 'attendance attendance--overview' }, [
             h('header', { class: 'attendance__header', 'data-attendance-overview-header': '' }, [
               h('div', { class: 'attendance__header-copy' }, [
-                h('h2', { class: 'attendance__title' }, 'Attendance'),
-                h('p', { class: 'attendance__subtitle' }, 'Track punches, summaries, and adjustments.'),
+                h('h2', { class: 'attendance__title' }, 'MetaSheet 考勤'),
+                h('p', { class: 'attendance__subtitle' }, '跟踪打卡、汇总和补卡调整。'),
               ]),
               h('div', {
                 class: 'attendance__header-aside',

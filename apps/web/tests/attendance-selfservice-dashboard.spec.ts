@@ -733,7 +733,14 @@ describe('Attendance self-service dashboard', () => {
     expect(rulesCard).not.toContain('approval-flow-secret')
     expect(rulesCard).not.toContain('wifi-secret')
     expect(rulesCard).not.toContain('integration-secret')
-    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Fix missing punch')
+    expect(container?.querySelector('[data-selfservice-action="missing-punch"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-action="leave"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-card="actions"] [data-selfservice-action="overtime"]')).toBeNull()
+    expect(container?.querySelector('[data-selfservice-card="actions"] [data-selfservice-action="shift-swap"]')).toBeNull()
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Makeup punch')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).not.toContain('Fix missing punch')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).not.toContain('Overtime')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).not.toContain('Shift swap')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
   })
@@ -947,6 +954,8 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container!.querySelector('.attendance--overview')).toBeTruthy()
     expect(container!.querySelector('[data-attendance-history-filters]')?.closest('[data-attendance-overview-primary]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toMatch(/Good (morning|afternoon|evening)/)
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
   })
 
   it('W2/4355 late/early without anomaly: attention offers a records review action', async () => {
@@ -970,7 +979,7 @@ describe('Attendance self-service dashboard', () => {
     const attention = container!.querySelector('[data-attendance-overview-attention]')
     expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('record_review')
     expect(attention?.textContent).toContain('Review the focus workday')
-    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Review records')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
   })
 
   it('W2/4355 pending-request without anomaly: attention tracks approval and never exposes approve/reject', async () => {
@@ -1010,7 +1019,7 @@ describe('Attendance self-service dashboard', () => {
     const attention = container!.querySelector('[data-attendance-overview-attention]')
     expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('request_pending')
     expect(attention?.textContent).toContain('Track pending approvals')
-    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Open request report')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
     expect(attention?.textContent?.toLowerCase()).not.toContain('approve')
     expect(attention?.textContent?.toLowerCase()).not.toContain('reject')
   })
@@ -2045,13 +2054,15 @@ describe('Attendance self-service dashboard', () => {
     // late-early — no fourth "Attention items" stat (that signal now lives
     // solely in the Needs-attention band, §4.2, avoiding a second copy).
     const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
-    expect(summary.textContent).toContain('Latest punch')
-    expect(summary.textContent).toContain('Work minutes')
+    expect(summary.textContent).toContain("Today's hours")
+    expect(summary.textContent).toContain('7h 24m')
+    expect(summary.textContent).not.toContain('444')
     expect(summary.textContent).toContain('Late / Early')
+    expect(summary.textContent).not.toContain('Work minutes')
     expect(summary.textContent).not.toContain('Attention items')
     const warning = summary.querySelector('.attendance__summary-value--warning') as HTMLElement | null
     expect(warning, 'late/early 18/18 should color as warning').toBeTruthy()
-    expect(warning!.textContent).toContain('18 / 18')
+    expect(warning!.textContent).toContain('18m / 18m')
   })
 
   it('UI-P1: no timeline when the active record is not from today', async () => {

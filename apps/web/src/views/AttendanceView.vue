@@ -29507,6 +29507,8 @@ defineExpose({
 .attendance--overview {
   gap: 16px;
   padding: 16px 20px 24px;
+  background-color: #f4f6fa;
+  background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
 }
 
 .attendance__header {
