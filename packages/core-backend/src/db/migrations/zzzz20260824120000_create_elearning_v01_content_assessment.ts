@@ -60,6 +60,7 @@ export const QUESTION_REVISION_DENY_TRIGGER = 'trg_elearning_question_revisions_
 export const GRADING_RECORD_DENY_FN = 'elearning_grading_records_deny_mutation'
 export const GRADING_RECORD_DENY_TRIGGER = 'trg_elearning_grading_records_deny_mutation'
 export const GRADING_RECORD_ATTEMPT_KIND_UNIQ = 'elearning_grading_records_org_attempt_kind_uniq'
+export const ELEARNING_MEDIA_STALE_CLAIM_INDEX = 'idx_elearning_media_stale_updated_at_id'
 
 export const COURSES_ACTIVE_VERSION_FN = 'elearning_courses_active_version_published'
 export const COURSES_ACTIVE_VERSION_TRIGGER = 'trg_elearning_courses_active_version_published'
@@ -943,6 +944,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     CREATE INDEX IF NOT EXISTS idx_elearning_media_org
       ON elearning_media (org_id)
+  `.execute(db)
+  await sql`
+    CREATE INDEX IF NOT EXISTS idx_elearning_media_stale_updated_at_id
+      ON elearning_media (updated_at, id)
+      WHERE status IN ('uploading', 'probing')
   `.execute(db)
   await sql`
     CREATE INDEX IF NOT EXISTS idx_elearning_questions_org

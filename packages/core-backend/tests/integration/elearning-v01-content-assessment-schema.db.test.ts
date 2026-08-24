@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import {
+  ELEARNING_MEDIA_STALE_CLAIM_INDEX,
   ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ELEARNING_V01_TABLES,
   GRADING_RECORD_ATTEMPT_KIND_UNIQ,
@@ -518,6 +519,54 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [GRADING_RECORD_ATTEMPT_KIND_UNIQ],
     )
     expect(uniq.rows).toHaveLength(1)
+  })
+
+  it('pins the elearning_media stale-claim partial index name, column order, and predicate', async () => {
+    const listed = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef
+         FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename = 'elearning_media'
+          AND indexname = $1`,
+      [ELEARNING_MEDIA_STALE_CLAIM_INDEX],
+    )
+    expect(listed.rows).toHaveLength(1)
+    expect(listed.rows[0].indexname).toBe(ELEARNING_MEDIA_STALE_CLAIM_INDEX)
+    expect(listed.rows[0].indexdef).toMatch(/USING btree \(updated_at, id\) WHERE/i)
+
+    const columns = await pool.query<{ attname: string }>(
+      `SELECT a.attname
+         FROM pg_index ix
+         JOIN pg_class idx ON idx.oid = ix.indexrelid
+         JOIN pg_class tbl ON tbl.oid = ix.indrelid
+         JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+         JOIN unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+         JOIN pg_attribute a
+           ON a.attrelid = ix.indrelid
+          AND a.attnum = k.attnum
+        WHERE nsp.nspname = current_schema()
+          AND tbl.relname = 'elearning_media'
+          AND idx.relname = $1
+        ORDER BY k.ord`,
+      [ELEARNING_MEDIA_STALE_CLAIM_INDEX],
+    )
+    expect(columns.rows.map((row) => row.attname)).toEqual(['updated_at', 'id'])
+
+    const predicate = await pool.query<{ predicate: string | null }>(
+      `SELECT pg_get_expr(ix.indpred, ix.indrelid) AS predicate
+         FROM pg_index ix
+         JOIN pg_class idx ON idx.oid = ix.indexrelid
+         JOIN pg_class tbl ON tbl.oid = ix.indrelid
+         JOIN pg_namespace nsp ON nsp.oid = tbl.relnamespace
+        WHERE nsp.nspname = current_schema()
+          AND tbl.relname = 'elearning_media'
+          AND idx.relname = $1`,
+      [ELEARNING_MEDIA_STALE_CLAIM_INDEX],
+    )
+    expect(predicate.rows).toHaveLength(1)
+    expect(predicate.rows[0].predicate).toBe(
+      `(status = ANY (ARRAY['uploading'::text, 'probing'::text]))`,
+    )
   })
 
   it('gives every table org_id TEXT NOT NULL with column_default IS NULL', async () => {

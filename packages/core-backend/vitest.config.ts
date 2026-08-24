@@ -1496,6 +1496,11 @@ export default defineConfig({
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
       'tests/integration/elearning-media-quota.db.test.ts',
+      // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
+      // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
+      // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
+      // after Start Postgres + db:migrate (same step as the quota suite).
+      'tests/integration/elearning-media-reconciler.db.test.ts',
       // Playwright E2E suites run through their own harness, not Vitest.
       'tests/e2e/**',
     ],

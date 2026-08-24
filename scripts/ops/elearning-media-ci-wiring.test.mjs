@@ -3,7 +3,13 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { isQuotedInTestExclude } from './ci-realdb-step-contract.mjs'
+import {
+  isQuotedInTestExclude,
+  isSuiteWiredInRealDbStep,
+  realDbStepWholeFileArgs,
+  requireExecutableRealDbStep,
+  REAL_DB_STEP_IDS,
+} from './ci-realdb-step-contract.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
@@ -14,6 +20,7 @@ const ENV_EXAMPLE = join(repoRoot, '.env.example')
 const PROBE_SRC = join(repoRoot, 'packages/core-backend/src/services/elearning-media-probe.ts')
 const RUNTIME_SRC = join(repoRoot, 'packages/core-backend/src/services/elearning-media-runtime.ts')
 const ROUTES_SRC = join(repoRoot, 'packages/core-backend/src/routes/elearning-media.ts')
+const INDEX_SRC = join(repoRoot, 'packages/core-backend/src/index.ts')
 
 const SUITES = [
   'tests/unit/elearning-media-validation.test.ts',
@@ -23,9 +30,30 @@ const SUITES = [
   'tests/unit/elearning-media-runtime.test.ts',
   'tests/unit/elearning-media-routes.test.ts',
   'tests/unit/elearning-media-ingest.test.ts',
+  'tests/unit/elearning-media-reconciler.test.ts',
+  'tests/unit/elearning-media-s3.test.ts',
+]
+
+const MEDIA_CLAIM_UNIT_FILES = [
+  'tests/unit/elearning-media-runtime.test.ts',
+  'tests/unit/elearning-media-reconciler.test.ts',
+  'tests/unit/elearning-media-storage.test.ts',
+  'tests/unit/elearning-media-s3.test.ts',
 ]
 
 const DB_SUITE = 'tests/integration/elearning-media-quota.db.test.ts'
+const RECONCILER_DB = 'tests/integration/elearning-media-reconciler.db.test.ts'
+const MEDIA_DB_STEP_ID = 'elearning-v01-media-quota-real-db'
+
+function stripTsComments(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(/^\s*\/\/.*$/gm, '')
+}
+
+function wholeFileArg(run, file) {
+  return new RegExp(`(?:^|\\s)${file.replace(/\./g, '\\.')}(?:\\s|$)`).test(run)
+}
 
 function uncommentedLines(text) {
   return text
@@ -58,8 +86,23 @@ test('plugin-tests.yml keeps the core-backend test job and an explicit media can
   const wf = readFileSync(WORKFLOW, 'utf8')
   assert.match(wf, /pnpm --filter @metasheet\/core-backend test/)
   assert.match(wf, /Run elearning V0\.1 media ingestion canaries/)
+  const canaryAt = wf.indexOf('Run elearning V0.1 media ingestion canaries')
+  assert.ok(canaryAt >= 0, 'media canary step must exist')
+  const canary = namedStepContaining(wf, canaryAt)
+  const runAt = canary.search(/^\s+run:/m)
+  assert.ok(runAt >= 0, 'media canary must have a run script')
+  const run = canary.slice(runAt)
+  assert.match(run, /\bvitest\b/)
+  assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'media canary must not use a -t filter')
+  assert.equal(run.includes('--testNamePattern'), false, 'media canary must not use --testNamePattern')
   for (const file of SUITES) {
-    assert.ok(wf.includes(file), `plugin-tests.yml canary must name ${file}`)
+    assert.ok(wholeFileArg(run, file), `plugin-tests.yml canary must name ${file} as a whole-file vitest arg`)
+  }
+  for (const file of MEDIA_CLAIM_UNIT_FILES) {
+    assert.ok(
+      SUITES.includes(file) && wholeFileArg(run, file),
+      `runtime/reconciler/storage/S3 unit file ${file} must stay in the existing canary invocation`,
+    )
   }
   assert.match(wf, /node --test scripts\/ops\/elearning-media-ci-wiring\.test\.mjs/)
 })
@@ -117,6 +160,105 @@ test('quota DB suite exists, is excluded, and is a post-Postgres whole-file vite
     step,
     /DATABASE_URL:\s*postgresql:\/\/postgres@localhost:5432\/metasheet_test/,
     'DB step must provide DATABASE_URL with the same post-DB pattern as neighboring gates',
+  )
+})
+
+test('reconciler DB suite exists, is excluded, and is a sibling whole-file arg of the media real-DB step', () => {
+  const abs = join(repoRoot, 'packages/core-backend', RECONCILER_DB)
+  assert.ok(existsSync(abs), `suite ${RECONCILER_DB} must exist on disk`)
+  const cfg = readFileSync(VITEST_CFG, 'utf8')
+  assert.ok(
+    isQuotedInTestExclude(cfg, RECONCILER_DB),
+    `test.exclude must contain the exact quoted entry '${RECONCILER_DB}'`,
+  )
+  assert.equal(
+    isQuotedInTestExclude(cfg, 'tests/unit/elearning-media-reconciler.test.ts'),
+    false,
+    'reconciler unit file must not be excluded from the no-DB job',
+  )
+
+  const wf = readFileSync(WORKFLOW, 'utf8')
+  requireExecutableRealDbStep(wf, MEDIA_DB_STEP_ID)
+  assert.ok(
+    isSuiteWiredInRealDbStep(wf, MEDIA_DB_STEP_ID, DB_SUITE),
+    `step ${MEDIA_DB_STEP_ID} must keep ${DB_SUITE} as a whole-file vitest arg`,
+  )
+  assert.ok(
+    isSuiteWiredInRealDbStep(wf, MEDIA_DB_STEP_ID, RECONCILER_DB),
+    `step ${MEDIA_DB_STEP_ID} must run ${RECONCILER_DB} as a whole-file vitest arg`,
+  )
+  const wired = realDbStepWholeFileArgs(wf, MEDIA_DB_STEP_ID)
+  assert.equal(wired.includes(DB_SUITE), true)
+  assert.equal(wired.includes(RECONCILER_DB), true)
+  assert.equal(
+    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval).includes(RECONCILER_DB),
+    false,
+    `${RECONCILER_DB} must not be wired into the approval real-DB step`,
+  )
+  assert.equal(
+    realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable).includes(RECONCILER_DB),
+    false,
+    `${RECONCILER_DB} must not be wired into the multitable real-DB step`,
+  )
+
+  const src = readFileSync(abs, 'utf8')
+  assert.equal(src.includes('describe.skip'), false)
+  assert.equal(src.includes('describeIfDatabase'), false)
+  assert.match(src, /if \(!DATABASE_URL\)/)
+  assert.match(src, /throw new Error/)
+  assert.match(src, /refusing skip-shaped green/)
+  assert.match(src, /reconcileStaleElearningMediaRows/)
+  assert.match(src, /FOR UPDATE SKIP LOCKED/)
+  assert.match(src, /new Client\(/)
+  assert.match(src, /new Pool\(/)
+  assert.match(src, /\.end\(\)/)
+  assert.match(src, /FILE_NS/)
+})
+
+test('index.ts mounts media routes, defers startWorkers until listen, and stops them on shutdown', () => {
+  const src = stripTsComments(readFileSync(INDEX_SRC, 'utf8'))
+  assert.match(src, /bootElearningMediaRuntime/)
+  assert.match(src, /this\.app\.use\(\s*mediaRuntime\.router\s*\)/)
+  assert.match(src, /startElearningMediaWorkers\s*=\s*mediaRuntime\.startWorkers/)
+
+  const assignAt = src.search(/startElearningMediaWorkers\s*=\s*mediaRuntime\.startWorkers/)
+  const mountAt = src.search(/this\.app\.use\(\s*mediaRuntime\.router\s*\)/)
+  const listenAt = src.search(/this\.httpServer\.listen\s*\(/)
+  const startAt = src.search(/this\.stopElearningMediaWorkers\s*=\s*startElearningMediaWorkers\s*\(\s*\)/)
+  const stopMethodAt = src.search(/async\s+stop\s*\(/)
+  assert.ok(stopMethodAt >= 0, 'stop() must exist')
+  const stopSlice = src.slice(stopMethodAt)
+  const startAfterStopRel = stopSlice.search(/\n  async\s+start\s*\(/)
+  const stopSrc = startAfterStopRel >= 0 ? stopSlice.slice(0, startAfterStopRel) : stopSlice
+  const stopAwaitAt = stopSrc.search(/await\s+this\.stopElearningMediaWorkers\s*\?\.\s*\(\s*\)/)
+  const poolEndAt = stopSrc.search(/await\s+pool\.end\s*\(\s*\)/)
+
+  assert.ok(assignAt >= 0, 'boot must capture startWorkers without invoking it')
+  assert.ok(mountAt >= 0, 'boot must mount mediaRuntime.router')
+  assert.ok(listenAt >= 0, 'server listen must exist')
+  assert.ok(startAt >= 0, 'startWorkers must be invoked after listen')
+  assert.ok(stopAwaitAt >= 0, 'stop() must await stopElearningMediaWorkers')
+  assert.ok(poolEndAt >= 0, 'stop() must await pool.end')
+  assert.ok(
+    stopAwaitAt < poolEndAt,
+    'stop() must await stopElearningMediaWorkers before await pool.end',
+  )
+
+  assert.ok(mountAt < listenAt, 'route mount must happen during boot, before listen')
+  assert.ok(assignAt < listenAt, 'startWorkers capture must happen during boot, before listen')
+  assert.ok(listenAt < startAt, 'startWorkers invocation must be deferred until after listen')
+  assert.equal(
+    /startElearningMediaWorkers\s*\(\s*\)/.test(src.slice(assignAt, listenAt)),
+    false,
+    'boot must not call startWorkers before listen',
+  )
+  assert.match(
+    src.slice(Math.max(0, startAt - 280), startAt + 80),
+    /NODE_ENV\s*!==\s*['"]test['"]/,
+  )
+  assert.match(
+    src.slice(Math.max(0, startAt - 280), startAt + 80),
+    /!\s*process\.env\.VITEST/,
   )
 })
 
