@@ -23,7 +23,7 @@
 > witness PR #5131 钉成 head `1d8f0708de`、状态 OPEN/Draft、main 仍是修复前的窄谓词——这些在落笔
 > 时刻均为真(经 CI job 日志与 `gh pr view` 核实)。**但 #5131 在该提交落地后仅 6 分钟(12:15:34+08,
 > 合并提交 `771cd9be20`)即被合并**,使同一批断言当场失效:#5131 现 **MERGED**(非 Draft/OPEN),宽
-> 谓词与三个见证文件现已落 `origin/main`(现 tip `771cd9be20`,取代原引用的 `136be5f1f5`),armed
+> 谓词与三个见证文件现已落 `origin/main`(合并提交 `771cd9be20` 是当前 `origin/main` 的**祖先**——此处刻意不镜像 main 的 tip:tip 是热的,本文档已因追它而两次过期),armed
 > real-DB golden 在 main 上以 push 事件重跑仍是 **59/59、0 fail、0 skip**(`run 32689331718` /
 > `job 97320045961`,与 #5131 分支上的原始执行 `run 32682499617` / `job 97301471543` 并存,不互相
 > 替代——前者证"合并后 main 上仍执行",后者证"该 head 上曾执行",两者回答不同问题)。下方每处受影响
@@ -173,7 +173,7 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > **原写「⚠️ 下面 (a)(b) 的谓词修复只存在于 #5131 分支(head `1d8f0708de`),尚未落 main:origin/main
 > 现在 `136be5f1f5`……其上的 `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据……
 > `multitable-role-cascade-witness.*` 三个见证文件在 main 上根本不存在」,已更正**:#5131 合并后,
-> 宽谓词与三个见证文件均已落 `origin/main`(现 tip `771cd9be20`,取代原引用的 `136be5f1f5`;
+> 宽谓词与三个见证文件均已落 `origin/main`(合并提交 `771cd9be20` 是当前 `origin/main` 的**祖先**;此处刻意不镜像 main 的 tip;
 > `gh api repos/zensgit/metasheet2/branches/main --jq '.commit.sha'` 核实)。main 上
 > `scripts/ops/multitable-l1-battery.mjs:451-469` 现即 (a)(b) 段所述的宽 `ROLE_CASCADE_WITNESS_QUERY`
 > (对 `roles` 的任意外键判断,不再硬编码表名),`:490` 现即 `ROLE_DELETE_CHILD_WRITE_ACTIONS =
@@ -256,7 +256,7 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
   #5131 分支(未合并,head `1d8f0708de`)**;origin/main 现在 `136be5f1f5`,其上(已核实,
   `scripts/ops/multitable-l1-battery.mjs:382-394`)电池脚本里的 `ROLE_CASCADE_WITNESS_QUERY` 仍是窄
   谓词……」,**已更正**:#5131 已于 2026-08-24T12:15:34+08(合并提交 `771cd9be20`)合并,宽谓词现已在
-  `origin/main`(现 tip `771cd9be20`)上,`scripts/ops/multitable-l1-battery.mjs:451-469` 即宽版
+  `origin/main`(含合并提交 `771cd9be20`,该提交是当前 main 的祖先)上,`scripts/ops/multitable-l1-battery.mjs:451-469` 即宽版
   `ROLE_CASCADE_WITNESS_QUERY`(核实方式与引用行号见 §B1a)。
   原写「**现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",电池会用这份窄谓词复
   核……电池会**放行一个已经失效的豁免**……」,**已更正**:该风险的前提(#5131 未合并)已不成立——
@@ -416,7 +416,7 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 7. **建号**(用 `scripts/ops/create-l1-battery-admin-on-staging.sh`;两枚 secrets 已设)
 8. **owner 按现行 ≥2 天判据开 L1**:enable 9/9 → 立即 postdeploy-full(**trigger 腿预期红 = `505926e3…`**,flag 腿全绿)
 9. **窗口内** dispatch 电池(intent `L1-open-battery-run-1`)→ PASS(证据绑镜像 digest)
-10. **ratify A1 于 #5042**(建议绑 merge commit `5b2376bb49`,并在批注声明所用 SHA 形式)→ 出窗 → L2
+10. **ratify A1 于 #5042**(建议绑 merge commit `5b2376bb49`,并在批注声明所用 SHA 形式)→ 出窗 → **STOP:L2 及其之后 HOLD**,待 owner ratify 阶梯 erratum(fence 不晚于 strict、`MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 flag 清单、明确由哪一级 provision trust checkpoint;机制见 §D2-F10)。**本条最短路径到此为止,不得续接 L2**——主序列已声明 HOLD,此清单若仍写 `→ L2` 即构成绕过。
 11. **L4 前 X2 一行修复 — ✅ 已修复(#5114)**;census 覆盖缺口 — ✅ 已随 #5128(`e9944cbfed8`,已 MERGED)补齐(见 §D2-F7)。⚠️ 与 §D2-F10 独立:即便 L4 打开,revert/reset 仍会在无 checkpoint 时于 preview/execute 两处拒绝。
 
 **F1 已闭合;不再有"修复前不建号"的阻断——但第 5 步(staging 重部署+迁移)未完成前,第 6/7/9 步都会以难诊断的方式失败。**
