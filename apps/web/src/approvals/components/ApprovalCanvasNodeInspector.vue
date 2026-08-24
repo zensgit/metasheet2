@@ -58,6 +58,15 @@ const emit = defineEmits<{
   'insert-condition': [nodeKey: string]
   'insert-parallel': [nodeKey: string]
   remove: [nodeKey: string]
+  /** B2 — mints the FIRST write path for a canvas node's display name (verified: no such path
+   *  existed before this slice — `approvalNodeEdit.ts`'s G-5 pass only ever touches `.config`,
+   *  never `.name`; `graphNodeLabel` is read-only). Parent stays the sole owner of mutation, per
+   *  this component's existing "parent owns selection and all mutations" contract — it applies
+   *  `name` the SAME way the parent already applies a linear step's `step.name` (a direct write to
+   *  the node's `name` field, not a second parallel edit-map system alongside G-2..G-5, since
+   *  `name` is a plain top-level field those four passes deliberately never touch). Blank/whitespace
+   *  `name` means "clear the override" — `graphNodeLabel` already falls back to the node-type label. */
+  rename: [nodeKey: string, name: string]
 }>()
 
 const rootEl = ref<HTMLElement | null>(null)
@@ -116,6 +125,40 @@ function selectTab(id: ApprovalCanvasInspectorTabId): void {
   activeTab.value = id
 }
 
+// ── B2 inline title rename ─────────────────────────────────────────────────────────────────────
+// Pencil affordance → text input; Enter/blur commits, Esc reverts without emitting. Local
+// component state only (the draft VALUE lives here while editing; the parent owns the committed
+// `node.name` once `rename` is emitted, same "parent owns mutation" split as topology actions).
+const isRenamingTitle = ref(false)
+const renameDraftValue = ref('')
+const renameInputEl = ref<HTMLInputElement | null>(null)
+
+watch(
+  () => props.node.key,
+  () => {
+    // Switching selection while mid-rename must not leak an uncommitted edit onto the newly
+    // selected node — discard, exactly like Esc.
+    isRenamingTitle.value = false
+  },
+)
+
+function beginRenameTitle(): void {
+  if (props.readOnly) return
+  renameDraftValue.value = props.node.name?.trim() ?? ''
+  isRenamingTitle.value = true
+  void nextTick(() => renameInputEl.value?.focus())
+}
+
+function commitRenameTitle(): void {
+  if (!isRenamingTitle.value) return
+  isRenamingTitle.value = false
+  emit('rename', props.node.key, renameDraftValue.value)
+}
+
+function cancelRenameTitle(): void {
+  isRenamingTitle.value = false
+}
+
 const tabButtonRefs = new Map<string, HTMLElement>()
 function setTabButtonRef(id: string, el: Element | ComponentPublicInstance | null): void {
   if (el instanceof HTMLElement) tabButtonRefs.set(id, el)
@@ -166,9 +209,35 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
     <div class="template-authoring__canvas-inspector-header">
       <div class="template-authoring__canvas-inspector-title">
         <strong>{{ nodeTypeLabel(node.type) }}</strong>
-        <span class="template-authoring__node-type" :data-node-type="node.type">
+        <span
+          v-if="!isRenamingTitle"
+          class="template-authoring__node-type template-authoring__inspector-rename-row"
+          :data-node-type="node.type"
+        >
           {{ graphNodeLabel(node.key) }}
+          <button
+            v-if="!readOnly"
+            type="button"
+            class="template-authoring__inspector-rename-btn"
+            data-testid="approval-canvas-inspector-rename"
+            :aria-label="`重命名${graphNodeLabel(node.key)}节点`"
+            @click="beginRenameTitle"
+          >
+            ✎
+          </button>
         </span>
+        <input
+          v-else
+          ref="renameInputEl"
+          v-model="renameDraftValue"
+          type="text"
+          class="template-authoring__inspector-rename-input"
+          data-testid="approval-canvas-inspector-rename-input"
+          :aria-label="`${graphNodeLabel(node.key)}节点名称`"
+          @keydown.enter="commitRenameTitle"
+          @keydown.esc="cancelRenameTitle"
+          @blur="commitRenameTitle"
+        />
       </div>
       <el-button
         text
@@ -313,10 +382,38 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
         <slot />
       </template>
     </div>
+    <!-- B1: fixed bottom action bar — a sibling of the scrolling body, never inside it, so it
+         stays pinned regardless of tab content height. Every field (incl. the B2 inline
+         title-rename) already commits live via blur/Enter, same as before this slice — there is
+         no staged/uncommitted edit buffer for 取消 to meaningfully discard, so both buttons are
+         presentation-parity aliases for the existing 关闭 action (see PR description). -->
+    <div class="template-authoring__canvas-inspector-footer" data-testid="approval-canvas-inspector-footer">
+      <el-button
+        size="small"
+        data-testid="approval-canvas-inspector-cancel"
+        @click="emit('close')"
+      >
+        取消
+      </el-button>
+      <el-button
+        type="primary"
+        size="small"
+        data-testid="approval-canvas-inspector-confirm"
+        @click="emit('close')"
+      >
+        确定
+      </el-button>
+    </div>
   </aside>
 </template>
 
 <style scoped>
+/* B1: full-height right rail flush to the workspace's right edge. `align-items: stretch` +
+   `gap: 0` on the parent row (`.template-authoring__canvas-workspace`, TemplateAuthoringView.vue)
+   already stretch this to the row's full height with no gap before it — that part predates this
+   slice (#4917 restyle removed the old `max-height: min(70vh, 720px)` cap in favor of
+   `max-height: none` below). This slice's OWN scope is the footer action bar (below) and its own
+   internal scroll stays exactly where it already was, on the body region only. */
 .template-authoring__canvas-inspector {
   flex: 0 0 400px;
   width: 400px;
@@ -360,6 +457,17 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
   overflow: auto;
   padding: 10px 12px 14px;
 }
+/* B1: fixed bottom action bar — flex:0 0 auto keeps it pinned outside the scrolling body above,
+   which is the ONLY region that scrolls (header + footer never move). */
+.template-authoring__canvas-inspector-footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--el-border-color-light);
+  background: var(--el-bg-color);
+}
 .template-authoring__inspector-topology {
   display: flex;
   flex-wrap: wrap;
@@ -371,6 +479,44 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
 .template-authoring__node-type {
   font-size: 11px;
   color: var(--el-text-color-secondary);
+}
+/* B2 inline title rename. */
+.template-authoring__inspector-rename-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.template-authoring__inspector-rename-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--el-text-color-secondary);
+  cursor: pointer;
+}
+.template-authoring__inspector-rename-btn:hover {
+  color: var(--el-color-primary);
+}
+.template-authoring__inspector-rename-btn:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
+}
+.template-authoring__inspector-rename-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 3px;
+  background: var(--el-bg-color);
+  color: var(--el-text-color-primary);
+}
+.template-authoring__inspector-rename-input:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
 }
 /* L0-1 tab strip — flat, no shadow/gradient (parent §3.2 restraint, V-8). */
 .template-authoring__canvas-inspector-tabs {

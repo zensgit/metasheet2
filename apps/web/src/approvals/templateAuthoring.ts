@@ -2032,10 +2032,27 @@ export function validateTemplateBasicInfo(
   return issues
 }
 
+// B0 (docs draft-save split) — `minimal: true` restricts this validator to the SAVE-BLOCKING
+// subset: exactly what `ApprovalProductService.assertFormSchema`/`normalizeFormField` actually
+// reject at create/update (packages/core-backend/src/services/ApprovalProductService.ts:1265-1332,
+// verified directly — `options` is only shape-checked WHEN PRESENT, never required; the backend
+// never rejects an empty `options: []` for a `select`/`multi-select` field). Two checks are gated
+// behind `!options?.minimal` because the backend accepts what they'd otherwise block:
+//   - "needs at least one option" (line below) — the backend has NO such rule.
+//   - the record-link catalog/pin-mismatch check — achieved for free by minimal callers never
+//     passing a loaded `recordLinkCatalog` (that check is publish-time-only server-side too:
+//     `assertRecordLinkTargetsReadableByCreator` is called only inside `publishTemplate`, never
+//     `createTemplate`/`updateTemplate`).
+// Every OTHER check in this function (field id/label required+unique, malformed non-empty
+// options, detail-column structure, record-link baseId/sheetId shape, visibility-rule shape) DOES
+// 400 at create/update (`assertFormSchema` calls `normalizeFormField` + `normalizeDetailFieldParts`
+// + `validateFormFieldVisibilityRules` unconditionally) and stays blocking in BOTH modes — demoting
+// those would let `persistDraft` send a payload the server rejects.
 export function validateTemplateFormFields(
   draft: TemplateAuthoringDraft,
   unsupportedReason?: string | null,
   recordLinkCatalog?: RecordLinkCatalogValidationContext | null,
+  options?: { minimal?: boolean },
 ): string[] {
   const errors: string[] = validateTemplateBasicInfo(draft, unsupportedReason).map((issue) => issue.message)
   const fields = draft.fields.map((field) => field.id.trim()).filter(Boolean)
@@ -2045,9 +2062,9 @@ export function validateTemplateFormFields(
     const authorLabel = field.label.trim() || `第 ${index + 1} 个字段`
     if (!field.label.trim()) errors.push(`第 ${index + 1} 个字段的名称必填`)
     if ((field.type === 'select' || field.type === 'multi-select')) {
-      const options = parseOptionsText(field.optionsText)
-      if (options.length === 0) errors.push(`${authorLabel}需要至少一个选项`)
-      if (options.some((option) => !option.label.trim() || !option.value.trim())) {
+      const fieldOptions = parseOptionsText(field.optionsText)
+      if (!options?.minimal && fieldOptions.length === 0) errors.push(`${authorLabel}需要至少一个选项`)
+      if (fieldOptions.some((option) => !option.label.trim() || !option.value.trim())) {
         errors.push(`${authorLabel}的选项名称和值不能为空`)
       }
     }
@@ -2060,6 +2077,7 @@ export function validateTemplateFormFields(
           field.detailColumns,
           field.minRowsText,
           field.maxRowsText,
+          options,
         ),
       )
     }
@@ -2070,7 +2088,9 @@ export function validateTemplateFormFields(
         errors.push(`字段 ${field.label.trim() || field.id}（关联记录）需要选择目标空间与目标表`)
       } else if (recordLinkCatalog?.loaded) {
         // When catalog has loaded successfully, block save if the pin is absent or belongs
-        // to another base (hydrated mismatch retained as "目标不可用" option).
+        // to another base (hydrated mismatch retained as "目标不可用" option). PUBLISH-checklist
+        // concern only — the backend itself only resolves this at publish (see comment above) — so
+        // a minimal-mode caller simply never passes a loaded catalog and this branch never runs.
         const pinError = validateRecordLinkPinAgainstLoadedCatalog(field, recordLinkCatalog)
         if (pinError) errors.push(pinError)
       }
@@ -2154,11 +2174,26 @@ export function validateTemplateFormFields(
 
 // B2-03: the other half of the split — step / graph-edit ("审批流程") errors only. See
 // `validateTemplateFormFields` above for the rationale.
-export function validateTemplateApprovalFlow(draft: TemplateAuthoringDraft): string[] {
+//
+// B0 `minimal: true` gates ONLY the "至少需要一个审批步骤" check below — verified directly against
+// `ApprovalProductService.normalizeApprovalGraph` (packages/core-backend/src/services/
+// ApprovalProductService.ts:2957-2959): `nodes`/`edges` must be arrays but MAY be empty; there is
+// no minimum-node/start-end-presence check anywhere in that file at create/update. Every other
+// check below (per-step assignee/threshold/timeout shape, condition/parallel/cc/approvalNode edit
+// previews) stays blocking in BOTH modes: `createTemplate`/`updateTemplate` call
+// `validateApprovalAssigneeSourcesAgainstFormSchema` / `validateNodeTimeoutConfigs` /
+// `validateConditionBranchRules` / etc. UNCONDITIONALLY on whatever `approvalGraph` IS present
+// (ApprovalProductService.ts:5641-5665) — so a node this editor already built with, say, an empty
+// assignee scope 400s the same way at draft-save as at publish; only the "have at least one step
+// at all" floor is a pure FE nicety the backend never enforces.
+export function validateTemplateApprovalFlow(
+  draft: TemplateAuthoringDraft,
+  options?: { minimal?: boolean },
+): string[] {
   const errors: string[] = []
   // A complex graph (preservedGraph) carries no editable steps — the step requirement only
   // applies to linear drafts that build their graph from `steps`.
-  if (!draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
+  if (!options?.minimal && !draft.preservedGraph && draft.steps.length === 0) errors.push('至少需要一个审批步骤')
   // G-2 condition-editor PREVIEW: rule fieldId must reference a form field, operator must be in the
   // union, and defaultEdgeKey must be an OUTGOING edge of the condition node (the fall-through edge;
   // checked against `preservedGraph`'s edges). UX-only — the backend `normalizeApprovalGraph`
@@ -2277,6 +2312,65 @@ export function validateTemplateDraft(
     ...validateTemplateFormFields(draft, unsupportedReason, recordLinkCatalog),
     ...validateTemplateApprovalFlow(draft),
   ]
+}
+
+/**
+ * B0 (save vs. publish validation split) — the SAVE-BLOCKING minimum: exactly what
+ * `ApprovalProductService` rejects (400) on `createTemplate`/`updateTemplate`, no more. Composes
+ * the SAME two validators `validateTemplateDraft` does, both in `{ minimal: true }` mode and with
+ * no record-link catalog (the catalog/pin-mismatch check is publish-time-only server-side — see
+ * `validateTemplateFormFields`'s doc comment). Anything this omits that `validateTemplateDraft`
+ * still catches (empty select options, an empty detail-column list... — see the two validators'
+ * doc comments for the exact, evidence-cited list) is accepted by the server and becomes a counted
+ * "N项不完善" publish-checklist gap instead of a save block.
+ */
+export function validateTemplateSaveMinimum(
+  draft: TemplateAuthoringDraft,
+  unsupportedReason?: string | null,
+): string[] {
+  return [
+    ...validateTemplateFormFields(draft, unsupportedReason, null, { minimal: true }),
+    ...validateTemplateApprovalFlow(draft, { minimal: true }),
+  ]
+}
+
+let templateKeySeq = 0
+
+/**
+ * B0 — `approval_templates.key` is `NOT NULL UNIQUE` with NO per-org/space/tenant scoping (global
+ * uniqueness — verified against `packages/core-backend/src/db/migrations/
+ * zzzz20260411120100_approval_templates_and_instance_extensions.ts:16-26,92-93`) and carries no
+ * format/pattern constraint server-side. A millisecond timestamp + random suffix + an in-session
+ * monotonic counter (belt-and-braces against two seeds in the same tick) mirrors this module's own
+ * `nextLocalId` scheme (used for the SAME kind of non-cryptographic uniqueness need — draft-local
+ * ids), which is the only precedent for a generated identifier anywhere in this file. A duplicate
+ * is not proven IMPOSSIBLE (no client-side existence pre-check exists, and the server has none
+ * either — a real collision falls through to a raw Postgres unique-violation, which the backend
+ * does not currently map to a clean 400; see the PR body for this residual risk), but the
+ * collision probability is astronomically small for a single-author authoring session.
+ */
+function generateTemplateKey(): string {
+  templateKeySeq += 1
+  return `draft_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${templateKeySeq}`
+}
+
+/**
+ * B0 — auto-seed a placeholder `key`/`name` the FIRST time a draft is saved, instead of blocking
+ * on them (both are `NOT NULL` server-side — verified above / in `validateTemplateSaveMinimum`'s
+ * doc comment — so they must never be blank in the save payload, but the reference product never
+ * makes an author type them before saving). Returns a NEW draft object (never mutates `draft`,
+ * matching this module's pure-function discipline) — a no-op (same reference back) when both are
+ * already non-blank, so a draft that already has real values is never touched.
+ */
+export function seedDraftIdentityForSave(draft: TemplateAuthoringDraft): TemplateAuthoringDraft {
+  const key = draft.key.trim()
+  const name = draft.name.trim()
+  if (key && name) return draft
+  return {
+    ...draft,
+    key: key || generateTemplateKey(),
+    name: name || '未命名审批',
+  }
 }
 
 export function buildCreateTemplatePayload(draft: TemplateAuthoringDraft): CreateApprovalTemplateRequest {

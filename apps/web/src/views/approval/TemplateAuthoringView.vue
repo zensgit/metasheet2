@@ -34,6 +34,19 @@
       </template>
       <template #actions>
         <div class="template-authoring__actions">
+          <!-- B0: 飞书-style "N项不完善" affordance — save stays unblocked by these; publish
+               still requires them all resolved (canConfirmPublish, unchanged). -->
+          <el-button
+            v-if="incompleteAuthoringIssueCount > 0"
+            text
+            size="small"
+            class="template-authoring__incomplete-count"
+            data-testid="approval-template-incomplete-count"
+            :aria-label="`${incompleteAuthoringIssueCount} 项不完善，点击查看详情`"
+            @click="revealIncompleteAuthoringIssues"
+          >
+            {{ incompleteAuthoringIssueCount }} 项不完善
+          </el-button>
           <el-button
             :loading="saving"
             :disabled="!canSave"
@@ -447,6 +460,7 @@
             @insert-condition="onInsertConditionAfter"
             @insert-parallel="onInsertParallelAfter"
             @remove="onRemoveNode"
+            @rename="onRenameCanvasNode"
           >
             <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
           </ApprovalCanvasNodeInspector>
@@ -1458,6 +1472,7 @@ import {
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
   validateTemplateBasicInfo,
+  seedDraftIdentityForSave,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
   isPlaceholderRoleSource,
@@ -2766,6 +2781,23 @@ function onRemoveNode(nodeKey: string): void {
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
+// B2 — parent owns the mutation (component doc comment "parent owns selection and all
+// mutations"), applying `name` the same way `step.name` is applied for a linear node: a direct
+// write to the node object's `name` field on `draft.preservedGraph`, not a new parallel edit-map
+// alongside G-2 (condition) / G-3 (parallel) / G-4 (cc) / G-5 (approvalNode) — those four passes
+// only ever rebuild `config`, never `name`, so a direct write here survives `buildApprovalGraph`
+// untouched (verified: `applyApprovalNodeEditsToGraph` et al. spread `{ ...cloneJson(node), config
+// }`, carrying whatever `name` the source node already has). Also survives topology undo/redo:
+// `mergeLiveNodeConfigsOntoTopology` (approvalAuthoringHistory.ts) already treats `name` as "live"
+// node state alongside `config`, generically, with no change needed here. A blank/whitespace name
+// clears the override — `graphNodeLabel` already falls back to the node-type label for `undefined`.
+function onRenameCanvasNode(nodeKey: string, name: string): void {
+  const node = draft.value.preservedGraph?.nodes.find((candidate) => candidate.key === nodeKey)
+  if (!node) return
+  const trimmed = name.trim()
+  if (trimmed) node.name = trimmed
+  else delete node.name
+}
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
   return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
 }
@@ -2948,6 +2980,29 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
   { key: 'placeholder', label: '审批人占位', ok: publishPlaceholderRoleIssues.value.length === 0, detail: publishPlaceholderRoleIssues.value[0] },
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
+
+// B0 (header "N项不完善" affordance) — the SAME three issue lists the publish checklist already
+// derives, flattened. Zero new validation logic: this is a live view onto what `canConfirmPublish`
+// already gates on, so "0 项不完善" and "ready to publish" can never disagree. Deliberately NOT
+// `validationErrors.value` (that ref only updates on an explicit `validate()` call, i.e. after a
+// save attempt) — this counter is live from the moment the draft has anything incomplete, matching
+// the reference product's counter instead of only appearing after a blocked save.
+const incompleteAuthoringIssues = computed<string[]>(() => [
+  ...publishFormFieldIssues.value,
+  ...publishApprovalFlowIssues.value,
+  ...publishPlaceholderRoleIssues.value,
+])
+const incompleteAuthoringIssueCount = computed<number>(() => incompleteAuthoringIssues.value.length)
+
+/** Clicking the header "N项不完善" affordance reuses the EXACT same reveal machinery a blocked
+ *  save already uses (`validationErrors` + `firstInvalidAuthoringSection` + `scrollAuthoringTarget`)
+ *  — it never renders a second, parallel issue list. */
+async function revealIncompleteAuthoringIssues(): Promise<void> {
+  validationErrors.value = incompleteAuthoringIssues.value
+  activeAuthoringSection.value = firstInvalidAuthoringSection(publishFormFieldIssues.value)
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
+}
 const publishChecklistVisible = ref(false)
 // B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
 const publishNote = ref('')
@@ -3819,17 +3874,24 @@ function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId 
   return 'flow'
 }
 
+// B0 (owner-approved draft-save UX slice, 20260824): 保存草稿 no longer runs PUBLISH-grade
+// validation — it runs only the SAVE-BLOCKING minimum, i.e. what the backend actually 400s on
+// `createTemplate`/`updateTemplate` (see `validateTemplateFormFields`/`validateTemplateApprovalFlow`'s
+// `{ minimal: true }` doc comments in templateAuthoring.ts for the exact, evidence-cited server
+// reject-set). No record-link catalog fetch is needed here at all — the catalog/pin-mismatch check
+// is a publish-time-only concern server-side, so a plain draft save never awaits that network call.
+// `key`/`name` are auto-seeded (never blocked) since both are `NOT NULL` server-side but the
+// reference product never makes an author type them before saving (see
+// `seedDraftIdentityForSave`'s doc comment for the collision-safety reasoning).
+//
+// `openPublishChecklist`/`confirmPublish` are UNTOUCHED — they keep gating on the full
+// `publishChecklist` (`publishFormFieldIssues`/`publishApprovalFlowIssues`/`publishPlaceholderRoleIssues`,
+// still `validateTemplateFormFields`/`validateTemplateApprovalFlow` with NO `minimal` flag) before
+// ever reaching `persistDraft`, so relaxing what `validate()` itself checks never weakens publish.
 async function validate(): Promise<boolean> {
-  // Ensure catalog is attempted before pin-membership checks when the draft uses record-link.
-  if (draft.value.fields.some((f) => f.type === 'record-link') && !recordLinkCatalogLoaded.value) {
-    await ensureRecordLinkCatalog(true)
-  }
-  const formErrors = validateTemplateFormFields(
-    draft.value,
-    unsupportedReason.value,
-    recordLinkCatalogValidation.value,
-  )
-  const flowErrors = validateTemplateApprovalFlow(draft.value)
+  draft.value = seedDraftIdentityForSave(draft.value)
+  const formErrors = validateTemplateFormFields(draft.value, unsupportedReason.value, null, { minimal: true })
+  const flowErrors = validateTemplateApprovalFlow(draft.value, { minimal: true })
   validationErrors.value = [...formErrors, ...flowErrors]
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
@@ -4118,6 +4180,11 @@ onUnmounted(() => {
 
 .template-authoring__actions {
   justify-content: flex-end;
+}
+
+/* B0 — header "N项不完善" affordance, next to 保存草稿/发布. */
+.template-authoring__incomplete-count {
+  color: var(--ms-color-warning);
 }
 
 .template-authoring__header {

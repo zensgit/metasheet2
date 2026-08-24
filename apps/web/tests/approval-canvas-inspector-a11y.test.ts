@@ -158,3 +158,78 @@ describe('ApprovalCanvasNodeInspector L0-1 tab strip a11y (structural)', () => {
     )
   })
 })
+
+// ── B1/B2 (owner-approved draft-authoring UX slice, 20260824) — structural pins ───────────────
+describe('ApprovalCanvasNodeInspector B1 footer action bar (structural)', () => {
+  it('keeps stable footer/action data-testids, outside the scrolling body', () => {
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-footer"/)
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-cancel"/)
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-confirm"/)
+    // The footer is a sibling of `.template-authoring__canvas-inspector-body` (the scrolling
+    // region), declared AFTER it closes — never nested inside it.
+    const bodyOpenIndex = INSPECTOR_SRC.indexOf('template-authoring__canvas-inspector-body')
+    const footerIndex = INSPECTOR_SRC.indexOf('data-testid="approval-canvas-inspector-footer"')
+    expect(bodyOpenIndex).toBeGreaterThan(0)
+    expect(footerIndex).toBeGreaterThan(bodyOpenIndex)
+  })
+
+  it('pins the footer flex rule that keeps it fixed while the body scrolls', () => {
+    expect(INSPECTOR_SRC).toMatch(
+      /\.template-authoring__canvas-inspector-footer\s*\{[\s\S]*?flex:\s*0 0 auto/,
+    )
+    expect(INSPECTOR_SRC).toMatch(
+      /\.template-authoring__canvas-inspector-body\s*\{[\s\S]*?overflow:\s*auto/,
+    )
+  })
+
+  it('confirm/cancel labels are business copy, not internal identifiers', () => {
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-cancel"[\s\S]{0,80}>\s*取消\s*</)
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-confirm"[\s\S]{0,80}>\s*确定\s*</)
+  })
+})
+
+describe('ApprovalCanvasNodeInspector B2 inline title rename (structural)', () => {
+  it('keeps stable rename data-testids and emits a typed `rename` event (not a second write path)', () => {
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-rename"/)
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-rename-input"/)
+    expect(INSPECTOR_SRC).toMatch(/rename: \[nodeKey: string, name: string\]/)
+  })
+
+  it('the rename affordance is gated on `!readOnly`, matching the topology toolbar\'s own gate', () => {
+    expect(INSPECTOR_SRC).toMatch(
+      /v-if="!readOnly"\s*\n\s*type="button"\s*\n\s*class="template-authoring__inspector-rename-btn"/,
+    )
+  })
+
+  it('rename aria-labels route through graphNodeLabel(node.key), never the raw node key alone (raw-id census discipline)', () => {
+    expect(INSPECTOR_SRC).toMatch(
+      /:aria-label="`重命名\$\{graphNodeLabel\(node\.key\)\}节点`"/,
+    )
+    expect(INSPECTOR_SRC).toMatch(
+      /:aria-label="`\$\{graphNodeLabel\(node\.key\)\}节点名称`"/,
+    )
+  })
+
+  it('Enter commits, Esc cancels, blur commits — exact keydown/blur wiring on the rename input', () => {
+    expect(INSPECTOR_SRC).toMatch(/@keydown\.enter="commitRenameTitle"/)
+    expect(INSPECTOR_SRC).toMatch(/@keydown\.esc="cancelRenameTitle"/)
+    expect(INSPECTOR_SRC).toMatch(/@blur="commitRenameTitle"/)
+  })
+
+  it('switching the selected node discards an in-progress rename (no leaked edit onto the next node)', () => {
+    expect(INSPECTOR_SRC).toMatch(
+      /watch\(\s*\(\) => props\.node\.key,\s*\(\) => \{[\s\S]{0,220}isRenamingTitle\.value = false/,
+    )
+  })
+})
+
+// B2 priority slot — REFUSED, not implemented (owner contract decision needed; see PR
+// description). `ApprovalNode`/`ConditionBranch` carry no priority/order field today — pin the
+// negative so a future accidental addition here is a deliberate, reviewed choice, not a silent
+// drift back to "render nothing".
+describe('ApprovalCanvasNodeInspector B2 priority slot (deliberately NOT implemented)', () => {
+  it('renders no priority/order control in the panel header (no contract to author against yet)', () => {
+    expect(INSPECTOR_SRC).not.toMatch(/data-testid="[^"]*priority[^"]*"/)
+    expect(INSPECTOR_SRC).not.toMatch(/优先级/)
+  })
+})

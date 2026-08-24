@@ -1357,6 +1357,103 @@ describe('TemplateAuthoringView', () => {
     expect(badge?.textContent?.trim()).toBe('1 项不完善')
   })
 
+  // ── B0 (owner-approved draft-save UX slice, 20260824) ──────────────────────────────────────────
+  it('B0: 保存草稿 on a brand-new, untouched draft succeeds — auto-seeds a placeholder key/name instead of blocking (the owner\'s exact repro: publish-grade validation used to block this)', async () => {
+    await mountView()
+
+    // Nothing typed at all — key/name are both blank, exactly the state that used to render
+    // "模板 Key 必填 / 模板名称必填" and refuse to save.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = createTemplateSpy.mock.calls[0]?.[0] as any
+    expect(payload.key).toBeTruthy()
+    expect(payload.name).toBe('未命名审批')
+    // No blocking validation summary — this is a genuine SUCCESS path, not a suppressed error.
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')).toBeNull()
+    // The seeded values round-trip back into the visible Key/Name inputs.
+    const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
+    const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
+    expect(keyInput.value).toBe(payload.key)
+    expect(nameInput.value).toBe('未命名审批')
+  })
+
+  it('B0: an option-less select field no longer blocks 保存草稿 (server accepts `options: []`) — the SAME draft still fails the PUBLISH checklist', async () => {
+    routeParams = { id: 'tpl_gap_options' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          {
+            id: 'reviewer',
+            type: 'user',
+            label: '审批人',
+            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+          },
+          { id: 'priority', type: 'select', label: '优先级', options: [] },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')).toBeNull()
+
+    // Publish stays strict: the checklist's "表单字段" bucket still fails on the SAME gap.
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const fieldsItem = container!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')
+    expect(fieldsItem?.getAttribute('data-ok')).toBe('false')
+    expect(fieldsItem?.textContent).toContain('需要至少一个选项')
+  })
+
+  it('B0: the header "N项不完善" affordance counts the SAME gaps the publish checklist does, is clickable, and reveals the list via the existing validationErrors/scroll machinery', async () => {
+    routeParams = { id: 'tpl_gap_counter' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          {
+            id: 'reviewer',
+            type: 'user',
+            label: '审批人',
+            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+          },
+          { id: 'priority', type: 'select', label: '优先级', options: [] },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const counter = container!.querySelector('[data-testid="approval-template-incomplete-count"]') as HTMLButtonElement
+    expect(counter).not.toBeNull()
+    expect(counter.textContent?.trim()).toBe('1 项不完善')
+
+    counter.click()
+    await flushUi()
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary?.textContent).toContain('需要至少一个选项')
+    // Same DOM node the blocked-save path already uses to scroll+focus (mutation-provable: if the
+    // click stopped calling scrollAuthoringTarget, this assertion catches it as well as the
+    // existing "reveals and focuses field validation errors" test does for the save path).
+    expect(document.activeElement).toBe(summary)
+  })
+
+  it('B0: once every gap is resolved, the counter disappears entirely (no "0 项不完善" theater, matching the existing basic-info badge convention)', async () => {
+    routeParams = { id: 'tpl_gap_resolved' }
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-incomplete-count"]')).toBeNull()
+  })
+
   it('creates a common purchase template as a draft without publishing', async () => {
     await mountView()
 

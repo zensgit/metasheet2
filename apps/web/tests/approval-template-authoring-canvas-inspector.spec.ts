@@ -780,6 +780,206 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     ).toBe(false)
   })
 
+  // ── B1: fixed bottom action bar (取消/确定) ────────────────────────────────────────────────────
+  it('B1: footer action bar renders 取消/确定 alongside 关闭, and either button closes the panel the same way 关闭 does', async () => {
+    routeParams = { id: 'tpl_inspector_footer' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('cond_1')
+    await flushUi()
+
+    const footer = container!.querySelector('[data-testid="approval-canvas-inspector-footer"]') as HTMLElement
+    expect(footer).not.toBeNull()
+    const cancelBtn = footer.querySelector('[data-testid="approval-canvas-inspector-cancel"]') as HTMLButtonElement
+    const confirmBtn = footer.querySelector('[data-testid="approval-canvas-inspector-confirm"]') as HTMLButtonElement
+    expect(cancelBtn?.textContent?.trim()).toBe('取消')
+    expect(confirmBtn?.textContent?.trim()).toBe('确定')
+
+    confirmBtn.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+
+    // Reselect, then prove 取消 closes it too (both buttons alias 关闭's close semantics — see PR
+    // description: there is no staged/uncommitted edit buffer for 取消 to discard beyond the B2
+    // inline rename, which commits on blur before a click on either footer button even fires).
+    clickCanvasNode('cond_1')
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-canvas-inspector-cancel"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
+  })
+
+  it('B1: the footer stays visible regardless of the active tab (chrome-level, not tab content) and outside the scrolling body', async () => {
+    routeParams = { id: 'tpl_inspector_footer_tabs' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-footer"]')).not.toBeNull()
+    // The footer is a sibling of the scrolling body, not inside the tabpanel.
+    const tabPanel = inspector.querySelector('[data-testid="approval-canvas-inspector-tabpanel"]') as HTMLElement
+    expect(tabPanel.querySelector('[data-testid="approval-canvas-inspector-footer"]')).toBeNull()
+  })
+
+  // ── B2: inline title rename ────────────────────────────────────────────────────────────────────
+  it('B2: pencil affordance enters edit mode pre-filled with the current name; Enter commits, updates the displayed label, and reaches the save payload', async () => {
+    routeParams = { id: 'tpl_inspector_rename' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    const pencil = inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement
+    expect(pencil).not.toBeNull()
+    expect(pencil.getAttribute('aria-label')).toBe('重命名高额审批节点')
+    pencil.click()
+    await flushUi()
+
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    expect(input).not.toBeNull()
+    expect(input.value).toBe('高额审批')
+
+    input.value = '大额审批（>1000）'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('大额审批（>1000）')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const renamed = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_high')
+    expect(renamed.name).toBe('大额审批（>1000）')
+  })
+
+  it('B2: Esc reverts without committing; blur commits the same as Enter', async () => {
+    routeParams = { id: 'tpl_inspector_rename_esc' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    let input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '不应保存的名字'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('高额审批')
+    expect(inspector.textContent).not.toContain('不应保存的名字')
+
+    // Blur commits, same as Enter.
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '经由失焦提交'
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new Event('blur'))
+    await flushUi()
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(inspector.textContent).toContain('经由失焦提交')
+  })
+
+  it('B2: switching node selection mid-rename discards the pending edit rather than leaking it onto the new node', async () => {
+    routeParams = { id: 'tpl_inspector_rename_switch' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '半途而废'
+    input.dispatchEvent(new Event('input'))
+
+    clickCanvasNode('cc_1')
+    await flushUi()
+    const reInspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(reInspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]')).toBeNull()
+    expect(reInspector.textContent).toContain('抄送财务')
+    expect(reInspector.textContent).not.toContain('半途而废')
+
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.textContent).toContain('高额审批')
+  })
+
+  it('B2: a whitespace-only commit clears the name override, falling back to the node-type label', async () => {
+    routeParams = { id: 'tpl_inspector_rename_clear' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('cc_1')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    ;(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]') as HTMLButtonElement).click()
+    await flushUi()
+    const input = inspector.querySelector('[data-testid="approval-canvas-inspector-rename-input"]') as HTMLInputElement
+    input.value = '   '
+    input.dispatchEvent(new Event('input'))
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    const cleared = payload.approvalGraph.nodes.find((n: any) => n.key === 'cc_1')
+    expect(cleared.name).toBeUndefined()
+  })
+
+  it('B2: read-only mode does not render the rename affordance', async () => {
+    routeParams = { id: 'tpl_inspector_rename_readonly' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    canManageTemplates.value = false
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-canvas-inspector-rename"]')).toBeNull()
+  })
+
   it('narrow canvas selection scrolls the stacked inspector below the sticky step rail', async () => {
     const originalMatchMedia = window.matchMedia
     const originalScrollIntoView = HTMLElement.prototype.scrollIntoView
@@ -946,16 +1146,21 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(fieldPermSection.style.display).toBe('none')
     expect(inspector.querySelector('[data-testid="approval-node-section-operations"]')).not.toBeNull()
 
-    // A-8 (negative half): no Save/Cancel/Apply control anywhere in the inspector — tabs are
-    // presentation only. Each label checked individually — `not.toEqual(arrayContaining([...]))`
-    // only fails if ALL three are present, so it would pass a real Save button by itself.
-    expect(inspector.querySelector('[data-testid*="save"]')).toBeNull()
-    expect(inspector.querySelector('[data-testid*="cancel"]')).toBeNull()
-    expect(inspector.querySelector('[data-testid*="apply"]')).toBeNull()
-    const buttonLabels = Array.from(inspector.querySelectorAll('button')).map((btn) => btn.textContent?.trim())
-    expect(buttonLabels).not.toContain('保存')
-    expect(buttonLabels).not.toContain('取消')
-    expect(buttonLabels).not.toContain('应用')
+    // A-8 (negative half, re-scoped by B1 2026-08-24): no Save/Cancel/Apply control INSIDE the
+    // tab content — tabs are still presentation only, field edits still commit live with no
+    // staged/uncommitted buffer requiring an explicit apply step. B1 added a chrome-level footer
+    // action bar (取消/确定) OUTSIDE the tabpanel — that is scoped out of this assertion
+    // deliberately (see the dedicated B1 footer tests below), not a silent invariant weakening:
+    // the ORIGINAL A-8 concern (a per-field apply/save gate inside a tab) still holds.
+    const tabPanelContent = inspector.querySelector('[data-testid="approval-canvas-inspector-tabpanel"]') as HTMLElement
+    expect(tabPanelContent).not.toBeNull()
+    expect(tabPanelContent.querySelector('[data-testid*="save"]')).toBeNull()
+    expect(tabPanelContent.querySelector('[data-testid*="cancel"]')).toBeNull()
+    expect(tabPanelContent.querySelector('[data-testid*="apply"]')).toBeNull()
+    const tabPanelButtonLabels = Array.from(tabPanelContent.querySelectorAll('button')).map((btn) => btn.textContent?.trim())
+    expect(tabPanelButtonLabels).not.toContain('保存')
+    expect(tabPanelButtonLabels).not.toContain('取消')
+    expect(tabPanelButtonLabels).not.toContain('应用')
   })
 
   it('D1/D2: the configured-summary echo uses the RATIFIED §10.3 label, not the pre-D1 incidental wording (dept_head/requester)', async () => {
