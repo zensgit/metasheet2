@@ -352,6 +352,10 @@ describe('routes/permissions.ts', () => {
 // shortest such body. Every assertion below is unchanged, and the [recovery-census:…]
 // titles are byte-identical so the recorded census set is untouched.
 describe('routes/attendance-admin.ts', () => {
+  beforeEach(() => {
+    pgMocks.transaction.mockImplementation(async (handler) => handler({ query: pgMocks.query }))
+  })
+
   function installUserRolesRejection(error: unknown): void {
     pgMocks.query.mockImplementation(async (sql: string) => {
       if (/INSERT INTO user_roles/.test(sql)) throw error
@@ -378,7 +382,12 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/assign',
-      { params: { userId: 'user-1' }, body: { template: 'employee' } },
+      {
+        params: { userId: 'user-1' },
+        query: { scope: 'global' },
+        body: { template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -393,7 +402,12 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/assign',
-      { params: { userId: 'user-1' }, body: { template: 'employee' } },
+      {
+        params: { userId: 'user-1' },
+        query: { scope: 'global' },
+        body: { template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(500)
@@ -417,7 +431,11 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/batch/roles/assign',
-      { body: { userIds: [batchUserId], template: 'employee' } },
+      {
+        query: { scope: 'global' },
+        body: { userIds: [batchUserId], template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -444,7 +462,12 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/unassign',
-      { params: { userId: 'user-1' }, body: { template: 'employee' } },
+      {
+        params: { userId: 'user-1' },
+        query: { scope: 'global' },
+        body: { template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(409)
@@ -471,7 +494,12 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/:userId/roles/unassign',
-      { params: { userId: 'user-1' }, body: { template: 'employee' } },
+      {
+        params: { userId: 'user-1' },
+        query: { scope: 'global' },
+        body: { template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(500)
@@ -495,7 +523,11 @@ describe('routes/attendance-admin.ts', () => {
       attendanceAdminRouter(),
       'post',
       '/api/attendance-admin/users/batch/roles/unassign',
-      { body: { userIds: [batchUserId], template: 'employee' } },
+      {
+        query: { scope: 'global' },
+        body: { userIds: [batchUserId], template: 'employee' },
+        user: { id: 'admin-1', role: 'admin' },
+      },
       res,
     )
     expect(res.statusCode).toBe(409)

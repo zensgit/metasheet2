@@ -199,6 +199,8 @@ describe('W5-1 decision-trace dual-face wiring', () => {
     }
     app = null
     container = null
+    window.localStorage.removeItem('user_roles')
+    window.localStorage.removeItem('auth_token')
   })
 
   function nonGetCalls(): Array<[unknown, RequestInit | undefined]> {
@@ -430,6 +432,7 @@ describe('W5-1 decision-trace dual-face wiring', () => {
   })
 
   it('admin balance section: leave-type select feeds the same channel; default stays byte-identical annual', async () => {
+    window.localStorage.setItem('auth_token', 'eyJhbGciOiJub25lIn0.eyJyb2xlcyI6WyJhZG1pbiJdfQ.')
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(8)
