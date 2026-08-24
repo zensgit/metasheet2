@@ -354,8 +354,8 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(remote, /legacy_anchor_active_membership_witness_count/)
   assert.match(
     remote,
-    /if \[\[ "\$zero_no_row" -gt 0 \|\| "\$class6" -gt 0 \]\]/,
-    'a safe retry must gate on executable no-row users, not the disclosed deactivated-only residue',
+    /if \[\[ "\$repairable_users" -gt 0 \|\| "\$class6" -gt 0 \]\]/,
+    'a safe retry must gate on users that can gain a new default row, not actionless default conflicts',
   )
 }
 

@@ -779,7 +779,10 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     await seedUser('r09_no_row')
     await seedUser('r09_deactivated_only')
     await seedUserOrg('r09_deactivated_only', 'default', false)
+    await seedUser('r09_stale_other')
+    await seedUserOrg('r09_stale_other', 'retired_org', false)
     await seedInstance({ id: 'r09_by_user', sourceSystem: 'platform', requesterId: 'r09_no_row' })
+    await seedInstance({ id: 'r09_by_stale_user', sourceSystem: 'platform', requesterId: 'r09_stale_other' })
     await seedInstance({ id: 'r09_missing_user', sourceSystem: 'platform', requesterId: 'r09_absent' })
 
     await expect(recovery09Up(testDb)).resolves.toBeUndefined()
@@ -788,7 +791,9 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
 
     expect(await activeMembershipCount('r09_no_row')).toBe(1)
     expect(await activeMembershipCount('r09_deactivated_only')).toBe(0)
+    expect(await activeMembershipCount('r09_stale_other')).toBe(1)
     expect(await orgIdOf('r09_by_user')).toBe('default')
+    expect(await orgIdOf('r09_by_stale_user')).toBe('default')
     expect(await orgIdOf('r09_missing_user')).toBe('default')
     const synthetic = await sql<{ n: string }>`
       SELECT count(*)::text AS n FROM user_orgs
@@ -799,6 +804,10 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
        )
     `.execute(testDb)
     expect(synthetic.rows[0]?.n).toBe('3')
+    const stale = await sql<{ is_active: boolean }>`
+      SELECT is_active FROM user_orgs WHERE user_id = 'r09_stale_other' AND org_id = 'retired_org'
+    `.execute(testDb)
+    expect(stale.rows).toEqual([{ is_active: false }])
   })
 
   it('R09-2: more than one directory org anchor -> fail before membership or approval writes, values-free', async () => {

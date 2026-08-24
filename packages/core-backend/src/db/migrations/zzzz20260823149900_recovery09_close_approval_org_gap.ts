@@ -83,7 +83,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          OR EXISTS (
            SELECT 1 FROM users u
             WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
-              AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+              AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+              AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
          )
        )
   `.execute(db)
@@ -147,9 +148,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     const memberships = await sql`
       INSERT INTO user_orgs (user_id, org_id, is_active)
       SELECT u.id, ${legacyOrgId}, TRUE
-        FROM users u
+       FROM users u
        WHERE u.is_active = TRUE
-         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = ${legacyOrgId})
       ON CONFLICT (user_id, org_id) DO NOTHING
     `.execute(db)
     membershipsInserted = Number(memberships.numAffectedRows ?? 0)

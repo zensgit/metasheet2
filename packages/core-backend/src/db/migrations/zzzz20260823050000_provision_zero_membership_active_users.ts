@@ -34,15 +34,8 @@ import { checkTableExists } from './_patterns'
  * the (i)-guard (both migrations independently re-read `user_orgs` and re-assert the single-org
  * premise), but would waste the opportunity to resolve those rows via class 3 specifically.
  *
- * POPULATION: `users.id` for every row with `users.is_active = true` that holds NO `user_orgs`
- * row at all. Recovery09 narrowed the executable population from "no active membership" to "no
- * membership row" after staging proved a deactivated-only user is an actionless conflict shape:
- * `ON CONFLICT DO NOTHING` can never change that row, so including it only evaluates the org
- * premise for a write that cannot occur. H41 proves the final data is byte-identical (the
- * deactivated row remains deactivated) while multi-org staging no longer aborts on that no-op.
- * The broader D-9 `is_active` census remains available in the evidence workflow as an audit
- * population; it is not silently claimed to be repaired here. The original predicate had
- * byte-agreement with
+ * POPULATION: `users.id` for every row with `users.is_active = true` that holds NO active
+ * `user_orgs` membership (`D-9`-ruled single-`is_active` liveness predicate — byte-agreement with
  * the reader's `viewerActiveOrgIds`, `approval-instance-readability.ts:152-157`, and with this
  * same PR's revised Migration B class-3/class-6 predicates). Measured at ratification time as
  * `u1b_zero_membership_active_users=12` (evidence run 32568321791, `main`, archived per §10's
@@ -107,9 +100,9 @@ import { checkTableExists } from './_patterns'
  * user whose ONLY `user_orgs` row is a DEACTIVATED membership to what turns out to be the single
  * active org is NOT provisioned by this migration — `ON CONFLICT ... DO NOTHING` deliberately
  * leaves their row exactly as a prior unbind/deactivation left it. They remain zero-ACTIVE-
- * membership after this migration runs. Recovery09 makes this exclusion explicit in the source
- * predicate instead of relying on a conflicting INSERT plus `DO NOTHING`; the resulting data is
- * unchanged. The acceptance
+ * membership after this migration runs. Recovery09 distinguishes this actionless same-anchor
+ * conflict from H36's stale-membership-to-another-org shape: the latter may safely gain a NEW
+ * default membership while the stale row remains untouched; the former is never resurrected. The acceptance
  * signal is therefore NOT "12 rows appeared" but **`u1b_zero_membership_active_users` re-measured
  * post-deploy** (the same evidence-dispatch probe this PR's acceptance already uses) — if it does
  * not reach 0, this is the disclosed, expected reason, not a new defect.
@@ -153,7 +146,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     SELECT count(*)::text AS n
       FROM users u
      WHERE u.is_active = TRUE
-       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+       AND NOT EXISTS (
+         SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE
+       )
   `.execute(db)
   if (Number(population.rows[0]?.n ?? '0') === 0) return
 
@@ -164,6 +159,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE
   `.execute(db)
   if (activeOrgs.rows.length !== 1) {
+    // Recovery09 runs immediately before this migration and handles every multi-org user for
+    // whom a NEW default membership can be inserted. If only deactivated `default` conflicts
+    // remain, there is deliberately no write this migration may perform; return instead of
+    // evaluating the obsolete global-single-org premise for an actionless population.
+    const repairable = await sql<{ n: string }>`
+      SELECT count(*)::text AS n
+        FROM users u
+       WHERE u.is_active = TRUE
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+    `.execute(db)
+    if (Number(repairable.rows[0]?.n ?? '0') === 0) return
     throw new Error(
       `provision_zero_membership_active_users (Lock-11 D-8(β)) aborted before any INSERT: found ` +
       `${activeOrgs.rows.length} distinct active org(s) in user_orgs; exactly one is required to ` +
@@ -178,7 +185,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     SELECT u.id, ${theOrgId}, true
     FROM users u
     WHERE u.is_active = TRUE
-      AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+      AND NOT EXISTS (
+        SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE
+      )
     ON CONFLICT (user_id, org_id) DO NOTHING
   `.execute(db)
 

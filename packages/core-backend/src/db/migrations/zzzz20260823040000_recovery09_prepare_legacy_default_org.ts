@@ -8,7 +8,8 @@ const LEGACY_ORG_ID = 'default'
  * Recovery09 pre-alignment for deployments that contain isolated/synthetic org memberships in
  * addition to the legacy org. It does not delete, rename, deactivate, or otherwise rewrite an
  * existing organization or membership. The only membership write is an INSERT for an active user
- * that has never had any user_orgs row. A user with a deactivated row is deliberately untouched.
+ * with no active membership and no existing `default` row. A deactivated row for another org is
+ * preserved while the new default row is inserted; a deactivated default row is never resurrected.
  *
  * The fallback is intentionally narrower than "pick an org": directory_integrations must expose
  * exactly one distinct nonblank org and it must be the repo-owned legacy literal `default`; that
@@ -50,13 +51,14 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   const hasApprovalOrgId = await checkColumnExists(db, 'approval_instances', 'org_id')
   const hasAttachments = await checkTableExists(db, 'approval_attachments')
 
-  const usersWithNoMembershipRow = await sql<{ n: string }>`
+  const repairableUsers = await sql<{ n: string }>`
     SELECT count(*)::text AS n
       FROM users u
      WHERE u.is_active = TRUE
-       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = ${LEGACY_ORG_ID})
   `.execute(db)
-  const userCount = Number(usersWithNoMembershipRow.rows[0]?.n ?? '0')
+  const userCount = Number(repairableUsers.rows[0]?.n ?? '0')
 
   let missingRequesterTerminalCount = 0
   if (hasApprovalOrgId && hasAttachments) {
@@ -79,7 +81,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            OR EXISTS (
              SELECT 1 FROM users u
               WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
-                AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+                AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+                AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                  WHERE uo.user_id = u.id AND uo.org_id = ${LEGACY_ORG_ID})
            )
          )
     `.execute(db)
@@ -112,9 +116,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   const memberships = await sql`
     INSERT INTO user_orgs (user_id, org_id, is_active)
     SELECT u.id, ${legacyOrgId}, TRUE
-      FROM users u
+     FROM users u
      WHERE u.is_active = TRUE
-       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+       AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = ${legacyOrgId})
     ON CONFLICT (user_id, org_id) DO NOTHING
   `.execute(db)
 
