@@ -1103,25 +1103,28 @@ const DB_GOLDENS = [
     children: [{ table: 'role_permissions', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.role_permissions }],
     expect: { verdict: 'PRESENT', exitCode: 1, rows: [['role_permissions', 'c']] },
   },
+  // The four action legs deliberately sit on `role_permissions`, not `user_roles`: it keeps each
+  // mutation's blast radius attributable. Dropping user_roles coverage must red the two user_roles
+  // cases and NOT these; dropping 'n' must red only the SET NULL case; dropping 'd' only SET DEFAULT.
   {
-    label: "SET NULL — UPDATEs the child row, so the BEFORE … UPDATE … trigger fires",
-    children: [{ table: 'user_roles', action: 'SET NULL', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }],
-    expect: { verdict: 'PRESENT', exitCode: 1, rows: [['user_roles', 'n']] },
+    label: 'SET NULL — UPDATEs the child row, so the BEFORE … UPDATE … trigger fires',
+    children: [{ table: 'role_permissions', action: 'SET NULL', trigger: GOLDEN_TRIGGER_FUNCTIONS.role_permissions }],
+    expect: { verdict: 'PRESENT', exitCode: 1, rows: [['role_permissions', 'n']] },
   },
   {
     label: 'SET DEFAULT — likewise UPDATEs the child row',
-    children: [{ table: 'user_roles', action: 'SET DEFAULT', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }],
-    expect: { verdict: 'PRESENT', exitCode: 1, rows: [['user_roles', 'd']] },
+    children: [{ table: 'role_permissions', action: 'SET DEFAULT', trigger: GOLDEN_TRIGGER_FUNCTIONS.role_permissions }],
+    expect: { verdict: 'PRESENT', exitCode: 1, rows: [['role_permissions', 'd']] },
   },
   {
     label: 'NO ACTION — refuses the parent delete instead of writing the child; excuse survives',
-    children: [{ table: 'user_roles', action: 'NO ACTION', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }],
-    expect: { verdict: 'ABSENT', exitCode: 0, rows: [['user_roles', 'a']] },
+    children: [{ table: 'role_permissions', action: 'NO ACTION', trigger: GOLDEN_TRIGGER_FUNCTIONS.role_permissions }],
+    expect: { verdict: 'ABSENT', exitCode: 0, rows: [['role_permissions', 'a']] },
   },
   {
     label: 'RESTRICT — likewise refuses; excuse survives',
-    children: [{ table: 'user_roles', action: 'RESTRICT', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }],
-    expect: { verdict: 'ABSENT', exitCode: 0, rows: [['user_roles', 'r']] },
+    children: [{ table: 'role_permissions', action: 'RESTRICT', trigger: GOLDEN_TRIGGER_FUNCTIONS.role_permissions }],
+    expect: { verdict: 'ABSENT', exitCode: 0, rows: [['role_permissions', 'r']] },
   },
   {
     label: 'view_permissions shape: a CASCADE FK on a table with NO recovery-authority trigger ⇒ ABSENT',
