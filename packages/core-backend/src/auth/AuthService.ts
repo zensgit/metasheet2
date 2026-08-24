@@ -68,6 +68,27 @@ export interface AuthConfig {
   saltRounds: number
 }
 
+/** Exact ASCII sentinel used by the one-time user_orgs backfill. Not a user choice. */
+export const DEFAULT_SESSION_ORG_ID = 'default'
+
+/**
+ * Login-time request filter (D6 R1 / F1).
+ *
+ * A persisted `'default'` tenant hint is injected by the web client on every
+ * request including login, and every backfilled user has a legal `'default'`
+ * membership. That combination is not evidence the user chose an org.
+ *
+ * Token verification / refresh / explicit session-org switch MUST NOT use this
+ * helper — a minted `'default'` claim, or an explicit switcher choice, is a
+ * real session value and stays membership-checked via resolveSessionTenantId.
+ */
+export function requestedTenantIdForLogin(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (!trimmed || trimmed === DEFAULT_SESSION_ORG_ID) return undefined
+  return trimmed
+}
+
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
 /** The closed set this service may assign. Both call sites below pass only this id. */
 const SELF_SERVICE_ASSIGNABLE_ROLE_IDS = [ATTENDANCE_SELF_SERVICE_ROLE_ID] as const
@@ -356,7 +377,7 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
-      const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
+      const tenantId = await this.resolveSessionTenantId(user.id, requestedTenantIdForLogin(options.tenantId))
       const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
@@ -422,6 +443,28 @@ export class AuthService {
     } catch (error) {
       this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
       return undefined
+    }
+  }
+
+  async listActiveMembershipOrgIds(userId: string): Promise<string[]> {
+    try {
+      const pool = poolManager.get()
+      const result = await pool.query(
+        `SELECT uo.org_id
+         FROM user_orgs uo
+         JOIN users u ON u.id = uo.user_id
+         WHERE uo.user_id = $1
+           AND uo.is_active = true
+           AND u.is_active = true
+         ORDER BY uo.org_id ASC`,
+        [userId],
+      )
+      return result.rows
+        .map((row: { org_id?: unknown }) => row.org_id)
+        .filter((orgId: unknown): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+    } catch (error) {
+      this.logger.warn('Session org membership listing failed', error instanceof Error ? error : undefined)
+      return []
     }
   }
 

@@ -29,6 +29,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn(async () => authMockState.currentUserId),
+    setToken: vi.fn(),
   }),
 }))
 

@@ -75,6 +75,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
+import { useSessionOrg } from '../composables/useSessionOrg'
 import { ROUTE_PATHS } from '../router/types'
 import { useLocale } from '../composables/useLocale'
 import { useFeatureFlags } from '../stores/featureFlags'
@@ -114,6 +115,7 @@ interface DingTalkRuntimeStatus {
 const router = useRouter()
 const route = useRoute()
 const { getToken, setToken, primeSession } = useAuth()
+const { restoreExplicitSessionOrg } = useSessionOrg()
 const { locale, isZh, setLocale } = useLocale()
 const { loadProductFeatures, resolveHomePath } = useFeatureFlags()
 
@@ -285,6 +287,7 @@ async function onSubmit(): Promise<void> {
       userPayload,
       featurePayload,
     )
+    await restoreExplicitSessionOrg()
 
     if (passwordChangeRequired) {
       await router.replace(ROUTE_PATHS.FORCE_PASSWORD_CHANGE)
@@ -343,6 +346,7 @@ async function attemptContainerLogin(corpId?: string): Promise<boolean> {
     setToken(token)
     primeSession({ success: true, data: { user: userPayload, features: featurePayload } })
     persistAuthContext(userPayload, featurePayload)
+    await restoreExplicitSessionOrg()
     await loadProductFeatures(true, { skipSessionProbe: true })
     await router.replace(normalizePostLoginRedirect(route.query.redirect) || resolveHomePath())
     return true

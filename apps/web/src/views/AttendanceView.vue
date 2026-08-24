@@ -24,6 +24,17 @@
             }}
           </p>
         </div>
+        <AttendanceSessionOrgSwitcher
+          v-if="showOverview"
+          :tr="tr"
+          :orgs="sessionOrgIds"
+          :model-value="sessionOrgId"
+          :loading="sessionOrgLoading"
+          :switching="sessionOrgSwitching"
+          :error-message="sessionOrgError"
+          :has-usable-claim="Boolean(sessionOrgId)"
+          @change="handleSessionOrgChange"
+        />
         <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
@@ -10204,6 +10215,9 @@ import {
 } from './attendance/useAttendanceAdminPayroll'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
+import { useSessionOrg } from '../composables/useSessionOrg'
+import { readHistoryFilterOrgSeed } from '../utils/sessionOrgChoice'
+import AttendanceSessionOrgSwitcher from './attendance/AttendanceSessionOrgSwitcher.vue'
 import { getCalendarVisibleRange } from '../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -14702,8 +14716,26 @@ const importPreviewSummaryCards = computed(() => [
   },
 ])
 
-const initialAuthHeaders = typeof auth.buildAuthHeaders === 'function' ? auth.buildAuthHeaders() : {}
-const orgId = ref(String(initialAuthHeaders['x-tenant-id'] || '').trim())
+// History-filter seed only. Do not copy the session claim / explicit switcher
+// choice into this box — a filled orgId rides the punch body and would relocate
+// writes (D6 F2). A persisted `'default'` hint is also not a choice (F1).
+const orgId = ref(readHistoryFilterOrgSeed())
+
+const {
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  orgs: sessionOrgIds,
+  currentOrgId: sessionCurrentOrgId,
+  loadSessionOrgs,
+  switchSessionOrg,
+  restoreExplicitSessionOrg,
+} = useSessionOrg()
+const sessionOrgId = computed(() => sessionCurrentOrgId.value ?? '')
+
+async function handleSessionOrgChange(nextOrgId: string): Promise<void> {
+  await switchSessionOrg(nextOrgId)
+}
 const targetUserId = ref('')
 
 const {
@@ -29306,6 +29338,9 @@ onMounted(() => {
     currentUserId.value = id
     if (!committedCalendarUserId.value && !normalizedUserId()) {
       committedCalendarUserId.value = id
+    }
+    if (showOverview.value) {
+      void loadSessionOrgs().then(() => restoreExplicitSessionOrg())
     }
   }).catch(() => {
     // Auth failures are surfaced elsewhere; calendar simply waits for a
