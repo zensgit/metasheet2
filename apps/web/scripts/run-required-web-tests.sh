@@ -372,6 +372,14 @@
 # did not add a test. Panel's count is unchanged at 12 — N-3's fix (a bystander-comment assertion
 # discriminating a merge-vs-replace regression on its own) extended an EXISTING test body, adding
 # no new `it(...)`. File-level token wiring is unchanged — still no new spec files.
+# Owner-reported live authoring bug fix (2026-08-24, ApprovalFormInlineEditor.vue detail sub-field
+# `<el-table>` missing `row-key` + TemplateAuthoringView.vue's `addDetailColumn` collision-prone
+# `length + 1` id scheme): NEW token `approval-detail-column-row-key` (tests/approval-detail-
+# column-row-key.spec.ts, 3 tests — mounts the real TemplateAuthoringView.vue, reproduces both
+# defects red-before-fix, mutation-proven). Bare basename token; verified to match exactly one
+# file and checked for collision against every existing token in this script and both
+# approval-web-guard.yml paths blocks (neither `approval-detail-field` nor
+# `approval-detail-record-table` is a substring of it or vice versa) — none found.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Always-on Canvas V2 + residual PLAN 6fa2fbf6 / wave-3 canaries (files landed on main via #4815–#4826).
@@ -399,6 +407,7 @@ npx vitest run \
   approval-canvas-inspector-a11y \
   approval-form-palette-focus \
   approval-form-inline-editor-extract \
+  approval-detail-column-row-key \
   approval-form-identity \
   approval-form-authoring-adapter \
   approval-form-drag-payload \

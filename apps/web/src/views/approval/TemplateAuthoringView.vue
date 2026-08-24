@@ -3622,7 +3622,27 @@ const detailLeafTypeOptions = computed(() =>
 )
 
 function addDetailColumn(field: FieldAuthoringDraft) {
-  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
+  const created = createEmptyDetailColumnDraft(field.detailColumns.length + 1)
+  // Collision guard (owner-reported bug, 2026-08-24): `length + 1` assumes ids stay densely
+  // packed 1..N, but a delete-then-add sequence breaks that invariant — e.g.
+  // [col_1, col_2, col_3] -> delete col_2 (index 1) -> [col_1, col_3] (length 2) -> `length + 1`
+  // recomputes "col_3", which the SURVIVING third column already holds -> save-blocking
+  // "子字段 id 不能重复", plus a confusing "子字段 N" auto-label once N drifts arbitrarily far
+  // ahead of the visible row count over repeated add/delete cycles. `createEmptyDetailColumnDraft`
+  // itself stays frozen — its single-argument output is a pinned baseline
+  // (approval-form-builder-parity-delta-design-20260811.md §F1 "Protected baseline", pinned
+  // byte-for-byte by approval-form-authoring-adapter.test.ts) that the Designer 2.0 opaque
+  // allocator depends on staying untouched. Only the CONSTRUCTED draft returned from this call is
+  // patched here, scanning forward past any id this field's OWN detailColumns already uses before
+  // it is pushed — the call above, and its frozen output, are unchanged.
+  const existingIds = new Set(field.detailColumns.map((column) => column.id))
+  let candidateIndex = field.detailColumns.length + 1
+  while (existingIds.has(`col_${candidateIndex}`)) {
+    candidateIndex += 1
+  }
+  created.id = `col_${candidateIndex}`
+  created.label = `子字段 ${candidateIndex}`
+  field.detailColumns = [...field.detailColumns, created]
 }
 
 function removeDetailColumn(field: FieldAuthoringDraft, index: number) {

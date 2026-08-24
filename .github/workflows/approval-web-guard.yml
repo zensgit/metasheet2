@@ -168,6 +168,11 @@ on:
       # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
       - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
       - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # Owner-reported live authoring bug fix (2026-08-24): detail sub-field `<el-table>` missing
+      # `row-key` (focus-retention misbinding after a mid-list delete) + TemplateAuthoringView.vue
+      # `addDetailColumn`'s collision-prone `length + 1` id scheme. Both source files are already
+      # listed above/below; this is the new reproduction/mutation-proof spec's own path.
+      - 'apps/web/tests/approval-detail-column-row-key.spec.ts'
       # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
       # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
       - 'apps/web/src/approvals/approvalFormIdentity.ts'
@@ -471,6 +476,11 @@ on:
       # of TemplateAuthoringView.vue) + its behavior-equivalence spec.
       - 'apps/web/src/approvals/components/ApprovalFormInlineEditor.vue'
       - 'apps/web/tests/approval-form-inline-editor-extract.spec.ts'
+      # Owner-reported live authoring bug fix (2026-08-24): detail sub-field `<el-table>` missing
+      # `row-key` (focus-retention misbinding after a mid-list delete) + TemplateAuthoringView.vue
+      # `addDetailColumn`'s collision-prone `length + 1` id scheme. Both source files are already
+      # listed above/below; this is the new reproduction/mutation-proof spec's own path.
+      - 'apps/web/tests/approval-detail-column-row-key.spec.ts'
       # F1 (2026-08-17, delta §5 F1): opaque identity allocator + production form-command adapter
       # (FB-D3/D4/D5/D6) + their specs. approvalFormCommands.ts and its test are already listed above.
       - 'apps/web/src/approvals/approvalFormIdentity.ts'
@@ -688,6 +698,7 @@ jobs:
             approval-canvas-inspector-a11y \
             approval-form-palette-focus \
             approval-form-inline-editor-extract \
+            approval-detail-column-row-key \
             approval-form-identity \
             approval-form-authoring-adapter \
             approval-form-drag-payload \
