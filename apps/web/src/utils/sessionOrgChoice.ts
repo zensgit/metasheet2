@@ -41,11 +41,17 @@ export function readStoredInjectedTenantHint(): string | null {
   return null
 }
 
-/** History-filter seed only. A persisted `'default'` hint is not a chosen org. */
+/**
+ * Seed the attendance history-filter / punch `orgId` box from injected hint keys
+ * only (`tenantId` / `workspaceId`), including a stored `'default'`.
+ *
+ * Existing admin pickers and harnesses still treat that box as the request
+ * org scope. F2 is preserved because this never reads `sessionOrgChoice` or
+ * the reminted JWT — a switcher remint must not fill this box. F1 stays on
+ * login: `tenantHintForLoginRequest` still strips `'default'`.
+ */
 export function readHistoryFilterOrgSeed(): string {
-  const hint = readStoredInjectedTenantHint()
-  if (!hint || isDefaultSessionOrgId(hint)) return ''
-  return hint
+  return readStoredInjectedTenantHint() ?? ''
 }
 
 export function readSessionOrgChoice(): SessionOrgChoice | null {

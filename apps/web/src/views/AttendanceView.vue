@@ -14716,9 +14716,10 @@ const importPreviewSummaryCards = computed(() => [
   },
 ])
 
-// History-filter seed only. Do not copy the session claim / explicit switcher
-// choice into this box — a filled orgId rides the punch body and would relocate
-// writes (D6 F2). A persisted `'default'` hint is also not a choice (F1).
+// History-filter / punch orgId seed from injected hint keys only, including a
+// stored `'default'` (today's admin/harness scope). Do not copy the session
+// claim or explicit switcher choice into this box — a filled orgId rides the
+// punch body and would relocate writes (D6 F2). F1 stays on login headers.
 const orgId = ref(readHistoryFilterOrgSeed())
 
 const {
