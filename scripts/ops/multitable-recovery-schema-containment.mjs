@@ -149,6 +149,48 @@ const EXPECTED_AUTHORITY_TRIGGERS = [
   },
 ]
 
+/**
+ * The ONE schema the canonical recovery-authority surface lives in — DERIVED from
+ * `EXPECTED_AUTHORITY_TRIGGERS`, never retyped.
+ *
+ * WHY THIS EXISTS. `to_regclass('roles')` resolves through the SESSION's `search_path`, so any
+ * consumer that binds to `roles` by bare name is bound to whatever the session happens to see. A
+ * decoy `roles` reached first — a `"$user"` schema the connecting role owns, a `SET search_path`, a
+ * DSN `options=`, an `ALTER ROLE … SET`, or a `CREATE TEMP TABLE roles` — silently retargets the
+ * query, and a query that finds nothing there reads as "nothing is there" rather than "we looked
+ * somewhere else". Consumers therefore bind to `<EXPECTED_AUTHORITY_SCHEMA>.roles` and treat any
+ * disagreement between that and the session's own resolution as UNOBSERVABLE, never as absence.
+ *
+ * DERIVED, NOT RETYPED, and it REFUSES rather than picks: if the canonical trigger set ever spans
+ * more than one schema there is no longer a single canonical schema to bind to, and every consumer
+ * must be re-designed rather than silently bound to whichever schema happened to sort first.
+ */
+const EXPECTED_AUTHORITY_SCHEMA = (() => {
+  const schemas = [...new Set(EXPECTED_AUTHORITY_TRIGGERS.map((trigger) => trigger.schemaName))]
+  if (schemas.length !== 1) {
+    throw new Error(
+      `EXPECTED_AUTHORITY_TRIGGERS spans ${schemas.length} schemas (${schemas.join(', ')}); there is no single`
+      + ' canonical schema for consumers to bind `roles` to. Re-design the binding rather than picking one.',
+    )
+  }
+  return schemas[0]
+})()
+
+/**
+ * A schema name safe to embed in the SQL these consumers build.
+ *
+ * Values-free by construction: the only schema names this repo ever binds are the canonical one and
+ * the per-run random schemas its real-DB goldens create, all plain lowercase identifiers. Anything
+ * else is refused at build time rather than escaped and passed through.
+ */
+function assertBindableSchemaName(schema) {
+  const name = String(schema ?? '')
+  if (!/^[a-z_][a-z0-9_$]*$/.test(name)) {
+    throw new Error(`refusing to bind a non-identifier schema name: ${JSON.stringify(schema)}`)
+  }
+  return name
+}
+
 const TRY_LOCK_USER_BODY = `
 DECLARE
   lock_key bigint;
@@ -746,7 +788,9 @@ export {
   AUTHORITY_TRIGGER_FUNCTIONS,
   AUTHORITY_TRIGGER_SNAPSHOT_QUERY,
   EXPECTED_AUTHORITY_FUNCTIONS,
+  EXPECTED_AUTHORITY_SCHEMA,
   EXPECTED_AUTHORITY_TRIGGERS,
+  assertBindableSchemaName,
   assessSchemaSnapshot,
   canonicalFunction,
   canonicalSnapshot,

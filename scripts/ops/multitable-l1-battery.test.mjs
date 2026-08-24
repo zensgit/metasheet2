@@ -56,8 +56,9 @@ import {
   LEASE_FUNCTION_BY_KIND,
   NOT_DRIVEN_SITES,
   RECOVERY_CONFLICT_HTTP_CODE,
-  ROLES_RELATION_PRESENT_SQL,
-  ROLE_CASCADE_WITNESS_QUERY,
+  CANONICAL_ROLES_SCHEMA,
+  buildRoleCascadeBindingSql,
+  buildRoleCascadeWitnessQuery,
   ROLE_DELETE_CHILD_WRITE_ACTIONS,
   RECOVERY_CONFLICT_HTTP_STATUS,
   STAMP_PREFIX,
@@ -81,6 +82,7 @@ import {
   triggerCoverage,
 } from './multitable-l1-battery.mjs'
 
+const WITNESS_SQL = buildRoleCascadeWitnessQuery(CANONICAL_ROLES_SCHEMA)
 const BATTERY_SOURCE = readFileSync(new URL('./multitable-l1-battery.mjs', import.meta.url), 'utf8')
 // P3-7 (regate2): a comment-stripped view of the battery source. The first P2-4 guards matched
 // bare tokens (`early_exit_residue`) that a COMMENT satisfies — deleting the real code while
@@ -1410,22 +1412,22 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   // carries a canonical recovery-authority trigger. Both conjuncts asserted; over-widening to
   // "every FK pointing at roles" would classify `view_permissions` (which carries no such trigger)
   // as a refutation and block the L1 evidence path on a false PRESENT.
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /pg_catalog\.pg_constraint/)
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /con\.confrelid = to_regclass\('roles'\)/)
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /pg_catalog\.pg_trigger/)
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /NOT tg\.tgisinternal/)
+  assert.match(WITNESS_SQL, /pg_catalog\.pg_constraint/)
+  assert.match(WITNESS_SQL, /con\.confrelid = to_regclass\('public\.roles'\)/)
+  assert.match(WITNESS_SQL, /pg_catalog\.pg_trigger/)
+  assert.match(WITNESS_SQL, /NOT tg\.tgisinternal/)
   // Schema binding: unqualified `to_regclass`, never a hard-coded `public.` literal (which would
   // blind every real-DB golden this repo runs inside a per-run random schema).
   assert.ok(
-    !/to_regclass\('public\./.test(ROLE_CASCADE_WITNESS_QUERY),
+    !/con\.confrelid = to_regclass\('roles'\)/.test(WITNESS_SQL),
     'the witness query hard-codes the public schema; it must resolve through the session search_path',
   )
   // The trigger set is DERIVED from the containment census, not hand-typed: every canonical trigger
   // function the census names must appear in the query, and no other proname may.
   for (const fn of AUTHORITY_TRIGGER_FUNCTIONS) {
-    assert.ok(ROLE_CASCADE_WITNESS_QUERY.includes(`'${fn}'`), `the witness query does not match trigger function ${fn}`)
+    assert.ok(WITNESS_SQL.includes(`'${fn}'`), `the witness query does not match trigger function ${fn}`)
   }
-  const pronamesInQuery = [...ROLE_CASCADE_WITNESS_QUERY.matchAll(/'(metasheet_[a-z_]+)'/g)].map((m) => m[1])
+  const pronamesInQuery = [...WITNESS_SQL.matchAll(/'(metasheet_[a-z_]+)'/g)].map((m) => m[1])
   assert.deepEqual(
     pronamesInQuery.slice().sort(),
     [...AUTHORITY_TRIGGER_FUNCTIONS].sort(),
@@ -1433,26 +1435,38 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   )
   // Output protocol: the rows must be auditable — schema, table and action, not a bare boolean.
   for (const column of ['child_schema', 'child_table', 'confdeltype']) {
-    assert.match(ROLE_CASCADE_WITNESS_QUERY, new RegExp(`AS ${column}\\b`), `the witness query stopped publishing ${column}`)
+    assert.match(WITNESS_SQL, new RegExp(`AS ${column}\\b`), `the witness query stopped publishing ${column}`)
   }
 })
 
-test('the battery pairs the witness query with the SAME relation-presence control (P3 lockstep)', () => {
-  // The query resolves `roles` through the session's search_path. Zero rows from a session that
-  // cannot see a `roles` table would read as EXEMPTION-VALID — a false ABSENT, and a silently kept
-  // exemption. The battery is a consumer of that query and needs the pairing as much as the witness
-  // runner does; `users` resolving in the same-DB proof does not establish it.
-  assert.match(ROLES_RELATION_PRESENT_SQL, /to_regclass\('roles'\)/)
-  assert.match(ROLES_RELATION_PRESENT_SQL, /relkind IN \('r', 'p'\)/)
-  assert.ok(!/to_regclass\('public\./.test(ROLES_RELATION_PRESENT_SQL), 'a hard-coded schema blinds the per-random-schema goldens')
-  // …and it is USED, before the query it guards, with its own fail-closed refusal.
-  const presenceIdx = BATTERY_SOURCE.indexOf('SELECT ${ROLES_RELATION_PRESENT_SQL} AS present')
-  const queryIdx = BATTERY_SOURCE.indexOf('admin.client.query(ROLE_CASCADE_WITNESS_QUERY)')
-  assert.ok(presenceIdx > 0, 'the battery no longer runs the relation-presence control')
-  assert.ok(queryIdx > presenceIdx, 'the presence control must run BEFORE the query whose zero rows it makes meaningful')
-  assert.match(BATTERY_SOURCE, /failure: 'role_cascade_premise_unobservable'/, 'the unobservable-premise refusal is gone')
-  // Fail-closed: the refusal is a NOT_ARMED exit, never a log line the run continues past.
+test('the battery pairs the witness query with the SAME canonical binding, fail-closed (P3 lockstep)', () => {
+  // THIS TEST'S INVARIANT WAS INVERTED, NOT WIDENED. It used to assert that the control
+  // session-resolves `roles` (`to_regclass('roles')`) and hard-codes no schema, and called that the
+  // safety property. It was the defect: the control resolved the relation the same way the query
+  // did, so it failed for the same reason, and a decoy `roles` reached first on the search_path
+  // satisfied it while the query looked at the decoy and returned nothing.
+  const binding = buildRoleCascadeBindingSql(CANONICAL_ROLES_SCHEMA)
+  assert.match(binding.canonicalRolesPresentSql, /to_regclass\('public\.roles'\)/)
+  assert.match(binding.canonicalRolesPresentSql, /relkind IN \('r', 'p'\)/)
+  assert.match(binding.sessionBindsCanonicalSql, /to_regclass\('roles'\) = to_regclass\('public\.roles'\)/)
+  // NOT hard-coded: the per-run random schemas the real-DB goldens create must still render.
+  assert.match(buildRoleCascadeWitnessQuery('rcw_golden_schema'), /to_regclass\('rcw_golden_schema\.roles'\)/)
+  // …and the binding is CHECKED, before the query it guards, with its own fail-closed refusal.
+  const presenceIdx = BATTERY_SOURCE.indexOf('const binding = buildRoleCascadeBindingSql(CANONICAL_ROLES_SCHEMA)')
+  const queryIdx = BATTERY_SOURCE.indexOf('admin.client.query(buildRoleCascadeWitnessQuery(CANONICAL_ROLES_SCHEMA))')
+  assert.ok(presenceIdx > 0, 'the battery no longer computes the canonical binding')
+  assert.ok(queryIdx > presenceIdx, 'the binding check must run BEFORE the query whose zero rows it makes meaningful')
+  // All four doors are present, each with its own reason, and each is a NOT_ARMED exit — never a
+  // log line the run continues past. Same doors, same names as the independent witness runner's.
   const guard = BATTERY_SOURCE.slice(presenceIdx, queryIdx)
+  for (const failure of [
+    'role_cascade_canonical_relation_absent',
+    'role_cascade_binding_mismatch',
+    'role_cascade_relation_ambiguous',
+    'role_cascade_premise_unobservable',
+  ]) {
+    assert.match(guard, new RegExp(`failure: '${failure}'`), `the battery lost the ${failure} door`)
+  }
   assert.match(guard, /VERDICT: NOT_ARMED/)
   assert.match(guard, /return \{ exitCode: 2, evidence, lines \}/)
 })

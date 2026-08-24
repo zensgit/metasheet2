@@ -31,6 +31,28 @@
 > 同一轮修复内又发生了一次。head 钉点 `1d8f0708de` 本身不变(真 merge,非 squash,分支尖端未再动),
 > 仅**状态与位置**类断言(Draft/OPEN、"尚未落 main"、main 上谓词宽窄)过期。
 
+> **2026-08-25 五次更新(判据缺口重开;本文件的更正约定不变:历史条目原样保留、逐句标注,不做回溯改写)。**
+> 上一轮把 role-cascade witness 的判据记为「已随 #5131 合并落 main,缺口关闭」。**该结论已被推翻**:
+> 合并进 main 的谓词仍以 `to_regclass('roles')` 绑定 `roles`,而 `to_regclass` 走 SESSION 的
+> `search_path`。任何被优先解析到的同名 decoy —— 连接角色自己拥有的 `"$user"` schema、`SET
+> search_path`、DSN `options=`、`ALTER ROLE … SET`,或一张 `CREATE TEMP TABLE roles` —— 都会把查询
+> 悄悄改指向,零行随即被判为 `CASCADE ABSENT (premise CONFIRMED)` / exit 0,而目标库上的
+> `roles:delete` 级联其实是活的。与之配对的"正控"拦不住,**正因为它是耦合的**:它用同一种方式解析
+> `roles`,于是被同一张 decoy 喂饱,而另一半计数(带规范触发器的关系)由真实 schema 里的真实子表喂饱
+> —— 两个计数,两张不同的表,双绿。
+>
+> 已在 PG 15 上用**出厂的**探针、解析器、分类器与摘要渲染器端到端复现(含 stock `"$user", public`
+> 默认路径,无需任何 SET/options/ALTER),记录见
+> `docs/development/role-cascade-witness-shadow-resolution-repro-20260824.md`。
+>
+> **不需要撤回任何已发布结论**:`multitable-role-cascade-witness.yml` 与 `multitable-l1-battery.yml`
+> 至本次核验为止**运行次数均为 0**,该 witness 从未被 dispatch 过,没有 ABSENT 判决在流通。
+>
+> 因此下方「判据修复已随 #5131 合并落 main / 唯一缺口只剩合并」的结论**逐句作废**;§B1a 第 234 行
+> 及第 239 行的对应更正同样作废。`59/59` 这一执行事实本身继续成立 —— 它证明的是那批 golden 跑过,
+> 不是它们覆盖了本节所述的 schema 解析面(它们没有:唯一相关的 golden 只测了 decoy **不在** path 上
+> 的情形)。**修复与新增真库负例见本 PR**;修复落地前,两条 workflow 继续保持不 dispatch。
+
 > 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;

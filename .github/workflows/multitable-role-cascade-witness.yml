@@ -29,7 +29,7 @@ name: Multitable Role-Cascade Witness
 # -----------------------------
 # The SQL is NOT re-typed here, and the "does a role delete write a triggered child" predicate is
 # NOT re-implemented here. `scripts/ops/multitable-role-cascade-witness.mjs` imports BOTH from the
-# battery (`ROLE_CASCADE_WITNESS_QUERY`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
+# battery (`buildRoleCascadeWitnessQuery`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
 # probe that runs on the host, and applies the battery's own predicate to the observed rows back on
 # this runner. Two divergent copies of a witness query is precisely the "second, narrower artifact"
 # failure this repository has been bitten by. This workflow file therefore contains no SQL at all —
