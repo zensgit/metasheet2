@@ -17,8 +17,21 @@
 > F4 七个旧 PR 已全部处置(5 关闭 + 2 owner 明文 PARKED,不是"全 OPEN",见 §D2-F4)。
 > **本轮新增两条 owner 待办**:ratified 阶梯 L2 判据的可产出性(新增 §D2-F10)、role-cascade witness
 > PR #5131 held Draft(见 §B1a)。下方各节据此更新;历史记录原样保留,不做回溯改写。
+>
+> **2026-08-24 四次更新(#5131 已合并;本轮为同一失效类的第二次自实例——不是"头指针漂移",是"状态
+> 在提交落地 6 分钟后翻转")**:上一条(三次更新,commit `57129e0b57`,12:09:47+08)把 role-cascade
+> witness PR #5131 钉成 head `1d8f0708de`、状态 OPEN/Draft、main 仍是修复前的窄谓词——这些在落笔
+> 时刻均为真(经 CI job 日志与 `gh pr view` 核实)。**但 #5131 在该提交落地后仅 6 分钟(12:15:34+08,
+> 合并提交 `771cd9be20`)即被合并**,使同一批断言当场失效:#5131 现 **MERGED**(非 Draft/OPEN),宽
+> 谓词与三个见证文件现已落 `origin/main`(现 tip `771cd9be20`,取代原引用的 `136be5f1f5`),armed
+> real-DB golden 在 main 上以 push 事件重跑仍是 **59/59、0 fail、0 skip**(`run 32689331718` /
+> `job 97320045961`,与 #5131 分支上的原始执行 `run 32682499617` / `job 97301471543` 并存,不互相
+> 替代——前者证"合并后 main 上仍执行",后者证"该 head 上曾执行",两者回答不同问题)。下方每处受影响
+> 陈述均以「原写『…』」标出并保留原文,不做回溯改写——这正是本清单存在的理由本身,在同一份文档、
+> 同一轮修复内又发生了一次。head 钉点 `1d8f0708de` 本身不变(真 merge,非 squash,分支尖端未再动),
+> 仅**状态与位置**类断言(Draft/OPEN、"尚未落 main"、main 上谓词宽窄)过期。
 
-> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;**role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词**(见 §B1a/§B1),本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
+> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;
 > 下方 run 记录里的 `8c1be0b0…`/`14c180aa…` 是**当时**实测值,epoch-bound,今天重跑不会复现)(双主机 run
@@ -152,18 +165,26 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > prod 那条 `role_permissions → roles` cascade FK 依旧是 **INFERRED-STRONG**(未被只读见证证实或证伪)。
 > 见证查询 `ROLE_CASCADE_WITNESS_QUERY` 最初由 #5045(`4bacc27ccc`)引入电池脚本,早于 #5125 即已在
 > main 上;唯一 dispatch 它的 workflow —— **PR #5131**(`multitable-role-cascade-witness.yml`;只读:仅 `docker ps` + 一次
-> `docker exec` 跑 `pg_catalog`-only `SELECT`,无写入)—— 目前仍是 **OPEN / Draft**(`gh pr view 5131`
-> 核实,head `1d8f0708de`,2026-08-24;该 PR 当天已推进三次,下面每条陈述都对这个 head 重新核实过)。
+> `docker exec` 跑 `pg_catalog`-only `SELECT`,无写入)—— **现已 MERGED**(合并提交 `771cd9be20`,
+> 2026-08-24T12:15:34+08;`gh pr view 5131 --json state,mergedAt,mergeCommit` 核实)。原写「目前仍是
+> **OPEN / Draft**」,已更正(见文首「四次更新」):该断言在本文档上一提交(`57129e0b57`,12:09:47+08)
+> 落地 6 分钟后即失效——head `1d8f0708de` 本身不变(真 merge,分支尖端未再动),过期的只是 PR 状态。
 >
-> **⚠️ 下面 (a)(b) 的谓词修复只存在于 #5131 分支(head `1d8f0708de`),尚未落 main**:origin/main 现在
-> `136be5f1f5`(`gh api repos/zensgit/metasheet2/branches/main --jq '.commit.sha'` 核实),其上的
-> `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据(`ROLE_CASCADE_WITNESS_QUERY` 硬编码
-> `child.relname = 'role_permissions'`,`roleDeleteCascadeExists` 只认字面值 `confdeltype === 'c'`——
-> origin/main 上的 `multitable-l1-battery.mjs:382-394` 已核实),`multitable-role-cascade-witness.*`
-> 三个见证文件在 main 上根本不存在。**main 上的这份窄判据不是电池之外的旁路检查,电池自身在运行时就
-> 消费它**:`multitable-l1-battery.mjs:1366-1371`(main 上已核实)用同一个 `ROLE_CASCADE_WITNESS_QUERY`
-> 查目标库,`roleDeleteCascadeExists` 判真则把 `not_driven_reason_expired` 推进 `failures`——今天从
-> main dispatch 的 L1 电池,`roles:delete` 站点的 NOT-DRIVEN 豁免复检用的就是这份窄判据。
+> **原写「⚠️ 下面 (a)(b) 的谓词修复只存在于 #5131 分支(head `1d8f0708de`),尚未落 main:origin/main
+> 现在 `136be5f1f5`……其上的 `scripts/ops/multitable-l1-battery.mjs` 目前仍是修复前的窄判据……
+> `multitable-role-cascade-witness.*` 三个见证文件在 main 上根本不存在」,已更正**:#5131 合并后,
+> 宽谓词与三个见证文件均已落 `origin/main`(现 tip `771cd9be20`,取代原引用的 `136be5f1f5`;
+> `gh api repos/zensgit/metasheet2/branches/main --jq '.commit.sha'` 核实)。main 上
+> `scripts/ops/multitable-l1-battery.mjs:451-469` 现即 (a)(b) 段所述的宽 `ROLE_CASCADE_WITNESS_QUERY`
+> (对 `roles` 的任意外键判断,不再硬编码表名),`:490` 现即 `ROLE_DELETE_CHILD_WRITE_ACTIONS =
+> ['c','n','d']`(均以 `git show origin/main:scripts/ops/multitable-l1-battery.mjs` 核实,行号与
+> #5131 分支上一轮核实时一致,因为是原样合并,未再改动);`.github/workflows/multitable-role-cascade-witness.yml`
+> / `scripts/ops/multitable-role-cascade-witness.mjs` / `scripts/ops/multitable-role-cascade-witness.test.mjs`
+> 三个见证文件均已在 `git ls-tree origin/main` 中列出。**main 上的这份宽判据不是电池之外的旁路检查,
+> 电池自身在运行时就消费它**:`multitable-l1-battery.mjs:1518-1520`(main 上已核实,原窄判据时期
+> 曾在 `:1366-1371`,行号随本次合并的其余改动一并前移)用同一个 `ROLE_CASCADE_WITNESS_QUERY` 查目标库,
+> `roleDeleteCascadeExists` 判真则把 `not_driven_reason_expired` 推进 `failures`——今天从 main dispatch
+> 的 L1 电池,`roles:delete` 站点的 NOT-DRIVEN 豁免复检用的已经是这份**宽**判据,不再是窄判据。
 >
 > **owner 复审在更早的 head(`c0c83e2534`)上指出的两处窄,已在 #5131 分支后续提交里修复,以该分支
 > 当前 head `1d8f0708de` 核实(以下行号均属 #5131 分支,不是 main;`1d8f0708de` 未再改动
@@ -201,11 +222,19 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > `production` 改成了 `staging`(`multitable-role-cascade-witness.yml:113-114`),并把
 > `default == options[0] == staging` 钉进了同一份 hermetic 套件。
 >
-> **但这不改变 PR #5131 仍是 Draft、main 上谓词仍未修复这件事**——CI 接入解决的是"这些 golden 会不会
-> 被执行"这个缺口,不是"main 上电池用的是不是宽谓词"这个缺口;后者只有合并才能解决(见 §B1 的排期
-> 结论)。ladder §A1.1 末段"建议在 ratify 前顺手跑掉"那条只读 SQL:载体已存在(#5131)、判据已在该
-> 分支修完、CI 现已覆盖 real-DB golden——三者都不再是缺口;唯一剩的缺口是**分支未合并**,main 上电池
-> 实跑时用的仍是窄谓词。
+> **补记(2026-08-24,四次更新):上面这段以 #5131 分支 head `1d8f0708de` 为范围的执行证据本身继续
+> 成立,不替换、只补充**——#5131 合并后同一条 armed step 在 `origin/main`(push 事件,commit
+> `771cd9be20`)上重新执行,`run 32689331718` / `job 97320045961`
+> (`gh api repos/zensgit/metasheet2/actions/jobs/97320045961/logs` 核实)同样打印 `# tests 59`
+> `# pass 59` `# fail 0` `# skipped 0`。两条证据回答不同问题(该 head 上曾执行 / 合并后 main 上仍执行),
+> 保留两条而非互相替换。
+>
+> **原写「但这不改变 PR #5131 仍是 Draft、main 上谓词仍未修复这件事……唯一剩的缺口是分支未合并,main
+> 上电池实跑时用的仍是窄谓词」,已更正(见文首「四次更新」)**:该段落成立的前提(#5131 尚未合并)在
+> 本文档上一提交(`57129e0b57`)落地 6 分钟后即被推翻——#5131 已 MERGED(`771cd9be20`),main 上电池
+> 实跑时用的**已是宽谓词**,不再是窄谓词。ladder §A1.1 末段"建议在 ratify 前顺手跑掉"那条只读 SQL:
+> 载体已存在(#5131,已合并)、判据已在 main 修完、CI 已覆盖 real-DB golden(分支与 main 两处均实测
+> 59/59)——**此前"唯一剩的缺口是分支未合并"这条也已不再成立**;§B1 对应段落同步更正,见下。
 >
 > **`INDETERMINATE` 提醒**:见证脚本把结果分三类——`ABSENT`(premise CONFIRMED,exit 0)、
 > `PRESENT`(premise REFUTED,exit 1)、`INDETERMINATE`(未能观测,**exit 2**)
@@ -222,27 +251,23 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`。**已闭合**(#5069 workflow always() 清理 → #5076 停止容器诚实枚举 → #5080/#5084 建号脚本 stdin-only+trap;全过独立复门)。
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
-- **⚠️ 与本条剩余前置"建号 + 电池实跑 PASS"交界的缺口(证据见 §B1a,role-cascade witness;不是重复劳动,是同一份证据在两处的排期含义)**:
-  上面"代码侧已闭合"这组不含 role-cascade witness 谓词的宽化——该谓词的宽版本目前**只存在于 #5131 分支
-  (未合并,head `1d8f0708de`)**;origin/main 现在 `136be5f1f5`,其上(已核实,
+- **⚠️ 与本条剩余前置"建号 + 电池实跑 PASS"交界的缺口(证据见 §B1a,role-cascade witness;不是重复劳动,是同一份证据在两处的排期含义)** —— **2026-08-24 四次更新:本条下方原文的核心前提(#5131 未合并)已失效,整段按原样保留、逐句标注更正,不做回溯改写**:
+  原写「上面"代码侧已闭合"这组不含 role-cascade witness 谓词的宽化——该谓词的宽版本目前**只存在于
+  #5131 分支(未合并,head `1d8f0708de`)**;origin/main 现在 `136be5f1f5`,其上(已核实,
   `scripts/ops/multitable-l1-battery.mjs:382-394`)电池脚本里的 `ROLE_CASCADE_WITNESS_QUERY` 仍是窄
-  谓词(硬编码只查 `role_permissions`,`roleDeleteCascadeExists` 只认字面值 `confdeltype === 'c'`)。
-  **现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",电池会用这份窄谓词复核
-  `roles:delete` 站点的 NOT-DRIVEN 豁免——若目标库上实际存在 `user_roles` 级联,或
-  `role_permissions`/`user_roles` 任一边的 parent-delete 动作是 `SET NULL`/`SET DEFAULT`(而非窄谓词
-  唯一认的 `CASCADE`),电池会**放行一个已经失效的豁免**,而不是按设计 `exit 1 not_driven_reason_expired`。
-  这不是纯理论:#5131 分支上的真库 golden(`user_roles-only CASCADE`、`SET NULL`、`SET DEFAULT` 三条)
-  已经证明这条路径会被触发,且这些 golden 现已在 CI 里实际执行通过(见 §B1a)。
-  **排期含义(2026-08-24 更正,替换上一轮"二选一"的定性)**:上一轮把"owner 明确接受本次 PASS 不覆盖
-  宽谓词"列为与"等 #5131 合并"并列的选项,这个定性**技术上不成立**——#5131 修的不是一份独立的
-  golden 覆盖率,而是**电池自身在运行时消费的判据**(见上,`multitable-l1-battery.mjs:1366-1371`):
-  窄版本在目标库存在 `user_roles` 级联或 SET NULL/SET DEFAULT 时会**假放行** `roles:delete` 豁免——
-  这不是"证据覆盖窄一点",是**电池报出的 PASS 本身不成立**,它在本该 `exit 1
-  not_driven_reason_expired` 的地方给出了 PASS。因此:窄谓词下的电池实跑**可以做诊断用途**(例如
-  验证凭据、建号、其余 census 站点是否正常),**但不得计入 A1 证据**;**#5131 合并是下一次"可计入
-  A1 证据的 L1 电池实跑"的硬前置**。owner 仍可决定何时合并 #5131、要不要先跑一次仅供诊断的电池——
-  但"接受窄 PASS 当作 A1 证据"这一项不存在,因为它产出的东西本身无效,不是本清单可以代 owner 放行
-  的选项。
+  谓词……」,**已更正**:#5131 已于 2026-08-24T12:15:34+08(合并提交 `771cd9be20`)合并,宽谓词现已在
+  `origin/main`(现 tip `771cd9be20`)上,`scripts/ops/multitable-l1-battery.mjs:451-469` 即宽版
+  `ROLE_CASCADE_WITNESS_QUERY`(核实方式与引用行号见 §B1a)。
+  原写「**现实后果**:在 #5131 合并前,若 owner 现在授权"建号 + 电池实跑",电池会用这份窄谓词复
+  核……电池会**放行一个已经失效的豁免**……」,**已更正**:该风险的前提(#5131 未合并)已不成立——
+  main 上电池自身在运行时消费的已是宽谓词(`multitable-l1-battery.mjs:1518-1520`,见 §B1a),窄谓词
+  假放行的场景不再是"若 owner 现在授权就会发生"的现实路径。
+  原写「**#5131 合并是下一次"可计入 A1 证据的 L1 电池实跑"的硬前置**……owner 仍可决定何时合并
+  #5131……」,**已更正**:该硬前置**现已满足**(#5131 已合并)。**本清单不代 owner 决定这是否意味着
+  "建号 + 电池实跑 PASS" 前置本身已满足或 A1 可以 ratify**——那需要一次实际的电池 dispatch 产出 PASS
+  证据(见下方"修复后序列"),本条只更正"谓词处于哪个分支/是否已合并"这一事实,不改变、不预判 owner
+  对是否现在授权电池实跑的决定。F3 双主机新指纹证据、staging pending≠0、"建号 + 电池实跑 PASS" 这三项
+  owner/ops 前置本身的完成状态不受本次更正影响,仍按 §B1 开头所记未满足。
 - 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
   owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
 - 门审边界(修好后仍适用):干净电池只观测 **12/55 census 站点(分母已随 #5128 由 48 升至 55,见 §D2-F8;driven 集合本身未变,仍是 12)+ 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
