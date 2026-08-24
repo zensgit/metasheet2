@@ -398,6 +398,20 @@ export const appRoutes: RouteRecordRaw[] = [
     component: PluginManagerView,
     meta: { title: 'Plugins', requiresAuth: true, requiresAdmin: true, requiredFeature: 'attendanceAdmin' }
   },
+  // E-learning V0.1 named pilot. Learner is elearning:read (never admin-only).
+  // Admin is elearning:admin only — do not infer requiresAdmin from /admin/.
+  {
+    path: '/learn',
+    name: 'elearning-learner',
+    component: () => import('../views/ElearningLearnerView.vue'),
+    meta: { title: 'Learning Center', titleZh: '学习中心', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:read'] }
+  },
+  {
+    path: '/admin/elearning',
+    name: 'elearning-admin',
+    component: () => import('../views/ElearningAdminView.vue'),
+    meta: { title: 'Cloud Classroom Admin', titleZh: '云课堂管理', requiresAuth: true, requiredFeature: 'elearning', permissions: ['elearning:admin'] }
+  },
   {
     path: '/:pathMatch(.*)*',
     name: 'not-found',
