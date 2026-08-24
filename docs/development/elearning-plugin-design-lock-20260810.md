@@ -2,12 +2,13 @@
 
 - 日期：2026-08-10
 - 状态：**DRAFT — PENDING RATIFY**（本文件是本线唯一的 ratify 对象；ratify 前置见 §14。在 owner 完成 §9 裁决并按最新 main 重核引用前，不得声称已 ratify。）
+- 终检通过后唯一合法状态字符串（**禁止**写成普通 `RATIFIED`）：**`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**。该状态只冻结架构合同；**不授权** L0 / V0.1、代码、迁移、feature flag 或任何实施 PR。unpark 须 owner 对具名试点或自用场景作明确批准。
 - Lineage（输入材料，均已 SUPERSEDED，不得独立演进）：
   - `elearning-plugin-feasibility-and-architecture-design-20260810.md`（产品 v2，本文底稿）
   - `elearning-plugin-hybrid-architecture-20260810.md`（Codex 混合架构稿，吸收其架构图/责任矩阵/投影矩阵/流程/媒体子架构/验收门）
   - 两轮独立对抗审（v1→审1：5×P1+2×P2；复审→审2：范围冻结 P1、管理范围门、ACL、抑制合同、幂等三态、**org 默认值 P1**）——全部意见已吸收，处置记录 §13。
-- 基准参照：钉钉云课堂公开手册（54 篇全文蒸馏；原始在线入口：https://alidocs.dingtalk.com/i/p/Y7kmbokZp3pgGLq2/docs/lo1YvX0prG98keNkLP1bVPw7xzbmLdEZ ）。本地离线镜像是**未入库研究材料**（`tmp/` 被 .gitignore 排除），不作为可复核路径、不构成仓库合同（审7 P2）。
-- ⚠️ 基线注记：写稿时检出落后 main；**ratify 前必须 rebase 至最新 main 并逐条重核**。本稿 citation 第四跳已对 `origin/main` `@96b6416717`（2026-08-24）重核，见 §14-③ / §13 审8。
+- 基准参照：外部企业学习产品公开手册（54 篇能力蒸馏）。原始来源、品牌入口与离线镜像是**未入库研究材料**，不作为可复核路径、不构成仓库合同（审7 P2 / 审9）。功能定义以本文自身原则为准；本锁不收录竞品名称。
+- ⚠️ 基线注记：写稿时检出落后 main；**ratify 前必须 rebase 至最新 main 并逐条重核**。本稿 citation 第四跳已对 `origin/main` `@96b6416717`（2026-08-24）重核，见 §14-③ / §13 审8；审9 最小修订见 §13。
 - 命名约定（ratify 后变更须走 design-lock amendment）：命名空间 `elearning` —— 插件 `plugin-elearning`、权限 `elearning:*`、表前缀 `elearning_`；**前端产品 feature `elearning`（单个，仅管导航/路由展示）+ 服务端 1 个 master `ELEARNING_ENABLED` + 6 个能力 flag `ELEARNING_{CONTENT,ASSIGNMENT,ASSESSMENT,INCENTIVE,ANALYTICS,MEDIA}_ENABLED`**（已裁：采用 ASSIGNMENT/ANALYTICS 命名；canonical 名单 = 此 7 个，环境变量/后端 capability payload/前端 store/测试不得出现别名）。产品显示名（审5 裁决 #9）：**员工端「学习中心」、管理端「云课堂管理」**。
 
 ---
@@ -20,7 +21,7 @@
 2. **调度不能借考勤的**：`AttendanceScheduler` 对所有插件开放注册，但默认 OFF、小时级单周期、串行、同名静默替换、leader 锁另需考勤 env（§6.5 逐条核实）——不当承重底座。自建 `elearning_jobs` due_at + claim-lease worker；**一切正确性判定在 API 路径同步裁决，调度只做异步物化**。
 3. **站内信无可靠持久化实现**：`plugin_notification_history` 迁移存在（`20250924180000:105` 起）但服务是内存态（`NotificationService.ts:536-540`）——不建收件箱，「首页任务列表（SoR 生成的持久化触达面）+ 推送通道」组合。
 
-规模警告：钉钉这份 54 页手册背后是一条产品线。**必须 L0–L6 分阶段、能力 flag 默认 OFF + 需求门 + 验收门**。L1+L2 即交付可用的企业培训 MVP。
+规模警告：该 54 页手册背后是一条产品线。**必须 L0–L6 分阶段、能力 flag 默认 OFF + 需求门 + 验收门**。L1+L2 即交付可用的企业培训 MVP。本锁 ratify 仍不授权开工（见文首 parked 合同）。
 
 ## 1. 架构结论（四层）
 
@@ -58,14 +59,14 @@ flowchart LR
 | 层 | 所有者 | 主要职责 | 明确不负责 |
 |---|---|---|---|
 | 平台 core | MetaSheet core | 认证、组织、RBAC、存储安全、窄审批端口（v1 未接入）、media 管线 | 课程完成规则、考试判分、学分规则 |
-| `plugin-elearning` | 学习域 | 内容、范围、指派、进度、测评、激励、运营 API 和 UI、作业 worker | 推流、自建邮件/钉钉底层通道 |
+| `plugin-elearning` | 学习域 | 内容、范围、指派、进度、测评、激励、运营 API 和 UI、作业 worker | 推流、自建邮件/第三方消息通道底层 |
 | 专用表 SoR | 学习域数据库 | 权威状态、不可变版本、台账、完成证据、审计 | 面向用户的自由编辑 |
 | 多维表投影 | 系统读模型 | 聚合分析、视图、图表、低代码二次加工 | 回写 SoR、保存答案键、绕过管理范围 |
 
-## 2. 对标基准蒸馏（钉钉云课堂）
+## 2. 对标基准蒸馏（外部企业学习产品）
 
 ### 2.1 员工端 IA（4 区）
-首页（指派任务+banner+自定义导航）｜学习中心（可见范围内已发布内容，类型/分类筛选）｜知识商城（钉钉内容生态专属，不做）｜我的（必修/选修/我的直播间/我的授课/学习档案/学时学分排行/证书）。
+首页（指派任务+banner+自定义导航）｜学习中心（可见范围内已发布内容，类型/分类筛选）｜知识商城（外部内容生态专属，不做）｜我的（必修/选修/我的直播间/我的授课/学习档案/学时学分排行/证书）。
 
 ### 2.2 管理端 13 模块
 学习统计｜学习管理（课程/培训计划/新员工培训/线下培训/学习地图）｜混培项目｜直播管理｜考试管理（独立考试/题库练习/题库/试卷/阅卷/阅卷记录）｜调研问卷｜学分管理（设置/头衔/调整/记录）｜证书管理｜讲师管理（列表/等级）｜分类管理｜智能问答｜系统设置（通用/首页封面/首页自定义/空间资源/权限）｜开放平台。
@@ -74,7 +75,7 @@ flowchart LR
 1. **可见范围 ≠ 指派**：可见决定「能看到、能自学」；指派产生「必修义务+截止+跟踪+催学」。完成时按当时是否存在有效指派归类必修/选修。
 2. **指派目标**：部门/角色/职位/个人 + 工号 xlsx 批量导入。
 3. **协同设置**（对象级）：其他管理员仅得 指派/设范围/跟踪 三动词。
-4. **催学升级链**：提醒学员 → 单聊部门主管 → 主管看本部门进度一键 DING。
+4. **催学升级链**：提醒学员 → 单聊部门主管 → 主管看本部门进度一键催办。
 5. **新员工自动指派** + 每周统计周报。
 6. **容器化测评**：容器内嵌考试/调研是打包实例，与独立考试数据不关联（本设计 copy-on-bind + revision 钉扣，§6.2）。
 7. **防挂机**：视频弹窗签到（≤10 次、每次≤120s、短视频豁免、改规则不追溯）；倍速 3 档。
@@ -84,14 +85,14 @@ flowchart LR
 11. **线下培训**：动态 QR 签到/签退、报名、课时、助教、日程同步、结业发学分/证书、满意度调研。
 12. **混培项目**：项目→培训班→阶段×任务；创建人/项目负责人/班主任；班级必修 ⊆ 项目范围；三维统计。
 13. **考试规则面**：时长/次数/随机组卷/及格分/公布策略/指派=必考；简答人工阅卷+阅卷记录；错题本；题库练习三模式。
-14. **统计 8 页** + 报表异步导出（限期保留）；个性化数据 → 钉钉的答案是开放平台 API。
+14. **统计 8 页** + 报表异步导出（限期保留）；个性化数据 → 基准产品走开放 API 导出，我方以聚合投影替代。
 15. **首页自定义**：平台名/logo/标语/导航/封面广告位。
 16. **权限**：主/子管理员超管；自定义角色 =（权限集合 + 管理范围）。
 17. **存储引用守卫**：删文件先解除引用。
 
 ## 3. 范围裁决表（逐模块）
 
-| 钉钉模块 | 裁决 | 理由/替代 |
+| 基准模块 | 裁决 | 理由/替代 |
 |---|---|---|
 | 课程管理（文章/视频/文档/系列） | ✅ L1 | 文章/文档/系列/外链视频先行；受控 MP4 随 M 轨 |
 | 分类管理（多级） | ✅ L1 | 通用树 |
@@ -123,7 +124,7 @@ flowchart LR
 ### 4.1 组织隔离前置纪律（适用所有表；含审2新 P1 修订）
 
 - 每张 SoR/台账/事件/媒体/投影映射表携带 `org_id`（**审5 裁决 #1：org_id**，附 §14-③ 举证义务；若举证发现组织与平台租户非一一对应，直接升级为显式 `(tenant_id, org_id)` 并成文两者关系，禁止不同表混用而不成文）。
-- **权威组织字段（审6 P1 锁定）**：HTTP 路径的唯一权威来源 = `req.authenticatedTenantId`（`auth/jwt-middleware.ts:101-103`@775d537e：仅当 JWT 本身携带 tenantId 时置位）；**禁止**以 `req.user.tenantId`、全局 tenantContext、或任何可被 `x-tenant-id` 回填的取值路径作为学习域组织来源——tenant-less 旧 token 的 header 回填通道（`jwt-middleware.ts:106-108`：`user.tenantId = headerTenantId`，亲验）对学习域必须不可达。字段缺失 → `403 ORG_CONTEXT_REQUIRED`。worker/作业路径只使用创建时已持久化并校验过的 `job.org_id`，不重新解析请求上下文。
+- **权威组织字段（审6 P1 锁定）**：HTTP 路径的唯一权威来源 = `req.authenticatedTenantId`（`auth/jwt-middleware.ts:101-103`@96b6416717：仅当 JWT 本身携带 tenantId 时置位）；**禁止**以 `req.user.tenantId`、全局 tenantContext、或任何可被 `x-tenant-id` 回填的取值路径作为学习域组织来源——tenant-less 旧 token 的 header 回填通道（`jwt-middleware.ts:106-108`@96b6416717：`user.tenantId = headerTenantId`，亲验）对学习域必须不可达。字段缺失 → `403 ORG_CONTEXT_REQUIRED`。worker/作业路径只使用创建时已持久化并校验过的 `job.org_id`，不重新解析请求上下文。
 - **`org_id NOT NULL` 且不设数据库默认值（审2 P1）**：组织值只能由认证上下文显式写入；缺少组织上下文的写入 **fail-closed 拒绝**。`DEFAULT_ORG_ID`（= `'default'`，attendance 历史兼容模式，`zzzz20260612130000_create_attendance_schedule_dispatch_requests.ts:5,59`）**仅允许出现在显式旧数据迁移语句中，不得用于新域运行时写入**——DB 默认值会把「漏传组织」从错误变成静默写入默认组织。
 - 唯一键一律按组织复合：`(org_id, source_key)`、`(org_id, user_id, behavior, ref)`、`(org_id, exam_id, user_id, attempt_no)`……
 - **same-org 外键链必须整链可建（审6 P1）**：每张被引用表显式声明复合父键 `UNIQUE(org_id, id)`——本锁点名 `elearning_assignment_members`、`elearning_scope_revisions`、`elearning_scope_revision_rules`、`elearning_course_versions`；子表引用一律 `(org_id, ref_id)` → 父 `(org_id, id)` 复合 FK 且 `ON DELETE RESTRICT`。head 指针类引用用**三列复合 FK** 钉「同组织且同父对象」：`elearning_scopes(org_id, id, active_revision_id)` → `elearning_scope_revisions(org_id, scope_id, id)`（latest 同构）、`elearning_courses(org_id, id, active_version_id)` → `elearning_course_versions(org_id, course_id, id)`（latest 同构）；规则行 → revision 亦为复合 FK。**门 10 的删除负控必须在真实迁移生成的这条链上执行**（迁移过 migration-replay；任一父键/复合 FK 缺失即门失败）。
@@ -147,7 +148,7 @@ flowchart LR
 
 ### 4.3 范围与指派
 
-- 范围存储 = §4.2 三表规范化模型（**无独立 `elearning_scope_rules` 表**——审4 消除的双模型残留）；`subject_type` 封闭集 **all|department|position|role|user** 与 `include_children` 落在 `elearning_scope_revision_rules` 行上。position 双数据源：`users.position`（`migrations/060`）/ `directory_accounts.title`（`zzzz20260324150000:82-83`）——覆盖率因租户而异，启用职位指派前做数据就绪检查，未达标 UI 明示。
+- 范围存储 = §4.2 三表规范化模型（**无独立 `elearning_scope_rules` 表**——审4 消除的双模型残留）；`subject_type` 封闭集 **all|department|position|role|user** 与 `include_children` 落在 `elearning_scope_revision_rules` 行上。position 双数据源：`users.position`（活迁移 `zzzz20260529190000_add_users_hr_profile_fields.ts:11-15`，`:15` 创建列）/ `directory_accounts.title`（`zzzz20260324150000:82-83`）——覆盖率因租户而异，启用职位指派前做数据就绪检查，未达标 UI 明示。不引用 `packages/core-backend/migrations/` legacy SQL。
 - `elearning_assignments`（target/deadline/assigned_by/(org_id, source_key)+request_hash 幂等/**course_version_id**，形状抄排班派发表 `zzzz20260612130000_create_attendance_schedule_dispatch_requests.ts`）。
 - `elearning_assignment_members`（**指派时点材料化事实**，source: manual|rule|import；后入部门者不自动追加——连续性由 auto_assign_rules 承担，不重写原始指派快照）。复合父键 **UNIQUE(org_id, id)**（供完成证据 same-org FK）；自身 FK `(org_id, assignment_id)` → assignments`(org_id, id)`。
 - `elearning_auto_assign_rules`（部门/职位谓词 → 目标计划；周报配置）。
@@ -293,7 +294,9 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 
 ## 11. 分阶段落地（每阶段：能力 flag OFF + 需求门 + 验收门）
 
-- **L0 治理骨架**：ratify 本锁（前置 §14）；org/tenant 键确认落迁移规范；插件双清单+空壳视图；RBAC 种子；服务端 flag 分层骨架（全 OFF）+ 前端 feature 五处联动；`elearning_jobs` worker 骨架；课程版本/完成证据/任务领取基础模型迁移；`elearning-web-guard.yml`；CJS `scripts.test` 链自带完备性守卫（照抄 `test-chain-completeness.test.cjs`）。
+**Parked 合同（审9）**：本锁 ratify **不等于** L0 开工授权。下列阶段是 owner unpark 之后的路线图。`IMPLEMENTATION PARKED` 期间不得提交插件骨架、迁移、feature flag、CI guard 或任何实施 PR；unpark 须 owner 对具名试点或自用场景作明确批准。
+
+- **L0 治理骨架**（unpark 后才开工；ratify 本锁只是前置，不启动本阶段）：org/tenant 键确认落迁移规范；插件双清单+空壳视图；RBAC 种子；服务端 flag 分层骨架（全 OFF）+ 前端 feature 五处联动；`elearning_jobs` worker 骨架；课程版本/完成证据/任务领取基础模型迁移；`elearning-web-guard.yml`；CJS `scripts.test` 链自带完备性守卫（照抄 `test-chain-completeness.test.cjs`）。
 - **L1 内容闭环**：分类、文章/文档/外链/系列课、版本化发布、可见范围、学习中心+我的（选修）、进度事件+服务端判定+证据行、课程级统计。
 - **M 轨（并行独立轨）**：分片上传+探针+presigned 播放+双配额；就绪后受控 MP4 接入。
 - **L2 任务闭环**：计划（钉版本）、指派（部门/职位/角色/个人+工号导入）、必修/选修归类、跟踪、催学链（频控+静默时段）、通知台账。
@@ -304,7 +307,7 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 
 ## 12. Ratify 验收门（16 门，全部进设计锁与测试计划）
 
-1. **组织隔离**：跨组织读取/写入/导出必须失败；**同 source_key 跨组织互不去重、各自独立成功**（幂等三态 §4.1 全测）；**缺组织上下文的写入被拒绝，而非落入默认组织**；**tenant-less 旧 token + 伪造 `x-tenant-id` 头不得读取或写入学习域（应得 403 `ORG_CONTEXT_REQUIRED`，审6）**。
+1. **组织隔离**：跨组织读取/写入/导出必须失败；**同 source_key 跨组织互不去重、各自独立成功**（幂等三态 §4.1 全测）；**缺组织上下文的写入被拒绝，而非落入默认组织**；**tenant-less 旧 token + 伪造 `x-tenant-id` 头不得读取或写入学习域（应得 403 `ORG_CONTEXT_REQUIRED`，审6）**。**测试姿态硬约束（审9）**：组织绑定与跨组织负控必须在真实 DB 会话下执行——`RBAC_BYPASS=false` 且 `RBAC_TOKEN_TRUST=false`（覆盖 `tests/setup.integration.ts:5-8` 的套件默认），使用真实 `users`/`user_orgs` 行、正常 token 签发及 `verifyToken` 的 DB 路径。`AuthService.buildTrustedTokenUser`（`AuthService.ts:204-244`；`verifyToken` `:259-264` 在 trust 开启时于查询 users/user_orgs 前直接接受 JWT claims）**不得**作为本门夹具；trusted-token fixture 不能满足本门。
 2. **版本钉扣**：已发布课程被编辑后，旧指派/进度/证据仍引用原版本；被引用版本不可物理删除。
 3. **完成防伪**：客户端直接声明完成被拒绝。
 4. **服务端核验输入**：媒体时长与文档页数只能由服务端核验结果参与完成判定。
@@ -363,13 +366,14 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 | 审7 机械 | 「owner 可整体替换」；「审1–审5」；auth.ts 行号精度 | 改「ratify 后变更须走 design-lock amendment」；审1–审7；`auth.ts:281,299-301`@b55c6827 并注明 approvalCanvas 先例 | 文首、§10、§14 |
 | 审7 追补 P2 | §7.4「owner 在 ratify 批注中覆盖硬下限」与 amendment 纪律冲突——合同逃生口 | 采纳；硬下限 5 锁定、org 只能上调，任何修改走 design-lock amendment；提交说明 six→seven | §7.4、commit message |
 | 审8 机械 | 第四跳 rebase 到 `origin/main` `@96b6416717`（约 280 提交）后 citation 漂移 | 纯机械重钉，不改合同：`AuthService.resolveSessionTenantId` `:387-426`；`buildFeaturePayload` → `src/routes/auth.ts:283`（Canvas never-inferred `:301-303`）；attendance `withPermission` `:23529-23614`；`20250924180000:105`；dispatch 迁移文件名补全；`zzzz20260411120100:22-38`。裁决 #1 实质仍成立（见 §14-③）。状态仍 DRAFT | 文首、§0、§4.1、§4.2、§4.3、§5.1、§10、§14 |
+| 审9 | exact-head 终检 `0eba89154b`：门1 测试假绿 P1；普通 RATIFIED 会被读成 L0 开工；锁文竞品名；`users.position` 钉 legacy SQL；审阅记录/活动 pin 未齐 | 采纳。门1加真实 DB 会话硬约束（`RBAC_BYPASS=false`/`RBAC_TOKEN_TRUST=false`，禁 trusted-token fixture）。终检通过后唯一合法状态 = `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`（不授权 L0/V0.1/代码/迁移/flag/实施 PR）。锁文去品牌化。`users.position` 改钉 `zzzz20260529190000:11-15`。§14-① 审1–审9；§4.1 活动合同 pin `@96b6416717`（历史行保留旧 SHA） | 文首、§2、§3、§4.1、§4.3、§11、门1、§13、§14、附录 |
 
 ## 14. Ratify 前置（顺序执行）
 
-1. ✅ 全部审阅意见落稿（审1–审7，处置记录 §13）。
+1. ✅ 全部审阅意见落稿（审1–审9，处置记录 §13）。
 2. ✅ Owner 九项裁决全部落槌（审5，§9 全 ACCEPTED / DEFERRED TO L6，无「待确认」残留）。
-3. ✅ 基线刷新（四跳完成；工作分支 `grok/elearning-plugin-20260824` cherry-pick 在 `96b6416717` 之上）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。其余承重锚点亲核仍在位：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`migrations/060_add_users_hr_profile_fields.sql` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
-4. ⏳ 对**本 citation 修订之后的新 commit**做最后一次 exact-commit 复核（审7 令；对象不再是 `b7b5f725e4`）。通过后才依次执行：状态改 RATIFIED → amend → push → 开 PR 走九门入库。复核通过前三者一律不做。
+3. ✅ 基线刷新（四跳完成；工作分支 `grok/elearning-plugin-20260824` cherry-pick 在 `96b6416717` 之上）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。其余承重锚点亲核仍在位：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`zzzz20260529190000_add_users_hr_profile_fields.ts:11-15` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`@96b6416717；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
+4. ⏳ 对**本审9 最小修订之后的新 commit**做 scoped exact-diff 快审（对象不再是 `0eba89154b` / `b7b5f725e4`）。通过后才依次执行：状态改为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**（禁止普通 `RATIFIED`）→ amend → push → 开 PR 走九门入库。该状态不授权 L0/V0.1/代码/迁移/flag/实施 PR。复核通过前三者一律不做。
 
 ## 15. 风险登记
 
@@ -382,4 +386,4 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 - R7 版本迁移运营成本：频繁改版累积多版本在学人群；显式迁移工具与版本收敛报表进 L2/L5 需求池。
 
 ## 附：基准手册页面索引
-基准 = 钉钉云课堂公开手册 54 篇（在线入口见文首「基准参照」；离线镜像为未入库研究材料，不构成仓库合同）。本锁对基准仅作竞品参照，功能定义以本文自身原则为准。
+基准 = 外部企业学习产品公开手册 54 篇（研究记录另存，不进入本锁合同；离线镜像为未入库研究材料）。本锁对基准仅作能力对照，功能定义以本文自身原则为准。不收录竞品名称、品牌入口或手册 URL。
