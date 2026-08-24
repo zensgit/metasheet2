@@ -45,6 +45,8 @@ const props = withDefaults(defineProps<{
   fullWidth?: boolean
   inputId?: string
   endpoint?: string
+  orgId?: string
+  globalScope?: boolean
 }>(), {
   disabled: false,
   fullWidth: false,
@@ -53,6 +55,8 @@ const props = withDefaults(defineProps<{
   searchPlaceholder: '',
   helpText: '',
   endpoint: undefined,
+  orgId: undefined,
+  globalScope: false,
 })
 
 const emit = defineEmits<{
@@ -66,7 +70,12 @@ const {
   searchQuery,
   statusMessage,
   users,
-} = useAttendanceAdminUsers({ tr: props.tr, endpoint: props.endpoint })
+} = useAttendanceAdminUsers({
+  tr: props.tr,
+  endpoint: props.endpoint,
+  orgId: computed(() => props.orgId),
+  globalScope: computed(() => props.globalScope),
+})
 
 const displayUsers = computed(() => {
   const selectedId = props.modelValue.trim()

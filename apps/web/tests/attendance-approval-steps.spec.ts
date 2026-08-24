@@ -6,6 +6,7 @@ import {
 } from '../src/views/attendance/useAttendanceApprovalDirectoryReadiness'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ref } from 'vue'
 import {
   ATTENDANCE_APPROVAL_REQUEST_TYPES,
   ATTENDANCE_DEFAULT_ORG_ID,
@@ -376,9 +377,13 @@ describe('useAttendanceAdminUsers endpoint (review P2)', () => {
       calls.push(path)
       return { ok: true, status: 200, json: async () => ({ ok: true, data: { items: [] } }) } as unknown as Response
     }
-    const { loadUsers } = useAttendanceAdminUsers({ apiFetch, endpoint: '/api/attendance-admin/users/search' })
+    const { loadUsers } = useAttendanceAdminUsers({
+      apiFetch,
+      endpoint: '/api/attendance-admin/users/search',
+      orgId: ref('org-a'),
+    })
     await loadUsers('bob')
-    expect(calls[0]).toBe('/api/attendance-admin/users/search?q=bob')
+    expect(calls[0]).toBe('/api/attendance-admin/users/search?q=bob&orgId=org-a')
     expect(calls.some(p => p.startsWith('/api/admin/users'))).toBe(false)
   })
 })

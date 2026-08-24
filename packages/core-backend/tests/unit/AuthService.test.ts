@@ -57,6 +57,16 @@ vi.mock('../../src/security/SecretManager', () => ({
 
 import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError } from '../../src/auth/AuthService'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
+import { censusFile } from './lib/recovery-census-recorder'
+
+// O2-D1 recovery-conflict census: auth/AuthService.ts classifies the 40001 marker with
+// `isRecoveryAuthorityBusyError` at TWO call sites (AuthService.ts:499, the register
+// transaction retry; AuthService.ts:870, the self-service backfill retry). Both were
+// already covered by the discriminating tests below — they were simply never linked to a
+// census site, which is why the DISCOVERY guard in recovery-conflict-census.test.ts found
+// this file outside the census denominator. The file-level afterAll installed here
+// asserts the EXECUTED site set equals this file's registered set exactly.
+const census = censusFile('AuthService.test.ts')
 
 function recoveryAuthorityBusyError(): Error & { code: string } {
   const error = new Error(RECOVERY_AUTHORITY_BUSY_MARKER) as Error & { code: string }
@@ -119,7 +129,7 @@ describe('AuthService.verifyToken', () => {
   // busy recovery lease must be contained locally rather than failing the whole token verification
   // (that would turn "recovery is busy" into "you are logged out" for a valid session), AND the
   // unpersisted attendance:read/attendance:write permissions must not leak into the returned user.
-  it('omits unpersisted attendance self-service permissions when backfill role assignment cannot persist under a busy recovery lease', async () => {
+  it('[recovery-census:auth-service:self-service-backfill] omits unpersisted attendance self-service permissions when backfill role assignment cannot persist under a busy recovery lease', async () => {
     jwtMocks.verify.mockReturnValue({ userId: 'u-backfill', email: 'backfill@x', role: 'user', iat: 0, exp: 0 })
     poolMocks.query.mockResolvedValueOnce({
       rows: [{
@@ -157,6 +167,7 @@ describe('AuthService.verifyToken', () => {
     expect(user?.permissions).not.toContain('attendance:write')
     expect(userRolesAttempts).toBe(USER_ROLE_ASSIGNMENT_RETRY_LIMIT)
     expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    census.record('auth-service:self-service-backfill')
   })
 
   it('preserves a verified token tenant only while active membership proves it', async () => {
@@ -574,7 +585,7 @@ describe('AuthService.register', () => {
   // register() would then return the created user as a "success" with the role silently missing.
   // Assert the opposite now: a persistently-busy lease must NOT resolve register() to a truthy
   // user with no role assigned. It must propagate a retryable, named failure instead.
-  it('does not report a successful registration when the self-service role cannot persist under a busy recovery lease', async () => {
+  it('[recovery-census:auth-service:register-user-roles] does not report a successful registration when the self-service role cannot persist under a busy recovery lease', async () => {
     process.env.PRODUCT_MODE = 'attendance'
     let userRolesAttempts = 0
     let createdId = 'user-busy'
@@ -626,6 +637,7 @@ describe('AuthService.register', () => {
     // pool — zero residue is proven by the real-DB suite,
     // tests/integration/auth-register-atomicity.db.test.ts).
     expect(poolMocks.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO users'))).toBe(true)
+    census.record('auth-service:register-user-roles')
   })
 })
 

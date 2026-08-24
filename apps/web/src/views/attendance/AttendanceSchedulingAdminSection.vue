@@ -292,6 +292,8 @@
         :full-width="false"
         input-id="attendance-rotation-user"
         endpoint="/api/attendance-admin/users/search"
+        :org-id="props.orgId"
+        :global-scope="props.globalScope"
       />
       <label class="attendance__field" for="attendance-rotation-rule">
         <span>{{ tr('Rotation rule', '轮班规则') }}</span>
@@ -596,6 +598,8 @@
         :full-width="false"
         input-id="attendance-assignment-user-id"
         endpoint="/api/attendance-admin/users/search"
+        :org-id="props.orgId"
+        :global-scope="props.globalScope"
       />
       <label class="attendance__field" for="attendance-assignment-shift-id">
         <span>{{ tr('Shift', '班次') }}</span>
@@ -815,6 +819,8 @@ interface SchedulingBindings {
 const props = defineProps<{
   tr: Translate
   scheduling: SchedulingBindings
+  orgId?: string
+  globalScope?: boolean
   shiftAssignmentCalendarChips?: CalendarEffectiveChip[]
   rotationAssignmentCalendarChips?: CalendarEffectiveChip[]
 }>()

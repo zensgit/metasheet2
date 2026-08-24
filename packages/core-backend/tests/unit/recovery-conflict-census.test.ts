@@ -83,7 +83,51 @@ const VITEST_CONFIG = path.resolve(__dirname, '../../vitest.config.ts')
 /** The import specifier every census-linked suite must use for the runtime recorder. */
 const RECORDER_SPECIFIER = './lib/recovery-census-recorder'
 
-const IMPORT_RE = /from\s+['"][^'"]*\/db\/recovery-conflict['"]/
+/**
+ * Which module DECLARES each classifier entry point a census row may be registered on.
+ *
+ * The census's property is "every enumerated write surface routes through the classifier",
+ * so the import check must be keyed to the module that OWNS the token the row is registered
+ * on — not to one hardcoded path. Until the O2-D1 denominator slice every registered token
+ * came from db/recovery-conflict.ts, which made a single file-level regex INDISTINGUISHABLE
+ * from the real rule. It stopped being indistinguishable when routes/univer-meta.ts and
+ * auth/AuthService.ts entered the denominator: both classify with
+ * `isRecoveryAuthorityBusyError`, which recovery-authorization-stability.ts declares.
+ *
+ * routes/admin-users.ts's `sendIfRecoveryAuthorityBusy` maps to the classifier module
+ * because it is a file-local alias whose body is exactly one unconditional delegation to
+ * `sendIfRecoveryConflict` — the file still imports the classifier (that delegation is
+ * pinned by extractFunctionBody below).
+ *
+ * Fail-closed: a row registered on a token absent from this map is itself a violation, so a
+ * new classifier entry point cannot be registered without declaring where it lives.
+ *
+ * DISCLOSURE (what a green here does and does NOT mean). Today the STABILITY branch is
+ * walked by exactly two files — routes/univer-meta.ts and auth/AuthService.ts, the two the
+ * O2-D1 denominator slice added. Nothing else reaches it. And routes/univer-meta.ts is
+ * precisely the file with the known 409-body divergence: the shared adapters answer through
+ * jsonError with `error.details.retryable = true`, while univer-meta's file-local responder
+ * (univer-meta.ts:4293) emits no `details` at all.
+ *
+ * So a green on this audit means "this surface routes through a RECOGNISED classification
+ * entry point". It does NOT mean "this surface emits the shared 409 contract". Making those
+ * two coincide is a response-contract change across five L1-armed routes — an owner call,
+ * deliberately not taken here.
+ */
+const CLASSIFIER_DECL_MODULE = 'db/recovery-conflict'
+const STABILITY_DECL_MODULE = 'multitable/recovery-authorization-stability'
+
+const TOKEN_DECL_MODULE: ReadonlyMap<string, string> = new Map([
+  ['classifyRecoveryConflict', CLASSIFIER_DECL_MODULE],
+  ['translateRecoveryConflict', CLASSIFIER_DECL_MODULE],
+  ['sendIfRecoveryConflict', CLASSIFIER_DECL_MODULE],
+  ['sendIfRecoveryAuthorityBusy', CLASSIFIER_DECL_MODULE],
+  ['isRecoveryAuthorityBusyError', STABILITY_DECL_MODULE],
+])
+
+function importReFor(moduleTail: string): RegExp {
+  return new RegExp(`from\\s+['"][^'"]*/${moduleTail}['"]`)
+}
 
 /**
  * P3-1 (round-3 adversarial gate, T1) — matches ANY `[recovery-census:<site>]` tag
@@ -274,11 +318,20 @@ function auditRecoveryConflictWiring(contents: ReadonlyMap<string, string>): str
       violations.push(`${requirement.file}: EMPTY source — census scan itself is broken`)
       continue
     }
-    if (!IMPORT_RE.test(source)) {
-      violations.push(`${requirement.file}: no import from db/recovery-conflict`)
-    }
     const stripped = stripComments(source)
     for (const call of requirement.calls) {
+      const declModule = TOKEN_DECL_MODULE.get(call.token)
+      if (declModule === undefined) {
+        violations.push(
+          `${requirement.file}: ${call.token} has no declaring module registered in `
+          + 'TOKEN_DECL_MODULE — declare where a new classifier entry point lives before '
+          + 'registering census rows on it',
+        )
+      } else if (!importReFor(declModule).test(source)) {
+        violations.push(
+          `${requirement.file}: no import from ${declModule} (which declares ${call.token})`,
+        )
+      }
       const count = countCalls(stripped, call.token)
       if (count !== call.legs.length) {
         violations.push(
@@ -346,7 +399,7 @@ function auditCensusLegLinkage(testContents: ReadonlyMap<string, string>): strin
     // property of the file's CONTENT (how many times this literal string appears), not
     // of which lines are recognised as declarations, so no enumeration of calling forms
     // can evade it. A well-formed leg's tag appears exactly once — inside its own test
-    // name — and nowhere else (verified over all 48 currently-registered legs).
+    // name — and nowhere else (verified over all 55 currently-registered legs).
     //
     // Disclosed residual, in the same spirit as the `MEMBER_SEGMENT_RE` comment above
     // ("the fully-dynamic form is a disclosed residual, not a gap this regex claims to
@@ -1062,10 +1115,11 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
       expect([...(sites as ReadonlySet<string>)].sort()).toEqual([...(byFile.get(testFile) as ReadonlySet<string>)].sort())
       total += (sites as ReadonlySet<string>).size
     }
-    // The whole enumerated surface: 48 call sites ⇒ 48 registered legs, no duplicates.
+    // The whole enumerated surface: 55 call sites ⇒ 55 registered legs, no duplicates.
+    // (48 until the O2-D1 denominator slice added univer-meta's 5 and AuthService's 2.)
     expect(total).toBe(allCensusLegs().length)
     expect(new Set(allCensusLegs().map((leg) => leg.site)).size).toBe(total)
-    expect(total).toBe(48)
+    expect(total).toBe(55)
   })
 
   it('a COMPLETE executed set is clean (positive control for the coverage predicate)', () => {
@@ -1104,7 +1158,7 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
         checked += 1
       }
     }
-    expect(checked).toBe(48)
+    expect(checked).toBe(55)
   })
 
   it('an EXTRA / foreign recorded site reds too (the set comparison is exact, not a subset test)', () => {

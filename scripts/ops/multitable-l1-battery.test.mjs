@@ -117,22 +117,106 @@ function parseCensusSites(source = CENSUS_SOURCE) {
   // double quotes or backticks slip past the anti-drift check while the guard stayed green. Match
   // any of the three JS string delimiters, requiring the SAME delimiter to close (backreference).
   for (const match of source.matchAll(/\bsite:\s*(['"`])((?:(?!\1).)+)\1/g)) sites.add(match[2])
-  // Exact floor, not a loose >=40: the census currently declares 48 sites; pin it so a SILENT
+  // Exact floor, not a loose >=40: the census currently declares 55 sites; pin it so a SILENT
   // drop (a site deleted) is caught too, not only additions. Update deliberately if the census
-  // legitimately changes size.
+  // legitimately changes size. (Was pinned at 48 — the pre-O2-D1 population — and stayed there
+  // when routes/univer-meta.ts and auth/AuthService.ts brought the census to 55, leaving the
+  // floor slack by seven. A stale pinned number is the same defect this file's newest guard
+  // exists to catch; re-pinned to the population the denominator slice established.)
   assert.ok(
-    sites.size >= 48,
-    `census parse yielded only ${sites.size} site ids (expected >= 48) — the census file moved, changed shape, or a site was dropped; refusing to compare against a possibly-truncated set`,
+    sites.size >= 55,
+    `census parse yielded only ${sites.size} site ids (expected >= 55) — the census file moved, changed shape, or a site was dropped; refusing to compare against a possibly-truncated set`,
   )
   return sites
 }
 
-/** Parse the census's registered source files, same fail-closed discipline. */
+/**
+ * Parse the census's registered source files, same fail-closed discipline.
+ *
+ * Quote-AGNOSTIC for the same reason `parseCensusSites` is (P2-2): a `file:` written with double
+ * quotes or a backtick would silently drop out of the corpus, and every check built on this set
+ * would quietly narrow rather than fail.
+ */
 function parseCensusFiles(source = CENSUS_SOURCE) {
   const files = new Set()
-  for (const match of source.matchAll(/\bfile:\s*'([^']+)'/g)) files.add(match[1])
+  for (const match of source.matchAll(/\bfile:\s*(['"`])((?:(?!\1).)+)\1/g)) files.add(match[2])
   assert.ok(files.size >= 10, `census parse yielded only ${files.size} files — refusing to compare`)
   return files
+}
+
+/** Comment-stripped view of an arbitrary source file (same discipline as BATTERY_CODE). */
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((line) => line.replace(/\/\/.*$/, ''))
+    .join('\n')
+}
+
+/**
+ * ROT TRIP-WIRE for the trigger exemptions: which recovery-authority tables does each
+ * census-registered source file actually WRITE?
+ *
+ * HONEST STATEMENT OF WHAT THIS IS. It is a one-directional trip-wire, NOT a completeness oracle,
+ * and the checks below only ever consume it in the safe direction: "a write was detected ⇒ an
+ * exemption may not claim there is no census-anchored surface". It is deliberately never used to
+ * prove a table has NO surface.
+ *
+ * Why the asymmetry is not optional: this scan measurably UNDER-detects. `user_roles` — the table
+ * behind the driven admin-users:role-assign surface — is detected in ZERO of the registered files,
+ * because that write lives behind a service call rather than a literal statement in the route; and
+ * routes/admin-directory.ts resolves to no table at all for the same reason. A scan that misses
+ * the battery's most-exercised guarded table cannot be allowed to carry a completeness claim —
+ * doing so would just mechanize a second false justification. Site-level constraints that ARE
+ * exact (census membership, NOT_DRIVEN membership) do the load-bearing work; this adds the one
+ * thing they cannot: noticing that a NEW census file started writing an exempted table.
+ *
+ * Over-detection, the direction that COULD false-red, is what the narrowness buys: only real write
+ * statements match (INSERT INTO / UPDATE / DELETE FROM, plus the kysely builders), and only after
+ * comments are stripped, so a table named in prose never registers as a write.
+ *
+ * Fail-closed floors, because a silently-empty scan is the exact failure mode this file already
+ * guards against elsewhere (空grep可能是路径没读到): EVERY registered census file must resolve to a
+ * readable source, and the corpus must yield a floor of detections. A path-root typo reds here
+ * instead of turning every consumer vacuously green.
+ */
+function deriveCensusFileTableWrites(guardedTables) {
+  assert.ok(guardedTables.size >= 8, `expected >= 8 guarded tables to scan for, got ${guardedTables.size}`)
+  const byFile = new Map()
+  let detections = 0
+  for (const file of [...parseCensusFiles()].sort()) {
+    let source
+    try {
+      source = readFileSync(new URL(`../../packages/core-backend/src/${file}`, import.meta.url), 'utf8')
+    } catch (error) {
+      assert.fail(
+        `census registers '${file}' but packages/core-backend/src/${file} is not readable (${error.code ?? error.message}) — the census and the tree have diverged; refusing to scan a corpus with a hole in it`,
+      )
+    }
+    const code = stripComments(source)
+    const tables = new Set()
+    for (const table of guardedTables) {
+      const rawSql = new RegExp(`(?:INSERT\\s+INTO|UPDATE|DELETE\\s+FROM)\\s+(?:ONLY\\s+)?${table}\\b`, 'i')
+      const kysely = new RegExp(`\\.(?:insertInto|updateTable|deleteFrom)\\(\\s*['"\`]${table}['"\`]`)
+      if (rawSql.test(code) || kysely.test(code)) {
+        tables.add(table)
+        detections += 1
+      }
+    }
+    byFile.set(file, tables)
+  }
+  // Floors pinned to the observed corpus, not to a loose ">0": a scan that collapses to a handful
+  // of hits has stopped measuring anything, and the consumers below would go vacuously green.
+  assert.ok(
+    detections >= 15,
+    `the census write-scan found only ${detections} (file, table) detections across ${byFile.size} files — expected >= 15; the scan has stopped resolving real write statements`,
+  )
+  const distinctTables = new Set([...byFile.values()].flatMap((tables) => [...tables]))
+  assert.ok(
+    distinctTables.size >= 6,
+    `the census write-scan resolved only ${distinctTables.size} distinct guarded tables (expected >= 6): ${[...distinctTables].sort().join(', ')}`,
+  )
+  return byFile
 }
 
 /**
@@ -1050,10 +1134,13 @@ test('a generated stamp is stable-shaped and unique per run', () => {
 // ---------------------------------------------------------------------------
 
 test('every one of the nine triggers is either exercised or explicitly exempted — exactly once', () => {
-  // The census axis structurally CANNOT catch field_permissions / record_permissions: those tables
-  // carry recovery-authority triggers but have no census row, so no census set-equality will ever
-  // notice they are untouched. L1 is a claim about the nine TRIGGERS, so the nine triggers get
-  // their own partition, checked against the migration.
+  // Why a SECOND axis at all: the census axis only proves each site is ACCOUNTED FOR, driven or
+  // excused. A table whose every census site sits in NOT_DRIVEN_SITES sails through census
+  // set-equality while its trigger is never fired — which is the live state of field_permissions
+  // and record_permissions. (Until the O2-D1 denominator slice registered routes/univer-meta.ts,
+  // those two tables had no census row at all; the hole moved shape, it did not close.) L1 is a
+  // claim about the nine TRIGGERS, so the nine triggers get their own partition, checked against
+  // the migration.
   const triggerRows = parseTupleBlock('export const RECOVERY_AUTHORITY_TRIGGERS')
   const allTriggers = new Set(triggerRows.map(([, trigger]) => trigger))
   assert.equal(allTriggers.size, EXPECTED_TRIGGER_COUNT)
@@ -1098,12 +1185,106 @@ test("each driven surface's declared trigger is the one the migration installs o
   assert.ok(TRIGGER_COVERAGE_EXEMPTIONS.some((entry) => entry.trigger === 'trg_users_recovery_authority_lock_lifecycle'))
 })
 
-test('every trigger exemption carries a substantive reason and a real table', () => {
+test('every trigger exemption carries a named reason, a concrete detail and a real table', () => {
+  // 'no-trigger-on-target-table' is deliberately NOT in this vocabulary: a TRIGGER exemption is by
+  // construction about a table that carries the trigger, so that reason could only ever be false.
+  const allowedReasons = new Set(['unknowable-lease-key', 'external-provider-required', 'orthogonal-fixture-cost'])
   const triggerRows = parseTupleBlock('export const RECOVERY_AUTHORITY_TRIGGERS')
   const pairs = new Set(triggerRows.map(([table, trigger]) => `${table}.${trigger}`))
   for (const entry of TRIGGER_COVERAGE_EXEMPTIONS) {
     assert.ok(pairs.has(`${entry.table}.${entry.trigger}`), `${entry.trigger} is not installed on ${entry.table}`)
-    assert.ok(entry.reason && entry.reason.length >= 80, `${entry.trigger}: reason is too thin to count as a disclosed cap`)
+    assert.ok(allowedReasons.has(entry.reason), `${entry.trigger}: unrecognised reason '${entry.reason}'`)
+    assert.ok(
+      entry.detail && entry.detail.length >= 80,
+      `${entry.trigger}: detail is too thin to count as a disclosed cap`,
+    )
+  }
+})
+
+/**
+ * THE REASON-TRUTH GUARD — the excuse itself is now under test, not just its existence.
+ *
+ * Nothing used to check whether a TRIGGER_COVERAGE exemption's justification was STILL TRUE, which
+ * is exactly how the field_permissions / record_permissions entries came to ship a false one: both
+ * asserted "the table has no row in recovery-census-table.ts, so there is no census-anchored HTTP
+ * surface to drive", and the O2-D1 denominator slice registered routes/univer-meta.ts — five census
+ * sites, three of them on those two tables — without a single check going red. `triggerCoverage()`
+ * spreads the entry straight into `trigger_coverage.not_exercised`, so the false clause would have
+ * been republished verbatim in every future L1 evidence artefact.
+ *
+ * This is the same discipline the OTHER axis already applies to roles:delete, whose "the cascade FK
+ * does not exist" excuse is re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY so a stale excuse
+ * FAILS the battery rather than surviving it. Here the excuse is checked hermetically, against the
+ * census table itself.
+ *
+ * NOT a prose grep. Regexing English out of `detail` is fragile and false-reds on rewording; the
+ * census-anchoring claim is carried as DATA (`censusAnchoredSites`) and compared against parsed
+ * sources. `detail` may only add colour to a claim already machine-checked.
+ */
+test("every trigger exemption's census-anchoring claim is still true against the census", () => {
+  const censusSites = parseCensusSites()
+  const notDriven = new Set(NOT_DRIVEN_SITES.map((entry) => entry.site))
+  const triggerRows = parseTupleBlock('export const RECOVERY_AUTHORITY_TRIGGERS')
+  const guardedTables = new Set(triggerRows.map(([table]) => table))
+  const writesByFile = deriveCensusFileTableWrites(guardedTables)
+
+  for (const entry of TRIGGER_COVERAGE_EXEMPTIONS) {
+    const claimed = entry.censusAnchoredSites
+    assert.ok(
+      Array.isArray(claimed),
+      `${entry.trigger} (${entry.table}): no censusAnchoredSites claim — every exemption must state, as data, which census sites target its table (use [] to claim none)`,
+    )
+    assert.equal(
+      new Set(claimed).size,
+      claimed.length,
+      `${entry.trigger} (${entry.table}): censusAnchoredSites lists a site twice`,
+    )
+
+    // (A) EXACT — every claimed site is really registered in the census. This is also what makes
+    // the guard demonstrably non-vacuous: rename a site in recovery-census-table.ts and this reds.
+    for (const site of claimed) {
+      assert.ok(
+        censusSites.has(site),
+        `${entry.trigger} (${entry.table}) claims census site '${site}', which recovery-census-table.ts does not register — the exemption is citing a surface that does not exist`,
+      )
+      // (C) EXACT — a claimed site must still be UNDRIVEN. If the battery ever grows to drive it,
+      // the site leaves NOT_DRIVEN_SITES and this reds, forcing the exemption to be revisited
+      // rather than quietly outliving the coverage gap it describes.
+      assert.ok(
+        notDriven.has(site),
+        `${entry.trigger} (${entry.table}) cites '${site}' as an undriven census-anchored surface, but that site is no longer in NOT_DRIVEN_SITES — if it is now driven, this trigger may no longer need an exemption`,
+      )
+    }
+
+    // (B) TRIP-WIRE, one direction only — a census-registered file that WRITES this table means a
+    // census-anchored surface demonstrably exists, so "none" has stopped being true. The scan
+    // under-detects by design (see deriveCensusFileTableWrites), so it is never read the other way.
+    const writers = [...writesByFile.entries()]
+      .filter(([, tables]) => tables.has(entry.table))
+      .map(([file]) => file)
+    if (claimed.length === 0) {
+      assert.deepEqual(
+        writers,
+        [],
+        `${entry.trigger} (${entry.table}) claims NO census-anchored surface, but ${writers.join(', ')} is registered in recovery-census-table.ts and writes ${entry.table} — the exemption's justification is false; name the sites in censusAnchoredSites and state the real cap`,
+      )
+    }
+  }
+
+  // POSITIVE CONTROL on the trip-wire, pinned to the two detections whose truth is verified rather
+  // than assumed. Without it the scan could quietly stop resolving univer-meta — a moved write, a
+  // comment marker inside a string literal defeating stripComments — and the two entries above
+  // would keep passing on their own say-so, the "none" branch never reachable again.
+  //
+  // Pinned deliberately, NOT generalised to "every entry with a non-empty claim must be detected":
+  // that generic form would false-red the day an exemption lands on a table whose writes sit behind
+  // a service call (user_roles resolves in zero census files today), i.e. it would read the
+  // under-detecting scan in the unsafe direction.
+  for (const table of ['field_permissions', 'record_permissions']) {
+    assert.ok(
+      writesByFile.get('routes/univer-meta.ts')?.has(table),
+      `the write-scan no longer detects routes/univer-meta.ts writing ${table} — the trip-wire has gone blind and the exemption claims above are no longer being checked against anything; fix deriveCensusFileTableWrites rather than the exemption`,
+    )
   }
 })
 
@@ -1193,4 +1374,30 @@ test('the battery acts on the expired-exemption verdict rather than only computi
   // would satisfy the predicate test above while shipping a stale exemption.
   assert.match(BATTERY_SOURCE, /not_driven_reason_expired/, 'the expired-exemption failure class is gone')
   assert.match(BATTERY_SOURCE, /if \(cascadePresent\) \{/, 'the cascade witness result is no longer branched on')
+})
+
+
+// ---- A1.3 provenance binding (deep review B4) --------------------------------------------------
+// A1.3 requires the exit evidence to name the head/image the PASS was produced against. Nothing
+// captured it, so every PASS was unbindable and the window would self-void by A1.3's own terms.
+// These guard the capture so it cannot be quietly dropped: the evidence must carry a `provenance`
+// object, the battery must self-hash THIS file (so the evidence names the exact battery that ran),
+// and the two caller-supplied identifiers must be read from env and default to null — a MISSING
+// binding has to be visible in the artifact, never silently absent.
+test('A1.3: the evidence carries a provenance object with a self-hash and env-supplied identifiers', () => {
+  assert.match(BATTERY_SOURCE, /provenance,/, 'evidence must include the provenance object')
+  assert.match(BATTERY_SOURCE, /script_sha256:/, 'provenance must carry the battery self-hash')
+  assert.match(
+    BATTERY_SOURCE,
+    /createHash\('sha256'\)[\s\S]{0,200}?import\.meta\.url/,
+    'script_sha256 must be a self-hash of THIS file, not a hardcoded or unrelated value',
+  )
+  assert.match(BATTERY_SOURCE, /env\.BATTERY_IMAGE_DIGEST/, 'image_digest must come from the caller env')
+  assert.match(BATTERY_SOURCE, /env\.BATTERY_BUILD_COMMIT/, 'build_commit must come from the caller env')
+  // Absent identifiers must become null (visible), never an empty string or a silent omission.
+  assert.match(
+    BATTERY_SOURCE,
+    /BATTERY_IMAGE_DIGEST[\s\S]{0,80}?\|\| null/,
+    'a missing image_digest must record null so an unbound PASS is visible in the evidence',
+  )
 })

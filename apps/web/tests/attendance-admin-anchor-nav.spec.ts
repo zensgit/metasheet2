@@ -71,6 +71,8 @@ describe('Attendance admin anchor navigation', () => {
     vi.clearAllMocks()
     window.localStorage.clear()
     window.localStorage.setItem('metasheet_locale', 'en')
+    window.localStorage.setItem('tenantId', 'default')
+    window.localStorage.setItem('workspaceId', 'default')
     window.history.replaceState({}, '', '/attendance')
     setViewportWidth(1280)
     vi.mocked(apiFetch).mockResolvedValue(
@@ -484,7 +486,7 @@ describe('Attendance admin anchor navigation', () => {
     const people = container!.querySelector<HTMLElement>('[data-attendance-group-people]')
     expect(people).toBeTruthy()
     expect(people!.querySelector('[data-attendance-group-member-count]')?.textContent).toContain('Showing 1 of 25 members')
-    expect(resolveBodies.at(-1)).toEqual({ userIds: [existingMemberUserId] })
+    expect(resolveBodies.at(-1)).toEqual({ userIds: [existingMemberUserId], orgId: 'default' })
     expect(people!.querySelector('[data-attendance-group-member-label]')?.textContent).toContain('Alice Member')
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain(existingMemberUserId)
     expect(people!.querySelector('[data-attendance-group-member-secondary]')?.textContent).toContain('alice.member@example.com')
@@ -752,7 +754,7 @@ describe('Attendance admin anchor navigation', () => {
     expect(people).toBeTruthy()
     // No uuid handoffs (496e3a082): non-UUID / legacy member IDs are now sent to the label
     // resolver too (the resolver no longer pre-filters to UUIDs).
-    expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'] }])
+    expect(resolveBodies).toEqual([{ userIds: ['legacy-user-1'], orgId: 'default' }])
     // The resolver rejects the legacy ID (400), so the UI falls back to showing the raw ID.
     expect(people!.querySelector('[data-attendance-group-member-label]')).toBeNull()
     expect(people!.querySelector('[data-attendance-group-member-user-id]')?.textContent).toContain('legacy-user-1')
