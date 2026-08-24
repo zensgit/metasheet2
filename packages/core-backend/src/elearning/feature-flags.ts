@@ -45,3 +45,8 @@ export function resolveElearningCatalogFeature(
   if (flag !== ELEARNING_PRODUCT_FEATURE) return undefined
   return isElearningEnabled(env)
 }
+
+/** Upload surface is live only when master AND MEDIA are exact literal 'true'. */
+export function isElearningMediaSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
+}

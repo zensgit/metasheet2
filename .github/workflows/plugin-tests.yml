@@ -392,6 +392,11 @@ jobs:
       - name: E-learning V0.1 content/assessment CI wiring contract
         run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
 
+      # E-learning V0.1 M1 media ingest: focused unit/route suites must stay in the no-DB
+      # vitest job (not excluded) and named as whole-file args of the media canary step.
+      - name: E-learning V0.1 media CI wiring contract
+        run: node --test scripts/ops/elearning-media-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract
@@ -812,6 +817,21 @@ jobs:
             tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
+      - name: Run elearning V0.1 media ingestion canaries
+        # M1 one-shot upload: flags, auth/org/RBAC/config-before-body, MIME/magic,
+        # probe/codec, quotas, S3 production fail-close, containment, cleanup.
+        # Whole-file args so a name filter matching zero tests cannot skip-green.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/elearning-media-validation.test.ts \
+            tests/unit/elearning-media-probe.test.ts \
+            tests/unit/elearning-media-storage.test.ts \
+            tests/unit/elearning-media-quota.test.ts \
+            tests/unit/elearning-media-runtime.test.ts \
+            tests/unit/elearning-media-routes.test.ts \
+            tests/unit/elearning-media-ingest.test.ts \
+            --reporter=dot
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -876,6 +896,19 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 content/assessment schema gate}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
+            --reporter=verbose
+
+      # E-learning V0.1 M1 media quota reservation against real Postgres.
+      # DATABASE_URL is required (bash :? and the suite throws).
+      - name: Run elearning V0.1 media quota real-DB gate
+        id: elearning-v01-media-quota-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 media quota real-DB gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-media-quota.db.test.ts \
             --reporter=verbose
 
       - name: Run sealed-export S3 private-ingestion real-DB proof

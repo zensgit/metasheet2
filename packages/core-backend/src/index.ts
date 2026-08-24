@@ -3354,6 +3354,22 @@ export class MetaSheetServer {
       throw e
     }
 
+    // E-learning V0.1 M1 media ingest — flag-gated boot. ELEARNING_ENABLED and
+    // ELEARNING_MEDIA_ENABLED must both be exact 'true' or nothing mounts. Production
+    // requires complete S3 bucket+region (never local disk); missing quotas/storage
+    // fail closed 503 on the upload path. A failed local/S3 probe aborts startup.
+    try {
+      const { bootElearningMediaRuntime } = await import('./services/elearning-media-runtime')
+      const mediaRuntime = await bootElearningMediaRuntime({ db: poolManager.get(), logger: this.logger })
+      if (mediaRuntime) {
+        this.app.use(mediaRuntime.router)
+        this.logger.info('E-learning media pipeline initialized (ELEARNING_ENABLED + ELEARNING_MEDIA_ENABLED)')
+      }
+    } catch (e) {
+      this.logger.error('E-learning media runtime boot FAILED with ELEARNING_MEDIA enabled — aborting startup (fail-closed: an unusable media store must not boot a live upload surface)', e as Error)
+      throw e
+    }
+
     // AI usage ledger retention sweep (ladder #9): a periodic bounded DELETE of
     // multitable_ai_usage_ledger rows past the retention window (default 90d,
     // env-overridable, floored at 7d so it can never cross a quota window). The
