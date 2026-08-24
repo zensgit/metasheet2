@@ -1,31 +1,27 @@
 name: Multitable Recovery-Flag Containment Check
 
-# W0 containment verification (owner-directed, 2026-07-14; extended 2026-08-12): prove on the RUNNING
-# host that the destructive/strict recovery flags are NOT active — `MULTITABLE_ENABLE_SHEET_REVERT`,
-# `MULTITABLE_ENABLE_PIT_RESET`, `MULTITABLE_HISTORY_CONTIGUITY_STRICT`, and `MULTITABLE_ENABLE_WRITER_FENCE`
-# must all stay off. The closeout flips RECONSTRUCTION_CAUSALITY_LANDED=true, so the strict-precondition
-# and writer-fence consumers become reachable ONLY when the latter two flags are set — this leg proves
-# they are not (code-default-off is NOT evidence about the environment).
-# Code-default-off is NOT evidence about the environment; this workflow produces the ops-side evidence leg.
+# W0 recovery-posture witness (owner-directed, 2026-07-14; rung-aware 2026-08-24). The default
+# `posture=inert` preserves the original containment contract: all recovery flags are inactive and all
+# nine authority triggers are DISABLED. Fixed later-rung postures let the same read-only workflow prove
+# an exact intentional staging/production state instead of teaching operators that a red containment
+# result is "expected". Code defaults and a failing helper are never evidence about a live environment.
 #
-# READ-ONLY: ssh + `docker ps` + `docker exec <backend> env` + catalog-only database reads +
+# READ-ONLY: ssh + `docker ps` + `docker exec <backend> node` flag classification + catalog-only database reads +
 # `docker inspect` + `docker compose config`. No writes, no restarts, no config edits.
 #
 # TWO MODES (`mode` fixed choice):
 #   • predeploy-flags — Leg 1 (running env) + Leg 3 (next-restart compose) FLAG checks only; Leg 2
 #     (live-DB schema) is skipped. Works on the CURRENTLY deployed image, BEFORE #4654's schema helper +
-#     trigger migrations exist — run this with target=both to obtain the pre-merge evidence that all four
-#     flags are OFF. Distinct PASS sentinel that explicitly states the schema was NOT verified.
-#   • postdeploy-full — the above PLUS Leg 2 (schema helper: 9 disabled triggers, 6 function fingerprints,
-#     no meta_links.foreign_record_id FK). Requires the deployed closeout image; run per-host AFTER deploy.
+#     trigger migrations exist. Distinct PASS sentinel explicitly states the schema was not verified.
+#   • postdeploy-full — the above PLUS Leg 2 (schema helper: exact disabled/armed state for all 9 triggers,
+#     6 function fingerprints, no meta_links.foreign_record_id FK). Requires the matching deployed image.
 #   The schema leg is gated by `if [ "$MODE" = "postdeploy-full" ]`: predeploy-flags skips it entirely, and
 #   postdeploy-full cannot bypass it (that guard is the only path to the schema check).
 #
-# `target` is a fixed `choice` input (staging | production | both) — NEVER free text. `choice` is a
-# UI-only guardrail (the REST API can still send an arbitrary string), so TARGET is re-validated with an
-# exact-match `case` (default branch fails closed) BEFORE the ssh call — that local check is the real
-# injection boundary, since only the validated, no-space TARGET token is ever interpolated onto the ssh
-# command line. The target → hard-coded expected-container list mapping (the real `container_name:`
+# `target`, `mode`, and `posture` are fixed `choice` inputs — NEVER free text. `choice` is a UI-only
+# guardrail (the REST API can still send arbitrary strings), so all three are re-validated with exact-match
+# `case` statements before the ssh call. Only validated, no-space enum tokens reach the command line.
+# The target → hard-coded expected-container list mapping (the real `container_name:`
 # values from docker-compose.app.yml / docker-compose.app.staging.yml on origin/main: `metasheet-backend`
 # for production, `metasheet-staging-backend` for staging) happens a second time, independently, INSIDE
 # the remote heredoc — so no multi-word, space-containing value (e.g. `both`'s two container names) is
@@ -45,21 +41,21 @@ name: Multitable Recovery-Flag Containment Check
 #   1. Running env: every expected container must be observed running and have its live env checked;
 #      missing ANY expected container ⇒ FAIL (a substring match on some unrelated container never suffices).
 #   2. Running database schema: the backend container runs the read-only, values-free schema helper.
-#      The nine recovery-authority triggers and their six function bodies must match the exact
-#      default-inert fingerprints (triggers disabled), and NO foreign-key constraint may cover
+#      The nine recovery-authority triggers must match the exact disabled/armed state declared by the
+#      requested posture; their six function bodies must match exactly, and NO foreign key may cover
 #      meta_links.foreign_record_id — any FK on that column fails regardless of constraint name,
 #      referenced table/column, validation state, or ON DELETE action. Missing DATABASE_URL/helper/
-#      permissions, an unexpectedly enabled trigger, or any shape drift ⇒ FAIL.
+#      permissions, a trigger-state mismatch, or any shape drift ⇒ FAIL.
 #   3. Next-restart (authoritative): the compose project's OWN config is derived from the running
 #      container's own labels (`com.docker.compose.project.config_files` /
 #      `com.docker.compose.project.working_dir`), then rendered read-only via `docker compose config` —
 #      this covers env_file AND compose YAML/override merges, not just a directory's top-level `.env*`
-#      files — and the four flags are verdicted against that rendered, fully-resolved config.
+#      files — and all five ladder flags are compared with the posture's exact active set.
 #
-# Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: a flag active (=true/1) anywhere
-# — running env OR rendered compose config — fails the job; a missing expected container, a broken/
-# implausible env or compose-config read, or an unresolvable compose-project label all fail the job too.
-# Nothing-observed must never read as "contained".
+# Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: expected-active flags must be
+# exactly `true`; any unexpected `true`/`1`, missing expected-active flag, trigger mismatch, missing expected
+# container, broken/implausible observation, or unresolved compose project fails. Nothing-observed is never
+# a PASS.
 
 on:
   workflow_dispatch:
@@ -71,11 +67,17 @@ on:
         options: [staging, production, both]
         default: both
       mode:
-        description: 'predeploy-flags = flag-only (running env + next-restart compose), works on the CURRENTLY deployed image BEFORE #4654 / the new schema helper + trigger migrations land. postdeploy-full = also verifies the live-DB recovery schema (9 disabled triggers, 6 function fingerprints, no meta_links.foreign_record_id FK) and REQUIRES the closeout image to be deployed. Fixed choices only — never free text reaches the remote host.'
+        description: 'predeploy-flags = exact running/next-restart flag set only, DB schema explicitly not verified. postdeploy-full = also verifies the live-DB recovery schema against the posture-selected disabled/armed trigger state. Fixed choices only.'
         required: true
         type: choice
         options: [predeploy-flags, postdeploy-full]
         default: postdeploy-full
+      posture:
+        description: 'Exact ladder posture to witness. inert is the default/rollback state; later choices are staging/production rung states. Fixed choices only.'
+        required: true
+        type: choice
+        options: [inert, l1-armed, l2-fence, l2-checkpoint, l3-strict, l4-revert, l5-reset]
+        default: inert
 
 concurrency:
   group: multitable-recovery-flag-containment-check
@@ -89,7 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Verify recovery flags are inactive on the deploy host
+      - name: Verify exact recovery ladder posture on the deploy host
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
@@ -97,6 +99,7 @@ jobs:
           DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
           TARGET: ${{ github.event.inputs.target }}
           MODE: ${{ github.event.inputs.mode }}
+          POSTURE: ${{ github.event.inputs.posture }}
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh
@@ -158,20 +161,35 @@ jobs:
 
           echo "mode='${MODE}'"
 
+          # POSTURE also reaches the ssh command line, so validate it at the same local injection
+          # boundary as TARGET/MODE. Every accepted token is a fixed, metacharacter-free enum value.
+          case "$POSTURE" in
+            inert|l1-armed|l2-fence|l2-checkpoint|l3-strict|l4-revert|l5-reset)
+              ;;
+            *)
+              echo "::error::unexpected posture '${POSTURE}' — refusing to proceed"
+              exit 1
+              ;;
+          esac
+
+          echo "posture='${POSTURE}'"
+
           # Remote script (single-quoted heredoc — nothing expands locally). Verdict lines are
-          # machine-greppable. TARGET (already validated above to be exactly staging|production|both,
-          # i.e. a single word with no spaces or shell metacharacters) is the ONLY input-derived token
-          # interpolated onto the ssh command line. The target -> container-name mapping is redone,
-          # independently, inside the remote heredoc below — no space-containing constant (e.g. the old
+          # machine-greppable. TARGET/MODE/POSTURE are already validated as fixed, single-word enums;
+          # they are the only input-derived tokens interpolated onto the ssh command line. The target
+          # -> container-name mapping and posture mapping are redone independently inside the remote
+          # heredoc below — no space-containing constant (e.g. the old
           # `both` -> "metasheet-backend metasheet-staging-backend" EXPECTED_CONTAINERS) is ever passed
           # as an env-assignment on the ssh command line, because ssh concatenates all trailing arguments
           # into a single string and re-parses it through the remote login shell — a space there
           # previously caused the second word to be parsed as a bogus extra command (exit 127).
-          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" 'bash -s' <<'REMOTE' | tee containment-report.txt
+          ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" POSTURE="$POSTURE" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
-          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE"
-          SCHEMA_HELPER_SHA256="c52501a9ff2edd1d91ec07b5e7ebe9d90b3242867031dec4dededa7e1d64060d"
-          SCHEMA_PASS_LINE="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
+          FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION"
+          SCHEMA_HELPER_SHA256="673ce2000bb367d7758acc88a7fe3b3994aa88d36139fb85036732ce8be90059"
+          SCHEMA_PASS_LINE_DISABLED="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
+          SCHEMA_PASS_LINE_ARMED="VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links"
+          FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const normalized=present?String(source[key]??"").trim().toLowerCase():"";const state=!present?"unset":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
           fail=0
           checked=0
 
@@ -209,6 +227,90 @@ jobs:
           esac
           echo "mode='${MODE}'"
 
+          # Exact rung contract. No caller-supplied list reaches the comparison logic: each posture maps
+          # to a hard-coded trigger state and exact active-flag set. l2-checkpoint is intentionally
+          # transient: the activation flag is on only while minting the named canary checkpoint.
+          case "${POSTURE:-}" in
+            inert)
+              EXPECTED_TRIGGER_STATE="disabled"
+              EXPECTED_ACTIVE_FLAGS=""
+              ;;
+            l1-armed)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS=""
+              ;;
+            l2-fence)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE"
+              ;;
+            l2-checkpoint)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION"
+              ;;
+            l3-strict)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_HISTORY_CONTIGUITY_STRICT"
+              ;;
+            l4-revert)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_SHEET_REVERT"
+              ;;
+            l5-reset)
+              EXPECTED_TRIGGER_STATE="armed"
+              EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET"
+              ;;
+            *)
+              echo "VERDICT: FAIL — unexpected posture '${POSTURE:-}' — refusing to proceed"
+              exit 2
+              ;;
+          esac
+          echo "posture='${POSTURE}' expected_trigger_state='${EXPECTED_TRIGGER_STATE}' expected_active_flags='${EXPECTED_ACTIVE_FLAGS:-<none>}'"
+
+          flag_expected_active() {
+            case " ${EXPECTED_ACTIVE_FLAGS} " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          check_flag_snapshot() {
+            context="$1"
+            snapshot="$2"
+            snapshot_count=$(printf '%s\n' "$snapshot" | awk 'NF { count++ } END { print count+0 }')
+            if [ "$snapshot_count" -ne 5 ]; then
+              echo "VERDICT: FAIL — ${context} flag snapshot count=${snapshot_count}, expected=5 (observation broken)"
+              fail=1
+              return
+            fi
+            for f in $FLAGS; do
+              match_count=$(printf '%s\n' "$snapshot" | awk -F '\t' -v key="$f" '$1 == key { count++ } END { print count+0 }')
+              state=$(printf '%s\n' "$snapshot" | awk -F '\t' -v key="$f" '$1 == key { print $2 }')
+              if [ "$match_count" -ne 1 ]; then
+                echo "   [${context}] $f: observed ${match_count} classifier rows, expected exactly 1 — POSTURE MISMATCH"
+                fail=1
+                continue
+              fi
+              if flag_expected_active "$f"; then
+                if [ "$state" = "true" ]; then
+                  echo "   [${context}] $f=true — ACTIVE AS EXPECTED"
+                else
+                  echo "   [${context}] $f: expected ACTIVE(true), observed state=${state} — POSTURE MISMATCH"
+                  fail=1
+                fi
+              else
+                if [ "$state" = "true" ] || [ "$state" = "one" ]; then
+                  echo "   [${context}] $f=$state — UNEXPECTED ACTIVE ⇒ POSTURE MISMATCH"
+                  fail=1
+                elif [ "$state" = "unset" ] || [ "$state" = "inactive" ]; then
+                  echo "   [${context}] $f — INACTIVE AS EXPECTED"
+                else
+                  echo "   [${context}] $f: unknown classifier state=${state:-empty} — POSTURE MISMATCH"
+                  fail=1
+                fi
+              fi
+            done
+          }
+
           if ! command -v docker >/dev/null 2>&1; then
             echo "VERDICT: FAIL — docker not available on host (observation broken)"
             exit 2
@@ -238,23 +340,15 @@ jobs:
               continue
             fi
 
-            # Leg 1: running env (what the container has RIGHT NOW).
-            envdump=$(docker exec "$name" env 2>/dev/null) || { echo "VERDICT: FAIL — cannot exec/env in $name (observation broken)"; fail=1; continue; }
-            count=$(printf '%s\n' "$envdump" | wc -l)
-            echo "   observed env vars: $count"
-            if [ "$count" -lt 5 ]; then echo "VERDICT: FAIL — env read in $name implausibly small (observation broken)"; fail=1; continue; fi
-            for f in $FLAGS; do
-              raw=$(printf '%s\n' "$envdump" | grep -E "^${f}=" | head -1 | cut -d= -f2- || true)
-              norm=$(printf '%s' "${raw:-}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-              if [ -z "${raw+x}" ] || [ -z "$raw" ]; then
-                echo "   [running] $f: unset — CONTAINED"
-              elif [ "$norm" = "true" ] || [ "$norm" = "1" ]; then
-                echo "   [running] $f=$raw — ACTIVE ⇒ CONTAINMENT BREACH"
-                fail=1
-              else
-                echo "   [running] $f=$raw — inactive value — CONTAINED"
-              fi
-            done
+            # Leg 1: classify the exact environment Node exposes to application code. Line-oriented
+            # `env | grep` is unsound for values containing newlines (e.g. "\ntrue" is active after
+            # the application's trim(), but its physical FLAG= line looks empty).
+            if ! running_snapshot=$(docker exec "$name" node -e "$FLAG_CLASSIFIER_JS" running _ $FLAGS 2>/dev/null); then
+              echo "VERDICT: FAIL — cannot classify the running Node environment in $name (observation broken)"
+              fail=1
+              continue
+            fi
+            check_flag_snapshot "running" "$running_snapshot"
 
             # Leg 2 (postdeploy-full mode ONLY): the schema helper + trigger migrations exist only on the
             # deployed closeout image; requiring them on the pre-#4654 image would always FAIL (missing
@@ -275,7 +369,13 @@ jobs:
               fail=1
               continue
             fi
-            if ! docker exec "$name" node scripts/ops/multitable-recovery-schema-containment.mjs >"$schema_out" 2>&1; then
+            if [ "$EXPECTED_TRIGGER_STATE" = "armed" ]; then
+              schema_pass_line="$SCHEMA_PASS_LINE_ARMED"
+            else
+              schema_pass_line="$SCHEMA_PASS_LINE_DISABLED"
+            fi
+            if ! docker exec "$name" node scripts/ops/multitable-recovery-schema-containment.mjs \
+              "--expected-trigger-state=${EXPECTED_TRIGGER_STATE}" >"$schema_out" 2>&1; then
               echo "VERDICT: FAIL — schema containment helper failed for $name (DB/helper/permission observation unavailable)"
               sed 's/^/   schema: /' "$schema_out"
               rm -f "$schema_out"
@@ -283,7 +383,7 @@ jobs:
               continue
             fi
             sed 's/^/   schema: /' "$schema_out"
-            if ! grep -qxF "$SCHEMA_PASS_LINE" "$schema_out"; then
+            if ! grep -qxF "$schema_pass_line" "$schema_out"; then
               echo "VERDICT: FAIL — schema containment helper did not emit its exact PASS sentinel for $name"
               rm -f "$schema_out"
               fail=1
@@ -315,55 +415,32 @@ jobs:
 
             cfg_out="$(mktemp)"
             cfg_err="$(mktemp)"
-            if ! docker compose "${compose_args[@]}" --project-directory "$working_dir" config >"$cfg_out" 2>"$cfg_err"; then
-              echo "VERDICT: FAIL — 'docker compose config' failed for $name (next-restart check broken)"
-              sed 's/^/   compose-config-stderr: /' "$cfg_err" 2>/dev/null || true
+            if ! docker compose "${compose_args[@]}" --project-directory "$working_dir" config --format json >"$cfg_out" 2>"$cfg_err"; then
+              echo "VERDICT: FAIL — 'docker compose config --format json' failed for $name (next-restart check broken)"
+              echo "   compose-config-stderr: suppressed (values-free evidence boundary)"
               rm -f "$cfg_out" "$cfg_err"
               fail=1
               continue
             fi
-            rendered_lines=$(wc -l < "$cfg_out")
-            echo "   rendered compose config: ${rendered_lines} lines (project: ${working_dir})"
-            if [ "$rendered_lines" -lt 5 ]; then
-              echo "VERDICT: FAIL — rendered compose config for $name implausibly small (observation broken)"
+            if ! compose_snapshot=$(docker exec -i "$name" node -e "$FLAG_CLASSIFIER_JS" compose "$name" $FLAGS <"$cfg_out" 2>/dev/null); then
+              echo "VERDICT: FAIL — cannot classify the rendered Compose environment for $name (observation broken or service identity ambiguous)"
               rm -f "$cfg_out" "$cfg_err"
               fail=1
               continue
             fi
-
-            for f in $FLAGS; do
-              hits=$(grep -E "^[[:space:]]*${f}[[:space:]]*:" "$cfg_out" || true)
-              if [ -z "$hits" ]; then
-                echo "   [next-restart] $f: absent from rendered compose config — CONTAINED"
-                continue
-              fi
-              breach=0
-              while IFS= read -r line; do
-                [ -z "$line" ] && continue
-                val=$(printf '%s' "$line" | sed -E 's/^[^:]*:[[:space:]]*//' | sed -E 's/^"(.*)"$/\1/' | sed -E "s/^'(.*)'\$/\1/")
-                norm=$(printf '%s' "$val" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-                if [ "$norm" = "true" ] || [ "$norm" = "1" ]; then
-                  echo "   [next-restart] $f=$val — ACTIVE ⇒ CONTAINMENT BREACH (next restart of $name would enable it)"
-                  fail=1
-                  breach=1
-                fi
-              done <<< "$hits"
-              if [ "$breach" -eq 0 ]; then
-                echo "   [next-restart] $f — inactive in all rendered occurrences — CONTAINED"
-              fi
-            done
+            check_flag_snapshot "next-restart" "$compose_snapshot"
             rm -f "$cfg_out" "$cfg_err"
           done
 
           echo "== summary =="
           echo "containers expected: $checked"
-          if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — containment breached or observation broken (see above)"; exit 1; fi
+          if [ "$fail" -ne 0 ]; then echo "VERDICT: FAIL — requested ladder posture mismatched or observation broken (see above)"; exit 1; fi
           # Two DISTINCT PASS sentinels — a predeploy-flags PASS must never be mistaken for a full
           # containment PASS: it explicitly states the database schema was NOT verified in this mode.
           if [ "$MODE" = "postdeploy-full" ]; then
-            echo "VERDICT: PASS (postdeploy-full) — recovery flags inactive in running/next-restart config AND database recovery schema matches its expected default-inert posture (triggers disabled, no meta_links.foreign_record_id FK)"
+            echo "VERDICT: PASS (postdeploy-full) — exact ladder posture '${POSTURE}' matches running/next-restart flags and database recovery schema matches its expected trigger posture"
           else
-            echo "VERDICT: PASS (predeploy-flags) — recovery flags inactive in running AND next-restart compose config; database recovery schema NOT verified in this mode (pre-deploy flag-only check)"
+            echo "VERDICT: PASS (predeploy-flags) — exact ladder posture '${POSTURE}' matches running AND next-restart flags; database recovery schema NOT verified in this mode"
           fi
           REMOTE
 

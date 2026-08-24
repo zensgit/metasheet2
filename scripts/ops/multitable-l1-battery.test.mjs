@@ -1503,3 +1503,25 @@ test('A1.3: the evidence carries a provenance object with a self-hash and env-su
     'a missing image_digest must record null so an unbound PASS is visible in the evidence',
   )
 })
+
+test('L1 evidence records exactly the five ladder flags without treating observation as a gate', () => {
+  const block = BATTERY_SOURCE.match(
+    /recovery_flags_observed:\s*\{([\s\S]*?)\n\s*\},\n\s*flag_requirement:/,
+  )
+  assert.ok(block, 'evidence must carry a recovery_flags_observed object')
+  const keys = [...block[1].matchAll(/^\s*(MULTITABLE_[A-Z0-9_]+):/gm)]
+    .map((match) => match[1])
+    .sort()
+  assert.deepEqual(keys, [
+    'MULTITABLE_ENABLE_PIT_RESET',
+    'MULTITABLE_ENABLE_SHEET_REVERT',
+    'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+    'MULTITABLE_ENABLE_WRITER_FENCE',
+    'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+  ])
+  assert.match(
+    BATTERY_SOURCE,
+    /flag_requirement: 'none — the battery runs at L1 posture and is independent of all five recovery flags'/,
+    'the battery records flags for evidence but must not silently become the posture authority',
+  )
+})

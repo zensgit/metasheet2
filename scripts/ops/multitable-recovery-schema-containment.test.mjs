@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 import {
   assessSchemaSnapshot,
   expectedSchemaSnapshot,
+  fingerprint,
   renderAssessment,
   runSchemaContainment,
 } from './multitable-recovery-schema-containment.mjs'
@@ -42,6 +43,54 @@ test('expected schema posture is exact: 9 disabled triggers, 6 functions, zero f
   const assessment = assessSchemaSnapshot(expected)
   assert.equal(assessment.ok, true)
   assert.match(renderAssessment(assessment), /^VERDICT: PASS -/m)
+})
+
+test('the ladder fingerprint table stays mechanically bound to disabled and armed helper postures', () => {
+  const ladder = readFileSync(
+    join(
+      repoRoot,
+      'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md',
+    ),
+    'utf8',
+  )
+  for (const state of ['disabled', 'armed']) {
+    const expected = fingerprint(expectedSchemaSnapshot(state).authorityTriggers)
+    assert.ok(
+      ladder.includes(expected),
+      `ladder must publish the exact ${state} trigger fingerprint ${expected}`,
+    )
+  }
+})
+
+test('the ladder marks the impossible v1 L2-L5 order as historical HOLD before presenting E1', () => {
+  const ladder = readFileSync(
+    join(
+      repoRoot,
+      'docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md',
+    ),
+    'utf8',
+  )
+  assert.match(
+    ladder,
+    /\*\*执行勘误（承重）\*\*：[\s\S]*L2\+ 在 E1 获 exact-SHA ratify 前没有可执行顺序/,
+    'the warning before the old ladder must fail closed instead of leaving two executable sequences',
+  )
+  const oldStart = ladder.indexOf('## 2. 冻结的 v1 阶梯记录')
+  const oldEnd = ladder.indexOf('## 3.', oldStart)
+  assert.ok(oldStart >= 0 && oldEnd > oldStart, 'the frozen v1 section must be bounded')
+  const oldLadder = ladder.slice(oldStart, oldEnd)
+  for (const rung of ['L2', 'L3', 'L4', 'L5']) {
+    assert.match(
+      oldLadder,
+      new RegExp(`\\*\\*${rung} — HISTORICAL / HOLD`),
+      `${rung} must not look executable in the frozen v1 section`,
+    )
+  }
+  assert.match(
+    ladder,
+    /修正案 E1[\s\S]*Status: \*\*PROPOSED\*\*/,
+    'the replacement sequence must remain explicitly unratified',
+  )
 })
 
 test('any FK covering meta_links.foreign_record_id fails closed — NO ACTION and CASCADE both red', async () => {
@@ -83,15 +132,32 @@ test('any FK covering meta_links.foreign_record_id fails closed — NO ACTION an
   }
 })
 
-test('with the FK removed the helper returns PASS with the exact workflow sentinel line', async () => {
+test('disabled and armed helper postures each return only their exact workflow sentinel', async () => {
   const snapshot = expectedCopy()
   snapshot.metaLinksForeignRecordFks = []
-  const result = await runSchemaContainment({
+  const disabled = await runSchemaContainment({
     env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
     querySnapshot: async () => snapshot,
   })
-  assert.equal(result.exitCode, 0)
-  assert.match(result.output, /meta-links-foreign-record-id-fk-absence: PASS count=0\/0/)
+  assert.equal(disabled.exitCode, 0)
+  assert.match(disabled.output, /meta-links-foreign-record-id-fk-absence: PASS count=0\/0/)
+
+  const armedSnapshot = structuredClone(expectedSchemaSnapshot('armed'))
+  const armed = await runSchemaContainment({
+    env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
+    querySnapshot: async () => armedSnapshot,
+    expectedTriggerState: 'armed',
+  })
+  assert.equal(armed.exitCode, 0)
+  assert.match(armed.output, /expected armed schema posture/)
+
+  const wrongState = await runSchemaContainment({
+    env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
+    querySnapshot: async () => snapshot,
+    expectedTriggerState: 'armed',
+  })
+  assert.equal(wrongState.exitCode, 1)
+  assert.match(wrongState.output, /recovery-authority-triggers: FAIL/)
 
   // The workflow greps its SCHEMA_PASS_LINE with `grep -qxF` (exact full line). Keep the helper's
   // PASS sentinel and the workflow constant in lockstep, or leg 2 fails at runtime despite exit 0.
@@ -102,21 +168,27 @@ test('with the FK removed the helper returns PASS with the exact workflow sentin
     ),
     'utf8',
   )
-  const sentinel = workflow.match(/^\s*SCHEMA_PASS_LINE="(.+)"$/m)
-  assert.ok(sentinel, 'workflow must define SCHEMA_PASS_LINE')
+  const disabledSentinel = workflow.match(/^\s*SCHEMA_PASS_LINE_DISABLED="(.+)"$/m)
+  const armedSentinel = workflow.match(/^\s*SCHEMA_PASS_LINE_ARMED="(.+)"$/m)
+  assert.ok(disabledSentinel, 'workflow must define SCHEMA_PASS_LINE_DISABLED')
+  assert.ok(armedSentinel, 'workflow must define SCHEMA_PASS_LINE_ARMED')
   assert.ok(
-    result.output.split('\n').includes(sentinel[1]),
-    'helper PASS output must contain the exact SCHEMA_PASS_LINE the workflow greps for',
+    disabled.output.split('\n').includes(disabledSentinel[1]),
+    'disabled helper PASS must contain the exact disabled sentinel',
+  )
+  assert.ok(
+    armed.output.split('\n').includes(armedSentinel[1]),
+    'armed helper PASS must contain the exact armed sentinel',
   )
 })
 
-test('workflow FLAGS pins exactly the four default-inert recovery flags, consumed by both legs', () => {
+test('workflow FLAGS pins exactly the five ladder recovery flags, classified by both legs', () => {
   const workflow = readFileSync(
     join(repoRoot, '.github/workflows/multitable-recovery-flag-containment-check.yml'),
     'utf8',
   )
-  // The remote heredoc declares FLAGS once; both the running-env leg and the next-restart leg iterate
-  // `for f in $FLAGS`. Pin the EXACT set so a silently dropped flag (e.g. deleting
+  // The remote heredoc declares FLAGS once; both the running-env leg and the next-restart leg invoke
+  // the same classifier with that set. Pin the EXACT set so a silently dropped flag (e.g. deleting
   // MULTITABLE_ENABLE_WRITER_FENCE) cannot pass green — it must red this required (test 20.x) contract.
   const flagsDecl = workflow.match(/^\s*FLAGS="([^"]+)"$/m)
   assert.ok(flagsDecl, 'workflow must declare FLAGS')
@@ -126,17 +198,23 @@ test('workflow FLAGS pins exactly the four default-inert recovery flags, consume
     [
       'MULTITABLE_ENABLE_PIT_RESET',
       'MULTITABLE_ENABLE_SHEET_REVERT',
+      'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
       'MULTITABLE_ENABLE_WRITER_FENCE',
       'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
     ],
-    'containment must verdict EXACTLY the four default-inert recovery flags: the two destructive execute gates (SHEET_REVERT/PIT_RESET) plus the two seam/fence consumers the closeout makes reachable (HISTORY_CONTIGUITY_STRICT/ENABLE_WRITER_FENCE)',
+    'the witness must verdict exactly the five ladder flags, including transient trust-checkpoint activation',
   )
-  // Both legs must consume FLAGS or a flag is only half-checked. Assert exactly two `for f in $FLAGS`.
-  const loopCount = (workflow.match(/for f in \$FLAGS/g) || []).length
-  assert.equal(loopCount, 2, 'both the running-env and next-restart legs must iterate `for f in $FLAGS`')
+  const classifierCalls = [
+    ...workflow.matchAll(/node -e "\$FLAG_CLASSIFIER_JS" (running|compose)[^\n]*\$FLAGS/g),
+  ].map((match) => match[1])
+  assert.deepEqual(
+    classifierCalls.sort(),
+    ['compose', 'running'],
+    'both running and next-restart legs must classify the exact FLAGS set',
+  )
 })
 
-test('MODE + TARGET are validated against their fixed choices BEFORE the ssh line (the real injection boundary)', () => {
+test('MODE + TARGET + POSTURE are validated against fixed choices BEFORE the ssh line', () => {
   const workflow = readFileSync(
     join(repoRoot, '.github/workflows/multitable-recovery-flag-containment-check.yml'),
     'utf8',
@@ -158,6 +236,11 @@ test('MODE + TARGET are validated against their fixed choices BEFORE the ssh lin
     preSsh,
     /case\s+"\$TARGET"\s+in\s*\n\s*staging\|production\|both\)/,
     'TARGET must be validated against exactly {staging,production,both} BEFORE it reaches the ssh command line',
+  )
+  assert.match(
+    preSsh,
+    /case\s+"\$POSTURE"\s+in\s*\n\s*inert\|l1-armed\|l2-fence\|l2-checkpoint\|l3-strict\|l4-revert\|l5-reset\)/,
+    'POSTURE must be validated against the exact rung set BEFORE it reaches the ssh command line',
   )
 })
 
@@ -215,6 +298,22 @@ test('database or catalog-permission failure is generic and never echoes URL/err
     /sensitive-user|sensitive-pass|example\.invalid|private-db|secret_row|postgresql:\/\//,
   )
   assert.doesNotMatch(result.output, /VERDICT: PASS/)
+})
+
+test('invalid expected trigger state is an explicit configuration failure before any query', async () => {
+  let queried = false
+  const result = await runSchemaContainment({
+    env: { DATABASE_URL: 'postgresql://placeholder.invalid/scratch' },
+    expectedTriggerState: 'armed; echo unsafe',
+    querySnapshot: async () => {
+      queried = true
+      return expectedCopy()
+    },
+  })
+  assert.equal(result.exitCode, 2)
+  assert.equal(queried, false)
+  assert.match(result.output, /must be exactly disabled or armed/)
+  assert.doesNotMatch(result.output, /observation unavailable|VERDICT: PASS/)
 })
 
 test('workflow requires the schema helper for every expected backend container and rejects missing PASS', () => {
@@ -317,8 +416,35 @@ const schemaHelperSha = workflowText.match(
   /^\s*SCHEMA_HELPER_SHA256="([0-9a-f]+)"$/m,
 )
 assert.ok(schemaHelperSha, 'workflow must pin SCHEMA_HELPER_SHA256')
-const schemaPassLine = workflowText.match(/^\s*SCHEMA_PASS_LINE="(.+)"$/m)
-assert.ok(schemaPassLine, 'workflow must define SCHEMA_PASS_LINE')
+const schemaPassLineDisabled = workflowText.match(
+  /^\s*SCHEMA_PASS_LINE_DISABLED="(.+)"$/m,
+)
+const schemaPassLineArmed = workflowText.match(
+  /^\s*SCHEMA_PASS_LINE_ARMED="(.+)"$/m,
+)
+assert.ok(schemaPassLineDisabled, 'workflow must define SCHEMA_PASS_LINE_DISABLED')
+assert.ok(schemaPassLineArmed, 'workflow must define SCHEMA_PASS_LINE_ARMED')
+
+const flagClassifierScript = workflowText.match(
+  /^\s*FLAG_CLASSIFIER_JS='(.+)'$/m,
+)
+assert.ok(flagClassifierScript, 'workflow must define FLAG_CLASSIFIER_JS')
+
+const ALL_LADDER_FLAGS = [
+  'MULTITABLE_ENABLE_SHEET_REVERT',
+  'MULTITABLE_ENABLE_PIT_RESET',
+  'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+  'MULTITABLE_ENABLE_WRITER_FENCE',
+  'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+]
+
+function flagSnapshot(activeFlags = [], overrides = {}) {
+  const active = new Set(activeFlags)
+  return ALL_LADDER_FLAGS.map((flag) => {
+    const state = overrides[flag] ?? (active.has(flag) ? 'true' : 'unset')
+    return `${flag}\t${state}`
+  }).join('\n')
+}
 
 // A PATH-shadowing `docker`. Every invocation is appended to $STUB_LOG (so a
 // test can assert whether `node …-schema-containment.mjs` ran), and each
@@ -329,16 +455,29 @@ cmd="\${1:-}"; shift || true
 case "$cmd" in
   compose)
     for a in "$@"; do [ "$a" = "version" ] && exit 0; done
-    printf '%s\\n' "$STUB_COMPOSE_CONFIG"; exit 0 ;;
+    printf '%s\\n' "$STUB_COMPOSE_CONFIG_JSON"
+    printf '%s' "\${STUB_COMPOSE_STDERR:-}" >&2
+    exit "\${STUB_COMPOSE_EXIT:-0}" ;;
   ps)
     printf '%s\\n' "$STUB_PS_NAMES"; exit 0 ;;
   exec)
-    shift
+    if [ "\${1:-}" = "-i" ]; then shift; fi
+    container="\${1:-}"; shift || true
     sub="\${1:-}"; shift || true
     case "$sub" in
-      env) printf '%s\\n' "$STUB_ENV"; exit 0 ;;
       sha256sum) printf '%s  %s\\n' "$STUB_HELPER_SHA" "\${1:-}"; exit 0 ;;
-      node) printf '%s\\n' "$STUB_HELPER_OUT"; exit "\${STUB_HELPER_EXIT:-0}" ;;
+      node)
+        if [ "\${1:-}" = "-e" ]; then
+          shift
+          classifier="\${1:-}"; shift || true
+          classifier_mode="\${1:-}"
+          case "$classifier_mode" in
+            running) printf '%s\\n' "$STUB_RUNNING_FLAG_SNAPSHOT"; exit 0 ;;
+            compose) cat >/dev/null; printf '%s\\n' "$STUB_COMPOSE_FLAG_SNAPSHOT"; exit 0 ;;
+            *) echo "stub: unknown classifier mode: $classifier_mode" >&2; exit 97 ;;
+          esac
+        fi
+        printf '%s\\n' "$STUB_HELPER_OUT"; exit "\${STUB_HELPER_EXIT:-0}" ;;
       *) echo "stub: unknown exec sub: $sub" >&2; exit 99 ;;
     esac ;;
   inspect)
@@ -364,32 +503,22 @@ chmodSync(join(containmentBinDir, 'docker'), 0o755)
 const remoteScriptPath = join(containmentStubBase, 'remote.sh')
 writeFileSync(remoteScriptPath, extractRemoteScript(workflowText))
 
-// Clean defaults are padded well clear of the `-lt 5` plausibility gates in
-// legs 1 and 3 so a future edit can't silently turn a clean run into an
-// "implausibly small" FAIL. No default value normalizes to true/1.
-const CLEAN_ENV = [
-  'PATH=/usr/local/bin:/usr/bin:/bin',
-  'HOME=/root',
-  'HOSTNAME=metasheet-backend',
-  'NODE_ENV=production',
-  'LANG=C.UTF-8',
-  'PWD=/app',
-  'TERM=xterm',
-  'SHLVL=1',
-].join('\n')
-const CLEAN_COMPOSE = [
-  'services:',
-  '  backend:',
-  '    image: metasheet-backend:latest',
-  '    restart: unless-stopped',
-  '    environment:',
-  '      NODE_ENV: "production"',
-  '      PORT: "3000"',
-  '      TZ: "UTC"',
-].join('\n')
+const CLEAN_FLAG_SNAPSHOT = flagSnapshot()
+const CLEAN_COMPOSE_CONFIG = JSON.stringify({
+  services: {
+    backend: {
+      container_name: 'metasheet-backend',
+      environment: {},
+    },
+    stagingBackend: {
+      container_name: 'metasheet-staging-backend',
+      environment: {},
+    },
+  },
+})
 
 let containmentLogSeq = 0
-function runRemote({ target, mode, stub = {} }) {
+function runRemote({ target, mode, posture = 'inert', stub = {} }) {
   const logPath = join(containmentStubBase, `log-${containmentLogSeq++}.txt`)
   writeFileSync(logPath, '')
   const env = {
@@ -398,14 +527,19 @@ function runRemote({ target, mode, stub = {} }) {
     STUB_LOG: logPath,
     TARGET: target,
     MODE: mode,
+    POSTURE: posture,
     STUB_PS_NAMES: 'metasheet-backend',
-    STUB_ENV: CLEAN_ENV,
+    STUB_RUNNING_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
+    STUB_COMPOSE_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
     STUB_HELPER_SHA: schemaHelperSha[1],
-    STUB_HELPER_OUT: schemaPassLine[1],
+    STUB_HELPER_OUT:
+      posture === 'inert' ? schemaPassLineDisabled[1] : schemaPassLineArmed[1],
     STUB_HELPER_EXIT: '0',
     STUB_CONFIG_FILES: '/app/docker-compose.app.yml',
     STUB_WORKING_DIR: '/app',
-    STUB_COMPOSE_CONFIG: CLEAN_COMPOSE,
+    STUB_COMPOSE_CONFIG_JSON: CLEAN_COMPOSE_CONFIG,
+    STUB_COMPOSE_STDERR: '',
+    STUB_COMPOSE_EXIT: '0',
     ...stub,
   }
   const result = spawnSync('bash', [remoteScriptPath], { env, encoding: 'utf8' })
@@ -422,13 +556,109 @@ function runRemote({ target, mode, stub = {} }) {
   }
 }
 
+function parseFlagSnapshot(output) {
+  return Object.fromEntries(
+    output
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.split('\t')),
+  )
+}
+
+test('embedded flag classifier uses application-equivalent trim semantics for running and Compose values', () => {
+  const activeFlag = 'MULTITABLE_ENABLE_PIT_RESET'
+  const running = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      flagClassifierScript[1],
+      'running',
+      '_',
+      ...ALL_LADDER_FLAGS,
+    ],
+    {
+      env: {
+        ...process.env,
+        [activeFlag]: '\nTrUe\t',
+        MULTITABLE_ENABLE_WRITER_FENCE: ' 1 ',
+      },
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(running.status, 0, running.stderr)
+  assert.deepEqual(parseFlagSnapshot(running.stdout), {
+    MULTITABLE_ENABLE_SHEET_REVERT: 'unset',
+    MULTITABLE_ENABLE_PIT_RESET: 'true',
+    MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'unset',
+    MULTITABLE_ENABLE_WRITER_FENCE: 'one',
+    MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: 'unset',
+  })
+
+  const compose = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      flagClassifierScript[1],
+      'compose',
+      'metasheet-backend',
+      ...ALL_LADDER_FLAGS,
+    ],
+    {
+      input: JSON.stringify({
+        services: {
+          backend: {
+            container_name: 'metasheet-backend',
+            environment: {
+              [activeFlag]: '\nTrUe\t',
+              MULTITABLE_ENABLE_WRITER_FENCE: false,
+            },
+          },
+        },
+      }),
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(compose.status, 0, compose.stderr)
+  assert.equal(parseFlagSnapshot(compose.stdout)[activeFlag], 'true')
+  assert.equal(
+    parseFlagSnapshot(compose.stdout).MULTITABLE_ENABLE_WRITER_FENCE,
+    'inactive',
+  )
+
+  const ambiguous = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      flagClassifierScript[1],
+      'compose',
+      'metasheet-backend',
+      ...ALL_LADDER_FLAGS,
+    ],
+    {
+      input: JSON.stringify({
+        services: {
+          a: { container_name: 'metasheet-backend', environment: {} },
+          b: { container_name: 'metasheet-backend', environment: {} },
+        },
+      }),
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(
+    ambiguous.status,
+    3,
+    'zero or duplicate service identity must fail closed rather than classify an arbitrary service',
+  )
+})
+
 // ── LOCAL pre-SSH segment behaviour harness ─────────────────────────────────────────────────────
 // The remote heredoc re-validates MODE/TARGET, but the only guard that can stop a bad value from
 // being re-parsed on the ssh command line is the LOCAL `case` that runs BEFORE `ssh`. A structural
 // "the case exists" assertion does NOT prove fail-closed: weakening the default-branch `exit 1` to a
 // no-op (`:`) leaves the case textually intact while letting an illegal value fall through to ssh.
 // So execute the whole `run:` block (up to the ssh line) with a PATH-shadowing `ssh` stub and assert:
-// illegal MODE/TARGET → non-zero exit AND ssh NEVER invoked; both legal → ssh reached.
+// illegal MODE/TARGET/POSTURE → non-zero exit AND ssh NEVER invoked; all legal → ssh reached.
 function extractLocalRunScript(text) {
   const lines = text.split('\n')
   const runIdx = lines.findIndex((line) => /^        run: \|\s*$/.test(line))
@@ -460,7 +690,7 @@ chmodSync(join(containmentBinDir, 'ssh'), 0o755)
 const localScriptPath = join(containmentStubBase, 'local.sh')
 writeFileSync(localScriptPath, extractLocalRunScript(workflowText))
 
-function runLocal({ target, mode }) {
+function runLocal({ target, mode, posture = 'inert' }) {
   const logPath = join(containmentStubBase, `local-log-${containmentLogSeq++}.txt`)
   writeFileSync(logPath, '')
   // Fresh HOME so the script's `~/.ssh/{known_hosts,deploy_key}` writes never touch the real home.
@@ -472,6 +702,7 @@ function runLocal({ target, mode }) {
     STUB_LOG: logPath,
     TARGET: target,
     MODE: mode,
+    POSTURE: posture,
     DEPLOY_HOST: 'deploy.invalid',
     DEPLOY_USER: 'deployer',
     DEPLOY_SSH_KEY_B64: Buffer.from('dummy-deploy-key').toString('base64'),
@@ -502,7 +733,7 @@ function runLocal({ target, mode }) {
   }
 }
 
-test('containment local pre-SSH validation FAILS CLOSED: illegal MODE/TARGET exit non-zero and never reach ssh', () => {
+test('containment local pre-SSH validation FAILS CLOSED for illegal MODE/TARGET/POSTURE', () => {
   // Both legal → local validation passes and control reaches the ssh invocation.
   const ok = runLocal({ target: 'staging', mode: 'predeploy-flags' })
   assert.equal(
@@ -529,6 +760,18 @@ test('containment local pre-SSH validation FAILS CLOSED: illegal MODE/TARGET exi
     badTarget.sshCalled,
     false,
     'illegal TARGET must NEVER reach ssh (the pre-SSH case must fail closed, not just exist)',
+  )
+
+  const badPosture = runLocal({
+    target: 'staging',
+    mode: 'predeploy-flags',
+    posture: 'l1-armed; touch pwned',
+  })
+  assert.notEqual(badPosture.status, 0, 'illegal POSTURE must exit non-zero before ssh')
+  assert.equal(
+    badPosture.sshCalled,
+    false,
+    'illegal POSTURE must NEVER reach ssh',
   )
 })
 
@@ -557,14 +800,20 @@ test('containment behavior 1: predeploy-flags + all clean → PASS, helper NOT i
     'predeploy-flags must NOT even read the helper fingerprint',
   )
   // Both flag legs must have run.
-  assert.ok(
-    log.includes('exec metasheet-backend env'),
-    'Leg 1 (running env) must run',
+  assert.match(
+    log,
+    /exec metasheet-backend node -e .* running _ MULTITABLE_ENABLE_SHEET_REVERT/,
+    'Leg 1 must classify the running Node environment',
   )
   assert.match(
     log,
-    /compose -f \/app\/docker-compose\.app\.yml --project-directory \/app config/,
-    'Leg 3 (next-restart compose config) must run',
+    /compose -f \/app\/docker-compose\.app\.yml --project-directory \/app config --format json/,
+    'Leg 3 must render next-restart Compose JSON',
+  )
+  assert.match(
+    log,
+    /exec -i metasheet-backend node -e .* compose metasheet-backend MULTITABLE_ENABLE_SHEET_REVERT/,
+    'Leg 3 must classify the rendered Compose service environment',
   )
 })
 
@@ -587,13 +836,15 @@ test('containment behavior 3: predeploy-flags catches a running-env flag=true �
     target: 'production',
     mode: 'predeploy-flags',
     stub: {
-      STUB_ENV: `${CLEAN_ENV}\nMULTITABLE_ENABLE_PIT_RESET=true`,
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot([
+        'MULTITABLE_ENABLE_PIT_RESET',
+      ]),
     },
   })
   assert.equal(status, 1)
   // Pin the RUNNING leg specifically (not just any breach).
   assert.match(stdout, /\[running\] MULTITABLE_ENABLE_PIT_RESET=true/)
-  assert.match(stdout, /CONTAINMENT BREACH/)
+  assert.match(stdout, /POSTURE MISMATCH/)
   assert.match(stdout, /VERDICT: FAIL/)
   assert.doesNotMatch(stdout, NO_CONTAINMENT_PASS)
 })
@@ -603,14 +854,33 @@ test('containment behavior 4: predeploy-flags catches a next-restart compose fla
     target: 'production',
     mode: 'predeploy-flags',
     stub: {
-      STUB_COMPOSE_CONFIG: `${CLEAN_COMPOSE}\n      MULTITABLE_ENABLE_WRITER_FENCE: "true"`,
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot([
+        'MULTITABLE_ENABLE_WRITER_FENCE',
+      ]),
     },
   })
   assert.equal(status, 1)
   // Pin the NEXT-RESTART (compose) leg specifically.
   assert.match(stdout, /\[next-restart\] MULTITABLE_ENABLE_WRITER_FENCE=true/)
-  assert.match(stdout, /CONTAINMENT BREACH \(next restart/)
+  assert.match(stdout, /POSTURE MISMATCH/)
   assert.match(stdout, /VERDICT: FAIL/)
+  assert.doesNotMatch(stdout, NO_CONTAINMENT_PASS)
+})
+
+test('containment behavior 4b: Compose render failure is fail-closed without leaking raw stderr values', () => {
+  const rawSentinel = 'RAW_FLAG_SENTINEL_8f03'
+  const { status, stdout, stderr } = runRemote({
+    target: 'production',
+    mode: 'predeploy-flags',
+    stub: {
+      STUB_COMPOSE_EXIT: '1',
+      STUB_COMPOSE_STDERR: `invalid interpolation near ${rawSentinel}`,
+    },
+  })
+  assert.equal(status, 1)
+  assert.match(stdout, /docker compose config --format json.*failed/)
+  assert.match(stdout, /compose-config-stderr: suppressed/)
+  assert.doesNotMatch(`${stdout}\n${stderr}`, new RegExp(rawSentinel))
   assert.doesNotMatch(stdout, NO_CONTAINMENT_PASS)
 })
 
@@ -656,23 +926,189 @@ test('containment behavior 6: an unexpected MODE fails closed inside the heredoc
   assert.equal(log.trim(), '', 'bad mode must fail before any docker invocation')
 })
 
+test('containment behavior 6b: an unexpected POSTURE fails closed before any observation', () => {
+  const { status, stdout, log } = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'garbage',
+  })
+  assert.equal(status, 2)
+  assert.match(stdout, /unexpected posture 'garbage'/)
+  assert.doesNotMatch(stdout, NO_CONTAINMENT_PASS)
+  assert.equal(log.trim(), '', 'bad posture must fail before any docker invocation')
+})
+
 test('containment behavior 7: postdeploy-full still fails on a running-env flag=true (Leg 1 load-bearing in full, exit 1)', () => {
   const { status, stdout, log } = runRemote({
     target: 'production',
     mode: 'postdeploy-full',
     stub: {
-      STUB_ENV: `${CLEAN_ENV}\nMULTITABLE_ENABLE_WRITER_FENCE=1`,
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot([], {
+        MULTITABLE_ENABLE_WRITER_FENCE: 'one',
+      }),
     },
   })
   assert.equal(status, 1)
-  assert.match(stdout, /\[running\] MULTITABLE_ENABLE_WRITER_FENCE=1/)
-  assert.match(stdout, /CONTAINMENT BREACH/)
+  assert.match(stdout, /\[running\] MULTITABLE_ENABLE_WRITER_FENCE=one/)
+  assert.match(stdout, /POSTURE MISMATCH/)
   assert.match(stdout, /VERDICT: FAIL/)
   assert.doesNotMatch(stdout, NO_CONTAINMENT_PASS)
   // The helper still ran (full mode) — proving the FAIL is Leg 1, not a skip.
   assert.ok(
     log.includes(HELPER_CALL),
     'full mode runs the helper; the FAIL here originates in Leg 1, not a helper skip',
+  )
+})
+
+const POSTURE_FLAGS = {
+  inert: [],
+  'l1-armed': [],
+  'l2-fence': ['MULTITABLE_ENABLE_WRITER_FENCE'],
+  'l2-checkpoint': [
+    'MULTITABLE_ENABLE_WRITER_FENCE',
+    'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+  ],
+  'l3-strict': [
+    'MULTITABLE_ENABLE_WRITER_FENCE',
+    'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+  ],
+  'l4-revert': [
+    'MULTITABLE_ENABLE_WRITER_FENCE',
+    'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    'MULTITABLE_ENABLE_SHEET_REVERT',
+  ],
+  'l5-reset': [
+    'MULTITABLE_ENABLE_WRITER_FENCE',
+    'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+    'MULTITABLE_ENABLE_SHEET_REVERT',
+    'MULTITABLE_ENABLE_PIT_RESET',
+  ],
+}
+
+test('rung witness: every posture requires its exact trigger state and five-flag set', () => {
+  for (const [posture, activeFlags] of Object.entries(POSTURE_FLAGS)) {
+    const result = runRemote({
+      target: 'production',
+      mode: 'postdeploy-full',
+      posture,
+      stub: {
+        STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(activeFlags),
+        STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(activeFlags),
+      },
+    })
+    assert.equal(
+      result.status,
+      0,
+      `${posture} must PASS its exact posture:\n${result.stdout}\n${result.stderr}`,
+    )
+    assert.match(result.stdout, new RegExp(`PASS \\(postdeploy-full\\).*'${posture}'`))
+    assert.match(
+      result.log,
+      new RegExp(
+        `--expected-trigger-state=${posture === 'inert' ? 'disabled' : 'armed'}`,
+      ),
+    )
+  }
+})
+
+test('rung witness: representative missing and extra flags fail each ladder boundary', () => {
+  const mutations = [
+    {
+      posture: 'l2-fence',
+      flags: [
+        'MULTITABLE_ENABLE_WRITER_FENCE',
+        'MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION',
+      ],
+      expected: /MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true — UNEXPECTED ACTIVE/,
+    },
+    {
+      posture: 'l2-checkpoint',
+      flags: ['MULTITABLE_ENABLE_WRITER_FENCE'],
+      expected:
+        /MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: expected ACTIVE\(true\), observed state=unset/,
+    },
+    {
+      posture: 'l3-strict',
+      flags: ['MULTITABLE_HISTORY_CONTIGUITY_STRICT'],
+      expected:
+        /MULTITABLE_ENABLE_WRITER_FENCE: expected ACTIVE\(true\), observed state=unset/,
+    },
+    {
+      posture: 'l4-revert',
+      flags: [
+        'MULTITABLE_ENABLE_WRITER_FENCE',
+        'MULTITABLE_ENABLE_SHEET_REVERT',
+      ],
+      expected:
+        /MULTITABLE_HISTORY_CONTIGUITY_STRICT: expected ACTIVE\(true\), observed state=unset/,
+    },
+    {
+      posture: 'l5-reset',
+      flags: [
+        'MULTITABLE_ENABLE_WRITER_FENCE',
+        'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
+        'MULTITABLE_ENABLE_SHEET_REVERT',
+      ],
+      expected:
+        /MULTITABLE_ENABLE_PIT_RESET: expected ACTIVE\(true\), observed state=unset/,
+    },
+  ]
+
+  for (const { posture, flags, expected } of mutations) {
+    const result = runRemote({
+      target: 'production',
+      mode: 'postdeploy-full',
+      posture,
+      stub: {
+        STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(flags),
+        STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS[posture]),
+      },
+    })
+    assert.equal(result.status, 1, `${posture} mutation must fail`)
+    assert.match(result.stdout, expected)
+    assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+  }
+})
+
+test('rung witness: wrong trigger state and malformed classifier output fail closed', () => {
+  const wrongTriggerState = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l1-armed',
+    stub: { STUB_HELPER_OUT: schemaPassLineDisabled[1] },
+  })
+  assert.equal(wrongTriggerState.status, 1)
+  assert.match(wrongTriggerState.stdout, /did not emit its exact PASS sentinel/)
+
+  const duplicateRow = runRemote({
+    target: 'production',
+    mode: 'predeploy-flags',
+    posture: 'inert',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: `${flagSnapshot()}\nMULTITABLE_ENABLE_WRITER_FENCE\ttrue`,
+    },
+  })
+  assert.equal(duplicateRow.status, 1)
+  assert.match(duplicateRow.stdout, /flag snapshot count=6, expected=5/)
+})
+
+test('target=both observes both exact containers and runs the full helper twice', () => {
+  const result = runRemote({
+    target: 'both',
+    mode: 'postdeploy-full',
+    posture: 'l1-armed',
+    stub: {
+      STUB_PS_NAMES: 'metasheet-backend\nmetasheet-staging-backend',
+    },
+  })
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /-- container: metasheet-backend/)
+  assert.match(result.stdout, /-- container: metasheet-staging-backend/)
+  assert.match(result.stdout, /containers expected: 2/)
+  assert.equal(
+    result.log.split(HELPER_CALL).length - 1,
+    2,
+    'postdeploy-full target=both must invoke the schema helper once per expected container',
   )
 })
 

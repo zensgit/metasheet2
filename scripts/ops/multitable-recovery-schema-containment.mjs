@@ -34,6 +34,8 @@ const AUTHORITY_FUNCTION_NAMES = [
   ...AUTHORITY_TRIGGER_FUNCTIONS,
 ]
 
+const EXPECTED_TRIGGER_STATES = new Set(['disabled', 'armed'])
+
 function triggerArgsHex(...args) {
   return Buffer.from(args.map((arg) => `${arg}\0`).join('')).toString('hex')
 }
@@ -565,9 +567,22 @@ function canonicalSnapshot(snapshot) {
   }
 }
 
-function expectedSchemaSnapshot() {
+function normalizeExpectedTriggerState(value = 'disabled') {
+  const normalized = String(value).trim().toLowerCase()
+  if (!EXPECTED_TRIGGER_STATES.has(normalized)) {
+    throw new TypeError('expected trigger state must be disabled or armed')
+  }
+  return normalized
+}
+
+function expectedSchemaSnapshot(expectedTriggerState = 'disabled') {
+  const triggerState = normalizeExpectedTriggerState(expectedTriggerState)
+  const enabled = triggerState === 'armed' ? 'O' : 'D'
   return canonicalSnapshot({
-    authorityTriggers: EXPECTED_AUTHORITY_TRIGGERS,
+    authorityTriggers: EXPECTED_AUTHORITY_TRIGGERS.map((trigger) => ({
+      ...trigger,
+      enabled,
+    })),
     authorityFunctions: EXPECTED_AUTHORITY_FUNCTIONS,
   })
 }
@@ -576,9 +591,10 @@ function fingerprint(value) {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
 }
 
-function assessSchemaSnapshot(snapshot) {
+function assessSchemaSnapshot(snapshot, { expectedTriggerState = 'disabled' } = {}) {
+  const triggerState = normalizeExpectedTriggerState(expectedTriggerState)
   const actual = canonicalSnapshot(snapshot)
-  const expected = expectedSchemaSnapshot()
+  const expected = expectedSchemaSnapshot(triggerState)
   const checks = [
     {
       id: 'recovery-authority-triggers',
@@ -615,6 +631,7 @@ function assessSchemaSnapshot(snapshot) {
   return {
     ok: checks.every((check) => check.ok),
     checks,
+    expectedTriggerState: triggerState,
   }
 }
 
@@ -633,8 +650,10 @@ function renderAssessment(assessment) {
   }
   lines.push(
     assessment.ok
-      ? 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links'
-      : 'VERDICT: FAIL - recovery schema posture is missing, unexpectedly enabled, fingerprint-drifted, or meta_links.foreign_record_id carries a foreign key',
+      ? assessment.expectedTriggerState === 'armed'
+        ? 'VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links'
+        : 'VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links'
+      : 'VERDICT: FAIL - recovery schema posture is missing, trigger-state-mismatched, fingerprint-drifted, or meta_links.foreign_record_id carries a foreign key',
   )
   return lines.join('\n')
 }
@@ -702,7 +721,19 @@ async function queryRecoverySchemaSnapshot(databaseUrl) {
 async function runSchemaContainment({
   env = process.env,
   querySnapshot = queryRecoverySchemaSnapshot,
+  expectedTriggerState = 'disabled',
 } = {}) {
+  let triggerState
+  try {
+    triggerState = normalizeExpectedTriggerState(expectedTriggerState)
+  } catch {
+    return {
+      exitCode: 2,
+      output:
+        'VERDICT: FAIL - expected-trigger-state must be exactly disabled or armed',
+    }
+  }
+
   const databaseUrl = String(env.DATABASE_URL ?? '').trim()
   if (!databaseUrl) {
     return {
@@ -714,7 +745,9 @@ async function runSchemaContainment({
 
   try {
     const snapshot = await querySnapshot(databaseUrl)
-    const assessment = assessSchemaSnapshot(snapshot)
+    const assessment = assessSchemaSnapshot(snapshot, {
+      expectedTriggerState: triggerState,
+    })
     return {
       exitCode: assessment.ok ? 0 : 1,
       output: renderAssessment(assessment),
@@ -728,8 +761,23 @@ async function runSchemaContainment({
   }
 }
 
+function parseExpectedTriggerStateArg(argv = process.argv.slice(2)) {
+  if (argv.length === 0) return 'disabled'
+  if (argv.length !== 1) return null
+  const match = argv[0].match(/^--expected-trigger-state=(disabled|armed)$/)
+  return match?.[1] ?? null
+}
+
 async function main() {
-  const result = await runSchemaContainment()
+  const expectedTriggerState = parseExpectedTriggerStateArg()
+  if (!expectedTriggerState) {
+    process.stderr.write(
+      'VERDICT: FAIL - expected-trigger-state must be exactly disabled or armed\n',
+    )
+    process.exitCode = 2
+    return
+  }
+  const result = await runSchemaContainment({ expectedTriggerState })
   const stream = result.exitCode === 0 ? process.stdout : process.stderr
   stream.write(`${result.output}\n`)
   process.exitCode = result.exitCode
@@ -747,12 +795,15 @@ export {
   AUTHORITY_TRIGGER_SNAPSHOT_QUERY,
   EXPECTED_AUTHORITY_FUNCTIONS,
   EXPECTED_AUTHORITY_TRIGGERS,
+  EXPECTED_TRIGGER_STATES,
   assessSchemaSnapshot,
   canonicalFunction,
   canonicalSnapshot,
   canonicalTrigger,
   expectedSchemaSnapshot,
   fingerprint,
+  normalizeExpectedTriggerState,
+  parseExpectedTriggerStateArg,
   queryRecoverySchemaSnapshot,
   renderAssessment,
   runSchemaContainment,
