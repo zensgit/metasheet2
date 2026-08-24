@@ -147,6 +147,42 @@ else throws), surfaced as `context.config.stockPreparationTableActions` (`:82-85
 works as-is**. `target.objectId` defaults to the production canonical object, which apply always
 rejects — see step 5.
 
+#### `target.fieldIdMap` is optional to *validate* but REQUIRED to *run*
+
+Config validation accepts the three keys above. A live dry run against a real multitable target
+does **not**: it fails with **HTTP 500 `VALIDATION_ERROR` / `Unknown fieldId: projectNo`**.
+
+`readExistingStockPreparationRows` builds its filter as
+`{ [mapFieldName('projectNo', target.fieldIdMap)]: projectNo }`
+(`lib/stock-preparation-table-actions.cjs:449-456`). With no `fieldIdMap` that resolves to the
+*logical* key `projectNo`, and the records service only ever speaks *physical* ids — an unknown
+key is rejected outright by `normalizeQueryFilters`
+(`packages/core-backend/src/multitable/query-service.ts:135`). The `'logical'` auto-resolution
+mode described at `lib/stock-preparation-table-actions.cjs:476-496` is used by the *other*
+stock-prep readers; this C4 table-action path is the `'pre_mapped'` side and consumes the
+**operator-configured** map, so it must be supplied.
+
+Derive it — do not hand-write it. Physical ids are
+`fld_<sha1(projectId:objectId:fieldId)>` via `getObjectFieldId`
+(`packages/core-backend/src/multitable/provisioning.ts:163-165`), where `projectId` is
+`` `${tenantId}:integration-core` `` (`lib/http-routes.cjs:648-651`) — *not* anything you pass in
+the request. For all 25 logical fields of the sandbox template:
+
+```js
+const { getObjectFieldId } = require('<repo>/packages/core-backend/src/multitable/provisioning')
+const prov = require('<repo>/plugins/plugin-integration-core/lib/stock-preparation-target-provisioning.cjs')
+
+const template = prov.__internals.sandboxStockPreparationTemplate({ objectId: '<your-sandbox-object-id>' })
+const fieldIdMap = Object.fromEntries(
+  prov.__internals.templateFieldIds(template).map((f) => [f, getObjectFieldId(projectId, objectId, f)]),
+)
+```
+
+Cross-check the result against `SELECT id FROM meta_fields WHERE sheet_id = '<your-sheet-id>'`;
+it should be an exact 25 ↔ 25 bijection. Supply **every** field — the completeness gate at
+`:265-294` rejects a partial map with 422 `TARGET_SCHEMA_INCOMPLETE` once any explicit binding
+is present.
+
 Optional read-plan override, if you renamed anything in the DDL (add it under `source.readPlan`;
 `sourceKind` must match `source.kind`, `:142-149`):
 
@@ -329,6 +365,22 @@ Each of these needs its own fixture and would make the happy path red:
 - The ERP/K3 material side, the MVP snapshot tables, and the large-BOM job routes.
 
 ## What a live run still has to prove
+
+> **Update — first live run, 2026-08-24.** Items 1-6 below have now been executed end to end
+> against a real local PostgreSQL 15 and a real local MetaSheet, on synthetic data only.
+> Both pulls reproduced the counts this README predicts, **exactly**:
+> pull #1 `add 7 / update 0 / skip 0 / inactive 0 / manual_confirm 0` (`rowsExpanded 7`,
+> all 7 objects in `readObjects`), pull #2 `add 0 / update 3 / skip 3 / inactive 1 /
+> manual_confirm 0`. Both applied: 7 created, then 3 updated + 1 marked inactive + 3 skipped.
+> The 1 → 3 sub-assembly change rolled up into exactly 3 `update` decisions whose
+> `changedFields` were `["rawQuantity","totalQuantity"]` and nothing else; every
+> human-preserved column stayed empty. `numeric` came back from node-postgres as a scaled
+> string and the planner handled it as modelled. Unquoted-identifier folding worked as
+> designed (the DDL's `DN_PDM_BomDetailsInfo` resolved to `dn_pdm_bomdetailsinfo`).
+>
+> One thing the fixture did **not** predict: the table-action config needs
+> `target.fieldIdMap` or the dry run 500s. See "**`target.fieldIdMap` is optional to
+> validate but REQUIRED to run**" in section 2c.
 
 The guard test is static and in-memory. It cannot and does not verify:
 
