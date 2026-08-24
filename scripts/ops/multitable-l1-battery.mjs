@@ -612,11 +612,22 @@ export function classifyRoleCascadeBinding(observed, { canonicalSchema } = {}) {
       detail: `the observed database has no ordinary table \`${schema}.roles\`, so the witness query binds to nothing; zero rows there is not evidence of absence`,
     }
   }
+  const seen = row.session_roles_schema == null ? null : row.session_roles_schema
   if (row.session_binds_canonical !== true) {
-    const seen = row.session_roles_schema == null ? null : String(row.session_roles_schema)
     return {
       door: ROLE_CASCADE_BINDING_DOORS.bindingMismatch,
       detail: `this session's own \`roles\` resolves to schema ${JSON.stringify(seen)}, not the canonical \`${schema}\` — the observed environment is not the one being certified, so no verdict may be drawn from it`,
+    }
+  }
+  // CROSS-FIELD CONSISTENCY, not just per-field types. `session_binds_canonical` and
+  // `session_roles_schema` are two views of ONE fact, and nothing forced them to agree: a payload
+  // asserting `true` while naming `null`, `''`, or another schema entirely was accepted and
+  // certified ABSENT / exit 0. The flag is a claim; the schema name is the evidence for it. An
+  // observation whose own two fields contradict each other is unreadable, whichever one is lying.
+  if (seen !== schema) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.bindingMismatch,
+      detail: `the observation claims the session binds the canonical \`roles\` but names its schema as ${JSON.stringify(seen)}, not \`${schema}\` — the payload contradicts itself, so nothing may be certified from it`,
     }
   }
   const visible = readCatalogCount(row.visible_roles_relations)

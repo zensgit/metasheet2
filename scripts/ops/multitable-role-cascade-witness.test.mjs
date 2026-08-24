@@ -345,7 +345,46 @@ test('the protocol is VALIDATED, not coerced — malformed payloads are unreadab
     const verdict = verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: junk } }))
     assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `session_roles_schema=${JSON.stringify(junk)}`)
   }
+
+  // The three IDENTIFIER fields must be non-empty, not merely strings. This invariant predates the
+  // type check above and was swallowed when the coercion block was replaced: `''` is a string, so a
+  // row naming no schema / no table / no constraint parsed cleanly and, with a legal non-writing
+  // `confdeltype`, reported CASCADE ABSENT / exit 0. Verified against head 826352dc72.
+  for (const field of ['child_schema', 'child_table', 'conname']) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'a', [field]: '' }
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `an empty ${field} was accepted`)
+    assert.equal(verdict.exitCode, 2, `an empty ${field} did not fail closed`)
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `empty ${field}`)
+    assert.match(verdict.detail, new RegExp(`empty ${field}`), 'the detail must name the offending field')
+  }
+  // …and the same row WITHOUT the emptying still classifies, so the case above is discriminating.
+  assert.equal(
+    verdictFor(observation({ presence: { ...bound, ...counts }, rows: [{ child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'a' }] })).verdict,
+    'ABSENT',
+  )
 })
+
+test('the binding fields must AGREE with each other, not merely have the right types', () => {
+  // `session_binds_canonical` and `session_roles_schema` are two views of ONE fact, and nothing
+  // forced them to agree. A payload asserting `true` while naming `null`, `''`, or another schema
+  // was accepted and certified ABSENT / exit 0 — verified against head 826352dc72. The flag is a
+  // claim; the schema name is the evidence for it, and a self-contradicting observation is
+  // unreadable whichever half is lying.
+  const counts = { visible_roles_relations: 1, canonical_exact_carriers: 9, recovery_authority_relations: 9, roles_referencing_fks: 1 }
+  const bound = { canonical_schema: 'public', canonical_roles_present: true, session_binds_canonical: true }
+  for (const claimed of [null, '', 'evil', 'PUBLIC', ' public', 'public ']) {
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: claimed } }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `session_roles_schema=${JSON.stringify(claimed)} was accepted`)
+    assert.equal(verdict.exitCode, 2, `session_roles_schema=${JSON.stringify(claimed)} did not fail closed`)
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.bindingMismatch, `session_roles_schema=${JSON.stringify(claimed)}`)
+    assert.match(verdict.detail, /contradicts itself/)
+  }
+  // POSITIVE CONTROL: the agreeing pair still passes, or the assertions above prove nothing.
+  assert.equal(verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: 'public' } })).verdict, 'ABSENT')
+})
+
+
 
 test('the legal delete-action letters are a SUPERSET of the child-write letters', () => {
   // Two sets with one job each: "is this an action at all" and "does it write the child". If the

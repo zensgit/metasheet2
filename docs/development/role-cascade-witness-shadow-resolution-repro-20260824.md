@@ -277,3 +277,51 @@ Corrected; that sentence would have pointed the next maintainer back at the defe
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
 | `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
 | `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |
+
+
+## Fourth review round — two more ways a payload could certify itself
+
+Confirmed against head `826352dc72`, both **ABSENT / exit 0**:
+
+1. **Empty identifier fields.** `child_schema`, `child_table` or `conname` set to `""` parsed
+   cleanly — `""` is a string, so the new type check passed — and with a legal non-writing
+   `confdeltype` the run reported absence. This invariant (all three non-empty) **already existed**
+   and was swallowed when the coercion block was replaced. A regression introduced by the previous
+   round's fix, not a pre-existing hole.
+2. **Self-contradicting binding fields.** `session_binds_canonical: true` together with
+   `session_roles_schema` of `null`, `""`, or `"evil"` was accepted. Each field was individually
+   well-typed; nothing required them to agree. The flag is a *claim*; the schema name is the
+   *evidence* for it.
+
+**Fix.** The three identifier fields must be non-empty (`confdeltype` needs no separate check —
+`""` is not a legal delete-action letter). And `classifyRoleCascadeBinding` — the shared
+classifier, so the battery gets it too — now requires `session_roles_schema` to equal the
+dynamically-passed `canonicalSchema` exactly whenever the flag claims a canonical binding. An
+observation whose own two fields contradict each other is unreadable, whichever half is lying.
+
+| mutation | reds |
+| --- | --- |
+| non-empty identifier check removed | witness |
+| cross-field consistency removed | witness **and** battery |
+
+Positive controls for both: the same rows without the emptying still classify ABSENT, and the
+agreeing `session_roles_schema: 'public'` pair still passes — otherwise the negatives prove nothing.
+
+### Merge
+
+`#5148` landed on main and added its own 「五次更新」 to the owner decision sheet (the executed
+staging migration window, `Applied: 337 / Pending: 0`). Resolved semantically rather than
+textually: main's entry keeps the number, this branch's erratum is renumbered **六次更新** and moved
+behind it, its cross-references re-anchored to main's current wording, and it now states explicitly
+that it does **not** touch the staging-window fact — that is a separate, still-standing claim.
+
+## Final state
+
+| lane | arming | result |
+| --- | --- | --- |
+| `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 70/70, 0 skipped |
+| `multitable-l1-battery.test.mjs` | — | 67/67 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
+| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |

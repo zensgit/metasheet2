@@ -378,6 +378,14 @@ export function parseWitnessObservation(text) {
   // cd0977e3c0. A value the catalog could not have produced is an UNREADABLE observation, never an
   // observation of no-write.
   const ROW_FIELDS = ['child_schema', 'child_table', 'conname', 'confdeltype']
+  // The three identifier fields must also be NON-EMPTY. This invariant predates the type check and
+  // was swallowed when the coercion block was replaced: `''` is a string, so a row naming no schema,
+  // no table or no constraint parsed cleanly and — with a legal non-writing `confdeltype` — was
+  // reported as CASCADE ABSENT / exit 0. An observation that cannot say WHICH constraint, on WHICH
+  // table, in WHICH schema was written by WHICH action is an unreadable observation, not a readable
+  // observation of nothing. (`confdeltype` needs no separate emptiness check: `''` is not one of
+  // the legal delete-action letters, so the enum check below rejects it.)
+  const NON_EMPTY_ROW_FIELDS = ['child_schema', 'child_table', 'conname']
   for (const row of rows) {
     for (const field of ROW_FIELDS) {
       if (typeof row[field] !== 'string') {
@@ -385,6 +393,15 @@ export function parseWitnessObservation(text) {
           ok: false,
           reason: INDETERMINATE_REASONS.unparseable,
           detail: `a ROWS entry has a non-string ${field} (${typeof row[field]}); the catalog projection is all text, so this payload did not come from the probe`,
+        }
+      }
+    }
+    for (const field of NON_EMPTY_ROW_FIELDS) {
+      if (row[field] === '') {
+        return {
+          ok: false,
+          reason: INDETERMINATE_REASONS.unparseable,
+          detail: `a ROWS entry has an empty ${field}; the catalog cannot produce an unnamed relation or constraint, so this observation cannot be read`,
         }
       }
     }

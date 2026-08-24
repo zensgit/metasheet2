@@ -1508,6 +1508,16 @@ test('the four binding doors are BEHAVIOURAL: each closes on its own input, and 
     assert.match(result.detail, testCase.says)
   }
 
+  // CROSS-FIELD CONSISTENCY: the flag and the schema name are two views of one fact. A row
+  // asserting `session_binds_canonical: true` while naming a different schema (or none) is
+  // self-contradicting and must close the binding door, whichever half is lying.
+  for (const claimed of [null, undefined, '', 'evil', 'PUBLIC', ' public']) {
+    const contradiction = classifyRoleCascadeBinding({ ...BINDING_ALL_OPEN, session_roles_schema: claimed }, opts)
+    assert.ok(contradiction, `a contradicting session_roles_schema=${JSON.stringify(claimed)} was accepted`)
+    assert.equal(contradiction.door, ROLE_CASCADE_BINDING_DOORS.bindingMismatch, JSON.stringify(claimed))
+    assert.match(contradiction.detail, /contradicts itself/)
+  }
+
   // ORDER IS PART OF THE CONTRACT: a database missing the canonical relation must not be reported
   // as a binding mismatch, and a mismatch must not be reported as ambiguity.
   assert.equal(
