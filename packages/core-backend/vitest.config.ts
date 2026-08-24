@@ -1505,6 +1505,12 @@ export default defineConfig({
       // wired as a WHOLE FILE sibling of the content/assessment + watch-progress
       // schema gates in plugin-tests.yml after db:migrate on the 20.x leg.
       'tests/integration/elearning-watch-progress-service.db.test.ts',
+      // E-learning V0.1 manual direct-assignment service gate. Requires real
+      // PostgreSQL (idempotency, membership, course-head/version locks).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the content/assessment + watch
+      // gates in plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-direct-assignment.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.

@@ -16,13 +16,15 @@ const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/elearning-v01-content-assessment-schema.db.test.ts'
 const WATCH_FILE = 'tests/integration/elearning-v01-watch-progress-schema.db.test.ts'
 const SERVICE_FILE = 'tests/integration/elearning-watch-progress-service.db.test.ts'
+const ASSIGNMENT_FILE = 'tests/integration/elearning-direct-assignment.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const SUITE = join(repoRoot, 'packages/core-backend', FILE)
 const WATCH_SUITE = join(repoRoot, 'packages/core-backend', WATCH_FILE)
 const SERVICE_SUITE = join(repoRoot, 'packages/core-backend', SERVICE_FILE)
-const GATE_FILES = [FILE, WATCH_FILE, SERVICE_FILE]
+const ASSIGNMENT_SUITE = join(repoRoot, 'packages/core-backend', ASSIGNMENT_FILE)
+const GATE_FILES = [FILE, WATCH_FILE, SERVICE_FILE, ASSIGNMENT_FILE]
 const CONTENT_MIGRATION = join(
   repoRoot,
   'packages/core-backend/src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment.ts',
@@ -70,6 +72,7 @@ test('plugin-tests.yml runs schema and watch-service gates as whole-file sibling
   assert.equal(wired.includes(FILE), true)
   assert.equal(wired.includes(WATCH_FILE), true)
   assert.equal(wired.includes(SERVICE_FILE), true)
+  assert.equal(wired.includes(ASSIGNMENT_FILE), true)
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'schema gate step must not use a -t filter')
@@ -90,6 +93,7 @@ test('wired suites and content/watch migrations exist on disk', () => {
   assert.ok(existsSync(SUITE), `wired suite packages/core-backend/${FILE} must exist on disk`)
   assert.ok(existsSync(WATCH_SUITE), `wired suite packages/core-backend/${WATCH_FILE} must exist on disk`)
   assert.ok(existsSync(SERVICE_SUITE), `wired suite packages/core-backend/${SERVICE_FILE} must exist on disk`)
+  assert.ok(existsSync(ASSIGNMENT_SUITE), `wired suite packages/core-backend/${ASSIGNMENT_FILE} must exist on disk`)
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
@@ -100,6 +104,7 @@ test('schema and watch-service gate sources throw when DATABASE_URL is missing (
     ['content/assessment', SUITE],
     ['watch-progress', WATCH_SUITE],
     ['watch-progress-service', SERVICE_SUITE],
+    ['direct-assignment-service', ASSIGNMENT_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)
@@ -142,6 +147,34 @@ test('watch-service gate uses dual PoolClient pg_locks barriers for start and he
   assert.match(src, /startElearningWatch\(watchDbFromClient/)
   assert.match(src, /recordElearningHeartbeat\(watchDbFromClient/)
   assert.match(src, /elearning-watch:insert-evidence/)
+  assert.equal(src.includes('new Client('), false)
+  assert.equal(src.includes('playwright'), false)
+  assert.equal(src.includes('setTimeout(res, 500)'), false)
+  assert.equal(src.includes('setTimeout(resolve, 500)'), false)
+})
+
+test('direct-assignment gate uses dual PoolClient pg_locks barriers for duplicate, course-head withdrawal, and platform-user deactivation', () => {
+  const src = readFileSync(ASSIGNMENT_SUITE, 'utf8')
+  const service = readFileSync(join(repoRoot, 'packages/core-backend/src/services/elearning-direct-assignment.ts'), 'utf8')
+  assert.match(src, /type PoolClient/)
+  assert.match(src, /pool\.connect\(\)/)
+  assert.match(src, /holder: PoolClient/)
+  assert.match(src, /waiter: PoolClient/)
+  assert.match(src, /pg_locks/)
+  assert.match(src, /lock_timeout/)
+  assert.match(src, /pg_blocking_pids/)
+  assert.match(src, /runLockBarrier/)
+  assert.match(src, /assignDbFromClient/)
+  assert.match(src, /assignElearningDirect\(assignDbFromClient/)
+  assert.match(src, /elearning-assign:insert-member/)
+  assert.match(src, /INSERT INTO users/)
+  assert.match(src, /UPDATE users SET is_active = false/)
+  assert.match(src, /inactive-platform/)
+  assert.match(service, /elearning-assign:load-membership/)
+  assert.match(service, /JOIN users u ON u\.id = uo\.user_id/)
+  assert.match(service, /uo\.is_active = true/)
+  assert.match(service, /u\.is_active = true/)
+  assert.match(service, /FOR SHARE OF u, uo/)
   assert.equal(src.includes('new Client('), false)
   assert.equal(src.includes('playwright'), false)
   assert.equal(src.includes('setTimeout(res, 500)'), false)
