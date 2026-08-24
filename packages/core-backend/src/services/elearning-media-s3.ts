@@ -1,13 +1,20 @@
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
   type S3ClientConfig,
 } from '@aws-sdk/client-s3'
 
 import {
+  assertElearningMediaListLimit,
   assertElearningMediaStorageKey,
+  ELEARNING_MEDIA_STORAGE_PREFIX,
+  nonnegativeAgeMs,
+  type ElearningMediaBlobPage,
+  type ElearningMediaBlobRef,
   type KeyAddressedElearningObjectStore,
 } from './elearning-media-storage'
 
@@ -102,6 +109,66 @@ export class ElearningMediaS3Provider implements KeyAddressedElearningObjectStor
       Key: storageKey,
     }))
   }
+
+  async hasMediaBlob(storageKey: string): Promise<boolean> {
+    assertElearningMediaStorageKey(storageKey)
+    try {
+      await this.client.send(new HeadObjectCommand({
+        Bucket: this.config.bucket,
+        Key: storageKey,
+      }))
+      return true
+    } catch (err) {
+      if (isS3MissingObject(err)) return false
+      throw new Error('elearning media blob existence check failed')
+    }
+  }
+
+  async listMediaBlobsPage(
+    cursor: string | undefined,
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<ElearningMediaBlobPage> {
+    assertElearningMediaListLimit(limit)
+    const continuationToken = normalizeS3ContinuationToken(cursor)
+    let response: S3ListObjectsV2Response
+    try {
+      response = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.config.bucket,
+        Prefix: ELEARNING_MEDIA_STORAGE_PREFIX,
+        MaxKeys: limit,
+        ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
+      })) as S3ListObjectsV2Response
+    } catch {
+      throw new Error('elearning media listing failed')
+    }
+    const contents = Array.isArray(response.Contents) ? response.Contents : []
+    if (contents.length > limit) {
+      throw new RangeError('elearning media listing exceeded the requested page bound')
+    }
+    const blobs: ElearningMediaBlobRef[] = []
+    for (const object of contents) {
+      const key = object.Key
+      if (typeof key !== 'string') {
+        throw new RangeError('storage key is outside the elearning media scope — refused')
+      }
+      if (key.endsWith('/')) continue
+      assertElearningMediaStorageKey(key)
+      const lastModified = object.LastModified
+      const ageMs = lastModified instanceof Date && !Number.isNaN(lastModified.getTime())
+        ? nonnegativeAgeMs(lastModified.getTime(), now)
+        : nonnegativeAgeMs(now.getTime(), now)
+      blobs.push({ key, ageMs })
+    }
+    if (response.IsTruncated) {
+      const nextCursor = response.NextContinuationToken
+      if (typeof nextCursor !== 'string' || nextCursor === '') {
+        throw new Error('elearning media listing is truncated without a continuation token')
+      }
+      return { blobs, nextCursor }
+    }
+    return { blobs }
+  }
 }
 
 export function createElearningMediaS3Provider(
@@ -112,4 +179,30 @@ export function createElearningMediaS3Provider(
   return config
     ? new ElearningMediaS3Provider(config, sender)
     : null
+}
+
+interface S3ListObjectsV2Response {
+  Contents?: Array<{ Key?: string; LastModified?: Date }>
+  IsTruncated?: boolean
+  NextContinuationToken?: string
+}
+
+function normalizeS3ContinuationToken(cursor: string | undefined): string | undefined {
+  if (cursor === undefined || cursor === '') return undefined
+  return cursor
+}
+
+function isS3MissingObject(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const rec = err as {
+    name?: unknown
+    Code?: unknown
+    code?: unknown
+    $metadata?: { httpStatusCode?: unknown }
+  }
+  if (rec.$metadata?.httpStatusCode === 404) return true
+  for (const field of [rec.name, rec.Code, rec.code]) {
+    if (field === 'NotFound' || field === 'NoSuchKey') return true
+  }
+  return false
 }

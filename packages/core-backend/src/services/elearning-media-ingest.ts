@@ -3,7 +3,10 @@
  * Order: reserve (uploading) → CAS probing → probe → store.put (valid probe only) → CAS ready.
  * Probe rejection returns rejected only after probing→rejected CAS succeeds; never stores.
  * Store failure must delete; delete resolve then CAS rejected; delete throw leaves probing.
- * Every CAS miss or DB error returns 500. Never reject a row whose object may still be present.
+ * Ready CAS miss after put must delete before 500. Delete resolve then best-effort probing→rejected
+ * so quota is released while the row is still probing. Delete throw still 500 and does not reject
+ * a possibly-present blob (later stale/rejected reconciliation recovers). Every CAS miss or DB
+ * error returns 500. Never reject a row whose object may still be present.
  */
 import { createHash, randomUUID } from 'node:crypto'
 
@@ -153,7 +156,15 @@ export async function ingestElearningMediaUpload(
   }
 
   const ready = await casStatus(input.db, input.orgId, id, 'probing', 'ready', probe.durationMs)
-  if (!ready) internalError()
+  if (!ready) {
+    try {
+      await input.store.delete(storageKey)
+    } catch {
+      internalError()
+    }
+    await casStatus(input.db, input.orgId, id, 'probing', 'rejected', null)
+    internalError()
+  }
 
   return {
     id,

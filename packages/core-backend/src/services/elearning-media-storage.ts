@@ -3,10 +3,23 @@
  * Generic StorageService is local-only and is never production media storage.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import * as path from 'node:path'
 
 export const ELEARNING_MEDIA_STORAGE_PREFIX = 'elearning-media/'
+export const ELEARNING_MEDIA_LIST_LIMIT_MIN = 1
+export const ELEARNING_MEDIA_LIST_LIMIT_MAX = 1000
+
+export interface ElearningMediaBlobRef {
+  key: string
+  /** Nonnegative age in milliseconds relative to the supplied (or current) time. */
+  ageMs: number
+}
+
+export interface ElearningMediaBlobPage {
+  blobs: ElearningMediaBlobRef[]
+  nextCursor?: string
+}
 
 export interface ElearningMediaStore {
   put(storageKey: string, content: Buffer, contentType?: string): Promise<void>
@@ -30,6 +43,27 @@ export function assertElearningMediaStorageKey(storageKey: string): string {
     throw new RangeError('storage key is outside the elearning media scope — refused')
   }
   return storageKey
+}
+
+export function assertElearningMediaListLimit(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < ELEARNING_MEDIA_LIST_LIMIT_MIN || limit > ELEARNING_MEDIA_LIST_LIMIT_MAX) {
+    throw new RangeError('elearning media list limit is out of range — refused')
+  }
+  return limit
+}
+
+export function nonnegativeAgeMs(lastModifiedMs: number, now: Date): number {
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new RangeError('elearning media age clock is invalid')
+  }
+  if (typeof lastModifiedMs !== 'number' || !Number.isFinite(lastModifiedMs)) {
+    throw new RangeError('elearning media last-modified time is invalid')
+  }
+  const ageMs = Math.max(0, Math.floor(now.getTime() - lastModifiedMs))
+  if (!Number.isSafeInteger(ageMs)) {
+    throw new RangeError('elearning media age is invalid')
+  }
+  return ageMs
 }
 
 export class LocalFsElearningMediaStore implements ElearningMediaStore {
@@ -65,6 +99,79 @@ export class LocalFsElearningMediaStore implements ElearningMediaStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
       throw err
+    }
+  }
+
+  async hasBlob(storageKey: string): Promise<boolean> {
+    try {
+      const st = await stat(this.contain(storageKey))
+      return st.isFile()
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+      throw err
+    }
+  }
+
+  async listPage(
+    cursor: string | undefined,
+    limit: number,
+    now: Date = new Date(),
+  ): Promise<ElearningMediaBlobPage> {
+    assertElearningMediaListLimit(limit)
+    const after = this.normalizeListCursor(cursor)
+    const keys = await this.collectPrefixedKeys()
+    const from = after === undefined ? keys : keys.filter((key) => key > after)
+    const pageKeys = from.slice(0, limit)
+    const blobs: ElearningMediaBlobRef[] = []
+    for (const key of pageKeys) {
+      const st = await stat(this.contain(key))
+      blobs.push({ key, ageMs: nonnegativeAgeMs(st.mtimeMs, now) })
+    }
+    if (from.length > limit) {
+      return { blobs, nextCursor: pageKeys[pageKeys.length - 1] }
+    }
+    return { blobs }
+  }
+
+  private normalizeListCursor(cursor: string | undefined): string | undefined {
+    if (cursor === undefined || cursor === '') return undefined
+    this.contain(cursor)
+    return cursor
+  }
+
+  private async collectPrefixedKeys(): Promise<string[]> {
+    const root = path.resolve(this.rootDir)
+    const prefixDir = path.resolve(root, ELEARNING_MEDIA_STORAGE_PREFIX)
+    if (prefixDir !== root && !prefixDir.startsWith(root + path.sep)) {
+      throw new RangeError('storage key escapes the elearning media root — refused')
+    }
+    const keys: string[] = []
+    await this.walkPrefixedFiles(prefixDir, root, keys)
+    keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    return keys
+  }
+
+  private async walkPrefixedFiles(dir: string, root: string, keys: string[]): Promise<void> {
+    let entries
+    try {
+      entries = await readdir(dir, { withFileTypes: true })
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+      throw err
+    }
+    for (const entry of entries) {
+      const resolved = path.resolve(dir, entry.name)
+      if (resolved === root || !resolved.startsWith(root + path.sep)) {
+        throw new RangeError('storage key escapes the elearning media root — refused')
+      }
+      if (entry.isDirectory()) {
+        await this.walkPrefixedFiles(resolved, root, keys)
+        continue
+      }
+      if (!entry.isFile()) continue
+      const rel = path.relative(root, resolved).split(path.sep).join('/')
+      assertElearningMediaStorageKey(rel)
+      keys.push(rel)
     }
   }
 }
