@@ -313,7 +313,7 @@ test('runVerdict reads a real file end to end and renders an auditable summary',
     assert.match(summary, /target: `production`/)
     assert.match(summary, /relation presence \(positive control\): roles=1, recovery_authority_relations=8/)
     // The narrowing is visible as a number, not invisible: FKs excluded for carrying no trigger.
-    assert.match(summary, /foreign keys referencing `roles` in total \(audit only, decides nothing\): 1/)
+    assert.match(summary, /foreign keys referencing `roles` \(audit only, decides nothing\): 1 in total, 1 on a table carrying a recovery-authority trigger/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

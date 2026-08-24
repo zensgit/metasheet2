@@ -480,9 +480,10 @@ export function renderSummary(verdict, { target = 'unknown' } = {}) {
     // pointing at `roles` from tables that have no recovery-authority trigger (view_permissions is
     // the known one); those are seen, counted here, and deliberately excluded from the verdict.
     lines.push(
-      `- foreign keys referencing \`roles\` in total (audit only, decides nothing):`
-      + ` ${verdict.presence.roles_referencing_fks}`
-      + ` — of which ${verdict.rows.length} sit on a table carrying a recovery-authority trigger`,
+      `- foreign keys referencing \`roles\` (audit only, decides nothing):`
+      + ` ${verdict.presence.roles_referencing_fks} in total,`
+      + ` ${verdict.rows.length} on a table carrying a recovery-authority trigger`
+      + ' (the rest cannot fire one and are excluded from the verdict)',
     )
   }
   lines.push('')
