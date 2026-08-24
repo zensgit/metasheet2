@@ -10,7 +10,7 @@
 
 **Workflow**:`Attendance Staging Window Runner`
 (`.github/workflows/attendance-staging-window-runner.yml`,`workflow_dispatch`)
-**head SHA**:`c345c6b405eebe5d9299e2a89d452c907f1aab6b`(两次运行同一 head)
+**head SHA**:`c345c6b405eebe5d9299e2a89d452c907f1aab6b`(四次运行同一 head)
 
 | run | action | 结论 | 起 / 止(UTC) |
 |---|---|---|---|
@@ -33,7 +33,7 @@ runbook 要求的三段全部出现在同一次运行里,顺序即下:
 备份(路径/摘要按 values-free 纪律不转录):
 
 ```
-2026-08-24T05:46:32Z  [window-runner] backup OK: 46095547 bytes (dump stays on host, not uploaded)
+2026-08-24T05:46:32Z  [window-runner] backup OK: 46095547 bytes [sha256 略] (dump stays on host, not uploaded)
 ```
 
 克隆彩排(先只对彩排库应用,真实库不动):
@@ -107,7 +107,7 @@ runbook 要求的三段全部出现在同一次运行里,顺序即下:
 `zzzz20260821091000_add_attendance_org_resolution_shadow_indexes` /
 `zzzz20260821120000_recovery_authority_functions_fix_search_path`
 
-七条之外另有九条(该报告成文后落的,及一条早于 `zzzz` 命名流的):
+七条之外另有九条——**不在该报告题面内**(题面钉于其分析时点;九条中三条实际早于报告落 main,`076_…` 则早于 `zzzz` 命名流):
 
 1. `076_create_integration_stock_prep_pack_installs`
 2. `zzzz20260821100000_add_approval_instance_org_id`
@@ -239,7 +239,7 @@ if (adapter.supportsTransactionalDdl && !this.#props.disableTransactions) {
 全表验证扫描并持 `ACCESS EXCLUSIVE`——同一批里连做两次」,但**没有说这把锁在两次扫描之后仍不释放**。
 
 **更正后的锁模型**:迁移 #1 在 `approval_records` 上取得的 `ACCESS EXCLUSIVE`,
-**一直持有到整批的最后一条迁移提交为止**——本窗口即穿过其后的 **15** 条迁移,而不只是穿过 #3 的扫描。
+**一直持有到整批的最后一条迁移提交为止**——本窗口即自 #1 起跨越同一事务内**含 #1 在内的 15 条**批内迁移(#1 位于 16 条装载序的第 2 位,`076_…` 在其之前;其后还有 **14** 条),而不只是穿过 #3 的扫描。
 `pg_advisory_xact_lock` 同理(事务级)。**锁窗口必须按整批预算,不能按单条迁移预算**;
 批越长,`approval_records` 被独占的时间越长,与该表自身行数无关的那部分时间由批里其余迁移决定。
 

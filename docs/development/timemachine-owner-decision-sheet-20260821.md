@@ -8,7 +8,7 @@
 > 下文 B1 段已按此改写。
 >
 > **2026-08-21 二次更新(fix-forward 已落地)**:两缺陷已修 + 过独立复门(APPROVE @ `ceb0f08def`,#5069);
-> **B1 的代码侧前置:五轮复审后已全部闭合**(2026-08-21)。电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)、建号脚本(F1:重写 #5080 + 提权修复 #5084 `162679992e`,含 login-first + 收敛行为 golden)、F5 readiness、五轮文案收窄——**均已落 main 且过独立复门(运行时代码 APPROVE,无 P1/P2)**。P3-INFO-1 已查证满足。**F2(设 required)、F4(旧 PR 处置)截至 2026-08-24 复核均已完成(见 §D2);剩余是 owner/ops:F3 主机证据、建号/电池实跑、~~staging pending≠0~~、A1 ratify——见下。** 原写「staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得比该报告更新的证据)」,**已更正(见上「五次更新」)**:该窗口已于 2026-08-24T05:44–05:54Z 执行完毕,staging **`Applied: 337 / Pending: 0`**(`run 32694623829` real-apply 段 + `run 32694880864` + 确认跑 `run 32695040817`),此项**不再是剩余项**。剩余 owner/ops 为三项:F3 双主机新指纹证据、建号 + 电池实跑 PASS、A1 ratify。
+> **B1 的代码侧前置:五轮复审后已全部闭合**(2026-08-21)。电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)、建号脚本(F1:重写 #5080 + 提权修复 #5084 `162679992e`,含 login-first + 收敛行为 golden)、F5 readiness、五轮文案收窄——**均已落 main 且过独立复门(运行时代码 APPROVE,无 P1/P2)**。P3-INFO-1 已查证满足。**F2(设 required)、F4(旧 PR 处置)截至 2026-08-24 复核均已完成(见 §D2);剩余是 owner/ops:F3 主机证据、建号/电池实跑、~~staging pending≠0~~、A1 ratify——见下。** 原写「staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得比该报告更新的证据)」,**已更正(见下「五次更新」)**:该窗口已于 2026-08-24T05:44–05:54Z 执行完毕,staging **`Applied: 337 / Pending: 0`**(`run 32694623829` real-apply 段 + `run 32694880864` + 确认跑 `run 32695040817`),此项**不再是剩余项**。剩余 owner/ops 为三项:F3 双主机新指纹证据、建号 + 电池实跑 PASS、A1 ratify。
 > 剩余 A1-ratify 前提**纯 owner/ops**:owner 授权 staging 电池实跑 → PASS → 再 ratify。secrets 已设、主机建号脚本已备。
 >
 > **2026-08-24 三次更新(fix-forward 复核,针对 #5130 之后又飘的表述)**:B1a 两处自伤均已随 #5125
@@ -47,7 +47,7 @@
 > 见新增文档 **`staging-migration-window-completion-20260824.md`**。
 > 历史记录原样保留,逐处以「原写『…』」标注,不做回溯改写。
 
-> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。**另:staging 迁移积压已于 2026-08-24T05:44–05:54Z 应用完毕,`pending = 0`(见上「五次更新」与 `staging-migration-window-completion-20260824.md`)——L0 该项前置已满足。** 下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
+> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。**另:staging 迁移积压已于 2026-08-24T05:44–05:54Z 应用完毕,`pending = 0`(见上「五次更新」与 `staging-migration-window-completion-20260824.md`)——L0 该项前置已满足。** 原写「本清单自身也是 open PR #5135,尚未合并」——#5135 已于 2026-08-24T07:53:28Z 合并为 `96b6416717`,该句随之移除。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;
 > 下方 run 记录里的 `8c1be0b0…`/`14c180aa…` 是**当时**实测值,epoch-bound,今天重跑不会复现)(双主机 run
@@ -85,9 +85,9 @@
   (依次见 §D2-F3 / §E 第 6–7 步、§E 第 7 步、§B1 与 §E 第 9 步、§B1 与 §E 第 10 步)。
 - 归属:审批线执行 + owner 批准(已按此完成);**Time Machine 线不代应用**(runbook 要求克隆彩排——本次确已先彩排后应用)。
 
-## A-2 · ⚠️ staging 重部署 —— 原计划缺失的硬前置(2026-08-22 深审发现)
+## A-2 · staging 重部署 —— 原计划缺失的硬前置(2026-08-22 深审发现;**已于 2026-08-24 解除,见节内更正**)
 
-staging 现镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**不含**:
+原写(2026-08-22 时点,现已过期):staging 当时镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**不含**:
 
 - **电池脚本** `scripts/ops/multitable-l1-battery.mjs`(该树里根本没有此文件)⇒ 电池 dispatch 会 `MODULE_NOT_FOUND`
 - **任何 `zzzz20260821*` 迁移**(含 F3 的 search_path 修复)⇒ 窗口 runner 无从应用 F3
