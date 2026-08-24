@@ -304,28 +304,55 @@
           <div>
             <h3>{{ tr('Common', '常用') }}</h3>
           </div>
+          <button
+            class="attendance-ew__customize"
+            type="button"
+            data-attendance-ew-customize
+            @click="toggleCustomize"
+          >
+            {{ customizing ? tr('Done', '完成') : tr('Customize', '自定义') }}
+          </button>
         </div>
-        <!-- First-screen 常用: 补卡 + 请假 only (owner 2026-08-24).
-             Overtime / shift-swap stay in the request form, not this row. -->
+        <!-- First-screen 常用: all four actions. Icons are original filled
+             pictograms; 自定义 swaps the glyph per user in localStorage. -->
         <div class="attendance-ew__tiles">
-          <button
-            class="attendance-ew__tile"
-            type="button"
-            data-selfservice-action="missing-punch"
-            @click="$emit('selfServiceAction', 'missing-punch')"
+          <div
+            v-for="tile in commonTiles"
+            :key="tile.action"
+            class="attendance-ew__tile-wrap"
           >
-            <span class="attendance-ew__tile-icon attendance-ew__tile-icon--makeup" aria-hidden="true">补</span>
-            <span>{{ tr('Makeup punch', '补卡') }}</span>
-          </button>
-          <button
-            class="attendance-ew__tile"
-            type="button"
-            data-selfservice-action="leave"
-            @click="$emit('selfServiceAction', 'leave')"
-          >
-            <span class="attendance-ew__tile-icon attendance-ew__tile-icon--leave" aria-hidden="true">假</span>
-            <span>{{ tr('Leave', '请假') }}</span>
-          </button>
+            <button
+              class="attendance-ew__tile"
+              type="button"
+              :data-selfservice-action="tile.action"
+              :data-attendance-ew-icon="commonIconPrefs[tile.action]"
+              :class="{ 'attendance-ew__tile--picking': pickingAction === tile.action }"
+              @click="onCommonTile(tile.action)"
+            >
+              <span class="attendance-ew__tile-icon" :class="`attendance-ew__tile-icon--${tile.tone}`" aria-hidden="true">
+                <AttendanceEmployeeCommonIcon :name="commonIconPrefs[tile.action]" />
+              </span>
+              <span>{{ tile.label }}</span>
+            </button>
+            <div
+              v-if="customizing && pickingAction === tile.action"
+              class="attendance-ew__icon-picker"
+              data-attendance-ew-icon-picker
+            >
+              <button
+                v-for="iconId in commonIconIds"
+                :key="iconId"
+                type="button"
+                class="attendance-ew__icon-option"
+                :class="{ 'attendance-ew__icon-option--active': commonIconPrefs[tile.action] === iconId }"
+                :data-attendance-ew-icon-option="iconId"
+                :aria-label="iconId"
+                @click.stop="assignCommonIcon(tile.action, iconId)"
+              >
+                <AttendanceEmployeeCommonIcon :name="iconId" />
+              </button>
+            </div>
+          </div>
         </div>
         <button
           class="attendance-ew__records-link"
@@ -470,8 +497,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import AttendanceEmployeeCommonIcon from './AttendanceEmployeeCommonIcon.vue'
 import type { AttendanceOverviewAttentionItem } from './attendanceOverviewPriority'
+import {
+  COMMON_ICON_IDS,
+  type CommonActionKey,
+  type CommonIconId,
+  type CommonIconPrefs,
+  loadCommonIconPrefs,
+  saveCommonIconPrefs,
+} from './attendanceEmployeeWorkspaceCommonIcons'
 import {
   formatLateEarlyPair,
   formatWorkDurationMinutes,
@@ -601,7 +637,7 @@ const props = defineProps<{
   formatSelfRulesWarning: (code: string) => string
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   punch: [eventType: 'check_in' | 'check_out']
   retryPunchNote: []
   'update:punchOutdoorNoteDraft': [value: string]
@@ -612,6 +648,41 @@ defineEmits<{
   changeBalanceLeaveType: [code: 'annual' | 'comp_time']
   openBalanceTrace: []
 }>()
+
+const commonIconIds = COMMON_ICON_IDS
+const commonIconPrefs = ref<CommonIconPrefs>(loadCommonIconPrefs())
+const customizing = ref(false)
+const pickingAction = ref<CommonActionKey | null>(null)
+
+const commonTiles = computed(() => [
+  { action: 'missing-punch' as const, tone: 'makeup', label: props.tr('Makeup punch', '补卡') },
+  { action: 'leave' as const, tone: 'leave', label: props.tr('Leave', '请假') },
+  { action: 'overtime' as const, tone: 'overtime', label: props.tr('Overtime', '加班') },
+  { action: 'shift-swap' as const, tone: 'swap', label: props.tr('Shift swap', '换班') },
+])
+
+onMounted(() => {
+  commonIconPrefs.value = loadCommonIconPrefs()
+})
+
+function toggleCustomize(): void {
+  customizing.value = !customizing.value
+  if (!customizing.value) pickingAction.value = null
+}
+
+function onCommonTile(action: CommonActionKey): void {
+  if (customizing.value) {
+    pickingAction.value = pickingAction.value === action ? null : action
+    return
+  }
+  emit('selfServiceAction', action === 'shift-swap' ? 'shift_swap' : action)
+}
+
+function assignCommonIcon(action: CommonActionKey, iconId: CommonIconId): void {
+  commonIconPrefs.value = { ...commonIconPrefs.value, [action]: iconId }
+  saveCommonIconPrefs(commonIconPrefs.value)
+  pickingAction.value = null
+}
 
 const greetingText = computed(() => greetingHeadline(props.tr, props.heroClockTime))
 
@@ -922,20 +993,35 @@ const attentionMark = computed(() => {
   opacity: 0.92;
 }
 
+.attendance-ew__customize {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #3370ff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 .attendance-ew__tiles {
   display: grid;
-  grid-template-columns: repeat(2, minmax(72px, 96px));
-  justify-content: start;
-  gap: 28px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.attendance-ew__tile-wrap {
+  position: relative;
+  min-width: 0;
 }
 
 .attendance-ew__tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  width: 100%;
   min-width: 0;
-  padding: 8px 4px;
+  padding: 4px 0;
   border: none;
   background: transparent;
   color: #1f2329;
@@ -944,20 +1030,90 @@ const attentionMark = computed(() => {
   cursor: pointer;
 }
 
+.attendance-ew__tile--picking .attendance-ew__tile-icon {
+  box-shadow: 0 0 0 2px #fff, 0 0 0 4px #3370ff, 0 8px 16px rgba(51, 112, 255, 0.22);
+}
+
 .attendance-ew__tile-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 12px;
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 15px;
-  font-weight: 700;
   color: #fff;
+  box-shadow: 0 6px 14px rgba(31, 45, 82, 0.14);
 }
 
-.attendance-ew__tile-icon--makeup { background: #ff7d00; }
-.attendance-ew__tile-icon--leave { background: #3370ff; }
+.attendance-ew__tile-icon :deep(svg) {
+  width: 26px;
+  height: 26px;
+}
+
+.attendance-ew__tile-icon--makeup {
+  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
+}
+
+.attendance-ew__tile-icon--leave {
+  background: linear-gradient(180deg, #34c759 0%, #00b42a 100%);
+}
+
+.attendance-ew__tile-icon--overtime {
+  background: linear-gradient(180deg, #ff9a2e 0%, #ff7d00 100%);
+}
+
+.attendance-ew__tile-icon--swap {
+  background: linear-gradient(180deg, #9b8af0 0%, #7b67ee 100%);
+}
+
+.attendance-ew__icon-picker {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  top: calc(100% + 6px);
+  transform: translateX(-50%);
+  display: grid;
+  grid-template-columns: repeat(4, 32px);
+  gap: 6px;
+  padding: 8px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 10px 28px rgba(31, 45, 82, 0.16);
+}
+
+.attendance-ew__tile-wrap:first-child .attendance-ew__icon-picker {
+  left: 0;
+  transform: none;
+}
+
+.attendance-ew__tile-wrap:last-child .attendance-ew__icon-picker {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+.attendance-ew__icon-option {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 8px;
+  background: #3d4450;
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.attendance-ew__icon-option :deep(svg) {
+  width: 16px;
+  height: 16px;
+}
+
+.attendance-ew__icon-option--active {
+  box-shadow: 0 0 0 2px #3370ff;
+}
 
 .attendance-ew__records-link {
   align-self: flex-start;
