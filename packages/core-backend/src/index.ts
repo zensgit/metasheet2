@@ -380,6 +380,7 @@ export class MetaSheetServer {
   private stopFilesOrphanBlobRetention?: () => void
   private stopMultitableAttachmentBlobPurge?: () => void
   private stopApprovalAttachmentWorkers?: () => void | Promise<void>
+  private stopElearningMediaWorkers?: () => void | Promise<void>
   private automationService?: AutomationService
   // Owner P1 (head 1d3854c7a): explicit readiness bit for the durable fail-closed chain. TRUE only after
   // the FULL AutomationService init sequence (constructor + init() + loadAndRegisterAllScheduled()) has
@@ -2713,6 +2714,13 @@ export class MetaSheetServer {
     this.shuttingDown = true
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
+    try {
+      await this.stopElearningMediaWorkers?.()
+    } catch {
+      this.logger.warn('elearning_media_workers_stop_failed')
+    }
+    this.stopElearningMediaWorkers = undefined
+
     const shutdownTasks: Promise<void>[] = []
 
     // 0. Stop background tasks
@@ -3358,15 +3366,26 @@ export class MetaSheetServer {
     // ELEARNING_MEDIA_ENABLED must both be exact 'true' or nothing mounts. Production
     // requires complete S3 bucket+region (never local disk); missing quotas/storage
     // fail closed 503 on the upload path. A failed local/S3 probe aborts startup.
+    // Mount the route during early boot; defer startWorkers until listen + signals
+    // succeed so a later start failure cannot leave a live interval behind.
+    let startElearningMediaWorkers: (() => () => Promise<void>) | undefined
     try {
       const { bootElearningMediaRuntime } = await import('./services/elearning-media-runtime')
       const mediaRuntime = await bootElearningMediaRuntime({ db: poolManager.get(), logger: this.logger })
       if (mediaRuntime) {
         this.app.use(mediaRuntime.router)
-        this.logger.info('E-learning media pipeline initialized (ELEARNING_ENABLED + ELEARNING_MEDIA_ENABLED)')
+        startElearningMediaWorkers = mediaRuntime.startWorkers
+        this.logger.info('elearning_media_pipeline_initialized')
       }
     } catch (e) {
-      this.logger.error('E-learning media runtime boot FAILED with ELEARNING_MEDIA enabled — aborting startup (fail-closed: an unusable media store must not boot a live upload surface)', e as Error)
+      if (this.stopElearningMediaWorkers) {
+        const stopWorkers = this.stopElearningMediaWorkers
+        this.stopElearningMediaWorkers = undefined
+        await Promise.resolve(stopWorkers()).catch(() => {
+          this.logger.warn('elearning_media_workers_rollback_stop_failed')
+        })
+      }
+      this.logger.error('elearning_media_boot_failed')
       throw e
     }
 
@@ -3910,6 +3929,10 @@ export class MetaSheetServer {
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       process.on('SIGTERM', () => this.stop('SIGTERM').then(() => process.exit(0)))
       process.on('SIGINT', () => this.stop('SIGINT').then(() => process.exit(0)))
+    }
+
+    if (startElearningMediaWorkers && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
+      this.stopElearningMediaWorkers = startElearningMediaWorkers()
     }
   }
 }
