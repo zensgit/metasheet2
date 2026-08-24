@@ -12,6 +12,27 @@ import { buildEmployeeWorkspaceProps } from '../verification/attendance-employee
 const tr = (en: string, _zh: string) => en
 
 describe('employee quick-action icons (admin-only)', () => {
+  it('workspace keeps accepted default glyphs and a compact 申请 footer without 关注 chip', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, buildEmployeeWorkspaceProps('empty'))
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('[data-attendance-overview-greeting]')?.textContent).not.toMatch(/关注|Focus /)
+    expect(container.querySelector('[data-attendance-ew-customize]')).toBeNull()
+    expect(container.querySelector('[data-selfservice-card="requests"]')?.closest('[data-attendance-overview-primary]')).toBeTruthy()
+    expect(container.querySelector('[data-selfservice-card="actions"]')?.closest('[data-attendance-overview-primary]')).toBeNull()
+    expect(container.querySelector('[data-selfservice-card="requests"]')?.textContent).toContain('暂无待审批')
+    expect(container.querySelector('[data-selfservice-action="missing-punch"]')?.getAttribute('data-attendance-ew-icon')).toBe('clock-plus')
+    expect(container.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
+    expect(container.querySelector('[data-selfservice-action="overtime"]')?.getAttribute('data-attendance-ew-icon')).toBe('moon')
+    expect(container.querySelector('[data-selfservice-action="shift-swap"]')?.getAttribute('data-attendance-ew-icon')).toBe('swap')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('workspace uses parent-supplied keys and has no customize control', async () => {
     const container = document.createElement('div')
     document.body.appendChild(container)

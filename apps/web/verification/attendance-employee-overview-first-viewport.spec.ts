@@ -32,11 +32,13 @@ async function boxes(page: Page) {
   const attention = page.locator('[data-attendance-overview-attention]')
   const action = page.locator('[data-attendance-overview-attention-action]')
   const tools = page.locator('.attendance-ew__tools')
+  const common = page.locator('[data-selfservice-card="actions"]')
   return {
     punch: await punch.boundingBox(),
     status: await status.boundingBox(),
     attention: await attention.boundingBox(),
     action: await action.count() ? await action.boundingBox() : null,
+    common: await common.boundingBox(),
     tools: await tools.boundingBox(),
   }
 }
@@ -80,14 +82,16 @@ test.describe('issue #4355 employee overview first viewport', () => {
       expect(measured.punch, `${state}: punch box`).toBeTruthy()
       expect(measured.status, `${state}: status box`).toBeTruthy()
       expect(measured.attention, `${state}: attention box`).toBeTruthy()
+      expect(measured.common, `${state}: 常用 box`).toBeTruthy()
       expect(measured.tools, `${state}: tools box`).toBeTruthy()
-      expect(measured.punch!.y, `${state}: punch before tools`).toBeLessThan(measured.tools!.y)
-      expect(measured.status!.y, `${state}: status before tools`).toBeLessThan(measured.tools!.y)
-      expect(measured.attention!.y, `${state}: attention before tools`).toBeLessThan(measured.tools!.y)
+      expect(measured.punch!.y, `${state}: punch before 常用`).toBeLessThan(measured.common!.y)
+      expect(measured.status!.y, `${state}: status before 常用`).toBeLessThan(measured.common!.y)
+      expect(measured.attention!.y, `${state}: attention before 常用`).toBeLessThan(measured.common!.y)
+      expect(measured.common!.y, `${state}: 常用 before remaining tools`).toBeLessThan(measured.tools!.y)
       expect(aboveFold(measured.punch, 844), `${state}: punch/primary action in the first mobile screen`).toBe(true)
       expect(startsInViewport(measured.status, 844), `${state}: daily status starts before secondary content`).toBe(true)
       if (measured.action) {
-        expect(measured.action.y, `${state}: attention action before tools`).toBeLessThan(measured.tools!.y)
+        expect(measured.action.y, `${state}: attention action before 常用`).toBeLessThan(measured.common!.y)
       }
       await noHorizontalOverflow(page)
       await page.screenshot({ path: `${OUT}/attendance-ew-390x844-${state}.png`, fullPage: false })

@@ -28,9 +28,6 @@
         <h2 class="attendance-ew__hello">{{ greetingText }}</h2>
         <p class="attendance-ew__hello-sub">{{ greetingSubline }}</p>
       </div>
-      <span v-if="workbenchFocusDateLabel" class="attendance-ew__focus-pill">
-        {{ tr(`Focus ${workbenchFocusDateLabel}`, `关注 ${workbenchFocusDateLabel}`) }}
-      </span>
     </div>
 
     <!--
@@ -199,10 +196,11 @@
       </div>
       <div v-else class="attendance-ew__todo-row">
         <span
-          class="attendance-ew__todo-mark"
-          :class="`attendance-ew__todo-mark--${attentionMark.tone}`"
+          class="attendance-ew__todo-mark attendance-ew__todo-mark--makeup"
           aria-hidden="true"
-        >{{ attentionMark.glyph }}</span>
+        >
+          <AttendanceEmployeeCommonIcon name="clock-plus" />
+        </span>
         <div class="attendance-ew__todo-copy">
           <strong>{{ attentionItem.title }}</strong>
           <p>{{ attentionItem.detail }}</p>
@@ -223,12 +221,9 @@
       >
         {{ tr('No more items', '没有更多事项') }}
       </p>
-    </div>
-    </div>
 
-    <div class="attendance-ew__tools">
-      <div class="attendance__card attendance__card--selfservice attendance-ew__requests" data-selfservice-card="requests">
-        <div class="attendance__requests-header">
+      <div class="attendance-ew__request-footer" data-selfservice-card="requests">
+        <div class="attendance-ew__request-footer-row">
           <div>
             <h3>{{ tr('My applications', '我的申请') }}</h3>
             <small v-if="hasRequestBody" class="attendance__field-hint">
@@ -236,6 +231,7 @@
             </small>
           </div>
           <strong v-if="hasRequestBody">{{ requestsTotal }}</strong>
+          <span v-else class="attendance-ew__request-empty">{{ tr('No pending approvals', '暂无待审批') }}</span>
         </div>
         <template v-if="hasRequestBody">
           <div class="attendance__chip-list">
@@ -296,10 +292,11 @@
             </li>
           </ul>
         </template>
-        <div v-else class="attendance__empty">{{ tr('No pending approvals in this range.', '这个区间里没有待审批的申请') }}</div>
       </div>
+    </div>
+    </div>
 
-      <div class="attendance__card attendance__card--selfservice attendance-ew__actions" data-selfservice-card="actions">
+    <div class="attendance__card attendance__card--selfservice attendance-ew__actions attendance-ew__common" data-selfservice-card="actions">
         <div class="attendance__requests-header">
           <div>
             <h3>{{ tr('Common', '常用') }}</h3>
@@ -335,6 +332,7 @@
         </p>
       </div>
 
+    <div class="attendance-ew__tools">
       <div class="attendance__card attendance__card--selfservice attendance-ew__balance" data-selfservice-card="annual-balance">
         <div class="attendance__requests-header">
           <div>
@@ -693,30 +691,11 @@ const metricOutTime = computed(() => props.heroTimeline?.checkOut ?? '--:--')
 const hasRequestBody = computed(() =>
   props.requestsTotal > 0 || props.selfServiceRecentRequests.length > 0,
 )
-
-const attentionMark = computed(() => {
-  switch (props.attentionItem.key) {
-    case 'anomaly':
-      return { glyph: '缺', tone: 'missing' }
-    case 'punch_failure':
-      return { glyph: '!', tone: 'missing' }
-    case 'request_pending':
-    case 'request_rejected':
-      return { glyph: '审', tone: 'pending' }
-    case 'setup_needed':
-      return { glyph: '设', tone: 'setup' }
-    case 'record_review':
-    case 'unknown_status':
-      return { glyph: '记', tone: 'review' }
-    default:
-      return { glyph: '·', tone: 'setup' }
-  }
-})
 </script>
 
 <style scoped>
-/* Employee-workspace chrome only. First-viewport IA is unchanged
-   (desktop punch|todo, mobile punch → status → attention → tools). */
+/* Employee-workspace chrome only. First viewport: desktop punch|待办+申请 footer,
+   常用 full-width below; mobile punch → 待办+申请 footer → 常用. */
 .attendance-ew {
   display: flex;
   flex-direction: column;
@@ -727,7 +706,6 @@ const attentionMark = computed(() => {
 .attendance-ew__greeting {
   display: flex;
   align-items: flex-end;
-  justify-content: space-between;
   gap: 12px;
   min-width: 0;
 }
@@ -752,22 +730,11 @@ const attentionMark = computed(() => {
   color: #8f959e;
 }
 
-.attendance-ew__focus-pill {
-  flex: 0 0 auto;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(31, 35, 41, 0.06);
-  color: #646a73;
-  font-size: 12px;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
 .attendance-ew__primary {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
   gap: var(--ms-space-4, 16px);
-  align-items: start;
+  align-items: stretch;
   min-width: 0;
 }
 
@@ -831,6 +798,7 @@ const attentionMark = computed(() => {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  min-height: 100%;
   border: none;
   border-radius: 18px;
   background: #fff;
@@ -878,28 +846,16 @@ const attentionMark = computed(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 14px;
-  font-weight: 650;
+  color: #fff;
 }
 
-.attendance-ew__todo-mark--missing {
-  background: #fff1f0;
-  color: #f54a45;
+.attendance-ew__todo-mark--makeup {
+  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
 }
 
-.attendance-ew__todo-mark--review {
-  background: #fff7e8;
-  color: #ff7d00;
-}
-
-.attendance-ew__todo-mark--pending {
-  background: #e8f3ff;
-  color: #3370ff;
-}
-
-.attendance-ew__todo-mark--setup {
-  background: #f5f6f7;
-  color: #646a73;
+.attendance-ew__todo-mark :deep(svg) {
+  width: 18px;
+  height: 18px;
 }
 
 .attendance-ew__todo-copy {
@@ -943,6 +899,40 @@ const attentionMark = computed(() => {
   margin: 0;
   font-size: 12px;
   color: #bbbfc4;
+}
+
+.attendance-ew__request-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid rgba(31, 35, 41, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.attendance-ew__request-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance-ew__request-footer-row h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: #1f2329;
+}
+
+.attendance-ew__request-empty {
+  color: #8f959e;
+  font-size: 13px;
+}
+
+.attendance-ew__common {
+  min-width: 0;
 }
 
 .attendance-ew__tools {
@@ -1395,11 +1385,9 @@ const attentionMark = computed(() => {
     flex-direction: column;
   }
 
-  .attendance-ew__actions { order: 1; }
-  .attendance-ew__requests { order: 2; }
-  .attendance-ew__balance { order: 3; }
-  .attendance-ew__rules { order: 4; }
-  .attendance-ew__history-filters { order: 5; }
+  .attendance-ew__balance { order: 1; }
+  .attendance-ew__rules { order: 2; }
+  .attendance-ew__history-filters { order: 3; }
 }
 
 @media (max-width: 768px) {
@@ -1439,10 +1427,6 @@ const attentionMark = computed(() => {
 
   .attendance-ew__todo-row {
     flex-wrap: wrap;
-  }
-
-  .attendance-ew__focus-pill {
-    white-space: normal;
   }
 
   .attendance__request-meta {

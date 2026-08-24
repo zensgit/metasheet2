@@ -949,7 +949,7 @@ describe('Attendance self-service dashboard', () => {
     expect(primary!.querySelector('[data-testid="attendance-hero-punch"]')).toBeTruthy()
     expect(primary!.querySelector('[data-selfservice-card="status"]')).toBeTruthy()
     expect(primary!.querySelector('[data-attendance-overview-attention]')).toBeTruthy()
-    expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeNull()
+    expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeTruthy()
     expect(primary!.querySelector('[data-selfservice-card="actions"]')).toBeNull()
     expect(primary!.querySelector('[data-attendance-history-filters]')).toBeNull()
 
@@ -960,7 +960,11 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('.attendance--overview')).toBeTruthy()
     expect(container!.querySelector('[data-attendance-history-filters]')?.closest('[data-attendance-overview-primary]')).toBeNull()
     expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toMatch(/Good (morning|afternoon|evening)/)
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).not.toMatch(/Focus |关注/)
     expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
+    const todoMark = container!.querySelector('[data-attendance-overview-attention] .attendance-ew__todo-mark')
+    expect(todoMark?.textContent?.trim(), '待办 mark is the makeup 面性 icon, not 缺').toBe('')
+    expect(todoMark?.querySelector('svg')).toBeTruthy()
   })
 
   it('renders four read-only 常用 tiles with default pictograms and no employee customize control', async () => {
