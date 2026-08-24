@@ -29501,6 +29501,7 @@ defineExpose({
   gap: 24px;
   padding: 24px;
   color: #2b2b2b;
+  min-width: 0;
 }
 
 .attendance--overview {

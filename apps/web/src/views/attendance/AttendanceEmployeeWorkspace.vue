@@ -113,7 +113,10 @@
         >
           {{ tr('Updating...', '更新中...') }}
         </small>
-        <div class="attendance__summary attendance__summary--workbench attendance__summary--stat">
+        <div
+          v-if="workbenchRecordStatus"
+          class="attendance__summary attendance__summary--workbench attendance__summary--stat"
+        >
           <div class="attendance__summary-item attendance__summary-item--stat">
             <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
             <span>{{ tr('Latest punch', '最近一次打卡') }}</span>

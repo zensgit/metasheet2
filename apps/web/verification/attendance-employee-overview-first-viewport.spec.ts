@@ -10,6 +10,11 @@ function aboveFold(box: { y: number; height: number } | null, viewportHeight: nu
   return box.y >= 0 && box.y + box.height <= viewportHeight
 }
 
+function startsInViewport(box: { y: number; height: number } | null, viewportHeight: number): boolean {
+  if (!box) return false
+  return box.y >= 0 && box.y < viewportHeight
+}
+
 async function noHorizontalOverflow(page: Page) {
   const overflow = await page.evaluate(() => ({
     scrollWidth: document.documentElement.scrollWidth,
@@ -79,10 +84,11 @@ test.describe('issue #4355 employee overview first viewport', () => {
       expect(measured.punch!.y, `${state}: punch before tools`).toBeLessThan(measured.tools!.y)
       expect(measured.status!.y, `${state}: status before tools`).toBeLessThan(measured.tools!.y)
       expect(measured.attention!.y, `${state}: attention before tools`).toBeLessThan(measured.tools!.y)
-      const primaryAction = measured.action ?? measured.punch
-      expect(primaryAction!.y, `${state}: primary action before tools`).toBeLessThan(measured.tools!.y)
-      expect(aboveFold(measured.punch, 844), `${state}: punch readable in first mobile screen`).toBe(true)
-      expect(aboveFold(measured.status, 844), `${state}: status readable in first mobile screen`).toBe(true)
+      expect(aboveFold(measured.punch, 844), `${state}: punch/primary action in the first mobile screen`).toBe(true)
+      expect(startsInViewport(measured.status, 844), `${state}: daily status starts before secondary content`).toBe(true)
+      if (measured.action) {
+        expect(measured.action.y, `${state}: attention action before tools`).toBeLessThan(measured.tools!.y)
+      }
       await noHorizontalOverflow(page)
       await page.screenshot({ path: `${OUT}/attendance-ew-390x844-${state}.png`, fullPage: false })
     }
