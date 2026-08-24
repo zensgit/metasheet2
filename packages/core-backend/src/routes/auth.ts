@@ -8,7 +8,8 @@ import { Router } from 'express'
 import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
-import { authService, requestedTenantIdForLogin, type User } from '../auth/AuthService'
+import { authService, type User } from '../auth/AuthService'
+import { requestedTenantIdForLogin } from '../auth/session-tenant-request'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
   bindDingTalkIdentityToUser,

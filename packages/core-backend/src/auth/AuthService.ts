@@ -24,6 +24,9 @@ import type { AliasQueryClient } from './login-alias-service'
 import { assignUserRoles } from '../rbac/role-assignment'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import { requestedTenantIdForLogin } from './session-tenant-request'
+
+export { DEFAULT_SESSION_ORG_ID, requestedTenantIdForLogin } from './session-tenant-request'
 
 export interface User {
   id: string
@@ -66,27 +69,6 @@ export interface AuthConfig {
   jwtSecret: string
   jwtExpiry: string
   saltRounds: number
-}
-
-/** Exact ASCII sentinel used by the one-time user_orgs backfill. Not a user choice. */
-export const DEFAULT_SESSION_ORG_ID = 'default'
-
-/**
- * Login-time request filter (D6 R1 / F1).
- *
- * A persisted `'default'` tenant hint is injected by the web client on every
- * request including login, and every backfilled user has a legal `'default'`
- * membership. That combination is not evidence the user chose an org.
- *
- * Token verification / refresh / explicit session-org switch MUST NOT use this
- * helper — a minted `'default'` claim, or an explicit switcher choice, is a
- * real session value and stays membership-checked via resolveSessionTenantId.
- */
-export function requestedTenantIdForLogin(raw: unknown): string | undefined {
-  if (typeof raw !== 'string') return undefined
-  const trimmed = raw.trim()
-  if (!trimmed || trimmed === DEFAULT_SESSION_ORG_ID) return undefined
-  return trimmed
 }
 
 const ATTENDANCE_SELF_SERVICE_ROLE_ID = 'attendance_employee'
