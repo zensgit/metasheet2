@@ -309,6 +309,7 @@
             <span>{{ tile.label }}</span>
           </button>
         </div>
+        <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
       </div>
 
     <div class="attendance-ew__tools">
@@ -891,6 +892,13 @@ const hasRequestBody = computed(() =>
 
 .attendance-ew__common {
   min-width: 0;
+}
+
+.attendance-ew__common-hint {
+  margin: 0;
+  color: #8f959e;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .attendance-ew__tools {
