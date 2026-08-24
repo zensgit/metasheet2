@@ -20,6 +20,14 @@
 -->
 <template>
   <div class="attendance-ew">
+    <!--
+      Lock §7 first viewport: daily workspace (punch + status) is the dominant
+      column; the one canonical attention item is the supporting column. Status
+      banner stays in the today column (lock §4.1 / §5: below the daily
+      workspace, never inside the history disclosure). Tools stay below this
+      primary row so they cannot compete with today's work.
+    -->
+    <div class="attendance-ew__primary" data-attendance-overview-primary>
     <div class="attendance-ew__today">
       <div class="attendance__hero-punch" data-testid="attendance-hero-punch">
         <div class="attendance__hero-clock">
@@ -130,27 +138,27 @@
           {{ selfServiceSetupFollowupHint }}
         </p>
       </div>
-    </div>
 
-    <div v-if="statusMessage" class="attendance__status-block">
-      <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
-        {{ statusMessage }}
-      </span>
-      <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
-        {{ tr('Code', '代码') }}: {{ statusCode }}
-      </span>
-      <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
-        {{ statusHint }}
-      </span>
-      <button
-        v-if="statusActionLabel"
-        class="attendance__btn attendance__btn--inline"
-        type="button"
-        :disabled="statusActionBusy"
-        @click="$emit('statusAction')"
-      >
-        {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
-      </button>
+      <div v-if="statusMessage" class="attendance__status-block">
+        <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
+          {{ statusMessage }}
+        </span>
+        <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
+          {{ tr('Code', '代码') }}: {{ statusCode }}
+        </span>
+        <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
+          {{ statusHint }}
+        </span>
+        <button
+          v-if="statusActionLabel"
+          class="attendance__btn attendance__btn--inline"
+          type="button"
+          :disabled="statusActionBusy"
+          @click="$emit('statusAction')"
+        >
+          {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
+        </button>
+      </div>
     </div>
 
     <div
@@ -169,6 +177,7 @@
       >
         {{ attentionItem.actionLabel }}
       </button>
+    </div>
     </div>
 
     <div class="attendance-ew__tools">
@@ -571,14 +580,24 @@ defineEmits<{
 .attendance-ew {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-5, 20px);
+  gap: var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+/* Lock §7: two-column first viewport — daily workspace | attention. */
+.attendance-ew__primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--ms-space-4, 16px);
+  align-items: start;
+  min-width: 0;
 }
 
 .attendance-ew__today {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: var(--ms-space-5, 20px);
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3, 12px);
+  min-width: 0;
 }
 
 .attendance-ew__today-status {
@@ -589,23 +608,26 @@ defineEmits<{
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-2, 8px);
+  min-width: 0;
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
   box-shadow: var(--ms-shadow-card);
-  padding: var(--ms-space-4, 16px) var(--ms-space-5, 20px);
+  padding: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
 }
 
 .attendance-ew__attention p {
   margin: 0;
   color: var(--ms-text-2);
-  line-height: 1.5;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .attendance-ew__tools {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: var(--ms-space-4, 16px);
+  min-width: 0;
 }
 
 .attendance-ew__tools-deemphasized {
@@ -656,7 +678,9 @@ defineEmits<{
   padding: 6px 10px;
   border: 1px solid #d0d0d0;
   border-radius: 6px;
-  min-width: 180px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .attendance__field-hint {
@@ -736,7 +760,8 @@ defineEmits<{
 .attendance__card--selfservice {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
 }
 
 .attendance__summary--workbench {
@@ -841,9 +866,10 @@ defineEmits<{
 
 .attendance__summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
 }
 
 .attendance__summary-item {
@@ -887,9 +913,11 @@ defineEmits<{
    verbatim, no hardcoded hex introduced. */
 .attendance__hero-punch {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--ms-space-5);
-  padding: var(--ms-space-4) var(--ms-space-5);
+  gap: var(--ms-space-3);
+  min-width: 0;
+  padding: var(--ms-space-3) var(--ms-space-4);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
@@ -900,11 +928,11 @@ defineEmits<{
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-1);
-  min-width: 132px;
+  min-width: 0;
 }
 
 .attendance__hero-time {
-  font-size: 32px;
+  font-size: 28px;
   font-weight: var(--ms-font-weight-title);
   line-height: 1.1;
   color: var(--ms-text-1);
@@ -923,17 +951,17 @@ defineEmits<{
 }
 
 .attendance__btn--hero {
-  min-height: 56px;
-  min-width: 160px;
-  font-size: 16px;
+  min-height: 44px;
+  min-width: 120px;
+  font-size: 15px;
   font-weight: var(--ms-font-weight-title);
   border-radius: var(--ms-radius-md);
 }
 
 .attendance__btn--hero-secondary {
-  min-height: 56px;
-  min-width: 132px;
-  font-size: 15px;
+  min-height: 44px;
+  min-width: 112px;
+  font-size: 14px;
   border-radius: var(--ms-radius-md);
   border-color: var(--ms-color-primary);
   color: var(--ms-color-primary);
@@ -985,7 +1013,8 @@ defineEmits<{
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-1);
-  padding: var(--ms-space-3) var(--ms-space-4);
+  min-width: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-card);
@@ -999,7 +1028,7 @@ defineEmits<{
 }
 
 .attendance__summary-value {
-  font-size: 22px;
+  font-size: 18px;
   line-height: 1.2;
   font-weight: var(--ms-font-weight-title);
   color: var(--ms-text-1);
@@ -1011,8 +1040,8 @@ defineEmits<{
 }
 
 @media (max-width: 768px) {
-  .attendance-ew__today {
-    grid-template-columns: 1fr;
+  .attendance-ew__primary {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .attendance__hero-punch {
@@ -1026,12 +1055,18 @@ defineEmits<{
     align-items: stretch;
   }
 
+  .attendance__btn--hero,
+  .attendance__btn--hero-secondary {
+    min-width: 0;
+    width: 100%;
+  }
+
   .attendance__hero-timeline {
     flex-wrap: wrap;
   }
 
   .attendance__summary--stat {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .attendance__selfservice-callout {

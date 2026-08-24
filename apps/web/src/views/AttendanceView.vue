@@ -1,5 +1,5 @@
 <template>
-  <div class="attendance">
+  <div class="attendance" :class="{ 'attendance--overview': showOverview }">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -11,8 +11,8 @@
       <p class="attendance__empty" v-else>{{ tr('Enable the attendance plugin to use this page.', '启用考勤插件后可使用此页面。') }}</p>
     </div>
     <template v-else>
-      <header class="attendance__header" v-if="showOverview || showReports">
-        <div>
+      <header class="attendance__header" v-if="showOverview || showReports" data-attendance-overview-header>
+        <div class="attendance__header-copy">
           <h2 class="attendance__title">
             {{ showReports ? tr('Attendance Reports', '考勤报表') : tr('Attendance', '考勤') }}
           </h2>
@@ -24,6 +24,16 @@
             }}
           </p>
         </div>
+        <!--
+          Trailing slot on overview: reserved for a compact session-org switcher
+          (#5145 Draft). Keep this node empty on main so that PR can land a
+          control here without fighting first-viewport layout.
+        -->
+        <div
+          v-if="showOverview"
+          class="attendance__header-aside"
+          data-attendance-overview-header-aside
+        />
         <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
@@ -29493,20 +29503,43 @@ defineExpose({
   color: #2b2b2b;
 }
 
+.attendance--overview {
+  gap: 16px;
+  padding: 16px 20px 24px;
+}
+
 .attendance__header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance__header-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.attendance__header-aside {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .attendance__title {
-  font-size: 22px;
-  margin-bottom: 4px;
+  font-size: 18px;
+  line-height: 1.25;
+  margin: 0 0 2px;
 }
 
 .attendance__subtitle {
+  margin: 0;
   color: #666;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .attendance__actions {

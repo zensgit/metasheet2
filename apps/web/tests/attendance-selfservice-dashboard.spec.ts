@@ -927,6 +927,138 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-selfservice-primary-action]')).toBeNull()
   })
 
+  it('W2/4355 first viewport: punch, status, and attention share the primary band; filters stay below', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const primary = container!.querySelector('[data-attendance-overview-primary]')
+    expect(primary).toBeTruthy()
+    expect(primary!.querySelector('[data-testid="attendance-hero-punch"]')).toBeTruthy()
+    expect(primary!.querySelector('[data-selfservice-card="status"]')).toBeTruthy()
+    expect(primary!.querySelector('[data-attendance-overview-attention]')).toBeTruthy()
+    expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeNull()
+    expect(primary!.querySelector('[data-selfservice-card="actions"]')).toBeNull()
+    expect(primary!.querySelector('[data-attendance-history-filters]')).toBeNull()
+
+    const aside = container!.querySelector('[data-attendance-overview-header-aside]')
+    expect(aside).toBeTruthy()
+    expect(aside!.childElementCount).toBe(0)
+
+    expect(container!.querySelector('.attendance--overview')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-history-filters]')?.closest('[data-attendance-overview-primary]')).toBeNull()
+  })
+
+  it('W2/4355 late/early without anomaly: attention offers a records review action', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('record_review')
+    expect(attention?.textContent).toContain('Review the focus workday')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Review records')
+  })
+
+  it('W2/4355 pending-request without anomaly: attention tracks approval and never exposes approve/reject', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-today',
+              work_date: '2026-04-15',
+              first_in_at: '2026-04-15T09:00:00+08:00',
+              last_out_at: '2026-04-15T18:00:00+08:00',
+              work_minutes: 480,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'normal',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('request_pending')
+    expect(attention?.textContent).toContain('Track pending approvals')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Open request report')
+    expect(attention?.textContent?.toLowerCase()).not.toContain('approve')
+    expect(attention?.textContent?.toLowerCase()).not.toContain('reject')
+  })
+
+  it('W2/4355 all-clear: normal day has an explicit caught-up state and no fabricated CTA', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-today',
+              work_date: '2026-04-15',
+              first_in_at: '2026-04-15T09:00:00+08:00',
+              last_out_at: '2026-04-15T18:00:00+08:00',
+              work_minutes: 480,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'normal',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('all_clear')
+    expect(attention?.textContent).toContain('You are caught up')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
+    expect(container!.querySelector('[data-testid="attendance-hero-punch"]')).toBeTruthy()
+  })
+
   it('updates self-service rules weekday labels when the locale changes', async () => {
     useLocale().setLocale('en')
     app = createApp(AttendanceView, { mode: 'overview' })
