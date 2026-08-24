@@ -1303,8 +1303,58 @@ action_migrate_rehearse() {
   # so migrations run under normal trigger semantics (faithful rehearsal).
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} SET session_replication_role = 'replica';"
-  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 -U "$pg_user" -d "$REHEARSAL_DB" "$container_dump_path" \
-    2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore.log"
+
+  # pg_restore pins each worker's search_path to the empty string. One already-applied
+  # attendance SQL function calls another public function by bare name, so COPY of a table whose
+  # CHECK constraint invokes it fails even though both functions are present. Restore pre-data
+  # first, apply a clone-only function search_path for that exact legacy shape, then restore data
+  # and post-data. Reset the clone function afterward so the rehearsal migration starts from the
+  # same function configuration as the source DB. The real staging DB is queried read-only and is
+  # never altered by this compatibility shim.
+  local restore_log="${OUTPUT_DIR}/rehearsal-restore.log"
+  local legacy_fn_signature="public.attendance_w4_scheduled_name_bytes(uuid, uuid, date)"
+  local legacy_fn_present legacy_fn_def legacy_fn_config legacy_fn_shim="no"
+  : > "$restore_log"
+
+  legacy_fn_present="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
+    -v ON_ERROR_STOP=1 -c "SELECT count(*) FROM pg_proc WHERE oid = to_regprocedure('${legacy_fn_signature}');" \
+    2>/dev/null | tr -d '[:space:]')"
+  [[ "$legacy_fn_present" =~ ^[01]$ ]] \
+    || fail "rehearsal restore compatibility probe returned a non-boolean function count"
+  if [[ "$legacy_fn_present" == "1" ]]; then
+    legacy_fn_def="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
+      -v ON_ERROR_STOP=1 -c "SELECT pg_get_functiondef(to_regprocedure('${legacy_fn_signature}'));" 2>/dev/null)"
+    legacy_fn_config="$(docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$MIGRATE_BACKUP_PG_DB" -tA \
+      -v ON_ERROR_STOP=1 -c "SELECT COALESCE(array_to_string(proconfig, ','), '') FROM pg_proc WHERE oid = to_regprocedure('${legacy_fn_signature}');" \
+      2>/dev/null | tr -d '[:space:]')"
+    if [[ "$legacy_fn_def" == *"attendance_w4_canonical_date_text(work_date)"* \
+       && "$legacy_fn_def" != *"public.attendance_w4_canonical_date_text(work_date)"* \
+       && "$legacy_fn_config" != *"search_path="* ]]; then
+      legacy_fn_shim="yes"
+    fi
+  fi
+
+  log "rehearsal: restoring pre-data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=pre-data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  if [[ "$legacy_fn_shim" == "yes" ]]; then
+    log "rehearsal: applying clone-only legacy function search_path compatibility"
+    docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 \
+      -c "ALTER FUNCTION ${legacy_fn_signature} SET search_path = pg_catalog, public;" \
+      2>&1 | tee "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+  fi
+  log "rehearsal: restoring data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  log "rehearsal: restoring post-data"
+  docker exec "$POSTGRES_CONTAINER" pg_restore -j 2 --exit-on-error --section=post-data -U "$pg_user" \
+    -d "$REHEARSAL_DB" "$container_dump_path" 2>&1 | tee -a "$restore_log"
+  if [[ "$legacy_fn_shim" == "yes" ]]; then
+    log "rehearsal: resetting clone-only legacy function compatibility"
+    docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d "$REHEARSAL_DB" -v ON_ERROR_STOP=1 \
+      -c "ALTER FUNCTION ${legacy_fn_signature} RESET search_path;" \
+      2>&1 | tee -a "${OUTPUT_DIR}/rehearsal-restore-compat.log"
+  fi
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
     -c "ALTER DATABASE ${REHEARSAL_DB} RESET session_replication_role;"
 
