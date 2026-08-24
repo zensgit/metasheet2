@@ -114,6 +114,7 @@
           <div
             v-if="workbenchRecordStatus"
             class="attendance__summary attendance__summary--workbench attendance__summary--stat"
+            :class="{ 'attendance__hero-timeline': Boolean(heroTimeline) }"
             :data-testid="heroTimeline ? 'attendance-hero-timeline' : undefined"
           >
             <div class="attendance__summary-item attendance__summary-item--stat">
