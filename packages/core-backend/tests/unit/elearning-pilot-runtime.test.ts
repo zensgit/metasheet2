@@ -7,8 +7,10 @@ import { describe, expect, test } from 'vitest'
 import { isElearningWatchSurfaceEnabled } from '../../src/elearning/feature-flags'
 import { authenticate } from '../../src/middleware/auth'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
+import type { ElearningCoursePublishDb } from '../../src/services/elearning-course-publish'
 import type { ElearningDirectAssignmentDb } from '../../src/services/elearning-direct-assignment'
 import type { ElearningExamDb } from '../../src/services/elearning-exam'
+import type { ElearningLearnerCoursesQueryable } from '../../src/services/elearning-learner-courses'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
   type ElearningPlaybackQueryable,
@@ -56,6 +58,9 @@ const MEMBER_ID = '55555555-5555-4555-8555-555555555555'
 const MEDIA = '66666666-6666-4666-8666-666666666666'
 const ATTEMPT = '77777777-7777-4777-8777-777777777777'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const REQUEST_ID = '88888888-8888-4888-8888-888888888888'
+const EXAM_ITEM_ID = '99999999-9999-4999-8999-999999999999'
+const PUBLISHED_EXAM_ID = 'abababab-abab-4aba-8aba-abababababab'
 
 const ASSIGN_BODY = {
   targetUserId: TARGET,
@@ -124,8 +129,61 @@ const EXAM_SUBMIT_RESULT = {
 const ANSWERS = { [Q1]: ['a'] }
 const SUBMIT_BODY = { answers: ANSWERS }
 
+const PUBLISH_BODY = {
+  requestId: REQUEST_ID,
+  title: 'Pilot course',
+  mediaId: MEDIA,
+  passScore: 10,
+  maxAttempts: 3,
+  questions: [{
+    questionType: 'single_choice',
+    prompt: 'Pick one',
+    options: [
+      { id: 'a', text: 'alpha' },
+      { id: 'b', text: 'beta' },
+    ],
+    correctOptionIds: ['a'],
+    points: 10,
+  }],
+}
+
+const PUBLISH_RESULT = {
+  courseId: REQUEST_ID,
+  courseVersionId: VERSION,
+  videoItemId: ITEM,
+  examItemId: EXAM_ITEM_ID,
+  examId: PUBLISHED_EXAM_ID,
+  status: 'published' as const,
+  questionCount: 1,
+  totalScore: 10,
+}
+
+const LEARNER_COURSES = [{
+  courseId: REQUEST_ID,
+  courseVersionId: VERSION,
+  title: 'Pilot course',
+  assignment: {
+    deadline: null,
+    assignedAt: '2026-01-02T03:04:05.000Z',
+  },
+  video: {
+    itemId: ITEM,
+    durationMs: 10_000,
+    status: 'not_started' as const,
+    effectiveMs: 0,
+    maxPositionMs: 0,
+    completedAt: null,
+  },
+  exam: {
+    itemId: EXAM_ITEM_ID,
+    latestAttempt: null,
+  },
+  completed: false,
+}]
+
 const INDEX_SRC = join(__dirname, '../../src/index.ts')
 const RUNTIME_SRC = join(__dirname, '../../src/services/elearning-pilot-runtime.ts')
+const ROUTE_SRC = join(__dirname, '../../src/routes/elearning-pilot.ts')
 
 const pinned = usePinnedServer()
 function serve(app: express.Express) {
@@ -135,7 +193,12 @@ function serve(app: express.Express) {
 
 function dummyDb(
   onUse?: () => void,
-): ElearningDirectAssignmentDb & ElearningWatchDb & ElearningPlaybackQueryable & ElearningExamDb {
+): ElearningDirectAssignmentDb
+  & ElearningWatchDb
+  & ElearningPlaybackQueryable
+  & ElearningExamDb
+  & ElearningCoursePublishDb
+  & ElearningLearnerCoursesQueryable {
   return {
     query: async () => {
       onUse?.()
@@ -190,6 +253,10 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(runtimeSrc).toMatch(/issueElearningMediaPlaybackTicket/)
     expect(runtimeSrc).toMatch(/startElearningExam/)
     expect(runtimeSrc).toMatch(/submitElearningExam/)
+    expect(runtimeSrc).toMatch(/publishElearningCourse/)
+    expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
+    expect(runtimeSrc).toMatch(/opts\.publishElearningCourse\s*\?\?\s*publishElearningCourse/)
+    expect(runtimeSrc).toMatch(/opts\.listElearningLearnerCourses\s*\?\?\s*listElearningLearnerCourses/)
     expect(runtimeSrc).not.toMatch(/authorizeElearningMediaPlayback/)
     expect(runtimeSrc).not.toMatch(/getBootedElearningMediaRangeStore/)
     expect(runtimeSrc).not.toMatch(/pool\.query|db\.query/)
@@ -199,6 +266,18 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const stack = (runtime!.router as unknown as { stack: Array<{ handle: unknown; regexp: RegExp }> }).stack
     expect(stack[0]?.handle).toBe(authenticate)
     expect(String(stack[0]?.regexp)).toMatch(/elearning/)
+
+    const routeSrc = readFileSync(ROUTE_SRC, 'utf8')
+    expect(routeSrc).toMatch(/json\(\s*\{\s*limit:\s*16\s*\*\s*1024\s*\}\s*\)/)
+    expect(routeSrc).toMatch(/json\(\s*\{\s*limit:\s*1024\s*\*\s*1024\s*\}\s*\)/)
+    expect(routeSrc).toMatch(/parseError\.status === 413|entity\.too\.large/)
+    expect(routeSrc).toMatch(/payload_too_large/)
+    expect(routeSrc).toMatch(/\/api\/elearning\/courses\/publish/)
+    expect(routeSrc).toMatch(/\/api\/elearning\/me\/courses/)
+    expect(routeSrc).toMatch(/res\.status\(\s*200\s*\)\.json\(\s*\{\s*courses:\s*result\s*\}\s*\)/)
+    expect(routeSrc).toMatch(/rbacGuard\('elearning',\s*'admin'\)|adminGuard/)
+    expect(routeSrc).toMatch(/gate\(\s*deps\.adminGuard,\s*'exam',\s*parsePublishJson\s*\)/)
+    expect(routeSrc).toMatch(/gate\(\s*deps\.readGuard,\s*'exam',\s*null\s*\)/)
   })
 
   test('JWT identity then org then RBAC precede body parsing; actor/org ignore client overrides', async () => {
@@ -227,12 +306,21 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const ticketCalls: unknown[] = []
     const examStartCalls: unknown[] = []
     const examSubmitCalls: unknown[] = []
+    const publishCalls: unknown[] = []
+    const learnerCalls: unknown[] = []
     const runtime = createElearningPilotRuntime({
       db: dummyDb(),
       env: FLAG_EXAM_ON,
       authenticate: authenticateMw,
       adminGuard,
-      readGuard: (_req, _res, next) => { order.push('rbac'); next() },
+      readGuard: (_req, res, next) => {
+        order.push('rbac')
+        if (_req.headers['x-test-deny-read'] === '1') {
+          res.status(403).json({ error: 'Insufficient permissions' })
+          return
+        }
+        next()
+      },
       assignElearningDirect: async (_db, input) => {
         assignCalls.push(input)
         order.push('service')
@@ -252,6 +340,16 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
         examSubmitCalls.push(input)
         order.push('service')
         return EXAM_SUBMIT_RESULT
+      },
+      publishElearningCourse: async (_db, input) => {
+        publishCalls.push(input)
+        order.push('service')
+        return PUBLISH_RESULT
+      },
+      listElearningLearnerCourses: async (_db, input) => {
+        learnerCalls.push(input)
+        order.push('service')
+        return LEARNER_COURSES
       },
     })
     expect(runtime).not.toBeNull()
@@ -350,6 +448,81 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       answers: ANSWERS,
     }])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
+
+    order.length = 0
+    const hugePublish = { ...PUBLISH_BODY, title: 'x'.repeat(20 * 1024) }
+    const anonPublish = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .set('x-test-anon', '1')
+      .send(hugePublish)
+    expect(anonPublish.status).toBe(401)
+    expect(publishCalls).toHaveLength(0)
+    expect(order).toEqual(['jwt'])
+
+    order.length = 0
+    const noOrgPublish = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .set('x-test-no-org', '1')
+      .send(hugePublish)
+    expect(noOrgPublish.status).toBe(403)
+    expect(noOrgPublish.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(publishCalls).toHaveLength(0)
+    expect(order.includes('rbac')).toBe(false)
+
+    order.length = 0
+    const deniedPublish = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .set('x-test-deny', '1')
+      .send(hugePublish)
+    expect(deniedPublish.status).toBe(403)
+    expect(publishCalls).toHaveLength(0)
+    expect(order).toEqual(['jwt', 'rbac'])
+
+    order.length = 0
+    const publish = await serve(app)
+      .post(`/api/elearning/courses/publish?orgId=evil-org&actorId=evil-actor&userId=evil-user`)
+      .set('x-user-id', 'header-user')
+      .set('x-tenant-id', 'header-org')
+      .send(PUBLISH_BODY)
+    expect(publish.status).toBe(201)
+    expect(publish.body).toEqual(PUBLISH_RESULT)
+    expect(JSON.stringify(publish.body)).not.toContain(PLAYBACK_SECRET)
+    expect(publishCalls).toEqual([{
+      orgId: ORG,
+      actorId: ACTOR,
+      requestId: REQUEST_ID,
+      title: PUBLISH_BODY.title,
+      mediaId: MEDIA,
+      passScore: 10,
+      maxAttempts: 3,
+      questions: PUBLISH_BODY.questions,
+    }])
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
+
+    order.length = 0
+    const deniedLearner = await serve(app)
+      .get('/api/elearning/me/courses')
+      .set('x-test-deny-read', '1')
+    expect(deniedLearner.status).toBe(403)
+    expect(learnerCalls).toHaveLength(0)
+    expect(order).toEqual(['jwt', 'rbac'])
+
+    order.length = 0
+    const learner = await serve(app)
+      .get(`/api/elearning/me/courses?orgId=evil-org&userId=evil-user`)
+      .set('x-user-id', 'header-user')
+      .set('x-tenant-id', 'header-org')
+    expect(learner.status).toBe(200)
+    expect(learner.body).toEqual({ courses: LEARNER_COURSES })
+    expect(Object.keys(learner.body)).toEqual(['courses'])
+    expect(Array.isArray(learner.body)).toBe(false)
+    expect(JSON.stringify(learner.body)).not.toContain(PLAYBACK_SECRET)
+    expect(JSON.stringify(learner.body)).not.toContain(JWT_SECRET)
+    expect(JSON.stringify(learner.body)).not.toMatch(/storage_key|storageKey|answer_key|answerKey|paper_snapshot|sha256/)
+    expect(JSON.stringify(learner.body)).not.toContain('explanation')
+    expect(JSON.stringify(learner.body)).not.toMatch(/"correct"/)
+    expect(learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
   })
 
   test('valid allowed-key body over 16 KiB is rejected before service even with a later 10 MB parser', async () => {
@@ -359,6 +532,8 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const ticketCalls: unknown[] = []
     const examStartCalls: unknown[] = []
     const examSubmitCalls: unknown[] = []
+    const publishCalls: unknown[] = []
+    const learnerCalls: unknown[] = []
     const order: string[] = []
     const authenticateMw: express.RequestHandler = (req, _res, next) => {
       order.push('jwt')
@@ -401,6 +576,16 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
         examSubmitCalls.push(input)
         order.push('service')
         return EXAM_SUBMIT_RESULT
+      },
+      publishElearningCourse: async (_db, input) => {
+        publishCalls.push(input)
+        order.push('service')
+        return PUBLISH_RESULT
+      },
+      listElearningLearnerCourses: async (_db, input) => {
+        learnerCalls.push(input)
+        order.push('service')
+        return LEARNER_COURSES
       },
     })
     const app = express()
@@ -465,6 +650,58 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(examSubmit.body).toEqual({ error: 'invalid_input' })
     expect(examSubmitCalls).toHaveLength(0)
     expect(order).toEqual(['jwt', 'rbac'])
+
+    order.length = 0
+    const underPublish = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .send({ ...PUBLISH_BODY, title: 'x'.repeat(20 * 1024) })
+    expect(underPublish.status).toBe(201)
+    expect(underPublish.body).toEqual(PUBLISH_RESULT)
+    expect(publishCalls).toHaveLength(1)
+    expect((publishCalls[0] as { orgId: string; actorId: string }).orgId).toBe(ORG)
+    expect((publishCalls[0] as { orgId: string; actorId: string }).actorId).toBe(ACTOR)
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
+
+    order.length = 0
+    publishCalls.length = 0
+    const nearPublish = `{${' '.repeat(64 * 1024)}"requestId":"${REQUEST_ID}","title":"Pilot course","mediaId":"${MEDIA}","passScore":10,"maxAttempts":3,"questions":${JSON.stringify(PUBLISH_BODY.questions)}}`
+    expect(Buffer.byteLength(nearPublish)).toBeGreaterThan(16 * 1024)
+    expect(Buffer.byteLength(nearPublish)).toBeLessThan(1024 * 1024)
+    const nearRes = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .set('content-type', 'application/json')
+      .send(nearPublish)
+    expect(nearRes.status).toBe(201)
+    expect(publishCalls).toHaveLength(1)
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
+
+    order.length = 0
+    publishCalls.length = 0
+    const publishLimit = 1024 * 1024
+    const overJson = `{${' '.repeat(publishLimit - 1)}}`
+    expect(Buffer.byteLength(overJson)).toBe(publishLimit + 1)
+    const overPublish = await serve(app)
+      .post('/api/elearning/courses/publish')
+      .set('content-type', 'application/json')
+      .send(overJson)
+    expect(overPublish.status).toBe(413)
+    expect(overPublish.body).toEqual({ error: 'payload_too_large' })
+    expect(JSON.stringify(overPublish.body)).not.toContain(PLAYBACK_SECRET)
+    expect(JSON.stringify(overPublish.body)).not.toMatch(/too large|entity|limit|bytes/i)
+    expect(publishCalls).toHaveLength(0)
+    expect(order).toEqual(['jwt', 'rbac'])
+
+    order.length = 0
+    const learner = await serve(app)
+      .get('/api/elearning/me/courses?orgId=evil-org&userId=evil-user')
+      .set('content-type', 'application/json')
+      .send('{')
+    expect(learner.status).toBe(200)
+    expect(learner.body).toEqual({ courses: LEARNER_COURSES })
+    expect(Object.keys(learner.body)).toEqual(['courses'])
+    expect(JSON.stringify(learner.body)).not.toMatch(/storage_key|storageKey|answer_key|answerKey|paper_snapshot/)
+    expect(learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
   })
 
   test('index.ts mounts the pilot runtime in setupMiddleware before the global 10 MB parser, not in start', () => {
@@ -497,6 +734,8 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
   test('exam flags OFF 404 the exam routes with no service call; watch ticket still issues', async () => {
     const examStartCalls: unknown[] = []
     const ticketCalls: unknown[] = []
+    const publishCalls: unknown[] = []
+    const learnerCalls: unknown[] = []
     const authenticateMw: express.RequestHandler = (req, _res, next) => {
       req.user = { id: ACTOR }
       req.authenticatedTenantId = ORG
@@ -507,6 +746,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       env: FLAG_ON,
       authenticate: authenticateMw,
       readGuard: (_req, _res, next) => next(),
+      adminGuard: (_req, _res, next) => next(),
       issueElearningMediaPlaybackTicket: async (_db, input) => {
         ticketCalls.push(input)
         return TICKET_RESULT
@@ -514,6 +754,14 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       startElearningExam: async (_db, input) => {
         examStartCalls.push(input)
         return EXAM_START_RESULT
+      },
+      publishElearningCourse: async (_db, input) => {
+        publishCalls.push(input)
+        return PUBLISH_RESULT
+      },
+      listElearningLearnerCourses: async (_db, input) => {
+        learnerCalls.push(input)
+        return LEARNER_COURSES
       },
     })
     const app = express()
@@ -530,5 +778,15 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(JSON.stringify(ticket.body)).not.toContain(PLAYBACK_SECRET)
     expect(ticketCalls).toHaveLength(1)
     expect((ticketCalls[0] as { playbackSigningSecret: string }).playbackSigningSecret).toBe(PLAYBACK_SECRET)
+
+    const publish = await serve(app).post('/api/elearning/courses/publish').send(PUBLISH_BODY)
+    expect(publish.status).toBe(404)
+    expect(publish.body).toEqual({ error: 'not_found' })
+    expect(publishCalls).toHaveLength(0)
+
+    const learner = await serve(app).get('/api/elearning/me/courses')
+    expect(learner.status).toBe(404)
+    expect(learner.body).toEqual({ error: 'not_found' })
+    expect(learnerCalls).toHaveLength(0)
   })
 })

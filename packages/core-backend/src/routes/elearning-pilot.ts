@@ -1,10 +1,14 @@
 /**
- * E-learning V0.1 named-pilot HTTP surface: assignment, watch, playback ticket, exams.
+ * E-learning V0.1 named-pilot HTTP surface: assignment, watch, playback ticket, exams,
+ * composite course publish, learner assigned-course list.
  *
  * Unmounted factory. Registers nothing unless master+CONTENT+ASSIGNMENT+MEDIA are exact 'true'.
- * Exam routes additionally recheck ASSESSMENT. Identity, authoritative org, then RBAC run
- * before JSON/service. Learner/actor/org are injected — never taken from the client.
- * Errors are values-free. Ticket/exam JSON never includes storage keys or paper secrets.
+ * Exam, publish, and learner-list routes additionally recheck ASSESSMENT. Identity,
+ * authoritative org, then RBAC run before JSON/service. Learner/actor/org are injected —
+ * never taken from the client. Publish uses a dedicated 1 MiB JSON parser; a body just
+ * over that limit is a values-free 413. Other JSON routes stay at 16 KiB. Learner GET
+ * has no JSON parser. Errors are values-free. Ticket/exam JSON never includes storage
+ * keys or paper secrets.
  */
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import { json, Router } from 'express'
@@ -13,6 +17,13 @@ import {
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
 } from '../elearning/feature-flags'
+import {
+  ElearningCoursePublishError,
+  publishElearningCourse,
+  type ElearningCoursePublishDb,
+  type ElearningCoursePublishErrorCode,
+  type PublishElearningCourseInput,
+} from '../services/elearning-course-publish'
 import {
   assignElearningDirect,
   ElearningDirectAssignmentError,
@@ -26,6 +37,12 @@ import {
   type ElearningExamDb,
   type ElearningExamErrorCode,
 } from '../services/elearning-exam'
+import {
+  ElearningLearnerCoursesError,
+  listElearningLearnerCourses,
+  type ElearningLearnerCoursesErrorCode,
+  type ElearningLearnerCoursesQueryable,
+} from '../services/elearning-learner-courses'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
   ElearningPlaybackError,
@@ -47,6 +64,7 @@ const UUID_RE =
 const ASSIGN_KEYS = new Set(['targetUserId', 'courseVersionId', 'sourceKey', 'deadline'])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
 const SUBMIT_KEYS = new Set(['answers'])
+const PUBLISH_KEYS = new Set(['requestId', 'title', 'mediaId', 'passScore', 'maxAttempts', 'questions'])
 const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
@@ -96,10 +114,28 @@ const EXAM_STATUS: Record<ElearningExamErrorCode, number> = {
   unavailable: 503,
 }
 
+const PUBLISH_STATUS: Record<ElearningCoursePublishErrorCode, number> = {
+  invalid_input: 400,
+  media_unavailable: 409,
+  conflict: 409,
+  unavailable: 503,
+}
+
+const LEARNER_STATUS: Record<ElearningLearnerCoursesErrorCode, number> = {
+  invalid_input: 400,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
+const publishJsonParser = json({ limit: 1024 * 1024 })
 
 export interface ElearningPilotRouteDeps {
-  db: ElearningDirectAssignmentDb & ElearningWatchDb & ElearningPlaybackQueryable & ElearningExamDb
+  db: ElearningDirectAssignmentDb
+    & ElearningWatchDb
+    & ElearningPlaybackQueryable
+    & ElearningExamDb
+    & ElearningCoursePublishDb
+    & ElearningLearnerCoursesQueryable
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -113,6 +149,8 @@ export interface ElearningPilotRouteDeps {
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
   startElearningExam?: typeof startElearningExam
   submitElearningExam?: typeof submitElearningExam
+  publishElearningCourse?: typeof publishElearningCourse
+  listElearningLearnerCourses?: typeof listElearningLearnerCourses
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -122,6 +160,19 @@ function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
 function parseJson(req: Request, res: Response, next: NextFunction): void {
   jsonParser(req, res, (error?: unknown) => {
     if (!error) return next()
+    res.status(400).json({ error: 'invalid_input' })
+  })
+}
+
+function parsePublishJson(req: Request, res: Response, next: NextFunction): void {
+  publishJsonParser(req, res, (error?: unknown) => {
+    if (!error) return next()
+    if (!req.readableEnded) req.resume()
+    const parseError = error as { status?: unknown; type?: unknown }
+    if (parseError.status === 413 || parseError.type === 'entity.too.large') {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
     res.status(400).json({ error: 'invalid_input' })
   })
 }
@@ -165,6 +216,8 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
   const startExam = deps.startElearningExam ?? startElearningExam
   const submitExam = deps.submitElearningExam ?? submitElearningExam
+  const publishCourse = deps.publishElearningCourse ?? publishElearningCourse
+  const listLearnerCourses = deps.listElearningLearnerCourses ?? listElearningLearnerCourses
   const router = Router()
 
   const asyncHandler =
@@ -207,12 +260,16 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
     next()
   }
 
-  const gate = (guard: RequestHandler, surface: 'watch' | 'exam' = 'watch'): RequestHandler[] => [
+  const gate = (
+    guard: RequestHandler,
+    surface: 'watch' | 'exam' = 'watch',
+    parser: RequestHandler | null = parseJson,
+  ): RequestHandler[] => [
     surface === 'exam' ? requireExamFlags : requireWatchFlags,
     requireIdentity,
     requireOrg,
     guard,
-    parseJson,
+    ...(parser ? [parser] : []),
   ]
 
   const recheck = (
@@ -454,6 +511,61 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       } catch (error) {
         if (error instanceof ElearningExamError) {
           res.status(EXAM_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/courses/publish',
+    ...gate(deps.adminGuard, 'exam', parsePublishJson),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      const body = readObject(req.body)
+      if (!body || rejectUnknownKeys(body, PUBLISH_KEYS)) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await publishCourse(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          requestId: body.requestId,
+          title: body.title,
+          mediaId: body.mediaId,
+          passScore: body.passScore,
+          maxAttempts: body.maxAttempts,
+          questions: body.questions,
+        } as PublishElearningCourseInput)
+        res.status(201).json(result)
+      } catch (error) {
+        if (error instanceof ElearningCoursePublishError) {
+          res.status(PUBLISH_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/me/courses',
+    ...gate(deps.readGuard, 'exam', null),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      try {
+        const result = await listLearnerCourses(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+        })
+        res.status(200).json({ courses: result })
+      } catch (error) {
+        if (error instanceof ElearningLearnerCoursesError) {
+          res.status(LEARNER_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })
