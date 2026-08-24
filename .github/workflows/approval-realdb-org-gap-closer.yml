@@ -41,6 +41,7 @@ on:
     # The `paths` filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-org-instance-gap-closer.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823149900_recovery09_close_approval_org_gap.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823150000_close_approval_instance_org_id_gap_window.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts'
@@ -50,6 +51,7 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-org-instance-gap-closer.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823149900_recovery09_close_approval_org_gap.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823150000_close_approval_instance_org_id_gap_window.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260114110000_create_user_orgs_table.ts'

@@ -42,6 +42,7 @@ on:
     # The `paths` filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-org-backfill-b.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823040000_recovery09_prepare_legacy_default_org.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'
@@ -51,6 +52,7 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-instance-org-backfill-b.db.test.ts'
+      - 'packages/core-backend/src/db/migrations/zzzz20260823040000_recovery09_prepare_legacy_default_org.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id.ts'
       - 'packages/core-backend/src/db/migrations/zzzz20260821100000_add_approval_instance_org_id.ts'

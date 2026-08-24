@@ -100,9 +100,9 @@ import { checkTableExists } from './_patterns'
  * user whose ONLY `user_orgs` row is a DEACTIVATED membership to what turns out to be the single
  * active org is NOT provisioned by this migration — `ON CONFLICT ... DO NOTHING` deliberately
  * leaves their row exactly as a prior unbind/deactivation left it. They remain zero-ACTIVE-
- * membership after this migration runs. This is a possible (not confirmed) shape for some subset
- * of the ratified "12" — nothing in `u1b`'s own probe SQL distinguishes "no row at all" from "a
- * deactivated row", so which of the 12 (if any) are this shape is unmeasured. The acceptance
+ * membership after this migration runs. Recovery09 distinguishes this actionless same-anchor
+ * conflict from H36's stale-membership-to-another-org shape: the latter may safely gain a NEW
+ * default membership while the stale row remains untouched; the former is never resurrected. The acceptance
  * signal is therefore NOT "12 rows appeared" but **`u1b_zero_membership_active_users` re-measured
  * post-deploy** (the same evidence-dispatch probe this PR's acceptance already uses) — if it does
  * not reach 0, this is the disclosed, expected reason, not a new defect.
@@ -159,6 +159,18 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE
   `.execute(db)
   if (activeOrgs.rows.length !== 1) {
+    // Recovery09 runs immediately before this migration and handles every multi-org user for
+    // whom a NEW default membership can be inserted. If only deactivated `default` conflicts
+    // remain, there is deliberately no write this migration may perform; return instead of
+    // evaluating the obsolete global-single-org premise for an actionless population.
+    const repairable = await sql<{ n: string }>`
+      SELECT count(*)::text AS n
+        FROM users u
+       WHERE u.is_active = TRUE
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+         AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+    `.execute(db)
+    if (Number(repairable.rows[0]?.n ?? '0') === 0) return
     throw new Error(
       `provision_zero_membership_active_users (Lock-11 D-8(β)) aborted before any INSERT: found ` +
       `${activeOrgs.rows.length} distinct active org(s) in user_orgs; exactly one is required to ` +

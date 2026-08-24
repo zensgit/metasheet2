@@ -5,6 +5,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { up as phase1Up } from '../../src/db/migrations/zzzz20260821100000_add_approval_instance_org_id'
+import { up as recovery09Up } from '../../src/db/migrations/zzzz20260823040000_recovery09_prepare_legacy_default_org'
 import { up as provisioningUp } from '../../src/db/migrations/zzzz20260823050000_provision_zero_membership_active_users'
 import { up as backfillBUp } from '../../src/db/migrations/zzzz20260823100000_backfill_approval_instance_org_id'
 
@@ -89,6 +90,13 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
         is_active boolean NOT NULL DEFAULT true
       )
     `.execute(testDb)
+    await sql`
+      CREATE TABLE directory_integrations (
+        id text PRIMARY KEY,
+        org_id text NOT NULL,
+        status text NOT NULL DEFAULT 'active'
+      )
+    `.execute(testDb)
 
     // Simulate "Phase 1 already landed" — adds org_id (nullable, no default) + the non-blank
     // CHECK, and runs its own (here trivially empty) class-2 backfill.
@@ -131,6 +139,10 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
   // Added for the D-8(β) provisioning gates (H32-H37, H40).
   async function seedUser(id: string, isActive = true): Promise<void> {
     await sql`INSERT INTO users (id, is_active) VALUES (${id}, ${isActive})`.execute(testDb)
+  }
+
+  async function seedDirectoryIntegration(id: string, orgId: string): Promise<void> {
+    await sql`INSERT INTO directory_integrations (id, org_id) VALUES (${id}, ${orgId})`.execute(testDb)
   }
 
   async function activeMembershipCount(userId: string): Promise<number> {
@@ -730,13 +742,13 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     expect(await activeMembershipCount('u_h37_target')).toBe(0)
   })
 
-  it("H41: a zero-ACTIVE-membership user whose ONLY row is an already-DEACTIVATED membership to the very org that is now THE sole active org -> provisioning does NOT crash and does NOT resurrect it (pins `ON CONFLICT (user_id, org_id) DO NOTHING`; NOT EXISTS alone would let the INSERT reach a live PRIMARY KEY collision here, which — without the ON CONFLICT clause — is a raw Postgres unique-violation, not a silent no-op)", async () => {
+  it("H41/R09: a zero-ACTIVE-membership user whose ONLY row is DEACTIVATED is excluded from the executable population, does not trigger the org premise, and is never resurrected", async () => {
     await seedUser('u_h41_seed', true)
     await seedUserOrg('u_h41_seed', 'orgOnly41', true) // establishes the sole active org
     await seedUser('u_h41_target', true)
     // The ONLY (user_id, org_id) pair for this user is INACTIVE, and its org_id is the SAME
-    // value the single-org premise will resolve to — a genuine (user_id, org_id) PK collision
-    // waiting to happen once provisioning computes theOrgId = 'orgOnly41'.
+    // value the single-org premise would resolve to. Recovery09 excludes this actionless conflict
+    // from the source set because the non-resurrection contract means no write can be permitted.
     await seedUserOrg('u_h41_target', 'orgOnly41', false)
 
     await expect(provisioningUp(testDb)).resolves.toBeUndefined()
@@ -749,6 +761,81 @@ describeIfDatabase('Migration B — ordered org_id backfill over the residual NU
     `.execute(testDb)
     expect(row.rows).toEqual([{ is_active: false }])
     expect(await activeMembershipCount('u_h41_target')).toBe(0)
+  })
+
+  it('R09-1: four-org staging shape -> default-anchored repair preserves synthetic memberships, never resurrects a deactivated row, and leaves Migration B no class-6 residue', async () => {
+    await seedDirectoryIntegration('di_default', 'default')
+    await seedUser('r09_default_witness')
+    await seedUserOrg('r09_default_witness', 'default')
+    for (const [userId, orgId] of [
+      ['r09_synth_a', 'synth_a'],
+      ['r09_synth_b', 'synth_b'],
+      ['r09_synth_c', 'synth_c'],
+    ] as const) {
+      await seedUser(userId)
+      await seedUserOrg(userId, orgId)
+    }
+
+    await seedUser('r09_no_row')
+    await seedUser('r09_deactivated_only')
+    await seedUserOrg('r09_deactivated_only', 'default', false)
+    await seedUser('r09_stale_other')
+    await seedUserOrg('r09_stale_other', 'retired_org', false)
+    await seedInstance({ id: 'r09_by_user', sourceSystem: 'platform', requesterId: 'r09_no_row' })
+    await seedInstance({ id: 'r09_by_stale_user', sourceSystem: 'platform', requesterId: 'r09_stale_other' })
+    await seedInstance({ id: 'r09_missing_user', sourceSystem: 'platform', requesterId: 'r09_absent' })
+
+    await expect(recovery09Up(testDb)).resolves.toBeUndefined()
+    await expect(provisioningUp(testDb)).resolves.toBeUndefined()
+    await expect(backfillBUp(testDb)).resolves.toBeUndefined()
+
+    expect(await activeMembershipCount('r09_no_row')).toBe(1)
+    expect(await activeMembershipCount('r09_deactivated_only')).toBe(0)
+    expect(await activeMembershipCount('r09_stale_other')).toBe(1)
+    expect(await orgIdOf('r09_by_user')).toBe('default')
+    expect(await orgIdOf('r09_by_stale_user')).toBe('default')
+    expect(await orgIdOf('r09_missing_user')).toBe('default')
+    const synthetic = await sql<{ n: string }>`
+      SELECT count(*)::text AS n FROM user_orgs
+       WHERE (user_id, org_id, is_active) IN (
+         ('r09_synth_a', 'synth_a', TRUE),
+         ('r09_synth_b', 'synth_b', TRUE),
+         ('r09_synth_c', 'synth_c', TRUE)
+       )
+    `.execute(testDb)
+    expect(synthetic.rows[0]?.n).toBe('3')
+    const stale = await sql<{ is_active: boolean }>`
+      SELECT is_active FROM user_orgs WHERE user_id = 'r09_stale_other' AND org_id = 'retired_org'
+    `.execute(testDb)
+    expect(stale.rows).toEqual([{ is_active: false }])
+  })
+
+  it('R09-2: more than one directory org anchor -> fail before membership or approval writes, values-free', async () => {
+    await seedDirectoryIntegration('di_a', 'default')
+    await seedDirectoryIntegration('di_b', 'another_org')
+    await seedUser('r09_anchor_witness')
+    await seedUserOrg('r09_anchor_witness', 'default')
+    await seedUser('r09_target')
+    await seedInstance({ id: 'r09_anchor_instance', sourceSystem: 'platform', requesterId: 'missing_r09' })
+
+    await expect(recovery09Up(testDb)).rejects.toThrow(/exactly the repo-owned legacy anchor/i)
+    await expect(recovery09Up(testDb)).rejects.not.toThrow(/another_org|r09_anchor_instance|r09_target/i)
+    expect(await activeMembershipCount('r09_target')).toBe(0)
+    expect(await orgIdOf('r09_anchor_instance')).toBeNull()
+  })
+
+  it('R09-3: terminal row owned by a deactivated-only requester remains unsupported and rolls back all candidate writes', async () => {
+    await seedDirectoryIntegration('di_default_r09_3', 'default')
+    await seedUser('r09_3_witness')
+    await seedUserOrg('r09_3_witness', 'default')
+    await seedUser('r09_3_insert_candidate')
+    await seedUser('r09_3_deactivated')
+    await seedUserOrg('r09_3_deactivated', 'default', false)
+    await seedInstance({ id: 'r09_3_unsupported', sourceSystem: 'platform', requesterId: 'r09_3_deactivated' })
+
+    await expect(recovery09Up(testDb)).rejects.toThrow(/neither requester-missing nor active-requester-with-no-membership-row/i)
+    expect(await activeMembershipCount('r09_3_insert_candidate')).toBe(0)
+    expect(await orgIdOf('r09_3_unsupported')).toBeNull()
   })
 
   it("H42: EMPTY population (fresh/CI-shaped DB — zero `users` rows at all, hence zero distinct active orgs) -> provisioning resolves as a safe no-op, does NOT abort on the FAIL-LOUD single-org guard (regression pin for a P1 CI outage this migration's first cut shipped: `approval-realdb-org-backfill-b` and `migration-prod-image-parity (postgres:15-alpine)` both caught 'found 0 distinct active org(s)' aborting db:migrate on every fresh-DB CI lane before the pre-flight population check was added)", async () => {

@@ -1122,8 +1122,28 @@ SELECT 'zero_membership_active_user_count=' || count(*)::text
   FROM users u
  WHERE u.is_active = TRUE
    AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
+SELECT 'zero_membership_no_row_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id);
+SELECT 'zero_membership_only_deactivated_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE);
+SELECT 'recovery09_repairable_user_count=' || count(*)::text
+  FROM users u
+ WHERE u.is_active = TRUE
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+   AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default');
 SELECT 'distinct_active_org_count=' || count(*)::text
   FROM (SELECT DISTINCT org_id FROM user_orgs WHERE is_active = TRUE) o;
+SELECT 'directory_integration_distinct_org_count=' || count(*)::text
+  FROM (SELECT DISTINCT org_id FROM directory_integrations WHERE org_id IS NOT NULL AND btrim(org_id) <> '') o;
+SELECT 'directory_integration_non_default_count=' || count(*)::text
+  FROM directory_integrations WHERE org_id <> 'default';
+SELECT 'legacy_anchor_active_membership_witness_count=' || count(*)::text
+  FROM user_orgs WHERE org_id = 'default' AND is_active = TRUE;
 SELECT 'class6_candidate_count=' || count(*)::text
   FROM approval_instances i
  WHERE i.id NOT LIKE 'plm:%'
@@ -1139,22 +1159,65 @@ SELECT 'class6_candidate_count=' || count(*)::text
       GROUP BY uo.user_id
      HAVING count(*) = 1
    );
+SELECT 'recovery09_unsupported_class6_count=' || count(*)::text
+  FROM approval_instances i
+ WHERE i.id NOT LIKE 'plm:%'
+   AND i.id NOT LIKE 'afs:%'
+   AND COALESCE(i.source_system, 'platform') = 'platform'
+   AND i.template_id IS NULL
+   ${org_null_predicate}
+   AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+   AND NOT EXISTS (
+     SELECT 1 FROM user_orgs uo
+      WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active = TRUE
+      GROUP BY uo.user_id HAVING count(*) = 1
+   )
+   AND NOT (
+     NOT EXISTS (SELECT 1 FROM users u WHERE u.id = i.requester_snapshot->>'id')
+     OR EXISTS (
+       SELECT 1 FROM users u
+        WHERE u.id = i.requester_snapshot->>'id' AND u.is_active = TRUE
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.is_active = TRUE)
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id AND uo.org_id = 'default')
+     )
+   );
 SQL
 
-  local invalid conflicts zero_membership active_orgs class6 value
+  local invalid conflicts zero_membership zero_no_row zero_deactivated repairable_users active_orgs directory_orgs non_default_integrations anchor_witness class6 unsupported_class6 value
   invalid="$(sed -n 's/^invalid_approval_action_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   conflicts="$(sed -n 's/^attachment_org_conflict_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   zero_membership="$(sed -n 's/^zero_membership_active_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_no_row="$(sed -n 's/^zero_membership_no_row_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  zero_deactivated="$(sed -n 's/^zero_membership_only_deactivated_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  repairable_users="$(sed -n 's/^recovery09_repairable_user_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   active_orgs="$(sed -n 's/^distinct_active_org_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  directory_orgs="$(sed -n 's/^directory_integration_distinct_org_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  non_default_integrations="$(sed -n 's/^directory_integration_non_default_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  anchor_witness="$(sed -n 's/^legacy_anchor_active_membership_witness_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
   class6="$(sed -n 's/^class6_candidate_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
-  for value in "$invalid" "$conflicts" "$zero_membership" "$active_orgs" "$class6"; do
+  unsupported_class6="$(sed -n 's/^recovery09_unsupported_class6_count=//p' "${OUTPUT_DIR}/target-read-only-prechecks.txt" | tail -n 1)"
+  for value in "$invalid" "$conflicts" "$zero_membership" "$zero_no_row" "$zero_deactivated" "$repairable_users" "$active_orgs" "$directory_orgs" "$non_default_integrations" "$anchor_witness" "$class6" "$unsupported_class6"; do
     [[ "$value" =~ ^[0-9]+$ ]] || fail "target read-only precheck returned a non-numeric cardinality"
   done
   [[ "$invalid" == "0" ]] || fail "target precheck: ${invalid} approval_records rows carry an action outside the target constraint"
   [[ "$conflicts" == "0" ]] || fail "target precheck: ${conflicts} attachment-bearing approval instances have cross-org conflicts"
-  if [[ "$zero_membership" -gt 0 || "$class6" -gt 0 ]]; then
-    [[ "$active_orgs" == "1" ]] \
-      || fail "target precheck: provisioning/backfill population exists but distinct active org count is ${active_orgs}, not exactly 1"
+  # Deactivated-only rows are an explicitly disclosed non-resurrection residue. Recovery09 and
+  # the corrected provisioning migration intentionally do not write them, so they must not make a
+  # safe retry demand that the already-applied Recovery09 migration still be pending. Only the
+  # executable no-row population and unresolved class-6 rows require the repair gate.
+  if [[ "$repairable_users" -gt 0 || "$class6" -gt 0 ]]; then
+    if [[ "$active_orgs" != "1" ]]; then
+      grep -q 'zzzz20260823040000_recovery09_prepare_legacy_default_org' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+        || fail "target precheck: multi-org repair is required but the Recovery09 pre-alignment migration is not pending in the exact target image"
+      grep -q 'zzzz20260823149900_recovery09_close_approval_org_gap' "${OUTPUT_DIR}/target-migrate-list-before.txt" \
+        || fail "target precheck: multi-org repair is required but the Recovery09 gap migration is not pending in the exact target image"
+      [[ "$((zero_no_row + zero_deactivated))" == "$zero_membership" ]] \
+        || fail "target precheck: Recovery09 zero-membership buckets do not close over the measured population"
+      [[ "$directory_orgs" == "1" && "$non_default_integrations" == "0" && "$anchor_witness" -gt 0 ]] \
+        || fail "target precheck: Recovery09 legacy default anchor is not uniquely and actively witnessed"
+      [[ "$unsupported_class6" == "0" ]] \
+        || fail "target precheck: ${unsupported_class6} class-6 candidate(s) are outside the bounded Recovery09 fallback"
+    fi
   fi
   log "target read-only prechecks OK"
 }

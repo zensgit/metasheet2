@@ -221,6 +221,142 @@ jobs:
                   AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
                   AND NOT EXISTS (SELECT 1 FROM user_orgs uo
                     WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+
+            # Recovery09: values-free source census for a multi-org-safe repair. These probes do
+            # not choose or emit an org id. They only report whether each zero-membership active
+            # user has zero / exactly one / multiple independently linked directory org sources,
+            # and the same cardinality buckets across existing attendance facts. A migration may
+            # use a source only when it is a singleton; zero and multi remain fail-closed.
+            # Older schemas may lack these tables/columns. Measure the complete query shape first;
+            # otherwise emit NOT_MEASURED rather than misreporting absence as a zero population.
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_directory_source_schema_present" \
+              "SELECT count(*) FROM (SELECT 1 WHERE
+                 (SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public'
+                     AND (table_name, column_name) IN (
+                       ('directory_account_links', 'local_user_id'),
+                       ('directory_account_links', 'directory_account_id'),
+                       ('directory_account_links', 'link_status'),
+                       ('directory_accounts', 'id'),
+                       ('directory_accounts', 'integration_id'),
+                       ('directory_accounts', 'is_active'),
+                       ('directory_integrations', 'id'),
+                       ('directory_integrations', 'org_id'),
+                       ('directory_integrations', 'status')
+                     )) = 9) q" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_unique_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') = 1
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_no_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') = 0
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_multi_linked_directory_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT di.org_id)
+                           FROM directory_account_links dal
+                           JOIN directory_accounts da ON da.id = dal.directory_account_id
+                           JOIN directory_integrations di ON di.id = da.integration_id
+                          WHERE dal.local_user_id = u.id
+                            AND dal.link_status = 'linked'
+                            AND da.is_active = TRUE
+                            AND di.status = 'active') > 1
+               ) q" || rc=1
+            else
+              echo "${label}.r09_u1b_unique_linked_directory_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_no_linked_directory_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_multi_linked_directory_org=NOT_MEASURED"
+            fi
+
+            probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_attendance_source_schema_present" \
+              "SELECT count(*) FROM (SELECT 1 WHERE
+                 (SELECT count(*) FROM information_schema.columns
+                   WHERE table_schema = 'public'
+                     AND (table_name, column_name) IN (
+                       ('attendance_records', 'user_id'),
+                       ('attendance_records', 'org_id'),
+                       ('attendance_requests', 'user_id'),
+                       ('attendance_requests', 'org_id')
+                     )) = 4) q" || rc=1
+            if [[ "$PROBE_VALUE" == "1" ]]; then
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_unique_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) = 1
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_no_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) = 0
+               ) q" || rc=1
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_u1b_multi_attendance_org" \
+              "SELECT count(*) FROM (
+                 SELECT u.id
+                   FROM users u
+                  WHERE u.is_active
+                    AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                      WHERE uo.user_id = u.id AND uo.is_active)
+                    AND (SELECT count(DISTINCT facts.org_id)
+                           FROM (
+                             SELECT ar.org_id FROM attendance_records ar WHERE ar.user_id = u.id
+                             UNION
+                             SELECT aq.org_id FROM attendance_requests aq WHERE aq.user_id = u.id
+                           ) facts) > 1
+               ) q" || rc=1
+            else
+              echo "${label}.r09_u1b_unique_attendance_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_no_attendance_org=NOT_MEASURED"
+              echo "${label}.r09_u1b_multi_attendance_org=NOT_MEASURED"
+            fi
             # U1c: the second backfill's discriminator — distinct orgs on directory_integrations
             # (a non-'default' integration org means the multi-org population was already
             # manufactured, which changes how u1a reads). COUNT DISTINCT only, no org values.
@@ -256,6 +392,54 @@ jobs:
             if [[ "$PROBE_VALUE" == "1" ]]; then
               probe "$pg_container" "$pg_user" "$pg_db" "${label}.p10_instances_total" \
                 "SELECT count(*) FROM approval_instances" || rc=1
+
+              # Recovery09: split the pre-Phase-1 class-6-shaped population by requester posture.
+              # No requester, instance, or org value is selected; the mutually exclusive buckets
+              # make the later repair policy reviewable without exposing tenant data.
+              probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_approval_attachments_table_present" \
+                "SELECT count(*) FROM information_schema.tables
+                  WHERE table_schema = 'public' AND table_name = 'approval_attachments'" || rc=1
+              if [[ "$PROBE_VALUE" == "1" ]]; then
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_active_requester_no_membership_rows" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_active_requester_only_deactivated_rows" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = u.id AND uo.is_active)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_inactive_requester" \
+                  "SELECT count(*) FROM approval_instances i
+                    JOIN users u ON u.id = i.requester_snapshot->>'id' AND NOT u.is_active
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = u.id AND uo.is_active
+                       GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+                probe "$pg_container" "$pg_user" "$pg_db" "${label}.r09_c6_requester_missing_from_users" \
+                  "SELECT count(*) FROM approval_instances i
+                   WHERE i.id NOT LIKE 'plm:%' AND i.id NOT LIKE 'afs:%'
+                     AND COALESCE(i.source_system, 'platform') = 'platform'
+                     AND i.template_id IS NULL
+                     AND NOT EXISTS (SELECT 1 FROM approval_attachments a WHERE a.instance_id = i.id)
+                     AND NOT EXISTS (SELECT 1 FROM users u
+                       WHERE u.id = i.requester_snapshot->>'id')
+                     AND NOT EXISTS (SELECT 1 FROM user_orgs uo
+                       WHERE uo.user_id = i.requester_snapshot->>'id' AND uo.is_active
+                       GROUP BY uo.user_id HAVING count(*) = 1)" || rc=1
+              fi
             fi
 
             # U3' (Lock-11 §8, RATIFIED — docs/development/approval-lock11-writer-org-derivation-
