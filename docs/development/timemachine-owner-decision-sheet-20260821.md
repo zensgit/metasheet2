@@ -218,7 +218,9 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 > job("observation-kit execution proof (SQL is read-only against a real DB)")本身**不在**
 > `required_status_checks.contexts` 列表里——列表里的是钉住其接线的 hermetic 车道("observation-kit
 > contract"),不是执行车道本身;`paths:` 过滤器保证"改到见证/电池/该 workflow 就会跑",但这与
-> GitHub 分支保护意义上的 required check 是两回事。同一提交也把 `workflow_dispatch` 的默认目标从
+> GitHub 分支保护意义上的 required check 是两回事。
+>
+> **由此产生一条持久控制缺口,以及一条在补上之前必须执行的人工步骤**:该执行车道未来即使变红,分支保护本身也**不会阻止合并**——被钉住的只是「接线存在」,不是「执行通过」。根治办法是把它接进一个**始终出现的 required 聚合门**(而非直接把这条 path-filtered 车道设为 required:它在无关 PR 上根本不产生 check run,直接设 required 会让那些 PR 永久 pending)。**在补上之前**:每次授权 L1 电池实跑之前,必须人工核对该执行车道在**待用 SHA** 上的最近一次运行为成功、且其 armed step 报告 `# skipped 0` —— `0 skipped` 才证明真库 golden 确实执行过,而不是车道走绿、golden 静默跳过。同一提交也把 `workflow_dispatch` 的默认目标从
 > `production` 改成了 `staging`(`multitable-role-cascade-witness.yml:113-114`),并把
 > `default == options[0] == staging` 钉进了同一份 hermetic 套件。
 >
