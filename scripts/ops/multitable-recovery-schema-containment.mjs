@@ -182,6 +182,12 @@ const EXPECTED_AUTHORITY_SCHEMA = (() => {
  * Values-free by construction: the only schema names this repo ever binds are the canonical one and
  * the per-run random schemas its real-DB goldens create, all plain lowercase identifiers. Anything
  * else is refused at build time rather than escaped and passed through.
+ *
+ * DEFENCE IN DEPTH, NOT LOAD-BEARING TODAY — stated so a reader does not have to guess. No OBSERVED
+ * schema name ever reaches a builder: every call site passes either `EXPECTED_AUTHORITY_SCHEMA` or a
+ * literal schema the caller just created. In particular the witness's `session_roles_schema` is a
+ * catalog string that is REPORTED and never fed back in. This guard exists so that stays true by
+ * construction if a future caller is tempted to bind something it read from a database.
  */
 function assertBindableSchemaName(schema) {
   const name = String(schema ?? '')

@@ -111,8 +111,19 @@ Landed in the same PR as this record.
 
 ## Verification
 
-Real-DB goldens, armed (`ROLE_CASCADE_WITNESS_DB_GOLDENS=1`) against PG 15.15-alpine:
-**64 tests, 64 pass, 0 fail, 0 skipped**. Battery contract suite: 63/63.
+Every lane that can exercise this code, armed, against PG 15.15-alpine — `0 skipped` throughout,
+because a skipped golden is not a green one:
+
+| lane | arming | result |
+| --- | --- | --- |
+| `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 64/64, 0 skipped |
+| `multitable-l1-battery.test.mjs` (contract) | — | 63/63 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
+| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+
+`evidence.posture.role_delete_cascade_present` and `…role_delete_triggered_children` are unchanged;
+`…role_delete_binding` is ADDED alongside them, so no consumer of the posture object loses a field.
 
 Five new real-DB negative goldens, each of which returned a false ABSENT before the fix:
 `"$user"`-shaped decoy in front of canonical; one-wrong-schema-only (visible count is exactly 1, so
