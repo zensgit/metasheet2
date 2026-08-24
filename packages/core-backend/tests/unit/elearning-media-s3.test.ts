@@ -1,9 +1,10 @@
 import {
+  GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   PutObjectCommand,
 } from '@aws-sdk/client-s3'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   createElearningMediaS3Provider,
@@ -11,7 +12,10 @@ import {
   readElearningMediaS3Config,
   type ElearningMediaS3CommandSender,
 } from '../../src/services/elearning-media-s3'
-import { ELEARNING_MEDIA_STORAGE_PREFIX } from '../../src/services/elearning-media-storage'
+import {
+  ELEARNING_MEDIA_RANGE_MAX_BYTES,
+  ELEARNING_MEDIA_STORAGE_PREFIX,
+} from '../../src/services/elearning-media-storage'
 
 const SECRET_BUCKET = 'secret-bucket-xyz'
 const SECRET_HOST = 's3.leaked-host.example'
@@ -23,6 +27,29 @@ function provider(send: ElearningMediaS3CommandSender['send']): ElearningMediaS3
     region: 'us-east-1',
     forcePathStyle: false,
   }, { send })
+}
+
+function asyncByteBody(
+  chunks: Array<Uint8Array | Buffer>,
+  extra?: { transformToByteArray?: () => Promise<Uint8Array> },
+): AsyncIterable<Uint8Array> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk
+    },
+    ...extra,
+  }
+}
+
+function trackedAsyncBody(chunks: unknown[], consumed: number[]): AsyncIterable<unknown> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (let i = 0; i < chunks.length; i += 1) {
+        consumed.push(i)
+        yield chunks[i]
+      }
+    },
+  }
 }
 
 describe('elearning media S3 config', () => {
@@ -232,5 +259,166 @@ describe('elearning media S3 listing and existence', () => {
     await s3.downloadByKey(SECRET_KEY)
     await s3.deleteByKey(SECRET_KEY)
     expect(commands).toHaveLength(3)
+  })
+
+  it('downloadRangeByKey emits GetObject Range bytes=start-end and converts exact/multi-chunk/short bodies', async () => {
+    const commands: unknown[] = []
+    let transformCalls = 0
+    const s3 = provider(async (command) => {
+      commands.push(command)
+      const range = (command as GetObjectCommand).input.Range
+      if (range === 'bytes=3-6') {
+        return {
+          Body: asyncByteBody(
+            [new Uint8Array([3, 4, 5, 6])],
+            {
+              transformToByteArray: async () => {
+                transformCalls += 1
+                return new Uint8Array([9, 9, 9, 9])
+              },
+            },
+          ),
+        }
+      }
+      if (range === 'bytes=7-9') {
+        return { Body: asyncByteBody([Buffer.from([7]), new Uint8Array([8])]) }
+      }
+      if (range === 'bytes=4-4') {
+        return { Body: asyncByteBody([new Uint8Array([4])]) }
+      }
+      return { Body: asyncByteBody([]) }
+    })
+    expect(await s3.downloadRangeByKey(SECRET_KEY, 3, 6)).toEqual(Buffer.from([3, 4, 5, 6]))
+    expect(commands).toHaveLength(1)
+    expect(commands[0]).toBeInstanceOf(GetObjectCommand)
+    const input = (commands[0] as GetObjectCommand).input
+    expect(input.Key).toBe(SECRET_KEY)
+    expect(input.Range).toBe('bytes=3-6')
+    expect(transformCalls).toBe(0)
+    expect(await s3.downloadRangeByKey(SECRET_KEY, 7, 9)).toEqual(Buffer.from([7, 8]))
+    expect((commands[1] as GetObjectCommand).input.Range).toBe('bytes=7-9')
+    expect(await s3.downloadRangeByKey(SECRET_KEY, 4, 4)).toEqual(Buffer.from([4]))
+    expect((commands[2] as GetObjectCommand).input.Range).toBe('bytes=4-4')
+  })
+
+  it('downloadRangeByKey refuses invalid bounds and foreign keys before I/O or allocation', async () => {
+    let calls = 0
+    const s3 = provider(async () => {
+      calls += 1
+      return { Body: asyncByteBody([new Uint8Array([1])]) }
+    })
+    const alloc = vi.spyOn(Buffer, 'alloc')
+    const concat = vi.spyOn(Buffer, 'concat')
+    try {
+      await expect(s3.downloadRangeByKey(SECRET_KEY, 2, 1)).rejects.toThrow(/invalid|refused/)
+      await expect(s3.downloadRangeByKey(SECRET_KEY, -1, 0)).rejects.toThrow(/invalid|refused/)
+      await expect(s3.downloadRangeByKey(SECRET_KEY, 0, Number.NaN)).rejects.toThrow(/invalid|refused/)
+      await expect(s3.downloadRangeByKey(SECRET_KEY, 0, ELEARNING_MEDIA_RANGE_MAX_BYTES)).rejects.toThrow(/invalid|refused/)
+      await expect(s3.downloadRangeByKey(SECRET_KEY, 0, Number.MAX_SAFE_INTEGER)).rejects.toThrow(/invalid|refused/)
+      await expect(s3.downloadRangeByKey('uploads/user.mp4', 0, 1)).rejects.toThrow(/outside/)
+      expect(calls).toBe(0)
+      expect(alloc.mock.calls.some((call) => {
+        const size = call[0]
+        return typeof size === 'number' && size > ELEARNING_MEDIA_RANGE_MAX_BYTES
+      })).toBe(false)
+      expect(concat.mock.calls.some((call) => {
+        const listed = call[0]
+        const total = Array.isArray(listed)
+          ? listed.reduce((sum, chunk) => sum + (chunk?.byteLength ?? 0), 0)
+          : 0
+        const explicit = call[1]
+        return total > ELEARNING_MEDIA_RANGE_MAX_BYTES
+          || (typeof explicit === 'number' && explicit > ELEARNING_MEDIA_RANGE_MAX_BYTES)
+      })).toBe(false)
+    } finally {
+      alloc.mockRestore()
+      concat.mockRestore()
+    }
+  })
+
+  it('downloadRangeByKey accepts an exact-max inclusive span', async () => {
+    const commands: unknown[] = []
+    const s3 = provider(async (command) => {
+      commands.push(command)
+      return { Body: asyncByteBody([new Uint8Array([1])]) }
+    })
+    expect(await s3.downloadRangeByKey(SECRET_KEY, 0, ELEARNING_MEDIA_RANGE_MAX_BYTES - 1)).toEqual(Buffer.from([1]))
+    expect(commands).toHaveLength(1)
+    expect((commands[0] as GetObjectCommand).input.Range).toBe(`bytes=0-${ELEARNING_MEDIA_RANGE_MAX_BYTES - 1}`)
+  })
+
+  it('downloadRangeByKey refuses an oversized streaming body at the crossing and does not consume later chunks — values-free', async () => {
+    const consumed: number[] = []
+    const concat = vi.spyOn(Buffer, 'concat')
+    const oversized = provider(async () => ({
+      Body: trackedAsyncBody(
+        [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5]), new Uint8Array([6, 7, 8, 9])],
+        consumed,
+      ),
+    }))
+    let thrown: unknown
+    try {
+      await oversized.downloadRangeByKey(SECRET_KEY, 3, 6)
+    } catch (error) {
+      thrown = error
+    } finally {
+      concat.mockRestore()
+    }
+    expect((thrown as Error).message).toBe('elearning media S3 response body unavailable')
+    expect(String(thrown)).not.toContain(SECRET_BUCKET)
+    expect(String(thrown)).not.toContain(SECRET_KEY)
+    expect(String(thrown)).not.toContain(SECRET_HOST)
+    expect(String(thrown)).not.toContain('bytes=3-6')
+    expect(consumed).toEqual([0, 1])
+    expect(concat).not.toHaveBeenCalled()
+  })
+
+  it('downloadRangeByKey refuses a transformToByteArray-only body without invoking it — values-free', async () => {
+    let transformCalls = 0
+    const transformOnly = provider(async () => ({
+      Body: {
+        transformToByteArray: async () => {
+          transformCalls += 1
+          return new Uint8Array(ELEARNING_MEDIA_RANGE_MAX_BYTES + 1)
+        },
+      },
+    }))
+    let thrown: unknown
+    try {
+      await transformOnly.downloadRangeByKey(SECRET_KEY, 4, 4)
+    } catch (error) {
+      thrown = error
+    }
+    expect((thrown as Error).message).toBe('elearning media S3 response body unavailable')
+    expect(transformCalls).toBe(0)
+    expect(String(thrown)).not.toContain(SECRET_BUCKET)
+    expect(String(thrown)).not.toContain(SECRET_KEY)
+    expect(String(thrown)).not.toContain(SECRET_HOST)
+  })
+
+  it('downloadRangeByKey refuses unavailable and malformed streaming bodies values-free', async () => {
+    const unavailable = provider(async () => ({}))
+    const malformedChunk = provider(async () => ({
+      Body: trackedAsyncBody([new Uint8Array([1]), 'not-bytes', new Uint8Array([2])], []),
+    }))
+    const exploding = provider(async () => ({
+      Body: {
+        async *[Symbol.asyncIterator]() {
+          throw new Error(`body leaked ${SECRET_BUCKET} ${SECRET_HOST} ${SECRET_KEY}`)
+        },
+      },
+    }))
+    for (const s3 of [unavailable, malformedChunk, exploding]) {
+      let thrown: unknown
+      try {
+        await s3.downloadRangeByKey(SECRET_KEY, 0, 1)
+      } catch (error) {
+        thrown = error
+      }
+      expect((thrown as Error).message).toBe('elearning media S3 response body unavailable')
+      expect(String(thrown)).not.toContain(SECRET_BUCKET)
+      expect(String(thrown)).not.toContain(SECRET_KEY)
+      expect(String(thrown)).not.toContain(SECRET_HOST)
+    }
   })
 })

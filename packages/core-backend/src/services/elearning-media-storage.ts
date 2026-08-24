@@ -3,12 +3,14 @@
  * Generic StorageService is local-only and is never production media storage.
  */
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, open, readFile, readdir, rm, stat, writeFile, type FileHandle } from 'node:fs/promises'
 import * as path from 'node:path'
 
 export const ELEARNING_MEDIA_STORAGE_PREFIX = 'elearning-media/'
 export const ELEARNING_MEDIA_LIST_LIMIT_MIN = 1
 export const ELEARNING_MEDIA_LIST_LIMIT_MAX = 1000
+/** Inclusive byte-range reads never exceed this streaming-friendly chunk. */
+export const ELEARNING_MEDIA_RANGE_MAX_BYTES = 8 * 1024 * 1024
 
 export interface ElearningMediaBlobRef {
   key: string
@@ -26,6 +28,11 @@ export interface ElearningMediaStore {
   get(storageKey: string): Promise<Buffer>
   /** idempotent: missing blob returns false, never throws ENOENT. */
   delete(storageKey: string): Promise<boolean>
+}
+
+/** Inclusive start/end byte range. Callers map HTTP open-end ranges using the DB size. */
+export interface ElearningMediaRangeReadableStore {
+  getRange(storageKey: string, start: number, end: number): Promise<Buffer>
 }
 
 /** Server-generated key. Client filenames never become path segments. */
@@ -52,6 +59,18 @@ export function assertElearningMediaListLimit(limit: number): number {
   return limit
 }
 
+/** Inclusive non-negative safe integers with start<=end and span<=ELEARNING_MEDIA_RANGE_MAX_BYTES. Invalid bounds fail before I/O. */
+export function assertElearningMediaByteRange(start: number, end: number): { start: number; end: number } {
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < 0 || start > end) {
+    throw new RangeError('elearning media byte range is invalid — refused')
+  }
+  const span = end - start + 1
+  if (!Number.isSafeInteger(span) || span > ELEARNING_MEDIA_RANGE_MAX_BYTES) {
+    throw new RangeError('elearning media byte range is invalid — refused')
+  }
+  return { start, end }
+}
+
 export function nonnegativeAgeMs(lastModifiedMs: number, now: Date): number {
   if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
     throw new RangeError('elearning media age clock is invalid')
@@ -66,7 +85,7 @@ export function nonnegativeAgeMs(lastModifiedMs: number, now: Date): number {
   return ageMs
 }
 
-export class LocalFsElearningMediaStore implements ElearningMediaStore {
+export class LocalFsElearningMediaStore implements ElearningMediaStore, ElearningMediaRangeReadableStore {
   constructor(private readonly rootDir: string) {
     if (typeof rootDir !== 'string' || rootDir.trim() === '') throw new RangeError('rootDir required')
   }
@@ -90,6 +109,24 @@ export class LocalFsElearningMediaStore implements ElearningMediaStore {
 
   async get(storageKey: string): Promise<Buffer> {
     return readFile(this.contain(storageKey))
+  }
+
+  async getRange(storageKey: string, start: number, end: number): Promise<Buffer> {
+    const range = assertElearningMediaByteRange(start, end)
+    const length = range.end - range.start + 1
+    if (!Number.isSafeInteger(length) || length > ELEARNING_MEDIA_RANGE_MAX_BYTES) {
+      throw new RangeError('elearning media byte range is invalid — refused')
+    }
+    const p = this.contain(storageKey)
+    let handle: FileHandle | undefined
+    try {
+      handle = await open(p, 'r')
+      const buffer = Buffer.alloc(length)
+      const { bytesRead } = await handle.read(buffer, 0, length, range.start)
+      return bytesRead === length ? buffer : buffer.subarray(0, bytesRead)
+    } finally {
+      await handle?.close()
+    }
   }
 
   async delete(storageKey: string): Promise<boolean> {
@@ -182,9 +219,13 @@ export interface KeyAddressedElearningObjectStore {
   deleteByKey(storageKey: string): Promise<void>
 }
 
-export class ObjectStoreElearningMediaStore implements ElearningMediaStore {
+export interface KeyAddressedElearningRangeObjectStore {
+  downloadRangeByKey(storageKey: string, start: number, end: number): Promise<Buffer>
+}
+
+export class ObjectStoreElearningMediaStore implements ElearningMediaStore, ElearningMediaRangeReadableStore {
   constructor(
-    private readonly provider: KeyAddressedElearningObjectStore,
+    private readonly provider: KeyAddressedElearningObjectStore & KeyAddressedElearningRangeObjectStore,
     private readonly prefix: string = ELEARNING_MEDIA_STORAGE_PREFIX,
   ) {
     if (typeof prefix !== 'string' || !prefix.endsWith('/')) throw new RangeError('prefix must end with "/"')
@@ -204,6 +245,21 @@ export class ObjectStoreElearningMediaStore implements ElearningMediaStore {
 
   async get(storageKey: string): Promise<Buffer> {
     return this.provider.downloadByKey(this.scoped(storageKey))
+  }
+
+  async getRange(storageKey: string, start: number, end: number): Promise<Buffer> {
+    const range = assertElearningMediaByteRange(start, end)
+    const span = range.end - range.start + 1
+    const body = await this.provider.downloadRangeByKey(this.scoped(storageKey), range.start, range.end)
+    if (
+      !Buffer.isBuffer(body)
+      || !Number.isSafeInteger(body.length)
+      || body.length > span
+      || body.length > ELEARNING_MEDIA_RANGE_MAX_BYTES
+    ) {
+      throw new Error('elearning media range body unavailable')
+    }
+    return body
   }
 
   async delete(storageKey: string): Promise<boolean> {

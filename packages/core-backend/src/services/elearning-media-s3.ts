@@ -9,13 +9,16 @@ import {
 } from '@aws-sdk/client-s3'
 
 import {
+  assertElearningMediaByteRange,
   assertElearningMediaListLimit,
   assertElearningMediaStorageKey,
+  ELEARNING_MEDIA_RANGE_MAX_BYTES,
   ELEARNING_MEDIA_STORAGE_PREFIX,
   nonnegativeAgeMs,
   type ElearningMediaBlobPage,
   type ElearningMediaBlobRef,
   type KeyAddressedElearningObjectStore,
+  type KeyAddressedElearningRangeObjectStore,
 } from './elearning-media-storage'
 
 export interface ElearningMediaS3Config {
@@ -64,15 +67,81 @@ export function readElearningMediaS3Config(
   }
 }
 
-async function responseBodyToBuffer(body: unknown): Promise<Buffer> {
-  const candidate = body as { transformToByteArray?: () => Promise<Uint8Array> } | null | undefined
-  if (!candidate || typeof candidate.transformToByteArray !== 'function') {
-    throw new Error('elearning media S3 response body unavailable')
-  }
-  return Buffer.from(await candidate.transformToByteArray())
+const ELEARNING_MEDIA_S3_BODY_UNAVAILABLE = 'elearning media S3 response body unavailable'
+
+function throwS3BodyUnavailable(): never {
+  throw new Error(ELEARNING_MEDIA_S3_BODY_UNAVAILABLE)
 }
 
-export class ElearningMediaS3Provider implements KeyAddressedElearningObjectStore {
+function isS3BodyUnavailable(err: unknown): boolean {
+  return err instanceof Error && err.message === ELEARNING_MEDIA_S3_BODY_UNAVAILABLE
+}
+
+async function responseBodyToBuffer(body: unknown): Promise<Buffer> {
+  const candidate = body as { transformToByteArray?: unknown } | null | undefined
+  if (!candidate || typeof candidate.transformToByteArray !== 'function') {
+    throwS3BodyUnavailable()
+  }
+  try {
+    const bytes = await candidate.transformToByteArray()
+    if (!(bytes instanceof Uint8Array)) {
+      throwS3BodyUnavailable()
+    }
+    return Buffer.from(bytes)
+  } catch (err) {
+    if (isS3BodyUnavailable(err)) throw err
+    throwS3BodyUnavailable()
+  }
+}
+
+/** Range bodies are consumed as async byte chunks. transformToByteArray is never invoked. */
+async function boundedS3RangeBodyToBuffer(body: unknown, maxBytes: number): Promise<Buffer> {
+  if (body == null || typeof body !== 'object') {
+    throwS3BodyUnavailable()
+  }
+  const getIterator = (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator]
+  if (typeof getIterator !== 'function') {
+    throwS3BodyUnavailable()
+  }
+  let iterator: AsyncIterator<unknown>
+  try {
+    iterator = (getIterator as (this: unknown) => AsyncIterator<unknown>).call(body)
+  } catch {
+    throwS3BodyUnavailable()
+  }
+  if (iterator == null || typeof iterator.next !== 'function') {
+    throwS3BodyUnavailable()
+  }
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const step = await iterator.next()
+      if (step.done) break
+      const chunk = step.value
+      if (!(chunk instanceof Uint8Array)) {
+        throwS3BodyUnavailable()
+      }
+      const chunkLen = chunk.byteLength
+      if (!Number.isSafeInteger(chunkLen) || chunkLen < 0 || chunkLen > maxBytes - total) {
+        throwS3BodyUnavailable()
+      }
+      total += chunkLen
+      chunks.push(chunk)
+    }
+  } catch (err) {
+    try {
+      await iterator.return?.()
+    } catch {
+      // ignore abort failures; the values-free unavailable error is authoritative
+    }
+    if (isS3BodyUnavailable(err)) throw err
+    throwS3BodyUnavailable()
+  }
+  return Buffer.concat(chunks, total)
+}
+
+export class ElearningMediaS3Provider implements KeyAddressedElearningObjectStore, KeyAddressedElearningRangeObjectStore {
   constructor(
     private readonly config: ElearningMediaS3Config,
     private readonly client: ElearningMediaS3CommandSender = new S3Client({
@@ -100,6 +169,19 @@ export class ElearningMediaS3Provider implements KeyAddressedElearningObjectStor
       Key: storageKey,
     })) as { Body?: unknown }
     return responseBodyToBuffer(response.Body)
+  }
+
+  async downloadRangeByKey(storageKey: string, start: number, end: number): Promise<Buffer> {
+    const range = assertElearningMediaByteRange(start, end)
+    assertElearningMediaStorageKey(storageKey)
+    const span = range.end - range.start + 1
+    const maxBytes = Math.min(span, ELEARNING_MEDIA_RANGE_MAX_BYTES)
+    const response = await this.client.send(new GetObjectCommand({
+      Bucket: this.config.bucket,
+      Key: storageKey,
+      Range: `bytes=${range.start}-${range.end}`,
+    })) as { Body?: unknown }
+    return boundedS3RangeBodyToBuffer(response.Body, maxBytes)
   }
 
   async deleteByKey(storageKey: string): Promise<void> {
