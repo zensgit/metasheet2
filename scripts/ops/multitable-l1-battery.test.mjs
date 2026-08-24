@@ -44,6 +44,7 @@ import test from 'node:test'
 import {
   AUTHORITY_FUNCTION_SHADOW_QUERY,
   AUTHORITY_FUNCTION_SNAPSHOT_QUERY,
+  AUTHORITY_TRIGGER_FUNCTIONS,
   EXPECTED_AUTHORITY_FUNCTIONS,
   EXPECTED_AUTHORITY_TRIGGERS,
   canonicalTrigger,
@@ -55,7 +56,9 @@ import {
   LEASE_FUNCTION_BY_KIND,
   NOT_DRIVEN_SITES,
   RECOVERY_CONFLICT_HTTP_CODE,
+  ROLES_RELATION_PRESENT_SQL,
   ROLE_CASCADE_WITNESS_QUERY,
+  ROLE_DELETE_CHILD_WRITE_ACTIONS,
   RECOVERY_CONFLICT_HTTP_STATUS,
   STAMP_PREFIX,
   TRIGGER_COVERAGE_EXEMPTIONS,
@@ -73,6 +76,7 @@ import {
   orderedSurfaces,
   parseCliArgs,
   roleDeleteCascadeExists,
+  roleDeleteChildWrites,
   sanitizeExcerpt,
   triggerCoverage,
 } from './multitable-l1-battery.mjs'
@@ -1355,18 +1359,116 @@ test('roles:delete is excused only while its schema premise holds — and the pr
   assert.ok(excused, 'roles:delete must be accounted for')
   assert.equal(excused.reason, 'no-trigger-on-target-table')
 
-  // Present + CASCADE ⇒ the excuse has expired and the battery must refuse it.
-  assert.equal(roleDeleteCascadeExists([{ conname: 'role_permissions_role_id_fkey', confdeltype: 'c' }]), true)
   // Absent ⇒ excuse holds.
   assert.equal(roleDeleteCascadeExists([]), false)
-  // Present but NOT cascading (NO ACTION / RESTRICT) ⇒ still no cascade, excuse holds. A naive
-  // "is there any FK?" check would get this backwards.
-  assert.equal(roleDeleteCascadeExists([{ conname: 'x', confdeltype: 'a' }]), false)
-  assert.equal(roleDeleteCascadeExists([{ conname: 'x', confdeltype: 'r' }]), false)
 
+  // EXHAUSTIVE over pg's parent-delete action alphabet, not a spot check: every letter
+  // `pg_constraint.confdeltype` can hold is enumerated here with the outcome its MECHANISM
+  // dictates, so a letter can never be silently dropped from — or smuggled into — the predicate.
+  //   the nine recovery-authority triggers are BEFORE INSERT OR UPDATE OR DELETE, so any action
+  //   that touches the child row fires one; 'a'/'r' refuse the parent delete instead and touch
+  //   nothing.
+  const ACTION_ALPHABET = {
+    c: { writesChild: true, meaning: 'CASCADE — the child row is deleted' },
+    n: { writesChild: true, meaning: 'SET NULL — the child row is updated' },
+    d: { writesChild: true, meaning: 'SET DEFAULT — the child row is updated' },
+    a: { writesChild: false, meaning: 'NO ACTION — the parent delete is refused; no child DML' },
+    r: { writesChild: false, meaning: 'RESTRICT — the parent delete is refused; no child DML' },
+  }
+  assert.deepEqual(
+    Object.keys(ACTION_ALPHABET).sort(),
+    ['a', 'c', 'd', 'n', 'r'],
+    'pg_constraint.confdeltype has exactly these five letters; the enumeration above drifted',
+  )
+  for (const [letter, { writesChild, meaning }] of Object.entries(ACTION_ALPHABET)) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'x', confdeltype: letter }
+    assert.equal(roleDeleteCascadeExists([row]), writesChild, `confdeltype '${letter}' (${meaning})`)
+  }
+  // …and the exported set is exactly the writing letters, so the two cannot drift apart.
+  assert.deepEqual(
+    [...ROLE_DELETE_CHILD_WRITE_ACTIONS].sort(),
+    Object.entries(ACTION_ALPHABET).filter(([, spec]) => spec.writesChild).map(([letter]) => letter).sort(),
+  )
+  // A mixed result set still refutes: one writing row among non-writing ones is enough.
+  assert.equal(
+    roleDeleteCascadeExists([
+      { child_schema: 'public', child_table: 'view_permissions', conname: 'a', confdeltype: 'r' },
+      { child_schema: 'public', child_table: 'user_roles', conname: 'b', confdeltype: 'n' },
+    ]),
+    true,
+  )
+  // The offender accessor and the boolean are the same predicate, never two.
+  assert.deepEqual(
+    roleDeleteChildWrites([
+      { child_schema: 'public', child_table: 'x', conname: 'a', confdeltype: 'r' },
+      { child_schema: 'public', child_table: 'y', conname: 'b', confdeltype: 'd' },
+    ]).map((row) => row.conname),
+    ['b'],
+  )
+
+  // The query is the CONJUNCTION, mechanically: FK → session-resolved `roles`, AND the child table
+  // carries a canonical recovery-authority trigger. Both conjuncts asserted; over-widening to
+  // "every FK pointing at roles" would classify `view_permissions` (which carries no such trigger)
+  // as a refutation and block the L1 evidence path on a false PRESENT.
   assert.match(ROLE_CASCADE_WITNESS_QUERY, /pg_catalog\.pg_constraint/)
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /child\.relname = 'role_permissions'/)
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /parent\.relname = 'roles'/)
+  assert.match(ROLE_CASCADE_WITNESS_QUERY, /con\.confrelid = to_regclass\('roles'\)/)
+  assert.match(ROLE_CASCADE_WITNESS_QUERY, /pg_catalog\.pg_trigger/)
+  assert.match(ROLE_CASCADE_WITNESS_QUERY, /NOT tg\.tgisinternal/)
+  // Schema binding: unqualified `to_regclass`, never a hard-coded `public.` literal (which would
+  // blind every real-DB golden this repo runs inside a per-run random schema).
+  assert.ok(
+    !/to_regclass\('public\./.test(ROLE_CASCADE_WITNESS_QUERY),
+    'the witness query hard-codes the public schema; it must resolve through the session search_path',
+  )
+  // The trigger set is DERIVED from the containment census, not hand-typed: every canonical trigger
+  // function the census names must appear in the query, and no other proname may.
+  for (const fn of AUTHORITY_TRIGGER_FUNCTIONS) {
+    assert.ok(ROLE_CASCADE_WITNESS_QUERY.includes(`'${fn}'`), `the witness query does not match trigger function ${fn}`)
+  }
+  const pronamesInQuery = [...ROLE_CASCADE_WITNESS_QUERY.matchAll(/'(metasheet_[a-z_]+)'/g)].map((m) => m[1])
+  assert.deepEqual(
+    pronamesInQuery.slice().sort(),
+    [...AUTHORITY_TRIGGER_FUNCTIONS].sort(),
+    'the witness query names a trigger function the containment census does not (or omits one it does)',
+  )
+  // Output protocol: the rows must be auditable — schema, table and action, not a bare boolean.
+  for (const column of ['child_schema', 'child_table', 'confdeltype']) {
+    assert.match(ROLE_CASCADE_WITNESS_QUERY, new RegExp(`AS ${column}\\b`), `the witness query stopped publishing ${column}`)
+  }
+})
+
+test('the battery pairs the witness query with the SAME relation-presence control (P3 lockstep)', () => {
+  // The query resolves `roles` through the session's search_path. Zero rows from a session that
+  // cannot see a `roles` table would read as EXEMPTION-VALID — a false ABSENT, and a silently kept
+  // exemption. The battery is a consumer of that query and needs the pairing as much as the witness
+  // runner does; `users` resolving in the same-DB proof does not establish it.
+  assert.match(ROLES_RELATION_PRESENT_SQL, /to_regclass\('roles'\)/)
+  assert.match(ROLES_RELATION_PRESENT_SQL, /relkind IN \('r', 'p'\)/)
+  assert.ok(!/to_regclass\('public\./.test(ROLES_RELATION_PRESENT_SQL), 'a hard-coded schema blinds the per-random-schema goldens')
+  // …and it is USED, before the query it guards, with its own fail-closed refusal.
+  const presenceIdx = BATTERY_SOURCE.indexOf('SELECT ${ROLES_RELATION_PRESENT_SQL} AS present')
+  const queryIdx = BATTERY_SOURCE.indexOf('admin.client.query(ROLE_CASCADE_WITNESS_QUERY)')
+  assert.ok(presenceIdx > 0, 'the battery no longer runs the relation-presence control')
+  assert.ok(queryIdx > presenceIdx, 'the presence control must run BEFORE the query whose zero rows it makes meaningful')
+  assert.match(BATTERY_SOURCE, /failure: 'role_cascade_premise_unobservable'/, 'the unobservable-premise refusal is gone')
+  // Fail-closed: the refusal is a NOT_ARMED exit, never a log line the run continues past.
+  const guard = BATTERY_SOURCE.slice(presenceIdx, queryIdx)
+  assert.match(guard, /VERDICT: NOT_ARMED/)
+  assert.match(guard, /return \{ exitCode: 2, evidence, lines \}/)
+})
+
+test('the widened premise check is WIRED, so the battery expires the excuse in the new situations too', () => {
+  // Guards the consequence, not just the predicate: widening the predicate makes the battery
+  // STRICTER (it now fails on user_roles cascades and on SET NULL / SET DEFAULT actions, not only
+  // on a role_permissions CASCADE). A run that computed the wider answer but reported the narrower
+  // one would satisfy the predicate test above while shipping the stale exemption.
+  assert.match(BATTERY_SOURCE, /roleDeleteChildWrites\(cascadeRows\)/, 'the failure no longer names the offending rows')
+  assert.match(BATTERY_SOURCE, /evidence\.posture\.role_delete_triggered_children/, 'the observed rows are no longer recorded as evidence')
+  assert.match(
+    BATTERY_SOURCE,
+    /THIS PREMISE CHECK IS STRICTER THAN IT USED TO BE/,
+    'the behaviour change is no longer disclosed at the site that makes it',
+  )
 })
 
 test('the battery acts on the expired-exemption verdict rather than only computing it', () => {

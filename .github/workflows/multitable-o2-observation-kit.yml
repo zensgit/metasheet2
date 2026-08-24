@@ -15,6 +15,13 @@ name: Multitable O2 Observation Kit
 # create-l1-battery-admin-on-staging.sh) that creates the staging L1 admin — its hermetic cases
 # are pure text/structure + string-mutation, no DB and no hosts, safe for this required lane.
 #
+# NOTE (2026-08-23): scripts/ops/multitable-role-cascade-witness.test.mjs joins this lane. It is
+# hermetic too — it runs the generated catalog probe as a node subprocess against a STUB `pg` it
+# writes into a temp dir, so no database, docker, or host is touched — and it carries the
+# cross-file sync pin asserting the witness SQL has exactly one definition (in
+# scripts/ops/multitable-l1-battery.mjs) across all workflows and non-test ops scripts. That pin
+# has to live in an always-on, path-filter-free lane or editing the other file defeats it.
+#
 # The test proves the observation
 # SQL is read-only by construction, drift-guards its trigger/function/lock-key
 # literals against the authoritative migration, and enforces that every
@@ -56,5 +63,5 @@ jobs:
         with:
           node-version: 20
       - name: Run hermetic observation-kit tests (no DB, no hosts)
-        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs scripts/ops/recovery-fingerprint-cross-guard.test.mjs
+        run: node --test scripts/ops/multitable-o2-observation.test.mjs scripts/ops/multitable-recovery-authority-triggers.test.mjs scripts/ops/multitable-l1-battery.test.mjs scripts/ops/multitable-l1-battery-workflow.test.mjs scripts/ops/create-l1-battery-admin-on-staging.test.mjs scripts/ops/recovery-fingerprint-cross-guard.test.mjs scripts/ops/multitable-role-cascade-witness.test.mjs
 
