@@ -386,6 +386,12 @@ jobs:
       - name: B5-a routing-policy CI wiring contract
         run: node --test scripts/ops/b5a-routing-policy-ci-wiring.test.mjs
 
+      # E-learning V0.1 L0-F3A: content/assessment schema gate two-point wiring (no DB).
+      # The real-Postgres suite must stay excluded from the no-DB job AND named as a
+      # whole-file arg of the 20.x step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning V0.1 content/assessment CI wiring contract
+        run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract
@@ -857,6 +863,20 @@ jobs:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
+
+      # E-learning V0.1 L0-F3A content/assessment schema gate. Migrations above must
+      # already have applied the two zzzz20260824* files; this suite does not mutate
+      # kysely_migration. DATABASE_URL is required (bash :? and the suite throws).
+      - name: Run elearning V0.1 content/assessment schema gate
+        id: elearning-v01-content-assessment-schema-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 content/assessment schema gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
+            --reporter=verbose
 
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
