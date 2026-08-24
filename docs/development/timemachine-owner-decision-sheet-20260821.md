@@ -8,7 +8,7 @@
 > 下文 B1 段已按此改写。
 >
 > **2026-08-21 二次更新(fix-forward 已落地)**:两缺陷已修 + 过独立复门(APPROVE @ `ceb0f08def`,#5069);
-> **B1 的代码侧前置:五轮复审后已全部闭合**(2026-08-21)。电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)、建号脚本(F1:重写 #5080 + 提权修复 #5084 `162679992e`,含 login-first + 收敛行为 golden)、F5 readiness、五轮文案收窄——**均已落 main 且过独立复门(运行时代码 APPROVE,无 P1/P2)**。P3-INFO-1 已查证满足。**F2(设 required)、F4(旧 PR 处置)截至 2026-08-24 复核均已完成(见 §D2);剩余是 owner/ops:F3 主机证据、建号/电池实跑、staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得比该报告更新的证据)、A1 ratify——见下。**
+> **B1 的代码侧前置:五轮复审后已全部闭合**(2026-08-21)。电池 workflow 凭据(#5069/#5076)、search_path 根修(F3,#5081)、context/台账(#5077)、建号脚本(F1:重写 #5080 + 提权修复 #5084 `162679992e`,含 login-first + 收敛行为 golden)、F5 readiness、五轮文案收窄——**均已落 main 且过独立复门(运行时代码 APPROVE,无 P1/P2)**。P3-INFO-1 已查证满足。**F2(设 required)、F4(旧 PR 处置)截至 2026-08-24 复核均已完成(见 §D2);剩余是 owner/ops:F3 主机证据、建号/电池实跑、~~staging pending≠0~~、A1 ratify——见下。** 原写「staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得比该报告更新的证据)」,**已更正(见下「五次更新」)**:该窗口已于 2026-08-24T05:44–05:54Z 执行完毕,staging **`Applied: 337 / Pending: 0`**(`run 32694623829` real-apply 段 + `run 32694880864` + 确认跑 `run 32695040817`),此项**不再是剩余项**。剩余 owner/ops 为三项:F3 双主机新指纹证据、建号 + 电池实跑 PASS、A1 ratify。
 > 剩余 A1-ratify 前提**纯 owner/ops**:owner 授权 staging 电池实跑 → PASS → 再 ratify。secrets 已设、主机建号脚本已备。
 >
 > **2026-08-24 三次更新(fix-forward 复核,针对 #5130 之后又飘的表述)**:B1a 两处自伤均已随 #5125
@@ -30,8 +30,24 @@
 > 陈述均以「原写『…』」标出并保留原文,不做回溯改写——这正是本清单存在的理由本身,在同一份文档、
 > 同一轮修复内又发生了一次。head 钉点 `1d8f0708de` 本身不变(真 merge,非 squash,分支尖端未再动),
 > 仅**状态与位置**类断言(Draft/OPEN、"尚未落 main"、main 上谓词宽窄)过期。
+>
+> **2026-08-24 五次更新(staging 迁移窗口已执行 —— `pending = 0`;本轮更正的是本清单存续最久的一条
+> 过期断言)**:2026-08-24T05:44–05:54Z,`Attendance Staging Window Runner`(head
+> `c345c6b405eebe5d9299e2a89d452c907f1aab6b`)在同一窗口内跑完 **备份 → 克隆彩排 → 真实应用 → 重部署 →
+> 确认**,staging 从 `Applied: 321 / Pending: 16` 变为 **`Applied: 337 / Pending: 0`**:
+> `run 32694623829`(`migrate`,success)real-apply 段 05:47:48Z `321/16` → 05:47:53Z `337/0`,
+> 05:47:54Z `[window-runner] apply OK: staging migrate ended at pending=0`;
+> `run 32694880864`(`deploy`,success)05:49:45Z `337/0` + `[staging-migration-alignment-report]
+> decision=aligned`,05:49:49Z `[window-runner] deploy OK: c345c6b405…`;
+> `run 32695040817`(`migrate` 确认跑,success)四处观测均 `337/0`。
+> **由此:L0 的 `staging pending migrations = 0` 前置已满足**,§A / §A-2 / §B1 / §E 下方相应断言逐处更正。
+> 实际应用 **16** 条(以 run log 为准),是 `staging-migration-backlog-disposition-20260822.md` 所析七条的真超集。
+> **同一窗口的 `deploy` 跑也解除了 §A-2 的镜像前置**(见该节更正)。
+> 完整证据与三条程序勘误(CHECK 预检判据过窄 / 锁窗口按整批而非按迁移 / 预检二照抄会 `42703`)
+> 见新增文档 **`staging-migration-window-completion-20260824.md`**。
+> 历史记录原样保留,逐处以「原写『…』」标注,不做回溯改写。
 
-> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。本清单自身也是 open PR #5135,尚未合并。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
+> 一页看全:O-2 启用加固线(F1–F6、X2、census 覆盖)与阶梯加速修正案 A1 的**代码侧修复均已落 main 并过独立复门**;role-cascade witness 的判据修复**已随 #5131 合并落 main**(合并提交 `771cd9be20`,2026-08-24T12:15:34+08,见 §B1a)——armed real-DB golden 在 main 上实测 **59/59、0 fail、0 skip**(`run 32689331718`/`job 97320045961`)。原写「role-cascade witness 的判据修复目前落在 open PR #5131(Draft,head `1d8f0708de`)上——CI 已把其 real-DB golden 接进执行车道并实测通过(59/59),但分支尚未合并,main 上电池实跑用的仍是修复前的窄谓词」,已更正(见上「四次更新」):"尚未合并"/"main 上仍是窄谓词" 两个分句在本文档 12:09:47 提交落地后 6 分钟即失效;`59/59` 本身在原句中即真,继续成立。**另:staging 迁移积压已于 2026-08-24T05:44–05:54Z 应用完毕,`pending = 0`(见上「五次更新」与 `staging-migration-window-completion-20260824.md`)——L0 该项前置已满足。** 原写「本清单自身也是 open PR #5135,尚未合并」——#5135 已于 2026-08-24T07:53:28Z 合并为 `96b6416717`,该句随之移除。下面除已注明的开发缺口外都是**只有 owner 能拍的板**。
 > 每条给:决策、我的建议、拍板后果、相关载体。**本清单不代为决定,也不改变任何姿态。**
 > 全程状态:4 flag OFF、9 trigger DISABLED(**当前权威指纹见阶梯 §5.2**:triggers `4d68217d…` / functions `e4a78f6c…`;
 > 下方 run 记录里的 `8c1be0b0…`/`14c180aa…` 是**当时**实测值,epoch-bound,今天重跑不会复现)(双主机 run
@@ -44,21 +60,63 @@
 
 ## A. 现在就能拍、且解锁最多的
 
-**A1 · 把 #5039 便笺转给审批线补迁移积压(**已非 4 条**——见 #5094 `0f24e8430d`,实测 ≥10 且每日增长)**
-- 决策:让审批线按便笺(`staging-approval-migrations-disposition-20260820.md`)在克隆上彩排后应用 4 条审批迁移。
-- 我的建议:**做**。这是 L0 唯一未勾项(`staging pending migrations ≠ 0`),也是整条阶梯的真瓶颈——L1 卡在它上。
-- 后果:staging `pending=0` → L0 五项全绿 → L1 可开。4 条全零命中本阶梯爆炸半径,2 条 high 是启发式误报(纯 CHECK 加宽)。
-- 归属:审批线执行 + owner 批准;**Time Machine 线不代应用**(runbook 要求克隆彩排)。
+**A1 · 把 #5039 便笺转给审批线补迁移积压 —— ✅ 已完成(2026-08-24 窗口已执行,`pending = 0`)**
+- 决策:让审批线按便笺(`staging-approval-migrations-disposition-20260820.md`)在克隆上彩排后应用审批迁移。
+- **状态:已执行完毕。** 2026-08-24T05:44–05:54Z,`Attendance Staging Window Runner`
+  (head `c345c6b405eebe5d9299e2a89d452c907f1aab6b`)按 runbook 走完 备份 → 克隆彩排 → 真实应用:
+  `run 32694623829`(success)real-apply 段 05:47:48Z `Applied: 321 / Pending: 16` → 05:47:53Z
+  **`Applied: 337 / Pending: 0`**,05:47:54Z `[window-runner] apply OK: staging migrate ended at pending=0`;
+  同窗口 `run 32694880864`(`deploy`,success)05:49:45Z 复读 `337/0` 且对齐报告
+  `decision=aligned`;`run 32695040817`(确认跑,success)四处观测均 `337/0`。
+  实际应用 **16** 条(非便笺当时的 4 条,亦非 #5094 估的 ≥10;以 run log 为准),
+  为 `staging-migration-backlog-disposition-20260822.md` 所析七条的真超集。
+  证据与三条程序勘误见 `staging-migration-window-completion-20260824.md`。
+- 原写「我的建议:做。这是 L0 唯一未勾项(`staging pending migrations ≠ 0`),也是整条阶梯的
+  真瓶颈——L1 卡在它上。」,**已更正**:该项**已完成**,既不再是未勾项,也不再是瓶颈。
+- **后果(已兑现)**:staging `pending=0`,L0 的该条前置满足。
+  按冻结的阶梯 §1,L0 清单上仍开着的是 **owner/ops 项**,不是本项:
+  ① §1 第五条的另一半——在目标主机跑一次**回滚后 `postdeploy-full`** 验证回到 inert 姿态
+  (owner-gated,本地演练不覆盖,另见 §E 末);② §1 第四条附带的 owner 天花板裁量(即 §C 的 C1);
+  ③ §1 第二条的 containment PASS **在冻结的阶梯 §1 上勾为 `[x]`**;但本清单 §D2-F3 与文首记其为
+  **pre-fix 点内**观测(`run 32321464042`,2026-08-20),新指纹 `e4a78f6c…` 的双主机证据仍待取
+  (见 §D2-F3、§E 第 6 步)。**此处报的是本清单的记载,不代阶梯改勾**——该勾选项属阶梯文档,冻结,不由本文改动。
+- **剩余的 owner/ops 关键路径**(本清单不代拍板,以下各项均已在下文列明,此处只指向、不新增):
+  **双主机 `postdeploy-full` 取 F3 新指纹证据(`e4a78f6c…`)→ 建号 → L1 电池实跑 → A1 ratify**
+  (依次见 §D2-F3 / §E 第 6–7 步、§E 第 7 步、§B1 与 §E 第 9 步、§B1 与 §E 第 10 步)。
+- 归属:审批线执行 + owner 批准(已按此完成);**Time Machine 线不代应用**(runbook 要求克隆彩排——本次确已先彩排后应用)。
 
-## A-2 · ⚠️ staging 重部署 —— 原计划缺失的硬前置(2026-08-22 深审发现)
+## A-2 · staging 重部署 —— 原计划缺失的硬前置(2026-08-22 深审发现;**已于 2026-08-24 解除,见节内更正**)
 
-staging 现镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**不含**:
+原写(2026-08-22 时点,现已过期):staging 当时镜像(`401fa1d880`,或 08-21 那次失败尝试的 `5e9a15f02e`)**不含**:
 
 - **电池脚本** `scripts/ops/multitable-l1-battery.mjs`(该树里根本没有此文件)⇒ 电池 dispatch 会 `MODULE_NOT_FOUND`
 - **任何 `zzzz20260821*` 迁移**(含 F3 的 search_path 修复)⇒ 窗口 runner 无从应用 F3
 - **匹配的 containment helper**:该镜像里的 helper sha 与 workflow 钉的 `c52501a9…` 不等 ⇒ postdeploy-full 的 **staging 腿会在 helper-sha 检查处以「被篡改」措辞直接失败**,根本到不了数据库观测
 
-**因此:第 6/7/9 步(取证 / 建号 / 电池)在 staging 重部署到 ≥ `d3289945e1` 之前全部不可执行**,且失败形式具误导性(像是安全告警而非"镜像太旧")。`Dockerfile.backend` 的 `COPY scripts` 保证重部署即全部修复。
+原写「**因此:第 6/7/9 步(取证 / 建号 / 电池)在 staging 重部署到 ≥ `d3289945e1` 之前全部不可执行**,且失败形式具误导性(像是安全告警而非"镜像太旧")。`Dockerfile.backend` 的 `COPY scripts` 保证重部署即全部修复。」,**已更正(见下)**。
+
+> **2026-08-24 五次更新:本节所记的镜像前置已解除,上面三条 bullet 的前提均不再成立**(原文按惯例
+> 原样保留,不做回溯改写)。同一迁移窗口内的 `run 32694880864`(`deploy`,success,
+> 2026-08-24T05:49Z)把 staging 重部署到 **`c345c6b405eebe5d9299e2a89d452c907f1aab6b`**
+> (日志:`Container metasheet-staging-backend Recreated` / `Container metasheet-staging-web Started`
+> / `[window-runner] auth round-trip OK (me=200, settings=200)` /
+> `[window-runner] deploy OK: c345c6b405…`)。逐条核实:
+> - **`≥ d3289945e1`**:`gh api repos/zensgit/metasheet2/compare/d3289945e1...c345c6b405` 返回
+>   `status=ahead, ahead_by=63, behind_by=0` ⇒ `d3289945e1` 是 `c345c6b405` 的祖先,条件满足。
+> - **电池脚本**:`scripts/ops/multitable-l1-battery.mjs` 在 `c345c6b405` 上**存在**
+>   (`git cat-file -e` 通过)⇒ 不再会 `MODULE_NOT_FOUND`。
+> - **`zzzz20260821*` 迁移(含 F3)**:
+>   `zzzz20260821120000_recovery_authority_functions_fix_search_path` 在 `c345c6b405` 上**存在**,
+>   且**已实际应用**到 staging(在本窗口所应用的 16 条之内,见 §A)。
+> - **containment helper sha**:`scripts/ops/multitable-recovery-schema-containment.mjs` 在
+>   `c345c6b405` 上的 sha256 为
+>   `c52501a9ff2edd1d91ec07b5e7ebe9d90b3242867031dec4dededa7e1d64060d`,与
+>   `multitable-recovery-flag-containment-check.yml:173` 钉的 `SCHEMA_HELPER_SHA256` **逐字节相等**
+>   ⇒ postdeploy-full 的 staging 腿不会再在 helper-sha 检查处以「被篡改」措辞失败。
+>
+> **即:第 6/7/9 步的这一层镜像前置已满足。** 但**这三步本身是否可以执行,仍是 owner/ops 的裁量**,
+> 且各自另有前置(第 6 步取证本身即 F3 待补项,第 9 步须先经第 8 步 arm 9/9)——本节只更正
+> 「镜像太旧」这一层,不改变、不预判 §B1 与 §E 所记的其余门。
 
 ## D2-F7 · X2 · `config-restore-execute` 的一条 unmapped-500 路径 —— ✅ 已修复(#5114),测试覆盖已随 #5128 落 main
 
@@ -249,7 +307,10 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 **B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
 - 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
   改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**代码侧已闭合(范围限定:A1 电池基础设施这组——P1 凭据生命周期 / P2 canonical posture 校验 / F1 建号脚本 / F2 required check / F3 search_path 代码修复;不含 role-cascade witness 谓词,那是独立的另一产物,见下一条);仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审;F2 状态已随 2026-08-24 复核更新)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)、电池 digest/sha 证据绑定(#5125)。**F2(设 required)已完成**(2026-08-24 经 `gh api .../branches/main/protection/required_status_checks` 核实,`contexts` 含 `recovery-schema-drift`)。**未满足的是 owner/ops**:F3 双主机新指纹证据、staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)、建号 + 电池实跑 PASS。三者齐备才可 ratify。已闭合缺陷存档:
+- 前置:**代码侧已闭合(范围限定:A1 电池基础设施这组——P1 凭据生命周期 / P2 canonical posture 校验 / F1 建号脚本 / F2 required check / F3 search_path 代码修复;不含 role-cascade witness 谓词,那是独立的另一产物,见下一条);仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审;F2 状态已随 2026-08-24 复核更新)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)、电池 digest/sha 证据绑定(#5125)。**F2(设 required)已完成**(2026-08-24 经 `gh api .../branches/main/protection/required_status_checks` 核实,`contexts` 含 `recovery-schema-drift`)。**未满足的是 owner/ops**:F3 双主机新指纹证据、建号 + 电池实跑 PASS。**两者**齐备才可 ratify。
+  **原写「……staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)……三者齐备才可 ratify」,已更正(见文首「五次更新」)**:staging 迁移窗口已于
+  2026-08-24T05:44–05:54Z 执行,`Applied: 337 / Pending: 0`(`run 32694623829` / `run 32694880864` /
+  `run 32695040817`),该项**已满足**,故 owner/ops 前置由三项减为两项。已闭合缺陷存档:
   - **P1 凭据生命周期**:cancel/超时/失败时管理员邮箱+密码可能遗留部署主机 `/tmp`。**已闭合**(#5069 workflow always() 清理 → #5076 停止容器诚实枚举 → #5080/#5084 建号脚本 stdin-only+trap;全过独立复门)。
   - **P2 canonical posture 校验**:当前只查 trigger 名+tgenabled;同名 trigger 在错表仍报 9/9 ARMED=假 ARMED。
     需校验表/事件/函数/参数/更新列/函数指纹+变异测试。**(已修 + 过独立复门,合 `ceb0f08def`)**
@@ -268,13 +329,17 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
   #5131……」,**已更正**:该硬前置**现已满足**(#5131 已合并)。**本清单不代 owner 决定这是否意味着
   "建号 + 电池实跑 PASS" 前置本身已满足或 A1 可以 ratify**——那需要一次实际的电池 dispatch 产出 PASS
   证据(见下方"修复后序列"),本条只更正"谓词处于哪个分支/是否已合并"这一事实,不改变、不预判 owner
-  对是否现在授权电池实跑的决定。F3 双主机新指纹证据、staging pending≠0、"建号 + 电池实跑 PASS" 这三项
-  owner/ops 前置本身的完成状态不受本次更正影响,仍按 §B1 开头所记未满足。
+  对是否现在授权电池实跑的决定。原写「F3 双主机新指纹证据、staging pending≠0、"建号 + 电池实跑 PASS"
+  这三项 owner/ops 前置本身的完成状态不受本次更正影响,仍按 §B1 开头所记未满足」——**该句在四次更新
+  落笔时为真,现按 2026-08-24「五次更新」更正**:其中 `staging pending≠0` 一项已于同日
+  05:44–05:54Z 完成(`Applied: 337 / Pending: 0`,`run 32694623829` / `run 32694880864` /
+  `run 32695040817`);**其余两项**(F3 双主机新指纹证据、建号 + 电池实跑 PASS)的完成状态确实不受
+  本次更正影响,仍按 §B1 开头所记未满足。
 - 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
   owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
 - 门审边界(修好后仍适用):干净电池只观测 **12/55 census 站点(分母已随 #5128 由 48 升至 55,见 §D2-F8;driven 集合本身未变,仍是 12)+ 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
 - 后果:未 ratify 期间原 `≥2 天` 判据继续生效,无损失。
-- 载体:A1 = #5042;电池修复轮全落 main(#5069/#5076/#5077/#5080/#5081/#5083/#5084/#5125);**代码侧 F1 硬前置已解除(#5084)**;F2 已完成(2026-08-24 核实);A1-ratify 剩 owner 侧前提(F3 主机证据/建号+实跑 PASS/#5039→#5094 pending≠0)。
+- 载体:A1 = #5042;电池修复轮全落 main(#5069/#5076/#5077/#5080/#5081/#5083/#5084/#5125);**代码侧 F1 硬前置已解除(#5084)**;F2 已完成(2026-08-24 核实);**#5039→#5094 的 staging 迁移积压已于 2026-08-24 应用完毕(`pending = 0`,见 §A)**;A1-ratify 剩 owner 侧前提**两项**(F3 主机证据 / 建号+实跑 PASS)。原写此处第三项「#5039→#5094 pending≠0」,已更正。
 
 ### C1a · P3-INFO-1 subject_type 枚举(已查证,结论=满足)
 
@@ -310,7 +375,8 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 - **F2 · 设漂移守卫为 required —— ✅ 已完成(2026-08-24 核实)**:check context 实名 **`recovery-schema-drift`**(job 名,非文件名),已对每个 PR 稳定产生(#5075)。
   **F3 复门证实这是安全必需**(非可选):否则有人 revert `public.` 限定符后重生成指纹 → required 全绿而 shadow 重开,只非-required 反例能抓。**owner 已在 branch protection 把 `recovery-schema-drift` 加入 required**(2026-08-24 经 `gh api repos/zensgit/metasheet2/branches/main/protection/required_status_checks` 核实,`contexts` 数组含该 context)。
 - **F3 · search_path 根修 —— 已落 main(#5081 `d3289945e1`)**:新迁移 schema-qualified 调用 + 固定 `SET search_path=pg_catalog,public`;函数指纹 `14c180aa→e4a78f6c`;triggers 不变 9/9 DISABLED;真库反例全 5 触发器路径均被防(复门 APPROVE)。
-  **⚠️ ops 协调**:迁移使 prod 函数变新指纹**仅在迁移跑时生效**;镜像落但迁移未应用时跑 postdeploy-full 会 FAIL 在 config 字段=**预期(config-field)非 drift**,迁移须先于 containment/L1 dispatch。**⚠️ 待补:新指纹的双主机 postdeploy-full 证据尚未取。**
+  **⚠️ ops 协调**:迁移使 prod 函数变新指纹**仅在迁移跑时生效**;镜像落但迁移未应用时跑 postdeploy-full 会 FAIL 在 config 字段=**预期(config-field)非 drift**,迁移须先于 containment/L1 dispatch。**⚠️ 待补:新指纹的双主机 postdeploy-full 证据尚未取**(2026-08-24 复核仍成立:`Multitable Recovery-Flag Containment Check` 的最近一次运行仍是 `run 32321464042`,2026-08-20,即本文档已标注的 **pre-fix 点内**观测;此后无新运行)。
+  **2026-08-24 五次更新补记(只补"迁移先于 containment"这一层,不改上面的待补项)**:上述 ops 排序前置在 **staging 侧已满足**——F3 迁移 `zzzz20260821120000_recovery_authority_functions_fix_search_path` 已随 2026-08-24 窗口应用到 staging(在 16 条之内,见 §A),且 staging 镜像已重部署到 `c345c6b405`(见 §A-2),其 containment helper sha 与 workflow 钉值相等。**故 staging 腿现已具备"跑得起来"的条件;但双主机(prod + staging)新指纹 `e4a78f6c…` 的 postdeploy-full 证据本身依然未取**,该项仍开着。
 - **F4 · 旧 Time Machine PR 处置 —— ✅ 已完成(2026-08-24 逐个核实)**:七个 PR 里五个已 **CLOSED**(经 `gh pr view --json state,closedAt` 核实,均在 2026-08-22T04:08–04:09Z 关闭,判定 superseded):#4216(`04:08:11Z`)、#4219(`04:08:15Z`)、#4204(`04:08:38Z`)、#4200(`04:08:42Z`)、#3805(`04:09:08Z`)。另两个是 owner 明文标注**故意 PARKED、禁止 sweep-close**、按设计保持 **OPEN**(不是遗漏):**#4205**(R13 Lane B T-state 设计,owner 评论 2026-08-21:是未来 T-state 工作的 ratify 前置输入,决策点在阶梯 L6 soak 之后)、**#4224**(R13-C retention↔Reset 设计锁,owner 评论 2026-08-22 的"F4 disposition sweep":内容尚未落地,是 §D2 所记 Phase D 一半的唯一草拟设计输入)。
 - **F5 · P3(第四轮):#5080 golden readiness 竞态 — ✅ CLOSED**:`pg_isready` 后即连目标库(可能库未建好即返回)——PR 跑一度 19/20。**已改为目标库上 `SELECT 1` 循环(`waitForTargetDbQueryable`),随 F1 同轮落 main #5084 `162679992e`**;goldens 连跑无 flake。
 - **F6 · P3-1(可选硬化)**:`recovery-authorization-stability.ts` 的函数指纹与 containment 常量无机械交叉守卫——将来改一份漏另一份会静默再破生产 lease。可加一条断言绑定。
@@ -385,6 +451,19 @@ revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L
 
 ## E. 阶梯执行(全 owner-gated,日历为瓶颈,非开发)
 
+> **2026-08-24 五次更新(L0 residual 的精确化)**:下行原写 `L0(差 A1)` 是速记,现按冻结的阶梯 §1
+> 逐条对齐(**该阶梯文档本身冻结,本次不改动**;此处只在本清单内记录其勾选状态)。阶梯 §1 五条中:
+> 第三条「staging 的 pending migrations ≠ 0」是阶梯 §1 上**唯一勾为 `[ ]` 的条目**,
+> **已于 2026-08-24 满足**(`Pending: 0`,见文首「五次更新」)。
+> 其余四条在阶梯 §1 上均勾为 `[x]`,但按**本清单自身的记载**仍附着三项 owner/ops 余项——
+> (i) §1 第五条正文明写的另一半:目标主机上跑一次**回滚后 `postdeploy-full`** 验证回到 inert 姿态;
+> (ii) §1 第四条正文明写的 owner 天花板裁量(= §C 的 C1);(iii) §1 第二条的 containment PASS,
+> 阶梯勾为 `[x]`,而本清单 §D2-F3 记其为 pre-fix 点内观测(`run 32321464042`),新指纹
+> `e4a78f6c…` 的双主机证据待取。**(i)(ii) 是阶梯正文自述的残留,(iii) 是本清单的记载——
+> 三者均不改动阶梯的勾选状态,该文档冻结。**
+> **A1 是阶梯的修正案、不是 L0 的勾选项**——它决定 L1 窗口按 `≥2 天` 还是 `≥1 天 + 电池 PASS` 计,
+> 与 L0 是否满足是两件事;原速记 `差 A1` 把两者并列,易致误读。本条只记录状态,不代 owner 拍板。
+
 L0(差 A1)→ L1 staging ENABLE triggers(flag 全 OFF)→ **⚠️ L2 及其之后 HOLD**(CONTIGUITY_STRICT;
 验收证据不可产出,见 §D2-F10;HOLD 直至 owner 就阶梯 erratum 三点 ratify:(a) 新顺序——fence 不晚于
 strict、(b) 把第五个 flag `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 的 flag 清单、
@@ -401,6 +480,15 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 
 ---
 > ⚠️ **第五轮 owner 复核观察(2026-08-21)**:F3 迁移已在 prod 执行,但部署窗口内有一次健康探针 `curl rc=7`;新指纹 `e4a78f6c` 的**双主机 postdeploy-full 证据尚未取**,staging 也未验证。**不能据此称 main 全绿或 prod 已稳定** —— F2 之后须先取双主机 postdeploy-full 证据(见 F3)再往下走。
+>
+> **2026-08-24 五次更新:上句是两个断言,现分别处置(原文保留)**——
+> ① 「新指纹 `e4a78f6c` 的**双主机 postdeploy-full 证据尚未取**」:**仍然成立**。`Multitable
+> Recovery-Flag Containment Check` 最近一次运行仍是 `run 32321464042`(2026-08-20,pre-fix 点内),
+> 此后无新运行。F2 之后须先取该证据再往下走 —— 该结论不变。
+> ② 「staging 也未验证」:**已部分位移,但结论未变**。staging 侧现已具备执行条件——F3 迁移已应用
+> (2026-08-24 窗口 16 条之内,见 §A)、镜像已重部署到 `c345c6b405`、containment helper sha 与
+> workflow 钉值相等(见 §A-2)。**但"具备执行条件"不等于"已验证":staging 腿的 postdeploy-full
+> 仍未跑,指纹证据仍未取。** 故本行整体结论保持不变,只是其失败原因不再会是「镜像太旧」。
 
 **最短路径(2026-08-22 深审后重排 —— ⚠️ 原顺序是循环的,见下)**
 
@@ -412,8 +500,19 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 1. **F2** ✅ 已完成(owner 已加 check context `recovery-schema-drift` 到 branch protection,2026-08-24 核实)∥ **F4** ✅ 已完成(5 关闭 + 2 owner 明文 PARKED,见 §D2-F4)∥ owner 落墨 C1 天花板裁决(仍待拍板)
 2. **文档修正一票** ✅ 已完成:指纹权威表(ladder §5.2,已核实存在)、armed 预期红(ladder §5.3,已核实存在)、redeploy 前置(本文档 §A-2)、清单指向 #5094(已核实,本文档 §A)
 3. **电池 workflow 补 digest 捕获 + 脚本 sha pin** ✅ 已完成(#5125 `7067b49516`,即 B4;详见 §B1a)
-4. **#5094 交付执行**:pin 部署 SHA + 冻结新迁移文件合并 → 按 pinned SHA 重生成对齐报告 → §7 只读预检 → 克隆彩排
-5. **⚠️ staging 重部署 pinned SHA(≥ `d3289945e1`)+ 应用迁移 → pending=0** —— **原计划缺失的硬前置**(见 §A-2)
+4. **#5094 交付执行** ✅ **已完成**(2026-08-24 窗口):pinned SHA = `c345c6b405`。**实际执行顺序按时间戳为**:
+   备份(05:46:32Z)→ 克隆彩排(`run 32694623829`,05:47:40–47:46Z,彩排库 `321→337`、`Pending: 0`,
+   绿后即丢弃)→ 真实应用(05:47:48–47:53Z)→ 重部署 + 对齐报告 `decision=aligned`
+   (`run 32694880864`,05:49:45Z)。原写「pin 部署 SHA + 冻结新迁移文件合并 → 按 pinned SHA 重生成
+   对齐报告 → §7 只读预检 → 克隆彩排」,已按实际执行更正——**注意对齐报告是在应用之后由 `deploy` 跑
+   产出的,不在彩排之前**。⚠️ **§7 只读预检的书面判据有三处缺陷**(CHECK 预检判据过窄 /
+   锁窗口按整批而非按迁移 / 预检二照抄会 `42703`),**其它环境复用前必读**
+   `staging-migration-window-completion-20260824.md` §2。
+5. **staging 重部署 pinned SHA(≥ `d3289945e1`)+ 应用迁移 → pending=0** ✅ **已完成**
+   (2026-08-24T05:44–05:54Z):应用迁移 = `run 32694623829`(`321/16` → **`337/0`**);
+   重部署 = `run 32694880864`(`deploy`,success,目标 `c345c6b405`,`d3289945e1` 为其祖先——
+   compare API `ahead_by=63, behind_by=0`);确认 = `run 32695040817`(四处 `337/0`)。
+   原写「**⚠️ …… —— 原计划缺失的硬前置**(见 §A-2)」:该硬前置**已解除**(§A-2 三条 bullet 逐条更正见该节)。
 6. **双主机 postdeploy-full**:取 triggers `4d68217d…` + functions `e4a78f6c…` PASS(=F3 证据,同时重绿 L0 item2)
 7. **建号**(用 `scripts/ops/create-l1-battery-admin-on-staging.sh`;两枚 secrets 已设)
 8. **owner 按现行 ≥2 天判据开 L1**:enable 9/9 → 立即 postdeploy-full(**trigger 腿预期红 = `505926e3…`**,flag 腿全绿)
@@ -421,4 +520,4 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 10. **ratify A1 于 #5042**(建议绑 merge commit `5b2376bb49`,并在批注声明所用 SHA 形式)→ 出窗 → **STOP:L2 及其之后 HOLD**,待 owner ratify 阶梯 erratum(fence 不晚于 strict、`MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 flag 清单、明确由哪一级 provision trust checkpoint;机制见 §D2-F10)。**本条最短路径到此为止,不得续接 L2**——主序列已声明 HOLD,此清单若仍写 `→ L2` 即构成绕过。
 11. **L4 前 X2 一行修复 — ✅ 已修复(#5114)**;census 覆盖缺口 — ✅ 已随 #5128(`e9944cbfed8`,已 MERGED)补齐(见 §D2-F7)。⚠️ 与 §D2-F10 独立:即便 L4 打开,revert/reset 仍会在无 checkpoint 时于 preview/execute 两处拒绝。
 
-**F1 已闭合;不再有"修复前不建号"的阻断——但第 5 步(staging 重部署+迁移)未完成前,第 6/7/9 步都会以难诊断的方式失败。**
+**F1 已闭合;不再有"修复前不建号"的阻断。** 原写「——但第 5 步(staging 重部署+迁移)未完成前,第 6/7/9 步都会以难诊断的方式失败。」,**已更正(见文首「五次更新」)**:第 5 步已于 2026-08-24 完成(重部署 `c345c6b405` + `Pending: 0`),该"难诊断失败"的前提不再成立。**但这只解除镜像/迁移这一层**——第 6/7/9 步各自的 owner/ops 门(第 6 步取证本身即 §D2-F3 的待补项;第 9 步须先经第 8 步 arm 9/9)不受影响,仍按上文各条。
