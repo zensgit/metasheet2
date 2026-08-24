@@ -270,6 +270,8 @@ import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import { resolveElearningCatalogFeature } from './elearning/feature-flags'
+import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
+import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
@@ -1353,6 +1355,19 @@ export class MetaSheetServer {
     // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
     if (isApprovalAttachmentsEnabled()) {
       this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
+
+    // E-learning V0.1 public media playback. Token-auth GET; factory null is a
+    // no-op (no route, no DB query). Mount BEFORE the authenticated pilot, the
+    // global JSON parsers, request metrics/logger, and global JWT. The store is
+    // lazy: getBootedElearningMediaRangeStore is the exact successfully booted
+    // range store, or null until boot succeeds.
+    const elearningMediaPlaybackRouter = createElearningMediaPlaybackRouter({
+      db: poolManager.get(),
+      getStore: getBootedElearningMediaRangeStore,
+    })
+    if (elearningMediaPlaybackRouter) {
+      this.app.use(elearningMediaPlaybackRouter)
     }
 
     // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory

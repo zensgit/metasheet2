@@ -26,11 +26,23 @@ import {
   LocalFsElearningMediaStore,
   ObjectStoreElearningMediaStore,
   probeElearningMediaStore,
+  type ElearningMediaRangeReadableStore,
   type ElearningMediaStore,
 } from './elearning-media-storage'
 import type { ElearningMediaDb } from './elearning-media-quota'
 
 export const ELEARNING_MEDIA_WORKER_INTERVAL_MS = 60_000
+
+let bootedElearningMediaRangeStore: ElearningMediaRangeReadableStore | null = null
+
+/** Lazy playback stream seam: the exact store instance from the last successful boot. */
+export function getBootedElearningMediaRangeStore(): ElearningMediaRangeReadableStore | null {
+  return bootedElearningMediaRangeStore
+}
+
+function publishBootedRangeStore(store: ElearningMediaRangeReadableStore | null): void {
+  bootedElearningMediaRangeStore = store
+}
 
 export type ElearningMediaStorageResolution =
   | { kind: 'local-fs'; store: LocalFsElearningMediaStore; rootDir: string; source: ElearningMediaBlobSource }
@@ -70,6 +82,10 @@ export interface ElearningMediaRuntimeOptions {
   intervalMs?: number
   /** Test seam only. Production uses setInterval/clearInterval. */
   timer?: ElearningMediaWorkerTimer
+  /** Test seam only. Production probes put/get/delete. */
+  probeStore?: (store: ElearningMediaStore) => Promise<void>
+  /** Test seam only. Production probes list permission and HEAD after put. */
+  probeSource?: (store: ElearningMediaStore, source: ElearningMediaBlobSource) => Promise<void>
 }
 
 const defaultWorkerTimer: ElearningMediaWorkerTimer = {
@@ -152,107 +168,118 @@ async function probeElearningMediaSource(
 export async function bootElearningMediaRuntime(
   opts: ElearningMediaRuntimeOptions,
 ): Promise<ElearningMediaRuntime | null> {
+  publishBootedRangeStore(null)
   const env = opts.env ?? process.env
   if (!isElearningMediaSurfaceEnabled(env)) return null
 
-  const storage = resolveElearningMediaStorage(env, opts.s3Sender)
-  if (storage.kind === 'local-fs') {
-    await probeElearningMediaStore(storage.store)
-    await probeElearningMediaSource(storage.store, storage.source)
-    opts.logger.info('elearning_media_storage_local_fs')
-  } else if (storage.kind === 'object-store') {
-    await probeElearningMediaStore(storage.store)
-    await probeElearningMediaSource(storage.store, storage.source)
-    opts.logger.info('elearning_media_storage_object_store')
-  } else {
-    opts.logger.warn('elearning_media_storage_s3_required')
-  }
+  const probeStore = opts.probeStore ?? probeElearningMediaStore
+  const probeSource = opts.probeSource ?? probeElearningMediaSource
 
-  const unavailableStore: ElearningMediaStore = {
-    put: async () => {
-      throw new Error('elearning media store unavailable')
-    },
-    get: async () => {
-      throw new Error('elearning media store unavailable')
-    },
-    delete: async () => {
-      throw new Error('elearning media store unavailable')
-    },
-  }
-
-  const inner = createElearningMediaRouter({
-    db: opts.db,
-    store: storage.store ?? unavailableStore,
-    storageAvailable: storage.store != null,
-    viewerId,
-    orgId,
-    writeGuard: opts.writeGuard ?? rbacGuard('elearning', 'write'),
-    env,
-    probe: opts.probe,
-  })
-  if (!inner) return null
-
-  const startWorkers = (): (() => Promise<void>) => {
-    if (storage.kind === 's3-required' || storage.store == null || storage.source == null) {
-      return async () => {}
+  try {
+    const storage = resolveElearningMediaStorage(env, opts.s3Sender)
+    if (storage.kind === 'local-fs') {
+      await probeStore(storage.store)
+      await probeSource(storage.store, storage.source)
+      opts.logger.info('elearning_media_storage_local_fs')
+    } else if (storage.kind === 'object-store') {
+      await probeStore(storage.store)
+      await probeSource(storage.store, storage.source)
+      opts.logger.info('elearning_media_storage_object_store')
+    } else {
+      opts.logger.warn('elearning_media_storage_s3_required')
     }
-    const store = storage.store
-    const source = storage.source
-    const intervalMs = opts.intervalMs ?? ELEARNING_MEDIA_WORKER_INTERVAL_MS
-    const timer = opts.timer ?? defaultWorkerTimer
-    let stopped = false
-    let running = false
-    let cursor: ElearningMediaReconcileCursor | undefined
-    const activeTicks = new Set<Promise<unknown>>()
-    let stopPromise: Promise<void> | undefined
 
-    const tick = async (): Promise<void> => {
-      if (stopped || running) return
-      running = true
-      try {
-        const stale = await reconcileStaleElearningMediaRows(opts.db, store)
-        const blobs = await reconcileElearningMediaBlobs(opts.db, source, store, { cursor })
-        cursor = blobs.nextCursor
-        opts.logger.info('elearning_media_reconcile', {
-          claimed: stale.claimed,
-          deleted: stale.deleted,
-          deleteFailed: stale.deleteFailed,
-          scannedBlobs: blobs.scannedBlobs,
-          deletedBlobs: blobs.deletedBlobs,
-          blobDeleteFailed: blobs.deleteFailed,
-          scannedRows: blobs.scannedRows,
-          missingReadyBlobs: blobs.missingReadyBlobs,
+    const unavailableStore: ElearningMediaStore = {
+      put: async () => {
+        throw new Error('elearning media store unavailable')
+      },
+      get: async () => {
+        throw new Error('elearning media store unavailable')
+      },
+      delete: async () => {
+        throw new Error('elearning media store unavailable')
+      },
+    }
+
+    const inner = createElearningMediaRouter({
+      db: opts.db,
+      store: storage.store ?? unavailableStore,
+      storageAvailable: storage.store != null,
+      viewerId,
+      orgId,
+      writeGuard: opts.writeGuard ?? rbacGuard('elearning', 'write'),
+      env,
+      probe: opts.probe,
+    })
+    if (!inner) return null
+
+    if (storage.store) publishBootedRangeStore(storage.store)
+
+    const startWorkers = (): (() => Promise<void>) => {
+      if (storage.kind === 's3-required' || storage.store == null || storage.source == null) {
+        return async () => {}
+      }
+      const store = storage.store
+      const source = storage.source
+      const intervalMs = opts.intervalMs ?? ELEARNING_MEDIA_WORKER_INTERVAL_MS
+      const timer = opts.timer ?? defaultWorkerTimer
+      let stopped = false
+      let running = false
+      let cursor: ElearningMediaReconcileCursor | undefined
+      const activeTicks = new Set<Promise<unknown>>()
+      let stopPromise: Promise<void> | undefined
+
+      const tick = async (): Promise<void> => {
+        if (stopped || running) return
+        running = true
+        try {
+          const stale = await reconcileStaleElearningMediaRows(opts.db, store)
+          const blobs = await reconcileElearningMediaBlobs(opts.db, source, store, { cursor })
+          cursor = blobs.nextCursor
+          opts.logger.info('elearning_media_reconcile', {
+            claimed: stale.claimed,
+            deleted: stale.deleted,
+            deleteFailed: stale.deleteFailed,
+            scannedBlobs: blobs.scannedBlobs,
+            deletedBlobs: blobs.deletedBlobs,
+            blobDeleteFailed: blobs.deleteFailed,
+            scannedRows: blobs.scannedRows,
+            missingReadyBlobs: blobs.missingReadyBlobs,
+          })
+        } catch {
+          opts.logger.warn('elearning_media_reconcile_tick_failed')
+        } finally {
+          running = false
+        }
+      }
+
+      const fire = (): void => {
+        if (stopped) return
+        const pending = tick().finally(() => {
+          activeTicks.delete(pending)
         })
-      } catch {
-        opts.logger.warn('elearning_media_reconcile_tick_failed')
-      } finally {
-        running = false
+        activeTicks.add(pending)
+        void pending.catch(() => undefined)
+      }
+
+      const handle = timer.setInterval(fire, intervalMs)
+      handle.unref?.()
+
+      return async () => {
+        if (stopPromise) return stopPromise
+        stopped = true
+        timer.clearInterval(handle)
+        stopPromise = Promise.allSettled([...activeTicks]).then(() => undefined)
+        await stopPromise
       }
     }
 
-    const fire = (): void => {
-      if (stopped) return
-      const pending = tick().finally(() => {
-        activeTicks.delete(pending)
-      })
-      activeTicks.add(pending)
-      void pending.catch(() => undefined)
-    }
-
-    const handle = timer.setInterval(fire, intervalMs)
-    handle.unref?.()
-
-    return async () => {
-      if (stopPromise) return stopPromise
-      stopped = true
-      timer.clearInterval(handle)
-      stopPromise = Promise.allSettled([...activeTicks]).then(() => undefined)
-      await stopPromise
-    }
+    const router = Router()
+    router.use('/api/elearning/media', authenticate)
+    router.use(inner)
+    return { router, storage, startWorkers }
+  } catch (error) {
+    publishBootedRangeStore(null)
+    throw error
   }
-
-  const router = Router()
-  router.use('/api/elearning/media', authenticate)
-  router.use(inner)
-  return { router, storage, startWorkers }
 }
