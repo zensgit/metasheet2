@@ -270,6 +270,7 @@ import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import { resolveElearningCatalogFeature } from './elearning/feature-flags'
+import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -1352,6 +1353,15 @@ export class MetaSheetServer {
     // Flag OFF remains a byte-for-byte no-op: no parser and therefore no attachment-specific refusal.
     if (isApprovalAttachmentsEnabled()) {
       this.app.post('/api/approval/attachments/refs', approvalAttachmentRefsJsonParser)
+    }
+
+    // E-learning V0.1 named-pilot HTTP surface. Flag OFF is a no-op (factory
+    // returns null). Mount BEFORE the global 10 MB JSON parser so the router-local
+    // 16 KiB limit stays effective. poolManager.get() is the DB handle only —
+    // no startup query. Do not remount from start().
+    const elearningPilotRuntime = createElearningPilotRuntime({ db: poolManager.get() })
+    if (elearningPilotRuntime) {
+      this.app.use(elearningPilotRuntime.router)
     }
 
     // Body parsing
