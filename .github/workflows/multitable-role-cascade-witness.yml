@@ -51,15 +51,17 @@ name: Multitable Role-Cascade Witness
 #
 # INPUT SAFETY
 # ------------
-# `target` is a fixed `choice` (production | staging) — NEVER free text. `choice` is a UI-only
-# guardrail (the REST dispatch API can still send an arbitrary string), so TARGET is re-validated
-# with an exact-match `case` whose default branch fails closed BEFORE it is interpolated onto the
-# ssh command line — that local check is the real injection boundary. The target → container-name
-# mapping is then redone, independently, INSIDE the remote heredoc, so no space-containing constant
-# is ever passed as an env-assignment: ssh concatenates all trailing arguments into one string and
-# re-parses it through the remote login shell, and a space there previously became "run this as a
-# second, bogus command" (multitable-recovery-flag-containment-check.yml's `both` path failed at
-# runtime with exit 127 before that fix). The probe travels the same way, as a single base64 word
+# `target` is a fixed `choice` (staging | production) — NEVER free text — and it DEFAULTS to
+# staging, the positive control, so a mis-click on the dispatch form cannot reach production.
+# `choice` is a UI-only guardrail (the REST dispatch API can still send an arbitrary string), so
+# TARGET is re-validated with an exact-match `case` whose default branch fails closed BEFORE it is
+# interpolated onto the ssh command line — that local check is the real injection boundary. The
+# target → container-name mapping is then redone, independently, INSIDE the remote heredoc, so no
+# space-containing constant is ever passed as an env-assignment: ssh concatenates all trailing
+# arguments into one string and re-parses it through the remote login shell, and a space there
+# previously became "run this as a second, bogus command"
+# (multitable-recovery-flag-containment-check.yml's `both` path failed at runtime with exit 127
+# before that fix). The probe travels the same way, as a single base64 word
 # whose alphabet is validated locally before interpolation.
 #
 # HOST IDENTITY IS PINNED
@@ -77,6 +79,10 @@ name: Multitable Role-Cascade Witness
 #   • CASCADE ABSENT (premise CONFIRMED)                                          → exit 0
 #   • CASCADE PRESENT (premise REFUTED — battery would exit 1 …reason_expired)    → exit 1
 #   • INDETERMINATE (failed to observe)                                           → exit 2
+# INDETERMINATE carries exit code 2 and the job FAILS. It IS a failure of the evidence gate —
+# legitimate and diagnosable (the reason codes discriminate, so one dispatch is enough to say
+# which half broke), but it is never "not a failure": nothing about the premise may be inherited
+# from a run that ends there, and the ladder gets no evidence out of it.
 # A missing container, an unreadable DATABASE_URL, an unresolvable `pg`, a failed connection, a
 # non-zero probe exit, an unparseable result, or a database whose session can resolve no `roles`
 # table / that carries no canonical recovery-authority trigger at all (the positive control — the
@@ -93,11 +99,19 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Which database to witness. Fixed choices only — never free text reaches the remote host.'
+        description: 'Which database to witness (fixed choices only — never free text). Staging first: it is the positive control.'
         required: true
         type: choice
-        options: [production, staging]
-        default: production
+        # STAGING IS FIRST, AND IS THE DEFAULT, ON PURPOSE.
+        # Staging's answer is independently known (no cascade), so a staging dispatch is the
+        # positive control for the witness itself: anything other than CASCADE ABSENT there
+        # indicts the witness, not the database. Defaulting to `production` meant one mis-click
+        # on the dispatch form reached the production host — a read-only reach, but still an
+        # un-rehearsed one, and the guidance that staging MUST go first would have been silently
+        # inverted by the form's own default. scripts/ops/multitable-role-cascade-witness.test.mjs
+        # pins `default == options[0] == staging` so this cannot drift back unnoticed.
+        options: [staging, production]
+        default: staging
 
 concurrency:
   group: multitable-role-cascade-witness-${{ github.event.inputs.target }}

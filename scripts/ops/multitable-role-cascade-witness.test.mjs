@@ -606,13 +606,52 @@ test('dispatch only — never scheduled', () => {
 
 test('target is a fixed choice, re-validated locally with a fail-closed default BEFORE ssh', () => {
   assert.match(workflowRaw, /type: choice/)
-  assert.match(workflowRaw, /options: \[production, staging\]/)
+  assert.match(workflowRaw, /options: \[staging, production\]/)
   const localCaseIdx = workflowRaw.indexOf('case "$TARGET" in')
   const sshIdx = workflowRaw.indexOf('ssh $ssh_opts')
   assert.ok(localCaseIdx > 0, 'the local exact-match validation must exist')
   assert.ok(sshIdx > 0, 'the ssh invocation must exist')
   assert.ok(localCaseIdx < sshIdx, 'TARGET must be re-validated BEFORE it is interpolated onto the ssh command line')
   assert.match(workflowRaw, /unexpected target '\$\{TARGET\}' \(expected production\|staging\) — refusing to proceed/)
+})
+
+/** The `workflow_dispatch` `target` input, parsed from the EXECUTABLE lines only (a `default:` in
+ *  a header comment must not be able to satisfy the pin below). */
+function dispatchTargetInput() {
+  const lines = workflowRaw.split('\n').filter((line) => !line.trimStart().startsWith('#'))
+  const start = lines.findIndex((line) => /^ {6}target:\s*$/.test(line))
+  assert.ok(start >= 0, 'the workflow_dispatch `target` input is gone')
+  const block = []
+  for (let i = start + 1; i < lines.length; i++) {
+    if (!/^ {8}\S/.test(lines[i])) break
+    block.push(lines[i])
+  }
+  const optionsLine = block.find((line) => /^ {8}options: /.test(line))
+  const defaultLine = block.find((line) => /^ {8}default: /.test(line))
+  return {
+    options: optionsLine ? optionsLine.replace(/^ {8}options: \[/, '').replace(/\]\s*$/, '').split(',').map((token) => token.trim()) : null,
+    default: defaultLine ? defaultLine.replace(/^ {8}default: /, '').trim() : null,
+  }
+}
+
+test('the dispatch DEFAULT is staging — the positive control — and never production', () => {
+  // Distinct from the fail-closed default in the test above: THAT one is the shell `case`'s
+  // unmapped branch (an injection boundary). THIS one is the dispatch FORM's pre-selected value.
+  // Neither covers the other. Staging's answer is independently known, so a staging dispatch is
+  // the control for the witness itself; defaulting to production meant one mis-click reached the
+  // production host and silently inverted the PR's own "dispatch staging first" guidance.
+  const input = dispatchTargetInput()
+  assert.deepEqual(
+    input.options,
+    ['staging', 'production'],
+    'the dispatch options changed shape — staging must be listed FIRST so the form agrees with the guidance',
+  )
+  assert.equal(
+    input.default,
+    'staging',
+    'the workflow_dispatch default is not `staging`: a mis-click on the dispatch form would reach PRODUCTION, inverting the "dispatch staging first as a positive control" guidance',
+  )
+  assert.equal(input.default, input.options[0], 'the pre-selected default must be the first option, or form and guidance disagree')
 })
 
 test('the target → container mapping is redone INDEPENDENTLY inside the remote heredoc', () => {
@@ -947,6 +986,150 @@ test('the hermetic suite is registered in the always-on O-2 kit lane (cross-file
 })
 
 // ---------------------------------------------------------------------------
+// 6b. The real-DB goldens must ACTUALLY RUN SOMEWHERE (cross-file wiring pin)
+// ---------------------------------------------------------------------------
+// The goldens below are opt-in behind ROLE_CASCADE_WITNESS_DB_GOLDENS=1, and the required
+// hermetic contract lane deliberately does not arm them. That leaves exactly one lane in which
+// the catalog proof executes at all — .github/workflows/multitable-o2-observation-kit-realdb.yml.
+// If its armed step, its env var, or its path filters are dropped, the strongest evidence in this
+// change quietly returns to running in NO lane while every check stays green: the repo's named
+// skip-green shape (被触发≠被验证). These pins live in THIS suite because this suite runs in the
+// always-on, path-filter-free contract lane, so editing the other file cannot defeat them.
+
+const REALDB_WORKFLOW_REL = '.github/workflows/multitable-o2-observation-kit-realdb.yml'
+const realdbWorkflowRaw = readFileSync(path.join(workflowsDir, 'multitable-o2-observation-kit-realdb.yml'), 'utf8')
+
+/** The exact command the armed step must run. Pinned, not matched loosely: a step that runs some
+ *  OTHER file would satisfy a substring match while executing none of the goldens. */
+const WITNESS_GOLDENS_COMMAND = 'node --test scripts/ops/multitable-role-cascade-witness.test.mjs'
+
+/**
+ * The lane's job steps as `{name, env, run}`, parsed from EXECUTABLE lines only.
+ *
+ * Comment lines are stripped FIRST and deliberately: a prose mention of
+ * `ROLE_CASCADE_WITNESS_DB_GOLDENS` in a header comment must never be able to satisfy a pin on the
+ * step that actually SETS it, and neither may an env var that landed on a different step
+ * (源码文本断言≠行为断言).
+ */
+function realdbJobSteps() {
+  const lines = realdbWorkflowRaw.split('\n').filter((line) => !/^\s*#/.test(line))
+  const steps = []
+  let current = null
+  for (const line of lines) {
+    const start = line.match(/^ {6}- (?:name|uses): (.*)$/)
+    if (start) {
+      current = { name: /^ {6}- name: /.test(line) ? start[1].trim() : '', body: [], env: {}, run: '' }
+      steps.push(current)
+      continue
+    }
+    if (/^ {0,6}\S/.test(line)) {
+      current = null
+      continue
+    }
+    if (current) current.body.push(line)
+  }
+  for (const step of steps) {
+    const envIdx = step.body.findIndex((line) => /^ {8}env:\s*$/.test(line))
+    if (envIdx >= 0) {
+      for (let i = envIdx + 1; i < step.body.length; i++) {
+        const kv = step.body[i].match(/^ {10}([A-Za-z_][A-Za-z0-9_]*): (.*)$/)
+        if (!kv) break
+        step.env[kv[1]] = kv[2].trim().replace(/^'(.*)'$/, '$1').replace(/^"(.*)"$/, '$1')
+      }
+    }
+    const runLine = step.body.find((line) => /^ {8}run: /.test(line))
+    if (runLine) step.run = runLine.replace(/^ {8}run: /, '').trim()
+  }
+  return steps
+}
+
+/** Every `- 'entry'` list under each `paths:` key, in file order. Same shape the O-2 suite's own
+ *  path-filter guard uses, so the two agree about what "is in the filter" means. */
+function realdbPathSections() {
+  const sections = []
+  const lines = realdbWorkflowRaw.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*paths:\s*$/.test(lines[i])) continue
+    const entries = []
+    for (let j = i + 1; j < lines.length; j++) {
+      const entry = lines[j].match(/^\s*-\s*'([^']+)'\s*$/)
+      if (entry) {
+        entries.push(entry[1])
+        continue
+      }
+      if (/^\s*#/.test(lines[j])) continue
+      break
+    }
+    sections.push(entries)
+  }
+  return sections
+}
+
+test('the real-DB goldens are ARMED in the observation-kit real-DB lane — otherwise they run in NO lane at all', () => {
+  const steps = realdbJobSteps()
+  // Non-vacuity: the parser must actually be reading the job, and must be reading env blocks.
+  assert.ok(steps.length >= 6, `parsed implausibly few steps (${steps.length}) out of ${REALDB_WORKFLOW_REL}`)
+  assert.ok(
+    steps.some((step) => Object.keys(step.env).length > 0),
+    'the step parser found no per-step env: block anywhere in the lane — it is not reading what it claims to read',
+  )
+
+  const armed = steps.filter((step) => step.run === WITNESS_GOLDENS_COMMAND)
+  assert.equal(
+    armed.length,
+    1,
+    `expected exactly ONE step in ${REALDB_WORKFLOW_REL} running \`${WITNESS_GOLDENS_COMMAND}\`, found ${armed.length}`
+      + ' — without it the real-DB goldens (the user_roles-only counterexample, the SET NULL / SET DEFAULT'
+      + ' legs and the view_permissions-shape over-widen guard) execute in no CI lane at all',
+  )
+  const step = armed[0]
+  assert.equal(
+    step.env.ROLE_CASCADE_WITNESS_DB_GOLDENS,
+    '1',
+    'the armed step no longer sets ROLE_CASCADE_WITNESS_DB_GOLDENS=1 on ITSELF — the goldens would SKIP inside a lane that looks like it runs them (skip-green)',
+  )
+  const adminUrl = step.env.ROLE_CASCADE_WITNESS_ADMIN_URL
+  assert.ok(
+    adminUrl,
+    'the armed step no longer sets ROLE_CASCADE_WITNESS_ADMIN_URL — the goldens need a maintenance connection that may CREATE/DROP throwaway databases, and without one they skip',
+  )
+  // Derived, not re-typed: the admin URL must point at the SAME postgres service this lane
+  // provisions, so changing the service port reds here instead of leaving the goldens pointed at
+  // nothing and skipping.
+  const laneDatabaseUrl = realdbWorkflowRaw.match(/^ {6}DATABASE_URL: (\S+)$/m)
+  assert.ok(laneDatabaseUrl, `could not find the job-level DATABASE_URL in ${REALDB_WORKFLOW_REL}`)
+  const lane = new URL(laneDatabaseUrl[1])
+  const admin = new URL(adminUrl)
+  assert.equal(admin.host, lane.host, "the goldens' admin URL points at a different host:port than the lane's own postgres service")
+  assert.notEqual(
+    admin.pathname,
+    lane.pathname,
+    'the goldens must connect to a MAINTENANCE database: they CREATE/DROP throwaway databases, which cannot be done from inside the migrated application database itself',
+  )
+})
+
+test('a change to the witness, its goldens, or the ONE query definition TRIGGERS the lane that executes them', () => {
+  const sections = realdbPathSections()
+  assert.equal(sections.length, 2, `expected 2 paths: sections (pull_request + push) in ${REALDB_WORKFLOW_REL}, found ${sections.length}`)
+  const required = [
+    'scripts/ops/multitable-role-cascade-witness.mjs',
+    'scripts/ops/multitable-role-cascade-witness.test.mjs',
+    // The ONE definition of the witness query lives here; the goldens execute its exported text.
+    'scripts/ops/multitable-l1-battery.mjs',
+  ]
+  sections.forEach((entries, index) => {
+    assert.ok(entries.length >= 9, `paths-section#${index + 1} unexpectedly small (${entries.length} entries)`)
+    for (const rel of required) {
+      assert.ok(
+        entries.includes(rel),
+        `paths-section#${index + 1} of ${REALDB_WORKFLOW_REL} does not trigger on ${rel}`
+          + ' — a PR editing it would land without the real-DB goldens ever running',
+      )
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 7. REAL-DB GOLDENS — the catalog, not a fixture's idea of the catalog
 //
 // Everything above drives the predicate through hand-written rows. That proves the classifier, and
@@ -958,6 +1141,12 @@ test('the hermetic suite is registered in the always-on O-2 kit lane (cross-file
 // OPT-IN, not opt-out (L1_BATTERY_DOCKER_GOLDENS discipline): the required, path-filter-free O-2
 // contract lane must stay hermetic, so a database hiccup on an unrelated PR can never red it. Not
 // being armed is a LOUD skip, never a silent one (被触发≠被验证).
+//
+// OPT-IN IS NOT "NEVER RUNS": in CI they are armed by the execution-proof lane
+// .github/workflows/multitable-o2-observation-kit-realdb.yml, whose armed step — and whose path
+// filters — are pinned by section 6b above, so this suite reds if that wiring is ever dropped.
+// And when a lane DOES arm them, the sentinel below turns "armed but unrunnable" into a hard
+// failure rather than a skip that reads as green.
 //
 //   ROLE_CASCADE_WITNESS_DB_GOLDENS=1 \
 //   ROLE_CASCADE_WITNESS_ADMIN_URL=postgresql://postgres@localhost:5432/postgres \
@@ -982,6 +1171,20 @@ function dbGoldenSkipReason() {
 }
 
 const DB_GOLDEN_SKIP = dbGoldenSkipReason()
+
+test('sentinel: a lane that ARMS the goldens must actually be able to run them (fail-not-skip)', () => {
+  // Dormant unless armed, so the hermetic contract lane is untouched. When a CI step sets
+  // ROLE_CASCADE_WITNESS_DB_GOLDENS=1 it is ASSERTING that the catalog proof runs there; a missing
+  // admin URL or an absent psql binary must then RED the lane, not skip it green
+  // (mirrors multitable-o2-observation.test.mjs's METASHEET_REAL_DB_TEST_STEP sentinel).
+  if (process.env.ROLE_CASCADE_WITNESS_DB_GOLDENS !== '1') return
+  assert.equal(
+    DB_GOLDEN_SKIP,
+    null,
+    `ROLE_CASCADE_WITNESS_DB_GOLDENS=1 says this step runs the real-DB goldens, but they would be SKIPPED — ${DB_GOLDEN_SKIP}`,
+  )
+})
+
 if (DB_GOLDEN_SKIP) {
   // eslint-disable-next-line no-console
   console.error(

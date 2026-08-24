@@ -61,6 +61,11 @@
  *   PRESENT       → premise REFUTED     (exit 1)  the battery would exit 1 not_driven_reason_expired
  *   INDETERMINATE → failed to observe   (exit 2)
  *
+ * INDETERMINATE carries exit code 2 and the dispatch FAILS. It IS a failure of the evidence gate —
+ * legitimate and diagnosable (`INDETERMINATE_REASONS` discriminates, so one dispatch is enough to
+ * say which half broke), but it must never be described as "not a failure": a run that ends there
+ * yields no evidence and nothing about the premise may be inherited from it.
+ *
  * A DATABASE THAT CARRIES NO CANONICAL RECOVERY-AUTHORITY TRIGGER AT ALL NOW LANDS IN THE THIRD, not
  * the first. This is a change of behaviour, stated rather than slipped in: the widened query's
  * `EXISTS (…)` conjunct makes it structurally incapable of returning a row on such a database, so
