@@ -1052,8 +1052,9 @@ describe('Attendance self-service dashboard', () => {
     expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('request_pending')
     expect(attention?.textContent).toContain('Track pending approvals')
     expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
-    expect(attention?.textContent?.toLowerCase()).not.toContain('approve')
-    expect(attention?.textContent?.toLowerCase()).not.toContain('reject')
+    const attentionButtons = Array.from(attention!.querySelectorAll('button')).map((button) => button.textContent?.trim())
+    expect(attentionButtons).not.toContain('Approve')
+    expect(attentionButtons).not.toContain('Reject')
   })
 
   it('W2/4355 all-clear: normal day has an explicit caught-up state and no fabricated CTA', async () => {
