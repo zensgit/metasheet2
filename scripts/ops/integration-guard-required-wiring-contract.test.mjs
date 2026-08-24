@@ -369,11 +369,13 @@ const CHAIN_COMPLETENESS_STEP_ID = 'chain-completeness'
 const CHAIN_COMPLETENESS_GUARD_PATH =
   'plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs'
 
-// #4802: the seven K3-line scripts/ops suites' step, inside plugin-tests.yml's required `test` job.
+// #4802: the K3/package scripts/ops suites' step, inside plugin-tests.yml's required `test` job.
 // See Pin 18 below.
 const K3_OPS_SUITES_STEP_ID = 'k3-line-ops-suites'
 const K3_OPS_SUITES_IF_EXACT = "matrix.node-version == '20.x'"
 const K3_OPS_SUITE_PATHS = Object.freeze([
+  'scripts/ops/attendance-onprem-package-runtime-contract.test.mjs',
+  'scripts/ops/attendance-onprem-package-verify-migrations.test.mjs',
   'scripts/ops/integration-erp-plm-deploy-readiness.test.mjs',
   'scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs',
   'scripts/ops/integration-k3wise-postdeploy-summary.test.mjs',
@@ -473,9 +475,9 @@ const PLUGIN_TESTS_CONTRACT_RUN_EXACT = CONTRACT_RUN_EXACT
 // current .github/workflows/integration-guard.yml and pasted verbatim, never hand-typed.
 const CHAIN_COMPLETENESS_RUN_EXACT = "set -euo pipefail\nMIN_CHAINED_SUITES=150\nGUARD=plugins/plugin-integration-core/__tests__/test-chain-completeness.test.cjs\nif ! guard_out=\"$(node \"$GUARD\" 2>&1)\"; then\n  printf '%s\\n' \"$guard_out\"\n  echo \"chain-completeness: node exited non-zero (output above)\" >&2\n  exit 1\nfi\nprintf '%s\\n' \"$guard_out\"\nchained=\"$(printf '%s\\n' \"$guard_out\" | grep -Eo 'test-chain-completeness: [0-9]+ suites' | tail -n 1 | grep -Eo '[0-9]+' || true)\"\nif [ -z \"$chained\" ]; then\n  echo \"chain-completeness: no 'test-chain-completeness: <N> suites' summary line found — refusing to report green\" >&2\n  exit 1\nfi\nif [ \"$chained\" -lt \"$MIN_CHAINED_SUITES\" ]; then\n  echo \"chain-completeness: only $chained suites were walked, expected at least $MIN_CHAINED_SUITES — a deleted main() call or an early process.exit(0) collapses this guard into a silent success\" >&2\n  exit 1\nfi\necho \"chain-completeness: $chained suites, all executed by the package test chain (floor $MIN_CHAINED_SUITES).\"\n"
 
-// #4802 — the seven K3-line scripts/ops suites' step inside plugin-tests.yml's required `test` job.
+// #4802 — the K3/package scripts/ops suites' step inside plugin-tests.yml's required `test` job.
 // Captured the same way, from a python3+PyYAML parse of the current .github/workflows/plugin-tests.yml.
-const K3_OPS_SUITES_RUN_EXACT = "node --test \\\n  scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \\\n  scripts/ops/integration-k3wise-signoff-gate.test.mjs \\\n  scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \\\n  scripts/ops/resolve-k3wise-smoke-token.test.mjs\n"
+const K3_OPS_SUITES_RUN_EXACT = "node --test \\\n  scripts/ops/attendance-onprem-package-runtime-contract.test.mjs \\\n  scripts/ops/attendance-onprem-package-verify-migrations.test.mjs \\\n  scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \\\n  scripts/ops/integration-k3wise-postdeploy-workflow-contract.test.mjs \\\n  scripts/ops/integration-k3wise-signoff-gate.test.mjs \\\n  scripts/ops/multitable-onprem-package-verify-k3-helper-contract.test.mjs \\\n  scripts/ops/resolve-k3wise-smoke-token.test.mjs\n"
 
 const RELEVANT_ENV_EXACT = '${{ steps.changes.outputs.relevant }}'
 const NOOP_OUTCOME_ENV_EXACT = '${{ steps.noop.outcome }}'
@@ -2111,7 +2113,7 @@ test('the pinned chain-completeness step executes the guard file directly, not v
 })
 
 // ---------------------------------------------------------------------------
-// Pin 18 (#4802) — THE SEVEN K3-LINE `scripts/ops` SUITES' EXECUTION ENTRY.
+// Pin 18 (#4802) — THE K3/PACKAGE `scripts/ops` SUITES' EXECUTION ENTRY.
 //
 // A repo-wide sweep found seven `scripts/ops/*.test.mjs` files on the K3/stock-prep line executed by
 // NOTHING: no workflow, no package.json script, no shell script. The single non-docs textual hit
@@ -2125,7 +2127,8 @@ test('the pinned chain-completeness step executes the guard file directly, not v
 // REDS that suite and nothing else. An on-prem package missing the K3 SQL Server executor seam's
 // shared helper shipped green through every executed check.
 //
-// They are now wired into plugin-tests.yml's `test` job, i.e. the REQUIRED `test (20.x)` context —
+// Those seven plus the attendance package content/runtime regression contracts are wired into
+// plugin-tests.yml's `test` job, i.e. the REQUIRED `test (20.x)` context —
 // the owner's standard being "写进 workflow 但未进入 required context 不算完成". This pin is what
 // stops that step being deleted again in silence, and it lives in a file that already executes in
 // BOTH required contexts.
@@ -2139,13 +2142,13 @@ test('the pinned chain-completeness step executes the guard file directly, not v
 // exist on disk: a renamed-away path would otherwise sit in the list running nothing.
 // ---------------------------------------------------------------------------
 
-test('plugin-tests.yml required test job runs all seven K3-line ops suites, id: k3-line-ops-suites, on the required 20.x leg', () => {
+test('plugin-tests.yml required test job runs all nine K3/package ops suites, id: k3-line-ops-suites, on the required 20.x leg', () => {
   const job = requirePluginTestsJob()
   const step = stepById(job, K3_OPS_SUITES_STEP_ID)
   assert.ok(
     step,
     `plugin-tests.yml: jobs.${PLUGIN_TESTS_JOB_ID} must have a step with id: ` +
-      `${K3_OPS_SUITES_STEP_ID} — deleting it returns all seven suites to the state #4802 reported, ` +
+      `${K3_OPS_SUITES_STEP_ID} — deleting it returns all nine suites to an unwired state, ` +
       `executed by nothing at all`,
   )
   assert.equal(
@@ -2169,8 +2172,8 @@ test('plugin-tests.yml required test job runs all seven K3-line ops suites, id: 
       `extra line that neuters the invocation, none of which substring containment would notice`,
   )
 
-  // The pin is a literal; prove the literal really is a `node --test` invocation carrying all seven
-  // paths as whole-file arguments, rather than seven names that merely appear somewhere in it.
+  // The pin is a literal; prove the literal really is a `node --test` invocation carrying all nine
+  // paths as whole-file arguments, rather than nine names that merely appear somewhere in it.
   const invocation = K3_OPS_SUITES_RUN_EXACT.replace(/\\\n\s*/g, ' ')
   assert.ok(
     invocation.startsWith('node --test '),
@@ -2181,7 +2184,7 @@ test('plugin-tests.yml required test job runs all seven K3-line ops suites, id: 
   assert.deepEqual(
     args.slice().sort(),
     [...K3_OPS_SUITE_PATHS].sort(),
-    'the pinned invocation must carry EXACTLY the seven #4802 suites as whole-file arguments — ' +
+    'the pinned invocation must carry EXACTLY the nine K3/package suites as whole-file arguments — ' +
       'no more (an unrelated file smuggled into this step), no fewer (a suite dropped back into ' +
       'inertness)',
   )

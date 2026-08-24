@@ -74,6 +74,44 @@ function verify_workspace_manifest() {
   fi
 }
 
+function verify_core_backend_runtime_dependencies() {
+  local root="$1"
+  local core_package_json="${root}/packages/core-backend/package.json"
+  local helper_package_json="${root}/packages/mssql-readonly-utils/package.json"
+  local helper_entry="${root}/packages/mssql-readonly-utils/index.cjs"
+  local helper_types="${root}/packages/mssql-readonly-utils/index.d.ts"
+  local lockfile="${root}/pnpm-lock.yaml"
+
+  [[ -f "$helper_package_json" ]] \
+    || die "Required package content missing: packages/mssql-readonly-utils/package.json"
+  [[ -f "$helper_entry" ]] \
+    || die "Required package content missing: packages/mssql-readonly-utils/index.cjs"
+  [[ -f "$helper_types" ]] \
+    || die "Required package content missing: packages/mssql-readonly-utils/index.d.ts"
+  [[ -f "$lockfile" ]] || die "Required package content missing: pnpm-lock.yaml"
+
+  node - "$core_package_json" "$helper_package_json" <<'NODE' \
+    || die "Packaged MSSQL workspace runtime dependency contract is invalid"
+const fs = require('node:fs')
+
+const core = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+const helper = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'))
+
+if (core.dependencies?.['@metasheet/mssql-readonly-utils'] !== 'workspace:*') {
+  throw new Error('core-backend must depend on @metasheet/mssql-readonly-utils via workspace:*')
+}
+if (helper.name !== '@metasheet/mssql-readonly-utils') {
+  throw new Error('helper package name mismatch')
+}
+if (helper.main !== 'index.cjs') {
+  throw new Error('helper package runtime entry must be index.cjs')
+}
+NODE
+
+  search_fixed_string 'version: link:../mssql-readonly-utils' "$lockfile" \
+    || die "pnpm-lock.yaml must link core-backend to packages/mssql-readonly-utils"
+}
+
 function verify_onprem_env_templates() {
   local root="$1"
   local rel
@@ -260,6 +298,10 @@ required=(
   "packages/core-backend/dist/src/db/migrate.js"
   "packages/core-backend/dist/src/db/migration-provider.js"
   "packages/core-backend/package.json"
+  "packages/mssql-readonly-utils/package.json"
+  "packages/mssql-readonly-utils/index.cjs"
+  "packages/mssql-readonly-utils/index.d.ts"
+  "pnpm-lock.yaml"
   "packages/core-backend/src/db/migrations/20250925_create_view_tables.sql"
   "packages/core-backend/src/db/migrations/20250926_create_audit_tables.sql"
   "packages/core-backend/src/db/migrations/zzzz20260318123000_formalize_meta_comments.ts"
@@ -314,6 +356,7 @@ fi
 
 verify_onprem_env_templates "$pkg_root"
 verify_workspace_manifest "$pkg_root"
+verify_core_backend_runtime_dependencies "$pkg_root"
 verify_web_dist_publish_entrypoints "$pkg_root"
 verify_core_backend_migration_set "$pkg_root"
 
