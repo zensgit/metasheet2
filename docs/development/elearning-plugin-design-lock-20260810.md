@@ -1,8 +1,8 @@
 # MetaSheet 云课堂（企业学习）插件 — Design Lock（唯一 ratify 对象）
 
 - 日期：2026-08-10
-- 状态：**DRAFT — PENDING RATIFY**（本文件是本线唯一的 ratify 对象；ratify 前置见 §14。在 owner 完成 §9 裁决并按最新 main 重核引用前，不得声称已 ratify。）
-- 终检通过后唯一合法状态字符串（**禁止**写成普通 `RATIFIED`）：**`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**。该状态只冻结架构合同；**不授权** L0 / V0.1、代码、迁移、feature flag 或任何实施 PR。unpark 须 owner 对具名试点或自用场景作明确批准。
+- 状态：**RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED**
+- 本文件是本线唯一的 ratify 对象。该状态只冻结架构合同；**不授权** L0 / V0.1、代码、迁移、feature flag 或任何实施 PR。unpark 须 owner 对具名试点或自用场景作明确批准。禁止写成普通 `RATIFIED`。
 - Lineage（输入材料，均已 SUPERSEDED，不得独立演进）：
   - `elearning-plugin-feasibility-and-architecture-design-20260810.md`（产品 v2，本文底稿）
   - `elearning-plugin-hybrid-architecture-20260810.md`（Codex 混合架构稿，吸收其架构图/责任矩阵/投影矩阵/流程/媒体子架构/验收门）
@@ -373,7 +373,7 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 1. ✅ 全部审阅意见落稿（审1–审9，处置记录 §13）。
 2. ✅ Owner 九项裁决全部落槌（审5，§9 全 ACCEPTED / DEFERRED TO L6，无「待确认」残留）。
 3. ✅ 基线刷新（四跳完成；工作分支 `grok/elearning-plugin-20260824` cherry-pick 在 `96b6416717` 之上）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。其余承重锚点亲核仍在位：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`zzzz20260529190000_add_users_hr_profile_fields.ts:11-15` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`@96b6416717；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
-4. ⏳ 对**本审9 最小修订之后的新 commit**做 scoped exact-diff 快审（对象不再是 `0eba89154b` / `b7b5f725e4`）。通过后才依次执行：状态改为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**（禁止普通 `RATIFIED`）→ amend → push → 开 PR 走九门入库。该状态不授权 L0/V0.1/代码/迁移/flag/实施 PR。复核通过前三者一律不做。
+4. ✅ scoped exact-diff 快审通过（审阅对象 `7ba7ee472d`，基线 `96b6416717`）。状态已改为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**（禁止普通 `RATIFIED`）。该状态不授权 L0/V0.1/代码/迁移/flag/实施 PR。
 
 ## 15. 风险登记
 
