@@ -587,6 +587,12 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
+      # E-learning V0.1 L0-F2: whole-package plugin test (scripts.test && chain).
+      # Do not replace with a name filter, continue-on-error, or skip.
+      - name: Run plugin-elearning package tests
+        run: |
+          pnpm --filter plugin-elearning test
+
       - name: Run attendance calculation-group W1 contract
         run: |
           node --test scripts/ops/attendance-calculation-group-membership-w1-contract.test.mjs

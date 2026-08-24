@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Router } from 'express'
 import type { LoadedPlugin } from '../../src/core/plugin-loader'
@@ -26,6 +27,7 @@ vi.mock('../../src/db/sharding/tenant-context', () => ({
 }))
 
 import { createPlatformAppsRouter } from '../../src/routes/platform-apps'
+import { ELEARNING_FLAG_NAMES, resolveElearningCatalogFeature } from '../../src/elearning/feature-flags'
 
 const tempDirs: string[] = []
 
@@ -281,5 +283,134 @@ describe('platform apps router', () => {
       instance: null,
     })
     expect(queryForTenantMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('platform apps router catalog feature predicate', () => {
+  const flagSnapshot: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    queryMock.mockReset()
+    queryForTenantMock.mockReset()
+    for (const name of ELEARNING_FLAG_NAMES) {
+      flagSnapshot[name] = Object.prototype.hasOwnProperty.call(process.env, name)
+        ? process.env[name]
+        : undefined
+    }
+  })
+
+  afterEach(() => {
+    for (const name of ELEARNING_FLAG_NAMES) {
+      if (flagSnapshot[name] === undefined) delete process.env[name]
+      else process.env[name] = flagSnapshot[name]
+    }
+  })
+
+  function readPluginAppManifest(pluginDirName: string): Record<string, unknown> {
+    return JSON.parse(
+      fs.readFileSync(
+        path.resolve(
+          path.dirname(fileURLToPath(import.meta.url)),
+          `../../../../plugins/${pluginDirName}/app.manifest.json`,
+        ),
+        'utf8',
+      ),
+    ) as Record<string, unknown>
+  }
+
+  function createCatalogLoader() {
+    const elearning = createLoadedPlugin('plugin-elearning', readPluginAppManifest('plugin-elearning'))
+    const afterSales = createLoadedPlugin('plugin-after-sales', readPluginAppManifest('plugin-after-sales'))
+    const attendance = createLoadedPlugin('plugin-attendance', readPluginAppManifest('plugin-attendance'))
+
+    return {
+      pluginLoader: {
+        getPlugins: () => new Map([
+          ['plugin-elearning', elearning],
+          ['plugin-after-sales', afterSales],
+          ['plugin-attendance', attendance],
+        ]),
+      } as any,
+      pluginStatus: new Map([
+        ['plugin-elearning', { status: 'active' as const }],
+        ['plugin-after-sales', { status: 'active' as const }],
+        ['plugin-attendance', { status: 'active' as const }],
+      ]),
+      isCatalogFeatureEnabled: resolveElearningCatalogFeature,
+    }
+  }
+
+  async function invoke(routePath: string, params?: Record<string, string>) {
+    const router = createPlatformAppsRouter(createCatalogLoader())
+    const handler = getRouteHandler(router, 'get', routePath)
+    const response = createMockResponse()
+    await handler({
+      params: params ?? {},
+      headers: {},
+      user: undefined,
+    }, response)
+    return response
+  }
+
+  function assertValuesFree(body: unknown) {
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toMatch(/ELEARNING/)
+    expect(serialized).not.toContain('ELEARNING_ENABLED')
+  }
+
+  it.each([
+    ['missing', undefined],
+    ['false', 'false'],
+    ['TRUE', 'TRUE'],
+    ['true-space', 'true '],
+  ] as const)('hides elearning from list and 404s detail when master is %s', async (_label, value) => {
+    if (value === undefined) delete process.env.ELEARNING_ENABLED
+    else process.env.ELEARNING_ENABLED = value
+
+    const list = await invoke('/')
+    expect(list.statusCode).toBe(200)
+    const ids = ((list.body as { list: Array<{ id: string }> }).list ?? []).map((item) => item.id).sort()
+    expect(ids).toEqual(['after-sales', 'attendance'])
+    expect(JSON.stringify(list.body)).not.toContain('学习中心')
+    assertValuesFree(list.body)
+
+    const detail = await invoke('/:appId', { appId: 'elearning' })
+    expect(detail.statusCode).toBe(404)
+    expect(detail.body).toEqual({ error: 'Platform app not found' })
+    assertValuesFree(detail.body)
+
+    const afterSales = await invoke('/:appId', { appId: 'after-sales' })
+    expect(afterSales.statusCode).toBe(200)
+    expect((afterSales.body as { id: string }).id).toBe('after-sales')
+
+    const attendance = await invoke('/:appId', { appId: 'attendance' })
+    expect(attendance.statusCode).toBe(200)
+    expect((attendance.body as { id: string }).id).toBe('attendance')
+  })
+
+  it('exposes elearning in list and detail when master is exact true', async () => {
+    process.env.ELEARNING_ENABLED = 'true'
+
+    const list = await invoke('/')
+    expect(list.statusCode).toBe(200)
+    const ids = ((list.body as { list: Array<{ id: string; displayName: string }> }).list ?? []).map((item) => item.id).sort()
+    expect(ids).toEqual(['after-sales', 'attendance', 'elearning'])
+    expect(JSON.stringify(list.body)).toContain('学习中心')
+
+    const detail = await invoke('/:appId', { appId: 'elearning' })
+    expect(detail.statusCode).toBe(200)
+    expect(detail.body).toMatchObject({
+      id: 'elearning',
+      displayName: '学习中心',
+      pluginStatus: 'active',
+      navigation: [],
+      featureFlags: ['elearning'],
+      instance: null,
+    })
+    assertValuesFree(detail.body)
+
+    const afterSales = await invoke('/:appId', { appId: 'after-sales' })
+    expect(afterSales.statusCode).toBe(200)
+    expect((afterSales.body as { id: string }).id).toBe('after-sales')
   })
 })

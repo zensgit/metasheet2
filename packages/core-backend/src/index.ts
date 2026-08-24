@@ -269,6 +269,7 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
+import { resolveElearningCatalogFeature } from './elearning/feature-flags'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -1678,6 +1679,7 @@ export class MetaSheetServer {
     this.app.use('/api/platform/apps', createPlatformAppsRouter({
       pluginLoader: this.pluginLoader,
       pluginStatus: this.pluginStatus,
+      isCatalogFeatureEnabled: resolveElearningCatalogFeature,
     }))
 
     // Metrics (JSON minimal)

@@ -1,0 +1,18 @@
+{
+  "manifestVersion": "2.0.0",
+  "name": "plugin-elearning",
+  "version": "0.1.0",
+  "displayName": "学习中心",
+  "description": "Enterprise learning plugin skeleton for the V0.1 named pilot.",
+  "author": { "name": "MetaSheet" },
+  "license": "UNLICENSED",
+  "engine": { "metasheet": ">=2.0.0-0" },
+  "main": "index.cjs",
+  "capabilities": { "views": [], "workflows": [], "functions": [] },
+  "contributes": {
+    "views": []
+  },
+  "permissions": [
+    "http.addRoute"
+  ]
+}

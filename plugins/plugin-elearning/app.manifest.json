@@ -1,0 +1,31 @@
+{
+  "id": "elearning",
+  "version": "0.1.0",
+  "displayName": "学习中心",
+  "pluginId": "plugin-elearning",
+  "runtimeModel": "direct",
+  "boundedContext": {
+    "code": "elearning",
+    "owner": "learning",
+    "description": "Enterprise learning named-pilot skeleton."
+  },
+  "platformDependencies": [
+    "auth",
+    "rbac",
+    "plugins"
+  ],
+  "navigation": [],
+  "permissions": [
+    "elearning:read",
+    "elearning:write",
+    "elearning:grade",
+    "elearning:stats",
+    "elearning:admin"
+  ],
+  "featureFlags": [
+    "elearning"
+  ],
+  "objects": [],
+  "workflows": [],
+  "integrations": []
+}

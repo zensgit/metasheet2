@@ -18,6 +18,9 @@ export const ELEARNING_FLAG_NAMES = [
 
 export type ElearningFlagName = (typeof ELEARNING_FLAG_NAMES)[number]
 
+/** Frontend product feature / app.manifest.featureFlags entry gated by ELEARNING_ENABLED. */
+export const ELEARNING_PRODUCT_FEATURE = 'elearning' as const
+
 export function isElearningFlagEnabled(
   name: ElearningFlagName,
   env: NodeJS.ProcessEnv = process.env,
@@ -27,4 +30,18 @@ export function isElearningFlagEnabled(
 
 export function isElearningEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return isElearningFlagEnabled(ELEARNING_ENABLED, env)
+}
+
+/**
+ * App-catalog opinion for the elearning product feature only.
+ * Returns false when the master flag is not exact 'true', true when it is,
+ * and undefined for any other flag so after-sales / attendance / unknown
+ * featureFlags keep their existing catalog behavior.
+ */
+export function resolveElearningCatalogFeature(
+  flag: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean | undefined {
+  if (flag !== ELEARNING_PRODUCT_FEATURE) return undefined
+  return isElearningEnabled(env)
 }

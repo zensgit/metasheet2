@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ELEARNING_FLAG_NAMES,
+  ELEARNING_PRODUCT_FEATURE,
   isElearningEnabled,
   isElearningFlagEnabled,
+  resolveElearningCatalogFeature,
   type ElearningFlagName,
 } from '../../src/elearning/feature-flags'
 
@@ -88,5 +90,22 @@ describe('elearning V0.1 flags', () => {
   it('does not treat a boolean true env value as enabled', () => {
     const name: ElearningFlagName = 'ELEARNING_ENABLED'
     expect(isElearningFlagEnabled(name, { [name]: true as unknown as string } as NodeJS.ProcessEnv)).toBe(false)
+  })
+
+  it('catalog predicate only opines on the elearning product feature', () => {
+    expect(ELEARNING_PRODUCT_FEATURE).toBe('elearning')
+    expect(resolveElearningCatalogFeature('afterSales')).toBeUndefined()
+    expect(resolveElearningCatalogFeature('attendance')).toBeUndefined()
+    expect(resolveElearningCatalogFeature('attendanceAdmin')).toBeUndefined()
+    expect(resolveElearningCatalogFeature('not-a-real-feature')).toBeUndefined()
+    expect(resolveElearningCatalogFeature('plugin-elearning')).toBeUndefined()
+    expect(resolveElearningCatalogFeature('elearning', {})).toBe(false)
+    expect(resolveElearningCatalogFeature('elearning', { ELEARNING_ENABLED: 'false' } as NodeJS.ProcessEnv)).toBe(false)
+    expect(resolveElearningCatalogFeature('elearning', { ELEARNING_ENABLED: 'TRUE' } as NodeJS.ProcessEnv)).toBe(false)
+    expect(resolveElearningCatalogFeature('elearning', { ELEARNING_ENABLED: 'true ' } as NodeJS.ProcessEnv)).toBe(false)
+    expect(resolveElearningCatalogFeature('elearning', { ELEARNING_ENABLED: 'true' } as NodeJS.ProcessEnv)).toBe(true)
+    expect(
+      resolveElearningCatalogFeature('afterSales', { ELEARNING_ENABLED: 'true' } as NodeJS.ProcessEnv),
+    ).toBeUndefined()
   })
 })
