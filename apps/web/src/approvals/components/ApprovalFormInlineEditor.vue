@@ -364,6 +364,7 @@
               <el-table
                 v-if="field.detailColumns.length > 0"
                 :data="field.detailColumns"
+                :row-key="detailColumnRowKey"
                 border
                 size="small"
                 class="template-authoring__detail-table"
@@ -552,7 +553,7 @@
  *
  * No injections are used.
  */
-import type { AuthorableFieldType, FieldAuthoringDraft } from '../templateAuthoring'
+import type { AuthorableFieldType, DetailColumnDraft, FieldAuthoringDraft } from '../templateAuthoring'
 
 interface ApprovalFormFieldPaletteEntry {
   type: AuthorableFieldType
@@ -656,6 +657,24 @@ function addDetailColumn(field: FieldAuthoringDraft): void {
 }
 function removeDetailColumn(field: FieldAuthoringDraft, index: number): void {
   emit('remove-detail-column', field, index)
+}
+// Owner-reported bug (2026-08-24): without an explicit `row-key`, Element Plus falls back to the
+// row's positional INDEX to key each `<tr>`/`<td>` (element-plus table-body render-helper
+// `getKeyOfRow`). `addDetailColumn`/`removeDetailColumn` REPLACE `field.detailColumns` wholesale
+// (`[...field.detailColumns, …]` / `.filter(...)`), so deleting a row shifts every later row's
+// position. If the author was focused mid-edit on a later select sub-field's 选项 textarea and
+// deletes an EARLIER row, Vue's keyed reconciliation reuses that SAME focused DOM node in place
+// for whichever row now lands at that position (same index-key, same input-vs-span v-if branch) —
+// the author keeps typing into the SAME on-screen box, but it now writes a DIFFERENT sub-field's
+// `optionsText`. The field they thought they configured stays empty and fails save with
+// "需要至少一个选项"; a sibling field they never meant to touch silently receives the options.
+// `DetailColumnDraft.localId` already exists for exactly this (`createEmptyDetailColumnDraft` /
+// `detailColumnDraftsFromField` both seed it) — it was just never wired to `row-key`, unlike the
+// sibling main-field list (`:key="field.localId"` above). Keying by identity instead of position
+// makes Vue move/remove DOM nodes by WHICH row they belong to, so a still-focused input keeps
+// tracking its own row through inserts/deletes.
+function detailColumnRowKey(row: DetailColumnDraft): string {
+  return row.localId
 }
 </script>
 
