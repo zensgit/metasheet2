@@ -5,11 +5,16 @@ import test from 'node:test'
 
 import {
   FLAG_KEYS,
+  GLOBAL_HISTORY_FLAG_BY_KEY,
   buildAssessment,
+  buildJsonPayload,
   collectFlagMapFromEnvText,
+  countListEntries,
   flagEnabled,
   imageTag,
+  isValueRedactedType,
   parseContainerInspect,
+  renderFlagValueForOperator,
   renderText,
 } from './multitable-global-history-flag-status.mjs'
 
@@ -205,4 +210,134 @@ test('assessment.violations is present in the JSON-serializable shape (additive,
   assert.equal(typeof json.assessment.ok, 'boolean')
   assert.equal(typeof json.assessment.backendTag, 'string')
   assert.equal(typeof json.assessment.webTag, 'string')
+})
+
+// ── P2 (2026-08-25): a `list`-typed flag's VALUE is never broadcast by the status tool ─────────────
+//
+// MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST is the manifest's first `list` spec. Its value is the
+// set of sheet ids designated as trust-checkpoint canaries by the O-2 ladder's L2-C rung — identity
+// the ladder deliberately keeps owner-held ("仅针对具名合成 sheet"). Before this fix the per-flag
+// status line rendered `${key}=${rawValue}` and `--json` serialized `snapshot.flags` untouched, so
+// both outputs printed the designated sheet ids verbatim.
+//
+// The redaction is keyed off `spec.type` (the manifest's own taxonomy), NEVER off the flag name —
+// the #1882 failure class is "secret redaction that matches key names only". The tests below
+// therefore drive the generic type predicate over the whole manifest as well as the concrete flag.
+
+const SECRET_SHEET_IDS = [
+  'shtCanaryZZZ-do-not-print-1',
+  'shtCanaryZZZ-do-not-print-2',
+]
+const LIST_FLAG_KEY = 'MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST'
+
+function snapshotWithAllowlist(rawValue) {
+  const lines = ['MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true', 'MULTITABLE_ENABLE_WRITER_FENCE=true']
+  if (rawValue !== undefined) lines.push(`${LIST_FLAG_KEY}=${rawValue}`)
+  return {
+    backend: { image: 'backend:abc', status: 'running' },
+    web: { image: 'web:abc', status: 'running' },
+    flags: collectFlagMapFromEnvText(lines.join('\n')),
+    health: null,
+  }
+}
+
+test('the manifest registers the allowlist as a value-redacted (list) type — the predicate this fix keys off', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[LIST_FLAG_KEY]
+  assert.ok(spec, `${LIST_FLAG_KEY} must be registered in the manifest`)
+  assert.equal(spec.type, 'list')
+  assert.equal(isValueRedactedType(spec), true)
+  // Keyed off the TYPE, not the name: a plain boolean spec is never redacted.
+  assert.equal(isValueRedactedType(GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_PIT_RESET), false)
+  assert.equal(isValueRedactedType(undefined), false)
+})
+
+test('list flag: designated sheet ids never appear verbatim in the TEXT output, and the count is right', () => {
+  const snapshot = snapshotWithAllowlist(SECRET_SHEET_IDS.join(','))
+  const output = renderText(snapshot, buildAssessment(snapshot))
+
+  for (const id of SECRET_SHEET_IDS) {
+    assert.doesNotMatch(output, new RegExp(id), `text output must never print the designated sheet id ${id}`)
+  }
+  assert.match(output, new RegExp(`${LIST_FLAG_KEY}=set\\(count=2\\)`))
+  // Positive control for the assertion itself: the ids ARE in the snapshot being rendered, so a
+  // doesNotMatch that passes on an empty/absent value would prove nothing.
+  assert.equal(snapshot.flags[LIST_FLAG_KEY], SECRET_SHEET_IDS.join(','))
+})
+
+test('list flag: designated sheet ids never appear verbatim in the --json payload either', () => {
+  const snapshot = snapshotWithAllowlist(SECRET_SHEET_IDS.join(','))
+  const assessment = buildAssessment(snapshot)
+  // Exactly what main() serializes under --json.
+  const serialized = JSON.stringify(buildJsonPayload(snapshot, assessment), null, 2)
+
+  for (const id of SECRET_SHEET_IDS) {
+    assert.doesNotMatch(serialized, new RegExp(id), `--json must never print the designated sheet id ${id}`)
+  }
+  const payload = JSON.parse(serialized)
+  assert.equal(payload.snapshot.flags[LIST_FLAG_KEY], 'set(count=2)')
+  // The raw snapshot handed to buildAssessment is untouched — redaction happens at the
+  // serialization boundary only, so the manifest's exact-activation rules still see real values.
+  assert.equal(snapshot.flags[LIST_FLAG_KEY], SECRET_SHEET_IDS.join(','))
+})
+
+test('list flag: the count-only form still answers "designated or not" — 0 vs N, across every fail-closed spelling', () => {
+  // These five spellings are the SAME table the in-process parser's unit suite pins
+  // (resolveTrustCheckpointSheetAllowlist in
+  // packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts: split ',', trim,
+  // drop empties). If the operator's count stopped agreeing with them it would stop describing
+  // what the route actually honours.
+  assert.equal(countListEntries(undefined), 0) // unset
+  assert.equal(countListEntries(''), 0) // empty
+  assert.equal(countListEntries('   '), 0) // whitespace-only
+  assert.equal(countListEntries(','), 0) // separator only
+  assert.equal(countListEntries(' , , '), 0) // separators + whitespace
+  assert.equal(countListEntries('shtA'), 1)
+  assert.equal(countListEntries(' shtA , shtB '), 2)
+  assert.equal(countListEntries('shtA,,shtB'), 2) // empty entry dropped, not counted
+
+  // NOT-DESIGNATED renders identically for every fail-closed spelling — they are behaviourally
+  // identical (each refuses activation for EVERY sheet), so the status line must not invite reading
+  // "(absent)" as "the restriction is not in force".
+  for (const raw of [undefined, '', '   ', ',', ' , , ']) {
+    const snapshot = snapshotWithAllowlist(raw)
+    const output = renderText(snapshot, buildAssessment(snapshot))
+    assert.match(output, new RegExp(`${LIST_FLAG_KEY}=set\\(count=0\\)`), `raw=${JSON.stringify(raw)}`)
+  }
+
+  // DESIGNATED is visibly different — the operator can tell the two states apart from the count alone.
+  const designated = snapshotWithAllowlist('shtCanaryOnly')
+  assert.match(
+    renderText(designated, buildAssessment(designated)),
+    new RegExp(`${LIST_FLAG_KEY}=set\\(count=1\\)`),
+  )
+})
+
+test('redaction is generic over the manifest: EVERY list spec is redacted, and non-list values stay verbatim', () => {
+  const listSpecs = Object.values(GLOBAL_HISTORY_FLAG_BY_KEY).filter((spec) => spec.type === 'list')
+  assert.ok(listSpecs.length >= 1, 'expected at least one list-typed spec to exercise the redaction')
+  for (const spec of listSpecs) {
+    assert.equal(renderFlagValueForOperator(spec, 'aaa,bbb'), 'set(count=2)')
+    assert.equal(renderFlagValueForOperator(spec, undefined), 'set(count=0)')
+  }
+  // Boolean / numeric / enum values ARE the operator's signal and carry no identifiers — verbatim.
+  assert.equal(renderFlagValueForOperator(GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_PIT_RESET, 'true'), 'true')
+  assert.equal(
+    renderFlagValueForOperator(GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_TOMBSTONE_CAPTURE_MAX_ROWS, '5000'),
+    '5000',
+  )
+  assert.equal(renderFlagValueForOperator(GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_PIT_RESET, undefined), '(absent)')
+})
+
+test('buildJsonPayload leaves every non-list flag byte-identical, including the null of an unobserved flag', () => {
+  const snapshot = snapshotWithAllowlist('shtCanaryOnly')
+  const payload = buildJsonPayload(snapshot, buildAssessment(snapshot))
+  assert.equal(payload.snapshot.flags.MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION, 'true')
+  // Unobserved non-list flags keep the `null` machine consumers of this payload key off — the text
+  // renderer's '(absent)' marker must not leak into the JSON contract.
+  assert.equal(payload.snapshot.flags.MULTITABLE_ENABLE_PIT_RESET, null)
+  // Everything outside `snapshot.flags` is passed through untouched.
+  assert.equal(payload.snapshot.backend.image, 'backend:abc')
+  assert.equal(payload.assessment.ok, true)
+  assert.deepEqual(Object.keys(payload).sort(), ['assessment', 'snapshot'])
+  assert.deepEqual(Object.keys(payload.snapshot.flags).sort(), [...FLAG_KEYS].sort())
 })
