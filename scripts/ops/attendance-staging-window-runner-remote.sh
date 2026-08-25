@@ -137,10 +137,12 @@ TARGET_MIGRATION_ENV_FILE=""
 # copy previously carried every staging secret PLUS any inherited MIGRATION_EXCLUDE /
 # MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET straight into every migrate
 # `docker run`). Only names on THIS allowlist are written. Each entry below is the FULL
-# migrate-path env surface as read from source (grep for `process\.env\.` across
-# packages/core-backend/src/db/migrate.ts, migration-provider.ts, db.ts,
-# integration/db/connection-pool.ts, security/SecretManager.ts, and every file under
-# src/db/migrations|migrations/ — 2026-08-24, zero other reads found):
+# migrate-path env surface as read from source. CENSUS METHOD (corrected 2026-08-25 — the
+# original claim named 5 files and said "zero other reads found", but the real IMPORT CLOSURE of
+# migrate.ts is 9 files and one of the unnamed four DID read an env var; a census whose scope is
+# smaller than the code it vouches for produces honest-looking absences): walk the full import
+# closure of migrate.ts (incl. core/logger.ts, error-handler, types), grep `process\.env\.` in
+# every file, plus every file under src/db/migrations|migrations/:
 #   DATABASE_URL                    - connection-pool.ts:200 secretManager.get('DATABASE_URL', ...)
 #   NODE_ENV                        - connection-pool.ts:200,207 (required/ssl gate);
 #                                      SecretManager.ts:69,74 (fallback + provider-required gate).
@@ -176,6 +178,9 @@ TARGET_MIGRATION_ENV_FILE=""
 #                                      env-provider, which the adjudication offers as an alternative
 #                                      but which would need its own separate verification the runner
 #                                      cannot make today)
+#   LOG_LEVEL                       - core/logger.ts:78 (in migrate.ts's import closure; unset
+#                                      falls back to 'info' — inert today, allowlisted so the
+#                                      census and the allowlist describe the same closure)
 # Deliberately NOT allowlisted: ALLOW_SECRET_FALLBACK (SecretManager.ts:69) — staging's template
 # never sets it and its absence is fail-CLOSED-safe (a genuinely missing required secret throws
 # rather than silently degrading), consistent with this allowlist's containment goal. Also never
@@ -187,7 +192,7 @@ TARGET_MIGRATION_ENV_ALLOWLIST=(
   DB_SSL DB_SSL_REJECT_UNAUTHORIZED DB_SSL_CA DB_SSL_CERT DB_SSL_KEY
   DB_POOL_MAX DB_POOL_MIN DB_IDLE_TIMEOUT DB_CONNECT_TIMEOUT
   DB_QUERY_TIMEOUT DB_STATEMENT_TIMEOUT DB_SLOW_MS APP_NAME
-  STORAGE_BASE_URL SECRET_PROVIDER SECRET_FILE_PATH
+  STORAGE_BASE_URL SECRET_PROVIDER SECRET_FILE_PATH LOG_LEVEL
 )
 # Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
 # postgres container/server as staging, never on a different host, and is always dropped
@@ -774,6 +779,25 @@ auth_round_trip() {
 
 # --- actions ---------------------------------------------------------------------------
 
+# F1 (2026-08-25, gate on 5b4b38d925 + independent external review — both found it): action=deploy's
+# inline migrate runs in the RUNNING backend container via staging_exec and inherits its WHOLE
+# environment. A container-level MIGRATION_EXCLUDE narrows the manifest INVISIBLY: excluded names
+# vanish from `--list` (the provider drops them), `Pending: 0` goes green over unapplied
+# migrations, and the alignment report cannot catch it — it has no filesystem census of its own
+# and parses the SAME `--list` text, so an exclusion pushes it TOWARD the pass branch. Meanwhile
+# action=migrate aborts loud on the identical host state. Same class as the target-migrate hazard
+# handling above: detect-and-abort first (visibility — a set hazard var is a misconfiguration to
+# surface, not to silently mask), then forced `-e` neutralization at every exec (belt), so
+# weakening either alone still leaves the other standing.
+assert_deploy_migrate_env_safe() {
+  local name value
+  for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null || true)"
+    [[ -z "$value" ]] \
+      || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
+  done
+}
+
 action_deploy() {
   require_sha
   require_compose_v2
@@ -866,7 +890,8 @@ action_deploy() {
   # AFTER (must end pending=0). The alignment report runs in-container from the deployed
   # image's own /app/scripts copy so its file scan matches the deployed migration set.
   prepare_container_runner
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
+  assert_deploy_migrate_env_safe
+  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
   docker cp "${OUTPUT_DIR}/migrate-list-before.txt" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migrate-list-before.txt"
   staging_exec node /app/scripts/ops/staging-migration-alignment-report.mjs \
     --migrate-list-file "${CONTAINER_RUNNER_DIR}/migrate-list-before.txt" \
@@ -877,8 +902,8 @@ action_deploy() {
     fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
   fi
 
-  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
+  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/migrate-list-after.txt" \
     || fail "migrations did not end at pending=0 (see migrate-list-after.txt)"
 

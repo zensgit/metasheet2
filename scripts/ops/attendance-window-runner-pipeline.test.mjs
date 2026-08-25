@@ -612,6 +612,7 @@ const REQUIRED_MIGRATE_ENV = [
   ['APP_NAME', 'metasheet-backend'],
   ['STORAGE_BASE_URL', 'http://localhost:8900/files'],
   ['SECRET_PROVIDER', 'env'],
+  ['LOG_LEVEL', 'info'],
 ]
 
 for (const [hazardName, hazardValue] of [
@@ -964,6 +965,75 @@ trap -p
   assert.match(r.stdout, /trap -- '[^']*' (SIGINT|INT)/)
   assert.match(r.stdout, /trap -- '[^']*' (SIGTERM|TERM)/)
   assert.match(r.stdout, /trap -- '[^']*' (SIGEXIT|EXIT)/)
+})
+
+test('WIRING (P1-2): the pipeline calls are present in the REAL apply path — deletion-mutation-provable', () => {
+  // The gate on 5b4b38d925 proved the previous shape's hole with arithmetic: each of these three
+  // CALLS could be deleted from the script with this whole suite still green at 132/132 — the
+  // functions were tested, their wiring was not, and a tested-but-never-called guard is a claim,
+  // not a check. These pins are function-scoped (extracted from the REAL runner source, not a
+  // replica) so deleting the call site — the gate's exact mutation — reds here.
+  const applyBody = extractRunnerFunctions(['action_migrate_apply'])
+  assert.match(applyBody, /compute_in_play_migrations "\$real_db"/,
+    'action_migrate_apply no longer computes the in-play set — the per-name confirmation below would confirm an empty list')
+  assert.match(applyBody, /assert_applied_counts_agree "\$\{OUTPUT_DIR\}\/migration-applied-before\.txt" "\$\{OUTPUT_DIR\}\/apply-migrate-list-before\.txt"/,
+    'action_migrate_apply no longer cross-checks the applied counts — ledger-invisible exclusions regain cover')
+  assert.match(applyBody, /confirm_in_play_migrations "\$\{OUTPUT_DIR\}\/migration-in-play\.txt"/,
+    'action_migrate_apply no longer name-confirms the in-play migrations — the exclusion canary is unwired')
+})
+
+test('WIRING (P2-4): BOTH signal-trap arm points in action_migrate, in ORDER — deletion-mutation-provable', () => {
+  // Gate finding F3 on 5b4b38d925: the plain HUP/INT/TERM literal appears at TWO arm points and
+  // the bare includes() in the registration test is satisfied by either — deleting either one
+  // alone stayed green at 132/132. The second arm point matters because rehearsal installs its
+  // OWN trap; without re-arming, the real-DB apply runs with the rehearsal-shaped trap gone and
+  // the secret env-file survives a caught signal (the pre-hardening shape).
+  const migrateBody = extractRunnerFunctions(['action_migrate'])
+  const arms = [...migrateBody.matchAll(/trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM/g)].map((m) => m.index)
+  assert.equal(arms.length, 2, `action_migrate must arm the signal trap at BOTH points, found ${arms.length}`)
+  const precheckIdx = migrateBody.indexOf('action_migrate_read_only_prechecks')
+  const rehearseIdx = migrateBody.indexOf('action_migrate_rehearse')
+  const applyIdx = migrateBody.indexOf('action_migrate_apply')
+  assert.ok(precheckIdx > 0 && rehearseIdx > 0 && applyIdx > 0, 'the migrate pipeline steps moved; re-anchor this test')
+  assert.ok(arms[0] < precheckIdx, 'the first arm point must precede the read-only prechecks')
+  assert.ok(rehearseIdx < arms[1] && arms[1] < applyIdx, 'the RE-arm must sit between rehearsal (which retraps) and the real-DB apply')
+})
+
+test('WIRING (F1): action_deploy inline migrate is exclusion-proof — hazard abort + forced MIGRATION_EXCLUDE=', () => {
+  // Found independently by the 5b4b38d925 gate AND the external review: action=deploy migrated
+  // via bare staging_exec in the RUNNING container, inheriting any container-level
+  // MIGRATION_EXCLUDE — which is ledger-INVISIBLE (excluded names vanish from --list, so the
+  // `Pending: 0` gate and the alignment report, which parses the same --list text with no
+  // filesystem census of its own, both go green over unapplied migrations).
+  const deployBody = extractRunnerFunctions(['action_deploy'])
+  assert.match(deployBody, /assert_deploy_migrate_env_safe/, 'the hazard abort is unwired from action_deploy')
+  const forced = [...deployBody.matchAll(/staging_exec_env "MIGRATION_EXCLUDE=" -- node "\$MIGRATE_JS"/g)]
+  assert.equal(forced.length, 3, `all three deploy-path MIGRATE_JS invocations must force MIGRATION_EXCLUDE= (list-before, run, list-after); found ${forced.length}`)
+  assert.ok(!/staging_exec node "\$MIGRATE_JS"/.test(deployBody),
+    'a bare staging_exec MIGRATE_JS reappeared in action_deploy — it inherits container MIGRATION_EXCLUDE')
+})
+
+test('EXECUTABLE (F1): assert_deploy_migrate_env_safe fails loud on a set hazard var, value never printed; passes when all three are unset', () => {
+  const fn = extractRunnerFunctions(['assert_deploy_migrate_env_safe'])
+  const harness = (dockerBody) => `#!/bin/bash
+set -uo pipefail
+BACKEND_CONTAINER="fake-backend"
+fail() { echo "[window-runner][error] $*" >&2; exit 1; }
+docker() { ${dockerBody}; }
+${fn}
+assert_deploy_migrate_env_safe
+echo SAFE
+`
+  // Hazard set: printenv answers for MIGRATION_EXCLUDE.
+  const bad = spawnSync('bash', ['-c', harness('if [[ "$4" == "MIGRATION_EXCLUDE" ]]; then echo "076_secret_name"; else return 1; fi')], { encoding: 'utf8' })
+  assert.equal(bad.status, 1, `stderr=${bad.stderr}`)
+  assert.match(bad.stderr, /MIGRATION_EXCLUDE/, 'the abort must NAME the hazard var')
+  assert.ok(!bad.stderr.includes('076_secret_name') && !bad.stdout.includes('076_secret_name'),
+    'the hazard VALUE must never be printed')
+  // All clear: printenv finds nothing.
+  const ok = spawnSync('bash', ['-c', harness('return 1')], { encoding: 'utf8' })
+  assert.equal(ok.status, 0, `stderr=${ok.stderr}`)
+  assert.match(ok.stdout, /SAFE/)
 })
 
 test('MUTATION (P2-4 registration): a runner registering only EXIT (pre-hardening shape) shows no HUP/INT/TERM in `trap -p`', () => {
