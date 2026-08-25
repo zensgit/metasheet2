@@ -1,6 +1,16 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v8(2026-08-26 七次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v9(2026-08-26 八次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+
+> **v9 修订说明**(第八轮故障分类与事件 identity 对账):①detail 新增
+> `fwb_retryable:*` 只是对现有重试集合的增量,共享 `hasRetryableFwbFailure` 不得
+> 缩窄掉既有 `fwb_execution_failed`/基础设施失败;②detail 逐行 event id 不再以
+> 既有裸 `::` 拼接的 `fwbEventId` 为单一 seed,改为对
+> `(applicationMode, baseEventId, ruleId, actionKey, rowIndex)` 做冻结版本的注入式 JSON
+> 编码后哈希,旧 create/update event id 仍字节不变;③provenance mismatch 不再使用 schema
+> 中不存在且语义矛盾的「parked/reclaimable」描述,而是 fence-CAS 到既有
+> `event_fires.outcome_unknown`,禁止自动重放并要求双账本 owner 处置;④明确同父
+> `target_record_id` 唯一是 v1 `create_detail_rows` 的 corruption guard,不预授权未来 update 模式。
 
 > **v8 修订说明**(第七轮执行链对账):①B 旗改为 admission gate,已持久化 detail 动作不得因关旗
 > 被记作 skipped/done;混合版本必须在启用前由全 worker capability barrier 拦住,回滚必须在新镜像上
@@ -298,6 +308,9 @@ CREATE TABLE meta_fwb_detail_row_applied (
 - 父表 `result_ref` 不塞 JSON/ID 列表,可以保持 NULL;每个目标记录和事件的可追溯标识只存子表,
   仍然 values-free。`event_id` 不做全局 UNIQUE;项目既定合同允许不同 consumer/event type 语境下
   的稳定 id,这里仅强制同一父 claim 内每行不同。
+- v1 只有 `create_detail_rows`,每个源行必须创建不同的目标记录;因此同父
+  `target_record_id` 唯一是 corruption guard,不是对未来「多行更新同一记录」的暗示。
+  若日后增加 detail update,必须另立 mode/身份/重放合同和迁移,不能在本约束上放宽。
 - 迁移只有一次 additive create。上线前验证「表不存在或精确同形」,同名漂移对象 fail closed;
   旧镜像和 FWB-1/2/3 不读该表,因此迁移前后行为不变,无需删旧索引、replica census 或代码回滚下限。
 
@@ -323,10 +336,49 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
   不是两行成功)、
   每行 `event_id` 等于本次纯函数推导值、`target_record_id` 非空。完全相等才返回
   `already_applied`;缺行、多行、错 event 或父行无子证据均以 values-free
-  `fwb_detail_provenance_mismatch` 终止并走 required alert,不自动补写或重发,且该 delivery 保持
-  parked/reclaimable,不能被 `markEventFiresDone` 吸收;只有 owner 处置证据不一致后才能恢复或终结。
+  `fwb_outcome_unknown:detail_provenance_mismatch` 进入**第三种交付处置**:required alert
+  必须成功上报,随后以当前 fence-CAS 将对应 `meta_automation_event_fires` 行从
+  `in_progress` 终结为既有 `outcome_unknown` 并原子清 lease;不得调用
+  `markEventFiresDone`,不得进入 `hasRetryableFwbFailure`,也不得等 lease 到期自动 reclaim。
+  外层 outbox consumer 只有在该 sink 终态写成功后才可完成自己的运输责任;它的 `done`
+  不得被解释成业务写回成功。恢复不是普通 retry:owner 必须通过 values-free、审计化操作同时锁定
+  该 event-fire 与匹配的 `(outbox_id,consumer_key)` 行,以 expected status/fence 防并发漂移,并在
+  严格 replay 证据已修复后原子重开两层 delivery;若无法证明可安全重放,只能保留
+  `outcome_unknown` 或由 owner 终结为失败。实现若只有错误 token、没有上述第三处置与双账本
+  恢复/终结合同,视为未完成。
 - N=0:首次事务只留下父 claim;重放要求该父 claim 的子行集恰为空。这样 no-op 也有稳定审计身份,
   而不是每次都重新「成功」。
+
+第三处置必须是**类型化控制流**,不能靠通用异常字符串碰运气。新增纯分类器
+`classifyFwbDeliveryDisposition(execution): 'settled' | 'retryable' | 'outcome_unknown'`,扫描一次
+execution 的全部 FWB step,优先级固定为 `outcome_unknown > retryable > settled`:任一
+`fwb_outcome_unknown:*` 都终止本次 event delivery;否则沿用现有 denylist 语义判断 retryable;
+确定性拒绝和全部成功才是 settled。现有 `hasRetryableFwbFailure` 可委派给该分类器,但不得把
+未知/空白基础设施失败改成白名单外的 settled。`runWithEventDedup` 的 durable 回调结果相应改成
+显式 `done | outcome_unknown`;`outcome_unknown` 必须调用新增的
+`markEventFiresOutcomeUnknown(ruleId,dedupKey,fence)`,后者与 done helper 一样只允许当前
+`in_progress` fence 单行 CAS,在同一 UPDATE 中写 terminal status 并清 lease。required alert 失败、
+CAS 命中 0 行或 DB 写失败时,外层 outbox consumer 都不得完成;只有 alert 成功且
+`outcome_unknown` 已持久化后,adapter 才可返回运输层 success。旧 create/update 的 settled/retry
+控制流和 event-id 字节必须不变。所有 `runWithEventDedup` 调用点必须显式返回上述闭集结果;
+任何遗漏返回值或运行时闭集外值均 fail closed,不得默认折叠为 `done`。
+
+owner 恢复操作也冻结为一个原子状态机,不留给实现自行选择。它先锁定并验证
+`event_fires(status='outcome_unknown',lease IS NULL,fence=expected)` 与匹配的
+`outbox_consumer(status='done',lease IS NULL,fence=expected)`;再验证外层 outbox event 与
+`rule_id/dedup_key` 的确定性关联及严格 replay 证据已修复。选择 **reopen** 时,同一事务把
+event-fire 改成 `in_progress`、lease 设为事务时钟之前、fence 加一,并把 consumer 改成
+`pending`、lease 清空、fence 加一、`attempts` 重置为 0、`last_error`
+清空、`updated_at` 写事务时钟;恢复审计须记录重置前的 attempts **计数**(不得含用户值)。这是
+必要的 retry-budget 重置:若保留一次 outcome-unknown claim 已达到的 `maxAttempts`,下一次
+`claimDueConsumers` 会在调用 adapter 前直接 poison。owner 转换本身不改 event-fire `attempts`,
+下一次过期租约 reclaim 才按既有规则递增。
+任一行未命中则整事务回滚。不得把
+event-fire 改成 `pending`,因为现有 `claimEventFiresLease` 对已存在 pending 行既不 fresh-claim
+也不 reclaim。下一次 dispatcher claim consumer 后,只能由 event-fire 的过期租约 reclaim 路径取得
+新 fence。选择 **terminate** 时,只允许 expected-fence CAS 将 event-fire 从
+`outcome_unknown` 改成 terminal `failed`,consumer 保持 done。两种操作均须 values-free 审计、
+显式 owner 授权;禁止普通业务 API 或自动定时器调用。
 
 默认 PostgreSQL `READ COMMITTED` 下,竞争者的 `ON CONFLICT` 会等待赢家提交;duplicate 分支随后必须
 用一条**独立** SELECT 取得新 statement snapshot,才能读取赢家同事务提交的完整子行。若未来改变
@@ -337,11 +389,17 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
 ### 4.4 逐行事件 identity 与溯源
 
 现有 FWB 的 action 级 event id 不能供 N 行共用:automation event-fires 与 webhook 都会按 event id
-去重。新增纯函数 `deriveFwbDetailRowEventId(fwbActionEventId, rowIndex)`,其第一参数必须是 executor
-已经构造的 action-scoped `fwbEventId`(已含 base event、rule 与 actionKey),**不是裸 completion
-event id**。函数使用域分隔、注入式 JSON 编码后 sha256,输出固定 printable-ASCII 形状
-`fwb_detail_row_<64hex>`;禁止 attempt/fence/timestamp/random 进入 seed。同一终态冻结行跨重试得到同一 id,
-不同行、不同 rule/action 得到不同 id。
+去重。新增纯函数
+`deriveFwbDetailRowEventId({ applicationMode, baseEventId, ruleId, actionKey, rowIndex })`;它直接接收
+executor/父 claim 已解析的五个结构化身份分量,不以现有用裸 `::` 拼接的 `fwbEventId` 为 seed,
+也**不是裸 completion event id**。v1 哈希 subject 精确冻结为
+`JSON.stringify(['fwb_detail_row_v1', applicationMode, baseEventId, ruleId, actionKey, rowIndex])`,
+再取 sha256 小写 hex,输出固定 printable-ASCII 形状 `fwb_detail_row_<64hex>`。其中
+`applicationMode` 必须等于父 claim 的闭集值,v1 生产写入只接受 `apply`;其余字符串分量必须
+非空,`rowIndex` 必须以 JSON **number** 编码且为非负安全整数,禁止字符串化。禁止
+attempt/fence/timestamp/random 进入 subject。域标签、元素顺序、元素类型任一变化都属于新 identity
+版本并需迁移,不能悄悄改 helper。同一终态冻结行跨重试得到同一 id,不同行、不同
+mode/rule/action 得到不同 id;旧 create/update 继续用现有 `fwbEventId`,其字节不变。
 
 每行 outbox 使用自己的派生 id,同一个 id 同时写入子表;真实下游测试必须证明两行产生两个
 event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部溯源由父账本六元业务键 +
@@ -358,9 +416,17 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
 2. **Mode/activation:**parser、类型联合、保存验证和 executor 三 case 穷尽一致;把 detail case 删掉或
    恢复「非 update 即 create」时,flag-ON 测试必须红且业务行保持 0。B 在 A/FWB/durable 任一 OFF 时
    save/enable 均 fail closed;已持久化 detail 动作不再读取 B admission 旗；底层 capability 暂不可用
-   时必须保持 event-fire 非 done 并 values-free 告警，不得将 skipped/确定性拒绝记作成功。新代码中的
-   `hasRetryableFwbFailure`/调用链只把明确的 `fwb_retryable:*` 视为可重试并回抛到 durable delivery；
-   既有 `unknown_mode` 仍是确定性配置拒绝。实际旧 worker 既不认识 detail mode，也没有这条新命名空间，
+   时必须保持 event-fire 非 done 并 values-free 告警，不得将 skipped/确定性拒绝记作成功。
+   detail 新增的 `fwb_retryable:*` 是对既有可重试集合的**增量**；共享
+   `hasRetryableFwbFailure` 必须继续把现有 create/update 产生的 `fwb_execution_failed`
+   以及它们今日其他非确定性基础设施/事务失败视为可重试，不得改成「只认
+   `fwb_retryable:*`」的白名单。中和 `fwb_execution_failed` 这条旧腿时，既有 create/update
+   真库用例必须证明 delivery 不再 reclaim 而变红；detail 的 `fwb_retryable:*` 与
+   `fwb_rejected:*`/`unknown_mode` 分别有独立正反例。既有 `unknown_mode` 仍是确定性配置拒绝。
+   `fwb_outcome_unknown:detail_provenance_mismatch` 必须走 §4.3 第三处置:既不进入上述重试集合,
+   也不被确定性拒绝路径折叠成 event-fire `done`;把它改成 `fwb_retryable:*`、
+   `fwb_rejected:*` 或普通 failed token 时,对应状态机测试必须红。
+   实际旧 worker 既不认识 detail mode，也没有这条新命名空间，
    所以 capability barrier 必须证明它在启用后无权 claim。
    旧
    create/update 确认哈希 golden 从**原始 route/service 请求或持久 config**进入生产规范化与哈希路径,
@@ -370,7 +436,15 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
 3. **Parent claim/replay:**N=0/1/200 首次与重放均构造;两个 worker 同抢同一 N 行只能得到一个
    完整赢家。空数组的 N=0 有正控;字段缺失/`null`/非数组的负例必须在 claim 前拒绝。
    把 detail 路径退回旧 duplicate 短路,或删除任一严格 replay 核对(行集/event/record id)时,
-   指定 corruption golden 必须红。
+   指定 corruption golden 必须红。provenance mismatch 必须另有真库状态机 golden:分类优先级
+   `outcome_unknown > retryable > settled`,required alert 失败/CAS 失败均不完成 outer consumer,
+   成功路径得到 event-fire `outcome_unknown` + lease NULL 和 consumer `done`;把第三态折回异常重试、
+   确定性 done 或无条件 `markEventFiresDone` 时各自指定测试必须红。owner reopen 在同一事务内完成
+   两层 expected-status/fence 转换,随后只能由 consumer claim + event-fire expired-lease reclaim
+   取得新 fence;任一 expected fence/status 错、只更新一层、改 event-fire 为 pending 或省略严格证据
+   复核时整笔影响 0/回滚。必须构造 consumer `attempts=maxAttempts` 的正控:reopen 原子清零后下一次
+   claim 确实执行 adapter;删除 attempts 重置时该测试应在 claim-time poison 且 adapter 调用数为 0。
+   terminate 只能 outcome_unknown→failed,且不得重开 consumer。
 4. **Nested mapping/execute recheck:**两个明细字段复用同一 child id,只读取指定组;不存在/跨组/类型漂移在
    rule-save/rule-enable/execute 三时点 fail closed。顶层字段重复到每行有正控。一个显式映射格为
    缺失/`null`/空白字符串时,父 claim 与所有业务写均为 0;删掉缺值门或改成跳行时指定测试必须变红。
@@ -381,7 +455,13 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    revision、子证据和 outbox 全部为 0;不存在「补剩余行」路径。
 6. **Event identity:**两行→两个不同 outbox event id→真实 durable adapter→两个下游效果;
    同一 action 全量 replay→零新增效果。把 seed 退回裸 completion event 或所有行共用 action id
-   时对应测试必须红。合同同时钉住「同一 instance 只能有一次 approved 终态事件」;若未来允许第二次
+   时对应测试必须红。额外用一对只在裸 `::` 拼接下碰撞的
+   `(applicationMode, baseEventId, ruleId, actionKey, rowIndex)` 语料钉住结构化编码边界;golden 必须逐字节
+   钉住 `JSON.stringify(['fwb_detail_row_v1','apply',baseEventId,ruleId,actionKey,rowIndex])`
+   与 `fwb_detail_row_<64hex>` 输出。把 `rowIndex` 改为字符串、改变元素顺序/域标签、漏掉
+   `applicationMode`,或改回以现有 `fwbEventId` 为单一 seed 时指定测试必须红,而旧
+   create/update event-id golden 仍字节不变。
+   合同同时钉住「同一 instance 只能有一次 approved 终态事件」;若未来允许第二次
    approved transition,必须先扩父业务键/event identity 与恢复语义,不能让 event mismatch 变成无恢复吸收态。
 7. **Cap/terminal snapshot:**办理节点写 200/201 与批准终态读取均有真库测试;先提交行 A、再由办理
    节点改成行 B、最后批准的正控必须让 FWB 只写 B;若改为读取提交时捕获值,对应测试必须红。execute
@@ -512,7 +592,7 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 - (b) 行级引用+伴生列:填单中可刷新;提交时切断与表的联动并成为审批内副本,批准终态再冻结。量级:中-大。
 - 安全底线:服务端以发起人身份过表 ACL;发布时目录校验;跨 org 不通。
 
-## 7. 待 owner 裁决(v8:五个独立裁决包)
+## 7. 待 owner 裁决(v9:五个独立裁决包)
 
 **A. v1.1 录入效率包 — 建议 RATIFY v7。**裁决面收窄为:①系统硬上限固定 **200**、
 嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
@@ -521,13 +601,17 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
 
-**B. FWB v2 delta lock 包 — 建议 RATIFY v8。**裁决面为:①单一 detailSourceFieldId +
+**B. FWB v2 delta lock 包 — 建议 RATIFY v9。**裁决面为:①单一 detailSourceFieldId +
 判别式来源;②既有六元父 claim/helper/index 零改动 + additive 逐行溯源表;③一次父 claim、N 行同事务、
 严格 replay(含 N=0 与缺字段区分,不复用旧 duplicate 短路);④旧 create/update 哈希字节不变 +
-detail 专用确认哈希域;⑤以 action-scoped FWB event 为父种子的逐行稳定 event id;⑥逐格类型矩阵;
+detail 专用确认哈希域;⑤以冻结的
+`(applicationMode, baseEventId, ruleId, actionKey, rowIndex)` JSON subject 派生逐行稳定 event id,
+且旧 create/update event id 不变;⑥逐格类型矩阵;
 ⑦新实例只追加;⑧按 §1.1 精确修订 FWB-0 数据源条款、终态冻结语义、缺值全有或全无、
 A/FWB/durable 依赖、穷尽 dispatcher、执行期权限/目标确认交集重检、admission/execution 分离、
-历史批准快照 census、终态 UPDATE 结构守卫、滚动部署/回滚;⑨§4.5 十一道验证门。
+历史批准快照 census、终态 UPDATE 结构守卫、既有 `fwb_execution_failed`
+重试腿不变、provenance mismatch 的 `outcome_unknown` 第三处置与双账本 owner 恢复/终结、
+滚动部署/回滚;⑨§4.5 十一道验证门。
 任何一项写成「实现时再定」都视为未裁。owner 未逐项接受前仍为 PROPOSED,不得开实现旗。
 
 **C. v1.2 引用桥包 — 建议 ACCEPT AS DEFERRED。**保留 `>50` 行或多人协作预填/导入的真实
