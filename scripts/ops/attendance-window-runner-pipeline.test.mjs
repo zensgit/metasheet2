@@ -1082,7 +1082,13 @@ ${envLines}  web:
   const run = (fileBody, liveSpec) => {
     const overridePath = join(dir, `ov-${Math.random().toString(36).slice(2, 8)}.yml`)
     if (fileBody !== null) writeFileSync(overridePath, fileBody)
-    const caseLines = Object.entries(liveSpec).map(([k, v]) => `      ${k}) return ${v} ;;`).join('\n')
+    // P2-1 (gate on fa74e5cae1): the first stub only returned an rc and never wrote stdout, so
+    // neutering the live probe's >/dev/null redirect left the whole suite green — the live-side
+    // values-free guard was untested. Real `docker exec … printenv NAME` WRITES THE VALUE to
+    // stdout on rc=0 (measured on docker 29.5.3), so the stub now does too: every rc=0 answer
+    // echoes a canary value first, and the values-free assertions below bite on the redirect.
+    const caseLines = Object.entries(liveSpec).map(([k, v]) =>
+      `      ${k}) ${v === 0 ? 'echo "org_secret_live_canary"; ' : ''}return ${v} ;;`).join('\n')
     const script = `#!/bin/bash
 set -euo pipefail
 OUTPUT_DIR="${dir}"
@@ -1092,6 +1098,7 @@ SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
 SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() {
   case "$4" in
+      PATH) echo "/usr/bin:org_secret_live_canary"; return 0 ;;
 ${caseLines}
       *) return 1 ;;
   esac
@@ -1127,7 +1134,7 @@ classify_runner_override
   assert.equal(r.status, 0, `stderr=${r.stderr}\nreport=${report}`)
   assert.match(report, /^override_shape=soak-w4w7$/m)
   assert.ok(!r.stdout.includes('org_secret') && !r.stderr.includes('org_secret') && !report.includes('org_secret'),
-    'org allowlist VALUES leaked into the classification output — the collection must be values-free')
+    'org allowlist VALUES leaked into the classification output — the collection must be values-free (file-side canary from the fixture, live-side canary echoed by every rc=0 probe answer)')
 
   // mixture (one rd + one soak) -> unexpected, exit 1, but the report is still WRITTEN
   const mixEnv = `    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n`
@@ -1168,7 +1175,8 @@ ${fn}
 classify_runner_override
 `
   // DRIFT: file says rd-window, container has only the scheduler flag -> match=false, exit 1.
-  let r = spawnSync('bash', ['-c', script('if [[ "$4" == "ATTENDANCE_SCHEDULER_ENABLED" ]]; then return 0; else return 1; fi')], { encoding: 'utf8' })
+  // (PATH answers rc=0 so the probe's positive control passes and the drift door is reached.)
+  let r = spawnSync('bash', ['-c', script('if [[ "$4" == "PATH" || "$4" == "ATTENDANCE_SCHEDULER_ENABLED" ]]; then echo "org_secret_live_canary"; return 0; else return 1; fi')], { encoding: 'utf8' })
   assert.equal(r.status, 1, `drift must fail loud; stderr=${r.stderr}`)
   let report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
   assert.match(report, /^override_shape=rd-window$/m)
@@ -1179,6 +1187,49 @@ classify_runner_override
   assert.equal(r.status, 1, 'a failed probe must refuse to certify agreement')
   report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
   assert.match(report, /^file_live_match=indeterminate$/m)
+
+  // P2-2 (gate on fa74e5cae1, MEASURED): a stopped container, a missing container and an
+  // unreachable daemon all return rc=1 from docker exec — the SAME code as "var unset". The
+  // first shape read rc=1-everywhere as four unset observations and printed a confident
+  // file_live_match over zero observations. The PATH positive control makes this refuse instead.
+  r = spawnSync('bash', ['-c', script('return 1')], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'rc=1-everywhere (container gone) must NOT read as an observation of unset')
+  report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^file_live_match=indeterminate$/m)
+  assert.match(report, /^live_flag_names=unobserved$/m, 'an unobserved live side must say so, not render as none')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): legal-but-unparsed environment spellings are UNEXPECTED, never a calm none', () => {
+  // P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+  // spellings the key parser does not read; each parsed as none — the CALM shape — inverting the
+  // fail-loud principle. An environment block whose keys we cannot enumerate must refuse.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovspell-'))
+  const spellings = [
+    ['list-form', '    environment:\n      - ATTENDANCE_SCHEDULER_ENABLED=true\n'],
+    ['flow-map', '    environment: { ATTENDANCE_SCHEDULER_ENABLED: "true" }\n'],
+    ['quoted-key', '    environment:\n      "ATTENDANCE_SCHEDULER_ENABLED": "true"\n'],
+  ]
+  for (const [label, envLines] of spellings) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, `services:\n  backend:\n    image: x\n${envLines}  web:\n    image: x\n`)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { if [[ "$4" == "PATH" ]]; then return 0; else return 1; fi; }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: an unparseable environment block must fail loud`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
   rmSync(dir, { recursive: true, force: true })
 })
 

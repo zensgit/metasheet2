@@ -798,7 +798,7 @@ assert_deploy_migrate_env_safe() {
   # this PR guards against elsewhere (a zero-read is not a read of zero). printenv distinguishes
   # natively: rc=0 set (possibly empty — empty is genuinely safe, all three consumers treat only
   # non-empty / exact-true as active), rc=1 unset, anything else = THE PROBE FAILED.
-  local name value rc probe_err
+  local name value rc probe_err probe_err_txt
   for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
     rc=0
     # stdout carries the VALUE (captured, never printed); stderr carries only docker's own
@@ -816,7 +816,9 @@ assert_deploy_migrate_env_safe() {
         rm -f "$probe_err" # printenv: variable unset — besides set-empty, the only SAFE observation
         ;;
       *)
-        fail "could not observe ${name} on the running backend (docker exec rc=${rc}: $(head -c 200 "$probe_err" | tr '\n' ' ')) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
+        probe_err_txt="$(head -c 200 "$probe_err" | tr '\n' ' ')"
+        rm -f "$probe_err"
+        fail "could not observe ${name} on the running backend (docker exec rc=${rc}: ${probe_err_txt}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
         ;;
     esac
   done
@@ -1374,44 +1376,65 @@ classify_runner_override() {
     # yaml structure keys (services/backend/web/environment/image) are lowercase; full-line
     # comments start at column 0. A key this pattern cannot see cannot silently pass either —
     # unknown UPPER keys land in file_names and force shape=unexpected below.
-    # grep exits 1 on ZERO matches — the expected outcome for the none shape — which under the
-    # runner's set -euo pipefail would abort this whole function silently mid-collection (caught
-    # by this function's own executable test before it ever ran on a host). Readability was
-    # checked above, so rc>=2 cannot hide an unreadable file behind the trailing `|| true`.
+    # grep exits 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
+    # CORRECTED (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the
+    # left of `||` (the sole call site is `classify_runner_override || status_rc=1`), so on a
+    # host the un-fixed line would NOT have aborted — it silently yielded empty file_names and a
+    # calm `none`, the UNSAFE direction. The executable test caught it only because its harness
+    # calls the function bare. Readability was checked above, so rc>=2 cannot hide an unreadable
+    # file behind the trailing `|| true`.
     file_names="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
     file_names="${file_names% }"
   fi
 
   local shape
   if [[ "$file_present" == false ]]; then shape="absent"
+  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -q 'environment:' "$OVERRIDE_FILE"; then
+    # P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+    # spellings this parser does not read — a hand-edited file in any of them parsed as a CALM
+    # none, inverting this function's own fail-loud principle. An environment block whose keys
+    # we cannot enumerate is an environment we cannot explain.
+    shape="unexpected"
   elif [[ -z "$file_names" ]]; then shape="none"
   elif [[ "$file_names" == "$rd_set" ]]; then shape="rd-window"
   elif [[ "$file_names" == "$soak_set" ]]; then shape="soak-w4w7"
   else shape="unexpected"
   fi
 
-  # Live side: presence by EXIT CODE only (0=set incl. empty, 1=unset, else=probe failed).
-  # stdout goes to /dev/null UNREAD — values never enter this function.
+  # Live side: presence by EXIT CODE only — stdout goes to /dev/null UNREAD, so values never
+  # enter this function.
+  #
+  # POSITIVE CONTROL FOR THE PROBE CHANNEL (P2-2, gate on fa74e5cae1 — MEASURED, and it
+  # falsified this function's first shape): docker exec returns rc=1 both for "var unset" AND
+  # for most cannot-observe failures — stopped container, no such container, daemon unreachable
+  # all yield rc=1, not >1. rc alone cannot distinguish "observed unset" from "observed
+  # nothing", and the first shape would have printed a confident file_live_match=true over zero
+  # observations. PATH is set in every container this runner manages, so if PATH cannot be read
+  # through the SAME channel, nothing below is an observation and the verdict is indeterminate.
   local name rc live_names="" probe_failed=false
-  for name in $candidates; do
-    rc=0
-    docker exec "$BACKEND_CONTAINER" printenv "$name" >/dev/null 2>&1 || rc=$?
-    case "$rc" in
-      0) live_names="${live_names:+$live_names }$name" ;;
-      1) : ;;
-      *) probe_failed=true ;;
-    esac
-  done
+  if ! docker exec "$BACKEND_CONTAINER" printenv PATH >/dev/null 2>&1; then
+    probe_failed=true
+  else
+    for name in $candidates; do
+      rc=0
+      docker exec "$BACKEND_CONTAINER" printenv "$name" >/dev/null 2>&1 || rc=$?
+      case "$rc" in
+        0) live_names="${live_names:+$live_names }$name" ;;
+        1) : ;;
+        *) probe_failed=true ;;
+      esac
+    done
+  fi
 
-  local match live_sorted
+  local match live_sorted live_render
   if [[ "$probe_failed" == true ]]; then
     match="indeterminate"
-    live_names=""
+    live_render="unobserved"
   else
     live_sorted="$(printf '%s\n' $live_names | sort -u | tr '\n' ' ')"
     live_sorted="$(echo "$live_sorted" | tr -s ' ')"; live_sorted="${live_sorted% }"; live_sorted="${live_sorted# }"
     [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
-    live_names="$live_sorted"
+    live_render="${live_sorted:-none}"
   fi
 
   {
@@ -1419,7 +1442,7 @@ classify_runner_override() {
     echo "override_file_present=${file_present}"
     echo "override_file_sha256=${file_sha:-none}"
     echo "file_flag_names=${file_names:-none}"
-    echo "live_flag_names=${live_names:-none}"
+    echo "live_flag_names=${live_render}"
     echo "file_live_match=${match}"
   } | tee "$out"
 
@@ -1443,7 +1466,8 @@ action_status() {
 
   local status_rc=0
   # Values-free override classification FIRST: it needs no running container for the file side,
-  # and a stopped container degrades it to file_live_match=indeterminate (rc 1) rather than green.
+  # and a stopped/unreachable container fails the probe's PATH positive control, degrading the
+  # verdict to file_live_match=indeterminate (never a confident green over zero observations).
   classify_runner_override || status_rc=1
   if docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     prepare_container_runner
