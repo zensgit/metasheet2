@@ -3853,6 +3853,13 @@ async function loadTemplateForEdit() {
   movingCanvasNode.value = null
   canvasZoom.value = 1
   if (!isEditMode.value) {
+    // P3-4 (gate on 6d6c6013cd, reproduced): this branch returns before the try/finally, so an
+    // id->'' transition arriving while an edit-route load was in flight left `loading` stuck true
+    // forever — the superseded load's finally correctly defers to the newer ticket, and the newer
+    // ticket (this branch) never touched loading. Unreachable today (/new always remounts via
+    // TemplateCenterView), but one router.push('/approval-templates/new') from this view would
+    // have made it live: a permanently unsaveable new-template page with no error.
+    loading.value = false
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null

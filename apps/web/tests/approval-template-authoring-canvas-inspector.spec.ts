@@ -7,6 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, provide, reactive, ref, type App as VueApp } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
@@ -42,7 +43,14 @@ const CANVAS_INSPECTOR_SHELL_SOURCE = readFileSync(
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
-let routeParams: Record<string, string> = {}
+// REACTIVE route mock (NIT-10, gate on 6d6c6013cd): the view watches route.params.id — a plain
+// object here means a future route-switch test in THIS spec would never fire the watcher and
+// pass vacuously. Same shape as approvalTemplateAuthoring.spec.ts.
+const routeMock = reactive({ params: {} as Record<string, string>, query: {}, path: '/approval-templates/new' })
+function setRouteParams(next: Record<string, string>): void {
+  routeMock.params = next
+  routeMock.path = next.id ? `/approval-templates/${next.id}/edit` : '/approval-templates/new'
+}
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -53,12 +61,7 @@ vi.mock('vue-router', async () => {
       replace: replaceSpy,
       back: vi.fn(),
     }),
-    useRoute: () => ({
-      params: routeParams,
-      query: {},
-      path: routeParams.id ? `/approval-templates/${routeParams.id}/edit` : '/approval-templates/new',
-      meta: {},
-    }),
+    useRoute: () => routeMock,
   }
 })
 
@@ -440,7 +443,7 @@ function clickCanvasNode(nodeKey: string) {
 
 describe('Canvas V2 Slice A — canvas inspector', () => {
   beforeEach(() => {
-    routeParams = {}
+    setRouteParams({})
     canManageTemplates.value = true
     createTemplateSpy.mockReset()
     updateTemplateSpy.mockReset()
@@ -463,7 +466,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('selecting approval/condition/cc/parallel nodes opens the matching right-side inspector', async () => {
-    routeParams = { id: 'tpl_inspector_types' }
+    setRouteParams({ id: 'tpl_inspector_types' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -510,7 +513,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('opens the inspector from the keyboard-accessible node selector', async () => {
-    routeParams = { id: 'tpl_inspector_keyboard' }
+    setRouteParams({ id: 'tpl_inspector_keyboard' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -534,7 +537,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('renders navigation controls and persists semantic drag/drop plus Alt+Arrow reorder', async () => {
-    routeParams = { id: 'tpl_canvas_navigation' }
+    setRouteParams({ id: 'tpl_canvas_navigation' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildLinearReorderGraph() as any }))
     await mountView()
     await flushUi()
@@ -587,7 +590,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('shows business labels instead of internal topology keys in the inspector', async () => {
-    routeParams = { id: 'tpl_inspector_labels' }
+    setRouteParams({ id: 'tpl_inspector_labels' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -623,7 +626,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('uses a business type label when the selected node has no display name', async () => {
-    routeParams = { id: 'tpl_inspector_unnamed' }
+    setRouteParams({ id: 'tpl_inspector_unnamed' })
     const graph = buildMixedGraph()
     const ccNode = graph.nodes.find((node) => node.key === 'cc_1')!
     ccNode.name = ''
@@ -642,7 +645,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('a representative inspector edit writes through to the existing draft save payload', async () => {
-    routeParams = { id: 'tpl_inspector_edit' }
+    setRouteParams({ id: 'tpl_inspector_edit' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -688,7 +691,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('deleting the selected node clears selection and closes the inspector', async () => {
-    routeParams = { id: 'tpl_inspector_delete' }
+    setRouteParams({ id: 'tpl_inspector_delete' })
     // Must be a COMPLEX graph (cc) so the canvas toggle mounts; approval_mid is a linear
     // mid-chain approval (1 in / 1 out) so removeLinearNode + the canvas remove button apply.
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -736,7 +739,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('read-only mode renders inspector details but disables mutation controls', async () => {
-    routeParams = { id: 'tpl_inspector_readonly' }
+    setRouteParams({ id: 'tpl_inspector_readonly' })
     // Load while manage is allowed (onMounted early-returns when canManageTemplates is false),
     // then flip to read-only so the inspector still mounts with disabled controls.
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
@@ -766,7 +769,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('inspector close button clears selection and closes the panel', async () => {
-    routeParams = { id: 'tpl_inspector_close' }
+    setRouteParams({ id: 'tpl_inspector_close' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -792,7 +795,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   // ── B1: fixed bottom action bar (取消/确定) ────────────────────────────────────────────────────
   it('B1 (E-P2-3): the footer renders exactly ONE 关闭 — the 取消/确定 pair was a lying control over live-committing fields and ratified A-8 forbids it', async () => {
-    routeParams = { id: 'tpl_inspector_footer' }
+    setRouteParams({ id: 'tpl_inspector_footer' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -818,7 +821,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B1: the footer stays visible regardless of the active tab (chrome-level, not tab content) and outside the scrolling body', async () => {
-    routeParams = { id: 'tpl_inspector_footer_tabs' }
+    setRouteParams({ id: 'tpl_inspector_footer_tabs' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -839,7 +842,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   // ── B2: inline title rename ────────────────────────────────────────────────────────────────────
   it('B2: pencil affordance enters edit mode pre-filled with the current name; Enter commits, updates the displayed label, and reaches the save payload', async () => {
-    routeParams = { id: 'tpl_inspector_rename' }
+    setRouteParams({ id: 'tpl_inspector_rename' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -882,7 +885,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // disabled after a rename, and a later topology undo resurrected stale names through the
     // live-name overlay (gate P3-1 probe). Rename now runs through the SAME undo stack as every
     // other structural edit (external review P2-4), and the overlay is gone.
-    routeParams = { id: 'tpl_inspector_rename_history' }
+    setRouteParams({ id: 'tpl_inspector_rename_history' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -936,7 +939,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B2 (G-P3-1): clearing the name to blank is ALSO undoable — undo resurrects the original, not the void', async () => {
-    routeParams = { id: 'tpl_inspector_rename_blank' }
+    setRouteParams({ id: 'tpl_inspector_rename_blank' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -964,7 +967,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B2: Esc reverts without committing; blur commits the same as Enter', async () => {
-    routeParams = { id: 'tpl_inspector_rename_esc' }
+    setRouteParams({ id: 'tpl_inspector_rename_esc' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -999,7 +1002,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B2: switching node selection mid-rename discards the pending edit rather than leaking it onto the new node', async () => {
-    routeParams = { id: 'tpl_inspector_rename_switch' }
+    setRouteParams({ id: 'tpl_inspector_rename_switch' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1028,7 +1031,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B2: a whitespace-only commit clears the name override, falling back to the node-type label', async () => {
-    routeParams = { id: 'tpl_inspector_rename_clear' }
+    setRouteParams({ id: 'tpl_inspector_rename_clear' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1054,7 +1057,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('B2: read-only mode does not render the rename affordance', async () => {
-    routeParams = { id: 'tpl_inspector_rename_readonly' }
+    setRouteParams({ id: 'tpl_inspector_rename_readonly' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1083,7 +1086,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     })
 
     try {
-      routeParams = { id: 'tpl_inspector_mobile_scroll' }
+      setRouteParams({ id: 'tpl_inspector_mobile_scroll' })
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
       await flushUi()
@@ -1123,7 +1126,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // Desktop inspector shell is wide enough for ms-w-360 controls (~400px) — PR4 extract.
     expect(CANVAS_INSPECTOR_SHELL_SOURCE).toMatch(/\.template-authoring__canvas-inspector\s*\{[\s\S]*?width:\s*400px/)
 
-    routeParams = { id: 'tpl_inspector_styles' }
+    setRouteParams({ id: 'tpl_inspector_styles' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1191,7 +1194,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // ("A-2 (re-pointed by Lock-5 E-1) …"). This test keeps the per-tab-content and no-Save/Cancel
   // halves of A-1/A-8 against the SHIPPED registry.
   it('A-1/A-8: the shipped registry renders 审批人设置/表单权限/操作权限 on an approval node, each tab showing ONLY its own content; no Save/Cancel/Apply control', async () => {
-    routeParams = { id: 'tpl_a1_a2' }
+    setRouteParams({ id: 'tpl_a1_a2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1257,7 +1260,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('D1/D2: the configured-summary echo uses the RATIFIED §10.3 label, not the pre-D1 incidental wording (dept_head/requester)', async () => {
-    routeParams = { id: 'tpl_d1_echo' }
+    setRouteParams({ id: 'tpl_d1_echo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1335,7 +1338,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('A-7: no scrim/overlay-mask element with the inspector mounted and visible', async () => {
-    routeParams = { id: 'tpl_a7' }
+    setRouteParams({ id: 'tpl_a7' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1360,7 +1363,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
 
   it('A-8: a field edit + tab switch yields the same undo state as the same edit without a switch; the counter can move (positive control, not vacuous)', async () => {
     async function measureUndoDisabledAfterFieldEdit(withTabSwitch: boolean): Promise<boolean> {
-      routeParams = { id: `tpl_a8_${withTabSwitch}` }
+      setRouteParams({ id: `tpl_a8_${withTabSwitch}` })
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
       await flushUi()
@@ -1402,7 +1405,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // move), not the unmet "exactly one" literal.
     expect(withSwitch).toBe(withoutSwitch)
 
-    routeParams = { id: 'tpl_a8_positive_control' }
+    setRouteParams({ id: 'tpl_a8_positive_control' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1427,7 +1430,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // "arrow onto this radio" here — the real keyboard mechanism is covered separately by the
   // real-browser check (verification/approval-inspector-keyboard.spec.ts).
   it('P1-1 regression: roster kind-switch caches and restores the outgoing payload — traversal away and back does not destroy configured roleIds, and Save succeeds with the original JSON intact', async () => {
-    routeParams = { id: 'tpl_p1_1_regression' }
+    setRouteParams({ id: 'tpl_p1_1_regression' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1481,7 +1484,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // EXISTING cards. Append never shifts card 0's index, so a naive "clear on any structural change"
   // implementation would needlessly re-open the exact P1-1 config-loss bug in a new sequence.
   it('P1-B: adding a 2nd card does NOT clear card 0\'s P1-1 kind-switch cache — switching card 0 away then back still restores its configured roleIds', async () => {
-    routeParams = { id: 'tpl_p1b_add_preserves_cache' }
+    setRouteParams({ id: 'tpl_p1b_add_preserves_cache' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1522,7 +1525,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // index must NOT inherit that removed card's stale per-index cached payload. This was load-bearing
   // but had zero coverage (mutation: deleting the clear-on-remove call left all 186 tests green).
   it('P1-B / P2(a): removing card 0 does NOT leak its cached kind-switch payload into the survivor that slides into its old index', async () => {
-    routeParams = { id: 'tpl_p1b_remove_clears_cache' }
+    setRouteParams({ id: 'tpl_p1b_remove_clears_cache' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1601,7 +1604,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // DOM: selecting `readonly` renders NO readonly hint in the canvas inspector (readonly is now
     // enforced, not disclosed-as-pending). Positive control that the tab + selector still work: the
     // routing hint path (a different span) is exercised by the D5 test below.
-    routeParams = { id: 'tpl_g13' }
+    setRouteParams({ id: 'tpl_g13' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1623,7 +1626,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('Lock-7B OD-L7B-7 / G-15: the field-permissions select on an APPROVAL node renders EXACTLY three options — 必填 is ABSENT, not a disabled fourth (M7)', async () => {
-    routeParams = { id: 'tpl_l7b_absent' }
+    setRouteParams({ id: 'tpl_l7b_absent' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1659,7 +1662,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // did NOT work — it pointed at the linear-only computed, which is structurally empty (`draft.
     // steps.length === 0`) whenever the canvas inspector is mounted at all (a complex graph). This
     // reproduces that probe end-to-end and asserts it now renders.
-    routeParams = { id: 'tpl_d5_routing_hint' }
+    setRouteParams({ id: 'tpl_d5_routing_hint' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1705,7 +1708,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('A-11: tab strip uses the tablist roving-tabindex pattern; every tab is keyboard reachable', async () => {
-    routeParams = { id: 'tpl_a11' }
+    setRouteParams({ id: 'tpl_a11' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1745,7 +1748,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('A-12: tab strip Left/Right stays within the strip; the toolbar Left/Right stays within itself; boundaries hold in both directions', async () => {
-    routeParams = { id: 'tpl_a12' }
+    setRouteParams({ id: 'tpl_a12' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1812,7 +1815,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   // reactive `approvalNodeMode`/`approvalNodeTimeout` getters) reliably reflects whether the setter
   // actually mutated anything.
   it('setApprovalNodeMode refuses threshold for a node inside a parallel region even past the disabled option (setter guard, not just render-layer)', async () => {
-    routeParams = { id: 'tpl_setter_guard_mode' }
+    setRouteParams({ id: 'tpl_setter_guard_mode' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -1837,7 +1840,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   it('setApprovalNodeTimeoutEnabled refuses to enable a timeout for a node inside a parallel region even past the disabled checkbox (setter guard, not just render-layer)', async () => {
-    routeParams = { id: 'tpl_setter_guard_timeout' }
+    setRouteParams({ id: 'tpl_setter_guard_timeout' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
@@ -2534,7 +2537,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
   })
 
   it('A-4 reachability (empirical): a complex graph with an unknown assignee-source kind on ONE node opens the WHOLE template read-only via the pre-existing G-1 guard, not scoped to that node', async () => {
-    routeParams = { id: 'tpl_a4_reachability' }
+    setRouteParams({ id: 'tpl_a4_reachability' })
     getTemplateSpy.mockResolvedValue(
       buildTemplate({
         approvalGraph: {

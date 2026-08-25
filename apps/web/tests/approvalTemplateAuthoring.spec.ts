@@ -28,10 +28,6 @@ const replaceSpy = vi.fn().mockResolvedValue(undefined)
 // in-place navigation, so the mock must be a reactive source or the watcher can never fire in
 // tests. Plain assignments below go through the same reactive object.
 const routeMock = reactive({ params: {} as Record<string, string>, query: {}, path: '/approval-templates/new' })
-const routeParams = new Proxy({} as Record<string, string>, {
-  get: (_t, key: string) => routeMock.params[key],
-  set: (_t, key: string, value: string) => { routeMock.params = { ...routeMock.params, [key]: value }; return true },
-})
 function setRouteParams(next: Record<string, string>): void {
   routeMock.params = next
   routeMock.path = next.id ? `/approval-templates/${next.id}/edit` : '/approval-templates/new'
@@ -1538,6 +1534,31 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
     expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+  })
+
+  it('P3-4 (gate on 6d6c6013cd): an edit->new transition arriving MID-LOAD does not strand loading — the new-template page stays saveable', async () => {
+    // Reproduced by the gate: the !isEditMode branch returned before the try/finally, so the
+    // in-flight edit load's finally deferred to the newer ticket and NOBODY cleared loading —
+    // /new rendered permanently unsaveable with no error. Unreachable today (/new always
+    // remounts), but one router.push from this view would have made it live.
+    let releaseA: (value: unknown) => void = () => {}
+    getTemplateSpy.mockImplementation(() => new Promise((resolve) => { releaseA = resolve }))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+
+    // Switch to /new while tpl_a's fetch is still in flight.
+    setRouteParams({})
+    await flushUi()
+    releaseA(buildTemplate({ id: 'tpl_a' })) // superseded response lands late; must change nothing
+    await flushUi()
+    await flushUi()
+
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
   })
 
   it('E-round4 P2 (stale response): a SLOW previous route\'s fetch resolving LAST cannot overwrite the current route\'s draft', async () => {
