@@ -48,8 +48,10 @@ BASE_URL=https://<staging> ADMIN_TOKEN=<sheet-admin JWT> EDITOR_TOKEN=<editor JW
 Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error.
 
 ### What the harness provisions (API-automated) vs manual prerequisites
-- **Automated** (HTTP, isolated per run): a fresh acceptance base + sheet + a `number` field; pre-T records A,B; an
-  `asOf` T; post-T records C,D (the delete-set; D is editor-created when `EDITOR_TOKEN` is present so scenario (d)
+- **Automated** (HTTP, isolated per run): a fresh acceptance base + sheet + a `number` field; pre-T records A,B; a
+  pre-T **history anchor**(原文写 `asOf` T——该参数已被 exact-anchor 契约移除:路由对任何非空 `asOf` 返回
+  `exact-anchor-required`,harness 现经 `GET .../records/:id/history` 取 `historyBatchId` 作为锚,见
+  `reset-acceptance-request-shape.test.ts` 的契约钉);post-T records C,D (the delete-set; D is editor-created when `EDITOR_TOKEN` is present so scenario (d)
   exercises a lock held by another actor) + a post-T change to A (to prove the revert); record lock (d);
   drift record (e); ceiling seeding for (f) on a **separate throwaway sheet** (only if `RESET_MAX_RECORDS` is small) —
   it never touches the main sheet, so **(g) still runs in the same flag-on run**: one run covers (b)–(g).
