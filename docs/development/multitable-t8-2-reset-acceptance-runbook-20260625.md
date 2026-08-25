@@ -28,7 +28,7 @@ Harness: `packages/core-backend/scripts/reset-acceptance.mjs` (Node ≥18, uses 
 | d | flag ON, admin, a **locked** post-T target in scope | `409 RESET_BLOCKED`, **zero writes** |
 | e | flag ON, admin, a record **created after the preview** (drift) | `409` (delete-set re-enumeration), nothing deleted |
 | f | flag ON, admin, sheet **above** `MULTITABLE_SHEET_REVERT_MAX_RECORDS` | `413 SHEET_TOO_LARGE` |
-| g | flag ON, admin, **happy path** | post-T records soft-deleted (gone from live), survivors reverted to T. *Harness asserts the LIVE effect (post-T leave the delete-set + `visibleRevertCount=0`); the `source=restore` revision write + trash landing are golden-covered, confirm trash once by hand.* |
+| g | flag ON, admin, **happy path** | post-T records soft-deleted (gone from live), survivors reverted to T. *Harness asserts the LIVE effect: post-T leave the delete-set, and the survivor's field VALUE is read back (`GET /records/:recordId?sheetId=…`) and equals its anchor value again — with a read-back positive control first proving it carried the post-anchor value BEFORE the reset, so an unchanged value can never pass. `visibleRevertCount=0` is kept only as corroboration: an absence is also what you get when nothing was ever changed. The `source=restore` revision write + trash landing are golden-covered, confirm trash once by hand.* |
 
 ## Run
 
@@ -48,7 +48,13 @@ BASE_URL=https://<staging> ADMIN_TOKEN=<sheet-admin JWT> EDITOR_TOKEN=<editor JW
   node packages/core-backend/scripts/reset-acceptance.mjs        # expect (b)–(g) PASS
 ```
 Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error (an unready trust substrate, a half-set
-`RESET_CANARY_*` pair, or a flag-on run with no designated canary — where (d)/(e)/(g) could not run at all).
+`RESET_CANARY_*` pair, a fixture write that did not land, or a flag-on run with no designated canary — where
+(d)/(e)/(g) could not run at all).
+
+Every fixture write `setup()` makes is checked for a 2xx **and** for the id it must return; a miss aborts the whole
+run with exit 2 and a named message, rather than continuing with a `null`. This is deliberate: a `null` field id
+used to make the harness skip the survivor's post-anchor change silently, which made (g)'s revert evidence
+vacuously true. A degraded run is never a green run.
 
 ### Owner-designated canary target (`RESET_CANARY_BASE_ID` / `RESET_CANARY_SHEET_ID`)
 The flag-on run additionally needs an ACTIVE trust checkpoint covering the anchor **on the sheet under test**
