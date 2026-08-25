@@ -1536,6 +1536,11 @@ export default defineConfig({
       // sibling of the content/assessment + watch gates in plugin-tests.yml
       // after db:migrate on the 20.x leg.
       'tests/integration/elearning-media-playback.db.test.ts',
+      // E-learning L0 canonical role-template migration gate. Requires real
+      // PostgreSQL (exact grants, idempotent repair, assignment-safe rollback).
+      // Excluded from the no-DB job and wired as a WHOLE FILE into the same
+      // post-migrate schema/service step in plugin-tests.yml.
+      'tests/integration/elearning-role-templates.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.

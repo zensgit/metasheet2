@@ -22,6 +22,7 @@ const PUBLISH_FILE = 'tests/integration/elearning-course-publish.db.test.ts'
 const EXAM_FILE = 'tests/integration/elearning-exam-service.db.test.ts'
 const LEARNER_FILE = 'tests/integration/elearning-learner-courses.db.test.ts'
 const PLAYBACK_FILE = 'tests/integration/elearning-media-playback.db.test.ts'
+const ROLE_TEMPLATE_FILE = 'tests/integration/elearning-role-templates.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
 const MEDIA_DB_STEP_ID = 'elearning-v01-media-quota-real-db'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
@@ -36,6 +37,7 @@ const PUBLISH_SUITE = join(repoRoot, 'packages/core-backend', PUBLISH_FILE)
 const EXAM_SUITE = join(repoRoot, 'packages/core-backend', EXAM_FILE)
 const LEARNER_SUITE = join(repoRoot, 'packages/core-backend', LEARNER_FILE)
 const PLAYBACK_SUITE = join(repoRoot, 'packages/core-backend', PLAYBACK_FILE)
+const ROLE_TEMPLATE_SUITE = join(repoRoot, 'packages/core-backend', ROLE_TEMPLATE_FILE)
 const GATE_FILES = [
   FILE,
   ATTEMPT_MIGRATION_FILE,
@@ -46,6 +48,7 @@ const GATE_FILES = [
   EXAM_FILE,
   LEARNER_FILE,
   PLAYBACK_FILE,
+  ROLE_TEMPLATE_FILE,
 ]
 const CONTENT_MIGRATION = join(
   repoRoot,
@@ -58,6 +61,10 @@ const PERMISSION_MIGRATION = join(
 const WATCH_MIGRATION = join(
   repoRoot,
   'packages/core-backend/src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress.ts',
+)
+const ROLE_TEMPLATE_MIGRATION = join(
+  repoRoot,
+  'packages/core-backend/src/db/migrations/zzzz20260826140000_add_elearning_role_templates.ts',
 )
 
 test('vitest.config.ts excludes elearning V0.1 schema and watch-service gates from the no-DB job', () => {
@@ -104,6 +111,7 @@ test('plugin-tests.yml runs schema and watch-service gates as whole-file sibling
   assert.equal(wired.includes(EXAM_FILE), true)
   assert.equal(wired.includes(LEARNER_FILE), true)
   assert.equal(wired.includes(PLAYBACK_FILE), true)
+  assert.equal(wired.includes(ROLE_TEMPLATE_FILE), true)
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'schema gate step must not use a -t filter')
@@ -129,9 +137,11 @@ test('wired suites and content/watch migrations exist on disk', () => {
   assert.ok(existsSync(EXAM_SUITE), `wired suite packages/core-backend/${EXAM_FILE} must exist on disk`)
   assert.ok(existsSync(LEARNER_SUITE), `wired suite packages/core-backend/${LEARNER_FILE} must exist on disk`)
   assert.ok(existsSync(PLAYBACK_SUITE), `wired suite packages/core-backend/${PLAYBACK_FILE} must exist on disk`)
+  assert.ok(existsSync(ROLE_TEMPLATE_SUITE), `wired suite packages/core-backend/${ROLE_TEMPLATE_FILE} must exist on disk`)
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
+  assert.ok(existsSync(ROLE_TEMPLATE_MIGRATION), 'role-template migration must exist on disk')
 })
 
 test('schema and watch-service gate sources throw when DATABASE_URL is missing (no describe.skip)', () => {
@@ -145,6 +155,7 @@ test('schema and watch-service gate sources throw when DATABASE_URL is missing (
     ['exam-service', EXAM_SUITE],
     ['learner-courses-service', LEARNER_SUITE],
     ['media-playback-service', PLAYBACK_SUITE],
+    ['role-template-migration', ROLE_TEMPLATE_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)

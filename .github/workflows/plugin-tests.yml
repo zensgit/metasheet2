@@ -932,6 +932,7 @@ jobs:
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
             tests/integration/elearning-media-playback.db.test.ts \
+            tests/integration/elearning-role-templates.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.
