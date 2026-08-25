@@ -434,6 +434,10 @@ npx vitest run featureFlagsApprovalAttachments --reporter=dot
 npx vitest run approval-fwb-mapping-config approval-fwb-mapping-editor --reporter=dot
 npx vitest run fwb-rule-authoring-helpers fwb-rule-authoring --reporter=dot
 npx vitest run tests/App.spec.ts attendance-date-only-format accountIdentityDisplay middleEllipsis attendance-records-route-redirect --reporter=dot
+# Attendance group list-detail closeout (#4354): these existing specs carry the
+# four-stage interaction and focused admin-rail behavior. Run them in an isolated
+# single fork because attendance-admin-regressions is intentionally a large mounted suite.
+NODE_OPTIONS=--max-old-space-size=8192 npx vitest run attendance-admin-regressions useAttendanceAdminRailNavigation attendance-experience-entrypoints --pool=forks --poolOptions.forks.singleFork=true --reporter=dot
 # Employee overview 常用 icons (PR #5146 P1-3): these four specs must run in the required
 # web-tests lane, not only locally. Tokens are exact basenames; none is a substring of
 # another token already in this script (verified against useAttendanceAdmin*).
