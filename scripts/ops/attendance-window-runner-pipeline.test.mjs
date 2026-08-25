@@ -1263,7 +1263,7 @@ test('EXECUTABLE (override classification): a cross-block DUPLICATE name still r
   const dir = mkdtempSync(join(tmpdir(), 'wr-ovdup-'))
   const cases = [
     ['both-blocks-duplicate', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n`],
-    ['web-dup-soak', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: "org_secret_alpha"\n      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: "org_secret_alpha"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: "org_secret_alpha"\n`],
+    ['web-dup-soak', `services:\n  backend:\n    image: x\n    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n      ${W7_FLAG_NAME}: "org_secret_alpha"\n  web:\n    image: x\n    environment:\n      ${W7_FLAG_NAME}: "org_secret_alpha"\n`],
   ]
   for (const [label, body] of cases) {
     const overridePath = join(dir, `ov-${label}.yml`)
@@ -1273,8 +1273,8 @@ set -euo pipefail
 OUTPUT_DIR="${dir}"
 OVERRIDE_FILE="${overridePath}"
 BACKEND_CONTAINER="fake-backend"
-SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
-SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() { local body="$5"; shift 6; (
   printenv() { [[ "$1" == "PATH" ]] && return 0; return 1; }
   eval "$body"
@@ -1302,8 +1302,8 @@ set -euo pipefail
 OUTPUT_DIR="${dir}"
 OVERRIDE_FILE="${dir}/absent.yml"
 BACKEND_CONTAINER="fake-backend"
-SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
-SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() { echo "EVIL_UNASKED_NAME"; return 0; }
 ${fn}
 classify_runner_override
