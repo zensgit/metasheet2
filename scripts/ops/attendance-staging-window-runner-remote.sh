@@ -326,7 +326,7 @@ staging_exec_env() {
     shift
   done
   [[ "${1:-}" == "--" ]] && shift
-  docker exec "${env_flags[@]}" "$BACKEND_CONTAINER" "$@"
+  docker exec ${env_flags[@]+"${env_flags[@]}"} "$BACKEND_CONTAINER" "$@"
 }
 
 cleanup_target_migration_runtime() {
@@ -473,7 +473,7 @@ target_migrate_exec() {
   docker run --rm --pull=never \
     --network "container:${BACKEND_CONTAINER}" \
     --env-file "$TARGET_MIGRATION_ENV_FILE" \
-    "${env_flags[@]}" \
+    ${env_flags[@]+"${env_flags[@]}"} \
     -e "MIGRATION_EXCLUDE=" \
     -e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \
     -e "ALLOW_DB_RESET=false" \
