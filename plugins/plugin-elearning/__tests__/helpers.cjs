@@ -12,9 +12,12 @@ const LOOKALIKES = Object.freeze([
   ' true',
 ])
 
-function snapshotFlags() {
+function snapshotFlags(extraKeys) {
   const snapshot = {}
-  for (const name of FLAG_NAMES) {
+  const keys = extraKeys && extraKeys.length
+    ? [...new Set([...FLAG_NAMES, ...extraKeys])]
+    : [...FLAG_NAMES]
+  for (const name of keys) {
     snapshot[name] = Object.prototype.hasOwnProperty.call(process.env, name)
       ? process.env[name]
       : undefined
@@ -23,9 +26,9 @@ function snapshotFlags() {
 }
 
 function restoreFlags(snapshot) {
-  for (const name of FLAG_NAMES) {
-    if (snapshot[name] === undefined) delete process.env[name]
-    else process.env[name] = snapshot[name]
+  for (const [name, value] of Object.entries(snapshot)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
   }
 }
 
@@ -44,7 +47,7 @@ function setFlags(map) {
 }
 
 function withFlags(map, fn) {
-  const snapshot = snapshotFlags()
+  const snapshot = snapshotFlags(Object.keys(map))
   try {
     setFlags(map)
     return fn()
@@ -54,7 +57,7 @@ function withFlags(map, fn) {
 }
 
 async function withFlagsAsync(map, fn) {
-  const snapshot = snapshotFlags()
+  const snapshot = snapshotFlags(Object.keys(map))
   try {
     setFlags(map)
     return await fn()

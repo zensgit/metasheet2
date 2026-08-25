@@ -1,6 +1,6 @@
 'use strict'
 
-const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller } = require('./lib/feature-flags.cjs')
+const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller, authenticatedOrgId } = require('./lib/feature-flags.cjs')
 const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
 
 const CANONICAL_METHOD = 'GET'
@@ -14,6 +14,10 @@ function sendUnauthenticated(res) {
       message: 'Authentication required',
     },
   })
+}
+
+function sendOrgContextRequired(res) {
+  res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
 }
 
 async function activate(context) {
@@ -33,6 +37,10 @@ async function activate(context) {
     const caller = req && req.user
     if (!isHydratedCaller(caller)) {
       sendUnauthenticated(res)
+      return
+    }
+    if (!authenticatedOrgId(req)) {
+      sendOrgContextRequired(res)
       return
     }
     res.json(getCapabilitiesPayload(undefined, caller))

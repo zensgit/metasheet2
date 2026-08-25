@@ -78,6 +78,7 @@
         @ended="onEnded($event)"
         @seeking="onSeeking($event)"
         @seeked="onSeeked($event)"
+        @error="onPlaybackError($event)"
       >
         {{ elearningLabel('learner.videoUnsupported', isZh) }}
       </video>
@@ -166,6 +167,7 @@ import {
   submitElearningExam,
   type ElearningExamSubmitResult,
   type ElearningLearnerCourse,
+  type ElearningPlaybackTicket,
   type ElearningPublicPaper,
   type ElearningQuestionType,
   type ElearningWatchState,
@@ -238,6 +240,8 @@ let ticketRenewalTimer: number | null = null
 let applyingTicketRenewal = false
 let ticketRenewalRestorePlaying = false
 let finishingTicketRenewal = false
+let viewMounted = false
+let watchStartPending = false
 let pendingDraft: Record<string, string[]> | null = null
 let saveWork: Promise<void> = Promise.resolve()
 let examEpoch = 0
@@ -311,26 +315,50 @@ function stopWatchSession(): void {
 function ticketRenewalDelayMs(expiresAt: string, ttlSeconds: number, nowMs = Date.now()): number {
   const ttlMs = Math.max(1, ttlSeconds) * 1000
   const parsedExpiryMs = Date.parse(expiresAt)
-  const expiryMs = Number.isFinite(parsedExpiryMs) ? parsedExpiryMs : nowMs + ttlMs
   const leadMs = Math.min(TICKET_RENEWAL_LEAD_MS, Math.floor(ttlMs / 2))
-  return Math.max(TICKET_RENEWAL_MIN_DELAY_MS, expiryMs - nowMs - leadMs)
+  const localExpiryMs = nowMs + ttlMs
+  const serverExpiryMs = Number.isFinite(parsedExpiryMs) ? parsedExpiryMs : localExpiryMs
+  const safeExpiryMs = Math.min(serverExpiryMs, localExpiryMs)
+  return Math.max(TICKET_RENEWAL_MIN_DELAY_MS, safeExpiryMs - nowMs - leadMs)
+}
+
+function isUsablePlaybackTicket(
+  ticket: ElearningPlaybackTicket,
+  itemId: string,
+  nowMs = Date.now(),
+): boolean {
+  if (ticket.itemId !== itemId) return false
+  const ttlMs = ticket.ttlSeconds * 1000
+  if (!Number.isFinite(ttlMs) || ttlMs <= TICKET_RENEWAL_MIN_DELAY_MS) return false
+  const parsedExpiryMs = Date.parse(ticket.expiresAt)
+  if (!Number.isFinite(parsedExpiryMs)) return false
+  return parsedExpiryMs - nowMs > TICKET_RENEWAL_MIN_DELAY_MS
+}
+
+function ownsPendingWatchStart(epoch: number, courseId: string): boolean {
+  return viewMounted && epoch === watchEpoch && activeCourseId.value === courseId
 }
 
 function isCurrentPlaybackContext(epoch: number, courseId: string | null, itemId: string | null): boolean {
   return (
-    !watchStopped
+    viewMounted
+    && !watchStopped
     && epoch === watchEpoch
     && courseId != null
     && itemId != null
     && activeCourseId.value === courseId
     && activeItemId === itemId
-    && sessionId != null
   )
+}
+
+function rejectPlaybackTicket(): void {
+  writeStatus(formatError(null), 'error')
+  stopWatchSession()
 }
 
 function schedulePlaybackTicketRenewal(expiresAt: string, ttlSeconds: number): void {
   clearTicketRenewalTimer()
-  if (watchStopped || !sessionId || !activeItemId) return
+  if (!viewMounted || watchStopped || !activeItemId) return
   const epoch = watchEpoch
   const courseId = activeCourseId.value
   const itemId = activeItemId
@@ -340,8 +368,14 @@ function schedulePlaybackTicketRenewal(expiresAt: string, ttlSeconds: number): v
   }, ticketRenewalDelayMs(expiresAt, ttlSeconds))
 }
 
+function isPlaybackIntendedPlaying(video: HTMLVideoElement | null): boolean {
+  if (heartbeatTimer != null) return true
+  if (!video) return false
+  return !video.paused && !video.ended
+}
+
 function applyRenewedPlaybackTicket(token: string): void {
-  ticketRenewalRestorePlaying = heartbeatTimer != null
+  ticketRenewalRestorePlaying = isPlaybackIntendedPlaying(videoNode)
   if (videoNode && Number.isFinite(videoNode.currentTime)) {
     resumePositionMs = positionMs()
   }
@@ -363,10 +397,10 @@ async function settleTicketRenewalRestore(video: HTMLVideoElement): Promise<void
   const shouldPlay = ticketRenewalRestorePlaying
   ticketRenewalRestorePlaying = false
   try {
-    if (shouldPlay && !watchStopped && sessionId && epoch === watchEpoch) {
+    if (shouldPlay && viewMounted && !watchStopped && epoch === watchEpoch) {
       try {
         await video.play()
-        if (epoch === watchEpoch && !watchStopped && sessionId) {
+        if (viewMounted && epoch === watchEpoch && !watchStopped && sessionId) {
           startHeartbeatTimer()
         }
       } catch {
@@ -390,9 +424,8 @@ async function renewPlaybackTicket(
   try {
     const ticket = await issueElearningPlaybackTicket(itemId)
     if (!isCurrentPlaybackContext(epoch, courseId, itemId)) return
-    if (ticket.itemId !== itemId) {
-      writeStatus(formatError(null), 'error')
-      stopWatchSession()
+    if (!isUsablePlaybackTicket(ticket, itemId)) {
+      rejectPlaybackTicket()
       return
     }
     applyRenewedPlaybackTicket(ticket.token)
@@ -577,6 +610,16 @@ function onSeeked(event: Event): void {
   startHeartbeatTimer()
 }
 
+function onPlaybackError(event: Event): void {
+  bindVideo(event)
+  if (!applyingTicketRenewal) return
+  writeStatus(formatError(null), 'error')
+  stopWatchSession()
+  playbackSrc.value = ''
+  sessionId = null
+  videoNode = null
+}
+
 function isSelected(questionRevisionId: string, optionId: string): boolean {
   return (answers.value[questionRevisionId] ?? []).includes(optionId)
 }
@@ -666,34 +709,47 @@ function onAnswerChange(
 }
 
 async function startWatch(course: ElearningLearnerCourse): Promise<void> {
-  if (busy.value || !ready.value) return
+  if (!ready.value || !viewMounted) return
+  if (busy.value && !watchStartPending) return
   busy.value = true
+  watchStartPending = true
   clearStatus()
   stopWatchSession()
   sessionId = null
   videoNode = null
   playbackSrc.value = ''
   activeCourseId.value = course.courseId
+  const epoch = watchEpoch
+  const courseId = course.courseId
+  const itemId = course.video.itemId
   try {
-    const watch = await startElearningWatch(course.video.itemId)
-    const ticket = await issueElearningPlaybackTicket(course.video.itemId)
+    const watch = await startElearningWatch(itemId)
+    if (!ownsPendingWatchStart(epoch, courseId)) return
+    const ticket = await issueElearningPlaybackTicket(itemId)
+    if (!ownsPendingWatchStart(epoch, courseId)) return
+    if (!isUsablePlaybackTicket(ticket, itemId)) {
+      writeStatus(formatError(null), 'error')
+      return
+    }
     lastSequence = watch.lastSequence
     sessionId = watch.sessionId
-    watchStopped = sessionId == null
-    activeItemId = course.video.itemId
-    applyServerWatchProgress(course.courseId, watch)
+    watchStopped = false
+    activeItemId = itemId
+    applyServerWatchProgress(courseId, watch)
     resumePositionMs = watch.status === 'in_progress' ? watch.maxPositionMs : null
     playbackSrc.value = elearningPlaybackSourceUrl(ticket.token)
-    if (!watchStopped) {
-      schedulePlaybackTicketRenewal(ticket.expiresAt, ticket.ttlSeconds)
-    }
-    if (watch.status === 'completed') {
+    schedulePlaybackTicketRenewal(ticket.expiresAt, ticket.ttlSeconds)
+    if (watch.status === 'completed' && ownsPendingWatchStart(epoch, courseId)) {
       await refreshCourses()
     }
   } catch (error) {
+    if (!ownsPendingWatchStart(epoch, courseId)) return
     writeStatus(formatError(error), 'error')
   } finally {
-    busy.value = false
+    if (epoch === watchEpoch) {
+      busy.value = false
+      watchStartPending = false
+    }
   }
 }
 
@@ -747,6 +803,7 @@ async function submitExam(): Promise<void> {
 }
 
 onMounted(() => {
+  viewMounted = true
   loading.value = true
   void ensureV01Ready()
     .then(() => refreshCourses())
@@ -759,6 +816,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  viewMounted = false
   stopWatchSession()
 })
 </script>

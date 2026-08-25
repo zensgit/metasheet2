@@ -59,6 +59,13 @@ function isHydratedCaller(caller) {
   return caller != null && typeof caller === 'object' && !Array.isArray(caller)
 }
 
+/** JWT-bound req.authenticatedTenantId only. Never headers or hydrated user tenant fields. */
+function authenticatedOrgId(req) {
+  if (req == null || typeof req !== 'object' || Array.isArray(req)) return null
+  const tenant = req.authenticatedTenantId
+  return typeof tenant === 'string' && tenant.trim() ? tenant.trim() : null
+}
+
 function normalizeStringArray(value) {
   if (!Array.isArray(value)) return []
   const result = []
@@ -121,6 +128,7 @@ module.exports = {
   isMasterEnabled,
   isCapabilityEnabled,
   isHydratedCaller,
+  authenticatedOrgId,
   callerAllowsCapability,
   getCapabilitiesPayload,
 }

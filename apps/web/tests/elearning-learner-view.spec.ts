@@ -1576,20 +1576,10 @@ describe('ElearningLearnerView', () => {
     expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
   })
 
-  it('renews the playback ticket before expiry and does not tight-loop on a stale expiresAt', async () => {
+  it('renews the playback ticket before expiry', async () => {
     h.ticket
       .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
       .mockResolvedValueOnce(playbackTicket({ token: 'play.token.renewed', ttlSeconds: 60 }))
-      .mockResolvedValueOnce(playbackTicket({
-        token: 'play.token.expired',
-        ttlSeconds: 1,
-        expiresAt: new Date(Date.now() - 1000).toISOString(),
-      }))
-      .mockResolvedValue(playbackTicket({
-        token: 'play.token.min-delay',
-        ttlSeconds: 1,
-        expiresAt: new Date(Date.now() - 1000).toISOString(),
-      }))
     const root = mountView()
     await flushUi()
     ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
@@ -1598,25 +1588,98 @@ describe('ElearningLearnerView', () => {
     expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
     expect(h.ticket).toHaveBeenCalledTimes(1)
 
-    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS - 1000)
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_LEAD_MS - 1000)
     await flushUi()
     expect(h.ticket).toHaveBeenCalledTimes(1)
 
-    vi.advanceTimersByTime(2000)
+    await vi.advanceTimersByTimeAsync(1000)
     await flushUntil(() => videoSrc(video).includes(elearningPlaybackSourceUrl('play.token.renewed')))
     expect(h.ticket).toHaveBeenCalledTimes(2)
     expect(h.ticket.mock.calls[1]?.[0]).toBe(VIDEO)
+  })
 
-    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
-    await flushUntil(() => h.ticket.mock.calls.length === 3)
-    expect(h.ticket).toHaveBeenCalledTimes(3)
-
-    vi.advanceTimersByTime(TICKET_RENEWAL_MIN_DELAY_MS - 1000)
+  it('does not install or renew a ticket at or below the min renewal delay', async () => {
+    h.ticket.mockResolvedValue(playbackTicket({
+      token: 'play.token.short',
+      ttlSeconds: 1,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    }))
+    const root = mountView()
     await flushUi()
-    expect(h.ticket).toHaveBeenCalledTimes(3)
-    vi.advanceTimersByTime(2000)
-    await flushUntil(() => h.ticket.mock.calls.length === 4)
-    expect(h.ticket).toHaveBeenCalledTimes(4)
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：request_failed（0）')
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_MIN_DELAY_MS * 2)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('does not install a renewed short-ttl ticket or keep renewing', async () => {
+    h.ticket
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
+      .mockResolvedValueOnce(playbackTicket({
+        token: 'play.token.short',
+        ttlSeconds: 1,
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：request_failed（0）')
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
+    expect(videoSrc(video)).not.toContain('play.token.short')
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_LEAD_MS + TICKET_RENEWAL_MIN_DELAY_MS * 3)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not install a ticket whose remaining expiresAt lifetime is at or below the min delay', async () => {
+    h.ticket.mockResolvedValue(playbackTicket({
+      token: 'play.token.short-remaining',
+      ttlSeconds: 60,
+      expiresAt: new Date(Date.now() + TICKET_RENEWAL_MIN_DELAY_MS).toISOString(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：request_failed（0）')
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_MIN_DELAY_MS * 2)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('renews a six-second ticket at 5s and not at 4s', async () => {
+    h.ticket.mockImplementation(async () => playbackTicket({
+      token: `play.token.${h.ticket.mock.calls.length}`,
+      ttlSeconds: 6,
+      expiresAt: new Date(Date.now() + 6_000).toISOString(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token.1'))
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(TICKET_RENEWAL_MIN_DELAY_MS - 1000)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushUntil(() => h.ticket.mock.calls.length === 2)
+    await flushUi()
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token.2'))
+    expect(h.ticket).toHaveBeenCalledTimes(2)
   })
 
   it('preserves playing position across ticket renewal without synthetic heartbeat credit', async () => {
@@ -1840,5 +1903,380 @@ describe('ElearningLearnerView', () => {
     await flushUi()
     expect(h.ticket).toHaveBeenCalledTimes(2)
     expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('renews completed-course replay tickets without sending heartbeat credit', async () => {
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startWatch.mockResolvedValue(watchState({
+      sessionId: null,
+      status: 'completed',
+      lastSequence: 9,
+      lastClientPositionMs: 5000,
+      effectiveMs: 4500,
+      maxPositionMs: 5000,
+    }))
+    h.ticket
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token.renewed', ttlSeconds: 60 }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = prepareVideo(
+      root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement,
+      5,
+      0,
+    )
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    Object.defineProperty(video, 'ended', { configurable: true, writable: true, value: false })
+    vi.spyOn(video, 'play').mockResolvedValue(undefined as void)
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
+
+    video.currentTime = 2
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => videoSrc(video).includes(elearningPlaybackSourceUrl('play.token.renewed')))
+    expect(h.ticket).toHaveBeenCalledTimes(2)
+    simulateTicketSrcReload(video)
+    await flushUi(20)
+    expect(video.currentTime).toBe(2)
+    vi.advanceTimersByTime(ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS * 3)
+    await flushUi()
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('does not issue a ticket after unmounting a late initial watch', async () => {
+    let releaseWatch!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseWatch = resolve
+    })
+    h.startWatch.mockImplementation(async () => {
+      await gate
+      return watchState()
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.startWatch.mock.calls.length === 1)
+    app?.unmount()
+    app = null
+    releaseWatch()
+    await flushUi(20)
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS * 2)
+    await flushUi()
+    expect(h.ticket).not.toHaveBeenCalled()
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('does not install a late initial ticket or schedule renewal after unmount', async () => {
+    let releaseTicket!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseTicket = resolve
+    })
+    h.ticket.mockImplementation(async () => {
+      await gate
+      return playbackTicket({ token: 'play.token.late' })
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.ticket.mock.calls.length === 1)
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    app?.unmount()
+    app = null
+    releaseTicket()
+    await flushUi(20)
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS * 2)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('does not start watch while an exam start is in flight', async () => {
+    let releaseExam!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseExam = resolve
+    })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockImplementation(async () => {
+      await gate
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: [] },
+      }
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.startExam.mock.calls.length === 1)
+    const watchBtn = root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement
+    watchBtn.disabled = false
+    watchBtn.click()
+    await flushUi()
+    expect(h.startWatch).not.toHaveBeenCalled()
+    expect(h.ticket).not.toHaveBeenCalled()
+    releaseExam()
+    await flushUntil(() => root.querySelector('[data-testid="elearning-exam-form"]') != null)
+    expect(h.startWatch).not.toHaveBeenCalled()
+  })
+
+  it('does not start watch while exam submit is in flight', async () => {
+    let releaseSubmit!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve
+    })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.submitExam.mockImplementation(async () => {
+      await gate
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'graded',
+        autoScore: 10,
+        totalScore: 10,
+        passed: true,
+        duplicate: false,
+      }
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.submitExam.mock.calls.length === 1)
+    const watchBtn = root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement
+    watchBtn.disabled = false
+    watchBtn.click()
+    await flushUi()
+    expect(h.startWatch).not.toHaveBeenCalled()
+    expect(h.ticket).not.toHaveBeenCalled()
+    releaseSubmit()
+    await flushUntil(() => root.querySelector('[data-testid="elearning-exam-result"]') != null)
+    expect(h.startWatch).not.toHaveBeenCalled()
+  })
+
+  it('does not let a late initial ticket from a previous course install after a switch', async () => {
+    let releaseTicket!: () => void
+    const gate = new Promise<void>((resolve) => {
+      releaseTicket = resolve
+    })
+    h.list.mockResolvedValue({
+      courses: [
+        course(),
+        course({ courseId: COURSE_PROGRESS, video: vid({ itemId: VIDEO_B }) }),
+      ],
+    })
+    h.startWatch.mockImplementation(async (itemId: string) => {
+      if (itemId === VIDEO_B) return watchState({ sessionId: SESSION_B, lastSequence: 7 })
+      return watchState()
+    })
+    h.ticket.mockImplementation(async (itemId: string) => {
+      if (itemId === VIDEO_B) return playbackTicket({ token: 'play.token.b', itemId: VIDEO_B, ttlSeconds: 60 })
+      await gate
+      return playbackTicket({ token: 'play.token.a-late', ttlSeconds: 60 })
+    })
+    const root = mountView()
+    await flushUi()
+    const firstStart = courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-watch')
+    firstStart.click()
+    await flushUntil(() => h.ticket.mock.calls.length === 1)
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+
+    const secondStart = courseQuery<HTMLButtonElement>(root, COURSE_PROGRESS, 'elearning-start-watch')
+    secondStart.disabled = false
+    secondStart.click()
+    await flushUi()
+    expect(h.startWatch.mock.calls.map((call) => call[0])).toEqual([VIDEO, VIDEO_B])
+    expect(videoSrc(courseQuery<HTMLVideoElement>(root, COURSE_PROGRESS, 'elearning-learner-video')))
+      .toContain(elearningPlaybackSourceUrl('play.token.b'))
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+
+    releaseTicket()
+    await flushUi(20)
+    const secondVideo = courseQuery<HTMLVideoElement>(root, COURSE_PROGRESS, 'elearning-learner-video')
+    expect(videoSrc(secondVideo)).toContain(elearningPlaybackSourceUrl('play.token.b'))
+    expect(videoSrc(secondVideo)).not.toContain('play.token.a-late')
+    expect(h.ticket.mock.calls.map((call) => call[0])).toEqual([VIDEO, VIDEO_B])
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => h.ticket.mock.calls.length === 3)
+    expect(h.ticket.mock.calls[2]?.[0]).toBe(VIDEO_B)
+  })
+
+  it('fails closed when the initial ticket itemId does not match the requested item', async () => {
+    h.ticket.mockResolvedValue(playbackTicket({
+      token: 'play.token.mismatch',
+      itemId: VIDEO_B,
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    const statusText = root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? ''
+    expect(statusText).toBe('失败：request_failed（0）')
+    expect(statusText).not.toContain(VIDEO)
+    expect(statusText).not.toContain(VIDEO_B)
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS * 2)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('never installs an already-expired initial ticket', async () => {
+    h.ticket.mockResolvedValue(playbackTicket({
+      token: 'play.token.expired',
+      ttlSeconds: 60,
+      expiresAt: new Date(Date.now() - 1000).toISOString(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：request_failed（0）')
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS * 2)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('never installs an expired renewed ticket and stops further renewal', async () => {
+    h.ticket
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
+      .mockResolvedValueOnce(playbackTicket({
+        token: 'play.token.expired',
+        ttlSeconds: 60,
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('request_failed'))
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：request_failed（0）')
+    expect(videoSrc(video)).toContain(elearningPlaybackSourceUrl('play.token'))
+    expect(videoSrc(video)).not.toContain('play.token.expired')
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS + TICKET_RENEWAL_MIN_DELAY_MS * 3)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(2)
+  })
+
+  it('renews no later than the local ttl boundary when expiresAt is skewed far ahead', async () => {
+    h.ticket.mockImplementation(async () => playbackTicket({
+      token: `play.token.${h.ticket.mock.calls.length}`,
+      ttlSeconds: 60,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS - 1000)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(1)
+    vi.advanceTimersByTime(2000)
+    await flushUntil(() => h.ticket.mock.calls.length === 2)
+    expect(h.ticket).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears renewal suppression after a values-free playback src error', async () => {
+    h.ticket
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token.renewed', ttlSeconds: 60 }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = prepareVideo(
+      root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement,
+      5,
+      0,
+    )
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    Object.defineProperty(video, 'ended', { configurable: true, writable: true, value: false })
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => videoSrc(video).includes(elearningPlaybackSourceUrl('play.token.renewed')))
+    h.heartbeat.mockClear()
+    video.dispatchEvent(new Event('error'))
+    await flushUi()
+    const statusText = root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? ''
+    expect(statusText).toBe('失败：request_failed（0）')
+    expect(statusText).not.toMatch(/\d{1,3}(?:\.\d{1,3}){3}/)
+    expect(root.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS + ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS * 3)
+    await flushUi()
+    expect(h.ticket).toHaveBeenCalledTimes(2)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+  })
+
+  it('keeps play intent when renewal arrives during seeking without synthetic credit', async () => {
+    h.ticket
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token', ttlSeconds: 60 }))
+      .mockResolvedValueOnce(playbackTicket({ token: 'play.token.renewed', ttlSeconds: 60 }))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    const video = prepareVideo(
+      root.querySelector('[data-testid="elearning-learner-video"]') as HTMLVideoElement,
+      5,
+      0,
+    )
+    Object.defineProperty(video, 'paused', { configurable: true, writable: true, value: false })
+    Object.defineProperty(video, 'ended', { configurable: true, writable: true, value: false })
+    vi.spyOn(video, 'play').mockResolvedValue(undefined as void)
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    expect(heartbeatBodies()).toEqual([{ sequence: 2, positionMs: 0, playing: true }])
+
+    video.currentTime = 2
+    video.dispatchEvent(new Event('seeking'))
+    await flushUi()
+    expect(heartbeatBodies().at(-1)).toEqual({ sequence: 3, positionMs: 2000, playing: false })
+
+    h.heartbeat.mockClear()
+    vi.advanceTimersByTime(TICKET_RENEWAL_LEAD_MS)
+    await flushUntil(() => videoSrc(video).includes(elearningPlaybackSourceUrl('play.token.renewed')))
+    await drainHeartbeats()
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    simulateTicketSrcReload(video)
+    await flushUi(20)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    expect(video.currentTime).toBe(2)
+    expect(video.play).toHaveBeenCalled()
+
+    vi.advanceTimersByTime(ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS)
+    await flushUi()
+    expect(heartbeatBodies()).toEqual([expect.objectContaining({ positionMs: 2000, playing: true })])
   })
 })

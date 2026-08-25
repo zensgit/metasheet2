@@ -38,11 +38,21 @@ async function main() {
     }
     env.PRODUCT_MODE = 'platform'
     env.PLUGIN_STATUS = 'active'
+    const hadProduct = Object.prototype.hasOwnProperty.call(process.env, 'PRODUCT_MODE')
+    const originalProduct = process.env.PRODUCT_MODE
+    const hadStatus = Object.prototype.hasOwnProperty.call(process.env, 'PLUGIN_STATUS')
+    const originalStatus = process.env.PLUGIN_STATUS
     await withFlagsAsync(env, async () => {
       const { context, routes } = createMockContext()
       await activate(context)
       assert.equal(routes.length, 0, 'capability flags / product mode / plugin status must not register routes')
+      assert.equal(process.env.PRODUCT_MODE, 'platform')
+      assert.equal(process.env.PLUGIN_STATUS, 'active')
     })
+    if (hadProduct) assert.equal(process.env.PRODUCT_MODE, originalProduct)
+    else assert.equal(Object.prototype.hasOwnProperty.call(process.env, 'PRODUCT_MODE'), false)
+    if (hadStatus) assert.equal(process.env.PLUGIN_STATUS, originalStatus)
+    else assert.equal(Object.prototype.hasOwnProperty.call(process.env, 'PLUGIN_STATUS'), false)
   }
 
   await withFlagsAsync({ ELEARNING_ENABLED: 'true' }, async () => {

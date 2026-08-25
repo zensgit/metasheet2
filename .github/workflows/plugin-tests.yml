@@ -399,6 +399,13 @@ jobs:
       - name: E-learning V0.1 media CI wiring contract
         run: node --test scripts/ops/elearning-media-ci-wiring.test.mjs
 
+      # E-learning V0.1 auth/tenant/RBAC gate wiring (no DB): dedicated config +
+      # setup + whole-file real JWT suite must stay pinned on the 20.x post-migrate
+      # step. Dropping the contract, swapping to a name filter, or folding the
+      # suite into vitest.integration.config.ts silently disables the proof.
+      - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
+        run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract

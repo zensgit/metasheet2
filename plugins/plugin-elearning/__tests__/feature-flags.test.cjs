@@ -11,6 +11,7 @@ const {
   isMasterEnabled,
   isCapabilityEnabled,
   isHydratedCaller,
+  authenticatedOrgId,
   callerAllowsCapability,
   getCapabilitiesPayload,
 } = require('../lib/feature-flags.cjs')
@@ -20,6 +21,7 @@ const {
   UNAUTHORIZED_CALLER,
   ALL_FLAGS_ON,
   allCapabilities,
+  withFlags,
 } = require('./helpers.cjs')
 
 function emptyEnv() {
@@ -68,6 +70,44 @@ assert.equal(isHydratedCaller('admin'), false)
 assert.equal(isHydratedCaller(['admin']), false)
 assert.equal(isHydratedCaller({}), true)
 assert.equal(isHydratedCaller(UNAUTHORIZED_CALLER), true)
+
+assert.equal(authenticatedOrgId(undefined), null)
+assert.equal(authenticatedOrgId(null), null)
+assert.equal(authenticatedOrgId('org-a'), null)
+assert.equal(authenticatedOrgId(['org-a']), null)
+assert.equal(authenticatedOrgId({}), null)
+assert.equal(authenticatedOrgId({ authenticatedTenantId: '' }), null)
+assert.equal(authenticatedOrgId({ authenticatedTenantId: '   ' }), null)
+assert.equal(authenticatedOrgId({ authenticatedTenantId: 12 }), null)
+assert.equal(authenticatedOrgId({ user: { tenantId: 'header-org' } }), null)
+assert.equal(authenticatedOrgId({ headers: { 'x-tenant-id': 'header-org' } }), null)
+assert.equal(
+  authenticatedOrgId({
+    user: { tenantId: 'header-org' },
+    headers: { 'x-tenant-id': 'forged-org' },
+  }),
+  null,
+)
+assert.equal(authenticatedOrgId({ authenticatedTenantId: 'org-bound' }), 'org-bound')
+assert.equal(authenticatedOrgId({ authenticatedTenantId: '  org-bound  ' }), 'org-bound')
+assert.equal(
+  authenticatedOrgId({
+    authenticatedTenantId: 'org-bound',
+    user: { tenantId: 'header-org' },
+    headers: { 'x-tenant-id': 'forged-org' },
+  }),
+  'org-bound',
+)
+
+{
+  const flagsSrc = require('node:fs').readFileSync(
+    require('node:path').join(__dirname, '../lib/feature-flags.cjs'),
+    'utf8',
+  )
+  assert.match(flagsSrc, /req\.authenticatedTenantId/)
+  assert.equal(flagsSrc.includes('x-tenant-id'), false)
+  assert.equal(flagsSrc.includes('user.tenantId'), false)
+}
 
 for (const lookalike of LOOKALIKES) {
   const env = {}
@@ -331,6 +371,33 @@ assertCaps({ permissions: ['elearning:Admin'] }, allCapabilities(false))
   )
   assert.equal(payload.enabled, true)
   assert.equal(payload.capabilities.analytics, false, 'analytics still exact-literal even when authorized')
+}
+
+{
+  const extraKey = 'PLUGIN_STATUS'
+  const hadExtra = Object.prototype.hasOwnProperty.call(process.env, extraKey)
+  const originalExtra = process.env[extraKey]
+  const hadProduct = Object.prototype.hasOwnProperty.call(process.env, 'PRODUCT_MODE')
+  const originalProduct = process.env.PRODUCT_MODE
+  delete process.env[extraKey]
+  delete process.env.PRODUCT_MODE
+  try {
+    withFlags({
+      ELEARNING_ENABLED: 'true',
+      PRODUCT_MODE: 'platform',
+      PLUGIN_STATUS: 'active',
+    }, () => {
+      assert.equal(process.env.PRODUCT_MODE, 'platform')
+      assert.equal(process.env.PLUGIN_STATUS, 'active')
+    })
+    assert.equal(Object.prototype.hasOwnProperty.call(process.env, extraKey), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(process.env, 'PRODUCT_MODE'), false)
+  } finally {
+    if (hadExtra) process.env[extraKey] = originalExtra
+    else delete process.env[extraKey]
+    if (hadProduct) process.env.PRODUCT_MODE = originalProduct
+    else delete process.env.PRODUCT_MODE
+  }
 }
 
 console.log('✓ feature-flags: exact-literal master/capability matrix')

@@ -24,6 +24,7 @@ import {
   ELEARNING_COURSE_PUBLISH_REQUESTS_COURSE_FK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_FK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK,
+  ELEARNING_COURSE_PUBLISH_REQUESTS_ITEM_ROLES_DISTINCT_CHK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_TABLE,
   ELEARNING_COURSE_PUBLISH_REQUESTS_VERSION_FK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK,
@@ -787,15 +788,27 @@ describe.sequential('elearning course-publish request ledger migration (isolated
     expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_COURSE_FK)?.def).toContain('elearning_courses(org_id, id)')
     expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VERSION_FK)?.def).toContain('(org_id, course_id, course_version_id)')
     expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VERSION_FK)?.def).toContain('elearning_course_versions(org_id, course_id, id)')
-    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK)?.def).toContain('(org_id, course_version_id, video_item_id)')
-    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK)?.def).toContain('elearning_course_version_items(org_id, course_version_id, id)')
-    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK)?.def).toContain('(org_id, course_version_id, exam_item_id)')
-    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK)?.def).toContain('elearning_course_version_items(org_id, course_version_id, id)')
+    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK)?.def).toContain('(org_id, course_version_id, video_item_id, video_item_type)')
+    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK)?.def).toContain('elearning_course_version_items(org_id, course_version_id, id, item_type)')
+    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK)?.def).toContain('(org_id, course_version_id, exam_item_id, exam_item_type, exam_id)')
+    expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK)?.def).toContain('elearning_course_version_items(org_id, course_version_id, id, item_type, exam_id)')
     expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_FK)?.def).toContain('(org_id, exam_id)')
     expect(byName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_FK)?.def).toContain('elearning_exams(org_id, id)')
     for (const row of fks.rows) {
       expect(row.def).toMatch(/ON DELETE RESTRICT/)
     }
+
+    const checks = await testPool.query<{ conname: string; def: string }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS def
+         FROM pg_constraint
+        WHERE conrelid = $1::regclass
+          AND contype = 'c'`,
+      [ELEARNING_COURSE_PUBLISH_REQUESTS_TABLE],
+    )
+    const checkByName = new Map(checks.rows.map((row) => [row.conname, row]))
+    expect(checkByName.get(ELEARNING_COURSE_PUBLISH_REQUESTS_ITEM_ROLES_DISTINCT_CHK)?.def).toContain(
+      'video_item_id <> exam_item_id',
+    )
   })
 
   it('rejects cross-org and parent-inconsistent request rows, and blocks parent deletes', async () => {
@@ -864,6 +877,57 @@ describe.sequential('elearning course-publish request ledger migration (isolated
     }))
     expect(wrongExam.code).toBe('23503')
     expect(wrongExam.constraint).toBe(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_FK)
+
+    const swappedRoles = await rejectPg(() => insertRequest({
+      org: orgA,
+      sourceKey: randomUUID(),
+      courseId: graphA.courseId,
+      versionId: graphA.versionId,
+      videoItemId: graphA.examItemId,
+      examItemId: graphA.videoItemId,
+      examId: graphA.examId,
+    }))
+    expect(swappedRoles.code).toBe('23503')
+    expect([
+      ELEARNING_COURSE_PUBLISH_REQUESTS_VIDEO_ITEM_FK,
+      ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK,
+    ]).toContain(swappedRoles.constraint)
+
+    const reusedVideo = await rejectPg(() => insertRequest({
+      org: orgA,
+      sourceKey: randomUUID(),
+      courseId: graphA.courseId,
+      versionId: graphA.versionId,
+      videoItemId: graphA.videoItemId,
+      examItemId: graphA.videoItemId,
+      examId: graphA.examId,
+    }))
+    expect(reusedVideo.code).toBe('23514')
+    expect(reusedVideo.constraint).toBe(ELEARNING_COURSE_PUBLISH_REQUESTS_ITEM_ROLES_DISTINCT_CHK)
+
+    const reusedExam = await rejectPg(() => insertRequest({
+      org: orgA,
+      sourceKey: randomUUID(),
+      courseId: graphA.courseId,
+      versionId: graphA.versionId,
+      videoItemId: graphA.examItemId,
+      examItemId: graphA.examItemId,
+      examId: graphA.examId,
+    }))
+    expect(reusedExam.code).toBe('23514')
+    expect(reusedExam.constraint).toBe(ELEARNING_COURSE_PUBLISH_REQUESTS_ITEM_ROLES_DISTINCT_CHK)
+
+    const sameOrgWrongExam = await rejectPg(() => insertRequest({
+      org: orgA,
+      sourceKey: randomUUID(),
+      courseId: graphA.courseId,
+      versionId: graphA.versionId,
+      videoItemId: graphA.videoItemId,
+      examItemId: graphA.examItemId,
+      examId: graphA2.examId,
+    }))
+    expect(sameOrgWrongExam.code).toBe('23503')
+    expect(sameOrgWrongExam.constraint).toBe(ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK)
 
     await insertRequest({
       org: orgA,

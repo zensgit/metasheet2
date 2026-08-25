@@ -771,6 +771,56 @@ describe('elearning course publish input closure', () => {
     expect(explained).not.toBe(hashed)
   })
 
+  it('pins a hard-coded v1 canonical JSON and SHA-256 golden for two questions, non-default maxAttempts, option order, and null explanations', () => {
+    const V1_CANONICAL_JSON = '{"domain":"elearning.course.publish.request.v1","maxAttempts":7,"mediaId":"22222222-2222-4222-8222-222222222222","passScore":15,"questions":[{"correctOptionIds":["a"],"explanation":null,"options":[{"id":"a","text":"alpha"},{"id":"b","text":"beta"}],"points":10,"prompt":"Pick one","questionType":"single_choice"},{"correctOptionIds":["a","c"],"explanation":null,"options":[{"id":"b","text":"beta"},{"id":"a","text":"alpha"},{"id":"c","text":"gamma"}],"points":5,"prompt":"Pick several","questionType":"multiple_choice"}],"title":"Pilot composite course","version":1}'
+    const V1_SHA256 = 'ef5b6dedea2c2824a5d165f5c9f00e0bf5d6a8cc9f7bf3c47b6c576682ed4944'
+
+    const omittedExplanation = {
+      questionType: 'single_choice' as const,
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      correctOptionIds: ['a'],
+      points: 10,
+    }
+    const canonical = canonicalizeElearningCoursePublishInput(baseInput({
+      maxAttempts: 7,
+      passScore: 15,
+      questions: [
+        omittedExplanation,
+        {
+          questionType: 'multiple_choice' as const,
+          prompt: 'Pick several',
+          options: [
+            { id: 'b', text: 'beta' },
+            { id: 'a', text: 'alpha' },
+            { id: 'c', text: 'gamma' },
+          ],
+          correctOptionIds: ['c', 'a'],
+          points: 5,
+          explanation: null,
+        },
+      ],
+    }))
+
+    expect(canonicalizeElearningCoursePublishRequest(canonical)).toBe(V1_CANONICAL_JSON)
+    expect(hashElearningCoursePublishRequest(canonical)).toBe(V1_SHA256)
+    expect(hashElearningCoursePublishRequestAtVersion(canonical, 1)).toBe(V1_SHA256)
+    expect(createHash('sha256').update(V1_CANONICAL_JSON, 'utf8').digest('hex')).toBe(V1_SHA256)
+    expect(JSON.parse(V1_CANONICAL_JSON).maxAttempts).toBe(7)
+    expect(JSON.parse(V1_CANONICAL_JSON).questions).toHaveLength(2)
+    expect(JSON.parse(V1_CANONICAL_JSON).questions[0].explanation).toBeNull()
+    expect(JSON.parse(V1_CANONICAL_JSON).questions[1].explanation).toBeNull()
+    expect(JSON.parse(V1_CANONICAL_JSON).questions[1].options.map((option: { id: string }) => option.id)).toEqual([
+      'b',
+      'a',
+      'c',
+    ])
+    expect(JSON.parse(V1_CANONICAL_JSON).questions[1].correctOptionIds).toEqual(['a', 'c'])
+  })
+
   it('replays v1 rows through the version dispatcher and fails unavailable for unknown versions', async () => {
     const canonical = canonicalizeElearningCoursePublishInput(baseInput())
     const v1 = hashElearningCoursePublishRequestAtVersion(canonical, 1)

@@ -7,12 +7,14 @@
  * vitest.integration.config.ts (that setup caches RBAC_TOKEN_TRUST true).
  */
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express from 'express'
 import jwt from 'jsonwebtoken'
 import { Pool } from 'pg'
 import request from 'supertest'
 
+import { authenticate } from '../../src/middleware/auth'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_PLAYBACK_SECRET_ENV } from '../../src/services/elearning-media-playback'
@@ -39,6 +41,43 @@ const JWT_SECRET = process.env.JWT_SECRET
 if (!JWT_SECRET) {
   throw new Error('elearning V0.1 auth/tenant/RBAC gate requires JWT_SECRET')
 }
+
+const require = createRequire(import.meta.url)
+const elearningPlugin = require('../../../../plugins/plugin-elearning/index.cjs') as {
+  activate: (context: {
+    api: {
+      http: {
+        addRoute: (method: string, path: string, handler: express.RequestHandler) => void
+      }
+    }
+  }) => Promise<void>
+  CANONICAL_METHOD: string
+  CANONICAL_PATH: string
+}
+
+const READER_CAPABILITIES = {
+  enabled: true,
+  capabilities: {
+    content: true,
+    assignment: true,
+    assessment: true,
+    incentive: false,
+    analytics: false,
+    media: true,
+  },
+} as const
+
+const CLOSED_CAPABILITIES = {
+  enabled: true,
+  capabilities: {
+    content: false,
+    assignment: false,
+    assessment: false,
+    incentive: false,
+    analytics: false,
+    media: false,
+  },
+} as const
 
 const FLAG_EXAM_ON = {
   ELEARNING_ENABLED: 'true',
@@ -190,37 +229,75 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       throw new Error('elearning pilot runtime must mount when exam flags are exact true')
     }
     const app = express()
+    let capabilitiesMounted = false
+    await elearningPlugin.activate({
+      api: {
+        http: {
+          addRoute(method, path, handler) {
+            if (method !== elearningPlugin.CANONICAL_METHOD || path !== elearningPlugin.CANONICAL_PATH) {
+              throw new Error(`unexpected plugin route ${method} ${path}`)
+            }
+            app.get(path, authenticate, handler)
+            capabilitiesMounted = true
+          },
+        },
+      },
+    })
+    if (!capabilitiesMounted) {
+      throw new Error('plugin-elearning capabilities route must mount when master flag is exact true')
+    }
     app.use(runtime.router)
     pinned.setApp(app)
   })
 
   afterAll(async () => {
-    await pool.query(
-      `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
-      [createdUserIds],
-    ).catch(() => undefined)
-    await pool.query(
-      `DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`,
-      [createdUserIds],
-    ).catch(() => undefined)
-    await pool.query(
-      `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
-      [createdUserIds],
-    ).catch(() => undefined)
-    await pool.query(
-      `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
-      [createdUserIds],
-    ).catch(() => undefined)
-    await pool.query(
-      `DELETE FROM users WHERE id = ANY($1::text[])`,
-      [createdUserIds],
-    ).catch(() => undefined)
-    await pool.query(
-      `DELETE FROM role_permissions WHERE role_id = $1`,
-      [ROLE_ID],
-    ).catch(() => undefined)
-    await pool.query(`DELETE FROM roles WHERE id = $1`, [ROLE_ID]).catch(() => undefined)
-    await pool.end()
+    try {
+      await pool.query(
+        `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      await pool.query(
+        `DELETE FROM user_permissions WHERE user_id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      await pool.query(
+        `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      await pool.query(
+        `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      await pool.query(
+        `DELETE FROM users WHERE id = ANY($1::text[])`,
+        [createdUserIds],
+      )
+      await pool.query(
+        `DELETE FROM role_permissions WHERE role_id = $1`,
+        [ROLE_ID],
+      )
+      await pool.query(`DELETE FROM roles WHERE id = $1`, [ROLE_ID])
+
+      const residue = await pool.query(
+        `SELECT 'user_namespace_admissions' AS rel FROM user_namespace_admissions WHERE user_id = ANY($1::text[])
+         UNION ALL
+         SELECT 'user_permissions' FROM user_permissions WHERE user_id = ANY($1::text[])
+         UNION ALL
+         SELECT 'user_roles' FROM user_roles WHERE user_id = ANY($1::text[])
+         UNION ALL
+         SELECT 'user_orgs' FROM user_orgs WHERE user_id = ANY($1::text[])
+         UNION ALL
+         SELECT 'users' FROM users WHERE id = ANY($1::text[])
+         UNION ALL
+         SELECT 'role_permissions' FROM role_permissions WHERE role_id = $2
+         UNION ALL
+         SELECT 'roles' FROM roles WHERE id = $2`,
+        [createdUserIds, ROLE_ID],
+      )
+      expect(residue.rows).toEqual([])
+    } finally {
+      await pool.end()
+    }
   })
 
   it('dedicated setup pinned RBAC flags false before auth/RBAC/runtime import', () => {
@@ -298,6 +375,69 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'Insufficient permissions' })
     expect(learnerCalls).toHaveLength(0)
+    valuesFree(res.body)
+  })
+
+  it('tenant-bound elearning:read receives flag AND hydrated-RBAC capabilities', async () => {
+    const token = signToken({
+      userId: readerId,
+      email: `${readerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get(elearningPlugin.CANONICAL_PATH)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual(READER_CAPABILITIES)
+    valuesFree(res.body)
+  })
+
+  it('tenant-less legacy token plus forged x-tenant-id is capabilities 403 ORG_CONTEXT_REQUIRED', async () => {
+    const token = signToken({
+      userId: legacyId,
+      email: `${legacyId}@el-auth-gate.test`,
+      role: 'user',
+    })
+    const res = await request(pinned.url())
+      .get(elearningPlugin.CANONICAL_PATH)
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', ORG_B)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    valuesFree(res.body)
+  })
+
+  it('invalid tenant claim without membership is capabilities 403 ORG_CONTEXT_REQUIRED', async () => {
+    const token = signToken({
+      userId: outsiderId,
+      email: `${outsiderId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: FORGED_ORG,
+    })
+    const res = await request(pinned.url())
+      .get(elearningPlugin.CANONICAL_PATH)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    valuesFree(res.body)
+  })
+
+  it('signed token carrying forged roles/perms cannot hydrate capabilities from claims', async () => {
+    const token = signToken({
+      userId: forgedId,
+      email: `${forgedId}@el-auth-gate.test`,
+      role: 'admin',
+      roles: ['admin'],
+      perms: ['elearning:admin', 'elearning:read', '*:*'],
+      permissions: ['elearning:admin', 'elearning:read', '*:*'],
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get(elearningPlugin.CANONICAL_PATH)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual(CLOSED_CAPABILITIES)
     valuesFree(res.body)
   })
 })
