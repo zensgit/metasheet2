@@ -98,7 +98,9 @@ export function verifyRestorePreviewIdentity(token: string, expected: RestorePre
 // identity binds a MULTI-record restore: the EXACT record set AND each record's per-record (masked, field-
 // filtered) `changesHash`, via an order-invariant `scopeHash`. The `type: 'restore-preview-scoped'` discriminator
 // makes single and scoped identities DISJOINT — a single-record token can never satisfy a scoped execute and
-// vice versa (BS-7 + D6). CONTRACT ONLY — not wired into any route, writes nothing (preview = BS-2, execute = BS-3).
+// vice versa (BS-7 + D6). WIRED: `univer-meta.ts`'s `POST /sheets/:sheetId/restore-batch-preview` (~L9497, BS-2
+// mint via `mintScopedRestorePreviewIdentity`) and `POST /sheets/:sheetId/restore-batch-execute` (~L9963, BS-3
+// verify via `verifyScopedRestorePreviewIdentity`) are the production callers.
 
 export interface ScopedRestorePreviewIdentityClaims {
   sheetId: string

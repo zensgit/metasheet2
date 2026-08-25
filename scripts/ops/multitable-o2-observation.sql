@@ -51,13 +51,20 @@
 --     or exhausted; correlate with app logs).
 --
 -- Ladder-level legend used in the per-query shape notes:
---   L0  = factory inert (triggers DISABLED, 4 flags unset)
+--   L0  = factory inert (triggers DISABLED, 5 flags unset)
 --   L1  = staging triggers ENABLED, flags still all OFF
---   L2  = + MULTITABLE_HISTORY_CONTIGUITY_STRICT
---   L3  = + MULTITABLE_ENABLE_WRITER_FENCE
+--   L2  = + MULTITABLE_ENABLE_WRITER_FENCE
+--   L2-C = + MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION (transient — named canary sheet
+--           only, restored OFF immediately after minting one checkpoint; not a standing rung)
+--   L3  = + MULTITABLE_HISTORY_CONTIGUITY_STRICT (fence stays ON, checkpoint flag back OFF)
 --   L4  = + MULTITABLE_ENABLE_SHEET_REVERT (canary drill)
 --   L5  = + MULTITABLE_ENABLE_PIT_RESET (canary drill)
 --   L6  = full-posture soak
+--   (fence BEFORE strict, per docs/development/multitable-timemachine-o2-enablement-ladder-
+--   20260819.md 修正案 E1.1/E1.2 — the order printed here up to 2026-08-24 had L2=strict then
+--   L3=fence; that order is a code conjunction-gate contradiction the ladder's own header now
+--   documents as unexecutable. The ladder's E1 is the authoritative executable order; read it
+--   rather than trusting this legend if the two ever disagree again.)
 -- ============================================================================
 
 

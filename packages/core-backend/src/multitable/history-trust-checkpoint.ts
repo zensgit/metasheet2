@@ -7,11 +7,15 @@ import type { QueryFn } from './permission-service'
  *
  * The trust floor: a checkpoint's `trusted_since_seq` is the point at/after which sheet history is
  * trustworthy for destructive recovery. This module owns the `building → active` state machine, the
- * seq-based (and display-only T-based) checkpoint selection, and the floor-clamped retention prune. It does
- * NOT wire checkpoint activation into the live restore/execute path — that in-fence cutover is L5-wire,
- * deferred until L4's canonical sheet fence lands. `activateCheckpoint` is written to RECEIVE a fenced txn
- * (the "L4 wires this in" seam), so it can be unit/real-DB tested in isolation now and adopted verbatim by
- * L4 later.
+ * seq-based (and display-only T-based) checkpoint selection, and the floor-clamped retention prune.
+ * WIRED (L5-wire, landed): `activateCheckpoint` DOES back a live path — `univer-meta.ts`'s
+ * `POST /sheets/:sheetId/trust-checkpoint-activate` (~L10162) is its production caller. That route holds
+ * `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` OFF by default, requires the canonical writer fence to be
+ * enabled first (`TRUST_CHECKPOINT_FENCE_REQUIRED`, ~L10171 — this module does not itself check the fence;
+ * the route calls `fenceWriterEntry` before `activateCheckpoint` in the same transaction, per the seam this
+ * module was written to receive), and requires D2 sheet-admin (`canManageSheetAccess`). `selectCheckpointByAnchorSeq`
+ * below is likewise live: it is `resolveExactAnchor`'s covering-checkpoint gate (`no-covering-checkpoint`
+ * refusal) on every revert/reset preview and execute.
  *
  * EXACT BIGINT (design lock §1.1): `seq`/`trusted_since_seq` are int8; the pg driver returns them as decimal
  * STRINGS. Every seq value crosses this module's boundary as a string; comparison is native SQL bigint
