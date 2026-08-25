@@ -1607,13 +1607,16 @@ const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 // component never re-seeds from a later prop change), so mounting it before `loadTemplateForEdit`
 // resolves the real draft would permanently strand the session on the empty placeholder. Both
 // `showFormBuilderV2` inputs only ever transition false→true for the life of one view instance:
-// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once in
-// `loadTemplateForEdit` and never reset — so `showFormBuilderV2` cannot flip back to false, and the
-// `v-if` mount is NOT re-evaluated by ordinary editing/tab-switching (the outer step chrome uses
-// v-show, not v-if — see `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY
-// thing that remounts (reseeds) the builder, and it is bumped ONLY at the three existing
-// server-round-trip points (`persistDraft` update/create, `createFromPreset`) that already call
-// `reseedFormHistoryFromDraft()` for the legacy history stack — never on routine field edits.
+// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once
+// per view instance by whichever `loadTemplateForEdit` ticket completes first (a route reload
+// re-runs the loader, but the flag only ever transitions false→true) — so `showFormBuilderV2`
+// cannot flip back to false, and the `v-if` mount is NOT re-evaluated by ordinary
+// editing/tab-switching (the outer step chrome uses v-show, not v-if — see
+// `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY thing that remounts
+// (reseeds) the builder, and it is bumped ONLY at DRAFT-REPLACEMENT points (invariant updated
+// with round 5 — the original text said "the three server-round-trip points", falsified twice
+// over by that round): `persistDraft` update/create, `createFromPreset`, a successful
+// route-reload apply, and the edit->new synchronous reset — never on routine field edits.
 const formSessionHydrated = ref(false)
 const formBuilderSessionEpoch = ref(0)
 const showFormBuilderV2 = computed(() => canvasV2Enabled.value && formSessionHydrated.value)
