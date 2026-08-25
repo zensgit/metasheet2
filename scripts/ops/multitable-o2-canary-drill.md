@@ -93,50 +93,111 @@
 > revert/reset canary drilled without this step cannot get past `RECOVERY_TRUST_REQUIRED` /
 > `NO_COVERING_CHECKPOINT` regardless of which later flags are on.
 
-### 3.1 Prerequisites (verify before dispatching activation)
+### 3.1 Standing prerequisites (verify; nothing here changes a flag)
+
+Every item below is a state to CONFIRM before §3.2 is entered. The flag ON/OFF window itself is
+§3.2's ordered sequence — do not turn anything on while working through this subsection.
 
 - [ ] Fence is already on: `MULTITABLE_ENABLE_WRITER_FENCE=true` on the target host (this is
   the `l2-fence` posture this rung sits inside — activation additionally requires it at the
   route layer: `univer-meta.ts`'s `POST /sheets/:sheetId/trust-checkpoint-activate` handler
   checks `TRUST_CHECKPOINT_FENCE_REQUIRED` (~`univer-meta.ts:10171`, gate on
   `isWriterFenceEnabled()`) and refuses **409** before touching the DB if the fence is off.
-- [ ] Activation flag is on for this transient window only:
-  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true`. Without it the route refuses
-  **403** `TRUST_CHECKPOINT_ACTIVATION_DISABLED` (~`univer-meta.ts:10164`) before any auth or
-  DB work — a values-free, no-oracle refusal.
-- [ ] Owner-designated canary sheet only. A parallel lane is introducing
-  `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (unset ⇒ refuse-all) to make this
-  enforced at the route rather than by operator discipline alone; until that lane lands,
-  the discipline is manual — do not provision a checkpoint on any sheet outside the drill
-  log's declared canary set, and never on a customer sheet. Re-read that env var's actual
-  gate shape once the parallel lane merges — this runbook does not assume its error code or
-  status.
-- [ ] Confirm posture before dispatching: containment `mode=postdeploy-full`,
-  `posture=l2-fence` → PASS (§1's sentinel), on the canary host only.
+- [ ] Activation flag is currently **OFF**: `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION`
+  unset (or not `true`). It is turned on for exactly one transient window in §3.2 step 2 and
+  removed again in step 5. It must be off when this section is entered, because §3.2 step 1's
+  entry posture (`l2-fence`) is *defined* by activation being off (ladder E1.2 posture matrix)
+  — a host that already has it on is not at the rung L2-C is entered from. While it is off the
+  route refuses **403** `TRUST_CHECKPOINT_ACTIVATION_DISABLED` (~`univer-meta.ts:10164`) before
+  any auth or DB work — a values-free, no-oracle refusal.
+- [ ] Canary sheet allowlist is set to the drill log's declared canary sheet — a **current,
+  route-enforced prerequisite** (landed on `main` with #5157), not a future work item.
+  `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` is a comma-separated list of sheet ids matched
+  **exactly** — no prefix, no glob, no case-folding
+  (`packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts`,
+  `resolveTrustCheckpointSheetAllowlist` / `isTrustCheckpointSheetAllowlisted`). It is
+  **fail-closed**: unset, empty, or only whitespace/commas ⇒ activation is refused for **every**
+  sheet, the canary included, so an owner designation is now a precondition by construction
+  rather than by operator discipline. Refusal: **409**
+  `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED`, values-free — it names the env var and the required
+  owner action, never the requested sheet id and never the list's contents.
+  - The list is still narrow by *policy* as well: put the drill log's declared canary sheet(s) in
+    it and nothing else, and never a customer sheet.
+- [ ] §1's preconditions are in hand for THIS host, in particular Q1 = 9 rows all
+  `enabled_state = 'O'`. The activation path takes the recovery-authority lease, which is
+  unavailable unless that substrate is exactly 9/9 ARMED (see the refusal table in §3.2 step 4).
 
-### 3.2 Provision the checkpoint
+### 3.2 The ordered L2-C window
 
-- [ ] OWNER-GATED (D2 sheet-admin write, one fenced transaction — design lock §3): mint the
-  checkpoint with `POST /sheets/:sheetId/trust-checkpoint-activate` (no body) against the
-  canary sheet, using a sheet-admin (`canManageSheetAccess`) actor.
-  - Expected refusals if a prerequisite is missing (fail closed, nothing written in every
-    case): **403** `TRUST_CHECKPOINT_ACTIVATION_DISABLED` (activation flag off), **409**
-    `TRUST_CHECKPOINT_FENCE_REQUIRED` (writer fence off), **409** `HISTORY_INCOMPLETE`
-    (a trashed-only record with unattributable vintage — `CheckpointUnattributableTrashError`,
-    owner P1 fail-closed abort), **409** `RECOVERY_IN_PROGRESS` (a recovery holds the sheet's
-    writer-fence lease right now — retry once it completes), **409** `ACTIVATION_CONFLICT`
-    (a racing second activation won the one-active partial-unique first — retry to supersede).
+The ladder's E1.1 item 2 fixes this order and it is **not** interchangeable. `l2-fence` is
+"fence ON, activation OFF" and `l2-checkpoint` is "fence ON, activation ON" (ladder E1.2 posture
+matrix), and the containment workflow fails closed on any mismatch — so an `l2-fence` PASS asked
+for *after* activation is turned on can never succeed, and the `l2-checkpoint` PASS is what proves
+the exact posture *before* anything is written:
+
+```
+l2-fence PASS -> activation ON -> l2-checkpoint PASS -> activate the checkpoint
+              -> activation OFF -> l2-fence PASS
+```
+
+- [ ] **Step 1 — entry posture (`l2-fence`), taken while activation is still OFF.**
+  OWNER-GATED: dispatch the containment workflow with `mode=postdeploy-full`, the canary
+  `target`, and `posture=l2-fence`. Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-fence' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  Anything else — including a FAIL that merely looks red on the flags this rung opens — is a
+  mismatch: ⛔ STOP per §0. This step can only pass with activation off, which is exactly why it
+  comes first.
+- [ ] **Step 2 — open the transient window: activation ON.** Set
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true` on the canary host only and apply it the
+  way that host's next-restart configuration is normally applied. This is the rung's own
+  owner/ops flag action (§0), not something this runbook performs; no posture is dispatched here,
+  because step 3 is what proves the flag actually took on both the running and next-restart legs.
+- [ ] **Step 3 — prove the exact posture (`l2-checkpoint`) BEFORE any checkpoint is written.**
+  OWNER-GATED: dispatch containment `mode=postdeploy-full`, `posture=l2-checkpoint`.
+  Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-checkpoint' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  ⛔ STOP on anything else — in particular, do **not** proceed to step 4 on the strength of step
+  1's PASS: that one described a different posture.
+- [ ] **Step 4 — activate the checkpoint (exactly once).** OWNER-GATED (D2 sheet-admin write, one
+  fenced transaction — design lock §3): mint it with
+  `POST /sheets/:sheetId/trust-checkpoint-activate` (no body) against the canary sheet, using a
+  sheet-admin (`canManageSheetAccess`) actor.
   - Expected success: **200** with `{ checkpointId, trustedSinceSeq, baselineCount }`. Record
     all three in the drill log verbatim (values-free elsewhere, but these three identifiers
     ARE the checkpoint evidence ladder E1.1 item 2 requires).
-- [ ] Confirm posture immediately after: containment `mode=postdeploy-full`,
-  `posture=l2-checkpoint` → PASS (activation flag observed ON, alongside fence).
-- [ ] Remove the activation flag from the environment and restart (or however the target's
-  next-restart config is normally applied) — this is the "immediately restore OFF" half of
-  E1.1 item 2. It must not be left in standing configuration.
-- [ ] Re-confirm posture: containment `mode=postdeploy-full`, `posture=l2-fence` → PASS
-  (activation flag observed OFF again, fence still ON). This is the exit criterion for L2-C:
-  a checkpoint now exists for the canary sheet, and the environment is back to `l2-fence`.
+  - Expected refusals if a prerequisite is missing — fail closed, **nothing written in every
+    case**, listed in the route's own evaluation order so it is clear which refusal shadows
+    which:
+
+    | Refusal | Status | Meaning |
+    |---|---|---|
+    | `TRUST_CHECKPOINT_ACTIVATION_DISABLED` | 403 | activation flag off — step 2 did not take |
+    | `TRUST_CHECKPOINT_FENCE_REQUIRED` | 409 | writer fence off (§3.1 item 1) |
+    | (uniform `FORBIDDEN`) | 403 | actor is not a sheet-admin by CURRENT database rows — claims alone never widen the grant, and the same 403 is returned again from inside the fenced transaction |
+    | `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED` | 409 | sheet is not in `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (§3.1 item 3). Unset/empty refuses everything |
+    | `NOT_FOUND` | 404 | no such sheet — ordered after the allowlist so a designation-less deployment leaks no existence oracle |
+    | `HISTORY_INCOMPLETE` | 409 | a trashed-only record with unattributable vintage (`CheckpointUnattributableTrashError`, owner P1 fail-closed abort) |
+    | `RECOVERY_IN_PROGRESS` | 409 | a recovery holds the sheet's writer-fence lease right now — retry once it completes |
+    | `ACTIVATION_CONFLICT` | 409 | a racing second activation won the one-active partial-unique first — retry to supersede |
+
+  - Two further refusals are **introduced by #5162** (the actor-authority-lease slice), which is
+    not merged at the time of writing — expect them on this route once that lane lands, and treat
+    their absence on an older image as "that image predates #5162", not as a missing gate:
+
+    | Refusal | Status | `details.retryable` | Meaning |
+    |---|---|---|---|
+    | `TRUST_CHECKPOINT_AUTHORITY_BUSY` | 409 | `true` | the actor-authority lease is contended. Accepted busy sources include automation's `LOCK TABLE field_permissions IN SHARE MODE` and L1's own trigger `ALTER TABLE … ENABLE TRIGGER`, as well as a concurrent permission writer or recovery — the refusal names the substrate, not one contender. Nothing was written; an explicit operator retry is the correct response |
+    | `TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE` | 409 | `false` | the recovery-authority substrate is not exactly 9/9 ARMED, so the lease cannot be taken. This is the **intended fail-closed rung precedence**: activation is unavailable *before* L1 completes, by design. It is not a bug and not a transient state — do not retry it. In a correctly sequenced drill it cannot fire at all, because §1's Q1 precondition (9 rows, all `enabled_state = 'O'`) is already in hand; seeing it here means that precondition was not actually met on this host |
+
+- [ ] **Step 5 — close the window: activation OFF.** Remove
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` from the environment and restart (or however
+  the target's next-restart config is normally applied) — this is the "immediately restore OFF"
+  half of E1.1 item 2. It must not be left in standing configuration.
+- [ ] **Step 6 — exit posture (`l2-fence`) again.** OWNER-GATED: dispatch containment
+  `mode=postdeploy-full`, `posture=l2-fence`. Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-fence' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  (activation observed OFF again on both legs, fence still ON). This is the exit criterion for
+  L2-C: a checkpoint now exists for the canary sheet, and the environment is back at `l2-fence`.
 
 ### 3.3 Hand the canary ids to the acceptance harness — it must NOT mint its own sheet
 
@@ -150,9 +211,10 @@ refuses `NO_COVERING_CHECKPOINT` on every preview, forever — the rung would be
   harness process as `RESET_CANARY_BASE_ID` and `RESET_CANARY_SHEET_ID`. **Both or neither** — one alone
   is a config error (exit 2). These two are operator-side inputs to a local process, not host
   configuration: they are not feature flags and are not registered in the global-history flag manifest.
-- [ ] `RESET_CANARY_SHEET_ID` must name the SAME sheet §3.2 activated the checkpoint on — that is, exactly
-  a sheet the operator would list in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` of
-  §3.1. A neighbouring sheet in the same canary base does not inherit the checkpoint.
+- [ ] `RESET_CANARY_SHEET_ID` must name the SAME sheet §3.2 step 4 activated the checkpoint on — which is
+  necessarily a sheet listed in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` of §3.1,
+  because activation refuses every sheet outside it. A neighbouring sheet in the same canary base does
+  not inherit the checkpoint.
 - [ ] With the pair UNSET the harness still runs the scenarios that legitimately own their fixtures — the
   flag-off inertness pair, the D2 sheet-admin refusal, the typed-confirm refusal and the size-ceiling
   refusal, each of which refuses UPSTREAM of the covering-checkpoint gate — but the reset-BEHAVIOR
