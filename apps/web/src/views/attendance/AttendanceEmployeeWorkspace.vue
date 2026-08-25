@@ -1046,6 +1046,7 @@ const hasRequestBody = computed(() =>
   gap: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
   padding-top: var(--ms-space-3, 12px);
   min-width: 0;
+  max-width: 100%;
 }
 
 .attendance-ew__history-filters-panel .attendance__field,
@@ -1460,6 +1461,10 @@ const hasRequestBody = computed(() =>
 
   .attendance__filters .attendance__field {
     width: 100%;
+  }
+
+  .attendance-ew__history-filters-panel {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .attendance-ew__balance-toggle .attendance__btn {

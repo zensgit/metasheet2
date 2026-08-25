@@ -132,6 +132,7 @@ describe('attendance web guard workflow contract', () => {
       'attendanceEmployeeWorkspaceCommonIcons',
       'attendanceEmployeeWorkspacePresentation',
       'useAttendanceAdminConfig',
+      'attendanceOverviewRequestReveal',
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))

@@ -975,6 +975,24 @@ describe('Attendance self-service dashboard', () => {
     expect(vi.mocked(apiFetch).mock.calls.length).toBe(callsBefore)
   })
 
+  it('我的申请 deep link (section=attendance-overview-requests, no requestId) opens the request/makeup disclosure', async () => {
+    app = createApp(AttendanceView, {
+      mode: 'overview',
+      initialSectionId: 'attendance-overview-requests',
+    })
+    app.mount(container!)
+    await flushUi(8)
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    const form = container!.querySelector<HTMLInputElement>('#attendance-request-work-date')
+    expect(requestTools).toBeTruthy()
+    expect(requestTools.open, '我的申请 entry must open the request/makeup disclosure').toBe(true)
+    expect(form).toBeTruthy()
+    expect(requestTools.contains(form)).toBe(true)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelector('#attendance-overview-requests')).toBeTruthy()
+  })
+
   it('below-fold IA: a quick action opens the request/makeup disclosure without a second form', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)

@@ -181,15 +181,15 @@
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
         <template #historyFilters>
-          <label class="attendance__field" for="attendance-from-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
             <span>{{ tr('From', '开始') }}</span>
             <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
           </label>
-          <label class="attendance__field" for="attendance-to-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-to-date">
             <span>{{ tr('To', '结束') }}</span>
             <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
           </label>
-          <label class="attendance__field" for="attendance-org-id">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-org-id">
             <span>{{ tr('Org ID', '组织 ID') }}</span>
             <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
           </label>
@@ -197,7 +197,7 @@
                tab is even less gated (self-service, open to every authenticated user by design),
                so the admin-only-by-default AttendanceUserPickerField was NOT swapped in here
                either. See the report-export block's comment for the full reasoning. -->
-          <label class="attendance__field" for="attendance-user-id">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-user-id">
             <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
             <input
               id="attendance-user-id"
@@ -207,7 +207,7 @@
               :placeholder="tr('Current user', '当前用户')"
             />
           </label>
-          <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
+          <button class="attendance__btn attendance-ew__history-filter-control" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
             {{ tr('Refresh', '刷新') }}
           </button>
         </template>
@@ -10289,6 +10289,7 @@ import {
 } from './attendance/halfDayLeaveHelper'
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
 import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
+import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -14856,13 +14857,24 @@ function revealOverviewRequestTools(): void {
   revealOverviewHistoryDetails(tools)
 }
 
+function overviewRequestToolsElement(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  return tools instanceof HTMLElement ? tools : null
+}
+
 async function scrollToOverviewSection(id: AttendanceOverviewSectionId, focusTargetId?: string): Promise<void> {
   if (typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(id) ?? document.getElementById(id)
-  if (id === ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies) {
-    revealOverviewHistoryDetails(target)
+  if (shouldRevealOverviewRequestTools(id)) {
+    revealOverviewRequestTools()
   }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    id === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(id) ?? document.getElementById(id)
   if (target instanceof HTMLElement) {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -15588,11 +15600,14 @@ async function focusInitialAttendanceSection(): Promise<void> {
     hydrateAttendanceGroupFromRoute(props.routeGroupContext)
     return
   }
-  if (showOverview.value && attendancePluginActive.value && props.initialRequestId.trim()) {
+  const targetId = props.initialSectionId.trim()
+  const revealRequests = showOverview.value
+    && attendancePluginActive.value
+    && shouldRevealOverviewRequestTools(targetId, props.initialRequestId)
+  if (revealRequests) {
     await nextTick()
     revealOverviewRequestTools()
   }
-  const targetId = props.initialSectionId.trim()
   if (!targetId || !attendancePluginActive.value) return
 
   if (showAdmin.value && !adminForbidden.value && isKnownAdminSectionId(targetId)) {
@@ -15602,7 +15617,15 @@ async function focusInitialAttendanceSection(): Promise<void> {
 
   if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
+  if (revealRequests) {
+    revealOverviewRequestTools()
+  }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    showOverview.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
     revealOverviewHistoryDetails(target)
     target.scrollIntoView({ behavior: 'auto', block: 'start' })
@@ -29680,6 +29703,18 @@ defineExpose({
   border: 1px solid #d0d0d0;
   border-radius: 6px;
   min-width: 180px;
+}
+
+/* Parent-owned slotted history filters: the 180px input min-width above
+   would overflow a 390px card. These classes live in this file so they
+   actually win over the slot content (child scoped CSS cannot). */
+.attendance-ew__history-filter-control,
+.attendance-ew__history-filter-control input,
+.attendance-ew__history-filter-control select {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .attendance__input--invalid {
