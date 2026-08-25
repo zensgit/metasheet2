@@ -332,6 +332,8 @@ export const ATTENDANCE_PUNCH_POLICY_CLOSED_SET_KEYS_OUT = [
   'reportSync',
   // Work-date attribution affects accounting, not the org-inherited punch-method posture.
   'workDateAttribution',
+  // Employee 常用 tile pictograms are visual-only; they do not change punch-method posture.
+  'employeeQuickActionIcons',
 ] as const
 
 function deepEqualJsonValue(a: unknown, b: unknown): boolean {

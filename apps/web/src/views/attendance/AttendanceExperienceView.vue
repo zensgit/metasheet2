@@ -255,8 +255,6 @@ const availableTabs = computed<Array<{ id: AttendanceTab; label: string }>>(() =
   return tabs
 })
 
-const desktopOnlyBlocked = computed(() => isMobile.value && desktopOnlyTabs.includes(activeTab.value))
-
 const desktopOnlyMessage = computed(() => {
   if (activeTab.value === 'workflow') {
     return t.value.workflowDesktopHint
@@ -278,6 +276,21 @@ const adminInitialSectionId = computed(() => {
   const section = Array.isArray(route.query.section) ? route.query.section[0] : route.query.section
   return typeof section === 'string' && section.startsWith('attendance-admin-') ? section : ''
 })
+
+// #4354 explicitly ships the attendance-group list-detail workspace as a mobile
+// one-column flow. Keep every other admin/import/workflow surface behind the
+// existing desktop-first gate; this is the only mobile admin deep link allowed.
+const mobileAttendanceGroupWorkspaceAllowed = computed(() => (
+  activeTab.value === 'admin'
+  && !groupRouteActive.value
+  && adminInitialSectionId.value === 'attendance-admin-groups'
+))
+
+const desktopOnlyBlocked = computed(() => (
+  isMobile.value
+  && desktopOnlyTabs.includes(activeTab.value)
+  && !mobileAttendanceGroupWorkspaceAllowed.value
+))
 
 function matchesMediaQuery(query: string): boolean {
   try {

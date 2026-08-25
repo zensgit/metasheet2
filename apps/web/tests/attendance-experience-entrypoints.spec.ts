@@ -528,6 +528,33 @@ describe('Attendance experience entrypoints', () => {
     expect(container!.textContent).not.toContain('Desktop recommended')
   })
 
+  it('allows the attendance-group list-detail section on mobile while keeping the admin gate narrow', async () => {
+    routeState.query = { tab: 'admin', section: 'attendance-admin-groups' }
+
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('max-width: 899px') || query.includes('pointer: coarse'),
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    })
+
+    app = createApp(AttendanceExperienceView)
+    app.mount(container!)
+    await flushUi()
+
+    const adminView = container!.querySelector<HTMLElement>('[data-view="admin"]')
+    expect(adminView?.dataset.section).toBe('attendance-admin-groups')
+    expect(container!.textContent).not.toContain('Desktop recommended')
+  })
+
   it('returns a mobile-blocked group route to its normalized returnTo', async () => {
     const groupId = '11111111-2222-4333-8444-555555555555'
     const returnTo = '/attendance?tab=admin&section=attendance-admin-groups'

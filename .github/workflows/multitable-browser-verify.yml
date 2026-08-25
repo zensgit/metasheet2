@@ -31,6 +31,9 @@ on:
       - 'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
       - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
+      # #4354: this shared browser lane also carries the attendance group workspace
+      # viewport contract, so AttendanceView changes must re-run it.
+      - 'apps/web/src/views/AttendanceView.vue'
       - 'apps/web/verification/**'
       - 'apps/web/playwright.verification.config.ts'
       - '.github/workflows/multitable-browser-verify.yml'

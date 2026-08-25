@@ -59,11 +59,14 @@ export function mergeLiveNodeConfigsOntoTopology(
       return {
         key: node.key,
         type: node.type,
-        ...(liveNode.name !== undefined
-          ? { name: liveNode.name }
-          : node.name !== undefined
-            ? { name: node.name }
-            : {}),
+        // NAME COMES FROM THE RESTORED GRAPH, not the live one (E-P2-4/G-P3-1, 2026-08-25).
+        // The live-name overlay existed to keep renames alive across topology undos back when
+        // rename mutated the draft OUTSIDE history; now that rename is itself a history entry
+        // (a topology op), stack ordering provides that — a topology undo restores a graph that
+        // already carries whatever name state existed at that point — and the overlay's only
+        // remaining effect was to make rename itself un-undoable (undo restored the old graph,
+        // then the overlay stamped the new name straight back on).
+        ...(node.name !== undefined ? { name: node.name } : {}),
         config: cloneJson(liveNode.config),
       }
     }),
