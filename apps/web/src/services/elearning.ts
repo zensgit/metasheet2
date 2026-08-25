@@ -58,7 +58,7 @@ export class ElearningApiError extends Error {
 export interface ElearningMediaUploadResult {
   id: string
   status: 'ready'
-  durationMs: number | null
+  durationMs: number
   sizeBytes: number
   sha256: string
 }
@@ -66,7 +66,7 @@ export interface ElearningMediaUploadResult {
 interface ElearningMediaUploadRejected {
   id: string
   status: 'rejected'
-  durationMs: number | null
+  durationMs: null
   sizeBytes: number
   sha256: string
 }

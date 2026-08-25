@@ -27,6 +27,8 @@ const INDEX_SRC = join(repoRoot, 'packages/core-backend/src/index.ts')
 const UNIT_DIR = join(repoRoot, 'packages/core-backend/tests/unit')
 const INTEGRATION_DIR = join(repoRoot, 'packages/core-backend/tests/integration')
 const WEB_TEST_DIR = join(repoRoot, 'apps/web/tests')
+const OPENAPI_JSON = join(repoRoot, 'packages/openapi/dist/openapi.json')
+const OPENAPI_SDK = join(repoRoot, 'packages/openapi/dist-sdk/index.d.ts')
 
 const SUITES = readdirSync(UNIT_DIR)
   .filter((name) => /^elearning-.*\.test\.ts$/.test(name))
@@ -606,6 +608,36 @@ test('elearning V0.1 frontend specs exist on disk', () => {
   for (const file of WEB_SPECS) {
     assert.ok(existsSync(join(repoRoot, 'apps/web', file)), `${file} must exist on disk`)
   }
+})
+
+test('media upload OpenAPI and generated SDK keep the ready/rejected discriminated union', () => {
+  const openapi = JSON.parse(readFileSync(OPENAPI_JSON, 'utf8'))
+  const schemas = openapi?.components?.schemas
+  const result = schemas?.ElearningMediaUploadResult
+  const ready = schemas?.ElearningMediaUploadReadyResult
+  const rejected = schemas?.ElearningMediaUploadRejectedResult
+
+  assert.deepEqual(result?.oneOf, [
+    { $ref: '#/components/schemas/ElearningMediaUploadReadyResult' },
+    { $ref: '#/components/schemas/ElearningMediaUploadRejectedResult' },
+  ])
+  assert.deepEqual(result?.discriminator, {
+    propertyName: 'status',
+    mapping: {
+      ready: '#/components/schemas/ElearningMediaUploadReadyResult',
+      rejected: '#/components/schemas/ElearningMediaUploadRejectedResult',
+    },
+  })
+  assert.deepEqual(ready?.properties?.status?.enum, ['ready'])
+  assert.equal(ready?.properties?.durationMs?.minimum, 1)
+  assert.equal(ready?.properties?.durationMs?.nullable, undefined)
+  assert.deepEqual(rejected?.properties?.status?.enum, ['rejected'])
+  assert.equal(rejected?.properties?.durationMs?.nullable, true)
+  assert.deepEqual(rejected?.properties?.durationMs?.enum, [null])
+
+  const sdk = readFileSync(OPENAPI_SDK, 'utf8')
+  assert.match(sdk, /ElearningMediaUploadReadyResult:[\s\S]*?status: "ready";[\s\S]*?durationMs: number;/)
+  assert.match(sdk, /ElearningMediaUploadRejectedResult:[\s\S]*?status: "rejected";[\s\S]*?durationMs: null;/)
 })
 
 test('elearning-web-guard.yml parses, installs frozen deps, and runs the four whole spec files', () => {

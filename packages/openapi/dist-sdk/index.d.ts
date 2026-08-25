@@ -17426,16 +17426,36 @@ export interface components {
             error: "rejected";
             rejected: components["schemas"]["ElearningMediaReject"][];
         };
-        /** @description Values-free media metadata. Never includes storageKey or client duration. */
-        ElearningMediaUploadResult: {
+        /** @description Values-free ready media metadata. Never includes storageKey or client duration. */
+        ElearningMediaUploadReadyResult: {
             id: components["schemas"]["ElearningUuid"];
-            /** @enum {string} */
-            status: "ready" | "rejected";
-            /** @description Server-probed duration in milliseconds. Null when status is rejected. */
-            durationMs: number | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "ready";
+            /** @description Positive server-probed duration in milliseconds. */
+            durationMs: number;
             sizeBytes: number;
             sha256: string;
         };
+        /** @description Values-free rejected media metadata. Never includes storageKey or client duration. */
+        ElearningMediaUploadRejectedResult: {
+            id: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "rejected";
+            /**
+             * @description Always null because rejected media has no trusted duration.
+             * @enum {integer|null}
+             */
+            durationMs: null;
+            sizeBytes: number;
+            sha256: string;
+        };
+        ElearningMediaUploadResult: components["schemas"]["ElearningMediaUploadReadyResult"] | components["schemas"]["ElearningMediaUploadRejectedResult"];
         ElearningPublishOption: {
             id: string;
             text: string;

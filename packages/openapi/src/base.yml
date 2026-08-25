@@ -4688,27 +4688,58 @@ components:
           minItems: 1
           items:
             $ref: '#/components/schemas/ElearningMediaReject'
-    ElearningMediaUploadResult:
+    ElearningMediaUploadReadyResult:
       type: object
       additionalProperties: false
       required: [id, status, durationMs, sizeBytes, sha256]
-      description: Values-free media metadata. Never includes storageKey or client duration.
+      description: Values-free ready media metadata. Never includes storageKey or client duration.
       properties:
         id:
           $ref: '#/components/schemas/ElearningUuid'
         status:
           type: string
-          enum: [ready, rejected]
+          enum: [ready]
         durationMs:
           type: integer
-          nullable: true
-          description: Server-probed duration in milliseconds. Null when status is rejected.
+          minimum: 1
+          description: Positive server-probed duration in milliseconds.
         sizeBytes:
           type: integer
           minimum: 1
         sha256:
           type: string
           pattern: '^[a-f0-9]{64}$'
+    ElearningMediaUploadRejectedResult:
+      type: object
+      additionalProperties: false
+      required: [id, status, durationMs, sizeBytes, sha256]
+      description: Values-free rejected media metadata. Never includes storageKey or client duration.
+      properties:
+        id:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [rejected]
+        durationMs:
+          type: integer
+          nullable: true
+          enum: [null]
+          description: Always null because rejected media has no trusted duration.
+        sizeBytes:
+          type: integer
+          minimum: 1
+        sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+    ElearningMediaUploadResult:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningMediaUploadReadyResult'
+        - $ref: '#/components/schemas/ElearningMediaUploadRejectedResult'
+      discriminator:
+        propertyName: status
+        mapping:
+          ready: '#/components/schemas/ElearningMediaUploadReadyResult'
+          rejected: '#/components/schemas/ElearningMediaUploadRejectedResult'
     ElearningPublishOption:
       type: object
       additionalProperties: false
