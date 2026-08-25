@@ -124,4 +124,17 @@ describe('attendance web guard workflow contract', () => {
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
     }
   })
+
+  it('keeps employee 常用 icon specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'attendanceEmployeeQuickActionIcons',
+      'attendanceEmployeeWorkspaceCommonIcons',
+      'attendanceEmployeeWorkspacePresentation',
+      'useAttendanceAdminConfig',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
 })
