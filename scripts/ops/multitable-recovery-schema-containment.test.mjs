@@ -530,6 +530,7 @@ const batteryMarkers = (timestamp) =>
   )
 const BATTERY_MARKER_TIMESTAMPS = [
   '2026-08-24T10:25:20.000000000Z',
+  '2026-08-25T02:34:30.000000000Z',
   '2026-08-25T10:27:00.000000000Z',
   '2026-08-25T13:14:50.000000000Z',
   '2026-08-25T14:54:40.000000000Z',
@@ -1022,7 +1023,7 @@ test('containment behavior 7: postdeploy-full still fails on a running-env flag=
   )
 })
 
-test('L1 PostgreSQL witness: four retained battery controls and no outside anomaly produce a values-free PASS', () => {
+test('L1 PostgreSQL witness: five retained battery controls and no outside anomaly produce a values-free PASS', () => {
   const result = runRemote({
     target: 'staging',
     mode: 'l1-postgres-window',
@@ -1030,10 +1031,10 @@ test('L1 PostgreSQL witness: four retained battery controls and no outside anoma
   })
 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
-  assert.match(result.stdout, /positive_controls=4\/4/)
-  assert.match(result.stdout, /battery_marker_counts=11,11,11,11/)
-  assert.match(result.stdout, /authority_busy_total=44/)
-  assert.match(result.stdout, /authority_busy_constructed=44/)
+  assert.match(result.stdout, /positive_controls=5\/5/)
+  assert.match(result.stdout, /battery_marker_counts=11,11,11,11,11/)
+  assert.match(result.stdout, /authority_busy_total=55/)
+  assert.match(result.stdout, /authority_busy_constructed=55/)
   assert.match(result.stdout, /authority_busy_outside_constructed=0/)
   assert.match(result.stdout, /deadlocks=0/)
   assert.match(result.stdout, /parse_errors=0/)
@@ -1060,7 +1061,7 @@ test('L1 PostgreSQL witness: every one of the 11 markers in every battery window
       posture: 'l1-armed',
       stub: { STUB_PG_LOGS: lines.join('\n') },
     })
-    const expectedCounts = [11, 11, 11, 11]
+    const expectedCounts = [11, 11, 11, 11, 11]
     expectedCounts[windowIndex] = 10
 
     assert.equal(result.status, 2)
@@ -1068,7 +1069,7 @@ test('L1 PostgreSQL witness: every one of the 11 markers in every battery window
       result.stdout,
       new RegExp(`battery_marker_counts=${expectedCounts.join(',')}`),
     )
-    assert.match(result.stdout, /positive_controls=3\/4/)
+    assert.match(result.stdout, /positive_controls=4\/5/)
     assert.match(result.stdout, /VERDICT: FAIL/)
     assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
   }
@@ -1084,7 +1085,7 @@ test('L1 PostgreSQL witness: an extra marker in any battery window cannot hide a
         STUB_PG_LOGS: `${CLEAN_L1_POSTGRES_LOGS}\n${timestamp} ERROR: ${AUTHORITY_BUSY_MARKER}`,
       },
     })
-    const expectedCounts = [11, 11, 11, 11]
+    const expectedCounts = [11, 11, 11, 11, 11]
     expectedCounts[windowIndex] = 12
 
     assert.equal(result.status, 2)
@@ -1092,7 +1093,7 @@ test('L1 PostgreSQL witness: an extra marker in any battery window cannot hide a
       result.stdout,
       new RegExp(`battery_marker_counts=${expectedCounts.join(',')}`),
     )
-    assert.match(result.stdout, /positive_controls=3\/4/)
+    assert.match(result.stdout, /positive_controls=4\/5/)
     assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
   }
 })

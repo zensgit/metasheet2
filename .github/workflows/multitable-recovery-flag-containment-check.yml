@@ -241,7 +241,7 @@ jobs:
 
           # One-time L1 observation witness. All bounds, positive-control windows, marker text, and
           # container identity are reviewed constants; no caller value can widen the log read. Raw log
-          # lines never leave the host. PostgreSQL logs every authority-busy raise, while four known
+          # lines never leave the host. PostgreSQL logs every authority-busy raise, while five known
           # battery runs prove the retained log spans the full observation window.
           if [ "$MODE" = "l1-postgres-window" ]; then
             if [ "$TARGET" != "staging" ] || [ "$POSTURE" != "l1-armed" ]; then
@@ -300,9 +300,10 @@ jobs:
               -v log_driver="$log_driver" \
               -v marker="METASHEET_RECOVERY_AUTHORITY_BUSY" \
               -v w1_start="2026-08-24T10:25:17.641000000Z" -v w1_end="2026-08-24T10:25:40.999999999Z" \
-              -v w2_start="2026-08-25T10:26:50.000000000Z" -v w2_end="2026-08-25T10:27:25.999999999Z" \
-              -v w3_start="2026-08-25T13:14:38.000000000Z" -v w3_end="2026-08-25T13:15:15.999999999Z" \
-              -v w4_start="2026-08-25T14:54:30.000000000Z" -v w4_end="2026-08-25T14:55:05.999999999Z" '
+              -v w2_start="2026-08-25T02:34:20.000000000Z" -v w2_end="2026-08-25T02:34:55.999999999Z" \
+              -v w3_start="2026-08-25T10:26:50.000000000Z" -v w3_end="2026-08-25T10:27:25.999999999Z" \
+              -v w4_start="2026-08-25T13:14:38.000000000Z" -v w4_end="2026-08-25T13:15:15.999999999Z" \
+              -v w5_start="2026-08-25T14:54:30.000000000Z" -v w5_end="2026-08-25T14:55:05.999999999Z" '
               function normalize_timestamp(raw, base, fraction) {
                 if (raw !~ /^20[0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?Z$/) return ""
                 base = raw
@@ -331,14 +332,15 @@ jobs:
                   if (in_window(timestamp, w2_start, w2_end)) { w2++; constructed = 1 }
                   if (in_window(timestamp, w3_start, w3_end)) { w3++; constructed = 1 }
                   if (in_window(timestamp, w4_start, w4_end)) { w4++; constructed = 1 }
+                  if (in_window(timestamp, w5_start, w5_end)) { w5++; constructed = 1 }
                   if (constructed) marker_constructed++; else marker_outside++
                 }
                 if (index(lowered, "deadlock detected") > 0) deadlocks++
               }
               END {
-                controls = (w1 == 11) + (w2 == 11) + (w3 == 11) + (w4 == 11)
-                printf "window_start=%s\nwindow_end=%s\nlog_driver=%s\nbattery_marker_counts=%d,%d,%d,%d\npositive_controls=%d/4\nauthority_busy_total=%d\nauthority_busy_constructed=%d\nauthority_busy_outside_constructed=%d\ndeadlocks=%d\nparse_errors=%d\n", obs_start, obs_end, log_driver, w1, w2, w3, w4, controls, marker_total, marker_constructed, marker_outside, deadlocks, parse_errors
-                if (parse_errors > 0 || controls != 4 || marker_outside != 0 || deadlocks != 0) exit 2
+                controls = (w1 == 11) + (w2 == 11) + (w3 == 11) + (w4 == 11) + (w5 == 11)
+                printf "window_start=%s\nwindow_end=%s\nlog_driver=%s\nbattery_marker_counts=%d,%d,%d,%d,%d\npositive_controls=%d/5\nauthority_busy_total=%d\nauthority_busy_constructed=%d\nauthority_busy_outside_constructed=%d\ndeadlocks=%d\nparse_errors=%d\n", obs_start, obs_end, log_driver, w1, w2, w3, w4, w5, controls, marker_total, marker_constructed, marker_outside, deadlocks, parse_errors
+                if (parse_errors > 0 || controls != 5 || marker_outside != 0 || deadlocks != 0) exit 2
               }
             ' "$pg_log" >"$pg_summary"; then
               cat "$pg_summary"
