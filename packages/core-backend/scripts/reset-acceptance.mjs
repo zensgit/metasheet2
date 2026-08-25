@@ -300,6 +300,12 @@ export async function setup(canary = resolveCanaryTarget()) {
  * `{ data: { record: { id, version, data } } }`. The response object is returned alongside the value so
  * the caller can assert "readable" and "correct value" SEPARATELY: a 403 on this read must never render
  * byte-identically to "the revert did not happen".
+ *
+ * READING A RED HERE: the read path applies the #2015 field mask
+ * (`filterVisiblePropertyFields` + the D3c composite). If the canary sheet masks this field for the
+ * ADMIN actor, the "readable" leg still passes 200 and the value leg reds with `data[salaryId]=undefined`
+ * — visibly different from a genuine non-revert, which reds with the POST-anchor value. Diagnose an
+ * `undefined` as a field-visibility problem on the canary sheet, not as a reset bug.
  */
 async function readSurvivorSalary(ctx) {
   const res = await api('GET', `/records/${ctx.A}?sheetId=${encodeURIComponent(ctx.sheetId)}`, ADMIN)
