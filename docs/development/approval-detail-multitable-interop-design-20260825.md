@@ -202,7 +202,8 @@ safe);date 只收**文本单元格**中的严格 `YYYY-MM-DD`;datetime 只收带
 不得把它降级为旧 `create` 并误写一行。N=0 仍获取一次动作级主 claim,但写 0 个业务行、revision、
 逐行溯源和 outbox;完整重放返回 `already_applied`。该语义只适用于终态
 `form_snapshot` 中 `detailSourceFieldId` **存在且值为空数组**;字段缺失、`null`、
-非数组或重复字段 id 均必须在父 claim 前以 values-free 错误拒绝,不得被解释为 N=0。
+非数组,或已发布 schema 的 fields 数组中存在重复 id,均必须在父 claim 前以
+values-free 错误拒绝,不得被解释为 N=0。
 
 新镜像必须同时扩展 `FwbWriteMode`、`parseFwbWriteMode`、保存验证与 executor 的**穷尽式**分派。现有
 executor 是 `if update -> update; else -> create`,因此只扩 parser 会把 `create_detail_rows` 静默送入单行
@@ -233,7 +234,9 @@ type FwbMappingSource =
   `create_detail_rows` 调用新的 `deriveFwbDetailConfirmationHash`,主体带显式域标签/
   版本并覆盖 `templateId + sourceTemplateVersionId + targetBaseId + targetSheetId +
   mode + detailSourceFieldId + 完整 source 联合映射`。不得把 detail `source` 形状反向
-  写回旧 mode 的 hash subject。
+  写回旧 mode 的 hash subject。现有 confirm 路由必须在 `parseFwbWriteMode`
+  后改为三个显式 case:create/update 仍调旧函数,detail 调新函数,未知 mode 在哈希前拒绝;
+  禁止在路由末尾无条件继续调用旧函数。
 - 逐行映射保留既有 `mapApprovalFormValues` 的**全有或全无**合同:对任一显式映射,
   源格缺失、`null` 或空白字符串均在父 claim 前以 `missing_required_value` 拒绝整个
   动作。不得因为 `minRows` 播种了空行就静默丢行、压缩 `row_index` 或只写部分列;
@@ -357,6 +360,9 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    owner 下调同一个服务端上限并重跑 A/B census 与全部边界测试,不得以 per-row commit 绕过原子性。
    同一次容量演练必须继续观测该批 200 个 `multitable.record.created` 在 durable dispatcher
    中的排队、端点效果数、重试与租约错误;只量主事务 p95 不能放行 B。
+   实现 PR 进入 review-ready 前必须在台账预先固定数值化的最大排队深度、排空时间和可接受
+   dead-letter/租约错误数;不得在看到实测数字后再改门槛。容量计数按 routing manifest 产生的
+   **consumer 行总数**计,不得只记 200 条 producer event。
 11. **Rolling deploy/rollback:**先 additive migration,再全 worker 新代码且四旗 OFF;flag-ON boot 对
     子表、约束、索引做精确 schema assertion,缺失/漂移即中止。激活前证明所有 dispatcher 都报告
     `create_detail_rows` capability,再按 A→durable/FWB→B 开启。回滚先禁止新规则并关 B,排空/停车相关
