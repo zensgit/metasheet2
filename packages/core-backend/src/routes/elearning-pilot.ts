@@ -35,6 +35,12 @@ import {
   type PublishElearningTrainingPlanInput,
 } from '../services/elearning-training-plan'
 import {
+  assignElearningTrainingPlan,
+  ElearningTrainingPlanAssignmentError,
+  type ElearningTrainingPlanAssignmentDb,
+  type ElearningTrainingPlanAssignmentErrorCode,
+} from '../services/elearning-training-plan-assignment'
+import {
   assignElearningBatch,
   ElearningBatchAssignmentError,
   type ElearningBatchAssignmentDb,
@@ -116,6 +122,7 @@ const PUBLISH_KEYS = new Set([
 const SCOPE_KEYS = new Set(['reason', 'rules'])
 const REVOKE_KEYS = new Set(['reason'])
 const TRAINING_PLAN_PUBLISH_KEYS = new Set(['requestId', 'title', 'items'])
+const TRAINING_PLAN_ASSIGN_KEYS = new Set(['sourceKey', 'deadline', 'rules'])
 const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
@@ -212,6 +219,22 @@ const TRAINING_PLAN_STATUS: Record<ElearningTrainingPlanErrorCode, number> = {
   unavailable: 503,
 }
 
+const TRAINING_PLAN_ASSIGNMENT_STATUS: Record<
+  ElearningTrainingPlanAssignmentErrorCode,
+  number
+> = {
+  invalid_input: 400,
+  not_found: 404,
+  plan_unavailable: 409,
+  course_unavailable: 409,
+  subject_not_found: 422,
+  unsupported_subject: 422,
+  empty_audience: 422,
+  audience_too_large: 422,
+  conflict: 409,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
@@ -225,7 +248,8 @@ export interface ElearningPilotRouteDeps {
     ElearningLearnerCoursesDb &
     ElearningScopeDb &
     ElearningAssignmentLifecycleDb &
-    ElearningTrainingPlanDb
+    ElearningTrainingPlanDb &
+    ElearningTrainingPlanAssignmentDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -239,6 +263,7 @@ export interface ElearningPilotRouteDeps {
   revokeElearningAssignmentMember?: typeof revokeElearningAssignmentMember
   publishElearningTrainingPlan?: typeof publishElearningTrainingPlan
   getElearningTrainingPlan?: typeof getElearningTrainingPlan
+  assignElearningTrainingPlan?: typeof assignElearningTrainingPlan
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -336,6 +361,8 @@ export function createElearningPilotRouter(
     deps.publishElearningTrainingPlan ?? publishElearningTrainingPlan
   const getTrainingPlan =
     deps.getElearningTrainingPlan ?? getElearningTrainingPlan
+  const assignTrainingPlan =
+    deps.assignElearningTrainingPlan ?? assignElearningTrainingPlan
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -705,6 +732,61 @@ export function createElearningPilotRouter(
       } catch (error) {
         if (error instanceof ElearningTrainingPlanError) {
           res.status(TRAINING_PLAN_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/training-plans/:planId/assign',
+    ...gate(deps.adminGuard, 'assignment'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const planId = uuidParam(req, 'planId')
+      const body = readObject(req.body)
+      if (
+        !planId
+        || !body
+        || rejectUnknownKeys(body, TRAINING_PLAN_ASSIGN_KEYS)
+        || !Object.prototype.hasOwnProperty.call(body, 'rules')
+      ) {
+        invalid(res)
+        return
+      }
+      const sourceKey = readRequiredString(body.sourceKey)
+      if (!sourceKey) {
+        invalid(res)
+        return
+      }
+      let deadline: string | null | undefined
+      if (Object.prototype.hasOwnProperty.call(body, 'deadline')) {
+        if (typeof body.deadline === 'string') {
+          deadline = body.deadline
+        } else if (body.deadline === null) {
+          deadline = null
+        } else {
+          invalid(res)
+          return
+        }
+      }
+      try {
+        const result = await assignTrainingPlan(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          planId,
+          sourceKey,
+          deadline,
+          rules: body.rules,
+        })
+        res.status(201).json(result)
+      } catch (error) {
+        if (error instanceof ElearningTrainingPlanAssignmentError) {
+          res.status(TRAINING_PLAN_ASSIGNMENT_STATUS[error.code]).json({
+            error: error.code,
+          })
           return
         }
         res.status(500).json({ error: 'internal_error' })

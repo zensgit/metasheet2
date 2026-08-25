@@ -19,6 +19,8 @@ type AssignmentRevokeRequest = components['schemas']['ElearningAssignmentRevocat
 type AssignmentRevokeResult = components['schemas']['ElearningAssignmentRevocationResult']
 type TrainingPlanPublishRequest = components['schemas']['ElearningTrainingPlanPublishRequest']
 type TrainingPlanPublishResult = components['schemas']['ElearningTrainingPlanPublishResult']
+type TrainingPlanAssignmentRequest = components['schemas']['ElearningTrainingPlanAssignmentRequest']
+type TrainingPlanAssignmentResult = components['schemas']['ElearningTrainingPlanAssignmentResult']
 type TrainingPlan = components['schemas']['ElearningTrainingPlan']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
 type WatchState = components['schemas']['ElearningWatchState']
@@ -130,6 +132,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/{planId}']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/training-plans/{planId}/assign']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
@@ -165,6 +168,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/training-plans/{planId}']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<TrainingPlan>()
+    expectTypeOf<
+      paths['/api/elearning/training-plans/{planId}/assign']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<TrainingPlanAssignmentResult>()
     expectTypeOf<
       paths['/api/elearning/me/courses']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<LearnerList>()
@@ -298,6 +304,13 @@ describe('elearning V0.1 OpenAPI paths', () => {
       itemCount: number
       duplicate: boolean
     }>()
+    expectTypeOf<TrainingPlanAssignmentResult>().toEqualTypeOf<{
+      planAssignmentId: string
+      planVersionId: string
+      assignmentCount: number
+      memberCount: number
+      duplicate: boolean
+    }>()
     expectTypeOf<TrainingPlan>().toEqualTypeOf<{
       planId: string
       title: string
@@ -397,6 +410,11 @@ describe('elearning V0.1 OpenAPI paths', () => {
       requestId: string
       title: string
       items: Array<{ courseVersionId: string; required: boolean }>
+    }>()
+    expectTypeOf<TrainingPlanAssignmentRequest>().toEqualTypeOf<{
+      sourceKey: string
+      deadline?: string | null
+      rules: components['schemas']['ElearningScopeRule'][]
     }>()
   })
 })

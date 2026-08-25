@@ -414,6 +414,11 @@ jobs:
       - name: E-learning L2 training-plan CI wiring contract
         run: node --test scripts/ops/elearning-training-plan-ci-wiring.test.mjs
 
+      # E-learning L2 atomic plan-assignment CI two-point wiring: focused units
+      # stay in the no-DB canary; the PostgreSQL suite runs after migrations.
+      - name: E-learning L2 plan-assignment CI wiring contract
+        run: node --test scripts/ops/elearning-training-plan-assignment-ci-wiring.test.mjs
+
       # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
       # excluded) and named as a whole-file arg of the unit canary; real-DB
       # suites stay in the post-migrate 20.x steps; frontend specs stay in
@@ -882,6 +887,8 @@ jobs:
             tests/unit/elearning-plugin-runtime.test.ts \
             tests/unit/elearning-training-plan-routes.test.ts \
             tests/unit/elearning-training-plan.test.ts \
+            tests/unit/elearning-training-plan-assignment-routes.test.ts \
+            tests/unit/elearning-training-plan-assignment.test.ts \
             tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
             tests/unit/elearning-watch-progress.test.ts \
             --reporter=dot
@@ -972,6 +979,7 @@ jobs:
             tests/integration/elearning-role-templates.db.test.ts \
             tests/integration/elearning-jobs.db.test.ts \
             tests/integration/elearning-training-plan.db.test.ts \
+            tests/integration/elearning-training-plan-assignment.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

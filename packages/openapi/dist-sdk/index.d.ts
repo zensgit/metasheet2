@@ -8565,6 +8565,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/training-plans/{planId}/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Atomically assign every course in a pinned training plan
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. The active published plan
+         *     version is pinned, the audience is resolved once, and one ordinary
+         *     assignment with the identical materialized member set is created per
+         *     plan item in a single transaction. Same-key replay returns the original
+         *     frozen plan version and counts without re-reading current directory or
+         *     course state. At most 100 courses and 10,000 members.
+         */
+        post: operations["assignElearningTrainingPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/courses/{courseId}/scope": {
         parameters: {
             query?: never;
@@ -17721,6 +17747,24 @@ export interface components {
             itemCount: number;
             duplicate: boolean;
         };
+        ElearningTrainingPlanAssignmentRequest: {
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+            /**
+             * @description Duplicate selectors are canonicalized before hashing and the
+             *     audience is resolved exactly once for every plan item. An empty
+             *     array returns 422 empty_audience.
+             */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningTrainingPlanAssignmentResult: {
+            planAssignmentId: components["schemas"]["ElearningUuid"];
+            planVersionId: components["schemas"]["ElearningUuid"];
+            assignmentCount: number;
+            memberCount: number;
+            duplicate: boolean;
+        };
         ElearningTrainingPlanItem: {
             courseVersionId: components["schemas"]["ElearningUuid"];
             position: number;
@@ -19427,6 +19471,48 @@ export interface operations {
             403: components["responses"]["ElearningError"];
             /** @description Assignment surface flags off or plan missing in this org */
             404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTrainingPlanAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Frozen plan assignment ids/counts; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off or plan missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description plan_unavailable, course_unavailable, or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
+            422: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

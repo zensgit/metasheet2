@@ -5026,6 +5026,51 @@ components:
           minimum: 1
           maximum: 100
         duplicate: { type: boolean }
+    ElearningTrainingPlanAssignmentRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceKey, rules]
+      properties:
+        sourceKey:
+          type: string
+          minLength: 1
+          maxLength: 512
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+        rules:
+          type: array
+          maxItems: 100
+          description: |
+            Duplicate selectors are canonicalized before hashing and the
+            audience is resolved exactly once for every plan item. An empty
+            array returns 422 empty_audience.
+          items:
+            $ref: '#/components/schemas/ElearningScopeRule'
+    ElearningTrainingPlanAssignmentResult:
+      type: object
+      additionalProperties: false
+      required:
+        - planAssignmentId
+        - planVersionId
+        - assignmentCount
+        - memberCount
+        - duplicate
+      properties:
+        planAssignmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        planVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        assignmentCount:
+          type: integer
+          minimum: 1
+          maximum: 100
+        memberCount:
+          type: integer
+          minimum: 1
+          maximum: 10000
+        duplicate: { type: boolean }
     ElearningTrainingPlanItem:
       type: object
       additionalProperties: false

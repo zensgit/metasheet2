@@ -27,6 +27,9 @@ import {
   type GetElearningTrainingPlanInput,
   type PublishElearningTrainingPlanInput,
 } from '../../src/services/elearning-training-plan'
+import type {
+  AssignElearningTrainingPlanInput,
+} from '../../src/services/elearning-training-plan-assignment'
 import { usePinnedServer } from '../utils/pinned-server'
 
 if (process.env.ELEARNING_PILOT_AUTH_GATE_SETUP !== '1') {
@@ -143,6 +146,24 @@ const TRAINING_PLAN_READ_RESULT = {
   },
 }
 
+const TRAINING_PLAN_ASSIGNMENT_BODY = {
+  sourceKey: 'auth-gate-plan-run',
+  deadline: '2030-01-01T00:00:00.000Z',
+  rules: [{
+    subjectType: 'user',
+    subjectRef: 'auth-gate-learner',
+    includeChildren: false,
+  }],
+} as const
+
+const TRAINING_PLAN_ASSIGNMENT_RESULT = {
+  planAssignmentId: randomUUID(),
+  planVersionId: TRAINING_PLAN_VERSION_ID,
+  assignmentCount: 1,
+  memberCount: 1,
+  duplicate: false,
+}
+
 const LEARNER_COURSES: ElearningLearnerCourse[] = [{
   courseId: '11111111-1111-4111-8111-111111111111',
   courseVersionId: '22222222-2222-4222-8222-222222222222',
@@ -241,6 +262,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   const learnerCalls: Array<{ orgId: string; userId: string }> = []
   const trainingPlanPublishCalls: PublishElearningTrainingPlanInput[] = []
   const trainingPlanGetCalls: GetElearningTrainingPlanInput[] = []
+  const trainingPlanAssignmentCalls: AssignElearningTrainingPlanInput[] = []
 
   beforeAll(async () => {
     await pool.query(
@@ -372,6 +394,10 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
           throw new ElearningTrainingPlanError('not_found')
         }
         return TRAINING_PLAN_READ_RESULT
+      },
+      assignElearningTrainingPlan: async (_db, input) => {
+        trainingPlanAssignmentCalls.push(input)
+        return TRAINING_PLAN_ASSIGNMENT_RESULT
       },
     })
     if (!runtime) {
@@ -699,6 +725,61 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.body).toEqual({ error: 'Insufficient permissions' })
     expect(trainingPlanPublishCalls).toHaveLength(0)
     valuesFree(res.body)
+  })
+
+  it('only DB-authorized admin can assign a plan with JWT-bound org and actor', async () => {
+    trainingPlanAssignmentCalls.length = 0
+    const adminToken = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const assigned = await request(pinned.url())
+      .post(`/api/elearning/training-plans/${TRAINING_PLAN_ID}/assign?orgId=${encodeURIComponent(ORG_B)}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', ORG_B)
+      .send(TRAINING_PLAN_ASSIGNMENT_BODY)
+    expect(assigned.status).toBe(201)
+    expect(assigned.body).toEqual(TRAINING_PLAN_ASSIGNMENT_RESULT)
+    expect(trainingPlanAssignmentCalls).toEqual([{
+      orgId: ORG_A,
+      actorId: adminId,
+      planId: TRAINING_PLAN_ID,
+      sourceKey: TRAINING_PLAN_ASSIGNMENT_BODY.sourceKey,
+      deadline: TRAINING_PLAN_ASSIGNMENT_BODY.deadline,
+      rules: TRAINING_PLAN_ASSIGNMENT_BODY.rules,
+    }])
+    valuesFree(assigned.body)
+
+    trainingPlanAssignmentCalls.length = 0
+    const writerToken = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const denied = await request(pinned.url())
+      .post(`/api/elearning/training-plans/${TRAINING_PLAN_ID}/assign`)
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send(TRAINING_PLAN_ASSIGNMENT_BODY)
+    expect(denied.status).toBe(403)
+    expect(denied.body).toEqual({ error: 'Insufficient permissions' })
+    expect(trainingPlanAssignmentCalls).toEqual([])
+
+    const legacyToken = signToken({
+      userId: legacyId,
+      email: `${legacyId}@el-auth-gate.test`,
+      role: 'user',
+    })
+    const noOrg = await request(pinned.url())
+      .post(`/api/elearning/training-plans/${TRAINING_PLAN_ID}/assign`)
+      .set('Authorization', `Bearer ${legacyToken}`)
+      .set('x-tenant-id', ORG_A)
+      .send(TRAINING_PLAN_ASSIGNMENT_BODY)
+    expect(noOrg.status).toBe(403)
+    expect(noOrg.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(trainingPlanAssignmentCalls).toEqual([])
   })
 
   it('the same admin receives not_found for a plan outside the JWT-bound org', async () => {
