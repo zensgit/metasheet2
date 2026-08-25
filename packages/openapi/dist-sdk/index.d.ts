@@ -8467,6 +8467,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assignments/{assignmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Look up assignment progress for every member
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`. No JSON body.
+         *     Actor and authoritative org come from JWT. Cursor is a member UUID
+         *     keyset; page size is at most 100. Closed DTO only: assignment metadata
+         *     plus member progress statuses. Scores, answers, answer keys, raw
+         *     events, revocation reason, storage data, and hidden audit values are
+         *     never returned. Deadline expiry is overdue, not revoke; a revoked
+         *     member has no current obligation and therefore reports overdue false.
+         */
+        get: operations["getElearningAssignmentProgress"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Explicitly revoke one assignment member
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Body key `reason` only, trimmed length 1..500. Actor and authoritative
+         *     org come from JWT. First call sets revoked_at to server time. Same
+         *     normalized reason is duplicate true. A different reason is conflict.
+         *     Cross-org or missing member is 404. Progress, evidence, attempts, and
+         *     the parent assignment are never deleted or reset.
+         */
+        put: operations["revokeElearningAssignmentMember"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/courses/{courseId}/scope": {
         parameters: {
             query?: never;
@@ -17570,6 +17621,42 @@ export interface components {
             memberCount: number;
             duplicate: boolean;
         };
+        ElearningAssignmentProgressMember: {
+            memberId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            /** @enum {string} */
+            source: "manual" | "rule" | "import";
+            /** Format: date-time */
+            assignedAt: string;
+            /** Format: date-time */
+            revokedAt: string | null;
+            overdue: boolean;
+            /** @enum {string} */
+            videoStatus: "not_started" | "in_progress" | "completed";
+            /** @enum {string} */
+            examStatus: "not_started" | "started" | "submitted" | "graded" | "expired";
+            passed: boolean;
+            /** @enum {string} */
+            courseStatus: "not_started" | "in_progress" | "completed";
+        };
+        ElearningAssignmentProgressResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            /** Format: date-time */
+            deadline: string | null;
+            members: components["schemas"]["ElearningAssignmentProgressMember"][];
+            nextCursor: components["schemas"]["ElearningUuid"] | null;
+        };
+        ElearningAssignmentRevocationRequest: {
+            reason: string;
+        };
+        ElearningAssignmentRevocationResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberId: components["schemas"]["ElearningUuid"];
+            /** @enum {boolean} */
+            revoked: true;
+            duplicate: boolean;
+        };
         /**
          * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
          *     database state. `department.subjectRef` is the directory department UUID;
@@ -19106,6 +19193,85 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
             422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAssignmentProgress: {
+        parameters: {
+            query?: {
+                /** @description Exclusive member UUID keyset cursor from the previous nextCursor. */
+                cursor?: components["schemas"]["ElearningUuid"];
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                assignmentId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Assignment metadata plus one page of member progress. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAssignmentProgressResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or assignment missing in this org) */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    revokeElearningAssignmentMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                assignmentId: components["schemas"]["ElearningUuid"];
+                memberId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAssignmentRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description Revoked true. duplicate true on same-reason replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAssignmentRevocationResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off, or member not on this org assignment) */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict (already revoked with a different reason) */
+            409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

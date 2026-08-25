@@ -33,6 +33,13 @@ import {
   type ElearningBatchAssignmentErrorCode,
 } from '../services/elearning-batch-assignment'
 import {
+  listElearningAssignmentProgress,
+  revokeElearningAssignmentMember,
+  ElearningAssignmentLifecycleError,
+  type ElearningAssignmentLifecycleDb,
+  type ElearningAssignmentLifecycleErrorCode,
+} from '../services/elearning-assignment-lifecycle'
+import {
   assignElearningDirect,
   ElearningDirectAssignmentError,
   type ElearningDirectAssignmentDb,
@@ -99,6 +106,7 @@ const PUBLISH_KEYS = new Set([
   'questions',
 ])
 const SCOPE_KEYS = new Set(['reason', 'rules'])
+const REVOKE_KEYS = new Set(['reason'])
 const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
@@ -180,6 +188,13 @@ const SCOPE_STATUS: Record<ElearningScopeErrorCode, number> = {
   unavailable: 503,
 }
 
+const LIFECYCLE_STATUS: Record<ElearningAssignmentLifecycleErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  conflict: 409,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
@@ -191,7 +206,8 @@ export interface ElearningPilotRouteDeps {
     ElearningExamDb &
     ElearningCoursePublishDb &
     ElearningLearnerCoursesDb &
-    ElearningScopeDb
+    ElearningScopeDb &
+    ElearningAssignmentLifecycleDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -201,6 +217,8 @@ export interface ElearningPilotRouteDeps {
   env?: NodeJS.ProcessEnv
   assignElearningDirect?: typeof assignElearningDirect
   assignElearningBatch?: typeof assignElearningBatch
+  listElearningAssignmentProgress?: typeof listElearningAssignmentProgress
+  revokeElearningAssignmentMember?: typeof revokeElearningAssignmentMember
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -269,6 +287,16 @@ function uuidParam(req: Request, name: string): string | null {
   return readUuid(value)
 }
 
+function readQueryValue(
+  query: Request['query'],
+  name: string,
+): string | undefined | null {
+  if (!Object.prototype.hasOwnProperty.call(query, name)) return undefined
+  const value = query[name]
+  if (typeof value !== 'string') return null
+  return value
+}
+
 function invalid(res: Response): void {
   res.status(400).json({ error: 'invalid_input' })
 }
@@ -280,6 +308,10 @@ export function createElearningPilotRouter(
 
   const assignDirect = deps.assignElearningDirect ?? assignElearningDirect
   const assignBatch = deps.assignElearningBatch ?? assignElearningBatch
+  const listProgress =
+    deps.listElearningAssignmentProgress ?? listElearningAssignmentProgress
+  const revokeMember =
+    deps.revokeElearningAssignmentMember ?? revokeElearningAssignmentMember
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -516,6 +548,109 @@ export function createElearningPilotRouter(
       } catch (error) {
         if (error instanceof ElearningBatchAssignmentError) {
           res.status(BATCH_ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/assignments/:assignmentId',
+    ...gate(deps.adminGuard, 'assignment', null),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const assignmentId = uuidParam(req, 'assignmentId')
+      if (!assignmentId) {
+        invalid(res)
+        return
+      }
+      const rawCursor = readQueryValue(req.query, 'cursor')
+      if (rawCursor === null) {
+        invalid(res)
+        return
+      }
+      let cursor: string | undefined
+      if (rawCursor !== undefined) {
+        const parsed = readUuid(rawCursor)
+        if (!parsed) {
+          invalid(res)
+          return
+        }
+        cursor = parsed
+      }
+      const rawLimit = readQueryValue(req.query, 'limit')
+      if (rawLimit === null) {
+        invalid(res)
+        return
+      }
+      let limit: number | undefined
+      if (rawLimit !== undefined) {
+        if (!/^[1-9]\d*$/.test(rawLimit)) {
+          invalid(res)
+          return
+        }
+        const parsed = Number(rawLimit)
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+          invalid(res)
+          return
+        }
+        limit = parsed
+      }
+      try {
+        const result = await listProgress(deps.db, {
+          orgId: ctx.orgId,
+          assignmentId,
+          cursor,
+          limit,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningAssignmentLifecycleError) {
+          res.status(LIFECYCLE_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.put(
+    '/api/elearning/assignments/:assignmentId/members/:memberId/revocation',
+    ...gate(deps.adminGuard, 'assignment'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const assignmentId = uuidParam(req, 'assignmentId')
+      const memberId = uuidParam(req, 'memberId')
+      const body = readObject(req.body)
+      if (
+        !assignmentId
+        || !memberId
+        || !body
+        || rejectUnknownKeys(body, REVOKE_KEYS)
+        || !Object.prototype.hasOwnProperty.call(body, 'reason')
+      ) {
+        invalid(res)
+        return
+      }
+      if (typeof body.reason !== 'string') {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await revokeMember(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          assignmentId,
+          memberId,
+          reason: body.reason,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningAssignmentLifecycleError) {
+          res.status(LIFECYCLE_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })

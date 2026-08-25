@@ -257,6 +257,123 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/assignments/{assignmentId}:
+    get:
+      operationId: getElearningAssignmentProgress
+      summary: Look up assignment progress for every member
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`. No JSON body.
+        Actor and authoritative org come from JWT. Cursor is a member UUID
+        keyset; page size is at most 100. Closed DTO only: assignment metadata
+        plus member progress statuses. Scores, answers, answer keys, raw
+        events, revocation reason, storage data, and hidden audit values are
+        never returned. Deadline expiry is overdue, not revoke; a revoked
+        member has no current obligation and therefore reports overdue false.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: assignmentId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+          description: Exclusive member UUID keyset cursor from the previous nextCursor.
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        '200':
+          description: Assignment metadata plus one page of member progress.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAssignmentProgressResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off or assignment missing in this org)
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assignments/{assignmentId}/members/{memberId}/revocation:
+    put:
+      operationId: revokeElearningAssignmentMember
+      summary: Explicitly revoke one assignment member
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+        Body key `reason` only, trimmed length 1..500. Actor and authoritative
+        org come from JWT. First call sets revoked_at to server time. Same
+        normalized reason is duplicate true. A different reason is conflict.
+        Cross-org or missing member is 404. Progress, evidence, attempts, and
+        the parent assignment are never deleted or reset.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: assignmentId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: path
+          name: memberId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningAssignmentRevocationRequest'
+      responses:
+        '200':
+          description: Revoked true. duplicate true on same-reason replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAssignmentRevocationResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off, or member not on this org assignment)
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: conflict (already revoked with a different reason)
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/courses/{courseId}/scope:
     put:
       operationId: setElearningCourseScope

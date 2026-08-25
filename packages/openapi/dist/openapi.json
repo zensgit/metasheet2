@@ -7883,6 +7883,160 @@
           }
         }
       },
+      "ElearningAssignmentProgressMember": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "memberId",
+          "userId",
+          "source",
+          "assignedAt",
+          "revokedAt",
+          "overdue",
+          "videoStatus",
+          "examStatus",
+          "passed",
+          "courseStatus"
+        ],
+        "properties": {
+          "memberId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "userId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "rule",
+              "import"
+            ]
+          },
+          "assignedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "revokedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "overdue": {
+            "type": "boolean"
+          },
+          "videoStatus": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "in_progress",
+              "completed"
+            ]
+          },
+          "examStatus": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "started",
+              "submitted",
+              "graded",
+              "expired"
+            ]
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "courseStatus": {
+            "type": "string",
+            "enum": [
+              "not_started",
+              "in_progress",
+              "completed"
+            ]
+          }
+        }
+      },
+      "ElearningAssignmentProgressResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignmentId",
+          "courseVersionId",
+          "deadline",
+          "members",
+          "nextCursor"
+        ],
+        "properties": {
+          "assignmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "members": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ElearningAssignmentProgressMember"
+            }
+          },
+          "nextCursor": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningUuid"
+              }
+            ],
+            "nullable": true
+          }
+        }
+      },
+      "ElearningAssignmentRevocationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "ElearningAssignmentRevocationResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignmentId",
+          "memberId",
+          "revoked",
+          "duplicate"
+        ],
+        "properties": {
+          "assignmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "memberId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "revoked": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
       "ElearningScopeRule": {
         "description": "L1 visibility rule. Subjects are resolved from fresh, active, same-org\ndatabase state. `department.subjectRef` is the directory department UUID;\nonly department rules may set includeChildren true. Position matches the\ntrimmed, case-sensitive title on an active same-org directory account.\nPlatform roles are not accepted until an org-scoped role-membership store\nexists. `all` requires subjectRef absent/null.\n",
         "oneOf": [
@@ -23355,6 +23509,164 @@
           },
           "422": {
             "description": "subject_not_found, unsupported_subject, empty_audience, or audience_too_large",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/assignments/{assignmentId}": {
+      "get": {
+        "operationId": "getElearningAssignmentProgress",
+        "summary": "Look up assignment progress for every member",
+        "description": "Admin L2 assignment operation. RBAC `elearning:admin`. No JSON body.\nActor and authoritative org come from JWT. Cursor is a member UUID\nkeyset; page size is at most 100. Closed DTO only: assignment metadata\nplus member progress statuses. Scores, answers, answer keys, raw\nevents, revocation reason, storage data, and hidden audit values are\nnever returned. Deadline expiry is overdue, not revoke; a revoked\nmember has no current obligation and therefore reports overdue false.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assignmentId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            },
+            "description": "Exclusive member UUID keyset cursor from the previous nextCursor."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Assignment metadata plus one page of member progress.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningAssignmentProgressResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found (flags off or assignment missing in this org)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation": {
+      "put": {
+        "operationId": "revokeElearningAssignmentMember",
+        "summary": "Explicitly revoke one assignment member",
+        "description": "Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nBody key `reason` only, trimmed length 1..500. Actor and authoritative\norg come from JWT. First call sets revoked_at to server time. Same\nnormalized reason is duplicate true. A different reason is conflict.\nCross-org or missing member is 404. Progress, evidence, attempts, and\nthe parent assignment are never deleted or reset.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assignmentId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "memberId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningAssignmentRevocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked true. duplicate true on same-reason replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningAssignmentRevocationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found (flags off, or member not on this org assignment)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "conflict (already revoked with a different reason)",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

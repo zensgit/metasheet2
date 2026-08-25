@@ -13,6 +13,10 @@ type PublishRequest = components['schemas']['ElearningCoursePublishRequest']
 type PublishResult = components['schemas']['ElearningCoursePublishResult']
 type AssignRequest = components['schemas']['ElearningDirectAssignmentRequest']
 type AssignResult = components['schemas']['ElearningDirectAssignmentResult']
+type AssignmentProgress = components['schemas']['ElearningAssignmentProgressResult']
+type AssignmentMember = components['schemas']['ElearningAssignmentProgressMember']
+type AssignmentRevokeRequest = components['schemas']['ElearningAssignmentRevocationRequest']
+type AssignmentRevokeResult = components['schemas']['ElearningAssignmentRevocationResult']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
 type WatchState = components['schemas']['ElearningWatchState']
 type Heartbeat = components['schemas']['ElearningHeartbeatRequest']
@@ -50,6 +54,9 @@ const LEARNER_OUTPUT_ROOTS = [
   'ElearningPlaybackTicket',
   'ElearningMediaUploadResult',
   'ElearningLearnerCourseList',
+  'ElearningAssignmentProgressResult',
+  'ElearningAssignmentProgressMember',
+  'ElearningAssignmentRevocationResult',
 ] as const
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -116,6 +123,8 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/media']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/courses/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assignments/direct']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assignments/{assignmentId}']['get']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
@@ -139,6 +148,12 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/assignments/direct']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<AssignResult>()
+    expectTypeOf<
+      paths['/api/elearning/assignments/{assignmentId}']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<AssignmentProgress>()
+    expectTypeOf<
+      paths['/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<AssignmentRevokeResult>()
     expectTypeOf<
       paths['/api/elearning/me/courses']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<LearnerList>()
@@ -237,6 +252,34 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<LearnerList>().toEqualTypeOf<{
       courses: components['schemas']['ElearningLearnerCourse'][]
     }>()
+    expectTypeOf<AssignmentMember>().toEqualTypeOf<{
+      memberId: string
+      userId: string
+      source: 'manual' | 'rule' | 'import'
+      assignedAt: string
+      revokedAt: string | null
+      overdue: boolean
+      videoStatus: 'not_started' | 'in_progress' | 'completed'
+      examStatus: 'not_started' | 'started' | 'submitted' | 'graded' | 'expired'
+      passed: boolean
+      courseStatus: 'not_started' | 'in_progress' | 'completed'
+    }>()
+    expectTypeOf<AssignmentProgress>().toEqualTypeOf<{
+      assignmentId: string
+      courseVersionId: string
+      deadline: string | null
+      members: AssignmentMember[]
+      nextCursor: string | null
+    }>()
+    expectTypeOf<AssignmentRevokeRequest>().toEqualTypeOf<{
+      reason: string
+    }>()
+    expectTypeOf<AssignmentRevokeResult>().toEqualTypeOf<{
+      assignmentId: string
+      memberId: string
+      revoked: true
+      duplicate: boolean
+    }>()
 
     const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
       paths?: Record<string, any>
@@ -268,6 +311,17 @@ describe('elearning V0.1 OpenAPI paths', () => {
       {
         name: 'GET /api/elearning/me/courses 200',
         keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/me/courses', 'get', '200')),
+      },
+      {
+        name: 'GET /api/elearning/assignments/{assignmentId} 200',
+        keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/assignments/{assignmentId}', 'get', '200')),
+      },
+      {
+        name: 'PUT /api/elearning/assignments/{assignmentId}/members/{memberId}/revocation 200',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(doc, '/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation', 'put', '200'),
+        ),
       },
     ].filter((row) => row.keys.length > 0)
     expect(leaks).toEqual([])

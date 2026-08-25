@@ -1539,6 +1539,12 @@ export default defineConfig({
       // into plugin-tests.yml after db:migrate on the 20.x leg.
       'tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts',
       'tests/integration/elearning-batch-assignment.db.test.ts',
+      // E-learning L2 B1 assignment progress + explicit revocation. Requires
+      // real PostgreSQL (advisory lock, UUID keyset, persistence preservation).
+      // Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
+      // it; wired as a WHOLE FILE sibling of the batch-assignment gate in
+      // plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-assignment-lifecycle.db.test.ts',
       // E-learning V0.1 protected-playback service gate. Requires real
       // PostgreSQL (ticket/authorize). Excluded from the no-DB job so a
       // missing DATABASE_URL cannot skip-green it; wired as a WHOLE FILE
