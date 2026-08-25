@@ -13,7 +13,9 @@ name: Multitable Role-Cascade Witness
 # That is an inference about migration ORDER, not an observation of the catalog.
 #
 # The premise is a CONJUNCTION and the witness checks all three conjuncts: the foreign key targets
-# the session-resolved `roles` relation, the child table carries a canonical recovery-authority
+# the CANONICALLY-bound `roles` relation (`<canonical>.roles`, never the bare session-resolved name
+# — an unqualified `to_regclass('roles')` is retargeted by any same-named decoy the session reaches
+# first, and its zero rows then read as CONFIRMED), the child table carries a canonical recovery-authority
 # trigger, and the parent-delete action actually writes the child row (CASCADE deletes it; SET NULL
 # and SET DEFAULT update it — all three fire a `BEFORE INSERT OR UPDATE OR DELETE` trigger, while
 # NO ACTION and RESTRICT refuse the parent delete and touch nothing). Dropping the trigger conjunct
@@ -29,7 +31,7 @@ name: Multitable Role-Cascade Witness
 # -----------------------------
 # The SQL is NOT re-typed here, and the "does a role delete write a triggered child" predicate is
 # NOT re-implemented here. `scripts/ops/multitable-role-cascade-witness.mjs` imports BOTH from the
-# battery (`ROLE_CASCADE_WITNESS_QUERY`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
+# battery (`buildRoleCascadeWitnessQuery`, `roleDeleteCascadeExists`): it embeds the query verbatim into the
 # probe that runs on the host, and applies the battery's own predicate to the observed rows back on
 # this runner. Two divergent copies of a witness query is precisely the "second, narrower artifact"
 # failure this repository has been bitten by. This workflow file therefore contains no SQL at all —

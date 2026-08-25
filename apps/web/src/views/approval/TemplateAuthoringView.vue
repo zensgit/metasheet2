@@ -34,6 +34,19 @@
       </template>
       <template #actions>
         <div class="template-authoring__actions">
+          <!-- B0: 飞书-style "N项不完善" affordance — save stays unblocked by these; publish
+               still requires them all resolved (canConfirmPublish, unchanged). -->
+          <el-button
+            v-if="incompleteAuthoringIssueCount > 0"
+            text
+            size="small"
+            class="template-authoring__incomplete-count"
+            data-testid="approval-template-incomplete-count"
+            :aria-label="`${incompleteAuthoringIssueCount} 项不完善，点击查看详情`"
+            @click="revealIncompleteAuthoringIssues"
+          >
+            {{ incompleteAuthoringIssueCount }} 项不完善
+          </el-button>
           <el-button
             :loading="saving"
             :disabled="!canSave"
@@ -447,6 +460,7 @@
             @insert-condition="onInsertConditionAfter"
             @insert-parallel="onInsertParallelAfter"
             @remove="onRemoveNode"
+            @rename="onRenameCanvasNode"
           >
             <ApprovalGraphNodeConfigEditor :node="selectedCanvasInspectorNode" />
           </ApprovalCanvasNodeInspector>
@@ -1458,6 +1472,8 @@ import {
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
   validateTemplateBasicInfo,
+  collectTemplateSaveMinimum,
+  seedDraftIdentityForSave,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
   isPlaceholderRoleSource,
@@ -1591,13 +1607,16 @@ const draft = ref<TemplateAuthoringDraft>(createEmptyTemplateDraft())
 // component never re-seeds from a later prop change), so mounting it before `loadTemplateForEdit`
 // resolves the real draft would permanently strand the session on the empty placeholder. Both
 // `showFormBuilderV2` inputs only ever transition false→true for the life of one view instance:
-// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once in
-// `loadTemplateForEdit` and never reset — so `showFormBuilderV2` cannot flip back to false, and the
-// `v-if` mount is NOT re-evaluated by ordinary editing/tab-switching (the outer step chrome uses
-// v-show, not v-if — see `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY
-// thing that remounts (reseeds) the builder, and it is bumped ONLY at the three existing
-// server-round-trip points (`persistDraft` update/create, `createFromPreset`) that already call
-// `reseedFormHistoryFromDraft()` for the legacy history stack — never on routine field edits.
+// `canvasV2Enabled` is a stable session-scoped flag value and `formSessionHydrated` is set once
+// per view instance by whichever `loadTemplateForEdit` ticket completes first (a route reload
+// re-runs the loader, but the flag only ever transitions false→true) — so `showFormBuilderV2`
+// cannot flip back to false, and the `v-if` mount is NOT re-evaluated by ordinary
+// editing/tab-switching (the outer step chrome uses v-show, not v-if — see
+// `activeAuthoringSection` above). `formBuilderSessionEpoch` is the ONLY thing that remounts
+// (reseeds) the builder, and it is bumped ONLY at DRAFT-REPLACEMENT points (invariant updated
+// with round 5 — the original text said "the three server-round-trip points", falsified twice
+// over by that round): `persistDraft` update/create, `createFromPreset`, a successful
+// route-reload apply, and the edit->new synchronous reset — never on routine field edits.
 const formSessionHydrated = ref(false)
 const formBuilderSessionEpoch = ref(0)
 const showFormBuilderV2 = computed(() => canvasV2Enabled.value && formSessionHydrated.value)
@@ -1633,7 +1652,11 @@ function onFormBuilderDraftChange(nextDraft: TemplateAuthoringDraft, focusLocalI
   refreshFormBuilderHistoryFlags()
 }
 
-/** Deliberate resync after a genuine server round-trip (save/create/preset) — NOT a routine reseed. */
+/** Deliberate resync after a genuine draft REPLACEMENT — server round-trips (save/create/preset)
+ *  and route transitions on a reused instance (round-5 P2: A->B switch left the builder showing
+ *  A's fields — ApprovalFormBuilder reads the draft ONCE per epoch by design, and only this epoch
+ *  bump remounts it). First mount is untouched: showFormBuilderV2 is still false there (the
+ *  hydration gate runs after this would-be call), so the guard makes it a natural no-op. */
 function reseedFormBuilderSessionIfActive(): void {
   if (!showFormBuilderV2.value) return
   formBuilderSessionEpoch.value += 1
@@ -1799,7 +1822,17 @@ const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupported
 // A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
 // the author inserts their first condition or parallel gateway.
 const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
-const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+// EDIT ROUTE REQUIRES THE LOADED TEMPLATE TO BE **THIS ROUTE'S** TEMPLATE (external review
+// rounds 3+4, both reproduced on the real mounted path). Round 3: getTemplate rejects, draft
+// stays the empty no-templateId fallback, and save fell through persistDraft's create branch —
+// minting a fresh 未命名审批 template from an EDIT url. Round 4: the route param SWITCHES
+// (/tpl_a/edit -> /tpl_b/edit) on a reused component instance — the load ran only in onMounted,
+// so draft still held tpl_a and 保存 called updateTemplate('tpl_a', …) from tpl_b's URL. The
+// predicate is therefore EQUALITY with the current route id, not mere presence — presence is the
+// round-3 subset (`'' !== 'tpl_b'`). Anchored on draft.templateId (set only by
+// draftFromTemplate after a successful fetch), not on loadError, which topology ops reuse.
+const editRouteLoaded = computed(() => !isEditMode.value || draft.value.templateId === templateId.value)
+const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
   if (!isEditMode.value && !isDraftDirty.value) return '新模板'
   return isDraftDirty.value ? '有未保存更改' : '已保存'
@@ -2766,6 +2799,37 @@ function onRemoveNode(nodeKey: string): void {
   // Canvas V2 Slice A: deleting the selected node clears selection and closes the inspector.
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
+// B2 — parent owns the mutation (component doc comment "parent owns selection and all
+// mutations"). HOW it applies (rewritten 2026-08-25, twice flagged stale — the text below this
+// line previously described a direct write to `draft.preservedGraph` with the live-name overlay
+// keeping renames alive across topology undo; BOTH halves of that design are gone, E-P2-4):
+// rename runs a topology op through the UNIFIED authoring history, so it is undo/redo-able like
+// every structural edit — and `mergeLiveNodeConfigsOntoTopology` deliberately no longer overlays
+// live names, because with rename in history, stack ordering provides what the overlay faked and
+// the overlay's only remaining effect was making rename itself un-undoable. A blank/whitespace
+// name clears the override (`graphNodeLabel` falls back to the node-type label), equally undoable.
+function onRenameCanvasNode(nodeKey: string, name: string): void {
+  // THROUGH THE UNIFIED HISTORY, not a direct draft mutation (E-P2-4, external review
+  // 2026-08-25): the first shape wrote draft.preservedGraph in place, so rename produced no
+  // history entry — undo stayed disabled after a rename, and a later topology undo resurrected
+  // stale names. A topology op records a snapshot pair with inverse in the SAME undo stack every
+  // other structural edit uses; renaming to the current name is an identity op and records
+  // nothing. (mergeLiveNodeConfigsOntoTopology no longer overlays live names for the same
+  // reason — see its comment.)
+  const trimmed = name.trim()
+  runTopologyOp(
+    (graph) => ({
+      nodes: graph.nodes.map((node) => {
+        if (node.key !== nodeKey) return node
+        if (trimmed) return { ...node, name: trimmed }
+        const { name: _dropped, ...rest } = node
+        return rest
+      }),
+      edges: graph.edges,
+    }),
+    { kind: 'node', nodeKey },
+  )
+}
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
   return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
 }
@@ -2948,6 +3012,29 @@ const publishChecklist = computed<PublishChecklistItem[]>(() => [
   { key: 'placeholder', label: '审批人占位', ok: publishPlaceholderRoleIssues.value.length === 0, detail: publishPlaceholderRoleIssues.value[0] },
 ])
 const canConfirmPublish = computed(() => publishChecklist.value.every((item) => item.ok))
+
+// B0 (header "N项不完善" affordance) — the SAME three issue lists the publish checklist already
+// derives, flattened. Zero new validation logic: this is a live view onto what `canConfirmPublish`
+// already gates on, so "0 项不完善" and "ready to publish" can never disagree. Deliberately NOT
+// `validationErrors.value` (that ref only updates on an explicit `validate()` call, i.e. after a
+// save attempt) — this counter is live from the moment the draft has anything incomplete, matching
+// the reference product's counter instead of only appearing after a blocked save.
+const incompleteAuthoringIssues = computed<string[]>(() => [
+  ...publishFormFieldIssues.value,
+  ...publishApprovalFlowIssues.value,
+  ...publishPlaceholderRoleIssues.value,
+])
+const incompleteAuthoringIssueCount = computed<number>(() => incompleteAuthoringIssues.value.length)
+
+/** Clicking the header "N项不完善" affordance reuses the EXACT same reveal machinery a blocked
+ *  save already uses (`validationErrors` + `firstInvalidAuthoringSection` + `scrollAuthoringTarget`)
+ *  — it never renders a second, parallel issue list. */
+async function revealIncompleteAuthoringIssues(): Promise<void> {
+  validationErrors.value = incompleteAuthoringIssues.value
+  activeAuthoringSection.value = firstInvalidAuthoringSection(publishFormFieldIssues.value)
+  await nextTick()
+  scrollAuthoringTarget(validationSummaryRef.value, true)
+}
 const publishChecklistVisible = ref(false)
 // B3-09 (发布说明) — optional free text bound to the checklist dialog's textarea.
 const publishNote = ref('')
@@ -3622,7 +3709,27 @@ const detailLeafTypeOptions = computed(() =>
 )
 
 function addDetailColumn(field: FieldAuthoringDraft) {
-  field.detailColumns = [...field.detailColumns, createEmptyDetailColumnDraft(field.detailColumns.length + 1)]
+  const created = createEmptyDetailColumnDraft(field.detailColumns.length + 1)
+  // Collision guard (owner-reported bug, 2026-08-24): `length + 1` assumes ids stay densely
+  // packed 1..N, but a delete-then-add sequence breaks that invariant — e.g.
+  // [col_1, col_2, col_3] -> delete col_2 (index 1) -> [col_1, col_3] (length 2) -> `length + 1`
+  // recomputes "col_3", which the SURVIVING third column already holds -> save-blocking
+  // "子字段 id 不能重复", plus a confusing "子字段 N" auto-label once N drifts arbitrarily far
+  // ahead of the visible row count over repeated add/delete cycles. `createEmptyDetailColumnDraft`
+  // itself stays frozen — its single-argument output is a pinned baseline
+  // (approval-form-builder-parity-delta-design-20260811.md §F1 "Protected baseline", pinned
+  // byte-for-byte by approval-form-authoring-adapter.test.ts) that the Designer 2.0 opaque
+  // allocator depends on staying untouched. Only the CONSTRUCTED draft returned from this call is
+  // patched here, scanning forward past any id this field's OWN detailColumns already uses before
+  // it is pushed — the call above, and its frozen output, are unchanged.
+  const existingIds = new Set(field.detailColumns.map((column) => column.id))
+  let candidateIndex = field.detailColumns.length + 1
+  while (existingIds.has(`col_${candidateIndex}`)) {
+    candidateIndex += 1
+  }
+  created.id = `col_${candidateIndex}`
+  created.label = `子字段 ${candidateIndex}`
+  field.detailColumns = [...field.detailColumns, created]
 }
 
 function removeDetailColumn(field: FieldAuthoringDraft, index: number) {
@@ -3741,11 +3848,25 @@ function moveStep(index: number, delta: -1 | 1) {
   draft.value.steps = swap(draft.value.steps, index, delta) ?? draft.value.steps
 }
 
+// Round-4 stale-response guard: navigations can overlap (slow tpl_a fetch, user switches to
+// tpl_b, tpl_b resolves first, tpl_a resolves LAST) — without a sequence check the older
+// response would overwrite the newer route's draft. Each load takes a ticket; only the holder
+// of the CURRENT ticket may apply its result or touch shared loading state.
+let templateLoadSeq = 0
+
 async function loadTemplateForEdit() {
+  const seq = ++templateLoadSeq
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
   canvasZoom.value = 1
   if (!isEditMode.value) {
+    // P3-4 (gate on 6d6c6013cd, reproduced): this branch returns before the try/finally, so an
+    // id->'' transition arriving while an edit-route load was in flight left `loading` stuck true
+    // forever — the superseded load's finally correctly defers to the newer ticket, and the newer
+    // ticket (this branch) never touched loading. Unreachable today (/new always remounts via
+    // TemplateCenterView), but one router.push('/approval-templates/new') from this view would
+    // have made it live: a permanently unsaveable new-template page with no error.
+    loading.value = false
     draft.value = createEmptyTemplateDraft()
     unsupportedReason.value = null
     graphReadOnlyMessage.value = null
@@ -3754,6 +3875,9 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2: an edit->new transition on a reused instance replaced the draft above — the
+    // builder must re-read it (no-ops on first mount via the showFormBuilderV2 guard).
+    reseedFormBuilderSessionIfActive()
     // F4 hydration gate: a NEW template's starter draft is available synchronously (no fetch) —
     // seed the v2 session in the SAME tick, before first paint, so there is no builder-mounts-empty
     // flash even for a brand-new template.
@@ -3764,6 +3888,7 @@ async function loadTemplateForEdit() {
   loadError.value = null
   try {
     const template = await getTemplate(templateId.value)
+    if (seq !== templateLoadSeq) return // superseded by a newer navigation — drop this response
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
@@ -3775,9 +3900,19 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2 (external review, reproduced mounted with Canvas V2 ON): a route reload on a
+    // reused instance replaced the draft above, but ApprovalFormBuilder reads the draft ONCE per
+    // epoch — basic info showed B while the form designer still showed A's fields. Reseed here;
+    // the showFormBuilderV2 guard makes this a no-op on the first (mount-time) load, where the
+    // hydration gate below does the seeding.
+    reseedFormBuilderSessionIfActive()
   } catch (error: unknown) {
+    if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
   } finally {
+    if (seq !== templateLoadSeq) {
+      // the newer navigation owns loading/hydration state now
+    } else {
     loading.value = false
     // F4 hydration gate: set exactly ONCE per view instance, success or failure — `draft.value`
     // holds whatever the load produced (the real template, or the pre-existing empty fallback on
@@ -3785,6 +3920,7 @@ async function loadTemplateForEdit() {
     // `draft.value` reassignment (e.g. after save) never re-triggers this — see
     // `reseedFormBuilderSessionIfActive` for the ONE deliberate, explicit resync path.
     formSessionHydrated.value = true
+    }
   }
 }
 
@@ -3799,18 +3935,28 @@ function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId 
   return 'flow'
 }
 
+// B0 (owner-approved draft-save UX slice, 20260824): 保存草稿 no longer runs PUBLISH-grade
+// validation — it runs only the SAVE-BLOCKING minimum, i.e. what the backend actually 400s on
+// `createTemplate`/`updateTemplate` (see `validateTemplateFormFields`/`validateTemplateApprovalFlow`'s
+// `{ minimal: true }` doc comments in templateAuthoring.ts for the exact, evidence-cited server
+// reject-set). No record-link catalog fetch is needed here at all — the catalog/pin-mismatch check
+// is a publish-time-only concern server-side, so a plain draft save never awaits that network call.
+// `key`/`name` are auto-seeded (never blocked) since both are `NOT NULL` server-side but the
+// reference product never makes an author type them before saving (see
+// `seedDraftIdentityForSave`'s doc comment for the collision-safety reasoning).
+//
+// `openPublishChecklist`/`confirmPublish` are UNTOUCHED — they keep gating on the full
+// `publishChecklist` (`publishFormFieldIssues`/`publishApprovalFlowIssues`/`publishPlaceholderRoleIssues`,
+// still `validateTemplateFormFields`/`validateTemplateApprovalFlow` with NO `minimal` flag) before
+// ever reaching `persistDraft`, so relaxing what `validate()` itself checks never weakens publish.
 async function validate(): Promise<boolean> {
-  // Ensure catalog is attempted before pin-membership checks when the draft uses record-link.
-  if (draft.value.fields.some((f) => f.type === 'record-link') && !recordLinkCatalogLoaded.value) {
-    await ensureRecordLinkCatalog(true)
-  }
-  const formErrors = validateTemplateFormFields(
-    draft.value,
-    unsupportedReason.value,
-    recordLinkCatalogValidation.value,
-  )
-  const flowErrors = validateTemplateApprovalFlow(draft.value)
-  validationErrors.value = [...formErrors, ...flowErrors]
+  // Seeding is a NO-OP for existing templates (see seedDraftIdentityForSave — gate P2-1); their
+  // blank identity blocks below instead. The save-blocking set has ONE definition —
+  // collectTemplateSaveMinimum — and this is its production call site (E-P3).
+  draft.value = seedDraftIdentityForSave(draft.value)
+  const minimum = collectTemplateSaveMinimum(draft.value, unsupportedReason.value)
+  const formErrors = minimum.formErrors
+  validationErrors.value = minimum.all
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
     ElMessage.warning('请先修正模板配置')
@@ -3822,6 +3968,14 @@ async function validate(): Promise<boolean> {
 }
 
 async function persistDraft() {
+  // WRITE-PATH DEFENCE, independent of the canSave UI gate (external review rounds 3+4): the
+  // draft must be THIS route's template. `!==` covers both poisoned states — never-loaded
+  // (`'' !== 'tpl_b'`, would fall through to CREATE and mint a duplicate) and stale-after-
+  // route-switch (`'tpl_a' !== 'tpl_b'`, would UPDATE the wrong template from tpl_b's URL).
+  if (isEditMode.value && draft.value.templateId !== templateId.value) {
+    loadError.value = '模板尚未加载成功，无法保存 — 请刷新重试'
+    return null
+  }
   if (!(await validate())) return null
   saving.value = true
   try {
@@ -4039,6 +4193,15 @@ const conditionNodeSummaries = computed(() =>
     })),
 )
 
+// Round-4: Vue Router REUSES this component across /:id/edit param changes — onMounted alone
+// leaves the previous template's draft live under the new URL. Reload on every id change (and on
+// edit->new transitions, where loadTemplateForEdit resets to the empty starter synchronously).
+watch(templateId, (next, prev) => {
+  if (next === prev) return
+  if (!canManageTemplates.value) return
+  void loadTemplateForEdit()
+})
+
 onMounted(() => {
   if (!canManageTemplates.value) return
   void directory.loadRoles()
@@ -4098,6 +4261,11 @@ onUnmounted(() => {
 
 .template-authoring__actions {
   justify-content: flex-end;
+}
+
+/* B0 — header "N项不完善" affordance, next to 保存草稿/发布. */
+.template-authoring__incomplete-count {
+  color: var(--ms-color-warning);
 }
 
 .template-authoring__header {

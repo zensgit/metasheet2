@@ -6,7 +6,7 @@
  * WHY THIS EXISTS
  * ---------------
  * At ladder L1 (`docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md` §2)
- * the nine recovery-authority triggers are ENABLED on staging while all four recovery flags stay
+ * the nine recovery-authority triggers are ENABLED on staging while all five recovery flags stay
  * OFF. With no recovery process holding a lease, organic traffic sees **zero** 40001 — so the
  * ladder's "zero unmapped 500" criterion is, under passive observation, satisfied by a system in
  * which the triggers never fire at all. Passive observation therefore cannot distinguish
@@ -101,6 +101,8 @@ import {
   EXPECTED_AUTHORITY_TRIGGERS,
   canonicalFunction,
   canonicalTrigger,
+  EXPECTED_AUTHORITY_SCHEMA,
+  assertBindableSchemaName,
 } from './multitable-recovery-schema-containment.mjs'
 
 const requireFromBackend = createRequire(
@@ -397,7 +399,9 @@ const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
  * write into a table that carries a recovery-authority trigger?** Three conjuncts, each of which
  * has to be there:
  *
- *  1. **The FK targets the session-resolved `roles` relation** (`con.confrelid = to_regclass(...)`).
+ *  1. **The FK targets the CANONICALLY-bound `roles` relation** (`con.confrelid =
+ *     to_regclass('<canonical>.roles')` — NOT the session-resolved bare name; see SCHEMA/OID
+ *     BINDING below for why that distinction is the whole point).
  *  2. **The child table carries a canonical recovery-authority trigger.** Derived from the catalog
  *     via the census's function list, never from a hand-typed table list. This conjunct is what
  *     keeps the predicate from over-widening: `20250925_create_view_tables.sql:261` conditionally
@@ -422,33 +426,233 @@ const RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST = AUTHORITY_TRIGGER_FUNCTIONS
  * conjunct could only ever manufacture a false ABSENT. It is also moot in practice:
  * `033_create_rbac_core.sql:5` makes `id` the primary key of `roles`.
  *
- * SCHEMA/OID BINDING. `to_regclass` resolves through the SESSION's `search_path`, and the result is
- * an OID compared against `con.confrelid` — so a decoy `roles` in a schema that is not on the path
- * can neither be mistaken for the real one nor hide it. It is deliberately UNQUALIFIED: hard-coding
- * `public.` would blind every real-DB golden this repo runs in a per-run random schema. The
- * witness runner's relation-presence control (`RELATION_PRESENCE_QUERY`) resolves the SAME relation
- * the same way; the two are coupled and must be narrowed in lockstep, or a database this query
- * cannot even see would report as "no cascade" instead of "wrong database".
+ * SCHEMA/OID BINDING — CANONICAL, NOT SESSION-RESOLVED. This query binds `roles` to
+ * `<canonicalSchema>.roles`. It used to bind the bare name `to_regclass('roles')`, which resolves
+ * through the SESSION's `search_path`; the docblock here defended that as safe because "a decoy
+ * `roles` in a schema that is not on the path can neither be mistaken for the real one nor hide
+ * it". That sentence was true and covered only the case it named. A decoy that IS on the path —
+ * reached via a `"$user"` schema the connecting role owns, a `SET search_path`, a DSN `options=`,
+ * an `ALTER ROLE … SET`, or a `CREATE TEMP TABLE roles` — silently retargeted the query, which then
+ * returned zero rows and was reported as `CASCADE ABSENT (premise CONFIRMED)`, exit 0, on a
+ * database whose cascade was live. Reproduced end to end on PG 15 with the shipped probe and
+ * classifier; see `docs/development/role-cascade-witness-shadow-resolution-repro-20260824.md`.
+ *
+ * The coupled presence control could not catch it BECAUSE it was coupled: it resolved `roles` the
+ * same way, so it failed for the same reason — satisfied by the decoy — while the other half of the
+ * control (a relation carrying a canonical trigger) was satisfied by the REAL child in the real
+ * schema. Two counters, two different relations, both green.
+ *
+ * PARAMETERISED, NOT HARD-CODED. Hard-coding `public.` would blind every real-DB golden this repo
+ * runs in a per-run random schema — which is why the bare name was chosen originally. So the schema
+ * is a parameter: production passes `EXPECTED_AUTHORITY_SCHEMA`, DERIVED from the containment
+ * census's own `EXPECTED_AUTHORITY_TRIGGERS` (all nine of which are `public`) rather than retyped;
+ * the goldens pass the random schema they just created.
  */
 /**
- * "This session can resolve a `roles` TABLE" — as a SQL boolean expression, so every consumer of
- * `ROLE_CASCADE_WITNESS_QUERY` can pair the query with the SAME presence check.
+ * The relation-binding SQL fragments every consumer of the witness query must pair with it.
  *
- * ONE DEFINITION, because the two must be narrowed in lockstep or the pair manufactures a false
- * ABSENT: the query resolves `roles` through the session's `search_path`, so a session that cannot
- * see `roles` at all returns zero rows — which reads as "nothing writes a triggered child" while
- * actually meaning "we are looking somewhere that has no roles table". `relkind IN ('r','p')`
- * because `con.confrelid` can only ever be an ordinary or partitioned table; a VIEW named `roles`
- * would otherwise report presence for a query that is guaranteed to return nothing.
+ * ONE DEFINITION, and the two halves are no longer coupled through the same resolution — that
+ * coupling is precisely what made the old positive control unable to fail:
+ *
+ *   • `canonicalRolesOid` — `to_regclass('<canonicalSchema>.roles')`, the relation the witness query
+ *     itself binds to. This is the PRIMARY correctness mechanism: the query looks at the canonical
+ *     relation whatever the session's `search_path` happens to say.
+ *   • `sessionRolesOid` — `to_regclass('roles')`, what the session WOULD have resolved. Compared
+ *     against the canonical OID purely as a tamper/drift detector: a mismatch means the observed
+ *     environment is not the one we think we are observing, so the observation is refused rather
+ *     than certified. Defence in depth, not the thing that makes the verdict right.
+ *   • `visibleRolesRelations` — how many ordinary/partitioned `roles` relations sit on the session's
+ *     `search_path` at all. A DIAGNOSTIC second door: it converges on nothing by itself (a single
+ *     WRONG schema on the path counts exactly one), which is why it must never be traded off
+ *     against the OID equality above. If these two ever conflict, weaken THIS one.
+ *
+ * `relkind IN ('r','p')` because `con.confrelid` can only ever be an ordinary or partitioned table;
+ * a VIEW named `roles` would otherwise report presence for a query guaranteed to return nothing.
  */
-export const ROLES_RELATION_PRESENT_SQL = `EXISTS (
+export function buildRoleCascadeBindingSql(canonicalSchema) {
+  const schema = assertBindableSchemaName(canonicalSchema)
+  // Rebased onto the bound schema so production gets the literal expected identity and the real-DB
+  // goldens get the same shape in the random schema they just created. Every component is an
+  // identifier from the census, re-checked here rather than trusted.
+  const exactCarrierTuples = EXPECTED_AUTHORITY_TRIGGERS
+    .map((trigger) => [trigger.tableName, trigger.triggerName, trigger.functionName].map(assertBindableSchemaName))
+    .map(([table, name, fn]) => `('${table}', '${name}', '${fn}')`)
+    .join(',\n        ')
+  const canonicalOid = `to_regclass('${schema}.roles')`
+  return {
+    schema,
+    canonicalRolesOidSql: canonicalOid,
+    /** The canonical relation exists AND is a table — not a view, not absent. */
+    canonicalRolesPresentSql: `EXISTS (
       SELECT 1
       FROM pg_catalog.pg_class rel
+      WHERE rel.oid = ${canonicalOid}
+        AND rel.relkind IN ('r', 'p')
+    )`,
+    /** What the session's own search_path resolves the bare name to, as a schema name or NULL. */
+    sessionRolesSchemaSql: `(
+      SELECT ns.nspname
+      FROM pg_catalog.pg_class rel
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
       WHERE rel.oid = to_regclass('roles')
         AND rel.relkind IN ('r', 'p')
-    )`
+    )`,
+    /** The session's resolution agrees with the canonical binding. */
+    sessionBindsCanonicalSql: `(
+      to_regclass('roles') IS NOT NULL
+      AND to_regclass('roles') = ${canonicalOid}
+    )`,
+    /** How many `roles` tables are visible anywhere on the session's search_path (incl. pg_temp). */
+    visibleRolesRelationsSql: `(
+      SELECT count(*)
+      FROM pg_catalog.pg_class rel
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+      WHERE rel.relname = 'roles'
+        AND rel.relkind IN ('r', 'p')
+        AND ns.nspname = ANY (current_schemas(true))
+    )`,
+    /**
+     * EXACT canonical carrier identities present, derived from `EXPECTED_AUTHORITY_TRIGGERS` and
+     * rebased onto the bound schema. THIS is the positive control the verdict depends on.
+     *
+     * Scoping the carrier COUNT to the canonical schema (below) was not enough: it constrains the
+     * carrier table's schema and the function's NAME, but not the function's SCHEMA or the trigger's
+     * identity. A relation in the canonical schema carrying a trigger that calls a same-named
+     * function from ANOTHER schema — `evil.metasheet_recovery_authority_user_trigger` — satisfied
+     * it, on a catalog whose recovery-authority surface is not the canonical one at all. All four
+     * doors then opened and the run reported CONFIRMED. Verified on PG 15 against the previous head.
+     *
+     * Each tuple must match on carrier schema+table, trigger name, AND function schema+name. One
+     * exact match is enough: the question this control answers is "is this the canonical
+     * recovery-authority surface", not "is all of it intact" — that is the battery's Phase-0
+     * exact-posture check (`triggerCoverage`), which the independent witness deliberately does not
+     * re-implement.
+     *
+     * DERIVED, NOT RETYPED, and the WITNESS QUERY STAYS WIDE: narrowing the query itself to this
+     * table list would be the enumeration trap — it would go stale the first time the migration
+     * covers one more table, and nothing would say so.
+     */
+    canonicalExactCarriersSql: `(
+      SELECT count(*)
+      FROM (VALUES
+        ${exactCarrierTuples}
+      ) AS want(table_name, trigger_name, function_name)
+      WHERE EXISTS (
+        SELECT 1
+        FROM pg_catalog.pg_trigger trg
+        JOIN pg_catalog.pg_class rel ON rel.oid = trg.tgrelid
+        JOIN pg_catalog.pg_namespace rel_ns ON rel_ns.oid = rel.relnamespace
+        JOIN pg_catalog.pg_proc fn ON fn.oid = trg.tgfoid
+        JOIN pg_catalog.pg_namespace fn_ns ON fn_ns.oid = fn.pronamespace
+        WHERE NOT trg.tgisinternal
+          AND rel_ns.nspname = '${schema}'
+          AND rel.relname = want.table_name
+          AND trg.tgname = want.trigger_name
+          AND fn_ns.nspname = '${schema}'
+          AND fn.proname = want.function_name
+      )
+    )`,
+    /** AUDIT-ONLY since the exact control above took over the decision: the loose carrier count. */
+    canonicalTriggerCarriersSql: `(
+      SELECT count(DISTINCT trg.tgrelid)
+      FROM pg_catalog.pg_trigger trg
+      JOIN pg_catalog.pg_proc prc ON prc.oid = trg.tgfoid
+      JOIN pg_catalog.pg_class rel ON rel.oid = trg.tgrelid
+      JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+      WHERE NOT trg.tgisinternal
+        AND ns.nspname = '${schema}'
+        AND prc.proname IN (${RECOVERY_AUTHORITY_TRIGGER_FUNCTION_SQL_LIST})
+    )`,
+    /** AUDIT-ONLY, decides nothing — see the witness runner's docblock. */
+    rolesReferencingFksSql: `(
+      SELECT count(*)
+      FROM pg_catalog.pg_constraint fk
+      WHERE fk.contype = 'f'
+        AND fk.confrelid = ${canonicalOid}
+    )`,
+  }
+}
 
-export const ROLE_CASCADE_WITNESS_QUERY = `
+/**
+ * The door names, and the ONE implementation of the doors.
+ *
+ * EXTRACTED SO THE DOORS ARE BEHAVIOURAL, NOT TEXTUAL. They used to be four inline `if`s in the
+ * battery's preflight and four more in the witness runner's classifier, guarded by tests that
+ * scanned the SOURCE for the failure strings. Verified against the previous head: replacing the
+ * battery's `if (bindingRow.session_binds_canonical !== true)` with `if (false)` left its whole
+ * contract suite green at 63/63. A source-text assertion is not a behaviour assertion.
+ *
+ * Both consumers now DELEGATE here and map the door to their own vocabulary — the battery to a
+ * `role_cascade_*` preflight failure, the witness runner to an INDETERMINATE reason — so a door can
+ * only be neutered in one place, and that place is covered by real input/output tests.
+ *
+ * ORDER IS PART OF THE CONTRACT: a database missing the canonical relation entirely must not be
+ * reported as a binding mismatch, and a mismatched binding must not be reported as ambiguity.
+ */
+export const ROLE_CASCADE_BINDING_DOORS = Object.freeze({
+  canonicalRelationAbsent: 'canonical_relation_absent',
+  bindingMismatch: 'binding_mismatch',
+  relationAmbiguous: 'relation_ambiguous',
+  relationsAbsent: 'relations_absent',
+})
+
+/**
+ * @param {{canonical_roles_present?: unknown, session_binds_canonical?: unknown,
+ *          session_roles_schema?: unknown, visible_roles_relations?: unknown,
+ *          canonical_exact_carriers?: unknown}} observed
+ * @returns {{door: string, detail: string} | null} null means every door is open — and ONLY then may
+ *          a caller draw a verdict from the witness rows.
+ */
+export function classifyRoleCascadeBinding(observed, { canonicalSchema } = {}) {
+  const schema = String(canonicalSchema ?? '')
+  const row = observed ?? {}
+  if (row.canonical_roles_present !== true) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.canonicalRelationAbsent,
+      detail: `the observed database has no ordinary table \`${schema}.roles\`, so the witness query binds to nothing; zero rows there is not evidence of absence`,
+    }
+  }
+  const seen = row.session_roles_schema == null ? null : row.session_roles_schema
+  if (row.session_binds_canonical !== true) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.bindingMismatch,
+      detail: `this session's own \`roles\` resolves to schema ${JSON.stringify(seen)}, not the canonical \`${schema}\` — the observed environment is not the one being certified, so no verdict may be drawn from it`,
+    }
+  }
+  // CROSS-FIELD CONSISTENCY, not just per-field types. `session_binds_canonical` and
+  // `session_roles_schema` are two views of ONE fact, and nothing forced them to agree: a payload
+  // asserting `true` while naming `null`, `''`, or another schema entirely was accepted and
+  // certified ABSENT / exit 0. The flag is a claim; the schema name is the evidence for it. An
+  // observation whose own two fields contradict each other is unreadable, whichever one is lying.
+  if (seen !== schema) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.bindingMismatch,
+      detail: `the observation claims the session binds the canonical \`roles\` but names its schema as ${JSON.stringify(seen)}, not \`${schema}\` — the payload contradicts itself, so nothing may be certified from it`,
+    }
+  }
+  const visible = readCatalogCount(row.visible_roles_relations)
+  if (visible !== 1) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.relationAmbiguous,
+      detail: `${visible === null ? 'an unreadable number of' : visible} \`roles\` tables are visible on this session's search_path (expected exactly the canonical one); the binding cannot be uniquely confirmed`,
+    }
+  }
+  const exactCarriers = readCatalogCount(row.canonical_exact_carriers)
+  if (exactCarriers === null || exactCarriers < 1) {
+    return {
+      door: ROLE_CASCADE_BINDING_DOORS.relationsAbsent,
+      detail: `no relation in \`${schema}\` carries a canonical recovery-authority trigger at its EXPECTED identity (carrier table, trigger name, and function schema AND name all matching the containment census), so this is not the canonical recovery-authority surface and the witness query is structurally incapable of returning a meaningful row; zero rows there is not evidence of absence`,
+    }
+  }
+  return null
+}
+
+/** The canonical schema production binds to. Derived from the containment census, never retyped. */
+export const CANONICAL_ROLES_SCHEMA = EXPECTED_AUTHORITY_SCHEMA
+
+export function buildRoleCascadeWitnessQuery(canonicalSchema) {
+  const { canonicalRolesOidSql } = buildRoleCascadeBindingSql(canonicalSchema)
+  return `
   SELECT
     child_ns.nspname AS child_schema,
     child.relname AS child_table,
@@ -458,7 +662,7 @@ export const ROLE_CASCADE_WITNESS_QUERY = `
   JOIN pg_catalog.pg_class child ON child.oid = con.conrelid
   JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid = child.relnamespace
   WHERE con.contype = 'f'
-    AND con.confrelid = to_regclass('roles')
+    AND con.confrelid = ${canonicalRolesOidSql}
     AND EXISTS (
       SELECT 1
       FROM pg_catalog.pg_trigger tg
@@ -469,6 +673,7 @@ export const ROLE_CASCADE_WITNESS_QUERY = `
     )
   ORDER BY child_ns.nspname, child.relname, con.conname
 `
+}
 
 /**
  * The `confdeltype` letters that make a parent delete WRITE INTO THE CHILD ROW.
@@ -490,11 +695,47 @@ export const ROLE_CASCADE_WITNESS_QUERY = `
 export const ROLE_DELETE_CHILD_WRITE_ACTIONS = Object.freeze(['c', 'n', 'd'])
 
 /**
+ * Every letter `pg_constraint.confdeltype` can legally hold for a foreign key.
+ *
+ * WHY THIS IS A SEPARATE, WIDER SET. `ROLE_DELETE_CHILD_WRITE_ACTIONS` answers "does this action
+ * write the child row"; anything outside it is treated as "no child write" — i.e. as evidence FOR
+ * the exemption. That is correct for `'a'` and `'r'`, and catastrophic for a letter that is not an
+ * action at all: an observation carrying `confdeltype: 7` was coerced to the string `'7'`, found
+ * absent from the write set, and reported as CASCADE ABSENT / exit 0. A value that cannot have come
+ * from the catalog is an UNREADABLE observation, not an observation of no-write.
+ *
+ * The write set must be a subset of this one; a test pins that, so widening one without the other
+ * cannot pass.
+ */
+export const FK_DELETE_ACTION_LETTERS = Object.freeze(['a', 'r', 'c', 'n', 'd'])
+
+/**
+ * A catalog COUNT, validated rather than coerced.
+ *
+ * `Number()` maps `true` to 1, `null` to 0 and `''` to 0 — so a malformed payload became a
+ * well-formed-looking observation with every door open. Accepts a real non-negative safe integer,
+ * or the strict decimal STRING form, because node-postgres returns `count(*)` (bigint) as a string
+ * and the shared door classifier is fed straight from a pg row.
+ *
+ * @returns {number|null} null means "not a count" — the caller must fail closed, never default.
+ */
+export function readCatalogCount(value) {
+  if (typeof value === 'number') {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null
+  }
+  if (typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
+  }
+  return null
+}
+
+/**
  * @returns true when the observed rows show a foreign key whose parent-delete action writes into a
  * recovery-authority-triggered child of `roles` — i.e. when the `roles:delete` NOT-DRIVEN excuse has
  * expired on the observed database.
  *
- * The rows are already conjunct-1 and conjunct-2 filtered by `ROLE_CASCADE_WITNESS_QUERY` (FK →
+ * The rows are already conjunct-1 and conjunct-2 filtered by `buildRoleCascadeWitnessQuery` (FK →
  * `roles`, child carries a canonical trigger); this decides conjunct 3. The delete-action letters
  * live HERE and not in the SQL on purpose: the witness ships the SQL verbatim to the target host,
  * and the host program must observe without classifying.
@@ -554,7 +795,7 @@ export const NOT_DRIVEN_SITES = Object.freeze([
     site: 'roles:delete',
     reason: 'no-trigger-on-target-table',
     detail:
-      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is a foreign-key cascade into a triggered child — and no such FK EXISTS on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading role_permissions (:17) and user_roles (:36) versions are both no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by ROLE_CASCADE_WITNESS_QUERY over EVERY recovery-authority-triggered child of roles, for every parent-delete action that writes the child row (CASCADE / SET NULL / SET DEFAULT) — if any of them exists on the target database, the battery FAILS rather than keep this excuse.",
+      "DELETE /api/roles/:id deletes only from `roles`, which carries none of the nine triggers. Its documented blocking path is a foreign-key cascade into a triggered child — and no such FK EXISTS on a schema built by this repo's migration chain (role_permissions is created by 20250924190000_create_rbac_tables.ts with only a permission_code FK; 033_create_rbac_core.sql's cascading role_permissions (:17) and user_roles (:36) versions are both no-op CREATE TABLE IF NOT EXISTS). Verified empirically: driving it under a held role lease returned 200, and pg_constraint shows no roles-referencing FK. Re-checked at runtime by buildRoleCascadeWitnessQuery over EVERY recovery-authority-triggered child of roles, for every parent-delete action that writes the child row (CASCADE / SET NULL / SET DEFAULT) — if any of them exists on the target database, the battery FAILS rather than keep this excuse.",
   },
   {
     site: 'auth:register',
@@ -1440,16 +1681,17 @@ export async function runBattery({ env = process.env, options } = {}) {
       shadowed_authority_functions: posture.shadowOffenders,
       unexpected_authority_triggers: posture.unexpectedTriggers,
       unexpected_authority_functions: posture.unexpectedFunctions,
-      // The battery is deliberately FLAG-AGNOSTIC. L1 is "triggers ENABLED, all four recovery
+      // The battery is deliberately FLAG-AGNOSTIC. L1 is "triggers ENABLED, all five recovery
       // flags OFF"; the battery requires no flag in any state and asserts nothing about them.
       // They are recorded only so the evidence names the posture the run observed.
       recovery_flags_observed: {
         MULTITABLE_HISTORY_CONTIGUITY_STRICT: env.MULTITABLE_HISTORY_CONTIGUITY_STRICT ?? null,
         MULTITABLE_ENABLE_WRITER_FENCE: env.MULTITABLE_ENABLE_WRITER_FENCE ?? null,
+        MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: env.MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION ?? null,
         MULTITABLE_ENABLE_SHEET_REVERT: env.MULTITABLE_ENABLE_SHEET_REVERT ?? null,
         MULTITABLE_ENABLE_PIT_RESET: env.MULTITABLE_ENABLE_PIT_RESET ?? null,
       },
-      flag_requirement: 'none — the battery runs at L1 posture and is independent of all four recovery flags',
+      flag_requirement: 'none — the battery runs at L1 posture and is independent of all five recovery flags',
     }
     if (!posture.armed) {
       const report = notArmedReport(posture)
@@ -1503,20 +1745,46 @@ export async function runBattery({ env = process.env, options } = {}) {
     // — and exit 1 rather than produce evidence — in strictly MORE situations than before. That is
     // the point: every one of those situations is a database on which `roles:delete` really is
     // blockable and therefore really must be driven.
-    // SCHEMA/OID BINDING — the presence control this query must be paired with. The witness
-    // resolves `roles` through the SESSION's search_path, so zero rows from a session that cannot
-    // see a `roles` table would read as "nothing writes a triggered child" and quietly keep the
-    // exemption. `users` resolving in the same-DB proof above does NOT establish this: the two
-    // tables could sit in different schemas. Same client, same session, same resolution as the
+    // SCHEMA/OID BINDING — the doors this query must be paired with. The query binds
+    // `<canonical>.roles`; these doors establish that the canonical relation exists, that this
+    // session's own view agrees with it, that the binding is unambiguous, and that this really is
+    // the canonical recovery-authority surface. Without them, zero rows from a database that is not
+    // the one we think we are observing would read as "nothing writes a triggered child" and
+    // quietly keep the exemption. `users` resolving in the same-DB proof above does NOT establish
+    // this: the two tables could sit in different schemas. Same client, same session as the
     // query it guards — that is the whole point.
-    const rolesPresence = await sqlOne(`SELECT ${ROLES_RELATION_PRESENT_SQL} AS present`)
-    if (rolesPresence[0]?.present !== true) {
-      log(lines, "VERDICT: NOT_ARMED - this session cannot resolve a `roles` table through its search_path, so the roles:delete premise cannot be re-checked here; zero rows from the witness query would not be evidence of absence")
-      failures.push({ phase: 'preflight', failure: 'role_cascade_premise_unobservable', reason: "to_regclass('roles') resolved no ordinary table on the battery's own session" })
+    // SAME DOORS, SAME ORDER, SAME REASONS as the independent witness runner's
+    // `classifyObservation` — the two must stay in lockstep or one can certify what the other
+    // refuses. Every failure here is NOT_ARMED / exit 2, never a verdict.
+    const binding = buildRoleCascadeBindingSql(CANONICAL_ROLES_SCHEMA)
+    const bindingRow = (await sqlOne(`SELECT
+      ${binding.canonicalRolesPresentSql} AS canonical_roles_present,
+      ${binding.sessionBindsCanonicalSql} AS session_binds_canonical,
+      ${binding.sessionRolesSchemaSql} AS session_roles_schema,
+      ${binding.visibleRolesRelationsSql} AS visible_roles_relations,
+      ${binding.canonicalExactCarriersSql} AS canonical_exact_carriers,
+      ${binding.canonicalTriggerCarriersSql} AS canonical_trigger_carriers`))[0] ?? {}
+    // ONE delegation, and no inline conditions left in this file: the doors live in
+    // `classifyRoleCascadeBinding`, where they are tested with real inputs. Neutering a door there
+    // reds those tests; deleting this call is what the source pin in the contract suite catches.
+    const bindingDoor = classifyRoleCascadeBinding(bindingRow, { canonicalSchema: binding.schema })
+    const bindingFailure = bindingDoor
+      ? { failure: `role_cascade_${bindingDoor.door}`, reason: bindingDoor.detail }
+      : null
+    if (bindingFailure) {
+      log(lines, `VERDICT: NOT_ARMED - the roles:delete premise cannot be re-checked here (${bindingFailure.failure}): ${bindingFailure.reason}; zero rows from the witness query would not be evidence of absence`)
+      failures.push({ phase: 'preflight', ...bindingFailure })
       evidence.finished_at = new Date().toISOString()
       return { exitCode: 2, evidence, lines }
     }
-    const cascadeRows = (await admin.client.query(ROLE_CASCADE_WITNESS_QUERY)).rows
+    evidence.posture.role_delete_binding = {
+      canonical_schema: binding.schema,
+      session_roles_schema: bindingRow.session_roles_schema ?? null,
+      visible_roles_relations: Number(bindingRow.visible_roles_relations),
+      canonical_exact_carriers: Number(bindingRow.canonical_exact_carriers),
+      canonical_trigger_carriers: Number(bindingRow.canonical_trigger_carriers),
+    }
+    const cascadeRows = (await admin.client.query(buildRoleCascadeWitnessQuery(CANONICAL_ROLES_SCHEMA))).rows
     const cascadePresent = roleDeleteCascadeExists(cascadeRows)
     evidence.posture.role_delete_cascade_present = cascadePresent
     // Auditable, not a bare boolean: the exact rows the predicate decided on.

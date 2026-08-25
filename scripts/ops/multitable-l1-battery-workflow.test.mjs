@@ -137,6 +137,18 @@ function extractRemoteHeredoc(runBodyText) {
 const scrubBlock = extractStepBlock(workflowText, SCRUB_STEP_NAME_LINE)
 const batteryBlock = extractStepBlock(workflowText, BATTERY_STEP_NAME_LINE)
 const residueBlock = extractStepBlock(workflowText, RESIDUE_STEP_NAME_LINE)
+
+test('battery provenance logging uses a defined shell builtin, never the scrub-only log helper', () => {
+  assert.match(
+    batteryBlock,
+    /printf '%s\\n' "provenance: image=\$\{image_digest:-<unset>\} commit=\$\{build_commit:-<unset>\}"/,
+  )
+  assert.doesNotMatch(
+    batteryBlock,
+    /\blog "provenance:/,
+    'the battery remote body does not define log(); using it loses the line with command-not-found',
+  )
+})
 const scrubRunBody = extractRunBody(scrubBlock)
 const scrubRemoteBody = extractRemoteHeredoc(scrubRunBody)
 

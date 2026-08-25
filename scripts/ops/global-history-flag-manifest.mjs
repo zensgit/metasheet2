@@ -32,7 +32,9 @@
 /**
  * @typedef {Object} FlagSpec
  * @property {string} key
- * @property {'boolean'|'numeric'|'enum'} type
+ * @property {'boolean'|'numeric'|'enum'|'list'} type - 'list' = comma-separated allowlist; like 'numeric'/'enum'
+ *   it is NOT a boolean, so isActivated()/isMisconfiguredTruthy() return false for it by construction and it
+ *   can never participate in a dependsOn/conflicts rule (those evaluate activation).
  * @property {string} activationValue - exact string that activates a boolean flag (ignored for numeric/enum)
  * @property {boolean} [caseInsensitive] - true only for the three flags (PIT_RESET/PIT_UNDELETE/SHEET_REVERT) whose source call site lowercases+trims
  * @property {string[]} dependsOn - other flag keys that MUST also be active for this flag's gated effect to be safe/whole
@@ -145,6 +147,25 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     purpose:
       'W0-1 L5-wire (owner review 2026-07-17): the production caller for activateCheckpoint — POST /sheets/:sheetId/trust-checkpoint-activate provisions a trust checkpoint for one sheet in ONE fenced transaction (canonical fence first, then the design-lock §3 cutover: allocate trusted_since_seq, snapshot live + attributable-trash baselines, supersede the prior active checkpoint, activate). ADDITIVE-ONLY trust provisioning: no destructive write, and activating a checkpoint enables NOTHING by itself — strict mode and Revert/Reset stay behind their own default-OFF flags; a checkpoint is merely the (a)-half of the strict-enablement precondition. Fail-closed: an unattributable trashed-only record aborts the whole activation (409 HISTORY_INCOMPLETE, values-free). Sheet-admin (canManageSheetAccess, D2) floor — provisioning the trust floor for destructive recovery is an admin capability. danger=medium (not high): it writes only checkpoint/baseline rows, never live record data, but it moves the sheet\'s trust floor that later destructive recoveries anchor on, so it is not a plain ops convenience either.',
     source: 'packages/core-backend/src/routes/univer-meta.ts#TRUST_CHECKPOINT_ACTIVATION_ENABLED,/trust-checkpoint-activate',
+  },
+  {
+    key: 'MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST',
+    type: 'list',
+    // Kept SHORT on purpose: this string is rendered inline on the operator's per-flag status line
+    // (multitable-global-history-flag-status.mjs non-boolean branch). The full rationale is in `purpose`.
+    activationValue:
+      "comma-separated sheet ids (trimmed, EXACT match); UNSET/EMPTY ⇒ refused for EVERY sheet, fail-closed",
+    // NOT modeled as a dependsOn of MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: isActivated() is false for
+    // every non-boolean spec (see :414), so a `requires` rule keyed off this list would fire on EVERY posture
+    // that has activation on — including the ladder's legitimate `l2-checkpoint` posture — and permanently red
+    // the --strict status. The precondition is enforced in-process by the route and documented here instead.
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "SCOPE gate for trust-checkpoint activation (P2 fix, 2026-08-25). The O-2 enablement ladder's L2-C rung provisions a checkpoint for a NAMED synthetic canary sheet only and explicitly forbids bulk-provisioning customer sheets — before this flag that was CONVENTION and the route accepted any sheet id. Now the route refuses unless the requested sheet id appears verbatim in this list, so owner designation is a precondition by construction. Fail-closed in the operator-relevant direction: leaving it unset does not 'disable the restriction', it disables ACTIVATION ENTIRELY. Danger=medium rather than low because a too-wide value (e.g. pasting customer sheet ids) is what the L2-C rung forbids, and a checkpoint is a durable trust anchor for later destructive recovery. The refusal is values-free: it names the env var and the required action, never the requested sheet id and never the list contents.",
+    source:
+      'packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts#TRUST_CHECKPOINT_SHEET_ALLOWLIST_ENV,resolveTrustCheckpointSheetAllowlist,isTrustCheckpointSheetAllowlisted; packages/core-backend/src/routes/univer-meta.ts#/trust-checkpoint-activate',
   },
   {
     key: 'MULTITABLE_ENABLE_SHEET_REVERT',

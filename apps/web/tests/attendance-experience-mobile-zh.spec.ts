@@ -157,7 +157,7 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     expect(container?.querySelector('[data-testid="attendance-workflow-designer"]')).toBeNull()
   })
 
-  it('keeps a group route blocked on mobile without starting a probe or scoped request', async () => {
+  it('keeps a group route blocked on mobile and returns to the allowed group workspace', async () => {
     vi.mocked(apiFetch).mockClear()
     await router?.replace('/attendance/admin/groups/11111111-2222-4333-8444-555555555555/schedule')
     await flushUi(6)
@@ -171,7 +171,7 @@ describe('AttendanceExperienceView mobile zh fallback', () => {
     await waitForRoutePath(router!, '/attendance')
 
     expect(router?.currentRoute.value.fullPath).toBe('/attendance?tab=admin&section=attendance-admin-groups')
-    expect(container?.textContent).toContain('建议使用桌面端')
-    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).toBeNull()
+    expect(container?.textContent).not.toContain('建议使用桌面端')
+    expect(container?.querySelector('[data-testid="attendance-admin-center"]')).not.toBeNull()
   })
 })

@@ -8,7 +8,7 @@
   - `elearning-plugin-hybrid-architecture-20260810.md`（Codex 混合架构稿，吸收其架构图/责任矩阵/投影矩阵/流程/媒体子架构/验收门）
   - 两轮独立对抗审（v1→审1：5×P1+2×P2；复审→审2：范围冻结 P1、管理范围门、ACL、抑制合同、幂等三态、**org 默认值 P1**）——全部意见已吸收，处置记录 §13。
 - 基准参照：外部企业学习产品公开手册（54 篇能力蒸馏）。原始来源、品牌入口与离线镜像是**未入库研究材料**，不作为可复核路径、不构成仓库合同（审7 P2 / 审9）。功能定义以本文自身原则为准；本锁不收录竞品名称。
-- ⚠️ 基线注记：写稿时检出落后 main；**ratify 前必须 rebase 至最新 main 并逐条重核**。本稿 citation 第四跳已对 `origin/main` `@96b6416717`（2026-08-24）重核，见 §14-③ / §13 审8；审9 最小修订见 §13。
+- ⚠️ 基线注记：写稿时检出落后 main；**ratify 前必须 rebase 至最新 main 并逐条重核**。本稿 citation 第五跳已对 `origin/main` `@22ae2a1c07`（2026-08-25）重核，见 §14-③ / §13 审10；审9 最小修订见 §13。
 - 命名约定（ratify 后变更须走 design-lock amendment）：命名空间 `elearning` —— 插件 `plugin-elearning`、权限 `elearning:*`、表前缀 `elearning_`；**前端产品 feature `elearning`（单个，仅管导航/路由展示）+ 服务端 1 个 master `ELEARNING_ENABLED` + 6 个能力 flag `ELEARNING_{CONTENT,ASSIGNMENT,ASSESSMENT,INCENTIVE,ANALYTICS,MEDIA}_ENABLED`**（已裁：采用 ASSIGNMENT/ANALYTICS 命名；canonical 名单 = 此 7 个，环境变量/后端 capability payload/前端 store/测试不得出现别名）。产品显示名（审5 裁决 #9）：**员工端「学习中心」、管理端「云课堂管理」**。
 
 ---
@@ -186,7 +186,7 @@ L1–L2 需 ~18 张，其余随阶段建。
 ## 5. 权限、范围与前端
 
 ### 5.1 权限码与角色
-`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin-elearning_viewer|operator|admin`（`buildPluginPermissionCode`/`buildPluginRoleId`）。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23529-23614` 样板）。
+`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin-elearning_viewer|operator|admin`（`buildPluginPermissionCode`/`buildPluginRoleId`）。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23575-23660` 样板）。
 
 ### 5.2 管理范围
 `elearning_admin_scopes(user_id, dept_id, include_children)`；**所有管理面 详情/列表/统计/导出 查询强制携带范围谓词，默认拒绝**；列表不得返回范围外行。design-lock 评审时评估与 `delegated_role_admin_scopes` 合并。
@@ -367,12 +367,13 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 | 审7 追补 P2 | §7.4「owner 在 ratify 批注中覆盖硬下限」与 amendment 纪律冲突——合同逃生口 | 采纳；硬下限 5 锁定、org 只能上调，任何修改走 design-lock amendment；提交说明 six→seven | §7.4、commit message |
 | 审8 机械 | 第四跳 rebase 到 `origin/main` `@96b6416717`（约 280 提交）后 citation 漂移 | 纯机械重钉，不改合同：`AuthService.resolveSessionTenantId` `:387-426`；`buildFeaturePayload` → `src/routes/auth.ts:283`（Canvas never-inferred `:301-303`）；attendance `withPermission` `:23529-23614`；`20250924180000:105`；dispatch 迁移文件名补全；`zzzz20260411120100:22-38`。裁决 #1 实质仍成立（见 §14-③）。状态仍 DRAFT | 文首、§0、§4.1、§4.2、§4.3、§5.1、§10、§14 |
 | 审9 | exact-head 终检 `0eba89154b`：门1 测试假绿 P1；普通 RATIFIED 会被读成 L0 开工；锁文竞品名；`users.position` 钉 legacy SQL；审阅记录/活动 pin 未齐 | 采纳。门1加真实 DB 会话硬约束（`RBAC_BYPASS=false`/`RBAC_TOKEN_TRUST=false`，禁 trusted-token fixture）。终检通过后唯一合法状态 = `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`（不授权 L0/V0.1/代码/迁移/flag/实施 PR）。锁文去品牌化。`users.position` 改钉 `zzzz20260529190000:11-15`。§14-① 审1–审9；§4.1 活动合同 pin `@96b6416717`（历史行保留旧 SHA） | 文首、§2、§3、§4.1、§4.3、§11、门1、§13、§14、附录 |
+| 审10 机械 | 第五跳刷新至 `origin/main` `@22ae2a1c07`；13 个新增提交中，活动合同锚点仅 `plugin-attendance/index.cjs` 有交集 | 纯机械重钉，不改合同：`withAnyPermission/withPermission` 样板由 `:23529-23614` 更新为 `:23575-23660`；其余承重锚点继承有效。状态仍为 `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED` | 文首、§5.1、§14-③ |
 
 ## 14. Ratify 前置（顺序执行）
 
-1. ✅ 全部审阅意见落稿（审1–审9，处置记录 §13）。
+1. ✅ 全部审阅意见落稿（审1–审10，处置记录 §13）。
 2. ✅ Owner 九项裁决全部落槌（审5，§9 全 ACCEPTED / DEFERRED TO L6，无「待确认」残留）。
-3. ✅ 基线刷新（四跳完成；工作分支 `grok/elearning-plugin-20260824` cherry-pick 在 `96b6416717` 之上）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。其余承重锚点亲核仍在位：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`zzzz20260529190000_add_users_hr_profile_fields.ts:11-15` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`@96b6416717；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
+3. ✅ 基线刷新（五跳完成；当前合并审阅树对齐 `origin/main` `@22ae2a1c07`）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。**第五跳 96b6416717→22ae2a1c07（2026-08-25，13 提交）**：活动合同锚点仅 `plugin-attendance/index.cjs` 有交集，RBAC 样板结构未变，行号重钉为 `:23575-23660`（§13 审10）；其余承重锚点继承有效：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`zzzz20260529190000_add_users_hr_profile_fields.ts:11-15` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`@96b6416717；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
 4. ✅ scoped exact-diff 快审通过（审阅对象 `7ba7ee472d`，基线 `96b6416717`）。状态已改为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**（禁止普通 `RATIFIED`）。该状态不授权 L0/V0.1/代码/迁移/flag/实施 PR。
 
 ## 15. 风险登记

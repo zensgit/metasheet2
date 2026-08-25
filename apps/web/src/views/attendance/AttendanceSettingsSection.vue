@@ -62,6 +62,10 @@
         <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
         <input id="attendance-geo-radius" v-model="settingsForm.geoFenceRadius" name="geoFenceRadius" type="number" min="1" />
       </label>
+      <AttendanceEmployeeQuickActionIconsField
+        v-model="settingsForm.employeeQuickActionIcons"
+        :tr="tr"
+      />
     </div>
     <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
       {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
@@ -71,6 +75,8 @@
 
 <script setup lang="ts">
 import type { Ref } from 'vue'
+import AttendanceEmployeeQuickActionIconsField from './AttendanceEmployeeQuickActionIconsField.vue'
+import type { EmployeeQuickActionIcons } from './attendanceEmployeeWorkspaceCommonIcons'
 
 type Translate = (en: string, zh: string) => string
 type MaybePromise<T> = T | Promise<T>
@@ -84,6 +90,7 @@ interface SettingsFormState {
   geoFenceLng: string
   geoFenceRadius: string
   minPunchIntervalMinutes: number
+  employeeQuickActionIcons: EmployeeQuickActionIcons
 }
 
 interface SettingsBindings {

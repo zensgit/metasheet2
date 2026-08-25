@@ -3,16 +3,20 @@
 > Status: **RATIFIED**。批准来源 = owner 在承载 PR #5014 留下的 exact-SHA 批注
 > `RATIFY 642b765a96`（本文档自身定义的 RATIFY 机制即为此）。本次仅同步文件头——
 > 批准早已成立，头部此前未跟上（ledger-sync）。
+> **范围提示**：本 `RATIFIED` 状态不覆盖文末修正案 E1；E1 仍为 `PROPOSED`，L2+ 保持 HOLD。
 > **批准的是顺序与判据本身，不含任何台阶执行授权**：本文档不执行任何一步，
 > 每一级台阶仍是**独立的 owner/ops 动作**，文档状态 ≠ 任何 flag/trigger 变更授权。
+> **执行勘误（承重）**：§2 保留的是已批准 v1 的历史文本；其中 L2 先开 strict、L3 后开
+> fence 的顺序已被代码合取门证明不可执行，**不得按 §2 的 L2–L5 继续操作**。当前唯一可执行动作是
+> §5.3 的 L1 五旗标只读补证；L2+ 在 E1 获 exact-SHA ratify 前没有可执行顺序。读者不得因文件标题
+> `RATIFIED` 而把被冻结的 v1 L2–L5 当成授权或 runbook。
 > 基线：#4654 closeout（merged `12f1f8c466`，inert 落地）。
-> **主机证据（2026-08-20 刷新，取代原 08-12 的一组）**：双主机 postdeploy-full PASS，
-> run `32321464042`（prod `metasheet-backend` + `metasheet-staging-backend` 同刻同指纹：
-> 4 flag 运行态与 next-restart 均 CONTAINED、triggers 9/9 DISABLED(该 run 当时打印 `8c1be0b0…`；
-> **注：#5069 起 trigger canonical identity 加宽，同一姿态现打印 `4d68217d…`——见 §5.2**)、
-> functions 6/6 `14c180aa…`、`meta_links.foreign_record_id` FK 0/0）。
-> 原证据（prod run `31650980676`、both run `31651250987`，绑镜像 `12f1f8c466`）保留为历史记录，
-> 但**已不是当前镜像的证据**——L0 判据以上面这组为准。
+> **当前主机证据（2026-08-24）**：双主机 `postdeploy-full` run `32714983998` PASS；prod +
+> staging 同见旧 4 flag 运行态与 next-restart 均 OFF、triggers 9/9 DISABLED `4d68217d…`、
+> functions 6/6 `e4a78f6c…`、`meta_links.foreign_record_id` FK 0/0。该版本尚未检查第五个
+> checkpoint-activation flag，故不能倒填为五旗标证据；当前 L1 的补证方式见 §5.3。
+> 旧证据（run `32321464042` 及 `31650980676`/`31651250987`）只保留为历史记录，不再是当前镜像
+> 或当前 flag 集合的权威证据。
 
 > **⚠️ 指纹变更公告（2026-08-21，migration `zzzz20260821120000_recovery_authority_functions_fix_search_path`）**：
 > 该迁移对 6 个 recovery-authority 函数做了 search_path 加固（CVE-2018-1058 型 shadow 根治）——
@@ -34,9 +38,10 @@ closeout 落的是**默认关闭的基座**。把它变成活能力涉及两类�
 
 - **DB 侧**：8 张平台授权表上的 9 个 triggers（出厂 DISABLED）。ENABLE 后平台权限写路径
   开始参与 recovery-authority 串行化 ⇒ 平台写者第一次真的会遇到 40001。
-- **应用侧**：4 个 env flag（`MULTITABLE_HISTORY_CONTIGUITY_STRICT` /
-  `MULTITABLE_ENABLE_WRITER_FENCE` / `MULTITABLE_ENABLE_SHEET_REVERT` /
-  `MULTITABLE_ENABLE_PIT_RESET`）。
+- **应用侧**：5 个 env flag（`MULTITABLE_ENABLE_WRITER_FENCE` /
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` / `MULTITABLE_HISTORY_CONTIGUITY_STRICT` /
+  `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET`）。checkpoint activation
+  只在具名 canary 建立 trust floor 的短窗口内开启，建立后立即恢复 OFF。
 
 顺序错误的代价不对称：先开 flag 后开 trigger ⇒ recovery 对 `authorityLease='unavailable'`
 fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做 40001 分类 ⇒ 用户可见 500
@@ -46,40 +51,42 @@ fail-closed（安全但全部失败）；先开 trigger 而平台写路径没做
 
 - [x] O2-S1（注册同事务原子性）、O2-S2（40001 单一分类器 + 11 写者 census）、
       O2-S3（recovery 租约有界退避）已合 main 且随镜像部署到目标主机。 — 载体 #5014 `642b765a96` 已在 main，prod/staging 两侧现镜像均含之（已核）。
-- [x] 目标主机 `postdeploy-full` containment PASS（**当前镜像**）——run `32321464042`（2026-08-20，双主机）。
-- [ ] ⚠️ **staging 的 pending migrations ≠ 0**：2026-08-20 部署 `401fa1d880` 时，迁移对齐报告判
-      `do_not_run_full_migrate`，runner 按 bundle §3.2 停止 —— staging 容器已在新镜像上、
-      但**他线**（考勤 W7 / 审批 Lock-N 等）的迁移积压未应用。**本阶梯所依赖的三条 recovery 迁移
-      早在 2026-08-12 已应用**，故上面那条 containment PASS 成立；但 L0 原文要求的
-      「pending migrations = 0」在 staging 上**不成立**，需按
-      `docs/development/staging-migration-alignment-runbook-verification-20260519.md` 单独处置后再开 L1。
+- [x] 目标主机 `postdeploy-full` containment PASS（当时镜像）——双主机 run `32714983998`
+      （2026-08-24）：旧 4 flag OFF、9/9 triggers DISABLED、F3 后函数指纹精确；第五 flag 当时尚未
+      纳入 witness，不能从该 run 倒填，L1 出窗前按 §5.3 补证。
+- [x] **staging pending migrations = 0**：2026-08-24 窗口完成，`Applied: 337 / Pending: 0`
+      （apply run `32694623829`；确认 runs `32694880864` / `32695040817`）。此前
+      `do_not_run_full_migrate` 的历史状态已解除，不再是 L0 阻断。
 - [x] **census 可达性升级已闭合**（对抗门 P3-1 已收口：48 站点行为腿 + 运行时执行绑定 + tag 唯一 + 一名一 tag 全落地，见 #5018/#5020）。**剩余的不是这个缺陷，而是 owner 对天花板类残留的裁量**（T2 空壳替换 / 构造式 tag / `CLASSIFIER_MODULE` 迁移——文本守卫无法证明 src 站点可达性）；该裁量是 L0 的一个独立 owner 决策项，不是编码缺口。
-- [x] 回滚路径**脚本侧已演练一次**：`scripts/ops/multitable-recovery-authority-triggers.mjs`
+- [x] 回滚路径**脚本侧与目标主机 inert 见证均已完成**：`scripts/ops/multitable-recovery-authority-triggers.mjs`
       （`disable`=大红回滚，从 census 派生 9 目标、单事务、亏损即回滚），在真库上跑通
       enable→disable 往返并验回到出厂指纹（见 §5 演练记录，#5037 `a875950936`）。
-      ⚠️ **L0 剩这一条的另一半仍开着**：在**目标主机**上跑 `postdeploy-full` 验证回到 inert
-      姿态，属 owner-gated 主机动作，本地演练不覆盖——L1 前须由 owner 执行一次。
+      目标主机侧由双主机 run `32714983998` 见证当时 inert 姿态。该 run 只覆盖旧 4 flag；新增第五
+      checkpoint-activation flag 的当前 L1 补证仍按 §5.3 单独完成，不能把旧 run 扩张解释。
 
-## 2. 阶梯（每级 = 独立 owner 授权 + 观察期）
+## 2. 冻结的 v1 阶梯记录（L2–L5 **HOLD / DO NOT EXECUTE**）
+
+> 本节用于保存 ratify 历史与 L1 原判据，不再是 L2+ runbook。下面 L2→L3 的顺序与当前代码合取门
+> 冲突；不得通过“人工解释红灯”或跳过 checkpoint 来执行。可执行的候选顺序仅见 E1，且 E1 仍待 ratify。
 
 **L1 — staging ENABLE triggers（flags 保持全 OFF）**
 9/9 triggers ENABLE（仅 staging）。flags 全 OFF ⇒ recovery 端点仍不可达，本级只暴露
 「平台写 × authority 串行化」。观察 ≥2 日历日：40001 发生率、S2 分类器命中
 （409/具名 retryable，**零** unmapped 500）、平台写延迟无回归。
 
-**L2 — staging `MULTITABLE_HISTORY_CONTIGUITY_STRICT=1`**
+**L2 — HISTORICAL / HOLD（旧：`MULTITABLE_HISTORY_CONTIGUITY_STRICT=1`）**
 只读侧收严（历史链断裂拒绝重建）。观察：strict 拒绝率 = 预期（合成断链演练拒绝、
 正常表通过），无误伤。
 
-**L3 — staging `MULTITABLE_ENABLE_WRITER_FENCE=1`**
+**L3 — HISTORICAL / HOLD（旧：`MULTITABLE_ENABLE_WRITER_FENCE=1`）**
 写者围栏可达。观察：普通写路径无回归；S3 退避在写者间隙内拿到租约（演练）；
 写者不停时 recovery 仍具名 busy（fail-closed 不变）。
 
-**L4 — staging `MULTITABLE_ENABLE_SHEET_REVERT=1`（canary）**
+**L4 — HISTORICAL / HOLD（旧：`MULTITABLE_ENABLE_SHEET_REVERT=1` canary）**
 在**具名合成 org**（禁客户数据）上执行 revert 演练：precise-anchor 成功、
 preview-drift abort 正控、trash/link 状态核对。
 
-**L5 — staging `MULTITABLE_ENABLE_PIT_RESET=1`（canary）** — 同 L4 纪律做 reset 演练。
+**L5 — HISTORICAL / HOLD（旧：`MULTITABLE_ENABLE_PIT_RESET=1` canary）** — 同 L4 纪律做 reset 演练。
 
 **L6 — staging soak**：全开姿态 ≥7 日历日。判据（全部满足才可申请生产）：
 零 unmapped 40001（=零该类 500）、零 40P01、零 containment 意外、canary 演练全绿、
@@ -88,11 +95,14 @@ recovery busy-exhaustion 率在口径内。
 **L7+ — 生产**：重复 L1→L5（同序、同判据、独立授权、canary org 另立）。任一观察不达
 ⇒ 停在当前级或回滚一级，**不跳级、不补授权**。
 
-## 3. 每级通用规则
+## 3. 每级通用规则（只适用于当时已 ratify 的当前顺序）
+
+本节的 fail-stop 规则继续有效，但不能使 §2 中已冻结的 L2–L5 顺序重新可执行。E1 未 ratify 前，
+“当前顺序”只到 L1；不存在可授权的 L2 posture transition。
 
 授权 = owner 亲笔（exact 内容 + 目标环境 + 级别）；执行后立即跑 `postdeploy-full`
-（containment workflow 的 flag 腿此时**预期红**的项须与本级声明的开启集合精确一致——
-差一个即回滚）；观察窗内新增 P1/P2 ⇒ 冻结阶梯。
+并选择本级固定 `posture`；只有 running env、next-restart、trigger/function/FK 全部正向 PASS 才算本级
+姿态成立。任何红都按失败处理，不再人工解释为“本级预期”；观察窗内新增 P1/P2 ⇒ 冻结阶梯。
 
 ## 4. 已登记残余（启用面不扩，此处只登记处置）
 
@@ -106,7 +116,8 @@ recovery busy-exhaustion 率在口径内。
 
 ## 5. 回滚（每级可逆，单向依次撤）
 
-flag 级：从 compose/env 移除该 flag → 重启 → `predeploy-flags` 验证该 flag CONTAINED。
+flag 级：从 compose/env 移除该 flag → 重启 → 用下一较低 rung（或 `l1-armed`）的固定 `posture`
+取得精确正向 PASS，不只检查被移除的单个 flag。
 trigger 级（大红开关）：9/9 `DISABLE TRIGGER` → `postdeploy-full` 验证回到出厂 inert
 指纹（triggers `4d68217d…` / functions `e4a78f6c…`（随 `zzzz20260821120000` 起，pre-fix 为
 `14c180aa…`，见上「指纹变更公告」）仍应精确匹配——DISABLE 不改函数体）。
@@ -132,11 +143,20 @@ trigger 级（大红开关）：9/9 `DISABLE TRIGGER` → `postdeploy-full` 验�
 hermetic 守卫 13 测试在无 node_modules 纯净树 13/13,已接入 obs-kit contract required 车道。
 **未行使的轴（如实披露)**:PG16 / musl / x86(本地=PG15 Homebrew aarch64)、`lock_timeout` 路径(空库无并发写者)、以及**目标主机**上的 postdeploy-full(见上 ⚠️,owner-gated)。
 
-## 修正案 A1 — L1 窗口的证据替代（Status: **PROPOSED**，未 ratify 前上文判据原样生效）
+## 修正案 A1 — L1 窗口的证据替代（Status: **RATIFIED**）
 
 > RATIFY 机制与本文档相同：owner 在承载 PR 以 exact-SHA 批注 `RATIFY-A1 <sha>`。
 > **前置**：A1 仅在「L1 演练电池」落地 main **且通过独立对抗门审**后方可 ratify——
 > 电池是本修正案的承重证据工具，未经门审的电池不得作为窗口压缩依据。
+>
+> **批准记录（2026-08-24）**：owner-directed Codex 批注
+> `RATIFY-A1 7067b49516b26ed4d8d5a64ebea624f0fed53ba9`（#5042 comment `5395076709`）。
+> 绑定 #5125 最后一次实质修改 A1 的 merge commit，而非 owner sheet 中已经过时的 `5b2376bb49`；
+> 该 SHA 的本文档与批准时 main `36588a291e` 字节一致。批准范围仅 staging L1；production 仍 ≥2 日。
+> 承重电池 = run `32716676483`：11/11 持租约具名 409、11/11 释锁恢复、2/2 错类负控、
+> trigger coverage 6/9、未驱动 43、failures `[]`、residue 0，且 provenance 三元组齐全。
+> 可证明的观察起点 = `2026-08-24T10:25:17.641Z`；最早出窗点 =
+> `2026-08-25T10:25:17.641Z`，仍须满足无相关异常及本级其余退出判据。**A1 ratify ≠ L1 已完成。**
 
 ### A1.1 修正内容（仅两处，其余判据一字不动）
 
@@ -151,9 +171,21 @@ hermetic 守卫 13 测试在无 node_modules 纯净树 13/13,已接入 obs-kit c
   (b)另立生产授权 workflow,然后**另行 ratify**,不由 A1 顺带继承。
   > 生产那条级联 FK 目前是 **INFERRED-STRONG**(据生产迁移账);**一条只读 SQL 即可定案**——在生产库跑电池的
   > `ROLE_CASCADE_WITNESS_QUERY`。建议 ratify 前顺手跑掉,以确认本条收窄的依据。
+  >
+  > **⚠️ 2026-08-24 更正 —— 这条建议在修复落地前不可执行。** 上句写于该查询以
+  > `to_regclass('roles')` 绑定 `roles` 的版本;`to_regclass` 走 SESSION 的 `search_path`,任何被优先
+  > 解析到的同名 decoy(连接角色自己拥有的 `"$user"` schema、`SET search_path`、DSN `options=`、
+  > `ALTER ROLE … SET`,或一张 `CREATE TEMP TABLE roles`)都会把查询悄悄改指向,零行随即被判为
+  > `CASCADE ABSENT (premise CONFIRMED)` / exit 0 —— 也就是说,**「顺手跑一条只读 SQL 定案」恰好会
+  > 在这条路径上产生一个看起来最干净的假阴性**。已在 PG 15 上端到端复现,见
+  > `role-cascade-witness-shadow-resolution-repro-20260824.md`。修复(改为绑定
+  > `<canonical>.roles`,并新增四道 INDETERMINATE 闸)与真库负例见对应 PR;符号名同步改为
+  > `buildRoleCascadeWitnessQuery(canonicalSchema)`。**修复合入前,不要对生产跑这条查询,也不要
+  > dispatch witness / 电池两条 workflow。**
 - **明确不变**：L6 soak ≥7 日历日**不动**（它买的是一个完整周周期的日历节律——周末形态、
   weekly cron、备份窗——合成负载伪造不了；租约饥饿/死锁积累是慢显影病灶，soak 是唯一
-  在真实节奏下行使它们的机会）；L2–L5 判据不变（本就无日历约束）。
+  在真实节奏下行使它们的机会）；A1 本身不改 L2–L5（本就无日历约束），其不可执行顺序由下文
+  独立修正案 E1 处理。
 
 ### A1.2 为什么这是证据替代而非偷工
 
@@ -193,18 +225,65 @@ soak 尾部 1–2 天与生产 L1 重叠可再省 1–2 天。代价:若 soak �
 | 姿态 | triggers 指纹 | functions 指纹 | containment VERDICT |
 |---|---|---|---|
 | **出厂 DISABLED**(L0/回滚后应见) | `4d68217d692677b331f4bc795380d2703e3d0a12718a3a293c3d2cad394266a9` | `e4a78f6cc9c993ed5ed7d2c81dfc44b94d844c7fb046160d8d13077208fa2498` | **PASS** |
-| **ARMED**(L1 起应见) | `505926e3fe8e89c47c0d2a8dc35e34f64121acc92d60b5dbf805415a9c85283a` | 同上 `e4a78f6c…` | **FAIL(预期)** — 见 §3 |
+| **ARMED**(L1 起应见) | `505926e3fe8e89c47c0d2a8dc35e34f64121acc92d60b5dbf805415a9c85283a` | 同上 `e4a78f6c…` | rung-aware witness 以 `posture=l1-armed` **正向 PASS** |
 
 **旧值只应出现在历史记录里**(某次 run 当时的实测),不得再作为比对基准。凡历史表格中的 `8c1be0b0`/`14c180aa`,均为 **epoch-bound**:它们在当时正确,今天重跑**不会**复现。
 
-### 5.3 ⚠️ L1 起,postdeploy-full 的 **trigger 腿按构造必红**
+### 5.3 L1 起必须用 rung-aware 正向 PASS，不再解释“预期红”
 
-L1 arm 9/9 之后,containment 的期望常量仍钉"出厂 DISABLED",因此 **L1 → L6 全程每次 postdeploy-full,trigger 腿都会 FAIL**,打印 `505926e3…` vs expected `4d68217d…`。
+`multitable-recovery-flag-containment-check.yml` 的 `posture` 是固定 choice，逐级映射到硬编码的
+trigger 状态与 5-flag 精确集合。`postdeploy-full` 只有在 running env、next-restart Compose、9 个
+trigger、6 个函数及 FK-absence **全部与所选 rung 精确相等**时才 PASS。L1 使用
+`posture=l1-armed`：9/9 trigger 必须是 `O`，5 flag 必须全部 OFF；回滚/L0 使用 `posture=inert`。
 
-**这是预期,不是 drift。** 判读规则:
+helper 仍默认验证 inert；只有固定 rung 显式传 `--expected-trigger-state=armed` 才验证 ARMED。
+workflow 与容器 helper 的 SHA 必须一致，旧镜像不能被新 workflow 误判为 PASS。任何红都按失败处理，
+不再把“observed 恰好等于某个红色 fingerprint”当作人工放行理由。
 
-- **flag 腿必须全绿**(4 flag CONTAINED)——这条是真判据,红了才是事故;
-- **trigger 腿红且 observed == `505926e3…`** ⇒ 正是 armed 姿态,正常;
-- **trigger 腿红但 observed 是别的值** ⇒ **真 drift,立即停并按 §5 回滚**。
+**当前 L1 的一次性过渡**：run `32716676483` 使用的旧电池只记录 4 个旧 flag，run
+`32714983998` 也只机械核了这 4 个，均不能倒填为第五个 checkpoint-activation flag 的证据。
+本修正落 main 后，L1 出窗还须一次只读 `mode=predeploy-flags,target=staging,posture=l1-armed`：它在
+当前旧镜像上即可精确核 running + next-restart 的 5-flag OFF；9/9 canonical ARMED 由电池工件承担。
+这组桥接证据只用于当前 L1。L2 前必须部署本修正后的 helper，并用 `postdeploy-full` 对对应 posture
+取得同一次完整正向 PASS。
 
-不写清这条,九天观察期里"红即正常"会把操作员训练成无视指纹——而那正是漂移门失效的方式。
+## 修正案 E1 — L2–L5 可执行顺序与单次批授权（Status: **PROPOSED**）
+
+> 本节只修正 D2-F10 已证的不可执行合同。未 ratify 前，L2 及其之后保持 HOLD；本节不授权任何
+> flag、checkpoint 写、Revert/Reset 或 production 动作。
+
+### E1.1 顺序
+
+1. **L2 — writer fence**：在 triggers 保持 ARMED、其余 4 flag OFF 时，仅开启
+   `MULTITABLE_ENABLE_WRITER_FENCE=true`；以 `posture=l2-fence` 取正向 PASS，观察普通写无回归。
+2. **L2-C — named canary trust checkpoint（短暂过渡，不是常驻 rung）**：仅针对具名合成 sheet，
+   临时同时开启 writer fence + `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true`，以
+   `posture=l2-checkpoint` 证明精确姿态后调用一次 activation；记录 `checkpointId`、
+   `trustedSinceSeq`、`baselineCount`。随后立即移除 activation flag，并重新取得
+   `posture=l2-fence` PASS。禁止给客户 sheet 批量 provision。
+3. **L3 — strict**：在 fence 保持 ON、activation 已恢复 OFF 后，开启
+   `MULTITABLE_HISTORY_CONTIGUITY_STRICT=true`，以 `posture=l3-strict` 取 PASS。验收改为：
+   构造断链 sheet 明确拒绝；**已建立 checkpoint 的具名 canary**通过；无 checkpoint 的 sheet
+   按设计 fail-closed，不得被算作“正常表误伤”。
+4. **L4 — Revert canary**：fence + strict + sheet-revert ON，`posture=l4-revert`；仅具名合成 org。
+5. **L5 — PIT Reset canary**：在 L4 集合上再开 PIT-reset，`posture=l5-reset`；retention 冲突仍硬拒。
+6. **L6**：原 ≥7 日历日不变。production 仍是独立授权，不由 E1 或 staging 批授权继承。
+
+### E1.2 固定姿态矩阵
+
+| posture | triggers | 应为 ON 的 flag（除此以外全部 OFF） |
+|---|---|---|
+| `inert` | DISABLED | 无 |
+| `l1-armed` | ARMED | 无 |
+| `l2-fence` | ARMED | writer fence |
+| `l2-checkpoint` | ARMED | writer fence + checkpoint activation |
+| `l3-strict` | ARMED | writer fence + strict |
+| `l4-revert` | ARMED | writer fence + strict + sheet revert |
+| `l5-reset` | ARMED | writer fence + strict + sheet revert + PIT reset |
+
+### E1.3 减少逐条请示的授权形状
+
+owner 可用一条 `AUTHORIZE-STAGING-L2-L5 <E1 exact SHA>` 批准**仅 staging**按 E1.1 顺序执行。
+该授权不是跳门：每一步仍须取得对应 `posture` 的正向 PASS 和该 rung 的行为证据；任一步 FAIL、
+出现 P1/P2、读数不完整或 checkpoint 工件缺失即自动停止，不得继续下一步。该批授权不覆盖 production、
+不压缩 L6、不允许客户数据，也不允许把 activation flag 留在常驻配置中。

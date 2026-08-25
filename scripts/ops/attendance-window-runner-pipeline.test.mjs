@@ -346,9 +346,36 @@ function assertExactTargetMigrationContract({ remote, workflow }) {
   assert.match(remote, /org\.opencontainers\.image\.revision/)
   assert.match(remote, /\[\[ "\$revision" == "\$DEPLOY_SHA" \]\]/, 'target image revision must equal the requested SHA')
   assert.match(remote, /--network "container:\$\{BACKEND_CONTAINER\}"/)
+  // PINNED-ASSERTION CHANGE (2026-08-24, P1-1 hardening): this used to be a bare
+  // "--env-file is present" check — proving env PROPAGATION exists without proving it is
+  // SAFE, which is exactly what let the verbatim Config.Env copy (and any inherited
+  // MIGRATION_EXCLUDE riding along with it) ship invisibly under a green suite
+  // (staging-review-adjudication-20260824.md: "it pins the vector rather than guarding
+  // against it"). --env-file itself is kept (still the only safe "inherit another
+  // container's env" primitive docker offers) but the assertion now also requires the
+  // narrowing allowlist, the detect-and-abort hazard check, and the forced -e backstop to
+  // all be present alongside it — the HARDENED shape, not the old bare-propagation one.
   assert.match(remote, /--env-file "\$TARGET_MIGRATION_ENV_FILE"/)
   assert.match(remote, /chmod 0600 "\$TARGET_MIGRATION_ENV_FILE"/)
   assert.match(remote, /trap cleanup_target_migration_runtime EXIT/)
+  assert.match(remote, /trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM/, 'P2-4: HUP\\/INT\\/TERM must be trapped, not just EXIT')
+  assert.match(remote, /trap 'cleanup_rehearsal; cleanup_target_migration_runtime; exit 1' HUP INT TERM/, 'P2-4: the rehearsal DB cleanup must also survive a caught signal')
+  assert.match(remote, /^TARGET_MIGRATION_ENV_ALLOWLIST=\(/m, 'P1-1: the copied env must be narrowed to an explicit allowlist, not verbatim Config.Env')
+  for (const name of ['DATABASE_URL', 'NODE_ENV', 'DB_SSL', 'STORAGE_BASE_URL', 'SECRET_PROVIDER', 'SECRET_FILE_PATH']) {
+    assert.match(remote, new RegExp(`\\b${name}\\b`), `allowlist must carry ${name}`)
+  }
+  assert.doesNotMatch(
+    remote,
+    /handle\.write\("\\n"\.join\(values\)/,
+    'P1-1: must not regress to writing the FULL unfiltered Config.Env verbatim',
+  )
+  assert.match(remote, /raise SystemExit\(\s*$/m, 'P1-1: materialization must be able to abort (hazard-var detection)')
+  assert.match(remote, /hazards\.append\(name\)/, 'P1-1: hazard-var detection must actually collect offending names')
+  assert.match(remote, /-e "MIGRATION_EXCLUDE="/, 'P1-1: every migrate-family docker run must force MIGRATION_EXCLUDE empty')
+  assert.match(remote, /-e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false"/, 'P1-1: every migrate-family docker run must force this off')
+  assert.match(remote, /-e "ALLOW_DB_RESET=false"/, 'P1-1: every migrate-family docker run must force this off')
+  assert.match(remote, /^compute_in_play_migrations\(\) \{/m, 'P1-2: an in-play migration set must be mechanically computed')
+  assert.match(remote, /^confirm_in_play_migrations\(\) \{/m, 'P1-2: every in-play migration must be name-confirmed')
 
   const start = remote.indexOf('action_migrate() {')
   const end = remote.indexOf('\n# --- W4+W7 combined-soak', start)
@@ -405,6 +432,1120 @@ test('MUTATION: falling back to the running backend for real apply turns the exa
     () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
     /real apply must not use the running old image/,
   )
+})
+
+test('MUTATION (pinned-assertion change): reverting the allowlist marker to the pre-hardening name turns the contract red', () => {
+  const original = readFileSync(REMOTE_SH, 'utf8')
+  const mutated = original.replace('TARGET_MIGRATION_ENV_ALLOWLIST=(', 'NOT_AN_ALLOWLIST=(')
+  assert.throws(
+    () => assertExactTargetMigrationContract({ remote: mutated, workflow: readFileSync(WORKFLOW, 'utf8') }),
+    /allowlist/,
+  )
+})
+
+// --- P1-1/P1-2/P2-4 hardening (2026-08-24, staging-review-adjudication-20260824.md) -----
+//
+// The tests below run the REAL committed functions (never paraphrased) under a FAKE
+// `docker` placed first on PATH, which intercepts exactly the three docker invocation
+// shapes these functions use (`inspect -f '{{json .Config.Env}}'`, `run ... sh -c '...'`
+// filesystem listing, `run ... node ... --confirm NAME`, and `exec ... psql ...`) and
+// nothing else — an unexpected shape is a hard failure (exit 96-99), so a test that
+// "passes" because the fake silently no-opped an unanticipated call is not possible here.
+// This proves BEHAVIOR (house doctrine: source-text assertions are not behavior
+// assertions), not just that certain strings appear in the script.
+
+function extractRunnerArray(name) {
+  const remote = readFileSync(REMOTE_SH, 'utf8')
+  const m = remote.match(new RegExp(`^${name}=\\([\\s\\S]*?\\n\\)`, 'm'))
+  assert.ok(m, `expected an array declaration: ${name}`)
+  return m[0]
+}
+
+// writeFakeDocker: one fake docker(1) script reused by every test below, its behavior
+// steered entirely by env vars set per-spawn (see callers) — never by which test invoked
+// it — so no test can accidentally get a different fake than the one every other test
+// exercises.
+const FAKE_DOCKER_DIR = mkdtempSync(join(tmpdir(), 'window-runner-fake-docker-'))
+writeFileSync(
+  join(FAKE_DOCKER_DIR, 'docker'),
+  `#!/bin/bash
+set -u
+if [[ "\${1:-}" == "inspect" ]]; then
+  cat "$FAKE_CONFIG_ENV_JSON"
+  exit 0
+fi
+if [[ "\${1:-}" == "run" ]]; then
+  shift
+  if [[ -n "\${FAKE_DOCKER_RUN_LOG:-}" ]]; then
+    printf '%s\\n' "$*" >> "$FAKE_DOCKER_RUN_LOG"
+  fi
+  while [[ "\${1:-}" == -* ]]; do
+    case "$1" in
+      --network|--env-file) shift 2 ;;
+      -e) shift 2 ;;
+      --rm) shift ;;
+      --pull=never) shift ;;
+      --pull) shift 2 ;;
+      *) echo "unhandled fake-docker run flag: $1" >&2; exit 96 ;;
+    esac
+  done
+  shift # image name, unused by the fake
+  if [[ "\${1:-}" == "sh" && "\${2:-}" == "-c" ]]; then
+    script="\${3//\\/app\\//$FAKE_APP_ROOT\\/}"
+    sh -c "$script"
+    exit $?
+  fi
+  if [[ "\${1:-}" == "node" ]]; then
+    shift; shift # node <script.js>
+    if [[ "\${1:-}" == "--confirm" ]]; then
+      name="$2"
+      IFS=',' read -ra applied_arr <<< "\${FAKE_CONFIRM_APPLIED:-}"
+      for a in "\${applied_arr[@]}"; do
+        if [[ "$a" == "$name" ]]; then
+          echo "migration \\"$name\\" is applied"
+          exit 0
+        fi
+      done
+      echo "migration \\"$name\\" not found among the known migrations" >&2
+      exit 2
+    fi
+    echo "fake-docker: unhandled node invocation: $*" >&2
+    exit 95
+  fi
+  echo "unexpected fake-docker run tail: $*" >&2
+  exit 98
+fi
+if [[ "\${1:-}" == "exec" ]]; then
+  cat "\${FAKE_APPLIED_NAMES:-/dev/null}"
+  exit 0
+fi
+echo "unexpected fake-docker call: $*" >&2
+exit 97
+`,
+  { mode: 0o755 },
+)
+
+/**
+ * buildMigrationEnvHarness: extracts materialize_target_migration_env,
+ * TARGET_MIGRATION_ENV_ALLOWLIST, target_migrate_exec, list_migration_name_universe,
+ * list_migration_names_applied, compute_in_play_migrations, confirm_in_play_migrations,
+ * and cleanup_target_migration_runtime VERBATIM from the shipped runner, applies an
+ * optional text transform to any one of them (mutation tests), and wraps them in a
+ * minimal, real, `set -euo pipefail` bash program with the fake docker above.
+ */
+function buildMigrationEnvHarness(transforms = {}) {
+  const pieces = {
+    allowlist: extractRunnerArray('TARGET_MIGRATION_ENV_ALLOWLIST'),
+    materialize: extractRunnerFunctions(['materialize_target_migration_env']),
+    targetExec: extractRunnerFunctions(['target_migrate_exec']),
+    universe: extractRunnerFunctions(['list_migration_name_universe']),
+    applied: extractRunnerFunctions(['list_migration_names_applied']),
+    inPlay: extractRunnerFunctions(['compute_in_play_migrations']),
+    countsAgree: extractRunnerFunctions(['assert_applied_counts_agree']),
+    confirm: extractRunnerFunctions(['confirm_in_play_migrations']),
+    cleanup: extractRunnerFunctions(['cleanup_target_migration_runtime']),
+  }
+  for (const [key, transform] of Object.entries(transforms)) {
+    assert.ok(key in pieces, `unknown harness piece: ${key}`)
+    pieces[key] = transform(pieces[key])
+  }
+  const failLine = extractRunnerLine('fail')
+  const logLine = extractRunnerLine('log')
+  return `#!/bin/bash
+set -euo pipefail
+BACKEND_CONTAINER="fake-backend"
+POSTGRES_CONTAINER="fake-postgres"
+MIGRATE_BACKUP_PG_USER="fakeuser"
+MIGRATE_JS="fake-migrate.js"
+TARGET_MIGRATION_IMAGE="fake-image:tag"
+${failLine}
+${logLine}
+${pieces.allowlist}
+${pieces.cleanup}
+${pieces.targetExec}
+${pieces.universe}
+${pieces.applied}
+${pieces.inPlay}
+${pieces.countsAgree}
+${pieces.confirm}
+${pieces.materialize}
+`
+}
+
+function runMigrationEnvHarness(script, driverTail, env = {}) {
+  const outDir = mkdtempSync(join(tmpdir(), 'window-runner-migrate-out-'))
+  const envFile = join(outDir, 'target-migrate-env')
+  writeFileSync(envFile, '')
+  const full = `${script}\nOUTPUT_DIR="${outDir}"\nTARGET_MIGRATION_ENV_FILE="${envFile}"\n${driverTail}\n`
+  const result = spawnSync('bash', ['-c', full], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${FAKE_DOCKER_DIR}:${process.env.PATH}`,
+      ...env,
+    },
+  })
+  return { ...result, outDir, envFile }
+}
+
+function configEnvFixture(dir, pairs) {
+  const file = join(dir, 'config-env.json')
+  writeFileSync(file, JSON.stringify(pairs.map(([k, v]) => `${k}=${v}`)))
+  return file
+}
+
+const REQUIRED_MIGRATE_ENV = [
+  ['DATABASE_URL', 'postgres://u:p@postgres:5432/metasheet'],
+  ['NODE_ENV', 'production'],
+  ['DB_SSL', 'false'],
+  ['DB_SSL_REJECT_UNAUTHORIZED', 'false'],
+  ['DB_SSL_CA', ''],
+  ['DB_SSL_CERT', ''],
+  ['DB_SSL_KEY', ''],
+  ['DB_POOL_MAX', '20'],
+  ['DB_POOL_MIN', '2'],
+  ['DB_IDLE_TIMEOUT', '30000'],
+  ['DB_CONNECT_TIMEOUT', '10000'],
+  ['DB_QUERY_TIMEOUT', '30000'],
+  ['DB_STATEMENT_TIMEOUT', '30000'],
+  ['DB_SLOW_MS', '500'],
+  ['APP_NAME', 'metasheet-backend'],
+  ['STORAGE_BASE_URL', 'http://localhost:8900/files'],
+  ['SECRET_PROVIDER', 'env'],
+  ['LOG_LEVEL', 'info'],
+]
+
+for (const [hazardName, hazardValue] of [
+  ['MIGRATION_EXCLUDE', '076_create_integration_stock_prep_pack_installs'],
+  ['MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL', 'true'],
+  ['ALLOW_DB_RESET', 'true'],
+]) {
+  test(`EXECUTABLE (P1-1 detect-and-abort): a hostile inherited ${hazardName} aborts materialization, values-free`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'window-runner-hazard-'))
+    const secretMarker = 'HAZARD_VALUE_MUST_NEVER_APPEAR_' + hazardName
+    const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, [hazardName, hazardValue === 'true' ? 'true' : secretMarker]])
+    const script = buildMigrationEnvHarness()
+    const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', {
+      FAKE_CONFIG_ENV_JSON: configEnv,
+    })
+    assert.notEqual(r.status, 0, `expected materialization to abort; stdout=${r.stdout}`)
+    assert.match(r.stderr, new RegExp(`ABORT.*${hazardName}`), 'must name the offending variable')
+    if (hazardValue !== 'true') {
+      assert.doesNotMatch(r.stdout + r.stderr, new RegExp(secretMarker), 'must never echo the hazardous value, only the name')
+    }
+    assert.equal(readFileSync(r.envFile, 'utf8'), '', 'must not have written anything to the env file before aborting')
+  })
+}
+
+test('EXECUTABLE (P1-1 detect-and-abort) MUTATION: removing the hazard-var scan turns all three hostile-env tests red — and ONLY changes the abort path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-hazard-mut-'))
+  const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, ['MIGRATION_EXCLUDE', '076_create_integration_stock_prep_pack_installs']])
+  const script = buildMigrationEnvHarness({
+    materialize: (text) => text.replace(/if hazards:\n[\s\S]*?\n    \)\n/, ''),
+  })
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected the mutated (unguarded) materialization to SUCCEED where the real one aborts; stderr=${r.stderr}`)
+  assert.doesNotMatch(r.stderr, /ABORT/, 'the mutation must actually remove the abort, not just reword it')
+  // Positive control that this is a targeted mutation, not a broken harness: the SAME
+  // mutated harness on a CLEAN env still materializes correctly.
+  const cleanConfigEnv = configEnvFixture(dir, REQUIRED_MIGRATE_ENV)
+  const clean = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: cleanConfigEnv })
+  assert.equal(clean.status, 0)
+  assert.match(readFileSync(clean.envFile, 'utf8'), /DATABASE_URL=/)
+})
+
+test('EXECUTABLE (P1-1 allowlist): a non-allowlisted secret-shaped var (JWT_SECRET) is silently dropped from the written env file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-drop-'))
+  const configEnv = configEnvFixture(dir, [
+    ...REQUIRED_MIGRATE_ENV,
+    ['JWT_SECRET', 'do-not-leak-this-jwt-secret'],
+    ['POSTGRES_PASSWORD', 'do-not-leak-this-pg-password'],
+    ['DINGTALK_CLIENT_SECRET', 'do-not-leak-this-dingtalk-secret'],
+  ])
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected clean materialization; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  assert.doesNotMatch(written, /do-not-leak-this/, 'non-allowlisted secrets must never reach the migration env file')
+  assert.match(written, /DATABASE_URL=/, 'the allowlisted vars must still be present')
+})
+
+test('EXECUTABLE (P1-1 allowlist) POSITIVE CONTROL: the full required migrate-path env surface survives materialization intact (nothing needed is silently dropped)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-positive-'))
+  const configEnv = configEnvFixture(dir, [...REQUIRED_MIGRATE_ENV, ['IRRELEVANT_NOISE', 'x']])
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `expected clean materialization; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  for (const [name] of REQUIRED_MIGRATE_ENV) {
+    assert.match(written, new RegExp(`^${name}=`, 'm'), `${name} must survive materialization — dropping it can break staging (e.g. DB_SSL absence + baked-in NODE_ENV=production flips SSL on against a non-SSL postgres)`)
+  }
+  assert.doesNotMatch(written, /IRRELEVANT_NOISE/, 'non-allowlisted noise must still be dropped even in the positive-control fixture')
+})
+
+test('MUTATION (P1-1 allowlist completeness): dropping DB_SSL from the allowlist turns the positive-control test red', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-allowlist-mut-'))
+  const configEnv = configEnvFixture(dir, REQUIRED_MIGRATE_ENV)
+  const script = buildMigrationEnvHarness({
+    allowlist: (text) => text.replace('DB_SSL ', ''),
+  })
+  const r = runMigrationEnvHarness(script, 'materialize_target_migration_env', { FAKE_CONFIG_ENV_JSON: configEnv })
+  assert.equal(r.status, 0, `materialization itself should still succeed; stderr=${r.stderr}`)
+  const written = readFileSync(r.envFile, 'utf8')
+  assert.doesNotMatch(written, /^DB_SSL=/m, 'the mutated allowlist must actually have dropped DB_SSL, proving the positive-control test is discriminating')
+})
+
+test('EXECUTABLE (P1-1 layer 3): target_migrate_exec forces the three hazard vars off on every migrate-family docker run, winning over any earlier flag', () => {
+  const script = buildMigrationEnvHarness()
+  const runLog = join(mkdtempSync(join(tmpdir(), 'window-runner-runlog-')), 'run.log')
+  const r = runMigrationEnvHarness(
+    script,
+    'target_migrate_exec "MIGRATION_EXCLUDE=should-be-overridden" -- node "$MIGRATE_JS" --confirm somename',
+    { FAKE_DOCKER_RUN_LOG: runLog, FAKE_CONFIRM_APPLIED: 'somename' },
+  )
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const logged = readFileSync(runLog, 'utf8')
+  assert.match(logged, /-e MIGRATION_EXCLUDE=should-be-overridden.*-e MIGRATION_EXCLUDE=(?!should)/, 'the forced empty override must come AFTER the caller-supplied value (docker: last -e for a name wins)')
+  assert.match(logged, /-e MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false/)
+  assert.match(logged, /-e ALLOW_DB_RESET=false/)
+})
+
+test('MUTATION (P1-1 layer 3): removing the forced -e overrides turns the previous test red', () => {
+  const script = buildMigrationEnvHarness({
+    targetExec: (text) => text
+      .replace('-e "MIGRATION_EXCLUDE=" \\\n', '')
+      .replace('-e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \\\n', '')
+      .replace('-e "ALLOW_DB_RESET=false" \\\n', ''),
+  })
+  const runLog = join(mkdtempSync(join(tmpdir(), 'window-runner-runlog-mut-')), 'run.log')
+  const r = runMigrationEnvHarness(
+    script,
+    'target_migrate_exec "MIGRATION_EXCLUDE=should-be-overridden" -- node "$MIGRATE_JS" --confirm somename',
+    { FAKE_DOCKER_RUN_LOG: runLog, FAKE_CONFIRM_APPLIED: 'somename' },
+  )
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const logged = readFileSync(runLog, 'utf8')
+  assert.match(logged, /MIGRATION_EXCLUDE=should-be-overridden/)
+  assert.doesNotMatch(logged, /-e MIGRATION_EXCLUDE=(?!should)/, 'with the mutation, the hazardous caller value is no longer overridden — proving the real code is what wins')
+})
+
+// fakeAppRootFixture: mirrors the REAL migrations layout, including the two file types
+// that co-exist inside src/db/migrations/ (verified in review, 2026-08-24 —
+// 20250925_create_view_tables.sql / 20250926_create_audit_tables.sql sit alongside the
+// .ts migrations, not just in the top-level migrations/ folder; missing that glob would
+// silently narrow the universe, exactly the failure mode this whole change exists to
+// prevent). Also plants a `_`-prefixed non-migration helper file (mirroring the real
+// _patterns.ts/_template.ts) to prove it is excluded, not merely absent from the fixture.
+function fakeAppRootFixture(names, { legacySqlInTsDir = [], underscorePrefixedNoise = true } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'window-runner-fake-app-'))
+  const tsDir = join(root, 'packages', 'core-backend', 'src', 'db', 'migrations')
+  const sqlDir = join(root, 'packages', 'core-backend', 'migrations')
+  mkdirSync(tsDir, { recursive: true })
+  mkdirSync(sqlDir, { recursive: true })
+  for (const name of names) {
+    if (name.startsWith('076')) {
+      writeFileSync(join(sqlDir, `${name}.sql`), '-- fixture\n')
+    } else {
+      writeFileSync(join(tsDir, `${name}.ts`), '// fixture\n')
+    }
+  }
+  for (const name of legacySqlInTsDir) {
+    writeFileSync(join(tsDir, `${name}.sql`), '-- legacy fixture\n')
+  }
+  if (underscorePrefixedNoise) {
+    writeFileSync(join(tsDir, '_patterns.ts'), '// shared helper, not a migration\n')
+  }
+  return root
+}
+
+test('EXECUTABLE (P1-2): compute_in_play_migrations = image filesystem manifest MINUS already-applied (both env-immune)', () => {
+  const appRoot = fakeAppRootFixture(['zzzz1_already_applied', 'zzzz2_pending_a', 'zzzz3_pending_b', '076_create_integration_stock_prep_pack_installs'])
+  const appliedFile = join(appRoot, 'applied.txt')
+  writeFileSync(appliedFile, 'zzzz1_already_applied\n076_create_integration_stock_prep_pack_installs\n')
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'compute_in_play_migrations fakerealdb', {
+    FAKE_APP_ROOT: appRoot,
+    FAKE_APPLIED_NAMES: appliedFile,
+  })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const inPlay = readFileSync(join(r.outDir, 'migration-in-play.txt'), 'utf8').trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(inPlay, ['zzzz2_pending_a', 'zzzz3_pending_b'])
+})
+
+test('EXECUTABLE (P1-2 universe fidelity): a legacy .sql file living INSIDE src/db/migrations/ (not just the top-level migrations/) is counted, and a `_`-prefixed shared-helper file is not', () => {
+  // Mirrors the real repo shape caught in review: 20250925_create_view_tables.sql /
+  // 20250926_create_audit_tables.sql sit next to the .ts migrations, and _patterns.ts /
+  // _template.ts are shared helper code the provider itself skips by name convention.
+  const appRoot = fakeAppRootFixture(['zzzz1_pending'], {
+    legacySqlInTsDir: ['20250925_create_view_tables', '20250926_create_audit_tables'],
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, 'list_migration_name_universe', { FAKE_APP_ROOT: appRoot })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const universe = r.stdout.trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(universe, ['20250925_create_view_tables', '20250926_create_audit_tables', 'zzzz1_pending'])
+  assert.doesNotMatch(r.stdout, /_patterns/, 'the underscore-prefixed helper file must never be mistaken for a migration name')
+})
+
+test('MUTATION (P1-2 universe fidelity): dropping the src/db/migrations *.sql glob turns the previous test red', () => {
+  const appRoot = fakeAppRootFixture(['zzzz1_pending'], {
+    legacySqlInTsDir: ['20250925_create_view_tables', '20250926_create_audit_tables'],
+  })
+  const script = buildMigrationEnvHarness({
+    universe: (text) => text.replace(
+      '/app/packages/core-backend/src/db/migrations/*.sql /app/packages/core-backend/migrations/*.sql',
+      '/app/packages/core-backend/migrations/*.sql',
+    ),
+  })
+  const r = runMigrationEnvHarness(script, 'list_migration_name_universe', { FAKE_APP_ROOT: appRoot })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const universe = r.stdout.trim().split('\n').filter(Boolean).sort()
+  assert.deepEqual(universe, ['zzzz1_pending'], 'with the mutation, the two legacy .sql migrations silently vanish from the universe')
+})
+
+function writeCountFixtures(dir, { psqlLines, providerAppliedLine }) {
+  const psqlFile = join(dir, 'psql-applied.txt')
+  const providerFile = join(dir, 'provider-list.txt')
+  writeFileSync(psqlFile, psqlLines.map((l) => `${l}\n`).join(''))
+  writeFileSync(providerFile, `${providerAppliedLine}\nPending: 0\n`)
+  return { psqlFile, providerFile }
+}
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree passes when the env-immune psql count matches the provider Applied:N', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-agree-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 3',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree FAILS LOUD on a zero-count psql read (the empty-read-is-not-absence class)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-zero-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: [],
+    providerAppliedLine: 'Applied: 321',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.notEqual(r.status, 0, 'a zero applied-count from psql must never be silently trusted for a live staging DB')
+  assert.match(r.stderr, /not a positive integer/)
+  assert.doesNotMatch(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P2 sanity floor): assert_applied_counts_agree FAILS LOUD when the two independent sources disagree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-mismatch-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 4',
+  })
+  const script = buildMigrationEnvHarness()
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.notEqual(r.status, 0, 'a psql/provider disagreement must fail loud rather than silently pick one source')
+  assert.match(r.stderr, /count mismatch/)
+  assert.doesNotMatch(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('MUTATION (P2 sanity floor): removing the equality check turns the mismatch test red', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-counts-mismatch-mut-'))
+  const { psqlFile, providerFile } = writeCountFixtures(dir, {
+    psqlLines: ['a', 'b', 'c'],
+    providerAppliedLine: 'Applied: 4',
+  })
+  const script = buildMigrationEnvHarness({
+    countsAgree: (text) => text.replace(
+      /\[\[ "\$applied_count_psql" == "\$applied_count_provider" \][^\n]*\n[^\n]*\n/,
+      '',
+    ),
+  })
+  const r = runMigrationEnvHarness(script, `assert_applied_counts_agree "${psqlFile}" "${providerFile}" && echo COUNTS_AGREE_OK`)
+  assert.equal(r.status, 0, `expected the mutated (unguarded) check to wrongly pass a real mismatch; stderr=${r.stderr}`)
+  assert.match(r.stdout, /COUNTS_AGREE_OK/)
+})
+
+test('EXECUTABLE (P1-2): confirm_in_play_migrations passes when every in-play migration name-confirms applied', () => {
+  const script = buildMigrationEnvHarness()
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a,zzzz3_pending_b',
+  })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /CONFIRM_LOOP_OK/)
+})
+
+test('EXECUTABLE (P1-2 exclusion canary): confirm_in_play_migrations FAILS LOUD, naming the migration, when one in-play name is not confirmable (kysely returns exit 2 for an excluded name)', () => {
+  const script = buildMigrationEnvHarness()
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-canary-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    // zzzz3_pending_b is NOT in the applied set — simulates it having been silently
+    // excluded from the provider's getMigrations() (MIGRATION_EXCLUDE-class exclusion).
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a',
+  })
+  assert.notEqual(r.status, 0, 'the loop must fail when any in-play migration cannot be confirmed')
+  assert.match(r.stderr, /'zzzz3_pending_b'/, 'must name the specific migration that failed confirmation')
+  assert.doesNotMatch(r.stdout, /CONFIRM_LOOP_OK/, 'must never report success past an unconfirmed in-play migration')
+})
+
+test('MUTATION (P1-2): weakening confirm_in_play_migrations to accept ANY output turns the exclusion-canary test red', () => {
+  const script = buildMigrationEnvHarness({
+    confirm: (text) => text.replace(
+      'grep -q "^migration \\"${name}\\" is applied\\$" <<< "$out" \\\n      || fail "named confirmation for in-play migration \'${name}\' did not pass (see confirm-in-play.txt): ${out}"',
+      'true',
+    ),
+  })
+  const namesFile = join(mkdtempSync(join(tmpdir(), 'window-runner-names-canary-mut-')), 'in-play.txt')
+  writeFileSync(namesFile, 'zzzz2_pending_a\nzzzz3_pending_b\n')
+  const r = runMigrationEnvHarness(script, `confirm_in_play_migrations "${namesFile}" && echo CONFIRM_LOOP_OK`, {
+    FAKE_CONFIRM_APPLIED: 'zzzz2_pending_a',
+  })
+  assert.equal(r.status, 0, 'the mutated (unguarded) loop must now wrongly report success')
+  assert.match(r.stdout, /CONFIRM_LOOP_OK/)
+})
+
+test('EXECUTABLE (P2-4): SIGTERM mid-run still removes the migration secret file, and the process actually terminates', async () => {
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  const dir = mkdtempSync(join(tmpdir(), 'window-runner-signal-'))
+  const envFile = join(dir, 'secret-env-file')
+  writeFileSync(envFile, 'DATABASE_URL=postgres://fake\n', { mode: 0o600 })
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE="${envFile}"
+${cleanupFn}
+trap cleanup_target_migration_runtime EXIT
+trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
+echo READY
+sleep 30
+`
+  const { spawn } = await import('node:child_process')
+  const proc = spawn('bash', ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+  await new Promise((resolve) => {
+    proc.stdout.once('data', () => resolve())
+  })
+  assert.ok(existsSync(envFile), 'precondition: the secret file exists before the signal')
+  proc.kill('SIGTERM')
+  const exitInfo = await new Promise((resolve) => proc.once('exit', (code, signal) => resolve({ code, signal })))
+  assert.ok(!existsSync(envFile), 'SIGTERM must trigger cleanup (shred/rm) of the migration secret file before the process exits')
+  assert.notEqual(exitInfo.code, 0, 'a signal-terminated run must not report a clean exit code')
+})
+
+// The registration test below (not the SIGTERM-delivery test above) carries this change's
+// mutation proof. Empirically (verified on both bash 3.2 and bash 5.3 here), a bare `trap
+// ... EXIT` ALSO runs on an uncaught SIGHUP/SIGINT/SIGTERM in these bash versions — so a
+// file-existence assertion after `kill -TERM` does not by itself discriminate the explicit
+// HUP/INT/TERM trap from EXIT-only (both left no file behind in that A/B check). That
+// behavior is bash's own signal-handling implementation detail, not a documented contract
+// (POSIX/the bash manual only guarantee EXIT fires "on exit from the shell"), so relying on
+// it is exactly the fragility this hardening avoids: explicit registration is the portable,
+// self-documenting contract. What DOES discriminate, deterministically, is whether HUP/INT/
+// TERM are actually REGISTERED (`trap -p`) — which is what "add HUP/INT/TERM traps" means.
+test('EXECUTABLE (P2-4 registration): the runner registers explicit HUP/INT/TERM handlers, not only EXIT', () => {
+  const trapLines = [
+    "trap cleanup_target_migration_runtime EXIT",
+    "trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM",
+  ]
+  for (const line of trapLines) {
+    assert.ok(readFileSync(REMOTE_SH, 'utf8').includes(line), `expected the runner to contain: ${line}`)
+  }
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE=""
+${cleanupFn}
+${trapLines.join('\n')}
+trap -p
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGHUP|HUP)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGINT|INT)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGTERM|TERM)/)
+  assert.match(r.stdout, /trap -- '[^']*' (SIGEXIT|EXIT)/)
+})
+
+// Comment-stripped view of a function body. Two independent reviews of c5be6a54e8 (the external
+// one and the gate's N1) proved every WIRING pin below was satisfiable by a COMMENTED-OUT line:
+// with all eight load-bearing lines turned into `# ...` comments, bash -n passed and this suite
+// stayed green at 136/136 while action=deploy migrated nothing and the P1-2 pipeline was fully
+// unwired. A wiring pin may only match EXECUTABLE lines: strip full-line comments, then anchor
+// at line start.
+function executableLines(body) {
+  return body.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')
+}
+
+test('EXECUTABLE (P1-2 wiring): action_migrate_apply CALLS the pipeline — real body, recording stubs, order and arguments', () => {
+  // The stronger tier, and why it exists alongside the anchored text pins: a text pin — even
+  // comment-stripped and line-anchored — is still satisfied by a call wrapped in dead control
+  // flow (`if false; then ... fi`). Executing the REAL extracted body with recording stubs is
+  // not: commented, deleted, and dead-wrapped calls all fail identically — the recorder never
+  // sees them.
+  const applyFn = extractRunnerFunctions(['action_migrate_apply'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-apply-wiring-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+MIGRATE_JS="fake/dist/migrate.js"
+MIGRATE_BACKUP_PATH="/dev/null"
+CALLS="${dir}/calls.txt"
+log() { :; }
+fail() { echo "HARNESS-FAIL:$*" >&2; exit 1; }
+resolve_backend_database_url() { echo "postgres://u:p@postgres:5432/stagingdb"; }
+dsn_database_name() { echo "stagingdb"; }
+target_migrate_exec() {
+  echo "exec:$*" >> "$CALLS"
+  if [[ "$*" == *"--confirm 076_create_integration_stock_prep_pack_installs"* ]]; then
+    echo 'migration "076_create_integration_stock_prep_pack_installs" is applied'
+  elif [[ "$*" == *"--list"* ]]; then
+    echo "Applied: 337"
+    echo "Pending: 0"
+  else
+    echo "migrations run"
+  fi
+}
+compute_in_play_migrations() { echo "compute:$1" >> "$CALLS"; echo "zzzz_example" > "$OUTPUT_DIR/migration-in-play.txt"; }
+assert_applied_counts_agree() { echo "counts:$1|$2" >> "$CALLS"; }
+confirm_in_play_migrations() { echo "confirm:$1" >> "$CALLS"; }
+${applyFn}
+action_migrate_apply
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const calls = readFileSync(join(dir, 'calls.txt'), 'utf8').trim().split('\n')
+  const compute = calls.indexOf('compute:stagingdb')
+  const counts = calls.indexOf(`counts:${dir}/migration-applied-before.txt|${dir}/apply-migrate-list-before.txt`)
+  const confirm = calls.indexOf(`confirm:${dir}/migration-in-play.txt`)
+  const mutating = calls.indexOf('exec:-- node fake/dist/migrate.js')
+  assert.ok(compute >= 0, `compute_in_play_migrations never RAN with the real DB name; calls=${calls.join(' ; ')}`)
+  assert.ok(counts >= 0, `assert_applied_counts_agree never RAN with the two ledger paths; calls=${calls.join(' ; ')}`)
+  assert.ok(confirm >= 0, `confirm_in_play_migrations never RAN with the in-play file; calls=${calls.join(' ; ')}`)
+  assert.ok(mutating >= 0, 'the mutating migrate exec itself vanished — the harness drifted from the body')
+  assert.ok(compute < counts && counts < mutating, `the gates must run BEFORE the mutating migrate: compute=${compute} counts=${counts} mutating=${mutating}`)
+  assert.ok(confirm > mutating, 'per-name confirmation must follow the apply')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (F1 probe honesty): a FAILED probe refuses SAFE; unset and set-but-empty pass', () => {
+  // N2 (gate on c5be6a54e8): the first probe ended in `|| true`, collapsing docker exec rc=125
+  // and printenv-missing rc=127 into value="" -> SAFE certified without observing anything.
+  // printenv distinguishes natively: rc=0 set, rc=1 unset, else the PROBE failed.
+  const fn = extractRunnerFunctions(['assert_deploy_migrate_env_safe'])
+  const outDir = mkdtempSync(join(tmpdir(), 'wr-probe-'))
+  const harness = (dockerBody) => `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${outDir}"
+BACKEND_CONTAINER="fake-backend"
+fail() { echo "[window-runner][error] $*" >&2; exit 1; }
+docker() { ${dockerBody}; }
+${fn}
+assert_deploy_migrate_env_safe
+echo SAFE
+`
+  // docker exec itself fails (daemon down / container gone): must REFUSE, naming the rc.
+  const broken = spawnSync('bash', ['-c', harness('return 125')], { encoding: 'utf8' })
+  assert.equal(broken.status, 1, `stderr=${broken.stderr}`)
+  assert.match(broken.stderr, /rc=125/, 'the refusal must name the probe rc')
+  assert.match(broken.stderr, /FAILED probe/i)
+  // unset everywhere (printenv rc=1): SAFE.
+  const unset = spawnSync('bash', ['-c', harness('return 1')], { encoding: 'utf8' })
+  assert.equal(unset.status, 0, `stderr=${unset.stderr}`)
+  assert.match(unset.stdout, /SAFE/)
+  // set-but-EMPTY (printenv rc=0, empty output): SAFE — all three consumers treat only
+  // non-empty / exact-true as active, so empty must not block a deploy.
+  const empty = spawnSync('bash', ['-c', harness('if [[ "$4" == "MIGRATION_EXCLUDE" ]]; then echo ""; else return 1; fi')], { encoding: 'utf8' })
+  assert.equal(empty.status, 0, `stderr=${empty.stderr}`)
+  assert.match(empty.stdout, /SAFE/)
+})
+
+// The W7 env NAME is referenced via a const, mirroring the runner's own `${SOAK_W7_ENV_NAME}:`
+// indirection: the W7-1a inertness sweep (attendance-w7-1a-inertness-sweep.test.ts) asserts that
+// no tracked non-/tests/ file contains the literal name followed by ':' or '=' — its test-file
+// carve-out predates this scripts/ops suite, and the compliant idiom in this tree is indirection,
+// not a literal. The fixtures on DISK still carry the real name; only this SOURCE avoids it.
+const W4_FLAG_NAME = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
+const W7_FLAG_NAME = 'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED'
+
+test('EXECUTABLE (override classification): all four shapes + absence classify correctly, values-free', () => {
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovshape-'))
+  const overrideOf = (envLines) => `# Written by attendance-staging-window-runner (run test).
+services:
+  backend:
+    image: ghcr.io/x/metasheet2-backend:deadbeef
+${envLines}  web:
+    image: ghcr.io/x/metasheet2-web:deadbeef
+`
+  // liveSpec: map name -> printenv rc for the stub docker
+  const run = (fileBody, liveSpec) => {
+    const overridePath = join(dir, `ov-${Math.random().toString(36).slice(2, 8)}.yml`)
+    if (fileBody !== null) writeFileSync(overridePath, fileBody)
+    // The stub EMULATES docker exec's single sh -c protocol (P2-1 round 2): it runs the exact
+    // in-container script the classifier sends, under a shadow printenv that answers from
+    // liveSpec and — like the real printenv (measured on docker 29.5.3) — WRITES THE VALUE to
+    // stdout on rc=0. A classifier script that forgets to discard printenv's stdout therefore
+    // leaks the canary into the enumerator output, and the values-free assertions bite. Every
+    // invocation is counted: the whole classification must observe the container EXACTLY ONCE —
+    // a control-then-loop shape (the round-1 TOCTOU) makes 5 calls and reds the count pin.
+    const setCases = Object.entries(liveSpec).filter(([, v]) => v === 0).map(([k]) => k)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() {
+  echo call >> "${dir}/docker-calls.txt"
+  local body="$5"
+  shift 6
+  (
+    printenv() {
+      case "$1" in
+        PATH) echo "/usr/bin:org_secret_live_canary"; return 0 ;;
+${setCases.map((k) => `        ${k}) echo "org_secret_live_canary"; return 0 ;;`).join('\n')}
+        *) return 1 ;;
+      esac
+    }
+    eval "$body"
+  )
+}
+${fn}
+classify_runner_override
+`
+    rmSync(join(dir, 'docker-calls.txt'), { force: true })
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    const calls = existsSync(join(dir, 'docker-calls.txt'))
+      ? readFileSync(join(dir, 'docker-calls.txt'), 'utf8').trim().split('\n').filter(Boolean).length
+      : 0
+    return { r, report: readFileSync(join(dir, 'override-shape.txt'), 'utf8'), calls }
+  }
+
+  // absent file, nothing live -> absent, match=true, exit 0
+  let { r, report } = run(null, {})
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(report, /^override_shape=absent$/m)
+  assert.match(report, /^file_live_match=true$/m)
+
+  // none-shape (no environment block), nothing live -> none, exit 0
+  ;({ r, report } = run(overrideOf(''), {}))
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.match(report, /^override_shape=none$/m)
+
+  // rd-window file + both live -> rd-window, match=true, exit 0
+  const rdEnv = '    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n'
+  let calls
+  ;({ r, report, calls } = run(overrideOf(rdEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: 0 }))
+  assert.equal(r.status, 0, `stderr=${r.stderr}\nreport=${report}`)
+  assert.match(report, /^override_shape=rd-window$/m)
+  assert.match(report, /^file_live_match=true$/m)
+  // P2-1 round 2 (TOCTOU): control and enumeration must be ONE observation. The round-1 shape
+  // probed PATH and then looped four more execs (5 calls); a channel dying between them turned
+  // "observed nothing" into "observed unset". Structurally pinned: exactly one docker call.
+  assert.equal(calls, 1, `the live side must observe the container EXACTLY once, saw ${calls}`)
+
+  // soak file (with ORG VALUES) + both soak flags live -> soak-w4w7 AND the org slugs leak nowhere
+  const soakEnv = `    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha,org_secret_beta"\n      ${W7_FLAG_NAME}: "org_secret_beta"\n`
+  ;({ r, report } = run(overrideOf(soakEnv), { [W4_FLAG_NAME]: 0, [W7_FLAG_NAME]: 0 }))
+  assert.equal(r.status, 0, `stderr=${r.stderr}\nreport=${report}`)
+  assert.match(report, /^override_shape=soak-w4w7$/m)
+  assert.ok(!r.stdout.includes('org_secret') && !r.stderr.includes('org_secret') && !report.includes('org_secret'),
+    'org allowlist VALUES leaked into the classification output — the collection must be values-free (file-side canary from the fixture, live-side canary echoed by every rc=0 probe answer)')
+
+  // mixture (one rd + one soak) -> unexpected, exit 1, but the report is still WRITTEN
+  const mixEnv = `    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n`
+  ;({ r, report } = run(overrideOf(mixEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, [W4_FLAG_NAME]: 0 }))
+  assert.equal(r.status, 1, 'an unexpected shape must fail loud')
+  assert.match(report, /^override_shape=unexpected$/m)
+
+  // unknown UPPER key -> unexpected too (the pattern cannot be satisfied by novel flags)
+  ;({ r, report } = run(overrideOf('    environment:\n      SOME_NOVEL_FLAG: "1"\n'), { }))
+  assert.equal(r.status, 1)
+  assert.match(report, /^override_shape=unexpected$/m)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): drift and probe failure both fail loud, never green', () => {
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovdrift-'))
+  const rdFile = `services:
+  backend:
+    image: x
+    environment:
+      ATTENDANCE_SCHEDULER_ENABLED: "true"
+      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"
+  web:
+    image: x
+`
+  const overridePath = join(dir, 'ov.yml')
+  writeFileSync(overridePath, rdFile)
+  const script = (dockerBody) => `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { ${dockerBody}; }
+${fn}
+classify_runner_override
+`
+  // DRIFT: file says rd-window, container has only the scheduler flag -> match=false, exit 1.
+  // The stub emulates the single sh -c enumerator: shadow printenv answers PATH + scheduler.
+  const driftBody = `local body="$5"; shift 6; (
+    printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED) echo "org_secret_live_canary"; return 0 ;; *) return 1 ;; esac; }
+    eval "$body"
+  )`
+  let r = spawnSync('bash', ['-c', script(driftBody)], { encoding: 'utf8' })
+  assert.equal(r.status, 1, `drift must fail loud; stderr=${r.stderr}`)
+  let report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^override_shape=rd-window$/m)
+  assert.match(report, /^file_live_match=false$/m)
+
+  // PROBE FAILURE: docker exec rc=125 -> indeterminate, exit 1 — a zero-read is not a read of zero.
+  r = spawnSync('bash', ['-c', script('return 125')], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'a failed probe must refuse to certify agreement')
+  report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^file_live_match=indeterminate$/m)
+
+  // P2-2 (gate on fa74e5cae1, MEASURED): a stopped container, a missing container and an
+  // unreachable daemon all return rc=1 from docker exec — the SAME code as "var unset". The
+  // first shape read rc=1-everywhere as four unset observations and printed a confident
+  // file_live_match over zero observations. The PATH positive control makes this refuse instead.
+  r = spawnSync('bash', ['-c', script('return 1')], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'rc=1-everywhere (container gone) must NOT read as an observation of unset')
+  report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^file_live_match=indeterminate$/m)
+  assert.match(report, /^live_flag_names=unobserved$/m, 'an unobserved live side must say so, not render as none')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): a hostile candidate NAME cannot execute in-container — argv splice, not text splice', () => {
+  // Requal-2 NIT, gate-measured on the text-splice form: a candidate containing $(…) really
+  // executed inside the container. Candidates are constants today; the mechanism is dead anyway
+  // now — names travel as argv after the `_` $0 slot and never enter the script text. The
+  // harness forces a hostile name through SOAK_W7_ENV_NAME and pins that nothing executes.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovhostile-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${dir}/absent.yml"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
+SOAK_W7_ENV_NAME='$(touch "${dir}/pwned-marker")'
+docker() { local body="$5"; shift 6; (
+  printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  // Execution leaves no stdout trace (command substitution BECOMES the word), so the probe is a
+  // filesystem side-effect: under the text-splice form the $(touch …) RUNS and the marker
+  // appears; under the argv form the whole string is one inert argument.
+  assert.ok(!existsSync(join(dir, 'pwned-marker')),
+    'the hostile candidate name EXECUTED in-container — names are being spliced into the script text again')
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.ok(!report.includes('pwned'), 'hostile name leaked into the report')
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): a legal x-* extension block cannot impersonate services.backend', () => {
+  // External review round 3, reproduced before fixing: `x-template:\n  backend:\n    environment:`
+  // is legal compose (docker compose config accepts it), and the un-scoped awk matched its
+  // `  backend:` — feeding BOTH the set guard and the count guard from the same mis-scoped walk —
+  // so a file whose real services.backend carries no env classified rd-window with
+  // file_live_match=true: a confident green handed to the deploy decision. The walk now requires
+  // the FULL parent path (column-0 `services:` context).
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovxext-'))
+  const cases = [
+    // extension block carries the env; real backend has none -> the file's UPPER keys exist
+    // OUTSIDE services.backend.environment -> unexpected, never a calm rd-window/none.
+    ['x-template-impersonation', `x-template:\n  backend:\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\nservices:\n  backend:\n    image: x\n  web:\n    image: x\n`, 1, /^override_shape=unexpected$/m],
+    // anchor-swap control: the REAL services.backend env still classifies when an x-* block
+    // merely exists (empty) above it — proves the fix scopes rather than blinds.
+    ['x-block-plus-real-backend', `x-unrelated:\n  note: irrelevant\nservices:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n  web:\n    image: x\n`, 0, /^override_shape=rd-window$/m],
+  ]
+  for (const [label, body, wantRc, wantShape] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local body="$5"; shift 6; (
+  printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED) return 0 ;; *) return 1 ;; esac; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, wantRc, `${label}: rc=${r.status} stderr=${r.stderr}`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, wantShape, `${label} report:\n${report}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): a cross-block DUPLICATE name still refuses — counts, not only the deduped set', () => {
+  // Requal-2 P3-a, gate-measured false on the set-only guard: a web-block key whose NAME already
+  // appears in the backend block collapsed into the sort -u comparison — both-blocks duplicates
+  // classified rd-window with a confident match. Occurrence counts close it.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovdup-'))
+  const cases = [
+    ['both-blocks-duplicate', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n`],
+    ['web-dup-soak', `services:\n  backend:\n    image: x\n    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n      ${W7_FLAG_NAME}: "org_secret_alpha"\n  web:\n    image: x\n    environment:\n      ${W7_FLAG_NAME}: "org_secret_alpha"\n`],
+  ]
+  for (const [label, body] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local body="$5"; shift 6; (
+  printenv() { [[ "$1" == "PATH" ]] && return 0; return 1; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: a duplicated cross-block name must refuse, not classify`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+    assert.ok(!report.includes('org_secret'), 'values leaked')
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): tamper guard — an unasked NAME in the enumerator output refuses AND never reaches the report', () => {
+  // Requal-2 P3-b: the guard existed but nothing exercised it (removal stayed 143/143 green). It
+  // is diagnostic-only by construction — but what its removal costs is REPORT HONESTY:
+  // unvalidated container stdout would land in live_flag_names in the uploaded artifact.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovtamper-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${dir}/absent.yml"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { echo "EVIL_UNASKED_NAME"; return 0; }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'an unasked name in the channel must refuse certification')
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^file_live_match=indeterminate$/m)
+  assert.match(report, /^live_flag_names=unobserved$/m)
+  assert.ok(!report.includes('EVIL_UNASKED_NAME'), 'unvalidated container output reached the report')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): env keys under the WRONG service never classify — backend-scoped parse', () => {
+  // P2-2 (external review of 4141c27832): the round-1 grep collected every indented UPPER key in
+  // the whole file, so two rd-window keys under services.web.environment classified as rd-window
+  // and matched the BACKEND's live env — certifying agreement between one service's file entry
+  // and a DIFFERENT service's runtime.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovsvc-'))
+  const cases = [
+    ['web-block', `services:\n  backend:\n    image: x\n  web:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n`],
+    ['both-blocks', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n`],
+  ]
+  for (const [label, body] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local b="$5"; shift 6; (
+  printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED) echo v; return 0 ;; *) return 1 ;; esac; }
+  eval "$b"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: keys outside services.backend.environment must refuse, not classify`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): legal-but-unparsed environment spellings are UNEXPECTED, never a calm none', () => {
+  // P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+  // spellings the key parser does not read; each parsed as none — the CALM shape — inverting the
+  // fail-loud principle. An environment block whose keys we cannot enumerate must refuse.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovspell-'))
+  const spellings = [
+    ['list-form', '    environment:\n      - ATTENDANCE_SCHEDULER_ENABLED=true\n'],
+    ['flow-map', '    environment: { ATTENDANCE_SCHEDULER_ENABLED: "true" }\n'],
+    ['quoted-key', '    environment:\n      "ATTENDANCE_SCHEDULER_ENABLED": "true"\n'],
+  ]
+  // …and the door is ANCHORED (requal P3 on 4141c27832): a comment MENTIONING environment: and
+  // an image tag CONTAINING it are not environment blocks — both must stay a calm none.
+  const nonBlocks = [
+    ['comment-mention', '# deliberately no environment: block on purpose\n'],
+    ['image-tag-substring', ''],
+  ]
+  for (const [label, prefix] of nonBlocks) {
+    const overridePath = join(dir, `ov-nb-${label}.yml`)
+    const image = label === 'image-tag-substring' ? 'ghcr.io/zensgit/environment:abc123' : 'x'
+    writeFileSync(overridePath, `${prefix}services:\n  backend:\n    image: ${image}\n  web:\n    image: x\n`)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local b="$5"; shift 6; ( printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }; eval "$b" ); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `${label}: a mere mention of environment: must not fail a true none; stderr=${r.stderr}`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=none$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
+  for (const [label, envLines] of spellings) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, `services:\n  backend:\n    image: x\n${envLines}  web:\n    image: x\n`)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { if [[ "$4" == "PATH" ]]; then return 0; else return 1; fi; }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: an unparseable environment block must fail loud`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('WIRING (override classification): action_status runs the classifier and the summary carries the shape', () => {
+  const statusBody = executableLines(extractRunnerFunctions(['action_status']))
+  assert.match(statusBody, /^\s*classify_runner_override \|\| status_rc=1/m,
+    'action_status no longer runs the override classification (or its failure no longer reddens status_rc)')
+  assert.match(statusBody, /^\s*grep '\^override_shape=' "\$\{OUTPUT_DIR\}\/override-shape\.txt"/m,
+    'the status summary no longer carries the override shape')
+})
+
+test('WIRING (P1-2): the pipeline calls are present in the REAL apply path — deletion-mutation-provable', () => {
+  // The gate on 5b4b38d925 proved the previous shape's hole with arithmetic: each of these three
+  // CALLS could be deleted from the script with this whole suite still green at 132/132 — the
+  // functions were tested, their wiring was not, and a tested-but-never-called guard is a claim,
+  // not a check. These pins are function-scoped (extracted from the REAL runner source, not a
+  // replica) so deleting the call site — the gate's exact mutation — reds here.
+  const applyBody = executableLines(extractRunnerFunctions(['action_migrate_apply']))
+  assert.match(applyBody, /^\s*compute_in_play_migrations "\$real_db"\s*$/m,
+    'action_migrate_apply no longer computes the in-play set — the per-name confirmation below would confirm an empty list')
+  assert.match(applyBody, /^\s*assert_applied_counts_agree "\$\{OUTPUT_DIR\}\/migration-applied-before\.txt" "\$\{OUTPUT_DIR\}\/apply-migrate-list-before\.txt"\s*$/m,
+    'action_migrate_apply no longer cross-checks the applied counts — ledger-invisible exclusions regain cover')
+  assert.match(applyBody, /^\s*confirm_in_play_migrations "\$\{OUTPUT_DIR\}\/migration-in-play\.txt"\s*$/m,
+    'action_migrate_apply no longer name-confirms the in-play migrations — the exclusion canary is unwired')
+})
+
+test('WIRING (P2-4): BOTH signal-trap arm points in action_migrate, in ORDER — deletion-mutation-provable', () => {
+  // Gate finding F3 on 5b4b38d925: the plain HUP/INT/TERM literal appears at TWO arm points and
+  // the bare includes() in the registration test is satisfied by either — deleting either one
+  // alone stayed green at 132/132. The second arm point matters because rehearsal installs its
+  // OWN trap; without re-arming, the real-DB apply runs with the rehearsal-shaped trap gone and
+  // the secret env-file survives a caught signal (the pre-hardening shape).
+  const migrateBody = executableLines(extractRunnerFunctions(['action_migrate']))
+  const arms = [...migrateBody.matchAll(/^\s*trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM\s*$/gm)].map((m) => m.index)
+  assert.equal(arms.length, 2, `action_migrate must arm the signal trap at BOTH points, found ${arms.length}`)
+  const precheckIdx = migrateBody.indexOf('action_migrate_read_only_prechecks')
+  const rehearseIdx = migrateBody.indexOf('action_migrate_rehearse')
+  const applyIdx = migrateBody.indexOf('action_migrate_apply')
+  assert.ok(precheckIdx > 0 && rehearseIdx > 0 && applyIdx > 0, 'the migrate pipeline steps moved; re-anchor this test')
+  assert.ok(arms[0] < precheckIdx, 'the first arm point must precede the read-only prechecks')
+  assert.ok(rehearseIdx < arms[1] && arms[1] < applyIdx, 'the RE-arm must sit between rehearsal (which retraps) and the real-DB apply')
+})
+
+test('WIRING (F1): action_deploy inline migrate is exclusion-proof — hazard abort + forced MIGRATION_EXCLUDE=', () => {
+  // Found independently by the 5b4b38d925 gate AND the external review: action=deploy migrated
+  // via bare staging_exec in the RUNNING container, inheriting any container-level
+  // MIGRATION_EXCLUDE — which is ledger-INVISIBLE (excluded names vanish from --list, so the
+  // `Pending: 0` gate and the alignment report, which parses the same --list text with no
+  // filesystem census of its own, both go green over unapplied migrations).
+  const deployBody = executableLines(extractRunnerFunctions(['action_deploy']))
+  assert.match(deployBody, /^\s*assert_deploy_migrate_env_safe\s*$/m, 'the hazard abort is unwired from action_deploy')
+  const forced = [...deployBody.matchAll(/^\s*staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "\$MIGRATE_JS"/gm)]
+  assert.equal(forced.length, 3, `all three deploy-path MIGRATE_JS invocations must force ALL THREE hazard vars empty (N3; list-before, run, list-after); found ${forced.length}`)
+  assert.ok(!/^\s*staging_exec node "\$MIGRATE_JS"/m.test(deployBody),
+    'a bare staging_exec MIGRATE_JS reappeared in action_deploy — it inherits container MIGRATION_EXCLUDE')
+})
+
+test('EXECUTABLE (F1): assert_deploy_migrate_env_safe fails loud on a set hazard var, value never printed; passes when all three are unset', () => {
+  const fn = extractRunnerFunctions(['assert_deploy_migrate_env_safe'])
+  const outDir = mkdtempSync(join(tmpdir(), 'wr-probe-'))
+  const harness = (dockerBody) => `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${outDir}"
+BACKEND_CONTAINER="fake-backend"
+fail() { echo "[window-runner][error] $*" >&2; exit 1; }
+docker() { ${dockerBody}; }
+${fn}
+assert_deploy_migrate_env_safe
+echo SAFE
+`
+  // Hazard set: printenv answers for MIGRATION_EXCLUDE.
+  const bad = spawnSync('bash', ['-c', harness('if [[ "$4" == "MIGRATION_EXCLUDE" ]]; then echo "076_secret_name"; else return 1; fi')], { encoding: 'utf8' })
+  assert.equal(bad.status, 1, `stderr=${bad.stderr}`)
+  assert.match(bad.stderr, /MIGRATION_EXCLUDE/, 'the abort must NAME the hazard var')
+  assert.ok(!bad.stderr.includes('076_secret_name') && !bad.stdout.includes('076_secret_name'),
+    'the hazard VALUE must never be printed')
+  // All clear: printenv finds nothing.
+  const ok = spawnSync('bash', ['-c', harness('return 1')], { encoding: 'utf8' })
+  assert.equal(ok.status, 0, `stderr=${ok.stderr}`)
+  assert.match(ok.stdout, /SAFE/)
+})
+
+test('MUTATION (P2-4 registration): a runner registering only EXIT (pre-hardening shape) shows no HUP/INT/TERM in `trap -p`', () => {
+  const cleanupFn = extractRunnerFunctions(['cleanup_target_migration_runtime'])
+  // Pre-hardening shape: only EXIT is trapped.
+  const script = `#!/bin/bash
+set -u
+TARGET_MIGRATION_ENV_FILE=""
+${cleanupFn}
+trap cleanup_target_migration_runtime EXIT
+trap -p
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  assert.doesNotMatch(r.stdout, /(SIGHUP|SIGINT|SIGTERM)/, 'proving the registration test above is discriminating: without the explicit trap call, trap -p shows nothing for HUP/INT/TERM')
 })
 
 // --- action=residue-sweep (bundle §7 "Consolidated final residue sweep") --------------
