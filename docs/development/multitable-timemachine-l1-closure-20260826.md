@@ -1,18 +1,19 @@
 # Time Machine O-2 阶梯 —— L1(staging ENABLE triggers)关闭记录
 
 > **状态:CLOSED**(owner 宣告,2026-08-26)。本文件是 L1 的证据台账,**不授权任何后续动作**:
-> L2 及其之后仍 HOLD,production 未触碰,四个 recovery flag 全程 OFF。
+> L2 及其之后仍 HOLD,production 未触碰,五个本阶段 recovery ladder flag 全程 OFF。
 
 ## 0. 一页看全
 
-L1 的四条判据全部有据,证据均绑定 exact SHA,且每条都记录了它**证明不了**什么。
+L1 的四条判据全部有据。下表分别记录 workflow 源码 SHA、被测部署 SHA 与脚本指纹,
+不把不同 provenance 维度压成一个含混的 `run @ SHA`;每条也记录了它**证明不了**什么。
 时间窗:`2026-08-24T10:25:17.641Z` → `2026-08-25T14:55:51Z`(≈28.5h,已满足 ≥2 日历日以外的现行判据口径见 §5)。
 
 | 判据 | 证据 | 结论 |
 |---|---|---|
-| L1 电池 PASS | run `32862460377` @ `8fa91caf644fa9f638243067e64f31eec997c075` | PASS |
-| staging 姿态见证 | run `32862572066`,`mode=postdeploy-full posture=l1-armed` | PASS |
-| PostgreSQL 观察轴 | run `32871925465` @ `ab4d5955be`,`mode=l1-postgres-window` | PASS |
+| L1 电池 PASS | run `32862460377`;workflow head `22ae2a1c07a16703dfffe3fb7e625c280ae7922e`;target `build_commit=8fa91caf644fa9f638243067e64f31eec997c075`;script SHA 见 §1 | PASS |
+| staging 姿态见证 | run `32862572066`;workflow head `22ae2a1c07a16703dfffe3fb7e625c280ae7922e`;同一 staging 容器于电池后立即观测;`mode=postdeploy-full posture=l1-armed` | PASS |
+| PostgreSQL 观察轴 | run `32871925465`;workflow source `ab4d5955bee9987f20618fd085b9a31eb130328c`(review-only branch);`mode=l1-postgres-window` | PASS |
 | 时延观察 | 同电池 run,§4 | **有界残留,owner 已接受** |
 
 ## 1. L1 电池
@@ -26,6 +27,7 @@ VERDICT: PASS - 11/11 surfaces blocked with RECOVERY_AUTHORITY_BUSY,
 
 **provenance(A1.3 绑定)**:
 ```
+workflow_head = 22ae2a1c07a16703dfffe3fb7e625c280ae7922e
 script_sha256 = cfb6ec0a79ca7d42dae3ef39fb51dfd472ac27d1566e31f7318a8dbbf47a5970
 build_commit  = 8fa91caf644fa9f638243067e64f31eec997c075
 posture       = 9/9 ARMED
@@ -41,6 +43,10 @@ failures      = []
 **教训:PASS 不等于 PASS 在你以为的那棵树上。**
 
 ## 2. 姿态见证(bridge)
+
+workflow head = `22ae2a1c07a16703dfffe3fb7e625c280ae7922e`。该 run 紧接 §1 电池,
+观测同一 staging 容器;它独立证明的是五旗标 running/next-restart 姿态与 schema 指纹,
+不另行声称自己重新证明了容器的 `build_commit`。
 
 ```
 schema: VERDICT: PASS - recovery authority triggers/functions match the expected
@@ -68,7 +74,8 @@ and no deadlock was observed
 已知必然存在的东西没出现 ⇒ 探针瞎了,不能反读成"环境干净"(空读≠不存在)。
 改用**跨容器重建留存的有序 PostgreSQL 日志**后,同一问题才有真答案。
 
-**判据非恒真**(`multitable-recovery-flag-containment-check.yml`,分支 `ab4d5955be`):
+**判据非恒真**(`multitable-recovery-flag-containment-check.yml`,workflow source exact SHA
+`ab4d5955bee9987f20618fd085b9a31eb130328c`,review-only branch,未称其已落 main):
 `parse_errors > 0 || controls != 5 || marker_outside != 0 || deadlocks != 0` 任一即 `exit 2`。
 其中 `controls != 5` 是正控:它要求五个 battery 窗口**各自**命中 11 个 marker。
 **首轮 FAIL 正是它抓出了遗漏的第五次 battery run**;修正方式是补上真实运行记录,
@@ -109,4 +116,7 @@ and no deadlock was observed
   (顺序 fence 不晚于 strict / 第五个 flag 入 §0 清单 / 明确哪一级 provision trust checkpoint /
   该 flag 的运维证据载体)。**ratify erratum 本身不解除 HOLD。**
 - production:未触碰,不在本次范围。
-- 四个 recovery flag:全程 OFF,本次未改动任何 flag。
+- 五个本阶段 recovery ladder flag:全程 OFF,本次未改动任何 flag:
+  `MULTITABLE_ENABLE_SHEET_REVERT` / `MULTITABLE_ENABLE_PIT_RESET` /
+  `MULTITABLE_HISTORY_CONTIGUITY_STRICT` / `MULTITABLE_ENABLE_WRITER_FENCE` /
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION`。

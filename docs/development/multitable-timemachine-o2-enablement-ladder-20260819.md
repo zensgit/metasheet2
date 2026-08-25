@@ -6,9 +6,12 @@
 > **范围提示**：本 `RATIFIED` 状态不覆盖文末修正案 E1；E1 仍为 `PROPOSED`，L2+ 保持 HOLD。
 > **批准的是顺序与判据本身，不含任何台阶执行授权**：本文档不执行任何一步，
 > 每一级台阶仍是**独立的 owner/ops 动作**，文档状态 ≠ 任何 flag/trigger 变更授权。
+> **当前执行状态（2026-08-26，仅状态同步、不改合同）**：staging L1 已 CLOSED；关闭证据、
+> provenance 分层与 owner 接受的时延证据边界见
+> `multitable-timemachine-l1-closure-20260826.md`。production 未触碰，五个本阶段 flag 保持 OFF。
 > **执行勘误（承重）**：§2 保留的是已批准 v1 的历史文本；其中 L2 先开 strict、L3 后开
-> fence 的顺序已被代码合取门证明不可执行，**不得按 §2 的 L2–L5 继续操作**。当前唯一可执行动作是
-> §5.3 的 L1 五旗标只读补证；L2+ 在 E1 获 exact-SHA ratify 前没有可执行顺序。读者不得因文件标题
+> fence 的顺序已被代码合取门证明不可执行，**不得按 §2 的 L2–L5 继续操作**。§5.3 的 L1
+> 五旗标只读补证已经完成；L2+ 在 E1 获 exact-SHA ratify 前没有可执行顺序。读者不得因文件标题
 > `RATIFIED` 而把被冻结的 v1 L2–L5 当成授权或 runbook。
 > 基线：#4654 closeout（merged `12f1f8c466`，inert 落地）。
 > **当前主机证据（2026-08-24）**：双主机 `postdeploy-full` run `32714983998` PASS；prod +
