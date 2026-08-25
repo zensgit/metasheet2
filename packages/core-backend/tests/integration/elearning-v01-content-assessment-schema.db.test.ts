@@ -3,8 +3,8 @@
  *
  * This file assumes both Part A migrations have already been applied by the
  * caller — in CI that is `.github/workflows/plugin-tests.yml` "Run DB migrations"
- * immediately before this whole-file step. It does not call up()/down() and
- * does not write kysely_migration.
+ * immediately before this whole-file step. It does not write kysely_migration.
+ * down() is invoked only as a refuse check while attempts exist.
  *
  * DATABASE_URL is required. A missing URL throws (refuses skip-shaped green).
  * HTTP/API surfaces are out of this slice. Concurrent freeze proofs use two
@@ -12,6 +12,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
+import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
   ELEARNING_MEDIA_STALE_CLAIM_INDEX,
@@ -24,6 +25,16 @@ import {
   ELEARNING_V01_LEDGER_TRIGGERS,
   MEDIA_DURATION_STATUS_CHK,
 } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
+import {
+  ATTEMPT_ITEM_BACKFILL_ABORT,
+  ATTEMPT_ITEM_BACKFILL_PREFLIGHT_SQL,
+  ATTEMPT_ITEM_DOWN_NONEMPTY,
+  ATTEMPTS_ITEM_COLUMN,
+  ATTEMPTS_ITEM_FK,
+  ATTEMPTS_ITEM_USER_INDEX,
+  ITEMS_ORG_VERSION_EXAM_ID_UNIQ,
+  down as downAttemptItemScope,
+} from '../../src/db/migrations/zzzz20260826130000_scope_elearning_exam_attempts_to_item'
 import { ELEARNING_PERMISSION_CODES } from '../../src/db/migrations/zzzz20260824121000_add_elearning_permissions'
 
 const DATABASE_URL = process.env.DATABASE_URL
@@ -206,6 +217,7 @@ async function insertItem(input: {
   position: number
   mediaId?: string | null
   examId?: string | null
+  id?: string
   completionPolicyVersion?: string | null
   completionThresholdBps?: number | null
 }): Promise<void> {
@@ -221,6 +233,26 @@ async function insertItem(input: {
       : input.itemType === 'video'
         ? 9000
         : null
+  if (input.id) {
+    await pool.query(
+      `INSERT INTO elearning_course_version_items
+         (id, org_id, course_version_id, item_type, position, media_id, exam_id,
+          completion_policy_version, completion_threshold_bps)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [
+        input.id,
+        input.org,
+        input.versionId,
+        input.itemType,
+        input.position,
+        input.mediaId ?? null,
+        input.examId ?? null,
+        policyVersion,
+        threshold,
+      ],
+    )
+    return
+  }
   await pool.query(
     `INSERT INTO elearning_course_version_items
        (org_id, course_version_id, item_type, position, media_id, exam_id,
@@ -243,6 +275,7 @@ async function insertAttempt(input: {
   org: string
   examId: string
   versionId: string
+  itemId: string
   userId: string
   attemptNo: number
   status?: string
@@ -264,15 +297,16 @@ async function insertAttempt(input: {
     : input.gradedAt
   const result = await pool.query<{ id: string }>(
     `INSERT INTO elearning_exam_attempts (
-       org_id, exam_id, course_version_id, user_id, attempt_no,
+       org_id, exam_id, course_version_id, course_version_item_id, user_id, attempt_no,
        paper_snapshot, answers, auto_score, total_score, passed, status,
        submitted_at, graded_at
-     ) VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, $6::jsonb, $7, $8, $9, $10, $11, $12)
+     ) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
      RETURNING id`,
     [
       input.org,
       input.examId,
       input.versionId,
+      input.itemId,
       input.userId,
       input.attemptNo,
       answers === null ? null : JSON.stringify(answers),
@@ -442,6 +476,7 @@ async function seedGraph(org: string, mediaStatus = 'ready'): Promise<{
   questionId: string
   revisionId: string
   examId: string
+  examItemId: string
 }> {
   const courseId = randomUUID()
   const versionId = randomUUID()
@@ -449,6 +484,7 @@ async function seedGraph(org: string, mediaStatus = 'ready'): Promise<{
   const questionId = randomUUID()
   const revisionId = randomUUID()
   const examId = randomUUID()
+  const examItemId = randomUUID()
 
   await insertCourse(org, courseId)
   await insertVersion(org, versionId, courseId)
@@ -464,8 +500,8 @@ async function seedGraph(org: string, mediaStatus = 'ready'): Promise<{
   await insertExam(org, examId)
   await insertExamQuestion(org, examId, revisionId)
   await insertItem({ org, versionId, itemType: 'video', position: 1, mediaId })
-  await insertItem({ org, versionId, itemType: 'exam', position: 2, examId })
-  return { courseId, versionId, mediaId, questionId, revisionId, examId }
+  await insertItem({ org, versionId, itemType: 'exam', position: 2, examId, id: examItemId })
+  return { courseId, versionId, mediaId, questionId, revisionId, examId, examItemId }
 }
 
 describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
@@ -515,12 +551,14 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
         'zzzz20260824120000_create_elearning_v01_content_assessment',
         'zzzz20260824121000_add_elearning_permissions',
         'zzzz20260826120000_harden_elearning_v01_ledger',
+        'zzzz20260826130000_scope_elearning_exam_attempts_to_item',
       ]],
     )
     expect(result.rows.map((row) => row.name)).toEqual([
       'zzzz20260824120000_create_elearning_v01_content_assessment',
       'zzzz20260824121000_add_elearning_permissions',
       'zzzz20260826120000_harden_elearning_v01_ledger',
+      'zzzz20260826130000_scope_elearning_exam_attempts_to_item',
     ])
   })
 
@@ -823,6 +861,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('learner'),
       attemptNo: 1,
     })
@@ -835,6 +874,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('learner-order'),
       attemptNo: 1,
     })
@@ -859,6 +899,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
         org,
         examId: graph.examId,
         versionId: graph.versionId,
+        itemId: graph.examItemId,
         userId: actor('started-score'),
         attemptNo: 3,
         status: 'started',
@@ -928,6 +969,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('graded-incomplete'),
       attemptNo: 4,
     })
@@ -978,6 +1020,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('learner'),
       attemptNo: 1,
     })
@@ -1051,6 +1094,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId,
       attemptNo: 1,
       status: 'started',
@@ -1062,6 +1106,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
         org,
         examId: graph.examId,
         versionId: graph.versionId,
+        itemId: graph.examItemId,
         userId,
         attemptNo: 1,
         status: 'started',
@@ -1074,6 +1119,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId,
       attemptNo: 2,
     })
@@ -1322,6 +1368,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId,
       attemptNo: 1,
       status: 'started',
@@ -1342,6 +1389,14 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       ),
     )
     expect(String(identityErr?.message)).toMatch(/identity fields are immutable after insert/)
+
+    const itemIdentityErr = await reject(() =>
+      pool.query(
+        `UPDATE elearning_exam_attempts SET course_version_item_id = $2 WHERE id = $1`,
+        [startedId, randomUUID()],
+      ),
+    )
+    expect(String(itemIdentityErr?.message)).toMatch(/identity fields are immutable after insert/)
 
     await pool.query(
       `UPDATE elearning_exam_attempts SET answers = '{"a":"b"}'::jsonb WHERE id = $1`,
@@ -1419,6 +1474,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
         org,
         examId: graph.examId,
         versionId: graph.versionId,
+        itemId: graph.examItemId,
         userId: actor('insert-submitted'),
         attemptNo: 1,
         status: 'submitted',
@@ -1433,6 +1489,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
         org,
         examId: graph.examId,
         versionId: graph.versionId,
+        itemId: graph.examItemId,
         userId: actor('insert-graded'),
         attemptNo: 1,
         status: 'graded',
@@ -1459,6 +1516,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('submit-path'),
       attemptNo: 1,
     })
@@ -1489,6 +1547,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('expire-path'),
       attemptNo: 1,
     })
@@ -2147,6 +2206,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       org,
       examId: graph.examId,
       versionId: graph.versionId,
+      itemId: graph.examItemId,
       userId: actor('del-started'),
       attemptNo: 1,
     })
@@ -2156,5 +2216,276 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [startedId],
     )
     expect(remaining.rows[0].n).toBe(0)
+  })
+
+  it('pins course_version_item_id NOT NULL without a default, 4-col item FK RESTRICT, and per-item uniqueness', async () => {
+    const column = await pool.query<{ is_nullable: string; column_default: string | null; data_type: string }>(
+      `SELECT is_nullable, column_default, data_type
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name = $1`,
+      [ATTEMPTS_ITEM_COLUMN],
+    )
+    expect(column.rows).toHaveLength(1)
+    expect(column.rows[0].data_type).toBe('uuid')
+    expect(column.rows[0].is_nullable).toBe('NO')
+    expect(column.rows[0].column_default).toBeNull()
+
+    const fk = await pool.query<{ ncols: number; confdeltype: string }>(
+      `SELECT array_length(conkey, 1) AS ncols, confdeltype
+         FROM pg_constraint
+        WHERE conrelid = 'elearning_exam_attempts'::regclass
+          AND conname = $1`,
+      [ATTEMPTS_ITEM_FK],
+    )
+    expect(fk.rows).toHaveLength(1)
+    expect(fk.rows[0].ncols).toBe(4)
+    expect(fk.rows[0].confdeltype).toBe('r')
+
+    const itemUniq = await pool.query<{ conname: string }>(
+      `SELECT conname FROM pg_constraint
+        WHERE conrelid = 'elearning_course_version_items'::regclass
+          AND conname = $1`,
+      [ITEMS_ORG_VERSION_EXAM_ID_UNIQ],
+    )
+    expect(itemUniq.rows).toHaveLength(1)
+
+    const uniqCols = await pool.query<{ attname: string }>(
+      `SELECT a.attname
+         FROM pg_constraint c
+         JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS x(attnum, n) ON true
+         JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = x.attnum
+        WHERE c.conrelid = 'elearning_exam_attempts'::regclass
+          AND c.conname = 'elearning_exam_attempts_attempt_uniq'
+        ORDER BY x.n`,
+    )
+    expect(uniqCols.rows.map((row) => row.attname)).toEqual([
+      'org_id',
+      'course_version_item_id',
+      'user_id',
+      'attempt_no',
+    ])
+
+    const idx = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename = 'elearning_exam_attempts'
+          AND indexname = $1`,
+      [ATTEMPTS_ITEM_USER_INDEX],
+    )
+    expect(idx.rows).toHaveLength(1)
+
+    const guard = await pool.query<{ src: string }>(
+      `SELECT pg_get_functiondef('elearning_exam_attempts_state_guard'::regproc) AS src`,
+    )
+    expect(guard.rows[0].src).toContain('course_version_item_id')
+    expect(guard.rows[0].src).toMatch(/graded rows cannot be deleted/)
+    expect(guard.rows[0].src).not.toMatch(/cannot be deleted after/i)
+  })
+
+  it('rejects wrong org/version/exam item FKs and isolates uniqueness per item', async () => {
+    const org = orgId('item-fk')
+    const other = orgId('item-fk-other')
+    seededOrgIds.push(org, other)
+    const graph = await seedGraph(org)
+    const foreign = await seedGraph(other)
+    const userId = actor('learner')
+
+    const wrongOrg = await reject(() =>
+      insertAttempt({
+        org,
+        examId: graph.examId,
+        versionId: graph.versionId,
+        itemId: foreign.examItemId,
+        userId,
+        attemptNo: 1,
+      }),
+    )
+    expect(wrongOrg?.code).toBe('23503')
+    expect(wrongOrg?.constraint).toBe(ATTEMPTS_ITEM_FK)
+
+    const otherExamId = randomUUID()
+    await insertExam(org, otherExamId)
+    const otherExamItemId = randomUUID()
+    await insertItem({
+      org,
+      versionId: graph.versionId,
+      itemType: 'exam',
+      position: 3,
+      examId: otherExamId,
+      id: otherExamItemId,
+    })
+    const wrongExam = await reject(() =>
+      insertAttempt({
+        org,
+        examId: graph.examId,
+        versionId: graph.versionId,
+        itemId: otherExamItemId,
+        userId,
+        attemptNo: 1,
+      }),
+    )
+    expect(wrongExam?.code).toBe('23503')
+    expect(wrongExam?.constraint).toBe(ATTEMPTS_ITEM_FK)
+
+    const otherVersionId = randomUUID()
+    await insertVersion(org, otherVersionId, graph.courseId, 2)
+    const otherVersionItemId = randomUUID()
+    await insertItem({
+      org,
+      versionId: otherVersionId,
+      itemType: 'exam',
+      position: 1,
+      examId: graph.examId,
+      id: otherVersionItemId,
+    })
+    const wrongVersion = await reject(() =>
+      insertAttempt({
+        org,
+        examId: graph.examId,
+        versionId: graph.versionId,
+        itemId: otherVersionItemId,
+        userId,
+        attemptNo: 1,
+      }),
+    )
+    expect(wrongVersion?.code).toBe('23503')
+    expect(wrongVersion?.constraint).toBe(ATTEMPTS_ITEM_FK)
+
+    const aliasItemId = randomUUID()
+    await insertItem({
+      org,
+      versionId: graph.versionId,
+      itemType: 'exam',
+      position: 4,
+      examId: graph.examId,
+      id: aliasItemId,
+    })
+    const first = await insertAttempt({
+      org,
+      examId: graph.examId,
+      versionId: graph.versionId,
+      itemId: graph.examItemId,
+      userId,
+      attemptNo: 1,
+    })
+    const second = await insertAttempt({
+      org,
+      examId: graph.examId,
+      versionId: graph.versionId,
+      itemId: aliasItemId,
+      userId,
+      attemptNo: 1,
+    })
+    expect(first).toBeTruthy()
+    expect(second).not.toBe(first)
+  })
+
+  it('keeps the exported preflight helper fail-closed for ambiguous or zero matches', async () => {
+    const org = orgId('backfill-amb')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+    const aliasItemId = randomUUID()
+    await insertItem({
+      org,
+      versionId: graph.versionId,
+      itemType: 'exam',
+      position: 3,
+      examId: graph.examId,
+      id: aliasItemId,
+    })
+    const orphanExamId = randomUUID()
+    await insertExam(org, orphanExamId)
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `ALTER TABLE elearning_exam_attempts ALTER COLUMN course_version_item_id DROP NOT NULL`,
+      )
+      await client.query(
+        `ALTER TABLE elearning_exam_attempts DROP CONSTRAINT IF EXISTS elearning_exam_attempts_item_fk`,
+      )
+      await client.query(
+        `INSERT INTO elearning_exam_attempts (
+           org_id, exam_id, course_version_id, course_version_item_id, user_id, attempt_no,
+           paper_snapshot, answers, status
+         ) VALUES ($1, $2, $3, NULL, $4, 1, '{}'::jsonb, NULL, 'started')`,
+        [org, graph.examId, graph.versionId, actor('amb')],
+      )
+      const ambiguous = await reject(() => client.query(ATTEMPT_ITEM_BACKFILL_PREFLIGHT_SQL))
+      expect(String(ambiguous?.message)).toContain(ATTEMPT_ITEM_BACKFILL_ABORT)
+
+      await client.query('ROLLBACK')
+      await client.query('BEGIN')
+      await client.query(
+        `ALTER TABLE elearning_exam_attempts ALTER COLUMN course_version_item_id DROP NOT NULL`,
+      )
+      await client.query(
+        `ALTER TABLE elearning_exam_attempts DROP CONSTRAINT IF EXISTS elearning_exam_attempts_item_fk`,
+      )
+      await client.query(
+        `INSERT INTO elearning_exam_attempts (
+           org_id, exam_id, course_version_id, course_version_item_id, user_id, attempt_no,
+           paper_snapshot, answers, status
+         ) VALUES ($1, $2, $3, NULL, $4, 1, '{}'::jsonb, NULL, 'started')`,
+        [org, orphanExamId, graph.versionId, actor('zero')],
+      )
+      const zero = await reject(() => client.query(ATTEMPT_ITEM_BACKFILL_PREFLIGHT_SQL))
+      expect(String(zero?.message)).toContain(ATTEMPT_ITEM_BACKFILL_ABORT)
+      await client.query('ROLLBACK')
+    } finally {
+      try {
+        await client.query('ROLLBACK')
+      } catch {
+        /* already idle */
+      }
+      client.release()
+    }
+
+    const stillNotNull = await pool.query<{ is_nullable: string }>(
+      `SELECT is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name = $1`,
+      [ATTEMPTS_ITEM_COLUMN],
+    )
+    expect(stillNotNull.rows[0].is_nullable).toBe('NO')
+    const stillFk = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_constraint
+        WHERE conrelid = 'elearning_exam_attempts'::regclass
+          AND conname = $1`,
+      [ATTEMPTS_ITEM_FK],
+    )
+    expect(stillFk.rows[0].n).toBe(1)
+  })
+
+  it('refuses down while attempts exist so item provenance is not dropped', async () => {
+    const org = orgId('down-refuse')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+    await insertAttempt({
+      org,
+      examId: graph.examId,
+      versionId: graph.versionId,
+      itemId: graph.examItemId,
+      userId: actor('down'),
+      attemptNo: 1,
+    })
+    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await expect(
+      db.transaction().execute((trx) => downAttemptItemScope(trx)),
+    ).rejects.toThrow(ATTEMPT_ITEM_DOWN_NONEMPTY)
+    const column = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name = $1`,
+      [ATTEMPTS_ITEM_COLUMN],
+    )
+    expect(column.rows[0].n).toBe(1)
   })
 })

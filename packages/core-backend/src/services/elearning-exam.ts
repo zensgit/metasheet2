@@ -193,12 +193,12 @@ async function advisoryLock(
   tx: ElearningExamQueryable,
   orgId: string,
   userId: string,
-  examId: string,
+  itemId: string,
 ): Promise<void> {
   await tx.query(
     `/* elearning-exam:lock */
      SELECT pg_advisory_xact_lock(hashtext($1))`,
-    [elearningExamLockKey(orgId, userId, examId)],
+    [elearningExamLockKey(orgId, userId, itemId)],
   )
 }
 
@@ -351,6 +351,7 @@ async function lockUserAttempts(
   orgId: string,
   examId: string,
   userId: string,
+  itemId: string,
 ): Promise<AttemptRow[]> {
   const result = await tx.query(
     `/* elearning-exam:load-attempts */
@@ -359,9 +360,10 @@ async function lockUserAttempts(
       WHERE org_id = $1
         AND exam_id = $2
         AND user_id = $3
+        AND course_version_item_id = $4
       ORDER BY attempt_no ASC
       FOR UPDATE`,
-    [orgId, examId, userId],
+    [orgId, examId, userId, itemId],
   )
   return result.rows.map((row) => {
     const id = asText(row.id)
@@ -447,13 +449,13 @@ export async function startElearningExam(
   return db.transaction(async (tx) => {
     try {
       const examId = await peekExamIdFromItem(tx, orgId, itemId)
-      await advisoryLock(tx, orgId, userId, examId)
+      await advisoryLock(tx, orgId, userId, itemId)
       const item = await lockExamItem(tx, orgId, itemId)
-      if (item.examId !== examId) fail('unavailable')
+      if (item.examId !== examId || item.itemId !== itemId) fail('unavailable')
       await lockUnrevokedMember(tx, orgId, userId, item.versionId)
       await requireCompletedPriorVideos(tx, orgId, userId, item.versionId, item.position)
 
-      const attempts = await lockUserAttempts(tx, orgId, item.examId, userId)
+      const attempts = await lockUserAttempts(tx, orgId, item.examId, userId, item.itemId)
       const started = attempts.find((row) => row.status === 'started')
       if (started) {
         const snapshot = parseStoredSnapshot(started.paperSnapshot)
@@ -470,9 +472,18 @@ export async function startElearningExam(
         `/* elearning-exam:insert-attempt */
          INSERT INTO elearning_exam_attempts (
            id, org_id, exam_id, course_version_id, user_id, attempt_no,
-           paper_snapshot, answers, status
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started')`,
-        [attemptId, orgId, item.examId, item.versionId, userId, attemptNo, JSON.stringify(snapshot)],
+           paper_snapshot, answers, status, course_version_item_id
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started', $8)`,
+        [
+          attemptId,
+          orgId,
+          item.examId,
+          item.versionId,
+          userId,
+          attemptNo,
+          JSON.stringify(snapshot),
+          item.itemId,
+        ],
       )
       return publicStartResult(
         attemptId,
@@ -488,15 +499,15 @@ export async function startElearningExam(
   })
 }
 
-async function peekAttemptExamId(
+async function peekAttemptLockTarget(
   tx: ElearningExamQueryable,
   orgId: string,
   attemptId: string,
   userId: string,
-): Promise<string> {
+): Promise<{ examId: string; itemId: string }> {
   const result = await tx.query(
     `/* elearning-exam:peek-attempt */
-     SELECT user_id, exam_id
+     SELECT user_id, exam_id, course_version_item_id
        FROM elearning_exam_attempts
       WHERE org_id = $1 AND id = $2`,
     [orgId, attemptId],
@@ -504,7 +515,10 @@ async function peekAttemptExamId(
   const row = result.rows[0]
   if (!row) fail('not_found')
   if (asText(row.user_id) !== userId) fail('not_found')
-  return requireStoredUuid(row.exam_id)
+  return {
+    examId: requireStoredUuid(row.exam_id),
+    itemId: requireStoredUuid(row.course_version_item_id),
+  }
 }
 
 interface LockedAttempt {
@@ -513,6 +527,7 @@ interface LockedAttempt {
   status: string
   versionId: string
   examId: string
+  itemId: string
   paperSnapshot: unknown
   answers: unknown
   autoScore: number | null
@@ -534,6 +549,7 @@ async function lockAttempt(
        a.status,
        a.course_version_id,
        a.exam_id,
+       a.course_version_item_id,
        a.paper_snapshot,
        a.answers,
        a.auto_score,
@@ -544,6 +560,12 @@ async function lockAttempt(
        v.status AS version_status,
        e.status AS exam_status
      FROM elearning_exam_attempts a
+     JOIN elearning_course_version_items i
+       ON i.org_id = a.org_id
+      AND i.id = a.course_version_item_id
+      AND i.course_version_id = a.course_version_id
+      AND i.exam_id = a.exam_id
+      AND i.item_type = 'exam'
      JOIN elearning_course_versions v
        ON v.org_id = a.org_id AND v.id = a.course_version_id
      JOIN elearning_courses c
@@ -551,7 +573,7 @@ async function lockAttempt(
      JOIN elearning_exams e
        ON e.org_id = a.org_id AND e.id = a.exam_id
      WHERE a.org_id = $1 AND a.id = $2
-     FOR UPDATE OF a FOR SHARE OF c, v, e`,
+     FOR UPDATE OF a FOR SHARE OF i, c, v, e`,
     [orgId, attemptId],
   )
   const row = result.rows[0]
@@ -573,6 +595,7 @@ async function lockAttempt(
     status,
     versionId,
     examId: requireStoredUuid(row.exam_id),
+    itemId: requireStoredUuid(row.course_version_item_id),
     paperSnapshot: row.paper_snapshot,
     answers: row.answers,
     autoScore: row.auto_score == null ? null : requireRowNumber(row.auto_score),
@@ -611,10 +634,10 @@ export async function submitElearningExam(
 
   return db.transaction(async (tx) => {
     try {
-      const examId = await peekAttemptExamId(tx, orgId, attemptId, userId)
-      await advisoryLock(tx, orgId, userId, examId)
+      const peeked = await peekAttemptLockTarget(tx, orgId, attemptId, userId)
+      await advisoryLock(tx, orgId, userId, peeked.itemId)
       const attempt = await lockAttempt(tx, orgId, attemptId, userId)
-      if (attempt.examId !== examId) fail('unavailable')
+      if (attempt.examId !== peeked.examId || attempt.itemId !== peeked.itemId) fail('unavailable')
       await lockUnrevokedMember(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
 
@@ -682,10 +705,10 @@ export async function saveElearningExamAnswers(
 
   return db.transaction(async (tx) => {
     try {
-      const examId = await peekAttemptExamId(tx, orgId, attemptId, userId)
-      await advisoryLock(tx, orgId, userId, examId)
+      const peeked = await peekAttemptLockTarget(tx, orgId, attemptId, userId)
+      await advisoryLock(tx, orgId, userId, peeked.itemId)
       const attempt = await lockAttempt(tx, orgId, attemptId, userId)
-      if (attempt.examId !== examId) fail('unavailable')
+      if (attempt.examId !== peeked.examId || attempt.itemId !== peeked.itemId) fail('unavailable')
       await lockUnrevokedMember(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
       if (attempt.status !== 'started') fail('conflict')

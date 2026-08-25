@@ -93,8 +93,8 @@ export interface ElearningExamGrade {
   questions: ElearningExamQuestionScore[]
 }
 
-export function elearningExamLockKey(orgId: string, userId: string, examId: string): string {
-  return `elearning-exam:${orgId}:${userId}:${examId}`
+export function elearningExamLockKey(orgId: string, userId: string, itemId: string): string {
+  return `elearning-exam:${orgId}:${userId}:${itemId}`
 }
 
 export function failElearningExam(code: ElearningExamErrorCode): never {

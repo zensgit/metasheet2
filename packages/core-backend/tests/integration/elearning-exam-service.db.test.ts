@@ -487,8 +487,8 @@ function unwrapStart(
   return value
 }
 
-// Both start backends must park on the elearning-exam:lock advisory statement
-// behind the holder. An item-scoped key cannot wait on the exam key.
+// Both same-item start backends must park on the elearning-exam:lock advisory
+// statement behind the holder. A different item's key cannot wait on this lock.
 async function waitUntilBothExamLockWaiters(holderPid: number): Promise<void> {
   for (let attempt = 0; attempt < 250; attempt += 1) {
     const result = await pool.query<{ n: number }>(
@@ -1052,7 +1052,7 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     expect(await countOrg('elearning_grading_records', org)).toBe(1)
   })
 
-  it('serializes starts from two course items of the same exam and never leaks uniqueness errors', async () => {
+  it('starts independent attempt_no 1 rows for two course items of the same exam', async () => {
     const org = orgId('alias-seq')
     seededOrgIds.push(org)
     const seed = await seedPublishedExam({ org, aliasExamItem: true })
@@ -1067,9 +1067,11 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
       userId: seed.userId,
       itemId: seed.aliasExamItemId as string,
     })
-    expect(second.attemptId).toBe(first.attemptId)
-    expect(second.duplicate).toBe(true)
-    expect(await countOrg('elearning_exam_attempts', org)).toBe(1)
+    expect(second.attemptId).not.toBe(first.attemptId)
+    expect(second.duplicate).toBe(false)
+    expect(first.attemptNo).toBe(1)
+    expect(second.attemptNo).toBe(1)
+    expect(await countOrg('elearning_exam_attempts', org)).toBe(2)
 
     const raceOrg = orgId('alias-race')
     seededOrgIds.push(raceOrg)
@@ -1086,19 +1088,23 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
       expect((error as ElearningExamError).code).not.toMatch(/unique|23505/i)
       throw error
     }
-    expect(raced[0].attemptId).toBe(raced[1].attemptId)
-    expect(raced.filter((row) => row.duplicate)).toHaveLength(1)
-    expect(await countOrg('elearning_exam_attempts', raceOrg)).toBe(1)
+    expect(raced[0].attemptId).not.toBe(raced[1].attemptId)
+    expect(raced.filter((row) => row.duplicate)).toHaveLength(0)
+    expect(raced.every((row) => row.attemptNo === 1)).toBe(true)
+    expect(await countOrg('elearning_exam_attempts', raceOrg)).toBe(2)
     const nos = await pool.query(
-      `SELECT attempt_no, status FROM elearning_exam_attempts WHERE org_id = $1`,
+      `SELECT attempt_no, status, course_version_item_id
+         FROM elearning_exam_attempts WHERE org_id = $1
+        ORDER BY course_version_item_id`,
       [raceOrg],
     )
-    expect(nos.rows).toHaveLength(1)
-    expect(Number(nos.rows[0].attempt_no)).toBe(1)
-    expect(nos.rows[0].status).toBe('started')
+    expect(nos.rows).toHaveLength(2)
+    expect(nos.rows.map((row) => Number(row.attempt_no))).toEqual([1, 1])
+    expect(nos.rows.every((row) => row.status === 'started')).toBe(true)
+    expect(new Set(nos.rows.map((row) => String(row.course_version_item_id))).size).toBe(2)
   })
 
-  it('serializes concurrent starts of the same exam from two published course versions onto one attempt', async () => {
+  it('keeps two published course-version mounts on independent attempt_no 1 rows', async () => {
     const org = orgId('cross-mount')
     seededOrgIds.push(org)
     const seed = await seedPublishedExam({ org })
@@ -1108,6 +1114,42 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     expect(mount.memberId).not.toBe(seed.memberId)
     expect(await countOrg('elearning_assignment_members', org)).toBe(2)
     expect(await countOrg('elearning_course_versions', org)).toBe(2)
+
+    const first = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    const second = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: mount.examItemId,
+    })
+    expect(second.attemptId).not.toBe(first.attemptId)
+    expect(first.attemptNo).toBe(1)
+    expect(second.attemptNo).toBe(1)
+    expect(first.duplicate).toBe(false)
+    expect(second.duplicate).toBe(false)
+    expect(await countOrg('elearning_exam_attempts', org)).toBe(2)
+    const nos = await pool.query(
+      `SELECT attempt_no, status, exam_id, course_version_item_id
+         FROM elearning_exam_attempts WHERE org_id = $1`,
+      [org],
+    )
+    expect(nos.rows).toHaveLength(2)
+    expect(nos.rows.every((row) => Number(row.attempt_no) === 1)).toBe(true)
+    expect(nos.rows.every((row) => row.status === 'started')).toBe(true)
+    expect(nos.rows.every((row) => String(row.exam_id) === seed.examId)).toBe(true)
+    expect(new Set(nos.rows.map((row) => String(row.course_version_item_id)))).toEqual(
+      new Set([seed.examItemId, mount.examItemId]),
+    )
+    assertValuesFree([first, second], org, seed.userId)
+  })
+
+  it('serializes concurrent same-item starts behind the item advisory lock', async () => {
+    const org = orgId('item-lock')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedExam({ org })
 
     const holder: PoolClient = await pool.connect()
     const captured: Array<ReturnType<typeof captureStart>> = []
@@ -1119,7 +1161,7 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
       )
       await holder.query(
         'SELECT pg_advisory_xact_lock(hashtext($1))',
-        [elearningExamLockKey(org, seed.userId, seed.examId)],
+        [elearningExamLockKey(org, seed.userId, seed.examItemId)],
       )
       captured.push(
         captureStart(startElearningExam(db, {
@@ -1130,7 +1172,7 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
         captureStart(startElearningExam(db, {
           orgId: org,
           userId: seed.userId,
-          itemId: mount.examItemId,
+          itemId: seed.examItemId,
         })),
       )
       try {
@@ -1153,7 +1195,7 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     }
 
     if (!raced) {
-      throw new Error('cross-version start race did not settle')
+      throw new Error('same-item start race did not settle')
     }
     expect(raced).toHaveLength(2)
     expect(raced[0].attemptId).toBe(raced[1].attemptId)
@@ -1162,15 +1204,90 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     expect(raced[0].attemptNo).toBe(1)
     expect(raced[1].attemptNo).toBe(1)
     expect(await countOrg('elearning_exam_attempts', org)).toBe(1)
-    const nos = await pool.query(
-      `SELECT attempt_no, status, exam_id FROM elearning_exam_attempts WHERE org_id = $1`,
-      [org],
+  })
+
+  it('does not let a revoked mount poison start or submit on a second item', async () => {
+    const org = orgId('revoke-isolate')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedExam({ org })
+    const mount = await attachPublishedExamMount(seed)
+    const poisoned = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    await pool.query(
+      `UPDATE elearning_assignment_members
+          SET revoked_at = now(), revoked_by = $1, revocation_reason = 'pilot revoke'
+        WHERE org_id = $2 AND id = $3`,
+      [actor('revoker'), org, seed.memberId],
     )
-    expect(nos.rows).toHaveLength(1)
-    expect(Number(nos.rows[0].attempt_no)).toBe(1)
-    expect(nos.rows[0].status).toBe('started')
-    expect(String(nos.rows[0].exam_id)).toBe(seed.examId)
-    assertValuesFree(raced, org, seed.userId)
+    await expect(startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+    await expect(submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: poisoned.attemptId,
+      answers: perfectAnswers(seed),
+    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+
+    const isolated = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: mount.examItemId,
+    })
+    expect(isolated.attemptId).not.toBe(poisoned.attemptId)
+    expect(isolated.attemptNo).toBe(1)
+    expect(isolated.duplicate).toBe(false)
+    const submitted = await submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: isolated.attemptId,
+      answers: perfectAnswers(seed),
+    })
+    expect(submitted.duplicate).toBe(false)
+    expect(submitted.passed).toBe(true)
+    expect(await countOrg('elearning_exam_attempts', org)).toBe(2)
+    const leftover = await pool.query<{ status: string }>(
+      `SELECT status FROM elearning_exam_attempts WHERE org_id = $1 AND id = $2`,
+      [org, poisoned.attemptId],
+    )
+    expect(leftover.rows[0].status).toBe('started')
+  })
+
+  it('enforces max_attempts per mounted item, not per exam', async () => {
+    const org = orgId('max-item')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedExam({ org, maxAttempts: 1, aliasExamItem: true })
+    const first = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    await submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: first.attemptId,
+      answers: failAnswers(seed),
+    })
+    await expect(startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })).rejects.toMatchObject({ code: 'max_attempts' })
+
+    const alias = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.aliasExamItemId as string,
+    })
+    expect(alias.attemptNo).toBe(1)
+    expect(alias.attemptId).not.toBe(first.attemptId)
+    expect(alias.duplicate).toBe(false)
+    expect(await countOrg('elearning_exam_attempts', org)).toBe(2)
   })
 
   it('persists draft answers on a started attempt and replays them without grading', async () => {

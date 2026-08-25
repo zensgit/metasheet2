@@ -130,6 +130,7 @@ interface Seed {
   extraVideoItemId: string
   examItemId: string
   extraExamItemId: string
+  sameExamAliasItemId: string
   examId: string
   memberId: string
   assignmentId: string
@@ -202,6 +203,7 @@ async function seedCourse(input: {
   const videoItemId = randomUUID()
   const extraExamItemId = randomUUID()
   const examItemId = randomUUID()
+  const sameExamAliasItemId = randomUUID()
   const storageKey = `${NS}/media/${mediaId}/storage-secret`
 
   await pool.query(
@@ -272,7 +274,8 @@ async function seedCourse(input: {
        ($1, $2, $3, 'video', 2, $4, NULL, 'video-v1-90pct', 9000),
        ($5, $2, $3, 'video', 1, $6, NULL, 'video-v1-90pct', 9000),
        ($7, $2, $3, 'exam', 4, NULL, $8, NULL, NULL),
-       ($9, $2, $3, 'exam', 3, NULL, $10, NULL, NULL)`,
+       ($9, $2, $3, 'exam', 3, NULL, $10, NULL, NULL),
+       ($11, $2, $3, 'exam', 5, NULL, $10, NULL, NULL)`,
     [
       extraVideoItemId,
       input.org,
@@ -284,6 +287,7 @@ async function seedCourse(input: {
       extraExamId,
       examItemId,
       examId,
+      sameExamAliasItemId,
     ],
   )
   await pool.query(
@@ -344,6 +348,7 @@ async function seedCourse(input: {
     extraVideoItemId,
     examItemId,
     extraExamItemId,
+    sameExamAliasItemId,
     examId,
     memberId,
     assignmentId,
@@ -382,6 +387,7 @@ async function insertAttempt(input: {
   org: string
   examId: string
   versionId: string
+  itemId: string
   userId: string
   attemptNo: number
   status: 'started' | 'graded'
@@ -390,14 +396,15 @@ async function insertAttempt(input: {
   const attemptId = randomUUID()
   await pool.query(
     `INSERT INTO elearning_exam_attempts (
-       id, org_id, exam_id, course_version_id, user_id, attempt_no,
+       id, org_id, exam_id, course_version_id, course_version_item_id, user_id, attempt_no,
        paper_snapshot, answers, status
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started')`,
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, NULL, 'started')`,
     [
       attemptId,
       input.org,
       input.examId,
       input.versionId,
+      input.itemId,
       input.userId,
       input.attemptNo,
       JSON.stringify({ domain: 'elearning.exam.paper.v1', secret: 'paper' }),
@@ -604,6 +611,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId,
       attemptNo: 1,
       status: 'graded',
@@ -613,6 +621,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId,
       attemptNo: 2,
       status: 'graded',
@@ -622,6 +631,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId: otherUserId,
       attemptNo: 1,
       status: 'graded',
@@ -671,6 +681,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId,
       attemptNo: 1,
       status: 'graded',
@@ -680,6 +691,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId,
       attemptNo: 2,
       status: 'started',
@@ -688,6 +700,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       org,
       examId: seed.examId,
       versionId: seed.versionId,
+      itemId: seed.examItemId,
       userId: otherUserId,
       attemptNo: 1,
       status: 'graded',
@@ -710,5 +723,60 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
     expect(rows[0].exam.latestAttempt?.gradedAt).toBeNull()
     expect(rows[0].completed).toBe(true)
     assertNoSecrets(rows, org, userId, otherUserId, seed.storageKey)
+  })
+
+  it('does not leak latest-attempt or any-passed aggregates across exam items', async () => {
+    const org = orgId('item-leak')
+    seededOrgIds.push(org)
+    const userId = actor('learner')
+    const otherUserId = actor('other')
+    const seed = await seedCourse({
+      org,
+      userId,
+      otherUserId,
+      title: 'Item isolation course',
+      assignedAt: '2026-05-01T00:00:00.000Z',
+    })
+    await insertProgress({
+      org,
+      memberId: seed.memberId,
+      versionId: seed.versionId,
+      itemId: seed.videoItemId,
+      userId,
+      status: 'completed',
+    })
+    const leaked = await insertAttempt({
+      org,
+      examId: seed.examId,
+      versionId: seed.versionId,
+      itemId: seed.sameExamAliasItemId,
+      userId,
+      attemptNo: 1,
+      status: 'graded',
+      passed: true,
+    })
+
+    const rows = await listElearningLearnerCourses(db, { orgId: org, userId })
+    expect(rows).toHaveLength(1)
+    expect(rows[0].exam.itemId).toBe(seed.examItemId)
+    expect(rows[0].exam.itemId).not.toBe(seed.sameExamAliasItemId)
+    expect(rows[0].exam.latestAttempt).toBeNull()
+    expect(rows[0].completed).toBe(false)
+
+    const own = await insertAttempt({
+      org,
+      examId: seed.examId,
+      versionId: seed.versionId,
+      itemId: seed.examItemId,
+      userId,
+      attemptNo: 1,
+      status: 'graded',
+      passed: true,
+    })
+    const after = await listElearningLearnerCourses(db, { orgId: org, userId })
+    expect(after[0].exam.latestAttempt?.attemptId).toBe(own)
+    expect(after[0].exam.latestAttempt?.attemptId).not.toBe(leaked)
+    expect(after[0].completed).toBe(true)
+    assertNoSecrets(after, org, userId, otherUserId, seed.storageKey)
   })
 })

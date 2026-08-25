@@ -125,6 +125,7 @@ SELECT
       AND any_pass.user_id = $2
       AND any_pass.exam_id = exam.exam_id
       AND any_pass.course_version_id = v.id
+      AND any_pass.course_version_item_id = exam.item_id
       AND any_pass.status = 'graded'
       AND any_pass.passed IS TRUE
   ) AS any_passed
@@ -183,6 +184,7 @@ LEFT JOIN LATERAL (
     AND att.user_id = $2
     AND att.exam_id = exam.exam_id
     AND att.course_version_id = v.id
+    AND att.course_version_item_id = exam.item_id
   ORDER BY att.attempt_no DESC, att.id DESC
   LIMIT 1
 ) attempt ON TRUE
@@ -449,7 +451,7 @@ function mapCourse(row: Record<string, unknown>): ElearningLearnerCourse {
       itemId: requireUuid(row.exam_item_id),
       latestAttempt,
     },
-    // Monotonic: video completed AND any graded pass for this org/user/exam/version.
+    // Monotonic: video completed AND any graded pass for this org/user/exam item.
     completed: video.status === 'completed' && anyPassed,
   }
 }

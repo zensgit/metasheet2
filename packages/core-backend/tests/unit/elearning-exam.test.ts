@@ -245,7 +245,7 @@ function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
     const attempt = mem.attempt
     if (tag === 'elearning-exam:peek-attempt') {
       if (params[0] !== ORG || params[1] !== attempt.id) return { rows: [], rowCount: 0 }
-      return { rows: [{ user_id: attempt.userId, exam_id: attempt.examId }], rowCount: 1 }
+      return { rows: [{ user_id: attempt.userId, exam_id: attempt.examId, course_version_item_id: ITEM }], rowCount: 1 }
     }
     if (tag === 'elearning-exam:lock') {
       mem.lockKeys.push(String(params[0]))
@@ -260,6 +260,7 @@ function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
           status: attempt.status,
           course_version_id: attempt.versionId,
           exam_id: attempt.examId,
+          course_version_item_id: ITEM,
           paper_snapshot: attempt.paperSnapshot,
           answers: attempt.answers,
           auto_score: attempt.autoScore,
@@ -337,9 +338,9 @@ function perfectAnswers() {
 }
 
 describe('elearning exam lock and paper contract', () => {
-  it('names the advisory lock from org, user, and exam id', () => {
-    expect(elearningExamLockKey(ORG, USER, EXAM)).toBe(`elearning-exam:${ORG}:${USER}:${EXAM}`)
-    expect(elearningExamLockKey(ORG, USER, EXAM)).not.toBe(`elearning-exam:${ORG}:${USER}:${ITEM}`)
+  it('names the advisory lock from org, user, and course item id', () => {
+    expect(elearningExamLockKey(ORG, USER, ITEM)).toBe(`elearning-exam:${ORG}:${USER}:${ITEM}`)
+    expect(elearningExamLockKey(ORG, USER, ITEM)).not.toBe(`elearning-exam:${ORG}:${USER}:${EXAM}`)
     expect(ELEARNING_EXAM_PAPER_DOMAIN).toBe('elearning.exam.paper.v1')
     expect(ELEARNING_EXAM_PAPER_VERSION).toBe(1)
     expect(ELEARNING_EXAM_GRADE_KIND).toBe('auto')
@@ -650,7 +651,7 @@ describe('elearning exam public submit result', () => {
       passed: true,
       duplicate: false,
     })
-    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, EXAM)])
+    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, ITEM)])
     expect(mem.attempt.status).toBe('graded')
     expect(mem.attempt.answers).toEqual({
       [Q1]: ['a'],
@@ -690,8 +691,8 @@ describe('elearning exam public submit result', () => {
     expect(replay.duplicate).toBe(true)
     expect(mem.grades).toHaveLength(1)
     expect(mem.lockKeys).toEqual([
-      elearningExamLockKey(ORG, USER, EXAM),
-      elearningExamLockKey(ORG, USER, EXAM),
+      elearningExamLockKey(ORG, USER, ITEM),
+      elearningExamLockKey(ORG, USER, ITEM),
     ])
 
     await expectAsyncCode(() => submitElearningExam(db, {
@@ -910,7 +911,7 @@ describe('elearning exam start own answers', () => {
     })
     expect(mem.attempts).toHaveLength(1)
     expect(mem.attempts[0]?.answers).toBeNull()
-    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, EXAM)])
+    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, ITEM)])
   })
 
   it('replays a started attempt with canonical saved answers and does not insert a second row', async () => {
@@ -946,7 +947,7 @@ describe('elearning exam draft answer save', () => {
       answers: { [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] },
       duplicate: false,
     })
-    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, EXAM)])
+    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, ITEM)])
     expect(mem.attempt.status).toBe('started')
     expect(mem.attempt.answers).toEqual({ [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] })
     expect(mem.grades).toHaveLength(0)

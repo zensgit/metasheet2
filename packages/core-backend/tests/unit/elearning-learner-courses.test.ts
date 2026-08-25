@@ -212,6 +212,8 @@ describe('elearning learner courses source SQL', () => {
     expect(source).toContain('any_pass.user_id = $2')
     expect(source).toContain('any_pass.exam_id = exam.exam_id')
     expect(source).toContain('any_pass.course_version_id = v.id')
+    expect(source).toContain('any_pass.course_version_item_id = exam.item_id')
+    expect(source).toContain('att.course_version_item_id = exam.item_id')
     expect(source).toContain("any_pass.status = 'graded'")
     expect(source).toContain('any_pass.passed IS TRUE')
     expect(source).toContain(') AS any_passed')

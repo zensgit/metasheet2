@@ -14,6 +14,7 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILE = 'tests/integration/elearning-v01-content-assessment-schema.db.test.ts'
+const ATTEMPT_MIGRATION_FILE = 'tests/integration/elearning-exam-attempt-item-migration.db.test.ts'
 const WATCH_FILE = 'tests/integration/elearning-v01-watch-progress-schema.db.test.ts'
 const SERVICE_FILE = 'tests/integration/elearning-watch-progress-service.db.test.ts'
 const ASSIGNMENT_FILE = 'tests/integration/elearning-direct-assignment.db.test.ts'
@@ -27,6 +28,7 @@ const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const INTEGRATION_DIR = join(repoRoot, 'packages/core-backend/tests/integration')
 const SUITE = join(repoRoot, 'packages/core-backend', FILE)
+const ATTEMPT_MIGRATION_SUITE = join(repoRoot, 'packages/core-backend', ATTEMPT_MIGRATION_FILE)
 const WATCH_SUITE = join(repoRoot, 'packages/core-backend', WATCH_FILE)
 const SERVICE_SUITE = join(repoRoot, 'packages/core-backend', SERVICE_FILE)
 const ASSIGNMENT_SUITE = join(repoRoot, 'packages/core-backend', ASSIGNMENT_FILE)
@@ -36,6 +38,7 @@ const LEARNER_SUITE = join(repoRoot, 'packages/core-backend', LEARNER_FILE)
 const PLAYBACK_SUITE = join(repoRoot, 'packages/core-backend', PLAYBACK_FILE)
 const GATE_FILES = [
   FILE,
+  ATTEMPT_MIGRATION_FILE,
   WATCH_FILE,
   SERVICE_FILE,
   ASSIGNMENT_FILE,
@@ -134,6 +137,7 @@ test('wired suites and content/watch migrations exist on disk', () => {
 test('schema and watch-service gate sources throw when DATABASE_URL is missing (no describe.skip)', () => {
   for (const [label, path] of [
     ['content/assessment', SUITE],
+    ['exam-attempt-item-migration', ATTEMPT_MIGRATION_SUITE],
     ['watch-progress', WATCH_SUITE],
     ['watch-progress-service', SERVICE_SUITE],
     ['direct-assignment-service', ASSIGNMENT_SUITE],
