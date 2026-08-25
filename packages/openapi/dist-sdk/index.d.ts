@@ -8452,7 +8452,7 @@ export interface paths {
         };
         /**
          * List the current learner's assigned V0.1 courses
-         * @description RBAC `elearning:read`. Requires exam surface flags (watch gate plus
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus
          *     ASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.
          */
         get: operations["listMyElearningCourses"];
@@ -8475,7 +8475,7 @@ export interface paths {
         put?: never;
         /**
          * Start or resume a verified watch session for a video item
-         * @description RBAC `elearning:read`. Empty JSON object only. itemId is the course
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object only. itemId is the course
          *     version video item, not a media id. JSON limit 16 KiB.
          */
         post: operations["startElearningWatch"];
@@ -8496,7 +8496,7 @@ export interface paths {
         put?: never;
         /**
          * Record a verified watch heartbeat
-         * @description RBAC `elearning:read`. Required keys sequence (>=1), positionMs (>=0),
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Required keys sequence (>=1), positionMs (>=0),
          *     playing (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.
          */
         post: operations["recordElearningWatchHeartbeat"];
@@ -8517,7 +8517,7 @@ export interface paths {
         put?: never;
         /**
          * Issue a short-lived media playback ticket
-         * @description RBAC `elearning:read`. Empty JSON object. Returns an opaque HMAC token
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object. Returns an opaque HMAC token
          *     (not a session JWT). Token TTL is at most 600 seconds. Storage keys and
          *     signing secrets never appear. JSON limit 16 KiB.
          */
@@ -8574,7 +8574,7 @@ export interface paths {
         put?: never;
         /**
          * Start an objective exam attempt
-         * @description RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.
          *     itemId is the course version exam item. Returned paper is redacted
          *     (no answerKey, correct ids, explanation, examId, or passScore).
          *     Result includes canonical own answers for every paper question.
@@ -8597,7 +8597,7 @@ export interface paths {
         get?: never;
         /**
          * Save draft answers for a started exam attempt
-         * @description RBAC `elearning:read`. Requires exam surface flags. Body key `answers`
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
          *     only (map of questionRevisionId to selected option ids). Only started
          *     attempts may save. Same canonical body is duplicate true. Result is the
          *     closed started DTO with own answers. No answer keys. JSON limit 16 KiB.
@@ -8621,7 +8621,7 @@ export interface paths {
         put?: never;
         /**
          * Submit and auto-grade an exam attempt
-         * @description RBAC `elearning:read`. Body key `answers` only (map of questionRevisionId
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId
          *     to selected option ids). Auto-grade result has no per-question key,
          *     selected answers echo, or paper snapshot. JSON limit 16 KiB.
          */
@@ -18953,7 +18953,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:read`) */
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (any of `elearning:read`, `elearning:write`, `elearning:admin`) */
             403: components["responses"]["ElearningError"];
             /** @description Exam/learner-list surface flags off */
             404: components["responses"]["ElearningError"];

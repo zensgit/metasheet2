@@ -141,7 +141,7 @@ export interface ElearningPilotRouteDeps {
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
   adminGuard: RequestHandler
-  /** Production wiring: rbacGuard('elearning','read'). Injected in tests. */
+  /** Production wiring: rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']). Injected in tests. */
   readGuard: RequestHandler
   env?: NodeJS.ProcessEnv
   assignElearningDirect?: typeof assignElearningDirect

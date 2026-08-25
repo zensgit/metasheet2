@@ -243,11 +243,14 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(used).toBe(0)
   })
 
-  test('defaults wrap authenticate on /api/elearning and use rbacGuard elearning admin|read', () => {
+  test('defaults wrap authenticate on /api/elearning and use rbacGuard elearning admin plus learner-read any', () => {
     const runtimeSrc = readFileSync(RUNTIME_SRC, 'utf8')
     expect(runtimeSrc).toMatch(/router\.use\(\s*['"]\/api\/elearning['"]\s*,\s*(opts\.authenticate\s*\?\?\s*)?authenticate\s*\)/)
     expect(runtimeSrc).toMatch(/rbacGuard\('elearning',\s*'admin'\)/)
-    expect(runtimeSrc).toMatch(/rbacGuard\('elearning',\s*'read'\)/)
+    expect(runtimeSrc).toMatch(
+      /rbacGuardAny\(\s*\[\s*'elearning:read'\s*,\s*'elearning:write'\s*,\s*'elearning:admin'\s*\]\s*\)/,
+    )
+    expect(runtimeSrc).not.toMatch(/readGuard:\s*opts\.readGuard\s*\?\?\s*rbacGuard\('elearning',\s*'read'\)/)
     expect(runtimeSrc).toMatch(/req\.authenticatedTenantId/)
     expect(runtimeSrc).toMatch(/req\.user/)
     expect(runtimeSrc).toMatch(/ELEARNING_MEDIA_PLAYBACK_SECRET_ENV|ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET/)

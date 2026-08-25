@@ -63,6 +63,16 @@ export interface ElearningMediaUploadResult {
   sha256: string
 }
 
+interface ElearningMediaUploadRejected {
+  id: string
+  status: 'rejected'
+  durationMs: number | null
+  sizeBytes: number
+  sha256: string
+}
+
+type ElearningMediaUploadWire = ElearningMediaUploadResult | ElearningMediaUploadRejected
+
 export interface ElearningPublishOption {
   id: string
   text: string
@@ -598,6 +608,27 @@ export function elearningPlaybackSourceUrl(token: string): string {
   return `${ELEARNING_MEDIA_PLAYBACK_PATH}?token=${encodeURIComponent(token)}`
 }
 
+function parseMediaUploadWire(value: unknown, status: number): ElearningMediaUploadWire {
+  if (!isPlainObject(value) || !exactKeys(value, ['id', 'status', 'durationMs', 'sizeBytes', 'sha256'])) {
+    failShape(status)
+  }
+  if (value.status !== 'ready' && value.status !== 'rejected') failShape(status)
+  if (typeof value.sha256 !== 'string' || !SHA256_RE.test(value.sha256)) failShape(status)
+  const id = requireUuid(value.id, status)
+  const sizeBytes = requireSafeInt(value.sizeBytes, status, 1)
+  if (value.status === 'rejected') {
+    if (value.durationMs !== null) failShape(status)
+    return { id, status: 'rejected', durationMs: null, sizeBytes, sha256: value.sha256 }
+  }
+  return {
+    id,
+    status: 'ready',
+    durationMs: requireSafeInt(value.durationMs, status, 1),
+    sizeBytes,
+    sha256: value.sha256,
+  }
+}
+
 export async function uploadElearningMedia(file: File): Promise<ElearningMediaUploadResult> {
   const form = new FormData()
   form.append('file', file)
@@ -605,19 +636,9 @@ export async function uploadElearningMedia(file: File): Promise<ElearningMediaUp
     method: 'POST',
     body: form,
   })
-  if (!isPlainObject(payload) || !exactKeys(payload, ['id', 'status', 'durationMs', 'sizeBytes', 'sha256'])) {
-    failShape(201)
-  }
-  if (payload.status !== 'ready') fail('rejected', 201)
-  if (typeof payload.sha256 !== 'string' || !SHA256_RE.test(payload.sha256)) failShape(201)
-  const durationMs = payload.durationMs === null ? null : requireSafeInt(payload.durationMs, 201, 0)
-  return {
-    id: requireUuid(payload.id, 201),
-    status: 'ready',
-    durationMs,
-    sizeBytes: requireSafeInt(payload.sizeBytes, 201, 0),
-    sha256: payload.sha256,
-  }
+  const wire = parseMediaUploadWire(payload, 201)
+  if (wire.status === 'rejected') fail('rejected', 201)
+  return wire
 }
 
 export async function publishElearningCourse(

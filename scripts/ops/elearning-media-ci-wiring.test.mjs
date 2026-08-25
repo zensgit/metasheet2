@@ -49,6 +49,7 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/services/elearning.ts',
   'apps/web/src/views/ElearningAdminView.vue',
   'apps/web/src/views/ElearningLearnerView.vue',
+  'apps/web/src/views/elearningLabels.ts',
   'apps/web/src/router/appRoutes.ts',
   'apps/web/src/router/types.ts',
   'apps/web/src/router/guardPolicy.ts',

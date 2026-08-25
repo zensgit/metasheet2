@@ -11,7 +11,7 @@ import { Router, type Router as ExpressRouter } from 'express'
 
 import { isElearningWatchSurfaceEnabled } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
-import { rbacGuard } from '../rbac/rbac'
+import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import {
   publishElearningCourse,
@@ -141,7 +141,7 @@ export function createElearningPilotRuntime(
     viewerId: opts.viewerId ?? viewerId,
     orgId: opts.orgId ?? orgId,
     adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
-    readGuard: opts.readGuard ?? rbacGuard('elearning', 'read'),
+    readGuard: opts.readGuard ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
     env,
     assignElearningDirect: opts.assignElearningDirect,
     startElearningWatch: opts.startElearningWatch,

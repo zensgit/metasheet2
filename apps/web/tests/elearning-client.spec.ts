@@ -145,7 +145,7 @@ describe('elearning client transport', () => {
       sha256: SHA256,
     }))
     const file = new File([new Uint8Array([1, 2, 3])], 'demo.mp4', { type: 'video/mp4' })
-    await uploadElearningMedia(file)
+    const result = await uploadElearningMedia(file)
     const { path, options } = lastCall()
     expect(path).toBe('/api/elearning/media')
     expect(options.method).toBe('POST')
@@ -153,6 +153,13 @@ describe('elearning client transport', () => {
     expect([...(options.body as FormData).keys()]).toEqual(['file'])
     expect((options.body as FormData).get('file')).toBe(file)
     expect(JSON.stringify(options)).not.toMatch(/orgId|userId|actorId/)
+    expect(result).toEqual({
+      id: MEDIA,
+      status: 'ready',
+      durationMs: 4500,
+      sizeBytes: 12,
+      sha256: SHA256,
+    })
   })
 
   it('publishes without org/user overrides and validates the public result', async () => {
@@ -428,6 +435,68 @@ describe('elearning client fail-closed validation', () => {
     await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
       code: 'invalid_response',
       status: 200,
+    })
+  })
+
+  it('converts HTTP 201 rejected media metadata to a stable ElearningApiError', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(201, {
+      id: MEDIA,
+      status: 'rejected',
+      durationMs: null,
+      sizeBytes: 12,
+      sha256: SHA256,
+    }))
+    const file = new File([new Uint8Array([1, 2, 3])], 'demo.mp4', { type: 'video/mp4' })
+    const error = await uploadElearningMedia(file).catch((cause) => cause)
+    expect(error).toBeInstanceOf(ElearningApiError)
+    expect(error).toMatchObject({
+      name: 'ElearningApiError',
+      code: 'rejected',
+      status: 201,
+      message: 'rejected',
+    })
+    expect(JSON.stringify(error)).not.toMatch(/storageKey|storage_key|orgId|userId/)
+  })
+
+  it('rejects malformed 201 media upload shapes as invalid_response', async () => {
+    const file = new File([new Uint8Array([1, 2, 3])], 'demo.mp4', { type: 'video/mp4' })
+    const rejectUpload = async (body: Record<string, unknown>) => {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(201, body))
+      return uploadElearningMedia(file).catch((cause) => cause as ElearningApiError)
+    }
+
+    await expect(rejectUpload({
+      id: MEDIA,
+      status: 'ready',
+      durationMs: 4500,
+      sizeBytes: 0,
+      sha256: SHA256,
+    })).resolves.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'invalid_response',
+      status: 201,
+    })
+    await expect(rejectUpload({
+      id: MEDIA,
+      status: 'ready',
+      durationMs: null,
+      sizeBytes: 12,
+      sha256: SHA256,
+    })).resolves.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'invalid_response',
+      status: 201,
+    })
+    await expect(rejectUpload({
+      id: MEDIA,
+      status: 'rejected',
+      durationMs: 4500,
+      sizeBytes: 12,
+      sha256: SHA256,
+    })).resolves.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'invalid_response',
+      status: 201,
     })
   })
 

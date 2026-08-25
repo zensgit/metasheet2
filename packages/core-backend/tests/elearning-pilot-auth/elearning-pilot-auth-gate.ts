@@ -94,6 +94,7 @@ const pool = new Pool({ connectionString: DATABASE_URL, max: 8 })
 const STAMP = `${Date.now().toString(36)}-${randomUUID()}`
 const NS = `el-auth-${STAMP}`
 const ROLE_ID = `${NS}-reader`
+const WRITE_ROLE_ID = `${NS}-writer`
 const ORG_A = `${NS}-org-a`
 const ORG_B = `${NS}-org-b`
 const FORGED_ORG = `${NS}-forged-org`
@@ -140,28 +141,31 @@ function valuesFree(body: unknown): void {
 
 describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', () => {
   const readerId = randomUUID()
+  const writerId = randomUUID()
   const legacyId = randomUUID()
   const outsiderId = randomUUID()
   const forgedId = randomUUID()
-  const createdUserIds = [readerId, legacyId, outsiderId, forgedId]
+  const createdUserIds = [readerId, writerId, legacyId, outsiderId, forgedId]
   const pinned = usePinnedServer()
   const learnerCalls: Array<{ orgId: string; userId: string }> = []
 
   beforeAll(async () => {
     await pool.query(
       `INSERT INTO permissions (code, name, description)
-       VALUES ('elearning:read', 'E-learning Read', 'Read published learning content and own attempts')
+       VALUES
+         ('elearning:read', 'E-learning Read', 'Read published learning content and own attempts'),
+         ('elearning:write', 'E-learning Write', 'Create learning content')
        ON CONFLICT (code) DO NOTHING`,
     )
     await pool.query(
-      `INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
-      [ROLE_ID, ROLE_ID],
+      `INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4) ON CONFLICT (id) DO NOTHING`,
+      [ROLE_ID, ROLE_ID, WRITE_ROLE_ID, WRITE_ROLE_ID],
     )
     await pool.query(
       `INSERT INTO role_permissions (role_id, permission_code)
-       VALUES ($1, 'elearning:read')
+       VALUES ($1, 'elearning:read'), ($2, 'elearning:write')
        ON CONFLICT DO NOTHING`,
-      [ROLE_ID],
+      [ROLE_ID, WRITE_ROLE_ID],
     )
 
     async function insertUser(id: string, tag: string): Promise<void> {
@@ -181,14 +185,15 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     }
 
     await insertUser(readerId, 'reader')
+    await insertUser(writerId, 'writer')
     await insertUser(legacyId, 'legacy')
     await insertUser(outsiderId, 'outsider')
     await insertUser(forgedId, 'forged')
 
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active)
-       VALUES ($1, $2, TRUE), ($3, $2, TRUE), ($3, $4, TRUE), ($5, $2, TRUE)`,
-      [readerId, ORG_A, legacyId, ORG_B, forgedId],
+       VALUES ($1, $2, TRUE), ($3, $2, TRUE), ($4, $2, TRUE), ($4, $5, TRUE), ($6, $2, TRUE)`,
+      [readerId, ORG_A, writerId, legacyId, ORG_B, forgedId],
     )
 
     for (const userId of [readerId, legacyId, outsiderId]) {
@@ -203,6 +208,17 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
         [userId],
       )
     }
+
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [writerId, WRITE_ROLE_ID],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'elearning:write')
+       ON CONFLICT DO NOTHING`,
+      [writerId],
+    )
 
     // Namespace admission for every principal, including forgedId (roles/permissions
     // stay empty). A 403 then cannot be a later namespace denial.
@@ -273,10 +289,10 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
         [createdUserIds],
       )
       await pool.query(
-        `DELETE FROM role_permissions WHERE role_id = $1`,
-        [ROLE_ID],
+        `DELETE FROM role_permissions WHERE role_id = ANY($1::text[])`,
+        [[ROLE_ID, WRITE_ROLE_ID]],
       )
-      await pool.query(`DELETE FROM roles WHERE id = $1`, [ROLE_ID])
+      await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_ID, WRITE_ROLE_ID]])
 
       const residue = await pool.query(
         `SELECT 'user_namespace_admissions' AS rel FROM user_namespace_admissions WHERE user_id = ANY($1::text[])
@@ -289,10 +305,10 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
          UNION ALL
          SELECT 'users' FROM users WHERE id = ANY($1::text[])
          UNION ALL
-         SELECT 'role_permissions' FROM role_permissions WHERE role_id = $2
+         SELECT 'role_permissions' FROM role_permissions WHERE role_id = ANY($2::text[])
          UNION ALL
-         SELECT 'roles' FROM roles WHERE id = $2`,
-        [createdUserIds, ROLE_ID],
+         SELECT 'roles' FROM roles WHERE id = ANY($2::text[])`,
+        [createdUserIds, [ROLE_ID, WRITE_ROLE_ID]],
       )
       expect(residue.rows).toEqual([])
     } finally {
@@ -305,6 +321,43 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(process.env.RBAC_BYPASS).toBe('false')
     expect(process.env.RBAC_TOKEN_TRUST).toBe('false')
     expect(process.env.PRODUCT_MODE).toBe('plm-workbench')
+  })
+
+  it('tenant-bound elearning:write-only reaches injected learner-list with exact org/user', async () => {
+    learnerCalls.length = 0
+    const token = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get('/api/elearning/me/courses')
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ courses: LEARNER_COURSES })
+    expect(learnerCalls).toEqual([{ orgId: ORG_A, userId: writerId }])
+    valuesFree(res.body)
+  })
+
+  it('signed token carrying forged elearning:write cannot bypass DB RBAC', async () => {
+    learnerCalls.length = 0
+    const token = signToken({
+      userId: forgedId,
+      email: `${forgedId}@el-auth-gate.test`,
+      role: 'user',
+      roles: ['elearning:write'],
+      perms: ['elearning:write', 'elearning:read', 'elearning:admin'],
+      permissions: ['elearning:write', 'elearning:read', 'elearning:admin'],
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .get('/api/elearning/me/courses')
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'Insufficient permissions' })
+    expect(learnerCalls).toHaveLength(0)
+    valuesFree(res.body)
   })
 
   it('tenant-bound elearning:read reaches injected learner-list with exact org/user', async () => {

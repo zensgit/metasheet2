@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url'
 import type { RouteRecordRaw } from 'vue-router'
 import { describe, expect, it } from 'vitest'
 import { appRoutes } from '../src/router/appRoutes'
+import {
+  resolveRouteGuardDecision,
+  type RouteGuardPolicyContext,
+} from '../src/router/guardPolicy'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const manifest = JSON.parse(
@@ -127,5 +131,78 @@ describe('elearning V0.1 routes and plugin navigation', () => {
     expect(serializedNav).not.toMatch(/\/p\/plugin-elearning/)
     expect(serializedNav).not.toMatch(/elearning:write|elearning:grade|elearning:stats/)
     expect(serializedNav).not.toMatch(/elearning_course|ELEARNING_TASKS|ELEARNING_STATS/)
+  })
+})
+
+describe('elearning V0.1 focus-mode reachability (behavior)', () => {
+  const learnerMeta = {
+    requiredFeature: 'elearning',
+    permissions: ['elearning:read'],
+  }
+  const adminMeta = {
+    requiredFeature: 'elearning',
+    permissions: ['elearning:admin'],
+  }
+
+  const ctx = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
+    hasFeature: () => true,
+    hasPermission: () => true,
+    attendanceFocused: false,
+    plmWorkbenchFocused: false,
+    resolveHomePath: () => '/HOME',
+    ...over,
+  })
+  const decide = (path: string, meta: unknown, over: Partial<RouteGuardPolicyContext> = {}) =>
+    resolveRouteGuardDecision({ path, meta }, ctx(over))
+
+  it('allows exact /learn and /admin/elearning in attendance and plm-workbench focus after feature and permission gates', () => {
+    for (const focus of [
+      { attendanceFocused: true },
+      { plmWorkbenchFocused: true },
+    ] as const) {
+      expect(decide('/learn', learnerMeta, focus)).toEqual({ action: 'allow' })
+      expect(decide('/admin/elearning', adminMeta, focus)).toEqual({ action: 'allow' })
+    }
+  })
+
+  it('still redirects sibling and evil neighbors in both focus modes', () => {
+    const evil = [
+      '/learn/x',
+      '/learn-evil',
+      '/learner',
+      '/admin/elearning/x',
+      '/admin/elearning-evil',
+      '/admin/elearnings',
+      '/admin',
+    ]
+    for (const path of evil) {
+      expect(decide(path, {}, { attendanceFocused: true })).toEqual({
+        action: 'redirect',
+        target: '/attendance',
+      })
+      expect(decide(path, {}, { plmWorkbenchFocused: true })).toEqual({
+        action: 'redirect',
+        target: '/plm',
+      })
+    }
+  })
+
+  it('required-feature and exact route permission gates still win over focus reachability', () => {
+    expect(decide('/learn', learnerMeta, {
+      attendanceFocused: true,
+      hasFeature: () => false,
+    })).toEqual({ action: 'redirect', target: '/HOME' })
+    expect(decide('/admin/elearning', adminMeta, {
+      plmWorkbenchFocused: true,
+      hasFeature: () => false,
+    })).toEqual({ action: 'redirect', target: '/HOME' })
+    expect(decide('/learn', learnerMeta, {
+      attendanceFocused: true,
+      hasPermission: () => false,
+    })).toEqual({ action: 'redirect', target: '/HOME' })
+    expect(decide('/admin/elearning', adminMeta, {
+      plmWorkbenchFocused: true,
+      hasPermission: (permission) => permission !== 'elearning:admin',
+    })).toEqual({ action: 'redirect', target: '/HOME' })
   })
 })

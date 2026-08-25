@@ -23004,7 +23004,7 @@
       "get": {
         "operationId": "listMyElearningCourses",
         "summary": "List the current learner's assigned V0.1 courses",
-        "description": "RBAC `elearning:read`. Requires exam surface flags (watch gate plus\nASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus\nASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23030,7 +23030,7 @@
             "$ref": "#/components/responses/ElearningAuthError"
           },
           "403": {
-            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:read`)",
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (any of `elearning:read`, `elearning:write`, `elearning:admin`)",
             "$ref": "#/components/responses/ElearningError"
           },
           "404": {
@@ -23052,7 +23052,7 @@
       "post": {
         "operationId": "startElearningWatch",
         "summary": "Start or resume a verified watch session for a video item",
-        "description": "RBAC `elearning:read`. Empty JSON object only. itemId is the course\nversion video item, not a media id. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object only. itemId is the course\nversion video item, not a media id. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23124,7 +23124,7 @@
       "post": {
         "operationId": "recordElearningWatchHeartbeat",
         "summary": "Record a verified watch heartbeat",
-        "description": "RBAC `elearning:read`. Required keys sequence (>=1), positionMs (>=0),\nplaying (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Required keys sequence (>=1), positionMs (>=0),\nplaying (boolean). Unknown keys are invalid_input. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23196,7 +23196,7 @@
       "post": {
         "operationId": "issueElearningPlaybackTicket",
         "summary": "Issue a short-lived media playback ticket",
-        "description": "RBAC `elearning:read`. Empty JSON object. Returns an opaque HMAC token\n(not a session JWT). Token TTL is at most 600 seconds. Storage keys and\nsigning secrets never appear. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Empty JSON object. Returns an opaque HMAC token\n(not a session JWT). Token TTL is at most 600 seconds. Storage keys and\nsigning secrets never appear. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23477,7 +23477,7 @@
       "post": {
         "operationId": "startElearningExam",
         "summary": "Start an objective exam attempt",
-        "description": "RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.\nitemId is the course version exam item. Returned paper is redacted\n(no answerKey, correct ids, explanation, examId, or passScore).\nResult includes canonical own answers for every paper question.\nJSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.\nitemId is the course version exam item. Returned paper is redacted\n(no answerKey, correct ids, explanation, examId, or passScore).\nResult includes canonical own answers for every paper question.\nJSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23549,7 +23549,7 @@
       "put": {
         "operationId": "saveElearningExamAnswers",
         "summary": "Save draft answers for a started exam attempt",
-        "description": "RBAC `elearning:read`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers. No answer keys. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers. No answer keys. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23621,7 +23621,7 @@
       "post": {
         "operationId": "submitElearningExam",
         "summary": "Submit and auto-grade an exam attempt",
-        "description": "RBAC `elearning:read`. Body key `answers` only (map of questionRevisionId\nto selected option ids). Auto-grade result has no per-question key,\nselected answers echo, or paper snapshot. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId\nto selected option ids). Auto-grade result has no per-question key,\nselected answers echo, or paper snapshot. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
