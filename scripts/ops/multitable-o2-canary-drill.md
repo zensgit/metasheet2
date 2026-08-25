@@ -169,25 +169,18 @@ l2-fence PASS -> activation ON -> l2-checkpoint PASS -> activate the checkpoint
     case**, listed in the route's own evaluation order so it is clear which refusal shadows
     which:
 
-    | Refusal | Status | Meaning |
-    |---|---|---|
-    | `TRUST_CHECKPOINT_ACTIVATION_DISABLED` | 403 | activation flag off — step 2 did not take |
-    | `TRUST_CHECKPOINT_FENCE_REQUIRED` | 409 | writer fence off (§3.1 item 1) |
-    | (uniform `FORBIDDEN`) | 403 | actor is not a sheet-admin by CURRENT database rows — claims alone never widen the grant, and the same 403 is returned again from inside the fenced transaction |
-    | `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED` | 409 | sheet is not in `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (§3.1 item 3). Unset/empty refuses everything |
-    | `NOT_FOUND` | 404 | no such sheet — ordered after the allowlist so a designation-less deployment leaks no existence oracle |
-    | `HISTORY_INCOMPLETE` | 409 | a trashed-only record with unattributable vintage (`CheckpointUnattributableTrashError`, owner P1 fail-closed abort) |
-    | `RECOVERY_IN_PROGRESS` | 409 | a recovery holds the sheet's writer-fence lease right now — retry once it completes |
-    | `ACTIVATION_CONFLICT` | 409 | a racing second activation won the one-active partial-unique first — retry to supersede |
-
-  - Two further refusals are **introduced by #5162** (the actor-authority-lease slice), which is
-    not merged at the time of writing — expect them on this route once that lane lands, and treat
-    their absence on an older image as "that image predates #5162", not as a missing gate:
-
     | Refusal | Status | `details.retryable` | Meaning |
     |---|---|---|---|
+    | `TRUST_CHECKPOINT_ACTIVATION_DISABLED` | 403 | — | activation flag off — step 2 did not take |
+    | `TRUST_CHECKPOINT_FENCE_REQUIRED` | 409 | — | writer fence off (§3.1 item 1) |
+    | (uniform `FORBIDDEN`) | 403 | — | actor is not a sheet-admin by CURRENT database rows — claims alone never widen the grant, and the same 403 is returned again from inside the fenced transaction |
     | `TRUST_CHECKPOINT_AUTHORITY_BUSY` | 409 | `true` | the actor-authority lease is contended. Accepted busy sources include automation's `LOCK TABLE field_permissions IN SHARE MODE` and L1's own trigger `ALTER TABLE … ENABLE TRIGGER`, as well as a concurrent permission writer or recovery — the refusal names the substrate, not one contender. Nothing was written; an explicit operator retry is the correct response |
     | `TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE` | 409 | `false` | the recovery-authority substrate is not exactly 9/9 ARMED, so the lease cannot be taken. This is the **intended fail-closed rung precedence**: activation is unavailable *before* L1 completes, by design. It is not a bug and not a transient state — do not retry it. In a correctly sequenced drill it cannot fire at all, because §1's Q1 precondition (9 rows, all `enabled_state = 'O'`) is already in hand; seeing it here means that precondition was not actually met on this host |
+    | `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED` | 409 | — | sheet is not in `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (§3.1 item 3). Unset/empty refuses everything |
+    | `NOT_FOUND` | 404 | — | no such sheet — ordered after the allowlist so a designation-less deployment leaks no existence oracle |
+    | `HISTORY_INCOMPLETE` | 409 | — | a trashed-only record with unattributable vintage (`CheckpointUnattributableTrashError`, owner P1 fail-closed abort) |
+    | `RECOVERY_IN_PROGRESS` | 409 | `true` | a recovery holds the sheet's writer-fence lease right now — retry once it completes |
+    | `ACTIVATION_CONFLICT` | 409 | `true` | a racing second activation won the one-active partial-unique first — retry to supersede |
 
 - [ ] **Step 5 — close the window: activation OFF.** Remove
   `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` from the environment and restart (or however
