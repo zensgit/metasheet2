@@ -1100,6 +1100,7 @@ SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() {
   echo call >> "${dir}/docker-calls.txt"
   local body="$5"
+  shift 6
   (
     printenv() {
       case "$1" in
@@ -1193,7 +1194,7 @@ classify_runner_override
 `
   // DRIFT: file says rd-window, container has only the scheduler flag -> match=false, exit 1.
   // The stub emulates the single sh -c enumerator: shadow printenv answers PATH + scheduler.
-  const driftBody = `local body="$5"; (
+  const driftBody = `local body="$5"; shift 6; (
     printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED) echo "org_secret_live_canary"; return 0 ;; *) return 1 ;; esac; }
     eval "$body"
   )`
@@ -1221,6 +1222,101 @@ classify_runner_override
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('EXECUTABLE (override classification): a hostile candidate NAME cannot execute in-container — argv splice, not text splice', () => {
+  // Requal-2 NIT, gate-measured on the text-splice form: a candidate containing $(…) really
+  // executed inside the container. Candidates are constants today; the mechanism is dead anyway
+  // now — names travel as argv after the `_` $0 slot and never enter the script text. The
+  // harness forces a hostile name through SOAK_W7_ENV_NAME and pins that nothing executes.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovhostile-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${dir}/absent.yml"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
+SOAK_W7_ENV_NAME='$(touch "${dir}/pwned-marker")'
+docker() { local body="$5"; shift 6; (
+  printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  // Execution leaves no stdout trace (command substitution BECOMES the word), so the probe is a
+  // filesystem side-effect: under the text-splice form the $(touch …) RUNS and the marker
+  // appears; under the argv form the whole string is one inert argument.
+  assert.ok(!existsSync(join(dir, 'pwned-marker')),
+    'the hostile candidate name EXECUTED in-container — names are being spliced into the script text again')
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.ok(!report.includes('pwned'), 'hostile name leaked into the report')
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): a cross-block DUPLICATE name still refuses — counts, not only the deduped set', () => {
+  // Requal-2 P3-a, gate-measured false on the set-only guard: a web-block key whose NAME already
+  // appears in the backend block collapsed into the sort -u comparison — both-blocks duplicates
+  // classified rd-window with a confident match. Occurrence counts close it.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovdup-'))
+  const cases = [
+    ['both-blocks-duplicate', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n`],
+    ['web-dup-soak', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: "org_secret_alpha"\n      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: "org_secret_alpha"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: "org_secret_alpha"\n`],
+  ]
+  for (const [label, body] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
+SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+docker() { local body="$5"; shift 6; (
+  printenv() { [[ "$1" == "PATH" ]] && return 0; return 1; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: a duplicated cross-block name must refuse, not classify`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+    assert.ok(!report.includes('org_secret'), 'values leaked')
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (override classification): tamper guard — an unasked NAME in the enumerator output refuses AND never reaches the report', () => {
+  // Requal-2 P3-b: the guard existed but nothing exercised it (removal stayed 143/143 green). It
+  // is diagnostic-only by construction — but what its removal costs is REPORT HONESTY:
+  // unvalidated container stdout would land in live_flag_names in the uploaded artifact.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovtamper-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${dir}/absent.yml"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
+SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+docker() { echo "EVIL_UNASKED_NAME"; return 0; }
+${fn}
+classify_runner_override
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 1, 'an unasked name in the channel must refuse certification')
+  const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+  assert.match(report, /^file_live_match=indeterminate$/m)
+  assert.match(report, /^live_flag_names=unobserved$/m)
+  assert.ok(!report.includes('EVIL_UNASKED_NAME'), 'unvalidated container output reached the report')
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('EXECUTABLE (override classification): env keys under the WRONG service never classify — backend-scoped parse', () => {
   // P2-2 (external review of 4141c27832): the round-1 grep collected every indented UPPER key in
   // the whole file, so two rd-window keys under services.web.environment classified as rd-window
@@ -1242,7 +1338,7 @@ OVERRIDE_FILE="${overridePath}"
 BACKEND_CONTAINER="fake-backend"
 SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
 SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
-docker() { local b="$5"; (
+docker() { local b="$5"; shift 6; (
   printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED) echo v; return 0 ;; *) return 1 ;; esac; }
   eval "$b"
 ); }
@@ -1285,7 +1381,7 @@ OVERRIDE_FILE="${overridePath}"
 BACKEND_CONTAINER="fake-backend"
 SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
 SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
-docker() { local b="$5"; ( printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }; eval "$b" ); }
+docker() { local b="$5"; shift 6; ( printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }; eval "$b" ); }
 ${fn}
 classify_runner_override
 `

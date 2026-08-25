@@ -1363,7 +1363,7 @@ classify_runner_override() {
   soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
   soak_set="${soak_set% }"
 
-  local file_present=false file_sha="" file_names="" all_upper_keys=""
+  local file_present=false file_sha="" file_names="" all_upper_keys="" all_upper_count=0 backend_key_count=0
   if [[ -f "$OVERRIDE_FILE" && ! -r "$OVERRIDE_FILE" ]]; then
     # Present but unreadable: an environment we cannot explain. Classify as unexpected rather
     # than letting an empty read pass as the none shape — an empty read is not a read of empty.
@@ -1399,11 +1399,23 @@ classify_runner_override() {
     file_names="${file_names% }"
     all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
     all_upper_keys="${all_upper_keys% }"
+    # COUNTS, not only the deduped set (requal-2 P3-a, gate-measured false: a web-block key whose
+    # NAME already appears in the backend block collapses into the set comparison — both-blocks
+    # duplicates classified rd-window). Same broad pattern counted raw vs the backend-scoped walk.
+    all_upper_count="$(grep -cE '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" || true)"
+    backend_key_count="$(awk '
+      $0=="  backend:" {inb=1; next}
+      inb && /^  [^ ]/ {inb=0}
+      inb && $0=="    environment:" {ine=1; next}
+      inb && ine && /^    [^ ]/ {ine=0}
+      inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
+      END {print c+0}
+    ' "$OVERRIDE_FILE" || true)"
   fi
 
   local shape
   if [[ "$file_present" == false ]]; then shape="absent"
-  elif [[ "$all_upper_keys" != "$file_names" ]]; then
+  elif [[ "$all_upper_keys" != "$file_names" || "$all_upper_count" -ne "$backend_key_count" ]]; then
     # P2-2: env-looking keys exist OUTSIDE services.backend.environment (another service, or a
     # structure the scoped parser cannot read). Whatever this file is, it is not a writer product
     # and its effect on the backend cannot be certified from names alone.
@@ -1433,13 +1445,17 @@ classify_runner_override() {
   # discarded inside the container, so no value ever reaches the host. ANY nonzero exit — daemon
   # down, container gone, sh missing, PATH unreadable — is a failed probe, never an observation.
   local live_names="" probe_failed=false enum_out enum_rc
+  # Names are passed as ARGV ("$@" after the `_` $0 slot), never spliced into the script TEXT
+  # (requal-2 NIT on 74dad9e0ab, gate-measured: a name containing `$(...)` really executes under
+  # the text-splice form. Both soak names are constants today, so it was unreachable — but a
+  # mechanism does not stay unreachable by promise, and killing it costs two characters).
   enum_rc=0
   enum_out="$(docker exec "$BACKEND_CONTAINER" sh -c '
     printenv PATH >/dev/null 2>&1 || exit 9
-    for n in '"$candidates"'; do
+    for n in "$@"; do
       if printenv "$n" >/dev/null 2>&1; then printf "%s\n" "$n"; fi
     done
-  ' 2>/dev/null)" || enum_rc=$?
+  ' _ $candidates 2>/dev/null)" || enum_rc=$?
   if [[ "$enum_rc" -ne 0 ]]; then
     probe_failed=true
   fi
