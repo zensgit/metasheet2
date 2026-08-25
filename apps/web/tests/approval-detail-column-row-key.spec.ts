@@ -472,6 +472,16 @@ describe('approval detail sub-field editor — row-key + id-collision (owner-rep
     await flushUi()
     setRowLabel(3, 'D-sibling-select')
 
+    // Positive-control fuel (re-anchored 2026-08-25 — see the save assertions below): D carries a
+    // MALFORMED option ('broken:' — empty value) typed at setup time, before any delete/shift, so
+    // it is unambiguously D's own content. The malformed-option check survives B0's minimal save
+    // set; the EMPTINESS check the control originally leaned on does not.
+    const dOptionsInput = columnRowWrappers('选项')[3]!.querySelector('input') as HTMLInputElement
+    expect(dOptionsInput).not.toBeNull()
+    dOptionsInput.value = 'broken:'
+    dOptionsInput.dispatchEvent(new Event('input'))
+    await flushUi()
+
     // Focus C's OWN 选项 input while it is still safely at position 2 (no deletes have happened
     // yet, so "position 2" and "row C" still coincide regardless of row-key).
     const cOptionsInput = columnRowWrappers('选项')[2]!.querySelector('input') as HTMLInputElement
@@ -497,12 +507,22 @@ describe('approval detail sub-field editor — row-key + id-collision (owner-rep
     const cCellNow = columnRowWrappers('选项')[1]!.querySelector('input') as HTMLInputElement
     expect(cCellNow.value).toBe('opt:1')
 
-    // Save must NOT fail C for a missing option — the exact owner-reported symptom.
+    // Save must NOT fail C at all — the exact owner-reported symptom.
+    //
+    // RE-ANCHORED POSITIVE CONTROL (2026-08-25). The original control asserted D — never
+    // configured — fails save with 需要至少一个选项. #5143's owner-approved B0 deliberately
+    // demoted that EMPTINESS check to publish-only (the backend does not reject it at
+    // create/update), so at save it can no longer fire for anyone and the old control went
+    // vacuous-red. The control now leans on D's malformed option planted at setup, which stays
+    // save-blocking in B0's minimal set. Discrimination is preserved in BOTH directions: with a
+    // broken row-key, the 'opt:1' typed above lands on D instead of C, HEALING D's malformed
+    // text — this assertion then reds (measured, not assumed), alongside the primary DOM
+    // assertion above.
     await clickSave()
     const errors = validationListText()
-    expect(errors.some((line) => line.includes('C-target-select') && line.includes('需要至少一个选项'))).toBe(false)
-    // And D (never configured with options by the author) must not have silently absorbed them.
-    expect(errors.some((line) => line.includes('D-sibling-select') && line.includes('需要至少一个选项'))).toBe(true)
+    expect(errors.some((line) => line.includes('C-target-select'))).toBe(false)
+    // D's own malformed option must still be D's: present, save-blocking, and attributed to D.
+    expect(errors.some((line) => line.includes('D-sibling-select') && line.includes('选项 label/value 不能为空'))).toBe(true)
   })
 
   it('defect 2: deleting a middle sub-field then adding another never reproduces an existing id (save-blocking "子字段 id 不能重复" does not fire)', async () => {
