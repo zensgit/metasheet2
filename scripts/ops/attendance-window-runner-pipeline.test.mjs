@@ -1255,6 +1255,48 @@ classify_runner_override
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('EXECUTABLE (override classification): a legal x-* extension block cannot impersonate services.backend', () => {
+  // External review round 3, reproduced before fixing: `x-template:\n  backend:\n    environment:`
+  // is legal compose (docker compose config accepts it), and the un-scoped awk matched its
+  // `  backend:` — feeding BOTH the set guard and the count guard from the same mis-scoped walk —
+  // so a file whose real services.backend carries no env classified rd-window with
+  // file_live_match=true: a confident green handed to the deploy decision. The walk now requires
+  // the FULL parent path (column-0 `services:` context).
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovxext-'))
+  const cases = [
+    // extension block carries the env; real backend has none -> the file's UPPER keys exist
+    // OUTSIDE services.backend.environment -> unexpected, never a calm rd-window/none.
+    ['x-template-impersonation', `x-template:\n  backend:\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\nservices:\n  backend:\n    image: x\n  web:\n    image: x\n`, 1, /^override_shape=unexpected$/m],
+    // anchor-swap control: the REAL services.backend env still classifies when an x-* block
+    // merely exists (empty) above it — proves the fix scopes rather than blinds.
+    ['x-block-plus-real-backend', `x-unrelated:\n  note: irrelevant\nservices:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n  web:\n    image: x\n`, 0, /^override_shape=rd-window$/m],
+  ]
+  for (const [label, body, wantRc, wantShape] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local body="$5"; shift 6; (
+  printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED) return 0 ;; *) return 1 ;; esac; }
+  eval "$body"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, wantRc, `${label}: rc=${r.status} stderr=${r.stderr}`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, wantShape, `${label} report:\n${report}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('EXECUTABLE (override classification): a cross-block DUPLICATE name still refuses — counts, not only the deduped set', () => {
   // Requal-2 P3-a, gate-measured false on the set-only guard: a web-block key whose NAME already
   // appears in the backend block collapsed into the sort -u comparison — both-blocks duplicates

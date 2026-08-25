@@ -1389,12 +1389,18 @@ classify_runner_override() {
     # certifying agreement between one service's file entry and a different service's runtime.
     # The awk walks the writer-produced shape only; `all_upper_keys` keeps the old broad sweep,
     # and any UPPER key OUTSIDE the backend environment block forces `unexpected` below.
+    # FULL parent path services.backend.environment (external review round 3, reproduced: a
+    # legal `x-template:` extension block containing backend.environment satisfied BOTH the set
+    # guard and the count guard, because this same mis-scoped walk fed both — `  backend:` was
+    # matched under ANY top-level key). `svc` tracks the top-level context: set only by a
+    # column-0 `services:` line, cleared by any other column-0 key.
     file_names="$(awk '
-      $0=="  backend:" {inb=1; next}
-      inb && /^  [^ ]/ {inb=0}
-      inb && $0=="    environment:" {ine=1; next}
-      inb && ine && /^    [^ ]/ {ine=0}
-      inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
     ' "$OVERRIDE_FILE" | sort -u | tr '\n' ' ' || true)"
     file_names="${file_names% }"
     all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
@@ -1404,11 +1410,12 @@ classify_runner_override() {
     # duplicates classified rd-window). Same broad pattern counted raw vs the backend-scoped walk.
     all_upper_count="$(grep -cE '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" || true)"
     backend_key_count="$(awk '
-      $0=="  backend:" {inb=1; next}
-      inb && /^  [^ ]/ {inb=0}
-      inb && $0=="    environment:" {ine=1; next}
-      inb && ine && /^    [^ ]/ {ine=0}
-      inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
       END {print c+0}
     ' "$OVERRIDE_FILE" || true)"
   fi
