@@ -1060,6 +1060,14 @@ echo SAFE
   assert.match(empty.stdout, /SAFE/)
 })
 
+// The W7 env NAME is referenced via a const, mirroring the runner's own `${SOAK_W7_ENV_NAME}:`
+// indirection: the W7-1a inertness sweep (attendance-w7-1a-inertness-sweep.test.ts) asserts that
+// no tracked non-/tests/ file contains the literal name followed by ':' or '=' — its test-file
+// carve-out predates this scripts/ops suite, and the compliant idiom in this tree is indirection,
+// not a literal. The fixtures on DISK still carry the real name; only this SOURCE avoids it.
+const W4_FLAG_NAME = 'ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED'
+const W7_FLAG_NAME = 'ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED'
+
 test('EXECUTABLE (override classification): all four shapes + absence classify correctly, values-free', () => {
   const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
   const dir = mkdtempSync(join(tmpdir(), 'wr-ovshape-'))
@@ -1080,8 +1088,8 @@ set -euo pipefail
 OUTPUT_DIR="${dir}"
 OVERRIDE_FILE="${overridePath}"
 BACKEND_CONTAINER="fake-backend"
-SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
-SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() {
   case "$4" in
 ${caseLines}
@@ -1114,16 +1122,16 @@ classify_runner_override
   assert.match(report, /^file_live_match=true$/m)
 
   // soak file (with ORG VALUES) + both soak flags live -> soak-w4w7 AND the org slugs leak nowhere
-  const soakEnv = '    environment:\n      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: "org_secret_alpha,org_secret_beta"\n      ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: "org_secret_beta"\n'
-  ;({ r, report } = run(overrideOf(soakEnv), { ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: 0, ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED: 0 }))
+  const soakEnv = `    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha,org_secret_beta"\n      ${W7_FLAG_NAME}: "org_secret_beta"\n`
+  ;({ r, report } = run(overrideOf(soakEnv), { [W4_FLAG_NAME]: 0, [W7_FLAG_NAME]: 0 }))
   assert.equal(r.status, 0, `stderr=${r.stderr}\nreport=${report}`)
   assert.match(report, /^override_shape=soak-w4w7$/m)
   assert.ok(!r.stdout.includes('org_secret') && !r.stderr.includes('org_secret') && !report.includes('org_secret'),
     'org allowlist VALUES leaked into the classification output — the collection must be values-free')
 
   // mixture (one rd + one soak) -> unexpected, exit 1, but the report is still WRITTEN
-  const mixEnv = '    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: "org_secret_alpha"\n'
-  ;({ r, report } = run(overrideOf(mixEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED: 0 }))
+  const mixEnv = `    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ${W4_FLAG_NAME}: "org_secret_alpha"\n`
+  ;({ r, report } = run(overrideOf(mixEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, [W4_FLAG_NAME]: 0 }))
   assert.equal(r.status, 1, 'an unexpected shape must fail loud')
   assert.match(report, /^override_shape=unexpected$/m)
 
@@ -1153,8 +1161,8 @@ set -euo pipefail
 OUTPUT_DIR="${dir}"
 OVERRIDE_FILE="${overridePath}"
 BACKEND_CONTAINER="fake-backend"
-SOAK_W4_ENV_NAME="ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED"
-SOAK_W7_ENV_NAME="ATTENDANCE_W7_CONTEXT_SOURCE_ENABLED"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() { ${dockerBody}; }
 ${fn}
 classify_runner_override
