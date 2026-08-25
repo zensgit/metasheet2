@@ -1,8 +1,8 @@
 # MetaSheet 云课堂（企业学习）插件 — Design Lock（唯一 ratify 对象）
 
 - 日期：2026-08-10
-- 状态：**RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED**
-- 本文件是本线唯一的 ratify 对象。该状态只冻结架构合同；**不授权** L0 / V0.1、代码、迁移、feature flag 或任何实施 PR。unpark 须 owner 对具名试点或自用场景作明确批准。禁止写成普通 `RATIFIED`。
+- 状态：**RATIFIED — DESIGN CONTRACT；L0–L6 PHASED IMPLEMENTATION UNPARKED；PRODUCTION ENABLEMENT PARKED**
+- 本文件是本线唯一的 ratify 对象。Owner 已于 2026-08-25 明确批准将本合同内 L0–L6 整体实施设为开发目标并分阶段 unpark；该授权允许默认 OFF 的代码、迁移、feature flag、CI guard 与实施 PR。它**不授权**合并、部署、生产启用、真实客户数据访问，或任何面向真实业务环境的外部系统/服务调用（读写均含），这些动作仍须各自单独批准。禁止缩写成普通 `RATIFIED` 或将 unpark 解释为生产授权。
 - Lineage（输入材料，均已 SUPERSEDED，不得独立演进）：
   - `elearning-plugin-feasibility-and-architecture-design-20260810.md`（产品 v2，本文底稿）
   - `elearning-plugin-hybrid-architecture-20260810.md`（Codex 混合架构稿，吸收其架构图/责任矩阵/投影矩阵/流程/媒体子架构/验收门）
@@ -21,7 +21,7 @@
 2. **调度不能借考勤的**：`AttendanceScheduler` 对所有插件开放注册，但默认 OFF、小时级单周期、串行、同名静默替换、leader 锁另需考勤 env（§6.5 逐条核实）——不当承重底座。自建 `elearning_jobs` due_at + claim-lease worker；**一切正确性判定在 API 路径同步裁决，调度只做异步物化**。
 3. **站内信无可靠持久化实现**：`plugin_notification_history` 迁移存在（`20250924180000:105` 起）但服务是内存态（`NotificationService.ts:536-540`）——不建收件箱，「首页任务列表（SoR 生成的持久化触达面）+ 推送通道」组合。
 
-规模警告：该 54 页手册背后是一条产品线。**必须 L0–L6 分阶段、能力 flag 默认 OFF + 需求门 + 验收门**。L1+L2 即交付可用的企业培训 MVP。本锁 ratify 仍不授权开工（见文首 parked 合同）。
+规模警告：该 54 页手册背后是一条产品线。**必须 L0–L6 分阶段、能力 flag 默认 OFF + 需求门 + 验收门**。L1+L2 即交付可用的企业培训 MVP。2026-08-25 amendment 已授权分阶段实施，但不改变各阶段验收门与生产门禁。
 
 ## 1. 架构结论（四层）
 
@@ -294,16 +294,16 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 
 ## 11. 分阶段落地（每阶段：能力 flag OFF + 需求门 + 验收门）
 
-**Parked 合同（审9）**：本锁 ratify **不等于** L0 开工授权。下列阶段是 owner unpark 之后的路线图。`IMPLEMENTATION PARKED` 期间不得提交插件骨架、迁移、feature flag、CI guard 或任何实施 PR；unpark 须 owner 对具名试点或自用场景作明确批准。
+**实施授权 amendment（2026-08-25）**：Owner 已将本合同内 L0–L6 与 M 轨整体实施设为开发目标并分阶段 unpark。该授权只覆盖默认 OFF 的实现、测试、迁移、CI guard 与实施 PR；不等于合并、部署、生产启用、真实客户数据访问，或任何面向真实业务环境的外部系统/服务调用（读写均含）授权。实施必须按独立切片交付，先收敛 L0–L2 企业培训 MVP，再推进后续阶段；不得以“整体 unpark”为由把所有阶段并成一个大 PR。
 
-- **L0 治理骨架**（unpark 后才开工；ratify 本锁只是前置，不启动本阶段）：org/tenant 键确认落迁移规范；插件双清单+空壳视图；RBAC 种子；服务端 flag 分层骨架（全 OFF）+ 前端 feature 五处联动；`elearning_jobs` worker 骨架；课程版本/完成证据/任务领取基础模型迁移；`elearning-web-guard.yml`；CJS `scripts.test` 链自带完备性守卫（照抄 `test-chain-completeness.test.cjs`）。
+- **L0 治理骨架**：org/tenant 键确认落迁移规范；插件双清单+空壳视图；RBAC 种子；服务端 flag 分层骨架（全 OFF）+ 前端 feature 五处联动；`elearning_jobs` worker 骨架；课程版本/完成证据/任务领取基础模型迁移；`elearning-web-guard.yml`；CJS `scripts.test` 链自带完备性守卫（照抄 `test-chain-completeness.test.cjs`）。
 - **L1 内容闭环**：分类、文章/文档/外链/系列课、版本化发布、可见范围、学习中心+我的（选修）、进度事件+服务端判定+证据行、课程级统计。
 - **M 轨（并行独立轨）**：分片上传+探针+presigned 播放+双配额；就绪后受控 MP4 接入。
 - **L2 任务闭环**：计划（钉版本）、指派（部门/职位/角色/个人+工号导入）、必修/选修归类、跟踪、催学链（频控+静默时段）、通知台账。
 - **L3 测评**：题库（+xlsx 导入）+revision、试卷、独立+嵌入考试、attempt 快照+判分、阅卷+记录、考试统计。**L3.5**：题库练习+错题本。
 - **L4 激励**：学分规则+台账+上限+头衔+调整、证书模板+颁发台账、排行、学习档案。
 - **L5 运营**：统计 8 页读模型+异步导出中心（审计+保留期）、新员工自动指派+周报、portal 极简自定义、空间资源管理（引用守卫）、**聚合投影（含抑制合同）**。
-- **L6 扩展（逐项需求门，不自动进入开发）**：线下培训、学习地图、调研问卷、防挂机、混培、直播适配器、AI 问答。
+- **L6 扩展（已授权进入整体目标，但仍逐项过需求门）**：线下培训、学习地图、调研问卷、防挂机、混培、直播适配器、AI 问答。每项必须有独立范围、flag、验收门和 PR；未列出的扩展不在本次授权内。直播只实现 §9 已裁适配器边界；任何真实外部提供方调用、真实数据发送或付费资源启用仍须单独批准。
 
 ## 12. Ratify 验收门（16 门，全部进设计锁与测试计划）
 
@@ -366,15 +366,17 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 | 审7 机械 | 「owner 可整体替换」；「审1–审5」；auth.ts 行号精度 | 改「ratify 后变更须走 design-lock amendment」；审1–审7；`auth.ts:281,299-301`@b55c6827 并注明 approvalCanvas 先例 | 文首、§10、§14 |
 | 审7 追补 P2 | §7.4「owner 在 ratify 批注中覆盖硬下限」与 amendment 纪律冲突——合同逃生口 | 采纳；硬下限 5 锁定、org 只能上调，任何修改走 design-lock amendment；提交说明 six→seven | §7.4、commit message |
 | 审8 机械 | 第四跳 rebase 到 `origin/main` `@96b6416717`（约 280 提交）后 citation 漂移 | 纯机械重钉，不改合同：`AuthService.resolveSessionTenantId` `:387-426`；`buildFeaturePayload` → `src/routes/auth.ts:283`（Canvas never-inferred `:301-303`）；attendance `withPermission` `:23529-23614`；`20250924180000:105`；dispatch 迁移文件名补全；`zzzz20260411120100:22-38`。裁决 #1 实质仍成立（见 §14-③）。状态仍 DRAFT | 文首、§0、§4.1、§4.2、§4.3、§5.1、§10、§14 |
-| 审9 | exact-head 终检 `0eba89154b`：门1 测试假绿 P1；普通 RATIFIED 会被读成 L0 开工；锁文竞品名；`users.position` 钉 legacy SQL；审阅记录/活动 pin 未齐 | 采纳。门1加真实 DB 会话硬约束（`RBAC_BYPASS=false`/`RBAC_TOKEN_TRUST=false`，禁 trusted-token fixture）。终检通过后唯一合法状态 = `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`（不授权 L0/V0.1/代码/迁移/flag/实施 PR）。锁文去品牌化。`users.position` 改钉 `zzzz20260529190000:11-15`。§14-① 审1–审9；§4.1 活动合同 pin `@96b6416717`（历史行保留旧 SHA） | 文首、§2、§3、§4.1、§4.3、§11、门1、§13、§14、附录 |
-| 审10 机械 | 第五跳刷新至 `origin/main` `@22ae2a1c07`；13 个新增提交中，活动合同锚点仅 `plugin-attendance/index.cjs` 有交集 | 纯机械重钉，不改合同：`withAnyPermission/withPermission` 样板由 `:23529-23614` 更新为 `:23575-23660`；其余承重锚点继承有效。状态仍为 `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED` | 文首、§5.1、§14-③ |
+| 审9 | exact-head 终检 `0eba89154b`：门1 测试假绿 P1；普通 RATIFIED 会被读成 L0 开工；锁文竞品名；`users.position` 钉 legacy SQL；审阅记录/活动 pin 未齐 | 采纳。门1加真实 DB 会话硬约束（`RBAC_BYPASS=false`/`RBAC_TOKEN_TRUST=false`，禁 trusted-token fixture）。**审9 当时**唯一合法状态 = `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`（当时不授权 L0/V0.1/代码/迁移/flag/实施 PR）。锁文去品牌化。`users.position` 改钉 `zzzz20260529190000:11-15`。§14-① 审1–审9；§4.1 活动合同 pin `@96b6416717`（历史行保留旧 SHA） | 文首、§2、§3、§4.1、§4.3、§11、门1、§13、§14、附录 |
+| 审10 机械 | 第五跳刷新至 `origin/main` `@22ae2a1c07`；13 个新增提交中，活动合同锚点仅 `plugin-attendance/index.cjs` 有交集 | 纯机械重钉，不改合同：`withAnyPermission/withPermission` 样板由 `:23529-23614` 更新为 `:23575-23660`；其余承重锚点继承有效。**审10 当时的历史状态**仍为 `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED` | 文首、§5.1、§14-③ |
+| 2026-08-25 实施授权 amendment | Owner 将本合同内 L0–L6 与 M 轨整体实施设为开发目标并分阶段 unpark | 状态改为 `RATIFIED — DESIGN CONTRACT；L0–L6 PHASED IMPLEMENTATION UNPARKED；PRODUCTION ENABLEMENT PARKED`；允许默认 OFF 的实现与 PR，保留合并、部署、生产启用、真实数据与真实业务环境外部调用的独立批准门；L6 七项仍逐项过需求门 | 文首、§0、§11、§14-⑤ |
 
 ## 14. Ratify 前置（顺序执行）
 
 1. ✅ 全部审阅意见落稿（审1–审10，处置记录 §13）。
 2. ✅ Owner 九项裁决全部落槌（审5，§9 全 ACCEPTED / DEFERRED TO L6，无「待确认」残留）。
 3. ✅ 基线刷新（五跳完成；当前合并审阅树对齐 `origin/main` `@22ae2a1c07`）：第一跳 @775d537e61（20260810）——25 个锚点文件 diff 扫描仅 `index.ts`/`auth.ts` 漂移，权威组织字段钉 `jwt-middleware.ts:101-108`；第二跳 775d537e→b55c682748——仅一提交（#4850，directory 域），触碰文件与全部锚点零交集；第三跳 b55c682748→0e1e1778ba（20260811）——4 提交（#4851–#4854，staging/ops/测试基建域）触碰 17 文件，与锚点零交集。**第四跳 0e1e1778ba→96b6416717（20260824，约 280 提交）**：锚点交集为 `AuthService.ts` / `src/routes/auth.ts` / `plugin-attendance/index.cjs` / `index.ts` / `apps/web` feature store 与 `viewRegistry.ts`。机械重钉见 §13 审8。**第五跳 96b6416717→22ae2a1c07（2026-08-25，13 提交）**：活动合同锚点仅 `plugin-attendance/index.cjs` 有交集，RBAC 样板结构未变，行号重钉为 `:23575-23660`（§13 审10）；其余承重锚点继承有效：`jwt-middleware.ts:101-108`、`src/routes/files.ts:543-562`、`NotificationService.ts:536-540`、`AttendanceScheduler.ts:311,323,:39,104,:188-199,:205-208,:334`、`automation-action-idempotency.ts:1-18/:28-42/:58-63`、`PluginRbacProvisioningService.ts:130-140`、`flags.ts:5`、`zzzz20260411120100:22-38,:106-110`、`zzzz20260611120000:30-34`、`zzzz20260324150000:82-83`、`zzzz20260117090000` DO $$ + ON CONFLICT、`zzzz20260529190000_add_users_hr_profile_fields.ts:11-15` `users.position`。**裁决 #1 举证仍成立：会话租户经 `user_orgs` 活性校验解析（`AuthService.resolveSessionTenantId` `:387-426`；login 调用点 `:359`）且 `authenticatedTenantId` 仅源于 JWT 自带值（`jwt-middleware.ts:101-103`@96b6416717；header 回填只写 `user.tenantId` `:106-108`，不写 authenticatedTenantId）——org_id 单键成立，以 §4.1 权威字段锁定为强制前提。不升级为 `(tenant_id, org_id)`。**
-4. ✅ scoped exact-diff 快审通过（审阅对象 `7ba7ee472d`，基线 `96b6416717`）。状态已改为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**（禁止普通 `RATIFIED`）。该状态不授权 L0/V0.1/代码/迁移/flag/实施 PR。
+4. ✅ scoped exact-diff 快审通过（审阅对象 `7ba7ee472d`，基线 `96b6416717`）。初始 ratify 当时状态为 **`RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`**，当时不授权 L0/V0.1/代码/迁移/flag/实施 PR；该历史状态现由下列 ⑤ amendment 取代。
+5. ✅ Owner 实施授权 amendment（2026-08-25）：本合同内 L0–L6 与 M 轨整体实施已分阶段 unpark；默认 OFF 的代码、迁移、flag、CI guard 与实施 PR 可推进。合并、部署、生产启用、真实客户数据访问，以及任何面向真实业务环境的外部系统/服务调用（读写均含）仍未授权。
 
 ## 15. 风险登记
 
