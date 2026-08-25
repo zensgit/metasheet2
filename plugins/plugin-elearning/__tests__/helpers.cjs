@@ -109,8 +109,43 @@ function invokeHandler(handler, req) {
   })
 }
 
+const PRIVILEGED_CALLER = Object.freeze({
+  role: 'admin',
+  permissions: Object.freeze(['elearning:admin']),
+})
+
+const UNAUTHORIZED_CALLER = Object.freeze({
+  role: 'user',
+  permissions: Object.freeze([]),
+})
+
+const ALL_FLAGS_ON = Object.freeze({
+  ELEARNING_ENABLED: 'true',
+  ELEARNING_CONTENT_ENABLED: 'true',
+  ELEARNING_ASSIGNMENT_ENABLED: 'true',
+  ELEARNING_ASSESSMENT_ENABLED: 'true',
+  ELEARNING_INCENTIVE_ENABLED: 'true',
+  ELEARNING_ANALYTICS_ENABLED: 'true',
+  ELEARNING_MEDIA_ENABLED: 'true',
+})
+
+function allCapabilities(value) {
+  return {
+    content: value,
+    assignment: value,
+    assessment: value,
+    incentive: value,
+    analytics: value,
+    media: value,
+  }
+}
+
 module.exports = {
   LOOKALIKES,
+  PRIVILEGED_CALLER,
+  UNAUTHORIZED_CALLER,
+  ALL_FLAGS_ON,
+  allCapabilities,
   snapshotFlags,
   restoreFlags,
   clearFlags,

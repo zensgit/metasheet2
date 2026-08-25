@@ -1,10 +1,20 @@
 'use strict'
 
-const { isMasterEnabled, getCapabilitiesPayload } = require('./lib/feature-flags.cjs')
+const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller } = require('./lib/feature-flags.cjs')
 const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
 
 const CANONICAL_METHOD = 'GET'
 const CANONICAL_PATH = '/api/elearning/capabilities'
+
+function sendUnauthenticated(res) {
+  res.status(401).json({
+    ok: false,
+    error: {
+      code: 'UNAUTHORIZED',
+      message: 'Authentication required',
+    },
+  })
+}
 
 async function activate(context) {
   if (!isMasterEnabled()) {
@@ -15,12 +25,17 @@ async function activate(context) {
     throw new Error('plugin-elearning requires context.api.http.addRoute')
   }
 
-  context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (_req, res) => {
+  context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
     if (!isMasterEnabled()) {
       sendFeatureDisabled(res)
       return
     }
-    res.json(getCapabilitiesPayload())
+    const caller = req && req.user
+    if (!isHydratedCaller(caller)) {
+      sendUnauthenticated(res)
+      return
+    }
+    res.json(getCapabilitiesPayload(undefined, caller))
   })
 }
 

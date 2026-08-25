@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -14,10 +15,15 @@ import {
   ELEARNING_COURSE_PUBLISH_OPTION_TEXT_MAX,
   ELEARNING_COURSE_PUBLISH_PROMPT_MAX,
   ELEARNING_COURSE_PUBLISH_QUESTION_MAX,
+  ELEARNING_COURSE_PUBLISH_REQUEST_DOMAIN,
+  ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION,
   ELEARNING_COURSE_PUBLISH_TITLE_MAX,
   canonicalizeElearningCoursePublishInput,
+  canonicalizeElearningCoursePublishRequest,
   elearningCoursePublishLockKey,
   ElearningCoursePublishError,
+  hashElearningCoursePublishRequest,
+  hashElearningCoursePublishRequestAtVersion,
   publishElearningCourse,
   type ElearningCoursePublishDb,
   type ElearningCoursePublishQueryable,
@@ -44,7 +50,7 @@ const PUBLIC_KEYS = [
 
 const EXPECTED_TAG_ORDER = [
   'elearning-publish:lock',
-  'elearning-publish:existing-course',
+  'elearning-publish:load-request',
   'elearning-publish:load-media',
   'elearning-publish:insert-course',
   'elearning-publish:insert-version',
@@ -57,7 +63,11 @@ const EXPECTED_TAG_ORDER = [
   'elearning-publish:publish-exam',
   'elearning-publish:publish-version',
   'elearning-publish:set-pointers',
+  'elearning-publish:insert-request',
 ] as const
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const SERVICE_SOURCE = path.join(
   __dirname,
@@ -98,21 +108,35 @@ function tagOf(sql: string): string | null {
   return match ? match[1] : null
 }
 
+interface PublishRequestRow {
+  orgId: string
+  sourceKey: string
+  requestHash: string
+  requestHashVersion: number
+  courseId: string
+  courseVersionId: string
+  videoItemId: string
+  examItemId: string
+  examId: string
+  questionCount: number
+  totalScore: number
+}
+
 interface Mem {
-  existing: boolean
   media: boolean
   queries: string[]
   params: unknown[][]
   lockKeys: string[]
+  requests: PublishRequestRow[]
 }
 
 function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb; mem: Mem } {
   const mem: Mem = {
-    existing: false,
     media: true,
     queries: [],
     params: [],
     lockKeys: [],
+    requests: [],
     ...seed,
   }
   const query: ElearningCoursePublishQueryable['query'] = async (sql, params = []) => {
@@ -124,8 +148,29 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
       mem.lockKeys.push(String(params[0]))
       return { rows: [], rowCount: 1 }
     }
-    if (tag === 'elearning-publish:existing-course') {
-      return mem.existing ? { rows: [{ ok: 1 }], rowCount: 1 } : { rows: [], rowCount: 0 }
+    if (tag === 'elearning-publish:load-request') {
+      expect(sql).toContain('elearning_course_publish_requests')
+      expect(sql).toContain('org_id = $1')
+      expect(sql).toContain('source_key = $2')
+      expect(sql).toContain('FOR UPDATE')
+      const row = mem.requests.find(
+        (item) => item.orgId === params[0] && item.sourceKey === params[1],
+      )
+      if (!row) return { rows: [], rowCount: 0 }
+      return {
+        rows: [{
+          course_id: row.courseId,
+          course_version_id: row.courseVersionId,
+          video_item_id: row.videoItemId,
+          exam_item_id: row.examItemId,
+          exam_id: row.examId,
+          question_count: row.questionCount,
+          total_score: row.totalScore,
+          request_hash: row.requestHash,
+          request_hash_version: row.requestHashVersion,
+        }],
+        rowCount: 1,
+      }
     }
     if (tag === 'elearning-publish:load-media') {
       expect(sql).toContain("status = 'ready'")
@@ -178,6 +223,23 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
       expect(sql).toContain('active_version_id')
       expect(sql).toContain('latest_version_id')
       expect(sql).toContain('IS NULL')
+      return { rows: [], rowCount: 1 }
+    }
+    if (tag === 'elearning-publish:insert-request') {
+      expect(sql).toContain('elearning_course_publish_requests')
+      mem.requests.push({
+        orgId: String(params[1]),
+        sourceKey: String(params[2]),
+        requestHash: String(params[3]),
+        requestHashVersion: Number(params[4]),
+        courseId: String(params[5]),
+        courseVersionId: String(params[6]),
+        videoItemId: String(params[7]),
+        examItemId: String(params[8]),
+        examId: String(params[9]),
+        questionCount: Number(params[10]),
+        totalScore: Number(params[11]),
+      })
       return { rows: [], rowCount: 1 }
     }
     throw new Error(`unexpected publish query: ${tag ?? sql}`)
@@ -264,15 +326,21 @@ describe('elearning course publish source SQL order', () => {
     expect(unique).toEqual([...EXPECTED_TAG_ORDER])
 
     const lockAt = source.indexOf('elearning-publish:lock')
+    const loadRequestAt = source.indexOf('elearning-publish:load-request')
     const mediaAt = source.indexOf('elearning-publish:load-media')
     const examAt = source.indexOf('elearning-publish:publish-exam')
     const versionAt = source.indexOf('elearning-publish:publish-version')
     const pointersAt = source.indexOf('elearning-publish:set-pointers')
+    const insertRequestAt = source.indexOf('elearning-publish:insert-request')
     expect(lockAt).toBeGreaterThan(-1)
-    expect(mediaAt).toBeGreaterThan(lockAt)
+    expect(loadRequestAt).toBeGreaterThan(lockAt)
+    expect(mediaAt).toBeGreaterThan(loadRequestAt)
     expect(examAt).toBeGreaterThan(mediaAt)
     expect(versionAt).toBeGreaterThan(examAt)
     expect(pointersAt).toBeGreaterThan(versionAt)
+    expect(insertRequestAt).toBeGreaterThan(pointersAt)
+    expect(source).toContain('elearning_course_publish_requests')
+    expect(source).not.toMatch(/FROM elearning_courses\s+WHERE id = \$1/)
 
     const mediaSqlStart = source.indexOf('elearning-publish:load-media')
     const mediaSqlEnd = source.indexOf('elearning-publish:insert-course')
@@ -611,6 +679,140 @@ describe('elearning course publish input closure', () => {
     expect(opened).toBe(false)
   })
 
+  it('hashes a domain-prefixed deep-sorted command and treats missing/null explanation as the command contract', () => {
+    const omittedExplanation = {
+      questionType: 'single_choice' as const,
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      correctOptionIds: ['a'],
+      points: 10,
+    }
+    const left = canonicalizeElearningCoursePublishInput(baseInput({
+      questions: [omittedExplanation],
+    }))
+    const right = canonicalizeElearningCoursePublishInput(baseInput({
+      actorId: ` ${ACTOR} `,
+      orgId: ` ${ORG} `,
+      requestId: REQUEST.toUpperCase(),
+      title: ` ${TITLE} `,
+      questions: [{
+        points: 10,
+        prompt: ' Pick one ',
+        questionType: 'single_choice',
+        correctOptionIds: ['a'],
+        options: [
+          { id: ' a ', text: ' alpha ' },
+          { id: 'b', text: 'beta' },
+        ],
+        explanation: null,
+      }],
+    }))
+    const hashed = hashElearningCoursePublishRequest(left)
+    expect(hashed).toBe(hashElearningCoursePublishRequest(right))
+    expect(hashed).toBe(hashElearningCoursePublishRequest(
+      canonicalizeElearningCoursePublishInput(baseInput({
+        orgId: ORG_B,
+        actorId: 'other-actor',
+        questions: [omittedExplanation],
+      })),
+    ))
+
+    const canonicalJson = canonicalizeElearningCoursePublishRequest(left)
+    expect(Object.keys(JSON.parse(canonicalJson))).toEqual([
+      'domain',
+      'maxAttempts',
+      'mediaId',
+      'passScore',
+      'questions',
+      'title',
+      'version',
+    ])
+    expect(ELEARNING_COURSE_PUBLISH_REQUEST_DOMAIN).toBe('elearning.course.publish.request.v1')
+    expect(ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION).toBe(1)
+    expect(JSON.parse(canonicalJson).domain).toBe(ELEARNING_COURSE_PUBLISH_REQUEST_DOMAIN)
+    expect(JSON.parse(canonicalJson).version).toBe(ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION)
+    expect(canonicalJson).not.toMatch(/actorId|orgId|requestId|totalScore/)
+    expect(hashed).toBe(createHash('sha256').update(canonicalJson, 'utf8').digest('hex'))
+
+    const titleChanged = hashElearningCoursePublishRequest(
+      canonicalizeElearningCoursePublishInput(baseInput({
+        title: 'Other course',
+        questions: [omittedExplanation],
+      })),
+    )
+    const mediaChanged = hashElearningCoursePublishRequest(
+      canonicalizeElearningCoursePublishInput(baseInput({
+        mediaId: '33333333-3333-4333-8333-333333333333',
+        questions: [omittedExplanation],
+      })),
+    )
+    const optionOrderChanged = hashElearningCoursePublishRequest(
+      canonicalizeElearningCoursePublishInput(baseInput({
+        questions: [{
+          ...omittedExplanation,
+          options: [
+            { id: 'b', text: 'beta' },
+            { id: 'a', text: 'alpha' },
+          ],
+        }],
+      })),
+    )
+    const explained = hashElearningCoursePublishRequest(
+      canonicalizeElearningCoursePublishInput(baseInput({
+        questions: [sampleQuestion({ explanation: 'secret rationale' })],
+      })),
+    )
+    expect(titleChanged).not.toBe(hashed)
+    expect(mediaChanged).not.toBe(hashed)
+    expect(optionOrderChanged).not.toBe(hashed)
+    expect(explained).not.toBe(hashed)
+  })
+
+  it('replays v1 rows through the version dispatcher and fails unavailable for unknown versions', async () => {
+    const canonical = canonicalizeElearningCoursePublishInput(baseInput())
+    const v1 = hashElearningCoursePublishRequestAtVersion(canonical, 1)
+    expect(v1).toBe(hashElearningCoursePublishRequest(canonical))
+    expect(v1).toBe(createHash('sha256').update(canonicalizeElearningCoursePublishRequest(canonical), 'utf8').digest('hex'))
+    expectCode(() => hashElearningCoursePublishRequestAtVersion(canonical, 2), 'unavailable')
+    expectCode(() => hashElearningCoursePublishRequestAtVersion(canonical, 0), 'unavailable')
+    expectCode(() => hashElearningCoursePublishRequestAtVersion(canonical, 99), 'unavailable')
+
+    const stored = {
+      orgId: ORG,
+      sourceKey: REQUEST,
+      requestHash: v1,
+      requestHashVersion: 1,
+      courseId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      courseVersionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      videoItemId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      examItemId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      examId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      questionCount: 1,
+      totalScore: 10,
+    }
+    const replayed = await publishElearningCourse(createMemoryDb({ requests: [stored] }).db, baseInput())
+    expect(replayed).toEqual({
+      courseId: stored.courseId,
+      courseVersionId: stored.courseVersionId,
+      videoItemId: stored.videoItemId,
+      examItemId: stored.examItemId,
+      examId: stored.examId,
+      status: 'published',
+      questionCount: 1,
+      totalScore: 10,
+    })
+
+    await expectAsyncCode(createMemoryDb({
+      requests: [{ ...stored, requestHashVersion: 99, requestHash: v1 }],
+    }).db, baseInput(), 'unavailable')
+    await expectAsyncCode(createMemoryDb({
+      requests: [{ ...stored, requestHashVersion: 0, requestHash: v1 }],
+    }).db, baseInput(), 'unavailable')
+  })
+
   it('does not open a transaction for invalid input', async () => {
     let opened = false
     const db: ElearningCoursePublishDb = {
@@ -629,15 +831,30 @@ describe('publishElearningCourse', () => {
     const { db, mem } = createMemoryDb()
     const result = await publishElearningCourse(db, baseInput())
     const raw = assertPublicShape(result)
-    expect(raw.courseId).toBe(REQUEST)
+    expect(raw.courseId).not.toBe(REQUEST)
+    expect(String(raw.courseId)).toMatch(UUID_RE)
     expect(raw.status).toBe('published')
     expect(raw.questionCount).toBe(1)
     expect(raw.totalScore).toBe(10)
     expect(mem.lockKeys).toEqual([elearningCoursePublishLockKey(ORG, REQUEST)])
     expect(mem.queries.map((sql) => tagOf(sql))).toEqual([...EXPECTED_TAG_ORDER])
     expect(mem.params[0][0]).toBe(elearningCoursePublishLockKey(ORG, REQUEST))
-    expect(mem.params[3][0]).toBe(REQUEST)
-    expect(mem.params[3][3]).toBe(ACTOR)
+    const insertCourse = mem.params[mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-course')]
+    expect(insertCourse[0]).toBe(raw.courseId)
+    expect(insertCourse[0]).not.toBe(REQUEST)
+    expect(insertCourse[3]).toBe(ACTOR)
+    const insertVersion = mem.params[mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-version')]
+    expect(insertVersion[2]).toBe(raw.courseId)
+    const insertRequest = mem.params[mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-request')]
+    expect(insertRequest[1]).toBe(ORG)
+    expect(insertRequest[2]).toBe(REQUEST)
+    expect(insertRequest[3]).toBe(hashElearningCoursePublishRequest(canonicalizeElearningCoursePublishInput(baseInput())))
+    expect(insertRequest[4]).toBe(ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION)
+    expect(insertRequest[5]).toBe(raw.courseId)
+    expect(insertRequest[6]).toBe(raw.courseVersionId)
+    expect(insertRequest[7]).toBe(raw.videoItemId)
+    expect(insertRequest[8]).toBe(raw.examItemId)
+    expect(insertRequest[9]).toBe(raw.examId)
     const revisionParams = mem.params[mem.queries.findIndex((sql) => tagOf(sql) === 'elearning-publish:insert-revision')]
     expect(JSON.parse(String(revisionParams[5]))).toEqual([
       { id: 'a', text: 'alpha' },
@@ -664,7 +881,7 @@ describe('publishElearningCourse', () => {
     }))
     expect(mem.queries.map((sql) => tagOf(sql))).toEqual([
       'elearning-publish:lock',
-      'elearning-publish:existing-course',
+      'elearning-publish:load-request',
       'elearning-publish:load-media',
       'elearning-publish:insert-course',
       'elearning-publish:insert-version',
@@ -680,6 +897,7 @@ describe('publishElearningCourse', () => {
       'elearning-publish:publish-exam',
       'elearning-publish:publish-version',
       'elearning-publish:set-pointers',
+      'elearning-publish:insert-request',
     ])
   })
 
@@ -687,12 +905,61 @@ describe('publishElearningCourse', () => {
     await expectAsyncCode(createMemoryDb({ media: false }).db, baseInput(), 'media_unavailable')
   })
 
-  it('conflicts when the request id already exists as a course', async () => {
-    await expectAsyncCode(createMemoryDb({ existing: true }).db, baseInput(), 'conflict')
+  it('replays the original result for the same org+key+hash and conflicts on a different hash', async () => {
+    const { db, mem } = createMemoryDb()
+    const first = await publishElearningCourse(db, baseInput())
+    const replay = await publishElearningCourse(db, baseInput({ actorId: 'actor-retry' }))
+    expect(replay).toEqual(first)
+    expect(mem.requests).toHaveLength(1)
+    expect(mem.queries.map((sql) => tagOf(sql)).filter((tag) => tag === 'elearning-publish:insert-course')).toHaveLength(1)
+    expect(mem.queries.map((sql) => tagOf(sql)).slice(-2)).toEqual([
+      'elearning-publish:lock',
+      'elearning-publish:load-request',
+    ])
+
+    await expectAsyncCode(db, baseInput({ title: 'Other course' }), 'conflict')
+    expect(mem.requests).toHaveLength(1)
+
+    const otherOrg = createMemoryDb()
+    const isolated = await publishElearningCourse(otherOrg.db, baseInput({ orgId: ORG_B }))
+    expect(isolated.courseId).not.toBe(first.courseId)
+    expect(otherOrg.mem.requests).toHaveLength(1)
+    expect(otherOrg.mem.requests[0].orgId).toBe(ORG_B)
+    expect(otherOrg.mem.requests[0].sourceKey).toBe(REQUEST)
   })
 
-  it('maps unique violations to values-free conflict and other faults to unavailable', async () => {
-    const uniqueDb: ElearningCoursePublishDb = {
+  it('maps only the org+source_key unique violation to conflict; unrelated uniques are unavailable', async () => {
+    const sourceKeyDb: ElearningCoursePublishDb = {
+      transaction: async (handler) => handler({
+        query: async (sql) => {
+          if (tagOf(sql) === 'elearning-publish:insert-request') {
+            const error = new Error('duplicate') as Error & { code: string; constraint: string }
+            error.code = '23505'
+            error.constraint = 'elearning_course_publish_requests_org_source_key_uniq'
+            throw error
+          }
+          return { rows: tagOf(sql) === 'elearning-publish:load-media' ? [{ id: MEDIA }] : [], rowCount: 1 }
+        },
+      }),
+    }
+    await expectAsyncCode(sourceKeyDb, baseInput(), 'conflict')
+
+    const otherUniqueDb: ElearningCoursePublishDb = {
+      transaction: async (handler) => handler({
+        query: async (sql) => {
+          if (tagOf(sql) === 'elearning-publish:insert-course') {
+            const error = new Error('duplicate') as Error & { code: string; constraint: string }
+            error.code = '23505'
+            error.constraint = 'elearning_courses_pkey'
+            throw error
+          }
+          return { rows: tagOf(sql) === 'elearning-publish:load-media' ? [{ id: MEDIA }] : [], rowCount: 1 }
+        },
+      }),
+    }
+    await expectAsyncCode(otherUniqueDb, baseInput(), 'unavailable')
+
+    const unnamedUniqueDb: ElearningCoursePublishDb = {
       transaction: async (handler) => handler({
         query: async (sql) => {
           if (tagOf(sql) === 'elearning-publish:insert-course') {
@@ -704,7 +971,7 @@ describe('publishElearningCourse', () => {
         },
       }),
     }
-    await expectAsyncCode(uniqueDb, baseInput(), 'conflict')
+    await expectAsyncCode(unnamedUniqueDb, baseInput(), 'unavailable')
 
     const unavailableDb: ElearningCoursePublishDb = {
       transaction: async (handler) => handler({

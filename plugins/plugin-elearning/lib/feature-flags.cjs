@@ -46,12 +46,67 @@ function isCapabilityEnabled(key, env) {
   return isMasterEnabled(source) && isExactTrue(source[flagName])
 }
 
-function getCapabilitiesPayload(env) {
+const CAPABILITY_PERMISSIONS = Object.freeze({
+  content: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
+  assignment: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
+  assessment: Object.freeze(['elearning:read', 'elearning:write', 'elearning:grade', 'elearning:admin']),
+  incentive: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
+  analytics: Object.freeze(['elearning:stats', 'elearning:admin']),
+  media: Object.freeze(['elearning:read', 'elearning:write', 'elearning:admin']),
+})
+
+function isHydratedCaller(caller) {
+  return caller != null && typeof caller === 'object' && !Array.isArray(caller)
+}
+
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return []
+  const result = []
+  for (const item of value) {
+    const text = String(item ?? '').trim()
+    if (text) result.push(text)
+  }
+  return result
+}
+
+function isGlobalAdmin(caller) {
+  if (!isHydratedCaller(caller)) return false
+  if (caller.role === 'admin') return true
+  return normalizeStringArray(caller.roles).includes('admin')
+}
+
+function hydratedPermissionCodes(caller) {
+  if (!isHydratedCaller(caller)) return []
+  // Hydrated req.user.permissions only. Never raw `perms` claims.
+  return normalizeStringArray(caller.permissions)
+}
+
+function hasPermissionCode(codes, permissionCode) {
+  if (codes.includes(permissionCode) || codes.includes('*:*')) return true
+  const resource = permissionCode.split(':')[0]
+  return resource ? codes.includes(`${resource}:*`) : false
+}
+
+function callerAllowsCapability(caller, key) {
+  if (!isHydratedCaller(caller)) return false
+  if (isGlobalAdmin(caller)) return true
+  const required = CAPABILITY_PERMISSIONS[key]
+  if (!required) return false
+  const codes = hydratedPermissionCodes(caller)
+  for (const permissionCode of required) {
+    if (hasPermissionCode(codes, permissionCode)) return true
+  }
+  return false
+}
+
+function getCapabilitiesPayload(env, caller) {
   const source = env || process.env
   const enabled = isMasterEnabled(source)
   const capabilities = {}
   for (const key of CAPABILITY_KEYS) {
-    capabilities[key] = enabled && isExactTrue(source[CAPABILITY_FLAGS[key]])
+    capabilities[key] = enabled
+      && isExactTrue(source[CAPABILITY_FLAGS[key]])
+      && callerAllowsCapability(caller, key)
   }
   return { enabled, capabilities }
 }
@@ -60,9 +115,12 @@ module.exports = {
   MASTER_FLAG,
   CAPABILITY_KEYS,
   CAPABILITY_FLAGS,
+  CAPABILITY_PERMISSIONS,
   FLAG_NAMES,
   isExactTrue,
   isMasterEnabled,
   isCapabilityEnabled,
+  isHydratedCaller,
+  callerAllowsCapability,
   getCapabilitiesPayload,
 }

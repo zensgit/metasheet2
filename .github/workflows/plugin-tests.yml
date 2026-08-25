@@ -940,6 +940,25 @@ jobs:
             tests/integration/elearning-media-reconciler.db.test.ts \
             --reporter=verbose
 
+      # E-learning V0.1 ratified gate 1: real JWT + user_orgs + DB RBAC on the
+      # production pilot runtime. Dedicated config/setup sets RBAC_BYPASS=false
+      # and RBAC_TOKEN_TRUST=false BEFORE importing auth/RBAC/runtime. Do not
+      # fold this into vitest.integration.config.ts (that setup caches trust).
+      # Whole-file + DATABASE_URL :? so a missing DB cannot skip-green.
+      - name: Run elearning V0.1 auth/tenant/RBAC gate
+        id: elearning-v01-auth-tenant-rbac-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 auth/tenant/RBAC gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.elearning-pilot-auth.config.ts run \
+            tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
+            --reporter=verbose
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'

@@ -3,7 +3,7 @@
  * Uses existing tables and trigger-required draft→publish ordering.
  * Public results and errors are values-free.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
 import {
   ELEARNING_WATCH_POLICY_VERSION,
@@ -11,6 +11,8 @@ import {
 } from './elearning-watch-progress'
 
 export const ELEARNING_COURSE_PUBLISH_ACTOR_MAX = 256
+export const ELEARNING_COURSE_PUBLISH_REQUEST_DOMAIN = 'elearning.course.publish.request.v1' as const
+export const ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION = 1 as const
 export const ELEARNING_COURSE_PUBLISH_TITLE_MAX = 200
 export const ELEARNING_COURSE_PUBLISH_PROMPT_MAX = 2000
 export const ELEARNING_COURSE_PUBLISH_OPTION_ID_MAX = 64
@@ -173,7 +175,34 @@ function asSafeInt(value: unknown): number | null {
     if (!Number.isSafeInteger(value)) return null
     return value
   }
+  if (typeof value === 'string') {
+    const text = value.trim()
+    if (!/^-?\d+$/.test(text)) return null
+    const parsed = Number(text)
+    if (!Number.isSafeInteger(parsed)) return null
+    return parsed
+  }
   return null
+}
+
+function asText(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  return value
+}
+
+function deepSortedJson(value: unknown): string {
+  const walk = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(walk)
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.keys(v as Record<string, unknown>)
+          .sort()
+          .map((k) => [k, walk((v as Record<string, unknown>)[k])]),
+      )
+    }
+    return v
+  }
+  return JSON.stringify(walk(value))
 }
 
 function asFiniteNumber(value: unknown): number | null {
@@ -184,11 +213,15 @@ function asFiniteNumber(value: unknown): number | null {
   return null
 }
 
-function isUniqueViolation(error: unknown): boolean {
+const COURSE_PUBLISH_REQUEST_SOURCE_KEY_UNIQ =
+  'elearning_course_publish_requests_org_source_key_uniq'
+
+function isSourceKeyUniqueViolation(error: unknown): boolean {
   return Boolean(
     error
     && typeof error === 'object'
-    && (error as { code?: unknown }).code === '23505',
+    && (error as { code?: unknown }).code === '23505'
+    && (error as { constraint?: unknown }).constraint === COURSE_PUBLISH_REQUEST_SOURCE_KEY_UNIQ,
   )
 }
 
@@ -294,6 +327,41 @@ export function canonicalizeElearningCoursePublishInput(input: unknown): Canonic
   }
 }
 
+function canonicalizeElearningCoursePublishRequestV1(input: CanonicalInput): string {
+  return deepSortedJson({
+    domain: 'elearning.course.publish.request.v1',
+    maxAttempts: input.maxAttempts,
+    mediaId: input.mediaId,
+    passScore: input.passScore,
+    questions: input.questions,
+    title: input.title,
+    version: 1,
+  })
+}
+
+export function canonicalizeElearningCoursePublishRequest(input: CanonicalInput): string {
+  return canonicalizeElearningCoursePublishRequestV1(input)
+}
+
+export function hashElearningCoursePublishRequestAtVersion(
+  input: CanonicalInput,
+  version: number,
+): string {
+  if (version === 1) {
+    return createHash('sha256')
+      .update(canonicalizeElearningCoursePublishRequestV1(input), 'utf8')
+      .digest('hex')
+  }
+  fail('unavailable')
+}
+
+export function hashElearningCoursePublishRequest(input: CanonicalInput): string {
+  return hashElearningCoursePublishRequestAtVersion(
+    input,
+    ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION,
+  )
+}
+
 function publicResult(row: Omit<ElearningCoursePublishResult, 'status'>): ElearningCoursePublishResult {
   return {
     courseId: row.courseId,
@@ -307,15 +375,48 @@ function publicResult(row: Omit<ElearningCoursePublishResult, 'status'>): Elearn
   }
 }
 
+function publicResultFromRequest(row: Record<string, unknown>): ElearningCoursePublishResult {
+  const courseId = asText(row.course_id)
+  const courseVersionId = asText(row.course_version_id)
+  const videoItemId = asText(row.video_item_id)
+  const examItemId = asText(row.exam_item_id)
+  const examId = asText(row.exam_id)
+  const questionCount = asSafeInt(row.question_count)
+  const totalScore = asSafeInt(row.total_score)
+  if (
+    !courseId
+    || !courseVersionId
+    || !videoItemId
+    || !examItemId
+    || !examId
+    || questionCount === null
+    || totalScore === null
+  ) {
+    fail('unavailable')
+  }
+  return publicResult({
+    courseId,
+    courseVersionId,
+    videoItemId,
+    examItemId,
+    examId,
+    questionCount,
+    totalScore,
+  })
+}
+
 export async function publishElearningCourse(
   db: ElearningCoursePublishDb,
   input: PublishElearningCourseInput,
 ): Promise<ElearningCoursePublishResult> {
   const canonical = canonicalizeElearningCoursePublishInput(input)
+  const requestHash = hashElearningCoursePublishRequest(canonical)
+  const courseId = randomUUID()
   const courseVersionId = randomUUID()
   const examId = randomUUID()
   const videoItemId = randomUUID()
   const examItemId = randomUUID()
+  const requestRowId = randomUUID()
   const questionRows = canonical.questions.map((question, index) => ({
     question,
     position: index + 1,
@@ -332,13 +433,24 @@ export async function publishElearningCourse(
       )
 
       const existing = await tx.query(
-        `/* elearning-publish:existing-course */
-         SELECT 1 AS ok
-           FROM elearning_courses
-          WHERE id = $1`,
-        [canonical.requestId],
+        `/* elearning-publish:load-request */
+         SELECT course_id, course_version_id, video_item_id, exam_item_id, exam_id,
+                question_count, total_score, request_hash, request_hash_version
+           FROM elearning_course_publish_requests
+          WHERE org_id = $1 AND source_key = $2
+          FOR UPDATE`,
+        [canonical.orgId, canonical.requestId],
       )
-      if (existing.rows[0]) fail('conflict')
+      const existingRow = existing.rows[0]
+      if (existingRow) {
+        const existingHash = asText(existingRow.request_hash)
+        const storedVersion = asSafeInt(existingRow.request_hash_version)
+        if (!existingHash || storedVersion === null) fail('unavailable')
+        if (hashElearningCoursePublishRequestAtVersion(canonical, storedVersion) !== existingHash) {
+          fail('conflict')
+        }
+        return publicResultFromRequest(existingRow)
+      }
 
       const media = await tx.query(
         `/* elearning-publish:load-media */
@@ -360,14 +472,14 @@ export async function publishElearningCourse(
         `/* elearning-publish:insert-course */
          INSERT INTO elearning_courses (id, org_id, title, status, created_by)
          VALUES ($1, $2, $3, 'active', $4)`,
-        [canonical.requestId, canonical.orgId, canonical.title, canonical.actorId],
+        [courseId, canonical.orgId, canonical.title, canonical.actorId],
       )
       await tx.query(
         `/* elearning-publish:insert-version */
          INSERT INTO elearning_course_versions
            (id, org_id, course_id, version, status, title, created_by)
          VALUES ($1, $2, $3, 1, 'draft', $4, $5)`,
-        [courseVersionId, canonical.orgId, canonical.requestId, canonical.title, canonical.actorId],
+        [courseVersionId, canonical.orgId, courseId, canonical.title, canonical.actorId],
       )
       await tx.query(
         `/* elearning-publish:insert-exam */
@@ -471,12 +583,35 @@ export async function publishElearningCourse(
             AND id = $3
             AND active_version_id IS NULL
             AND latest_version_id IS NULL`,
-        [courseVersionId, canonical.orgId, canonical.requestId],
+        [courseVersionId, canonical.orgId, courseId],
       )
       if ((pointers.rowCount ?? 0) !== 1) fail('unavailable')
 
+      await tx.query(
+        `/* elearning-publish:insert-request */
+         INSERT INTO elearning_course_publish_requests (
+           id, org_id, source_key, request_hash, request_hash_version,
+           course_id, course_version_id, video_item_id, exam_item_id, exam_id,
+           question_count, total_score
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          requestRowId,
+          canonical.orgId,
+          canonical.requestId,
+          requestHash,
+          ELEARNING_COURSE_PUBLISH_REQUEST_HASH_VERSION,
+          courseId,
+          courseVersionId,
+          videoItemId,
+          examItemId,
+          examId,
+          canonical.questions.length,
+          canonical.totalScore,
+        ],
+      )
+
       return publicResult({
-        courseId: canonical.requestId,
+        courseId,
         courseVersionId,
         videoItemId,
         examItemId,
@@ -486,7 +621,7 @@ export async function publishElearningCourse(
       })
     } catch (error) {
       if (error instanceof ElearningCoursePublishError) throw error
-      if (isUniqueViolation(error)) fail('conflict')
+      if (isSourceKeyUniqueViolation(error)) fail('conflict')
       fail('unavailable')
     }
   })

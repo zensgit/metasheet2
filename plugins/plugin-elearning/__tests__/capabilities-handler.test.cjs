@@ -2,10 +2,14 @@
 
 const assert = require('node:assert/strict')
 const { activate } = require('../index.cjs')
-const { CAPABILITY_KEYS, CAPABILITY_FLAGS } = require('../lib/feature-flags.cjs')
+const { CAPABILITY_KEYS } = require('../lib/feature-flags.cjs')
 const { FEATURE_DISABLED_CODE } = require('../lib/http-errors.cjs')
 const {
   LOOKALIKES,
+  PRIVILEGED_CALLER,
+  UNAUTHORIZED_CALLER,
+  ALL_FLAGS_ON,
+  allCapabilities,
   withFlagsAsync,
   createMockContext,
   invokeHandler,
@@ -17,12 +21,17 @@ function assertCanonicalPayload(body, expected) {
   assert.deepEqual(body, expected)
 }
 
+function assertValuesFree(body) {
+  const serialized = JSON.stringify(body)
+  assert.equal(serialized.includes('ELEARNING'), false, 'body must be values-free of flag names')
+  assert.equal(serialized.includes('elearning:'), false, 'body must be values-free of permission codes')
+}
+
 function assertFeatureDisabled(result) {
   assert.equal(result.status, 404)
   assert.equal(result.body.ok, false)
   assert.equal(result.body.error.code, FEATURE_DISABLED_CODE)
-  const serialized = JSON.stringify(result.body)
-  assert.equal(serialized.includes('ELEARNING'), false, '404 body must be values-free of flag names')
+  assertValuesFree(result.body)
   assert.equal(
     Object.prototype.hasOwnProperty.call(result.body, 'capabilities'),
     false,
@@ -35,6 +44,15 @@ function assertFeatureDisabled(result) {
   )
 }
 
+function assertUnauthenticated(result) {
+  assert.equal(result.status, 401)
+  assert.equal(result.body.ok, false)
+  assert.equal(result.body.error.code, 'UNAUTHORIZED')
+  assertValuesFree(result.body)
+  assert.equal(Object.prototype.hasOwnProperty.call(result.body, 'capabilities'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(result.body, 'enabled'), false)
+}
+
 async function activateHandler(flagMap) {
   return withFlagsAsync(flagMap, async () => {
     const { context, routes } = createMockContext()
@@ -44,33 +62,117 @@ async function activateHandler(flagMap) {
   })
 }
 
+async function invokeWith(handler, flagMap, req) {
+  return withFlagsAsync(flagMap, () => invokeHandler(handler, req))
+}
+
 async function main() {
   {
     const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({ ELEARNING_ENABLED: 'true' }, () => invokeHandler(handler, {
+    const result = await invokeWith(handler, { ELEARNING_ENABLED: 'true' }, {
       user: { role: 'admin', permissions: ['elearning:admin'] },
-    }))
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: allCapabilities(false),
+    })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, { user: PRIVILEGED_CALLER })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: allCapabilities(true),
+    })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, {
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ASSIGNMENT_ENABLED: 'TRUE',
+      ELEARNING_ASSESSMENT_ENABLED: 'false',
+      ELEARNING_INCENTIVE_ENABLED: undefined,
+      ELEARNING_ANALYTICS_ENABLED: '1',
+      ELEARNING_MEDIA_ENABLED: 'true',
+    }, { user: PRIVILEGED_CALLER })
     assert.equal(result.status, 200)
     assertCanonicalPayload(result.body, {
       enabled: true,
       capabilities: {
-        content: false,
+        content: true,
         assignment: false,
         assessment: false,
         incentive: false,
         analytics: false,
-        media: false,
+        media: true,
       },
     })
   }
 
   {
-    const env = { ELEARNING_ENABLED: 'true' }
-    for (const key of CAPABILITY_KEYS) {
-      env[CAPABILITY_FLAGS[key]] = 'true'
-    }
     const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync(env, () => invokeHandler(handler))
+    const result = await invokeWith(handler, {}, { user: PRIVILEGED_CALLER })
+    assertFeatureDisabled(result)
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ELEARNING_ENABLED: 'false' }, { user: PRIVILEGED_CALLER })
+    assertFeatureDisabled(result)
+  }
+
+  for (const lookalike of LOOKALIKES) {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ELEARNING_ENABLED: lookalike }, { user: PRIVILEGED_CALLER })
+    assertFeatureDisabled(result)
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, {
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ASSIGNMENT_ENABLED: 'true',
+      ELEARNING_ASSESSMENT_ENABLED: 'true',
+      ELEARNING_INCENTIVE_ENABLED: 'true',
+      ELEARNING_ANALYTICS_ENABLED: 'true',
+      ELEARNING_MEDIA_ENABLED: 'true',
+      PRODUCT_MODE: 'platform',
+    }, { user: { role: 'admin' } })
+    assertFeatureDisabled(result)
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON })
+    assertUnauthenticated(result)
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, { user: null })
+    assertUnauthenticated(result)
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, { user: UNAUTHORIZED_CALLER })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: allCapabilities(false),
+    })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { role: 'user', permissions: ['elearning:read'] },
+    })
     assert.equal(result.status, 200)
     assertCanonicalPayload(result.body, {
       enabled: true,
@@ -79,31 +181,6 @@ async function main() {
         assignment: true,
         assessment: true,
         incentive: true,
-        analytics: true,
-        media: true,
-      },
-    })
-  }
-
-  {
-    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({
-      ELEARNING_ENABLED: 'true',
-      ELEARNING_CONTENT_ENABLED: 'true',
-      ELEARNING_ASSIGNMENT_ENABLED: 'TRUE',
-      ELEARNING_ASSESSMENT_ENABLED: 'false',
-      ELEARNING_INCENTIVE_ENABLED: undefined,
-      ELEARNING_ANALYTICS_ENABLED: '1',
-      ELEARNING_MEDIA_ENABLED: 'true',
-    }, () => invokeHandler(handler))
-    assert.equal(result.status, 200)
-    assertCanonicalPayload(result.body, {
-      enabled: true,
-      capabilities: {
-        content: true,
-        assignment: false,
-        assessment: false,
-        incentive: false,
         analytics: false,
         media: true,
       },
@@ -112,34 +189,94 @@ async function main() {
 
   {
     const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({}, () => invokeHandler(handler))
-    assertFeatureDisabled(result)
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { permissions: ['elearning:write'] },
+    })
+    assert.equal(result.status, 200)
+    assert.equal(result.body.capabilities.analytics, false)
+    assert.equal(result.body.capabilities.content, true)
+    assert.equal(result.body.capabilities.assessment, true)
   }
 
   {
     const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({ ELEARNING_ENABLED: 'false' }, () => invokeHandler(handler))
-    assertFeatureDisabled(result)
-  }
-
-  for (const lookalike of LOOKALIKES) {
-    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({ ELEARNING_ENABLED: lookalike }, () => invokeHandler(handler))
-    assertFeatureDisabled(result)
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { permissions: ['elearning:grade'] },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: false,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
   }
 
   {
     const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
-    const result = await withFlagsAsync({
-      ELEARNING_CONTENT_ENABLED: 'true',
-      ELEARNING_ASSIGNMENT_ENABLED: 'true',
-      ELEARNING_ASSESSMENT_ENABLED: 'true',
-      ELEARNING_INCENTIVE_ENABLED: 'true',
-      ELEARNING_ANALYTICS_ENABLED: 'true',
-      ELEARNING_MEDIA_ENABLED: 'true',
-      PRODUCT_MODE: 'platform',
-    }, () => invokeHandler(handler, { user: { role: 'admin' } }))
-    assertFeatureDisabled(result)
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { permissions: ['elearning:stats'] },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: {
+        content: false,
+        assignment: false,
+        assessment: false,
+        incentive: false,
+        analytics: true,
+        media: false,
+      },
+    })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { permissions: ['elearning:*'] },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, { enabled: true, capabilities: allCapabilities(true) })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { permissions: ['*:*'] },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, { enabled: true, capabilities: allCapabilities(true) })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: {
+        role: 'user',
+        permissions: [],
+        perms: ['elearning:admin', '*:*', 'elearning:stats'],
+      },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, {
+      enabled: true,
+      capabilities: allCapabilities(false),
+    })
+  }
+
+  {
+    const handler = await activateHandler({ ELEARNING_ENABLED: 'true' })
+    const result = await invokeWith(handler, { ...ALL_FLAGS_ON }, {
+      user: { roles: ['admin'], permissions: [] },
+    })
+    assert.equal(result.status, 200)
+    assertCanonicalPayload(result.body, { enabled: true, capabilities: allCapabilities(true) })
   }
 
   console.log('✓ capabilities-handler: payload shape, capability AND, secondary master gate')
