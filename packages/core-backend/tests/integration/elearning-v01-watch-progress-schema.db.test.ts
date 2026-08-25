@@ -507,14 +507,14 @@ describe('elearning V0.1 watch-progress schema gate (real DB)', () => {
       expect(row.column_default).toBeNull()
     }
 
-    const scopeCol = await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n
+    const scopeCol = await pool.query<{ is_nullable: string }>(
+      `SELECT is_nullable
          FROM information_schema.columns
         WHERE table_schema = current_schema()
           AND table_name = 'elearning_completion_evidence'
           AND column_name = 'scope_revision_rule_id'`,
     )
-    expect(scopeCol.rows[0].n).toBe(0)
+    expect(scopeCol.rows).toEqual([{ is_nullable: 'YES' }])
   })
 
   it('pins video/exam completion-policy shape and the item composite parent key', async () => {
@@ -1089,7 +1089,7 @@ describe('elearning V0.1 watch-progress schema gate (real DB)', () => {
       }),
     )
     expect(notRequired?.code).toBe('23514')
-    expect(notRequired?.constraint).toBe('elearning_progress_required_at_completion_chk')
+    expect(notRequired?.constraint).toBe('elearning_progress_required_access_basis_chk')
 
     await insertProgress({
       org,
