@@ -5,6 +5,10 @@ const { activate, deactivate, CANONICAL_METHOD, CANONICAL_PATH } = require('../i
 const { FLAG_NAMES } = require('../lib/feature-flags.cjs')
 const { LOOKALIKES, withFlagsAsync, createMockContext } = require('./helpers.cjs')
 
+function attachDatabase(context) {
+  context.api.database = { query: async () => [] }
+}
+
 async function main() {
   assert.equal(CANONICAL_METHOD, 'GET')
   assert.equal(CANONICAL_PATH, '/api/elearning/capabilities')
@@ -57,6 +61,7 @@ async function main() {
 
   await withFlagsAsync({ ELEARNING_ENABLED: 'true' }, async () => {
     const { context, routes } = createMockContext()
+    attachDatabase(context)
     await activate(context)
     assert.equal(routes.length, 1, 'master ON must register exactly one route')
     assert.equal(routes[0].method, 'GET')
@@ -64,10 +69,12 @@ async function main() {
     assert.equal(typeof routes[0].handler, 'function')
     const elearningPaths = routes.filter((route) => String(route.path).includes('elearning'))
     assert.equal(elearningPaths.length, 1)
+    await deactivate()
   })
 
   await withFlagsAsync({ ELEARNING_ENABLED: 'true' }, async () => {
     const { context, routes } = createMockContext()
+    attachDatabase(context)
     await activate(context)
     await deactivate()
     assert.equal(routes.length, 1, 'deactivate must not invent extra routes')

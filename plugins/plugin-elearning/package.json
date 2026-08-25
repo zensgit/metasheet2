@@ -6,6 +6,6 @@
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
-    "test": "node __tests__/feature-flags.test.cjs && node __tests__/activate-routes.test.cjs && node __tests__/capabilities-handler.test.cjs && node __tests__/manifest.test.cjs && node __tests__/test-chain-completeness.test.cjs"
+    "test": "node __tests__/feature-flags.test.cjs && node __tests__/activate-routes.test.cjs && node __tests__/capabilities-handler.test.cjs && node __tests__/manifest.test.cjs && node __tests__/jobs.test.cjs && node __tests__/test-chain-completeness.test.cjs"
   }
 }

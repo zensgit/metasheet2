@@ -2,6 +2,7 @@
 
 const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller, authenticatedOrgId } = require('./lib/feature-flags.cjs')
 const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
+const { startJobsWorker, stopJobsWorker, resolveDatabasePort } = require('./lib/jobs.cjs')
 
 const CANONICAL_METHOD = 'GET'
 const CANONICAL_PATH = '/api/elearning/capabilities'
@@ -21,12 +22,18 @@ function sendOrgContextRequired(res) {
 }
 
 async function activate(context) {
+  // Hot reload: host does not call deactivate() before re-activate, including
+  // when the re-run throws. Stop the prior timer before every subsequent exit.
+  stopJobsWorker()
   if (!isMasterEnabled()) {
     return
   }
 
   if (!context || !context.api || !context.api.http || typeof context.api.http.addRoute !== 'function') {
     throw new Error('plugin-elearning requires context.api.http.addRoute')
+  }
+  if (!resolveDatabasePort(context)) {
+    throw new Error('plugin-elearning requires context.api.database.query')
   }
 
   context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
@@ -45,9 +52,13 @@ async function activate(context) {
     }
     res.json(getCapabilitiesPayload(undefined, caller))
   })
+
+  startJobsWorker(context)
 }
 
-async function deactivate() {}
+async function deactivate() {
+  stopJobsWorker()
+}
 
 module.exports = {
   activate,

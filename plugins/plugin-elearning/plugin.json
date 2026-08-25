@@ -13,6 +13,8 @@
     "views": []
   },
   "permissions": [
-    "http.addRoute"
+    "http.addRoute",
+    "database.read",
+    "database.write"
   ]
 }

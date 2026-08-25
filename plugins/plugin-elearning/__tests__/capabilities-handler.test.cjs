@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
-const { activate } = require('../index.cjs')
+const { activate, deactivate } = require('../index.cjs')
 const { CAPABILITY_KEYS } = require('../lib/feature-flags.cjs')
 const { FEATURE_DISABLED_CODE } = require('../lib/http-errors.cjs')
 const {
@@ -73,9 +73,12 @@ function assertOrgContextRequired(result) {
 async function activateHandler(flagMap) {
   return withFlagsAsync(flagMap, async () => {
     const { context, routes } = createMockContext()
+    context.api.database = { query: async () => [] }
     await activate(context)
     assert.equal(routes.length, 1)
-    return routes[0].handler
+    const handler = routes[0].handler
+    await deactivate()
+    return handler
   })
 }
 

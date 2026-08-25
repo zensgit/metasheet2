@@ -392,6 +392,12 @@ jobs:
       - name: E-learning V0.1 content/assessment CI wiring contract
         run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
 
+      # E-learning L0 jobs claim-lease CI two-point wiring (no DB): the real-Postgres
+      # suite must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L0 jobs CI wiring contract
+        run: node --test scripts/ops/elearning-jobs-ci-wiring.test.mjs
+
       # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
       # excluded) and named as a whole-file arg of the unit canary; real-DB
       # suites stay in the post-migrate 20.x steps; frontend specs stay in
@@ -935,6 +941,7 @@ jobs:
             tests/integration/elearning-scope-access.db.test.ts \
             tests/integration/elearning-media-playback.db.test.ts \
             tests/integration/elearning-role-templates.db.test.ts \
+            tests/integration/elearning-jobs.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

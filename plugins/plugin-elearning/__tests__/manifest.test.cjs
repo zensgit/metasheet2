@@ -22,8 +22,12 @@ assert.ok(Array.isArray(pluginManifest.capabilities.views))
 assert.ok(Array.isArray(pluginManifest.capabilities.workflows))
 assert.ok(Array.isArray(pluginManifest.capabilities.functions))
 assert.ok(Array.isArray(pluginManifest.permissions))
-assert.deepEqual(pluginManifest.permissions, ['http.addRoute'])
-assert.equal(pluginManifest.permissions.length, 1)
+assert.deepEqual(pluginManifest.permissions, [
+  'http.addRoute',
+  'database.read',
+  'database.write',
+])
+assert.equal(pluginManifest.permissions.length, 3)
 
 assert.deepEqual(pluginManifest.contributes.views, [])
 assert.ok(Array.isArray(pluginManifest.contributes.views))
