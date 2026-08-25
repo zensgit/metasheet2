@@ -293,6 +293,71 @@ describe('ApprovalFormBuilder — N+1 insertion slots (FB-D3, §3.2)', () => {
   })
 })
 
+describe('ApprovalFormBuilder — detail field preview', () => {
+  it('renders configured sub-fields as a table-shaped, non-editable requester preview', async () => {
+    const builder = await mountBuilder([
+      field(1, {
+        type: 'detail',
+        label: '费用明细',
+        detailColumns: [
+          {
+            localId: 'detail_name',
+            id: 'name',
+            type: 'text',
+            label: '项目名称',
+            required: true,
+            optionsText: '',
+          },
+          {
+            localId: 'detail_kind',
+            id: 'kind',
+            type: 'select',
+            label: '费用类型',
+            required: false,
+            optionsText: '差旅:travel',
+          },
+          {
+            localId: 'detail_amount',
+            id: 'amount',
+            type: 'number',
+            label: '金额',
+            required: false,
+            optionsText: '',
+          },
+        ],
+      }),
+    ])
+
+    const preview = builder.q('[data-testid="approval-form-builder-detail-preview"]')
+    const table = preview.querySelector('table')
+    expect(table?.getAttribute('aria-label')).toBe('费用明细子表格预览')
+    expect(Array.from(preview.querySelectorAll('th')).map((cell) => (
+      cell.textContent?.replace(/\s+/g, ' ').trim()
+    ))).toEqual(['项目名称 *', '费用类型', '金额'])
+
+    const controls = Array.from(preview.querySelectorAll('input, select, textarea')) as Array<
+      HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+    >
+    expect(controls).toHaveLength(3)
+    expect(controls.every((control) => control.disabled)).toBe(true)
+    expect(controls.map((control) => control.getAttribute('aria-label'))).toEqual([
+      '项目名称输入预览',
+      '费用类型选择预览',
+      '金额输入预览',
+    ])
+    expect(preview.textContent).toContain('请选择费用类型')
+  })
+
+  it('shows an actionable empty state when a malformed draft has no detail columns', async () => {
+    const builder = await mountBuilder([
+      field(1, { type: 'detail', label: '费用明细', detailColumns: [] }),
+    ])
+    expect(builder.q('.approval-form-builder__detail-empty').textContent?.trim())
+      .toBe('请在右侧添加子字段')
+    expect(builder.root.querySelector('.approval-form-builder__detail-table')).toBeNull()
+  })
+})
+
 // --- anchor exactness -------------------------------------------------------
 
 describe('ApprovalFormBuilder — exact anchor placement (FB-D3)', () => {
