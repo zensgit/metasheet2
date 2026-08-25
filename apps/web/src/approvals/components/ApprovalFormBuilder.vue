@@ -505,7 +505,7 @@ function cardSummary(field: FieldAuthoringDraft): string {
 }
 
 function detailColumnLabel(column: DetailColumnDraft): string {
-  return column.label.trim() || typeLabels[column.type]
+  return column.label.trim() || (column.type === 'attachment' ? '附件' : typeLabels[column.type])
 }
 
 function detailPreviewPlaceholder(column: DetailColumnDraft): string {
