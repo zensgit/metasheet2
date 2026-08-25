@@ -453,6 +453,58 @@ export function isMisconfiguredTruthy(spec, rawValue) {
 }
 
 /**
+ * Parse a `list`-typed flag value into its ENTRY COUNT — never into the entries themselves.
+ *
+ * Semantics are deliberately identical to the in-process parser these flags are read by:
+ * `resolveTrustCheckpointSheetAllowlist` (packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts)
+ * — split on `,`, trim each entry, drop empty entries. So `''`, `','`, `' , , '` and an absent
+ * variable all count 0 (the fail-closed "nothing designated" state), while `'a,,b'` and `' a , b '`
+ * both count 2. `countListEntries` is exported so a test can pin those cases against the same table
+ * the TypeScript parser's unit suite uses; if the two ever diverge, the operator's count would stop
+ * describing what the route actually honours.
+ */
+export function countListEntries(rawValue) {
+  if (typeof rawValue !== 'string') return 0
+  return rawValue
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0).length
+}
+
+/**
+ * The operator-visible rendering of a flag's observed value — the ONLY form that may be printed or
+ * serialized by the status helper.
+ *
+ * Keyed off `spec.type`, never off a flag NAME: a `list` flag's value is a set of IDENTIFIERS (today,
+ * the designated trust-checkpoint canary sheet ids), and broadcasting designated-canary identity is
+ * not an ops status tool's job — the ladder's L2-C rung designates a named synthetic sheet precisely
+ * so that scope stays owner-held. A count-only form still answers the operator's actual question,
+ * "is a canary DESIGNATED or not" (0 vs N), and it is what the fail-closed refusal keys off.
+ *
+ * All of unset / '' / ',' / '   ' collapse to `set(count=0)` on purpose: they are behaviourally
+ * IDENTICAL (every one of them refuses activation for every sheet), so distinguishing them on the
+ * status line would invite reading "(absent)" as "the restriction is not in force".
+ *
+ * Every other type keeps its raw value verbatim — boolean/numeric/enum values ARE the operator's
+ * signal ('true' / '1' / a row cap) and carry no identifiers. Unobserved non-list flags keep the
+ * pre-existing `(absent)` marker.
+ */
+export function renderFlagValueForOperator(spec, rawValue) {
+  if (isValueRedactedType(spec)) return `set(count=${countListEntries(rawValue)})`
+  return rawValue ?? '(absent)'
+}
+
+/**
+ * The SINGLE definition of "this flag's observed value may not be printed verbatim", stated over the
+ * manifest's TYPE taxonomy rather than over a name list. Today that is exactly `list`; registering a
+ * second list-typed flag inherits the redaction with no further edit, and a name-keyed guard (the
+ * #1882 failure class — "redaction that matches key names only") is structurally impossible here.
+ */
+export function isValueRedactedType(spec) {
+  return Boolean(spec) && spec.type === 'list'
+}
+
+/**
  * Evaluate every `requires`/`conflicts` rule in the manifest against a flat env-like flag map
  * (`{ [key]: string | null | undefined }`). Returns a list of violations; empty = no illegal
  * combination present. Uses EXACT per-flag activation (via `isActivated`), never the loose

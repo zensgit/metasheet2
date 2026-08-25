@@ -474,6 +474,8 @@ case "$cmd" in
           case "$classifier_mode" in
             running) printf '%s\\n' "$STUB_RUNNING_FLAG_SNAPSHOT"; exit 0 ;;
             compose) cat >/dev/null; printf '%s\\n' "$STUB_COMPOSE_FLAG_SNAPSHOT"; exit 0 ;;
+            running-allowlist) printf '%s\\n' "$STUB_RUNNING_ALLOWLIST_PROBE"; exit "\${STUB_RUNNING_ALLOWLIST_EXIT:-0}" ;;
+            compose-allowlist) cat >/dev/null; printf '%s\\n' "$STUB_COMPOSE_ALLOWLIST_PROBE"; exit "\${STUB_COMPOSE_ALLOWLIST_EXIT:-0}" ;;
             *) echo "stub: unknown classifier mode: $classifier_mode" >&2; exit 97 ;;
           esac
         fi
@@ -503,6 +505,18 @@ chmodSync(join(containmentBinDir, 'docker'), 0o755)
 const remoteScriptPath = join(containmentStubBase, 'remote.sh')
 writeFileSync(remoteScriptPath, extractRemoteScript(workflowText))
 
+// The checkpoint-allowlist non-vacuity probe (P2, 2026-08-25). It runs on BOTH legs, but only for a
+// posture whose expected-active set contains MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION — today
+// exactly `l2-checkpoint`. Its contract line is `<VAR>\t<state>\t<count>` with state ∈
+// {designated, empty, unset}; the designated sheet IDS are never emitted.
+const CHECKPOINT_ALLOWLIST_VAR = 'MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST'
+function allowlistProbe(state, count) {
+  return `${CHECKPOINT_ALLOWLIST_VAR}\t${state}\t${count}`
+}
+// Default = the honest L2-C state: one designated canary sheet. Every posture other than
+// l2-checkpoint never reaches the probe at all.
+const DESIGNATED_ALLOWLIST_PROBE = allowlistProbe('designated', 1)
+
 const CLEAN_FLAG_SNAPSHOT = flagSnapshot()
 const CLEAN_COMPOSE_CONFIG = JSON.stringify({
   services: {
@@ -531,6 +545,10 @@ function runRemote({ target, mode, posture = 'inert', stub = {} }) {
     STUB_PS_NAMES: 'metasheet-backend',
     STUB_RUNNING_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
     STUB_COMPOSE_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
+    STUB_RUNNING_ALLOWLIST_PROBE: DESIGNATED_ALLOWLIST_PROBE,
+    STUB_COMPOSE_ALLOWLIST_PROBE: DESIGNATED_ALLOWLIST_PROBE,
+    STUB_RUNNING_ALLOWLIST_EXIT: '0',
+    STUB_COMPOSE_ALLOWLIST_EXIT: '0',
     STUB_HELPER_SHA: schemaHelperSha[1],
     STUB_HELPER_OUT:
       posture === 'inert' ? schemaPassLineDisabled[1] : schemaPassLineArmed[1],
@@ -1140,5 +1158,295 @@ test('containment structure: the two mode PASS sentinels are DISTINCT (a predepl
       /database recovery schema NOT verified/i.test(line),
     ),
     'the predeploy PASS sentinel must state the DB schema was NOT verified',
+  )
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// P2 (2026-08-25) — the l2-checkpoint posture must not PASS vacuously.
+//
+// Trust-checkpoint activation refuses EVERY sheet while MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST
+// is unset or empty (the fail-closed default introduced with the DB-fresh activation authority).
+// The posture witness enumerated only the five rung FLAGS, so `posture=l2-checkpoint` could report
+// PASS on a host where minting the canary checkpoint — the one thing that rung exists to do — was
+// structurally impossible. Same vacuous-green shape #5155 fixes for the retention conflict var.
+//
+// The requirement is DERIVED from the rung contract (`flag_expected_active
+// MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION`), not from a hardcoded posture name, so the matrix
+// below is the honest per-posture coverage: empty allowlist FAILS exactly the postures that turn
+// activation on, and leaves every other rung PASSing.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+const EMPTY_ALLOWLIST_PROBE = allowlistProbe('empty', 0)
+const UNSET_ALLOWLIST_PROBE = allowlistProbe('unset', 0)
+
+function posturesExpectingActivation() {
+  return Object.entries(POSTURE_FLAGS)
+    .filter(([, flags]) => flags.includes('MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION'))
+    .map(([posture]) => posture)
+}
+
+test('non-vacuity matrix: an EMPTY allowlist fails exactly the postures that turn activation on', () => {
+  const requiring = posturesExpectingActivation()
+  // Sanity: the derivation must actually select something, or the whole matrix below is vacuous.
+  assert.deepEqual(requiring, ['l2-checkpoint'])
+
+  for (const [posture, activeFlags] of Object.entries(POSTURE_FLAGS)) {
+    const result = runRemote({
+      target: 'production',
+      mode: 'postdeploy-full',
+      posture,
+      stub: {
+        STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(activeFlags),
+        STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(activeFlags),
+        STUB_RUNNING_ALLOWLIST_PROBE: EMPTY_ALLOWLIST_PROBE,
+        STUB_COMPOSE_ALLOWLIST_PROBE: EMPTY_ALLOWLIST_PROBE,
+      },
+    })
+    if (requiring.includes(posture)) {
+      assert.equal(
+        result.status,
+        1,
+        `${posture} presupposes reachable activation — an empty allowlist must FAIL it:\n${result.stdout}`,
+      )
+      assert.match(result.stdout, /NOT DESIGNATED/)
+      assert.match(result.stdout, /cannot be witnessed non-vacuously/)
+      assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+    } else {
+      // The rungs where activation is OFF presuppose a checkpoint ROW, which this env var cannot
+      // witness; demanding it there would false-red an operator following ladder §E1.1 step 2/3
+      // (which removes the activation flag and returns to posture=l2-fence).
+      assert.equal(
+        result.status,
+        0,
+        `${posture} does not turn activation on — the allowlist must not be demanded:\n${result.stdout}`,
+      )
+      assert.doesNotMatch(result.stdout, /NOT DESIGNATED/)
+      assert.doesNotMatch(result.stdout, new RegExp(CHECKPOINT_ALLOWLIST_VAR))
+    }
+  }
+})
+
+test('non-vacuity: the false-PASS counterexample — l2-checkpoint with no designated canary is FAIL, unset and empty alike', () => {
+  for (const probe of [EMPTY_ALLOWLIST_PROBE, UNSET_ALLOWLIST_PROBE]) {
+    const result = runRemote({
+      target: 'production',
+      mode: 'postdeploy-full',
+      posture: 'l2-checkpoint',
+      stub: {
+        STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+        STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+        STUB_RUNNING_ALLOWLIST_PROBE: probe,
+        STUB_COMPOSE_ALLOWLIST_PROBE: probe,
+      },
+    })
+    assert.equal(result.status, 1, `probe=${probe} must fail l2-checkpoint:\n${result.stdout}`)
+    assert.match(result.stdout, /VERDICT: FAIL/)
+    assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+    // Every rung flag was correct — the ONLY reason for the FAIL is the missing designation, so this
+    // is a discriminating counterexample, not a snapshot that failed for an unrelated reason.
+    assert.doesNotMatch(result.stdout, /POSTURE MISMATCH\n.*expected ACTIVE/)
+    assert.match(result.stdout, /MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true — ACTIVE AS EXPECTED/)
+  }
+
+  // Positive control on the same posture: a DESIGNATED canary passes, so the FAIL above is the
+  // designation and nothing else.
+  const designated = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+    },
+  })
+  assert.equal(designated.status, 0, designated.stdout)
+  assert.match(designated.stdout, /\[running\] MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST: DESIGNATED \(entries=1\)/)
+  assert.match(designated.stdout, /\[next-restart\] MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST: DESIGNATED \(entries=1\)/)
+})
+
+test('non-vacuity: the NEXT-RESTART leg is load-bearing on its own (a running-only designation disappears on the next compose up)', () => {
+  const result = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_RUNNING_ALLOWLIST_PROBE: DESIGNATED_ALLOWLIST_PROBE,
+      STUB_COMPOSE_ALLOWLIST_PROBE: UNSET_ALLOWLIST_PROBE,
+    },
+  })
+  assert.equal(result.status, 1, result.stdout)
+  assert.match(result.stdout, /\[next-restart\] MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST: NOT DESIGNATED/)
+  assert.match(result.stdout, /\[running\] MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST: DESIGNATED/)
+  assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+})
+
+test('non-vacuity: a BROKEN allowlist probe fails closed, never "the requirement did not apply"', () => {
+  // `set -uo pipefail` carries no `-e`, so a non-zero probe must be handled explicitly.
+  const runningBroken = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_RUNNING_ALLOWLIST_EXIT: '3',
+    },
+  })
+  assert.equal(runningBroken.status, 1, runningBroken.stdout)
+  assert.match(runningBroken.stdout, /cannot classify MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST in the running environment/)
+  assert.doesNotMatch(runningBroken.stdout, NO_CONTAINMENT_PASS)
+
+  const composeBroken = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_ALLOWLIST_EXIT: '4',
+    },
+  })
+  assert.equal(composeBroken.status, 1, composeBroken.stdout)
+  assert.match(composeBroken.stdout, /cannot classify MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST in the rendered Compose environment/)
+
+  // Malformed / duplicated / unknown-state rows are observation failures too — never a silent pass.
+  const duplicated = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_RUNNING_ALLOWLIST_PROBE: `${DESIGNATED_ALLOWLIST_PROBE}\n${DESIGNATED_ALLOWLIST_PROBE}`,
+    },
+  })
+  assert.equal(duplicated.status, 1, duplicated.stdout)
+  assert.match(duplicated.stdout, /probe returned 2 rows, expected exactly 1 \(observation broken\)/)
+
+  const unknownState = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l2-checkpoint',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l2-checkpoint']),
+      STUB_RUNNING_ALLOWLIST_PROBE: allowlistProbe('probably-fine', 0),
+    },
+  })
+  assert.equal(unknownState.status, 1, unknownState.stdout)
+  assert.match(unknownState.stdout, /probe returned unknown state='probably-fine' \(observation broken\)/)
+})
+
+test('non-vacuity: the embedded allowlist classifier witnesses PRESENCE only — designated sheet ids are never emitted', () => {
+  const allowlistClassifier = workflowText.match(/^\s*ALLOWLIST_CLASSIFIER_JS='(.+)'$/m)
+  assert.ok(allowlistClassifier, 'workflow must define ALLOWLIST_CLASSIFIER_JS')
+
+  const secretIds = 'shtCanaryZZZ-do-not-print-1,shtCanaryZZZ-do-not-print-2'
+  const running = spawnSync(
+    process.execPath,
+    ['-e', allowlistClassifier[1], 'running-allowlist', '_', CHECKPOINT_ALLOWLIST_VAR],
+    {
+      encoding: 'utf8',
+      env: { ...process.env, [CHECKPOINT_ALLOWLIST_VAR]: secretIds },
+    },
+  )
+  assert.equal(running.status, 0, running.stderr)
+  assert.equal(running.stdout, `${CHECKPOINT_ALLOWLIST_VAR}\tdesignated\t2\n`)
+  for (const id of secretIds.split(',')) {
+    assert.doesNotMatch(running.stdout, new RegExp(id))
+    assert.doesNotMatch(running.stderr, new RegExp(id))
+  }
+
+  // Compose leg: same presence-only contract, source = the rendered compose service environment.
+  const compose = spawnSync(
+    process.execPath,
+    ['-e', allowlistClassifier[1], 'compose-allowlist', 'metasheet-backend', CHECKPOINT_ALLOWLIST_VAR],
+    {
+      encoding: 'utf8',
+      input: JSON.stringify({
+        services: {
+          backend: {
+            container_name: 'metasheet-backend',
+            environment: { [CHECKPOINT_ALLOWLIST_VAR]: secretIds },
+          },
+        },
+      }),
+      env: { ...process.env, [CHECKPOINT_ALLOWLIST_VAR]: '' },
+    },
+  )
+  assert.equal(compose.status, 0, compose.stderr)
+  assert.equal(compose.stdout, `${CHECKPOINT_ALLOWLIST_VAR}\tdesignated\t2\n`)
+  assert.doesNotMatch(compose.stdout, /do-not-print/)
+
+  // Entry semantics are the in-process parser's, verbatim (split ',', trim, drop empties):
+  // every fail-closed spelling counts 0, and a blank entry never inflates the count.
+  const cases = [
+    [undefined, 'unset', '0'],
+    ['', 'empty', '0'],
+    ['   ', 'empty', '0'],
+    [',', 'empty', '0'],
+    [' , , ', 'empty', '0'],
+    ['shtA', 'designated', '1'],
+    [' shtA , shtB ', 'designated', '2'],
+    ['shtA,,shtB', 'designated', '2'],
+  ]
+  for (const [raw, expectedState, expectedCount] of cases) {
+    const env = { ...process.env }
+    if (raw === undefined) delete env[CHECKPOINT_ALLOWLIST_VAR]
+    else env[CHECKPOINT_ALLOWLIST_VAR] = raw
+    const probe = spawnSync(
+      process.execPath,
+      ['-e', allowlistClassifier[1], 'running-allowlist', '_', CHECKPOINT_ALLOWLIST_VAR],
+      { encoding: 'utf8', env },
+    )
+    assert.equal(probe.status, 0, probe.stderr)
+    assert.equal(
+      probe.stdout,
+      `${CHECKPOINT_ALLOWLIST_VAR}\t${expectedState}\t${expectedCount}\n`,
+      `raw=${JSON.stringify(raw)}`,
+    )
+  }
+
+  // An unknown mode is a hard exit, never a silent "nothing observed".
+  const badMode = spawnSync(
+    process.execPath,
+    ['-e', allowlistClassifier[1], 'running', '_', CHECKPOINT_ALLOWLIST_VAR],
+    { encoding: 'utf8', env: process.env },
+  )
+  assert.equal(badMode.status, 2)
+})
+
+test('non-vacuity: the probe is wired into BOTH legs and gated on the rung contract, not on a posture name', () => {
+  // Static contract. Deleting either call site, or replacing the derivation with a posture-name
+  // comparison, must red this required lane — the behavior tests above cannot see a call that was
+  // moved out of a leg, only one that changed its verdict.
+  const calls = [
+    ...workflowText.matchAll(
+      /node -e "\$ALLOWLIST_CLASSIFIER_JS" (running-allowlist|compose-allowlist)[^\n]*"\$CHECKPOINT_ALLOWLIST_VAR"/g,
+    ),
+  ].map((match) => match[1])
+  assert.deepEqual(
+    calls.sort(),
+    ['compose-allowlist', 'running-allowlist'],
+    'the allowlist probe must run on BOTH the running-env leg and the next-restart leg',
+  )
+  // Each call site is guarded by the DERIVED condition.
+  const guards = [
+    ...workflowText.matchAll(
+      /if flag_expected_active MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION; then/g,
+    ),
+  ]
+  assert.equal(
+    guards.length,
+    2,
+    'both probe call sites must derive the requirement from the posture expected-active set',
+  )
+  // And the classifier must be a SEPARATE constant: folding it into FLAG_CLASSIFIER_JS would make
+  // the five-flag ACTIVE/INACTIVE contract answer a question about a list-valued variable.
+  assert.notEqual(
+    workflowText.match(/^\s*ALLOWLIST_CLASSIFIER_JS='(.+)'$/m)[1],
+    flagClassifierScript[1],
   )
 })
