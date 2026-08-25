@@ -188,4 +188,105 @@ describe('plugin runtime config resolution', () => {
     })
   })
 
+  // The source->`ext_` field mapping is the OTHER half of the pack line: a pack declares which
+  // tenant columns exist, the mapping declares where their values come from. It is the same kind of
+  // deploy-time artifact (a tenant's own legacy column names) read by the same file-path posture, so
+  // it shares the pack reader rather than growing a parallel one that could drift from it.
+  //
+  // Before this key existed, the plugin's mapper had NO producer: `computeDryRun` took an
+  // `extFieldMapping` parameter that nothing on any route ever passed, so no production path could
+  // produce an `ext_` value at all.
+  describe('stock preparation ext field mapping', () => {
+    const ENV_KEY = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
+    let tmpDir: string
+
+    beforeEach(() => {
+      tmpDir = mkdtempSync(join(tmpdir(), 'ext-field-mapping-'))
+    })
+    afterEach(() => {
+      rmSync(tmpDir, { recursive: true, force: true })
+    })
+
+    function writeMappingFile(contents: string): string {
+      const file = join(tmpDir, 'ext-field-mapping.json')
+      writeFileSync(file, contents, 'utf8')
+      return file
+    }
+
+    const MAPPING = {
+      packId: 'factory-a',
+      mappingId: 'factory-a-legacy',
+      mappingVersion: 1,
+      mappings: [{ sourceColumn: 'Designer', target: 'ext_designer' }],
+    }
+
+    it('omits the key entirely when unset — the mapper stays dormant and no ext_ value is produced', () => {
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {})
+      expect('stockPreparationExtFieldMapping' in config).toBe(false)
+    })
+
+    it('reads the mapping off the named file', () => {
+      const file = writeMappingFile(JSON.stringify(MAPPING))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
+      expect(config.stockPreparationExtFieldMapping).toEqual(MAPPING)
+    })
+
+    it('fails closed — and LOUDLY — when the path is unreadable, rather than degrading to no mapping', () => {
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+        [ENV_KEY]: join(tmpDir, 'does-not-exist.json'),
+      })).toThrow(`${ENV_KEY} points at a file that could not be read`)
+    })
+
+    it('never echoes the configured path in the error (values-free: paths are deployment topology)', () => {
+      const secretish = join(tmpDir, 'absent-host-specific-name.json')
+      try {
+        resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: secretish })
+        throw new Error('expected a throw')
+      } catch (error) {
+        expect((error as Error).message).not.toContain(secretish)
+        expect((error as Error).message).toContain(ENV_KEY)
+      }
+    })
+
+    it('fails closed on malformed JSON', () => {
+      const file = writeMappingFile('{not-json')
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a file containing valid JSON`)
+    })
+
+    it('fails closed when the file is not a JSON object', () => {
+      const file = writeMappingFile(JSON.stringify([MAPPING]))
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
+        .toThrow(`${ENV_KEY} must point at a JSON object`)
+    })
+
+    it('is inert for any other plugin', () => {
+      const file = writeMappingFile(JSON.stringify(MAPPING))
+      expect(resolvePluginRuntimeConfig('plugin-after-sales', { [ENV_KEY]: file })).toEqual({})
+    })
+
+    // The pack key keeps its own, more specific shape message: sharing a reader must not blur the
+    // diagnosis a deployer gets.
+    it('leaves the pack catalog`s shape message unchanged', () => {
+      const packFile = join(tmpDir, 'packs.json')
+      writeFileSync(packFile, '[{"packId":"factory-a"}]', 'utf8')
+      expect(() => resolvePluginRuntimeConfig('plugin-integration-core', {
+        INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH: packFile,
+      })).toThrow('INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH must point at a JSON object keyed by packId')
+    })
+
+    // Both keys are independent: configuring one must not require or disturb the other.
+    it('carries both keys side by side', () => {
+      const packFile = join(tmpDir, 'packs.json')
+      writeFileSync(packFile, JSON.stringify({ 'factory-a': { packId: 'factory-a' } }), 'utf8')
+      const mappingFile = writeMappingFile(JSON.stringify(MAPPING))
+      const config = resolvePluginRuntimeConfig('plugin-integration-core', {
+        INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH: packFile,
+        [ENV_KEY]: mappingFile,
+      })
+      expect(config.stockPreparationCustomerPacks).toEqual({ 'factory-a': { packId: 'factory-a' } })
+      expect(config.stockPreparationExtFieldMapping).toEqual(MAPPING)
+    })
+  })
+
 })

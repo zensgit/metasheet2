@@ -549,6 +549,15 @@ const DEFAULT_SETTINGS = {
   workDateAttribution: {
     postShiftTailMinutes: DEFAULT_ATTRIBUTION_TAIL_MINUTES,
   },
+  // Employee overview 常用 tiles — admin-chosen filled pictogram keys only (visual).
+  // PUT is enum-strict (illegal keys 400). Read-side normalize still falls back
+  // for omitted/legacy stored values so employees never see a broken tile.
+  employeeQuickActionIcons: {
+    makeup: 'clock-plus',
+    leave: 'calendar',
+    overtime: 'moon',
+    swap: 'swap',
+  },
 }
 
 const allowRbacDegradation = process.env.RBAC_OPTIONAL === '1'
@@ -13450,6 +13459,37 @@ function normalizeCalendarPolicyOverrides(rawOverrides) {
     .filter(Boolean)
 }
 
+const EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES = [
+  'clock-plus',
+  'calendar',
+  'moon',
+  'swap',
+  'plus',
+  'user',
+  'briefcase',
+  'pin',
+]
+const EMPLOYEE_QUICK_ACTION_ICON_IDS = Object.freeze(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES)
+
+function normalizeEmployeeQuickActionIconsSetting(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {}
+  const defaults = DEFAULT_SETTINGS.employeeQuickActionIcons
+  const pick = (key, fallback) => (
+    EMPLOYEE_QUICK_ACTION_ICON_IDS.includes(source[key]) ? source[key] : fallback
+  )
+  return {
+    makeup: pick('makeup', defaults.makeup),
+    leave: pick('leave', defaults.leave),
+    overtime: pick('overtime', defaults.overtime),
+    swap: pick('swap', defaults.swap),
+  }
+}
+
+// Employee-readable projection: ONLY the four icon keys. No settings document.
+function pickEmployeeQuickActionIconsPublic(settings) {
+  return normalizeEmployeeQuickActionIconsSetting(settings && settings.employeeQuickActionIcons)
+}
+
 function normalizeSettings(raw) {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_SETTINGS }
   const autoAbsence = raw.autoAbsence ?? {}
@@ -13576,6 +13616,7 @@ function normalizeSettings(raw) {
     workDateAttribution: normalizeWorkDateAttributionSetting(
       raw.workDateAttribution ?? raw.work_date_attribution,
     ),
+    employeeQuickActionIcons: normalizeEmployeeQuickActionIconsSetting(raw.employeeQuickActionIcons),
   }
 }
 
@@ -14721,6 +14762,11 @@ function mergeSettings(base, update) {
     workDateAttribution: {
       ...(base?.workDateAttribution || {}),
       ...(update?.workDateAttribution || {}),
+    },
+    // Visual-only employee 常用 icon keys. Partial PUT (e.g. report digest) must not wipe them.
+    employeeQuickActionIcons: {
+      ...(base?.employeeQuickActionIcons || {}),
+      ...(update?.employeeQuickActionIcons || {}),
     },
   })
 }
@@ -24641,6 +24687,8 @@ module.exports = {
     ATTENDANCE_COMPREHENSIVE_HOURS_PERIOD_VALUE_COLUMNS,
     resetAttendanceSettingsCacheForTests,
     mergeSettings,
+    normalizeEmployeeQuickActionIconsSetting,
+    pickEmployeeQuickActionIconsPublic,
     ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_CADENCES,
     isAttendanceReportSyncScheduledTriggerRuntimeEnabled,
     normalizeAttendanceReportSyncScheduledTriggerSetting,
@@ -26480,6 +26528,14 @@ module.exports = {
       workDateAttribution: z.object({
         postShiftTailMinutes: z.number().int().min(0).max(MAX_ATTRIBUTION_TAIL_MINUTES).optional(),
       }).optional(),
+      // Employee overview 常用 pictogram keys (visual only). Enum-strict on write:
+      // illegal values 400 at this route. Read-side normalize still falls back.
+      employeeQuickActionIcons: z.object({
+        makeup: z.enum(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES).optional(),
+        leave: z.enum(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES).optional(),
+        overtime: z.enum(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES).optional(),
+        swap: z.enum(EMPLOYEE_QUICK_ACTION_ICON_ID_VALUES).optional(),
+      }).strict().optional(),
     })
 
     const autoShiftMatchingPreviewSchema = z.object({
@@ -49886,6 +49942,26 @@ module.exports = {
           }
           logger.error('Attendance settings lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load settings' } })
+        }
+      })
+    )
+
+    // Employee-readable, values-free icon keys only. Does not weaken attendance:admin
+    // on GET/PUT /api/attendance/settings and never returns the settings document.
+    context.api.http.addRoute(
+      'GET',
+      '/api/attendance/employee-quick-action-icons',
+      withPermission('attendance:read', async (_req, res) => {
+        try {
+          const settings = await getSettings(db)
+          res.json({ ok: true, data: pickEmployeeQuickActionIconsPublic(settings) })
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Employee quick-action icons lookup failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load employee quick-action icons' } })
         }
       })
     )

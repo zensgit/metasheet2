@@ -27,6 +27,13 @@
 > V2 runtime 仍另受 `MULTITABLE_MATERIAL_RECONCILIATION_ENABLED` 默认 OFF 与 `externalWrite=false`
 > 约束（OD-V2-6），且每一刀须各自过退出条件，ratify 不自动授权后续运行时代码、迁移、路由或实体机执行。
 >
+> **2026-08-23 再更正（被推翻的是上面这段更正自己的最后一句）：** 「一次 owner ratify 可解开三条线」
+> **不成立**。接管线决策登记册 **R-03** 已把 D2 设计锁裁为 **PARKED（不 ratify，维持挂起）**
+> （`docs/development/takeover-beiliao-20260821/decision-register.md`）。两条理由：(1)「G2 承载迁移的
+> 图号↔K3 登记表」不成立——登记表是由 K3 API 一次性物化的专用 registry，而 G2 是图号**语法** profile
+> 且排在 G0 之后，两者不是同一件事；(2) #4520 自述 ratify 即开实现刀，与双线上限冲突。因此 D2 设计锁
+> **已不在关键路径上**，任何计划都不应再把它当作「一裁解三线」的杠杆来排期。
+>
 > 本段只更正闸门陈述，不改本文的历史 grounding 与 §1–§5 判断。
 
 ## 1. 核心判断

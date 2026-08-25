@@ -247,6 +247,12 @@ function installOverviewMock(): void {
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
     }
+    if (url.includes('/api/attendance/employee-quick-action-icons')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' },
+      })
+    }
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
         ok: true,
@@ -379,6 +385,12 @@ function installZeroStateMock(): void {
     }
     if (url.includes('/api/attendance/settings')) {
       return jsonResponse(200, { ok: true, data: {} })
+    }
+    if (url.includes('/api/attendance/employee-quick-action-icons')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' },
+      })
     }
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
@@ -733,7 +745,19 @@ describe('Attendance self-service dashboard', () => {
     expect(rulesCard).not.toContain('approval-flow-secret')
     expect(rulesCard).not.toContain('wifi-secret')
     expect(rulesCard).not.toContain('integration-secret')
-    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Fix missing punch')
+    expect(container?.querySelector('[data-selfservice-action="missing-punch"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-action="leave"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-card="actions"] [data-selfservice-action="overtime"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-card="actions"] [data-selfservice-action="shift-swap"]')).toBeTruthy()
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Makeup punch')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Overtime')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).toContain('Shift swap')
+    expect(container?.querySelector('[data-selfservice-card="actions"]')?.textContent).not.toContain('Fix missing punch')
+    const tileIcons = container!.querySelectorAll('.attendance-ew__tile-icon')
+    expect(tileIcons).toHaveLength(4)
+    for (const icon of tileIcons) {
+      expect(icon.textContent?.trim(), 'tiles use filled pictograms, not 补/假/加/换 glyphs').toBe('')
+    }
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('Adjusted')
     expect(container?.querySelector('[data-selfservice-card="guide"]')?.textContent).toContain('manual correction')
   })
@@ -925,6 +949,172 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-overview-attention]')?.textContent).toContain('Resolve anomaly reminders')
     expect(container!.querySelector('[data-selfservice-focus-list]')).toBeNull()
     expect(container!.querySelector('[data-selfservice-primary-action]')).toBeNull()
+  })
+
+  it('W2/4355 first viewport: punch, status, and attention share the primary band; filters stay below', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const primary = container!.querySelector('[data-attendance-overview-primary]')
+    expect(primary).toBeTruthy()
+    expect(primary!.querySelector('[data-testid="attendance-hero-punch"]')).toBeTruthy()
+    expect(primary!.querySelector('[data-selfservice-card="status"]')).toBeTruthy()
+    expect(primary!.querySelector('[data-attendance-overview-attention]')).toBeTruthy()
+    expect(primary!.querySelector('[data-selfservice-card="requests"]')).toBeTruthy()
+    expect(primary!.querySelector('[data-selfservice-card="actions"]')).toBeNull()
+    expect(primary!.querySelector('[data-attendance-history-filters]')).toBeNull()
+
+    const aside = container!.querySelector('[data-attendance-overview-header-aside]')
+    expect(aside).toBeTruthy()
+    expect(aside!.childElementCount).toBe(0)
+
+    expect(container!.querySelector('.attendance--overview')).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-history-filters]')?.closest('[data-attendance-overview-primary]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toMatch(/Good (morning|afternoon|evening)/)
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).not.toMatch(/Focus |关注/)
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
+    const todoMark = container!.querySelector('[data-attendance-overview-attention] .attendance-ew__todo-mark')
+    expect(todoMark?.textContent?.trim(), '待办 mark is the makeup 面性 icon, not 缺').toBe('')
+    expect(todoMark?.querySelector('svg')).toBeTruthy()
+  })
+
+  it('renders four read-only 常用 tiles with default pictograms and no employee customize control', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const actions = container!.querySelector('[data-selfservice-card="actions"]')
+    expect(actions).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-ew-customize]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-ew-icon-picker]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-employee-quick-icons]')).toBeNull()
+    expect(actions!.textContent).toContain('Makeup punch')
+    expect(actions!.textContent).toContain('Leave')
+    expect(actions!.textContent).toContain('Overtime')
+    expect(actions!.textContent).toContain('Shift swap')
+    expect(container!.querySelector('[data-selfservice-action="missing-punch"]')?.getAttribute('data-attendance-ew-icon')).toBe('clock-plus')
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => (
+      typeof url === 'string' && url.includes('/api/attendance/employee-quick-action-icons')
+    ))).toBe(true)
+    expect(settingsFetchCount()).toBe(0)
+    expect(container!.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
+    expect(container!.querySelector('[data-selfservice-action="overtime"]')?.getAttribute('data-attendance-ew-icon')).toBe('moon')
+    expect(container!.querySelector('[data-selfservice-action="shift-swap"]')?.getAttribute('data-attendance-ew-icon')).toBe('swap')
+    for (const icon of container!.querySelectorAll('.attendance-ew__tile-icon')) {
+      expect(icon.textContent?.trim(), 'tiles use filled pictograms, not 补/假/加/换 glyphs').toBe('')
+    }
+  })
+
+  it('W2/4355 late/early without anomaly: attention offers a records review action', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('record_review')
+    expect(attention?.textContent).toContain('Review the focus workday')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
+  })
+
+  it('W2/4355 pending-request without anomaly: attention tracks approval and never exposes approve/reject', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-today',
+              work_date: '2026-04-15',
+              first_in_at: '2026-04-15T09:00:00+08:00',
+              last_out_at: '2026-04-15T18:00:00+08:00',
+              work_minutes: 480,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'normal',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('request_pending')
+    expect(attention?.textContent).toContain('Track pending approvals')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')?.textContent).toContain('Go handle')
+    const attentionButtons = Array.from(attention!.querySelectorAll('button')).map((button) => button.textContent?.trim())
+    expect(attentionButtons).not.toContain('Approve')
+    expect(attentionButtons).not.toContain('Reject')
+  })
+
+  it('W2/4355 all-clear: normal day has an explicit caught-up state and no fabricated CTA', async () => {
+    const defaultImpl = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = typeof input === 'string' ? input : input.url
+      if (url.includes('/api/attendance/anomalies?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/requests?')) {
+        return jsonResponse(200, { ok: true, data: { items: [] } })
+      }
+      if (url.includes('/api/attendance/records?')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'record-today',
+              work_date: '2026-04-15',
+              first_in_at: '2026-04-15T09:00:00+08:00',
+              last_out_at: '2026-04-15T18:00:00+08:00',
+              work_minutes: 480,
+              late_minutes: 0,
+              early_leave_minutes: 0,
+              status: 'normal',
+              meta: {},
+            }],
+            total: 1,
+          },
+        })
+      }
+      if (!defaultImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      return defaultImpl(input, init)
+    })
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const attention = container!.querySelector('[data-attendance-overview-attention]')
+    expect(attention?.getAttribute('data-attendance-overview-attention-key')).toBe('all_clear')
+    expect(attention?.textContent).toContain('You are caught up')
+    expect(container!.querySelector('[data-attendance-overview-attention-action]')).toBeNull()
+    expect(container!.querySelector('[data-testid="attendance-hero-punch"]')).toBeTruthy()
   })
 
   it('updates self-service rules weekday labels when the locale changes', async () => {
@@ -1913,13 +2103,15 @@ describe('Attendance self-service dashboard', () => {
     // late-early — no fourth "Attention items" stat (that signal now lives
     // solely in the Needs-attention band, §4.2, avoiding a second copy).
     const summary = container!.querySelector('.attendance__summary--workbench') as HTMLElement
-    expect(summary.textContent).toContain('Latest punch')
-    expect(summary.textContent).toContain('Work minutes')
+    expect(summary.textContent).toContain("Today's hours")
+    expect(summary.textContent).toContain('7h 24m')
+    expect(summary.textContent).not.toContain('444')
     expect(summary.textContent).toContain('Late / Early')
+    expect(summary.textContent).not.toContain('Work minutes')
     expect(summary.textContent).not.toContain('Attention items')
     const warning = summary.querySelector('.attendance__summary-value--warning') as HTMLElement | null
     expect(warning, 'late/early 18/18 should color as warning').toBeTruthy()
-    expect(warning!.textContent).toContain('18 / 18')
+    expect(warning!.textContent).toContain('18m / 18m')
   })
 
   it('UI-P1: no timeline when the active record is not from today', async () => {

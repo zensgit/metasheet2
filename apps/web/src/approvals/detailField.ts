@@ -143,12 +143,22 @@ export function buildDetailColumns(drafts: DetailColumnDraft[]): FormField[] {
  *
  * `minRowsText`/`maxRowsText` are the raw input strings (`''` = unset); they are validated as
  * the authoring UI binds text inputs.
+ *
+ * B0 `options?.minimal` gates ONLY the "select/multi-select sub-column needs >=1 option" check —
+ * verified directly against the backend (`ApprovalProductService.normalizeFormField`,
+ * `packages/core-backend/src/services/ApprovalProductService.ts:1289-1301`): `options` is only
+ * shape-checked when the key is present, and the authoring UI always sends `options: []` (never
+ * `undefined`) for an empty select — an empty array passes the backend's array-of-valid-options
+ * check vacuously. Every OTHER check here (non-empty `columns`, id required/unique, label
+ * required, leaf-type-only, malformed non-empty options, minRows/maxRows shape) mirrors a real
+ * `normalizeDetailFieldParts`/`normalizeFormField` 400 and stays blocking in both modes.
  */
 export function validateDetailColumnsDraft(
   fieldLabel: string,
   columns: DetailColumnDraft[],
   minRowsText: string,
   maxRowsText: string,
+  options?: { minimal?: boolean },
 ): string[] {
   const errors: string[] = []
   const label = fieldLabel || '(未命名明细)'
@@ -176,10 +186,10 @@ export function validateDetailColumnsDraft(
       errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 类型不支持`)
     }
     if (column.type === 'select' || column.type === 'multi-select') {
-      const options = parseOptionsText(column.optionsText)
-      if (options.length === 0) {
+      const columnOptions = parseOptionsText(column.optionsText)
+      if (!options?.minimal && columnOptions.length === 0) {
         errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 需要至少一个选项`)
-      } else if (options.some((option) => !option.label.trim() || !option.value.trim())) {
+      } else if (columnOptions.some((option) => !option.label.trim() || !option.value.trim())) {
         errors.push(`明细字段 ${label} 的子字段 ${columnLabel} 的选项 label/value 不能为空`)
       }
     }
