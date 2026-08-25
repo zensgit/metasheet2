@@ -50,6 +50,21 @@
  * the reset-behavior scenarios (d)/(e)/(g) then SKIP with an explicit reason and the run exits 2 — L5 is
  * never reported green off a self-made sheet.
  *
+ * SETUP WRITES FAIL LOUDLY (2026-08-25 — the false-green this section closes): every fixture write
+ * `setup()` makes is checked for a 2xx AND for the id it is supposed to return, and a miss aborts the
+ * whole run with exit 2 (config/setup) instead of continuing with a `null`. The defect this replaces:
+ * `POST /fields` was "best-effort", so a 500 left `salaryId === null`, which in turn made
+ * `if (salaryId && A) await api('PATCH', …)` skip the survivor's post-anchor change ENTIRELY — and
+ * scenario (g)'s "survivors reverted" assertion (`visibleRevertCount === 0`) was then trivially true
+ * because nothing had ever been changed to revert. The run reported green having proven nothing.
+ *
+ * (g) ASSERTS A VALUE, NOT AN ABSENCE (same fix): after the reset it READS THE SURVIVOR BACK
+ * (`GET /records/:recordId?sheetId=…`) and asserts the field holds `ANCHOR_SALARY_A` again. It first
+ * asserts, as a read-back positive control, that the survivor carries `POST_ANCHOR_SALARY_A` BEFORE the
+ * reset — otherwise an "after" read returning the anchor value would prove nothing (the value might
+ * never have changed). "Nothing pending" is kept only as a corroborating signal; it is not evidence
+ * that a revert happened.
+ *
  * Usage:
  *   BASE_URL=https://staging.example ADMIN_TOKEN=<jwt> [EDITOR_TOKEN=<jwt>] [RESET_MAX_RECORDS=<n>] \
  *     [RESET_CANARY_BASE_ID=<id> RESET_CANARY_SHEET_ID=<id>] \
@@ -68,8 +83,8 @@
  * and runs the matching scenarios.
  *
  * Exit: 0 = all run scenarios passed; 1 = a scenario failed; 2 = config/setup error (an unready trust
- * substrate, a half-set RESET_CANARY_* pair, or a flag-ON run with no designated canary — where (d)/(e)/(g)
- * could not be executed at all).
+ * substrate, a half-set RESET_CANARY_* pair, a fixture write that did not land, or a flag-ON run with no
+ * designated canary — where (d)/(e)/(g) could not be executed at all).
  */
 
 const BASE = (process.env.BASE_URL || '').replace(/\/$/, '')
@@ -99,6 +114,28 @@ async function api(method, path, token, body) {
   return { status: res.status, body: json }
 }
 const code = (r) => r?.body?.error?.code || ''
+/** A write "landed" only on a 2xx. Never infer success from a body that happens to parse. */
+const isOk = (r) => r.status >= 200 && r.status < 300
+
+// ---- (g)'s two salary values — named, because (g) now asserts the VALUE, not an absence ----------
+/** Survivor A's value at the anchor (written when A is created, BEFORE the anchor batch). */
+export const ANCHOR_SALARY_A = 100
+/** Survivor A's value AFTER the anchor (the change the reset must undo). */
+export const POST_ANCHOR_SALARY_A = 999
+
+/**
+ * A fixture write that did not land. Raised from `setup()`; `run()` routes it through `configError`
+ * so it exits 2 (config/setup) with its own lines — never a scenario FAIL, and never a silent `null`
+ * that makes a later assertion vacuously true. Carries the lines rather than one string so the abort
+ * reads exactly like every other `configError` in this file.
+ */
+export class ResetSetupError extends Error {
+  constructor(lines) {
+    super(lines.join('\n'))
+    this.name = 'ResetSetupError'
+    this.lines = lines
+  }
+}
 
 // ---- exact-anchor request-body builders (PURE — no I/O) ----------------------------------------------
 // Exported so a hermetic unit test can run these EXACT shapes through the route's own
@@ -195,29 +232,78 @@ export async function setup(canary = resolveCanaryTarget()) {
     sheetId = sheet.body?.data?.id || sheet.body?.data?.sheet?.id || sheet.body?.id
   }
   if (!baseId || !sheetId) throw new Error(`could not read baseId/sheetId (baseId=${baseId} sheetId=${sheetId})`)
-  // fields (best-effort; the revert assertion in (g) needs at least one editable field). Stamped so a
-  // REUSED canary sheet — which already carries the previous drill's field — never collides on name.
+  // The editable field (g)'s revert assertion reads back. NOT best-effort: a non-2xx here used to
+  // leave `salaryId === null`, which silently skipped the survivor's post-anchor change below and made
+  // (g)'s "survivors reverted" check trivially true. Stamped so a REUSED canary sheet — which already
+  // carries the previous drill's field — never collides on name.
   const f = await api('POST', '/fields', ADMIN, { sheetId, name: `Salary ${stamp}`, type: 'number' })
   const salaryId = f.body?.data?.id || f.body?.data?.field?.id || f.body?.id || null
-  const mkRec = async (data, token = ADMIN) => {
+  if (!isOk(f) || !salaryId) {
+    throw new ResetSetupError([
+      `\nFATAL (config/setup): the acceptance field could not be created — POST /fields returned ${f.status}` +
+        `${salaryId ? '' : ' with no field id'}.`,
+      'Every reset-BEHAVIOR scenario needs this field: (g) writes a post-anchor value through it and reads',
+      'the reverted value back through it. Continuing without it would skip the survivor\'s post-anchor change',
+      'and report "survivors reverted" having proven nothing — so this is a hard stop, not a degraded run.',
+      'Remediation: verify ADMIN_TOKEN can create fields on the target sheet, and that the sheet accepts a',
+      '`number` field. Response: ' + JSON.stringify(f.body),
+    ])
+  }
+  /** Create one drill record. A missing id is a setup abort for the same reason the field is. */
+  const mkRec = async (label, data, token = ADMIN) => {
     const r = await api('POST', '/records', token, { sheetId, data })
-    return r.body?.data?.id || r.body?.data?.record?.id || r.body?.id || null
+    const id = r.body?.data?.id || r.body?.data?.record?.id || r.body?.id || null
+    if (!isOk(r) || !id) {
+      throw new ResetSetupError([
+        `\nFATAL (config/setup): drill record ${label} could not be created — POST /records returned ${r.status}` +
+          `${id ? '' : ' with no record id'}.`,
+        'The delete-set / survivor assertions below name this record by id; a null id would silently turn them',
+        'into assertions about nothing.',
+        `Response: ${JSON.stringify(r.body)}`,
+      ])
+    }
+    return id
   }
   // pre-anchor records A,B
-  const A = await mkRec(salaryId ? { [salaryId]: 100 } : { name: 'a' })
-  const B = await mkRec(salaryId ? { [salaryId]: 200 } : { name: 'b' })
+  const A = await mkRec('A (the survivor)', { [salaryId]: ANCHOR_SALARY_A })
+  const B = await mkRec('B (the anchor write)', { [salaryId]: 200 })
   // The anchor is B's OWN creation write (the LATER of the two pre-anchor writes) — strictly after A,B,
   // strictly before A's change + C,D below. Discovered via HTTP (no DB access from this harness); see
   // `discoverCreateBatchId` above.
   const anchorBatchId = await discoverCreateBatchId(sheetId, B)
-  // post-anchor: change A (to test revert), create C,D (the delete-set)
-  if (salaryId && A) await api('PATCH', `/records/${A}`, ADMIN, { sheetId, data: { [salaryId]: 999 } })
-  const C = await mkRec(salaryId ? { [salaryId]: 300 } : { name: 'c' })
+  // post-anchor: change A (to test revert), create C,D (the delete-set). The PATCH is the ONE write
+  // (g)'s value assertion is about — if it does not land there is nothing for the reset to undo, so a
+  // non-2xx aborts rather than being skipped (which is exactly how the false green used to happen).
+  const patch = await api('PATCH', `/records/${A}`, ADMIN, { sheetId, data: { [salaryId]: POST_ANCHOR_SALARY_A } })
+  if (!isOk(patch)) {
+    throw new ResetSetupError([
+      `\nFATAL (config/setup): the survivor's post-anchor change could not be written — PATCH /records/:recordId returned ${patch.status}.`,
+      `Scenario (g) exists to prove the reset restores that survivor to ${ANCHOR_SALARY_A}. With the change never`,
+      'applied there is nothing to revert, and every (g) assertion would pass vacuously.',
+      'Remediation: verify ADMIN_TOKEN can PATCH records on the target sheet and that the record is not locked.',
+      `Response: ${JSON.stringify(patch.body)}`,
+    ])
+  }
+  const C = await mkRec('C (delete-set)', { [salaryId]: 300 })
   // D is the lock-target scenario. When EDITOR_TOKEN is available, create it as the editor so an admin Reset is blocked
   // by a lock held by another actor. If D is admin-created/admin-locked, current lock semantics allow the creator/locker
   // to proceed, which would be a harness false negative rather than a Reset bug.
-  const D = await mkRec(salaryId ? { [salaryId]: 400 } : { name: 'd' }, EDITOR || ADMIN)
+  const D = await mkRec('D (delete-set / lock target)', { [salaryId]: 400 }, EDITOR || ADMIN)
   return { baseId, sheetId, salaryId, A, B, C, D, anchorBatchId, dLockedByEditor: Boolean(EDITOR), canaryDesignated: canary.kind === 'designated' }
+}
+
+/**
+ * Read survivor A's `Salary` value straight back off the record — the only way this pure-HTTP harness
+ * can assert what the reset actually DID rather than what it left un-pending.
+ *
+ * `GET /records/:recordId?sheetId=…` (univer-meta.ts, `records:read`) answers
+ * `{ data: { record: { id, version, data } } }`. The response object is returned alongside the value so
+ * the caller can assert "readable" and "correct value" SEPARATELY: a 403 on this read must never render
+ * byte-identically to "the revert did not happen".
+ */
+async function readSurvivorSalary(ctx) {
+  const res = await api('GET', `/records/${ctx.A}?sheetId=${encodeURIComponent(ctx.sheetId)}`, ADMIN)
+  return { res, value: res.body?.data?.record?.data?.[ctx.salaryId] }
 }
 
 /** Values-free config/setup abort (exit 2). Returns the same summary shape `finish()` does. */
@@ -238,8 +324,17 @@ export async function run() {
   if (canary.kind === 'invalid') {
     return configError(`\nFATAL (config/setup): ${canary.reason}`, 'See scripts/ops/multitable-o2-canary-drill.md §3.3.')
   }
+  // ---- fixtures (any write that did not land is a config/setup abort, never a degraded run) ----
+  let ctx
+  try {
+    ctx = await setup(canary)
+  } catch (e) {
+    return configError(
+      ...(e instanceof ResetSetupError ? e.lines : [`\nFATAL (setup or harness error): ${e.message}`]),
+      'Nothing was asserted: the run stopped before the first scenario, so this is exit 2 (config/setup), not 0.',
+    )
+  }
   // ---- flag-state probe ----
-  const ctx = await setup(canary)
   const probe = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
   const flagOff = probe.status === 403 && code(probe) === 'RESET_DISABLED'
 
@@ -376,18 +471,41 @@ export async function run() {
   if (!resetBehaviorRunnable) {
     skipped('(g) happy-path reset (post-T soft-deleted + survivors reverted)', NO_CANARY_REASON)
   } else {
+    // READ-BACK POSITIVE CONTROL. Read the survivor BEFORE the reset and prove it is carrying its
+    // POST-anchor value right now. Without this leg, an "after" read that returns the anchor value
+    // proves nothing — the value might never have been changed at all, which is precisely the
+    // false-green this scenario used to report. The read is split into "could we read it" and "was
+    // it the right value" so a refused read can never render as "the revert did not happen".
+    const before = await readSurvivorSalary(ctx)
+    ok('(g) read-back control: the survivor record is readable', isOk(before.res), `GET /records/:recordId → ${before.res.status}/${code(before.res)}`)
+    ok(
+      `(g) read-back control: the survivor carries its POST-anchor value (${POST_ANCHOR_SALARY_A}) before the reset`,
+      Number(before.value) === POST_ANCHOR_SALARY_A,
+      `data[salaryId]=${JSON.stringify(before.value)}`,
+    )
+
     const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
     const id = pv.body?.data?.previewIdentity
     const delIds = pv.body?.data?.deleteRecordIds || []
     const ex = await api('POST', `/sheets/${ctx.sheetId}/reset-execute`, ADMIN, buildResetExecuteBody({ previewIdentity: id, confirm: 'reset' }))
-    ok('(g) happy-path execute → 2xx', ex.status >= 200 && ex.status < 300, `got ${ex.status}/${code(ex)}`)
+    ok('(g) happy-path execute → 2xx', isOk(ex), `got ${ex.status}/${code(ex)}`)
     ok('(g) preview reported the post-T delete-set (C,D)', delIds.includes(ctx.C) && delIds.includes(ctx.D), `deleteRecordIds=${JSON.stringify(delIds)}`)
     const after = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
     const delAfter = after.body?.data?.deleteRecordIds || []
     const revertAfter = after.body?.data?.summary?.visibleRevertCount ?? -1
     ok('(g) post-T C,D soft-deleted (no longer in the delete-set after reset)', !delAfter.includes(ctx.C) && !delAfter.includes(ctx.D), `deleteRecordIds=${JSON.stringify(delAfter)}`)
-    ok('(g) survivors reverted (no pending reverts at T after reset)', revertAfter === 0, `visibleRevertCount=${revertAfter}`)
-    log('\n  NOTE: (g) asserts the LIVE effect only (post-T left the live delete-set + survivors reverted). Two things are')
+    // THE revert assertion: the survivor's field VALUE, read back from the record itself.
+    const restored = await readSurvivorSalary(ctx)
+    ok('(g) the survivor record is readable back after the reset', isOk(restored.res), `GET /records/:recordId → ${restored.res.status}/${code(restored.res)}`)
+    ok(
+      `(g) survivor REVERTED — its field holds the anchor value (${ANCHOR_SALARY_A}) again, read back from the record`,
+      Number(restored.value) === ANCHOR_SALARY_A,
+      `data[salaryId]=${JSON.stringify(restored.value)}`,
+    )
+    // Corroborating only. "Nothing pending" is an ABSENCE: it is also what you get when nothing was
+    // ever changed, so it is deliberately NOT the assertion that carries the word "reverted".
+    ok('(g) corroborating: no pending revert remains at T after the reset', revertAfter === 0, `visibleRevertCount=${revertAfter}`)
+    log('\n  NOTE: (g) asserts the LIVE effect only (post-T left the live delete-set + the survivor\'s value restored). Two things are')
     log('  covered by backend goldens, not re-asserted here: the `source=restore` revision write, and that C/D land in the')
     log('  recycle bin (`meta_records_trash`) — confirm the trash side once by hand; recoverable, not hard-deleted.')
   }
