@@ -5,9 +5,27 @@
 > operator checklist: every step is either (a) a read-only SQL observation an operator runs
 > against a database they are already authorized to reach, or (b) a manual operator action /
 > an EXISTING workflow dispatch that is explicitly **OWNER-GATED** — meaning it must not be
-> performed without the per-rung owner authorization the ladder §3 requires (owner 亲笔:
-> exact content + target environment + level). This document introduces **no new
+> performed without the per-rung owner authorization the ladder's E1.3 authorization form
+> requires (owner 亲笔: exact content + target environment + level, or the single
+> `AUTHORIZE-STAGING-L2-L5 <E1 exact SHA>` batch form). This document introduces **no new
 > remote-reaching automation** and grants no authorization.
+>
+> **Ladder status (read before drilling L2-C/L3/L4/L5): the ladder's 修正案 E1 — the only
+> executable L2→L5 order — is `PROPOSED`, not yet ratified.** Every step below this point
+> (§3 L2-C, §4 L4, §5 L5) is `HOLD / DO NOT EXECUTE` until an owner ratifies E1 with an
+> exact-SHA `RATIFY-E1 <sha>` or issues `AUTHORIZE-STAGING-L2-L5 <E1 exact SHA>` (ladder
+> E1.3). This runbook describes what each step will do and check once authorized; it is not
+> itself the authorization.
+>
+> **Containment tool status (2026-08-24, #5151): rung-aware, POSITIVE per-posture PASS —
+> not "expected red".** `multitable-recovery-flag-containment-check.yml` takes a fixed
+> `posture` choice (`inert` / `l1-armed` / `l2-fence` / `l2-checkpoint` / `l3-strict` /
+> `l4-revert` / `l5-reset`) and PASSes only when running env, next-restart Compose, the 9
+> triggers, the 6 authority-function fingerprints, and the meta_links FK-absence check all
+> match that posture's own exact expected shape — never by an operator reading a red result
+> as "that's fine, this rung is supposed to look broken". Every containment dispatch below
+> names the exact `posture` for the rung being drilled and the exact PASS sentinel the tool
+> emits; there is no red-is-expected step left in this runbook.
 >
 > Observation queries referenced as Q1…Q8 live in `scripts/ops/multitable-o2-observation.sql`
 > (read-only by construction; self-tested by `scripts/ops/multitable-o2-observation.test.mjs`).
@@ -21,19 +39,32 @@
   for the drill and contain **no customer data**. Its identifiers are written into the drill
   log *before* the drill starts and pasted into the `EDIT ME` lists of Q3/Q8.
 - Flag changes themselves are **not** part of this runbook — they are the rung's own
-  owner/ops action (ladder §2/§3). This runbook covers the drill performed *after* the rung's
-  flag is on.
-- Any step marked ⛔ STOP that fails ⇒ freeze the ladder at the current rung (ladder §3),
-  record the evidence, do not proceed.
+  owner/ops action (ladder E1.1 sequence + E1.3 authorization form; ladder §5 for rollback).
+  This runbook covers the drill performed *after* the rung's flag is on and its
+  `postdeploy-full` posture PASS is in hand.
+- Any step marked ⛔ STOP that fails ⇒ freeze the ladder at the current rung (ladder §3's
+  fail-stop rule, which continues to apply regardless of E1's ratify status), record the
+  evidence, do not proceed.
 
 ## 1. Preconditions (verify, do not assume)
 
 - [ ] Rung posture confirmed on the target host. OWNER-GATED: dispatch the existing
   containment workflow `.github/workflows/multitable-recovery-flag-containment-check.yml`
-  (`gh workflow run` with `mode=postdeploy-full`, correct `target`) — dispatching it reaches
-  the deploy host over ssh, so it requires owner authorization like every dispatch here.
-  Expected: the flag legs red **exactly** on the set of flags this rung declares open
-  (ladder §3 — 差一个即回滚), schema leg green.
+  (`gh workflow run` with `mode=postdeploy-full`, the correct `target`, and
+  `posture=l4-revert` before opening §4's L4 drill or `posture=l5-reset` before opening §5's
+  L5 drill — `l5-reset`'s exact-active-flag set is a strict superset of `l4-revert`'s, so it
+  is also the correct posture to re-check once L5 is open). **Expected: a POSITIVE PASS**,
+  not a red result read as "expected" — the workflow fails closed on any mismatch, including
+  a flag this rung's posture declares OFF turning up on:
+  - `mode=postdeploy-full` → the workflow's literal sentinel line
+    `VERDICT: PASS (postdeploy-full) — exact ladder posture '<posture>' matches running/next-restart flags and database recovery schema matches its expected trigger posture`.
+  - `mode=predeploy-flags` (schema leg intentionally not verified; use only when the
+    postdeploy image/schema isn't deployed yet) → the distinct sentinel
+    `VERDICT: PASS (predeploy-flags) — exact ladder posture '<posture>' matches running AND next-restart flags; database recovery schema NOT verified in this mode`.
+
+  Any other output — including a FAIL that merely happens to be red on the flags this rung
+  opens — is a mismatch: ⛔ STOP per §0's hard rule, do not read it as confirming the
+  posture.
 - [ ] Q1 returns 9 rows, all `enabled_state = 'O'` (triggers were enabled at L1; a mixed
   posture here is an immediate ⛔ STOP — partial enablement is fail-closed by design).
 - [ ] Q2 returns 6 rows (authority functions present).
@@ -51,9 +82,148 @@
   `stats_reset` voids the window.
 - [ ] Record Q6 baseline burn count for the canary sheet (normally 0 before the first drill).
 
-## 3. L4 drill — sheet revert canary
+## 3. L2-C drill — named canary trust-checkpoint provisioning
 
-### 3.1 Seed and mint
+> **HOLD / DO NOT EXECUTE until E1 is ratified** (see the ladder-status note at the top of
+> this document). L2-C is a **transient provisioning step, not a standing rung**: per ladder
+> E1.1 item 2, it is entered only to mint one trust checkpoint on the named canary sheet,
+> then exited immediately back to `l2-fence`. It is a prerequisite for §4 (L4 revert) and §5
+> (L5 reset): both `handleExactAnchorPreview`'s trust-substrate check and `resolveExactAnchor`'s
+> covering-checkpoint gate refuse every anchor on a sheet with no active checkpoint, so a
+> revert/reset canary drilled without this step cannot get past `RECOVERY_TRUST_REQUIRED` /
+> `NO_COVERING_CHECKPOINT` regardless of which later flags are on.
+
+### 3.1 Standing prerequisites (verify; nothing here changes a flag)
+
+Every item below is a state to CONFIRM before §3.2 is entered. The flag ON/OFF window itself is
+§3.2's ordered sequence — do not turn anything on while working through this subsection.
+
+- [ ] Fence is already on: `MULTITABLE_ENABLE_WRITER_FENCE=true` on the target host (this is
+  the `l2-fence` posture this rung sits inside — activation additionally requires it at the
+  route layer: `univer-meta.ts`'s `POST /sheets/:sheetId/trust-checkpoint-activate` handler
+  checks `TRUST_CHECKPOINT_FENCE_REQUIRED` (~`univer-meta.ts:10171`, gate on
+  `isWriterFenceEnabled()`) and refuses **409** before touching the DB if the fence is off.
+- [ ] Activation flag is currently **OFF**: `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION`
+  unset (or not `true`). It is turned on for exactly one transient window in §3.2 step 2 and
+  removed again in step 5. It must be off when this section is entered, because §3.2 step 1's
+  entry posture (`l2-fence`) is *defined* by activation being off (ladder E1.2 posture matrix)
+  — a host that already has it on is not at the rung L2-C is entered from. While it is off the
+  route refuses **403** `TRUST_CHECKPOINT_ACTIVATION_DISABLED` (~`univer-meta.ts:10164`) before
+  any auth or DB work — a values-free, no-oracle refusal.
+- [ ] Canary sheet allowlist is set to the drill log's declared canary sheet — a **current,
+  route-enforced prerequisite** (landed on `main` with #5157), not a future work item.
+  `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` is a comma-separated list of sheet ids matched
+  **exactly** — no prefix, no glob, no case-folding
+  (`packages/core-backend/src/multitable/trust-checkpoint-activation-authz.ts`,
+  `resolveTrustCheckpointSheetAllowlist` / `isTrustCheckpointSheetAllowlisted`). It is
+  **fail-closed**: unset, empty, or only whitespace/commas ⇒ activation is refused for **every**
+  sheet, the canary included, so an owner designation is now a precondition by construction
+  rather than by operator discipline. Refusal: **409**
+  `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED`, values-free — it names the env var and the required
+  owner action, never the requested sheet id and never the list's contents.
+  - The list is still narrow by *policy* as well: put the drill log's declared canary sheet(s) in
+    it and nothing else, and never a customer sheet.
+- [ ] §1's preconditions are in hand for THIS host, in particular Q1 = 9 rows all
+  `enabled_state = 'O'`. The activation path takes the recovery-authority lease, which is
+  unavailable unless that substrate is exactly 9/9 ARMED (see the refusal table in §3.2 step 4).
+
+### 3.2 The ordered L2-C window
+
+The ladder's E1.1 item 2 fixes this order and it is **not** interchangeable. `l2-fence` is
+"fence ON, activation OFF" and `l2-checkpoint` is "fence ON, activation ON" (ladder E1.2 posture
+matrix), and the containment workflow fails closed on any mismatch — so an `l2-fence` PASS asked
+for *after* activation is turned on can never succeed, and the `l2-checkpoint` PASS is what proves
+the exact posture *before* anything is written:
+
+```
+l2-fence PASS -> activation ON -> l2-checkpoint PASS -> activate the checkpoint
+              -> activation OFF -> l2-fence PASS
+```
+
+- [ ] **Step 1 — entry posture (`l2-fence`), taken while activation is still OFF.**
+  OWNER-GATED: dispatch the containment workflow with `mode=postdeploy-full`, the canary
+  `target`, and `posture=l2-fence`. Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-fence' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  Anything else — including a FAIL that merely looks red on the flags this rung opens — is a
+  mismatch: ⛔ STOP per §0. This step can only pass with activation off, which is exactly why it
+  comes first.
+- [ ] **Step 2 — open the transient window: activation ON.** Set
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION=true` on the canary host only and apply it the
+  way that host's next-restart configuration is normally applied. This is the rung's own
+  owner/ops flag action (§0), not something this runbook performs; no posture is dispatched here,
+  because step 3 is what proves the flag actually took on both the running and next-restart legs.
+- [ ] **Step 3 — prove the exact posture (`l2-checkpoint`) BEFORE any checkpoint is written.**
+  OWNER-GATED: dispatch containment `mode=postdeploy-full`, `posture=l2-checkpoint`.
+  Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-checkpoint' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  ⛔ STOP on anything else — in particular, do **not** proceed to step 4 on the strength of step
+  1's PASS: that one described a different posture.
+- [ ] **Step 4 — activate the checkpoint (exactly once).** OWNER-GATED (D2 sheet-admin write, one
+  fenced transaction — design lock §3): mint it with
+  `POST /sheets/:sheetId/trust-checkpoint-activate` (no body) against the canary sheet, using a
+  sheet-admin (`canManageSheetAccess`) actor.
+  - Expected success: **200** with `{ checkpointId, trustedSinceSeq, baselineCount }`. Record
+    all three in the drill log verbatim (values-free elsewhere, but these three identifiers
+    ARE the checkpoint evidence ladder E1.1 item 2 requires).
+  - Expected refusals if a prerequisite is missing — fail closed, **nothing written in every
+    case**, listed in the route's own evaluation order so it is clear which refusal shadows
+    which:
+
+    | Refusal | Status | `details.retryable` | Meaning |
+    |---|---|---|---|
+    | `TRUST_CHECKPOINT_ACTIVATION_DISABLED` | 403 | — | activation flag off — step 2 did not take |
+    | `TRUST_CHECKPOINT_FENCE_REQUIRED` | 409 | — | writer fence off (§3.1 item 1) |
+    | (uniform `FORBIDDEN`) | 403 | — | actor is not a sheet-admin by CURRENT database rows — claims alone never widen the grant, and the same 403 is returned again from inside the fenced transaction |
+    | `TRUST_CHECKPOINT_AUTHORITY_BUSY` | 409 | `true` | the actor-authority lease is contended. Accepted busy sources include automation's `LOCK TABLE field_permissions IN SHARE MODE` and L1's own trigger `ALTER TABLE … ENABLE TRIGGER`, as well as a concurrent permission writer or recovery — the refusal names the substrate, not one contender. Nothing was written; an explicit operator retry is the correct response |
+    | `TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE` | 409 | `false` | the recovery-authority substrate is not exactly 9/9 ARMED, so the lease cannot be taken. This is the **intended fail-closed rung precedence**: activation is unavailable *before* L1 completes, by design. It is not a bug and not a transient state — do not retry it. In a correctly sequenced drill it cannot fire at all, because §1's Q1 precondition (9 rows, all `enabled_state = 'O'`) is already in hand; seeing it here means that precondition was not actually met on this host |
+    | `TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED` | 409 | — | sheet is not in `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (§3.1 item 3). Unset/empty refuses everything |
+    | `NOT_FOUND` | 404 | — | no such sheet — ordered after the allowlist so a designation-less deployment leaks no existence oracle |
+    | `HISTORY_INCOMPLETE` | 409 | — | a trashed-only record with unattributable vintage (`CheckpointUnattributableTrashError`, owner P1 fail-closed abort) |
+    | `RECOVERY_IN_PROGRESS` | 409 | `true` | a recovery holds the sheet's writer-fence lease right now — retry once it completes |
+    | `ACTIVATION_CONFLICT` | 409 | `true` | a racing second activation won the one-active partial-unique first — retry to supersede |
+
+- [ ] **Step 5 — close the window: activation OFF.** Remove
+  `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` from the environment and restart (or however
+  the target's next-restart config is normally applied) — this is the "immediately restore OFF"
+  half of E1.1 item 2. It must not be left in standing configuration.
+- [ ] **Step 6 — exit posture (`l2-fence`) again.** OWNER-GATED: dispatch containment
+  `mode=postdeploy-full`, `posture=l2-fence`. Expected, literally:
+  `VERDICT: PASS (postdeploy-full) — exact ladder posture 'l2-fence' matches running/next-restart flags and database recovery schema matches its expected trigger posture`
+  (activation observed OFF again on both legs, fence still ON). This is the exit criterion for
+  L2-C: a checkpoint now exists for the canary sheet, and the environment is back at `l2-fence`.
+
+### 3.3 Hand the canary ids to the acceptance harness — it must NOT mint its own sheet
+
+The T8-2 acceptance harness `packages/core-backend/scripts/reset-acceptance.mjs` that §5 runs is a pure
+HTTP client. It provisions its own drill RECORDS, but it must never provision its own SHEET: the covering
+trust checkpoint minted in §3.2 is bound to THIS named canary sheet, and §5 explicitly does not repeat
+checkpoint provisioning. A sheet the harness mints for itself therefore has no covering checkpoint and
+refuses `NO_COVERING_CHECKPOINT` on every preview, forever — the rung would be structurally unrunnable.
+
+- [ ] Write the canary base id and the canary sheet id from §3.2 into the drill log, and pass them to the
+  harness process as `RESET_CANARY_BASE_ID` and `RESET_CANARY_SHEET_ID`. **Both or neither** — one alone
+  is a config error (exit 2). These two are operator-side inputs to a local process, not host
+  configuration: they are not feature flags and are not registered in the global-history flag manifest.
+- [ ] `RESET_CANARY_SHEET_ID` must name the SAME sheet §3.2 step 4 activated the checkpoint on — which is
+  necessarily a sheet listed in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` of §3.1,
+  because activation refuses every sheet outside it. A neighbouring sheet in the same canary base does
+  not inherit the checkpoint.
+- [ ] With the pair UNSET the harness still runs the scenarios that legitimately own their fixtures — the
+  flag-off inertness pair, the D2 sheet-admin refusal, the typed-confirm refusal and the size-ceiling
+  refusal, each of which refuses UPSTREAM of the covering-checkpoint gate — but the reset-BEHAVIOR
+  scenarios SKIP with a stated reason and the run exits **2**, never 0. A green L5 can only come from a
+  run against the designated sheet; a run with no designated canary can never report L5 as passed.
+- [ ] Every run appends drill records and one stamped `number` field to the canary sheet. That is the same
+  canary data §6 has the operator delete or reset after the drill — do not point the harness at any sheet
+  outside the drill log's declared canary set, and never at a customer sheet.
+
+## 4. L4 drill — sheet revert canary
+
+> **HOLD / DO NOT EXECUTE until E1 is ratified.** Requires §3 (L2-C) already completed for
+> this canary sheet — an anchor drilled here without an active covering checkpoint refuses
+> `NO_COVERING_CHECKPOINT` regardless of the flags below.
+
+### 4.1 Seed and mint
 
 - [ ] In the canary org, create/refresh the canary sheet with a known record set; write the
   expected post-revert state into the drill log *before* executing anything.
@@ -61,7 +231,7 @@
   in `packages/core-backend/src/routes/univer-meta.ts`, `handleExactAnchorPreview`). Record
   the preview's anchor summary in the drill log.
 
-### 3.2 Precise-anchor revert success
+### 4.2 Precise-anchor revert success
 
 - [ ] Execute with the freshly-minted token: `POST /api/.../sheets/:sheetId/revert-execute`.
   Expected: success response; sheet content equals the pre-declared expected state.
@@ -73,7 +243,7 @@
   `meta_recovery_token_burns` PK). Evidence anchor:
   `packages/core-backend/tests/integration/multitable-exact-anchor-apply-realdb.test.ts`.
 
-### 3.3 Preview-drift abort — positive control
+### 4.3 Preview-drift abort — positive control
 
 This step exists to prove the abort path is **live** in this environment, not just in CI.
 
@@ -89,7 +259,7 @@ This step exists to prove the abort path is **live** in this environment, not ju
   (P25 preview-drift gates),
   `packages/core-backend/tests/integration/multitable-exact-anchor-recovery-realdb.test.ts`.
 
-### 3.4 Busy/backoff behaviour (lease contention)
+### 4.4 Busy/backoff behaviour (lease contention)
 
 - [ ] While an operator session holds a canary-subject platform write open (e.g. a
   long-running permission change in a transaction), execute a revert. Expected: either
@@ -111,7 +281,7 @@ This step exists to prove the abort path is **live** in this environment, not ju
   `recovery-conflict-surfaces-routes-*.test.ts` behaviour legs),
   `packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts`.
 
-### 3.5 Foreign-fence link-in concurrent write — no-40P01 check (ladder §4)
+### 4.5 Foreign-fence link-in concurrent write — no-40P01 check (ladder §4)
 
 The ladder registers the foreign-fence shared-lookup residual and **requires** this step at
 L4/L5: one link-in concurrent-write scenario confirming no deadlock.
@@ -129,7 +299,7 @@ L4/L5: one link-in concurrent-write scenario confirming no deadlock.
   `packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts`
   (P22 fence availability + deadlock-freedom).
 
-#### 3.5a Second link-in shape: an FK **into a platform-auth table** (found 2026-08-20)
+#### 4.5a Second link-in shape: an FK **into a platform-auth table** (found 2026-08-20)
 
 The scenario above exercises the multitable-side shape (`meta_links` → drill-sheet records). A
 **different** instance of the same residual class exists on the platform side and must be drilled
@@ -140,21 +310,21 @@ too, because it touches a table the ladder's own triggers sit on:
 Inserting into that table therefore takes a `KEY SHARE` lock on a `users` row — and `users` is one
 of the eight platform-auth tables whose recovery-authority trigger is ENABLED from L1 onward. That
 is exactly the ladder §4 shape (FK `KEY SHARE` vs row-level `FOR UPDATE`), reached through a
-**different, non-multitable** write path that the 3.5 scenario does not cover.
+**different, non-multitable** write path that the 4.5 scenario does not cover.
 
 - [ ] While a revert/reset is executing (so recovery holds its exclusive lease and the authority
   triggers are live), drive an approval write that inserts into `approval_usable_member_groups`
   (i.e. a member-group usability change on the canary org) in a loop.
-- [ ] Expected: same criterion as 3.5 — the approval writer may see a transient retryable 409/busy,
+- [ ] Expected: same criterion as 4.5 — the approval writer may see a transient retryable 409/busy,
   but **Q4 `deadlocks` delta = 0**; neither side deadlocks.
-- [ ] ⛔ STOP on any nonzero delta. Note in the drill record which of 3.5 / 3.5a produced it — they
+- [ ] ⛔ STOP on any nonzero delta. Note in the drill record which of 4.5 / 4.5a produced it — they
   are different lock shapes and a fix for one does not imply the other.
 - [ ] Applicability check first: this table only exists once the approval migration above is
-  applied. If the target host is behind on it, record 3.5a as **NOT RUN (table absent)** rather
+  applied. If the target host is behind on it, record 4.5a as **NOT RUN (table absent)** rather
   than as passed — an absent table cannot deadlock, and reading that as a pass would be exactly
   the empty-read trap.
 
-### 3.6 Trash / link state check
+### 4.6 Trash / link state check
 
 - [ ] Paste the canary sheet ids into Q8's `EDIT ME` list and run it.
   Expected: `dangling_links` = 0 rows (or rows with count 0) for the canary set;
@@ -163,42 +333,57 @@ is exactly the ladder §4 shape (FK `KEY SHARE` vs row-level `FOR UPDATE`), reac
 - [ ] Restore-path spot check: restore one drill-trashed record and verify it returns with
   its original timestamps (trash table preserves `original_created_at`/`original_updated_at`).
 
-### 3.7 Close the L4 window
+### 4.7 Close the L4 window
 
 - [ ] Re-run the full observation file; verify: Q6 total burns == ledger, Q7 empty,
   Q4 deadlock delta 0, Q5 still empty (0 rows — if not, the observation kit's sink
   inventory is stale; update it before trusting counts).
 - [ ] Record the Q4 AFTER values; compute and log deltas.
-- [ ] Drill log completed and attached to the rung's observation-window evidence (ladder §2
-  L4 criteria). Advancing to L5 is a **separate owner authorization** — nothing in this
-  runbook grants it.
+- [ ] Confirm posture one more time: containment `mode=postdeploy-full`, `posture=l4-revert`
+  → PASS.
+- [ ] Drill log completed and attached to the rung's observation-window evidence (ladder
+  E1.1 item 4's L4 criteria). Advancing to L5 is a **separate owner authorization** — nothing
+  in this runbook grants it.
 
-## 4. L5 drill — PIT reset canary
+## 5. L5 drill — PIT reset canary
 
-Same discipline as §3 with the reset endpoints
-(`POST /api/.../sheets/:sheetId/reset-preview` / `reset-execute`):
+> **HOLD / DO NOT EXECUTE until E1 is ratified.** Requires §3 (L2-C) already completed for
+> this canary sheet, same as L4 — the covering checkpoint is a sheet-level trust floor, not a
+> per-rung one, so L5 does not repeat checkpoint provisioning if §3/§4 already ran it for this
+> sheet. Because L5 does not provision one, the acceptance harness must REUSE the §3 canary
+> sheet via `RESET_CANARY_BASE_ID` / `RESET_CANARY_SHEET_ID` (§3.3) rather than minting its own;
+> without them the harness skips the reset-behavior scenarios and exits 2 by construction.
 
-- [ ] §3.1–§3.2 analogue: pre-declared expected post-reset state; precise-anchor reset
+Same discipline as §4 with the reset endpoints
+(`POST /api/.../sheets/:sheetId/reset-preview` / `reset-execute`), confirming posture
+`l5-reset` throughout instead of `l4-revert`:
+
+- [ ] §4.1–§4.2 analogue: pre-declared expected post-reset state; precise-anchor reset
   succeeds; exactly one new Q6 burn per execute; replay refused.
-- [ ] §3.3 analogue: preview-drift abort positive control (mutate after minting → execute
+- [ ] §4.3 analogue: preview-drift abort positive control (mutate after minting → execute
   must refuse, no burn, no data change). ⛔ STOP if it applies.
-- [ ] §3.4 analogue: busy/backoff under held lease; Q7 `paused_retryable` handling.
-- [ ] §3.5 **repeated for reset**: link-in concurrent-write, Q4 deadlock delta 0
+- [ ] §4.4 analogue: busy/backoff under held lease; Q7 `paused_retryable` handling.
+- [ ] §4.5 **repeated for reset**: link-in concurrent-write, Q4 deadlock delta 0
   (the ladder §4 requirement covers both L4 and L5).
-- [ ] §3.6 analogue: trash/link state; dangling links 0.
-- [ ] §3.7 analogue: close the window; L6 soak entry is a separate owner authorization.
+- [ ] §4.6 analogue: trash/link state; dangling links 0.
+- [ ] §4.7 analogue: close the window (confirm `posture=l5-reset` PASS); L6 soak entry is a
+  separate owner authorization.
 
-## 5. Abort / rollback of a drill
+## 6. Abort / rollback of a drill
 
 - A failed drill never "rolls itself forward": follow ladder §5 —
-  flag-level removal (rung's flag off, restart, `predeploy-flags` verification) or, for a
-  full stand-down, the trigger-level DISABLE script. Both are host-touching operator
-  actions. OWNER-GATED: any ssh session or workflow dispatch used to perform or verify the
-  rollback (including re-running the containment workflow) requires owner authorization.
+  flag-level removal (rung's flag off, restart, next-lower rung's — or `l1-armed`'s —
+  `posture` for a precise positive-PASS re-verification) or, for a full stand-down, the
+  trigger-level DISABLE script verified against `posture=inert`. Both are host-touching
+  operator actions. OWNER-GATED: any ssh session or workflow dispatch used to perform or
+  verify the rollback (including re-running the containment workflow) requires owner
+  authorization.
 - After rollback: Q1 must show the declared posture (9× 'D' after a full stand-down),
-  Q7 must be empty, and the canary org's data is deleted or reset by the operator.
+  Q7 must be empty, containment must PASS at the landed rung's exact `posture` (or
+  `posture=inert` after a full stand-down), and the canary org's data is deleted or reset by
+  the operator.
 
-## 6. Evidence-anchor index (all repo-relative, all existing)
+## 7. Evidence-anchor index (all repo-relative, all existing)
 
 | Drill step | Anchor |
 |---|---|
@@ -207,7 +392,9 @@ Same discipline as §3 with the reset endpoints
 | Route wiring of preview/execute endpoints | `packages/core-backend/tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts` |
 | Lease backoff bounded / fresh-attempt semantics | `packages/core-backend/tests/integration/multitable-recovery-lease-backoff-realdb.test.ts` |
 | Authority lease stability + fail-closed unavailable | `packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts`, `packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts` |
-| Foreign-fence availability, deadlock-freedom (§3.5) | `packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts` |
+| Foreign-fence availability, deadlock-freedom (§4.5) | `packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts` |
+| Trust-checkpoint activation route + fence/flag gating (§3 L2-C) | `packages/core-backend/src/routes/univer-meta.ts` (`POST /sheets/:sheetId/trust-checkpoint-activate`, ~L10162), `packages/core-backend/src/multitable/history-trust-checkpoint.ts` (`activateCheckpoint`, `selectCheckpointByAnchorSeq`) |
+| Acceptance-harness canary reuse + request shapes (§3.3, §5) | `packages/core-backend/scripts/reset-acceptance.mjs`, `packages/core-backend/tests/unit/reset-acceptance-request-shape.test.ts` |
 | 40001→409 classifier + census + per-surface behaviour legs | `packages/core-backend/src/db/recovery-conflict.ts`, `packages/core-backend/tests/unit/recovery-conflict-census.test.ts`, `packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts` |
 | Register-path atomicity under 40001 | `packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts` |
 | Trigger/function inertness fingerprints (containment) | `scripts/ops/multitable-recovery-schema-containment.mjs` |
