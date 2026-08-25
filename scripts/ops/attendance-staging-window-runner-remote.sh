@@ -141,7 +141,8 @@ TARGET_MIGRATION_ENV_FILE=""
 # original claim named 5 files and said "zero other reads found", but the real IMPORT CLOSURE of
 # migrate.ts is 9 files and one of the unnamed four DID read an env var; a census whose scope is
 # smaller than the code it vouches for produces honest-looking absences): walk the full import
-# closure of migrate.ts (incl. core/logger.ts, error-handler, types), grep `process\.env\.` in
+# closure of migrate.ts (incl. core/logger.ts, context/request-context.ts,
+# integration/metrics/metrics.ts), grep `process\.env\.` in
 # every file, plus every file under src/db/migrations|migrations/:
 #   DATABASE_URL                    - connection-pool.ts:200 secretManager.get('DATABASE_URL', ...)
 #   NODE_ENV                        - connection-pool.ts:200,207 (required/ssl gate);
@@ -787,14 +788,32 @@ auth_round_trip() {
 # and parses the SAME `--list` text, so an exclusion pushes it TOWARD the pass branch. Meanwhile
 # action=migrate aborts loud on the identical host state. Same class as the target-migrate hazard
 # handling above: detect-and-abort first (visibility — a set hazard var is a misconfiguration to
-# surface, not to silently mask), then forced `-e` neutralization at every exec (belt), so
-# weakening either alone still leaves the other standing.
+# surface, not to silently mask), then forced `-e` neutralization OF ALL THREE NAMES at every
+# exec (belt — N3: the first shape forced only MIGRATION_EXCLUDE while this comment claimed all
+# three), so weakening either layer alone still leaves the other standing.
 assert_deploy_migrate_env_safe() {
-  local name value
+  # PROBE HONESTY (N2, gate on c5be6a54e8): the first shape of this helper ended the probe with
+  # `|| true`, which collapsed EVERY nonzero exit — docker exec rc=125, missing printenv rc=127 —
+  # into value="" and certified SAFE without having observed anything. That is the exact class
+  # this PR guards against elsewhere (a zero-read is not a read of zero). printenv distinguishes
+  # natively: rc=0 set (possibly empty — empty is genuinely safe, all three consumers treat only
+  # non-empty / exact-true as active), rc=1 unset, anything else = THE PROBE FAILED.
+  local name value rc
   for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
-    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null || true)"
-    [[ -z "$value" ]] \
-      || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
+    rc=0
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null)" || rc=$?
+    case "$rc" in
+      0)
+        [[ -z "$value" ]] \
+          || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
+        ;;
+      1)
+        : # printenv: variable unset — the only observation besides set-empty that certifies SAFE
+        ;;
+      *)
+        fail "could not observe ${name} on the running backend (docker exec rc=${rc}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
+        ;;
+    esac
   done
 }
 
@@ -891,7 +910,7 @@ action_deploy() {
   # image's own /app/scripts copy so its file scan matches the deployed migration set.
   prepare_container_runner
   assert_deploy_migrate_env_safe
-  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
   docker cp "${OUTPUT_DIR}/migrate-list-before.txt" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migrate-list-before.txt"
   staging_exec node /app/scripts/ops/staging-migration-alignment-report.mjs \
     --migrate-list-file "${CONTAINER_RUNNER_DIR}/migrate-list-before.txt" \
@@ -902,8 +921,8 @@ action_deploy() {
     fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
   fi
 
-  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
-  staging_exec_env "MIGRATION_EXCLUDE=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/migrate-list-after.txt" \
     || fail "migrations did not end at pending=0 (see migrate-list-after.txt)"
 

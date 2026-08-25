@@ -967,18 +967,109 @@ trap -p
   assert.match(r.stdout, /trap -- '[^']*' (SIGEXIT|EXIT)/)
 })
 
+// Comment-stripped view of a function body. Two independent reviews of c5be6a54e8 (the external
+// one and the gate's N1) proved every WIRING pin below was satisfiable by a COMMENTED-OUT line:
+// with all eight load-bearing lines turned into `# ...` comments, bash -n passed and this suite
+// stayed green at 136/136 while action=deploy migrated nothing and the P1-2 pipeline was fully
+// unwired. A wiring pin may only match EXECUTABLE lines: strip full-line comments, then anchor
+// at line start.
+function executableLines(body) {
+  return body.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n')
+}
+
+test('EXECUTABLE (P1-2 wiring): action_migrate_apply CALLS the pipeline — real body, recording stubs, order and arguments', () => {
+  // The stronger tier, and why it exists alongside the anchored text pins: a text pin — even
+  // comment-stripped and line-anchored — is still satisfied by a call wrapped in dead control
+  // flow (`if false; then ... fi`). Executing the REAL extracted body with recording stubs is
+  // not: commented, deleted, and dead-wrapped calls all fail identically — the recorder never
+  // sees them.
+  const applyFn = extractRunnerFunctions(['action_migrate_apply'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-apply-wiring-'))
+  const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+MIGRATE_JS="fake/dist/migrate.js"
+MIGRATE_BACKUP_PATH="/dev/null"
+CALLS="${dir}/calls.txt"
+log() { :; }
+fail() { echo "HARNESS-FAIL:$*" >&2; exit 1; }
+resolve_backend_database_url() { echo "postgres://u:p@postgres:5432/stagingdb"; }
+dsn_database_name() { echo "stagingdb"; }
+target_migrate_exec() {
+  echo "exec:$*" >> "$CALLS"
+  if [[ "$*" == *"--confirm 076_create_integration_stock_prep_pack_installs"* ]]; then
+    echo 'migration "076_create_integration_stock_prep_pack_installs" is applied'
+  elif [[ "$*" == *"--list"* ]]; then
+    echo "Applied: 337"
+    echo "Pending: 0"
+  else
+    echo "migrations run"
+  fi
+}
+compute_in_play_migrations() { echo "compute:$1" >> "$CALLS"; echo "zzzz_example" > "$OUTPUT_DIR/migration-in-play.txt"; }
+assert_applied_counts_agree() { echo "counts:$1|$2" >> "$CALLS"; }
+confirm_in_play_migrations() { echo "confirm:$1" >> "$CALLS"; }
+${applyFn}
+action_migrate_apply
+`
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(r.status, 0, `stderr=${r.stderr}`)
+  const calls = readFileSync(join(dir, 'calls.txt'), 'utf8').trim().split('\n')
+  const compute = calls.indexOf('compute:stagingdb')
+  const counts = calls.indexOf(`counts:${dir}/migration-applied-before.txt|${dir}/apply-migrate-list-before.txt`)
+  const confirm = calls.indexOf(`confirm:${dir}/migration-in-play.txt`)
+  const mutating = calls.indexOf('exec:-- node fake/dist/migrate.js')
+  assert.ok(compute >= 0, `compute_in_play_migrations never RAN with the real DB name; calls=${calls.join(' ; ')}`)
+  assert.ok(counts >= 0, `assert_applied_counts_agree never RAN with the two ledger paths; calls=${calls.join(' ; ')}`)
+  assert.ok(confirm >= 0, `confirm_in_play_migrations never RAN with the in-play file; calls=${calls.join(' ; ')}`)
+  assert.ok(mutating >= 0, 'the mutating migrate exec itself vanished — the harness drifted from the body')
+  assert.ok(compute < counts && counts < mutating, `the gates must run BEFORE the mutating migrate: compute=${compute} counts=${counts} mutating=${mutating}`)
+  assert.ok(confirm > mutating, 'per-name confirmation must follow the apply')
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('EXECUTABLE (F1 probe honesty): a FAILED probe refuses SAFE; unset and set-but-empty pass', () => {
+  // N2 (gate on c5be6a54e8): the first probe ended in `|| true`, collapsing docker exec rc=125
+  // and printenv-missing rc=127 into value="" -> SAFE certified without observing anything.
+  // printenv distinguishes natively: rc=0 set, rc=1 unset, else the PROBE failed.
+  const fn = extractRunnerFunctions(['assert_deploy_migrate_env_safe'])
+  const harness = (dockerBody) => `#!/bin/bash
+set -uo pipefail
+BACKEND_CONTAINER="fake-backend"
+fail() { echo "[window-runner][error] $*" >&2; exit 1; }
+docker() { ${dockerBody}; }
+${fn}
+assert_deploy_migrate_env_safe
+echo SAFE
+`
+  // docker exec itself fails (daemon down / container gone): must REFUSE, naming the rc.
+  const broken = spawnSync('bash', ['-c', harness('return 125')], { encoding: 'utf8' })
+  assert.equal(broken.status, 1, `stderr=${broken.stderr}`)
+  assert.match(broken.stderr, /rc=125/, 'the refusal must name the probe rc')
+  assert.match(broken.stderr, /FAILED probe/i)
+  // unset everywhere (printenv rc=1): SAFE.
+  const unset = spawnSync('bash', ['-c', harness('return 1')], { encoding: 'utf8' })
+  assert.equal(unset.status, 0, `stderr=${unset.stderr}`)
+  assert.match(unset.stdout, /SAFE/)
+  // set-but-EMPTY (printenv rc=0, empty output): SAFE — all three consumers treat only
+  // non-empty / exact-true as active, so empty must not block a deploy.
+  const empty = spawnSync('bash', ['-c', harness('if [[ "$4" == "MIGRATION_EXCLUDE" ]]; then echo ""; else return 1; fi')], { encoding: 'utf8' })
+  assert.equal(empty.status, 0, `stderr=${empty.stderr}`)
+  assert.match(empty.stdout, /SAFE/)
+})
+
 test('WIRING (P1-2): the pipeline calls are present in the REAL apply path — deletion-mutation-provable', () => {
   // The gate on 5b4b38d925 proved the previous shape's hole with arithmetic: each of these three
   // CALLS could be deleted from the script with this whole suite still green at 132/132 — the
   // functions were tested, their wiring was not, and a tested-but-never-called guard is a claim,
   // not a check. These pins are function-scoped (extracted from the REAL runner source, not a
   // replica) so deleting the call site — the gate's exact mutation — reds here.
-  const applyBody = extractRunnerFunctions(['action_migrate_apply'])
-  assert.match(applyBody, /compute_in_play_migrations "\$real_db"/,
+  const applyBody = executableLines(extractRunnerFunctions(['action_migrate_apply']))
+  assert.match(applyBody, /^\s*compute_in_play_migrations "\$real_db"\s*$/m,
     'action_migrate_apply no longer computes the in-play set — the per-name confirmation below would confirm an empty list')
-  assert.match(applyBody, /assert_applied_counts_agree "\$\{OUTPUT_DIR\}\/migration-applied-before\.txt" "\$\{OUTPUT_DIR\}\/apply-migrate-list-before\.txt"/,
+  assert.match(applyBody, /^\s*assert_applied_counts_agree "\$\{OUTPUT_DIR\}\/migration-applied-before\.txt" "\$\{OUTPUT_DIR\}\/apply-migrate-list-before\.txt"\s*$/m,
     'action_migrate_apply no longer cross-checks the applied counts — ledger-invisible exclusions regain cover')
-  assert.match(applyBody, /confirm_in_play_migrations "\$\{OUTPUT_DIR\}\/migration-in-play\.txt"/,
+  assert.match(applyBody, /^\s*confirm_in_play_migrations "\$\{OUTPUT_DIR\}\/migration-in-play\.txt"\s*$/m,
     'action_migrate_apply no longer name-confirms the in-play migrations — the exclusion canary is unwired')
 })
 
@@ -988,8 +1079,8 @@ test('WIRING (P2-4): BOTH signal-trap arm points in action_migrate, in ORDER —
   // alone stayed green at 132/132. The second arm point matters because rehearsal installs its
   // OWN trap; without re-arming, the real-DB apply runs with the rehearsal-shaped trap gone and
   // the secret env-file survives a caught signal (the pre-hardening shape).
-  const migrateBody = extractRunnerFunctions(['action_migrate'])
-  const arms = [...migrateBody.matchAll(/trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM/g)].map((m) => m.index)
+  const migrateBody = executableLines(extractRunnerFunctions(['action_migrate']))
+  const arms = [...migrateBody.matchAll(/^\s*trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM\s*$/gm)].map((m) => m.index)
   assert.equal(arms.length, 2, `action_migrate must arm the signal trap at BOTH points, found ${arms.length}`)
   const precheckIdx = migrateBody.indexOf('action_migrate_read_only_prechecks')
   const rehearseIdx = migrateBody.indexOf('action_migrate_rehearse')
@@ -1005,11 +1096,11 @@ test('WIRING (F1): action_deploy inline migrate is exclusion-proof — hazard ab
   // MIGRATION_EXCLUDE — which is ledger-INVISIBLE (excluded names vanish from --list, so the
   // `Pending: 0` gate and the alignment report, which parses the same --list text with no
   // filesystem census of its own, both go green over unapplied migrations).
-  const deployBody = extractRunnerFunctions(['action_deploy'])
-  assert.match(deployBody, /assert_deploy_migrate_env_safe/, 'the hazard abort is unwired from action_deploy')
-  const forced = [...deployBody.matchAll(/staging_exec_env "MIGRATION_EXCLUDE=" -- node "\$MIGRATE_JS"/g)]
-  assert.equal(forced.length, 3, `all three deploy-path MIGRATE_JS invocations must force MIGRATION_EXCLUDE= (list-before, run, list-after); found ${forced.length}`)
-  assert.ok(!/staging_exec node "\$MIGRATE_JS"/.test(deployBody),
+  const deployBody = executableLines(extractRunnerFunctions(['action_deploy']))
+  assert.match(deployBody, /^\s*assert_deploy_migrate_env_safe\s*$/m, 'the hazard abort is unwired from action_deploy')
+  const forced = [...deployBody.matchAll(/^\s*staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "\$MIGRATE_JS"/gm)]
+  assert.equal(forced.length, 3, `all three deploy-path MIGRATE_JS invocations must force ALL THREE hazard vars empty (N3; list-before, run, list-after); found ${forced.length}`)
+  assert.ok(!/^\s*staging_exec node "\$MIGRATE_JS"/m.test(deployBody),
     'a bare staging_exec MIGRATE_JS reappeared in action_deploy — it inherits container MIGRATION_EXCLUDE')
 })
 
