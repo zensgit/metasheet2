@@ -10312,7 +10312,11 @@ export function univerMetaRouter(): Router {
         return res.status(409).json({ ok: false, error: { code: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE, message: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE } })
       }
       if (err instanceof TrustCheckpointSheetMissingError) {
-        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+        // VALUES-FREE (owner fix, 2026-08-25): the error class already carries a fixed message;
+        // pasting the request's sheetId back here re-introduced a request value into a refusal
+        // observable by a caller without current authority. Pinned by the l5wire 404 golden,
+        // which asserts the SERIALISED body never contains the requested id.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
       if (err instanceof CheckpointUnattributableTrashError) {
         // Fail-closed abort (owner P1, L5): a trashed-only record whose vintage cannot be causally attributed

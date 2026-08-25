@@ -198,8 +198,8 @@ export async function assertTrustCheckpointActivationAuthority(
  */
 export const TRUST_CHECKPOINT_AUTHORITY_BUSY_CODE = 'TRUST_CHECKPOINT_AUTHORITY_BUSY'
 export const TRUST_CHECKPOINT_AUTHORITY_BUSY_MESSAGE =
-  'Trust-checkpoint activation could not take the actor authority lease because permissions are ' +
-  'being stabilized concurrently; nothing was written. Retry this activation.'
+  'Trust-checkpoint activation could not take the actor authority lease: the recovery-authority ' +
+  'substrate is busy. Nothing was written. Retry this activation.'
 
 /**
  * Named, NON-retryable refusal: the canonical recovery-authority substrate is not exactly 9/9 ARMED

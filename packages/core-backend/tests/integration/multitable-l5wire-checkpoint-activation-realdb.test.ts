@@ -482,6 +482,11 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
     const res = await activateReq(missing)
     expect(res.status).toBe(404)
     expect(res.body?.error?.code).toBe('NOT_FOUND')
+    // VALUES-FREE (owner fix, 2026-08-25): the refusal must not echo the requested sheet id back.
+    // The error class already carried a fixed message; the route's catch had pasted `${sheetId}` in,
+    // which un-did it at the only place a caller can observe. Assert on the SERIALISED body so no
+    // field (message, details, anywhere) can reintroduce it.
+    expect(JSON.stringify(res.body)).not.toContain(missing)
   })
 
   // ── P2 authorization fix: DB-fresh in-transaction re-check ──────────────────────────────────────────
