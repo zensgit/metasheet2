@@ -11,6 +11,7 @@ import {
   listElearningCourseAccessCandidates,
   type ElearningCourseAccessCandidate,
 } from './elearning-course-access'
+import { matchElearningAudienceRuleIds } from './elearning-audience-resolver'
 
 export const ELEARNING_LEARNER_COURSES_LIMIT = 100 as const
 
@@ -225,11 +226,6 @@ WHERE (
     WHERE current_scope.org_id = $1
       AND current_scope.id = c.scope_id
       AND current_rule.id = access.scope_revision_rule_id
-      AND (
-        (current_rule.subject_type = 'all' AND current_rule.subject_ref IS NULL)
-        OR
-        (current_rule.subject_type = 'user' AND current_rule.subject_ref = $2)
-      )
   )
 )
 ORDER BY access.ordinality ASC`
@@ -527,6 +523,19 @@ export async function listElearningLearnerCourses(
     })
     if (candidates.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
     if (candidates.length === 0) return []
+
+    const visibilityRuleIds = [...new Set(candidates.flatMap((candidate) =>
+      candidate.basis.kind === 'visibility' ? [candidate.basis.scopeRevisionRuleId] : [],
+    ))]
+    if (visibilityRuleIds.length > 0) {
+      const matchedRuleIds = await matchElearningAudienceRuleIds(db, {
+        orgId,
+        userId,
+        ruleIds: visibilityRuleIds,
+      })
+      const matched = new Set(matchedRuleIds)
+      if (visibilityRuleIds.some((ruleId) => !matched.has(ruleId))) fail('unavailable')
+    }
 
     const versionIds = candidates.map((candidate) => candidate.courseVersionId)
     const assignmentMemberIds = candidates.map((candidate) => candidate.basis.assignmentMemberId)

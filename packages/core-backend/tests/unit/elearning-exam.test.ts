@@ -195,7 +195,7 @@ function assertPublicSubmitJson(payload: unknown): Record<string, unknown> {
 }
 
 function examQueryTag(sql: string): string | null {
-  const match = /\/\* (elearning-(?:exam|access):[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:exam|access|audience):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
 }
 
@@ -260,14 +260,35 @@ function queryAccessMemory(
     }
     return { rows: [{ active_revision_id: access.scopeRevisionId }], rowCount: 1 }
   }
-  if (tag === 'elearning-access:match-rule') {
+  if (tag === 'elearning-audience:load-revision-rules') {
     if (params[0] !== ORG || params[1] !== access.scopeRevisionId || !access.scopeRuleId) {
       return { rows: [], rowCount: 0 }
     }
-    const matches = access.scopeSubjectType !== 'user' || access.scopeSubjectRef === params[2]
-    return matches
-      ? { rows: [{ id: access.scopeRuleId }], rowCount: 1 }
-      : { rows: [], rowCount: 0 }
+    return {
+      rows: [{
+        rule_id: access.scopeRuleId,
+        scope_revision_id: access.scopeRevisionId,
+        subject_type: access.scopeSubjectType,
+        subject_ref: access.scopeSubjectRef,
+        include_children: false,
+      }],
+      rowCount: 1,
+    }
+  }
+  if (tag === 'elearning-audience:lock-principal') {
+    return { rows: [{ id: USER }], rowCount: 1 }
+  }
+  if (tag === 'elearning-audience:resolve-membership') {
+    if (params[0] !== ORG || typeof params[1] !== 'string') {
+      return { rows: [], rowCount: 0 }
+    }
+    const rules = JSON.parse(params[1]) as Array<Record<string, unknown>>
+    const rows = rules.flatMap((rule) => {
+      const matches = rule.subject_type === 'all'
+        || (rule.subject_type === 'user' && rule.subject_ref === USER)
+      return matches ? [{ rule_key: rule.rule_key, user_id: USER }] : []
+    })
+    return { rows, rowCount: rows.length }
   }
   return null
 }

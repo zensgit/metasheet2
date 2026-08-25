@@ -75,7 +75,7 @@ interface Mem {
 }
 
 function tagOf(sql: string): string | null {
-  const match = /\/\* (elearning-(?:playback|access):[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:playback|access|audience):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
 }
 
@@ -185,7 +185,7 @@ function createMemoryDb(seed: Partial<Mem> = {}): {
         rowCount: 1,
       }
     }
-    if (tag === 'elearning-access:match-rule') {
+    if (tag === 'elearning-audience:load-revision-rules') {
       if (
         !item ||
         params[0] !== ORG ||
@@ -194,11 +194,31 @@ function createMemoryDb(seed: Partial<Mem> = {}): {
       ) {
         return { rows: [], rowCount: 0 }
       }
-      const matches =
-        item.scopeSubjectType !== 'user' || item.scopeSubjectRef === params[2]
-      return matches
-        ? { rows: [{ id: item.scopeRuleId }], rowCount: 1 }
-        : { rows: [], rowCount: 0 }
+      return {
+        rows: [{
+          rule_id: item.scopeRuleId,
+          scope_revision_id: item.scopeRevisionId,
+          subject_type: item.scopeSubjectType,
+          subject_ref: item.scopeSubjectRef,
+          include_children: false,
+        }],
+        rowCount: 1,
+      }
+    }
+    if (tag === 'elearning-audience:lock-principal') {
+      return { rows: [{ id: USER }], rowCount: 1 }
+    }
+    if (tag === 'elearning-audience:resolve-membership') {
+      if (!item || params[0] !== ORG || typeof params[1] !== 'string') {
+        return { rows: [], rowCount: 0 }
+      }
+      const rules = JSON.parse(params[1]) as Array<Record<string, unknown>>
+      const rows = rules.flatMap((rule) => {
+        const matches = rule.subject_type === 'all'
+          || (rule.subject_type === 'user' && rule.subject_ref === USER)
+        return matches ? [{ rule_key: rule.rule_key, user_id: USER }] : []
+      })
+      return { rows, rowCount: rows.length }
     }
     throw new Error('unexpected query')
   }
@@ -596,7 +616,9 @@ describe('issueElearningMediaPlaybackTicket', () => {
       'elearning-access:lock-course',
       'elearning-access:lock-assignment',
       'elearning-access:lock-scope',
-      'elearning-access:match-rule',
+      'elearning-audience:load-revision-rules',
+      'elearning-audience:lock-principal',
+      'elearning-audience:resolve-membership',
     ])
   })
 

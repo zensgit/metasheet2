@@ -188,6 +188,16 @@ async function cleanupOrg(org: string): Promise<void> {
       [org],
     )
     await pool.query('DELETE FROM elearning_scopes WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM directory_integrations WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM user_orgs WHERE org_id = $1', [org])
+    await pool.query(
+      `DELETE FROM users user_row
+        WHERE user_row.id LIKE $1
+          AND NOT EXISTS (
+            SELECT 1 FROM user_orgs membership WHERE membership.user_id = user_row.id
+          )`,
+      [`${NS}-actor-learner-%`],
+    )
   } finally {
     await setTriggers(true)
   }
@@ -264,6 +274,23 @@ async function seedPublishedAssignment(input: {
   const memberId = randomUUID()
   const storageKey = `elearning-media/${NS}/${mediaId}.mp4`
 
+  await pool.query(
+    `INSERT INTO users (
+       id, email, name, password_hash, role, permissions,
+       is_active, is_admin, activation_status, local_password_set,
+       must_change_password, created_at, updated_at
+     ) VALUES (
+       $1, $2, $3, 'x', 'user', '[]'::jsonb,
+       TRUE, FALSE, 'activated', TRUE,
+       FALSE, now(), now()
+     )`,
+    [userId, `${userId}@playback.test`, userId],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1, $2, TRUE)`,
+    [userId, input.org],
+  )
   await pool.query(
     `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
      VALUES ($1, $2, 'Playback service course', 'active', $3)`,
@@ -390,7 +417,13 @@ async function insertAssignedPeer(seed: Seed, userId: string): Promise<void> {
   )
 }
 
-async function replaceAssignmentWithAllVisibility(seed: Seed): Promise<{
+async function replaceAssignmentWithVisibility(
+  seed: Seed,
+  rule: { subjectType: 'all'; subjectRef: null } | {
+    subjectType: 'position'
+    subjectRef: string
+  } = { subjectType: 'all', subjectRef: null },
+): Promise<{
   scopeId: string
   revisionId: string
 }> {
@@ -410,8 +443,8 @@ async function replaceAssignmentWithAllVisibility(seed: Seed): Promise<{
   await pool.query(
     `INSERT INTO elearning_scope_revision_rules
        (org_id, scope_revision_id, subject_type, subject_ref, include_children)
-     VALUES ($1, $2, 'all', NULL, FALSE)`,
-    [seed.org, revisionId],
+     VALUES ($1, $2, $3, $4, FALSE)`,
+    [seed.org, revisionId, rule.subjectType, rule.subjectRef],
   )
   await pool.query(
     `UPDATE elearning_scopes
@@ -435,6 +468,35 @@ async function replaceAssignmentWithAllVisibility(seed: Seed): Promise<{
     [actor('revoker'), seed.org, seed.memberId],
   )
   return { scopeId, revisionId }
+}
+
+async function seedDirectoryPosition(seed: Seed, title: string): Promise<{
+  linkId: string
+}> {
+  const integrationId = randomUUID()
+  const accountId = randomUUID()
+  const linkId = randomUUID()
+  const suffix = randomUUID()
+  await pool.query(
+    `INSERT INTO directory_integrations (
+       id, org_id, provider, name, status, corp_id, sync_enabled
+     ) VALUES ($1, $2, 'dingtalk', $3, 'active', $4, FALSE)`,
+    [integrationId, seed.org, `${NS}-${suffix}`, `${NS}-corp-${suffix}`],
+  )
+  await pool.query(
+    `INSERT INTO directory_accounts (
+       id, integration_id, provider, external_user_id, external_key,
+       name, title, is_active
+     ) VALUES ($1, $2, 'dingtalk', $3, $4, 'Learner', $5, TRUE)`,
+    [accountId, integrationId, `${NS}-external-${suffix}`, `${NS}-key-${suffix}`, title],
+  )
+  await pool.query(
+    `INSERT INTO directory_account_links (
+       id, directory_account_id, local_user_id, link_status, match_strategy
+     ) VALUES ($1, $2, $3, 'linked', 'test')`,
+    [linkId, accountId, seed.userId],
+  )
+  return { linkId }
 }
 
 function assertValuesFree(
@@ -577,7 +639,7 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
     const org = orgId('scope-race')
     seededOrgIds.push(org)
     const seed = await seedPublishedAssignment({ org })
-    const { scopeId } = await replaceAssignmentWithAllVisibility(seed)
+    const { scopeId } = await replaceAssignmentWithVisibility(seed)
     const ticket = await issueElearningMediaPlaybackTicket(db, {
       orgId: org,
       userId: seed.userId,
@@ -586,7 +648,7 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
       jwtSecret: JWT_SECRET,
       now: NOW,
     })
-    const barrier = createQueryBarrier('elearning-access:match-rule')
+    const barrier = createQueryBarrier('elearning-audience:load-revision-rules')
     const authorization = authorizeElearningMediaPlayback(
       new PgPlaybackDb(pool, barrier.afterQuery),
       {
@@ -631,6 +693,77 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
         storageKey: seed.storageKey,
       })
       await shrink
+      await updater.query('COMMIT')
+    } catch (error) {
+      barrier.release()
+      await updater.query('ROLLBACK')
+      throw error
+    } finally {
+      updater.release()
+    }
+
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'assignment_unavailable' })
+  })
+
+  it('linearizes directory-position authorization before a concurrent unlink', async () => {
+    const org = orgId('directory-race')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedAssignment({ org })
+    const title = `${NS}-Engineer`
+    const { linkId } = await seedDirectoryPosition(seed, title)
+    await replaceAssignmentWithVisibility(seed, {
+      subjectType: 'position',
+      subjectRef: title,
+    })
+    const ticket = await issueElearningMediaPlaybackTicket(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.itemId,
+      playbackSigningSecret: PLAYBACK_SECRET,
+      jwtSecret: JWT_SECRET,
+      now: NOW,
+    })
+    const barrier = createQueryBarrier('elearning-audience:lock-directory-accounts')
+    const authorization = authorizeElearningMediaPlayback(
+      new PgPlaybackDb(pool, barrier.afterQuery),
+      {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      },
+    )
+    await barrier.hit
+
+    const updater = await pool.connect()
+    try {
+      await updater.query('BEGIN')
+      const pid = Number(
+        (await updater.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      )
+      const unlink = updater.query(
+        `UPDATE directory_account_links
+            SET link_status = 'unlinked', updated_at = now()
+          WHERE id = $1`,
+        [linkId],
+      )
+      await waitForBackendLock(pid)
+      barrier.release()
+      await expect(authorization).resolves.toMatchObject({
+        storageKey: seed.storageKey,
+      })
+      await unlink
       await updater.query('COMMIT')
     } catch (error) {
       barrier.release()

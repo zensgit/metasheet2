@@ -216,8 +216,10 @@ paths:
         Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
         Actor and authoritative org come from JWT. This changes only who may
         discover and self-study an active published course. It never creates,
-        revokes, or reclassifies an assignment. Current live rules are `all`
-        and same-org active `user`; an empty rule array means visible to nobody.
+        revokes, or reclassifies an assignment. Current live rules are `all`,
+        same-org active `department`, same-org directory `position`, and same-org
+        active `user`; an empty rule array means visible to nobody. Platform role
+        rules return unsupported_subject until org-scoped role membership exists.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -248,10 +250,10 @@ paths:
           description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)
           $ref: '#/components/responses/ElearningError'
         '404':
-          description: Content surface flags off, course not found, or user subject not found
+          description: Content surface flags off, course not found, or audience subject not found
           $ref: '#/components/responses/ElearningError'
         '422':
-          description: unsupported_subject for reserved department, position, or role rules
+          description: unsupported_subject for role rules without org-scoped role membership
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

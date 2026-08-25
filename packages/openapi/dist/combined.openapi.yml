@@ -5817,29 +5817,71 @@ components:
         duplicate:
           type: boolean
     ElearningScopeRule:
-      type: object
-      additionalProperties: false
-      required:
-        - subjectType
-      description: |
-        L1 scope foundation rule. `all` requires subjectRef absent/null;
-        `user` requires a non-empty active same-org user id. includeChildren,
-        when present, must be false. Department, position, and role rules are
-        reserved by the storage model but are not accepted by this live API.
-      properties:
-        subjectType:
-          type: string
-          enum:
-            - all
-            - user
-        subjectRef:
-          type: string
-          minLength: 1
-          nullable: true
-        includeChildren:
-          type: boolean
-          enum:
-            - false
+      description: >
+        L1 visibility rule. Subjects are resolved from fresh, active, same-org
+
+        database state. `department.subjectRef` is the directory department
+        UUID;
+
+        only department rules may set includeChildren true. Position matches the
+
+        trimmed, case-sensitive title on an active same-org directory account.
+
+        Platform roles are not accepted until an org-scoped role-membership
+        store
+
+        exists. `all` requires subjectRef absent/null.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - subjectType
+          properties:
+            subjectType:
+              type: string
+              enum:
+                - all
+            subjectRef:
+              type: string
+              nullable: true
+              enum:
+                - null
+            includeChildren:
+              type: boolean
+              enum:
+                - false
+        - type: object
+          additionalProperties: false
+          required:
+            - subjectType
+            - subjectRef
+          properties:
+            subjectType:
+              type: string
+              enum:
+                - department
+            subjectRef:
+              $ref: '#/components/schemas/ElearningUuid'
+            includeChildren:
+              type: boolean
+        - type: object
+          additionalProperties: false
+          required:
+            - subjectType
+            - subjectRef
+          properties:
+            subjectType:
+              type: string
+              enum:
+                - position
+                - user
+            subjectRef:
+              type: string
+              minLength: 1
+            includeChildren:
+              type: boolean
+              enum:
+                - false
     ElearningScopeUpdateRequest:
       type: object
       additionalProperties: false
@@ -15806,12 +15848,23 @@ paths:
     put:
       operationId: setElearningCourseScope
       summary: Append and activate a course visibility-scope revision
-      description: |
+      description: >
         Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+
         Actor and authoritative org come from JWT. This changes only who may
+
         discover and self-study an active published course. It never creates,
-        revokes, or reclassifies an assignment. Current live rules are `all`
-        and same-org active `user`; an empty rule array means visible to nobody.
+
+        revokes, or reclassifies an assignment. Current live rules are `all`,
+
+        same-org active `department`, same-org directory `position`, and
+        same-org
+
+        active `user`; an empty rule array means visible to nobody. Platform
+        role
+
+        rules return unsupported_subject until org-scoped role membership
+        exists.
       security:
         - bearerAuth: []
       parameters:
@@ -15846,11 +15899,13 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '404':
           description: >-
-            Content surface flags off, course not found, or user subject not
+            Content surface flags off, course not found, or audience subject not
             found
           $ref: '#/components/responses/ElearningError'
         '422':
-          description: unsupported_subject for reserved department, position, or role rules
+          description: >-
+            unsupported_subject for role rules without org-scoped role
+            membership
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

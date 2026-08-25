@@ -8456,8 +8456,10 @@ export interface paths {
          * @description Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
          *     Actor and authoritative org come from JWT. This changes only who may
          *     discover and self-study an active published course. It never creates,
-         *     revokes, or reclassifies an assignment. Current live rules are `all`
-         *     and same-org active `user`; an empty rule array means visible to nobody.
+         *     revokes, or reclassifies an assignment. Current live rules are `all`,
+         *     same-org active `department`, same-org directory `position`, and same-org
+         *     active `user`; an empty rule array means visible to nobody. Platform role
+         *     rules return unsupported_subject until org-scoped role membership exists.
          */
         put: operations["setElearningCourseScope"];
         post?: never;
@@ -17528,15 +17530,29 @@ export interface components {
             duplicate: boolean;
         };
         /**
-         * @description L1 scope foundation rule. `all` requires subjectRef absent/null;
-         *     `user` requires a non-empty active same-org user id. includeChildren,
-         *     when present, must be false. Department, position, and role rules are
-         *     reserved by the storage model but are not accepted by this live API.
+         * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
+         *     database state. `department.subjectRef` is the directory department UUID;
+         *     only department rules may set includeChildren true. Position matches the
+         *     trimmed, case-sensitive title on an active same-org directory account.
+         *     Platform roles are not accepted until an org-scoped role-membership store
+         *     exists. `all` requires subjectRef absent/null.
          */
         ElearningScopeRule: {
             /** @enum {string} */
-            subjectType: "all" | "user";
-            subjectRef?: string | null;
+            subjectType: "all";
+            /** @enum {string|null} */
+            subjectRef?: null;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        } | {
+            /** @enum {string} */
+            subjectType: "department";
+            subjectRef: components["schemas"]["ElearningUuid"];
+            includeChildren?: boolean;
+        } | {
+            /** @enum {string} */
+            subjectType: "position" | "user";
+            subjectRef: string;
             /** @enum {boolean} */
             includeChildren?: false;
         };
@@ -19039,9 +19055,9 @@ export interface operations {
             401: components["responses"]["ElearningAuthError"];
             /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
             403: components["responses"]["ElearningError"];
-            /** @description Content surface flags off, course not found, or user subject not found */
+            /** @description Content surface flags off, course not found, or audience subject not found */
             404: components["responses"]["ElearningError"];
-            /** @description unsupported_subject for reserved department, position, or role rules */
+            /** @description unsupported_subject for role rules without org-scoped role membership */
             422: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

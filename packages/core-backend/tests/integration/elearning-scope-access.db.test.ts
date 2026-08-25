@@ -10,6 +10,10 @@ import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
 import {
+  resolveElearningAudienceMembers,
+} from '../../src/services/elearning-audience-resolver'
+import { listElearningLearnerCourses } from '../../src/services/elearning-learner-courses'
+import {
   setElearningCourseScope,
   type ElearningScopeDb,
   type ElearningScopeQueryable,
@@ -274,11 +278,346 @@ async function seedAssignment(client: PoolClient, seed: CourseSeed): Promise<str
   return memberId
 }
 
+interface DirectorySeed {
+  integrationId: string
+  parentDepartmentId: string
+  childDepartmentId: string
+  accountId: string
+}
+
+async function seedDirectoryMembership(
+  client: PoolClient,
+  input: {
+    orgId: string
+    userId: string
+    title?: string
+    linkStatus?: string
+    accountActive?: boolean
+    integrationStatus?: string
+  },
+): Promise<DirectorySeed> {
+  const integrationId = randomUUID()
+  const parentDepartmentId = randomUUID()
+  const childDepartmentId = randomUUID()
+  const accountId = randomUUID()
+  const suffix = randomUUID()
+  const parentExternalId = `parent-${suffix}`
+  const childExternalId = `child-${suffix}`
+  await client.query(
+    `INSERT INTO directory_integrations (
+       id, org_id, provider, name, status, corp_id, sync_enabled
+     ) VALUES ($1, $2, 'dingtalk', $3, $4, $5, FALSE)`,
+    [
+      integrationId,
+      input.orgId,
+      `${NS}-${suffix}`,
+      input.integrationStatus ?? 'active',
+      `${NS}-corp-${suffix}`,
+    ],
+  )
+  await client.query(
+    `INSERT INTO directory_departments (
+       id, integration_id, provider, external_department_id,
+       external_parent_department_id, name, is_active
+     ) VALUES
+       ($1, $3, 'dingtalk', $4, NULL, 'Parent', TRUE),
+       ($2, $3, 'dingtalk', $5, $4, 'Child', TRUE)`,
+    [
+      parentDepartmentId,
+      childDepartmentId,
+      integrationId,
+      parentExternalId,
+      childExternalId,
+    ],
+  )
+  await client.query(
+    `INSERT INTO directory_accounts (
+       id, integration_id, provider, external_user_id, external_key,
+       name, title, is_active
+     ) VALUES ($1, $2, 'dingtalk', $3, $4, 'Learner', $5, $6)`,
+    [
+      accountId,
+      integrationId,
+      `${NS}-external-${suffix}`,
+      `${NS}-key-${suffix}`,
+      input.title ?? null,
+      input.accountActive ?? true,
+    ],
+  )
+  await client.query(
+    `INSERT INTO directory_account_links (
+       directory_account_id, local_user_id, link_status, match_strategy
+     ) VALUES ($1, $2, $3, 'test')`,
+    [accountId, input.userId, input.linkStatus ?? 'linked'],
+  )
+  await client.query(
+    `INSERT INTO directory_account_departments (
+       directory_account_id, directory_department_id, is_primary
+     ) VALUES ($1, $2, TRUE)`,
+    [accountId, childDepartmentId],
+  )
+  return { integrationId, parentDepartmentId, childDepartmentId, accountId }
+}
+
 afterAll(async () => {
   await pool.end()
 })
 
 describe('elearning L1 scope/access gate (real DB)', () => {
+  it('resolves department descendants cycle-safely and preserves deterministic first-rule evidence', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const seed = await seedPublishedVideoCourse(client, { orgId: actor('org-department') })
+      const directory = await seedDirectoryMembership(client, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+      })
+
+      await setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'direct department only',
+        rules: [{
+          subjectType: 'department',
+          subjectRef: directory.parentDepartmentId,
+          includeChildren: false,
+        }],
+      })
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).rejects.toMatchObject({ code: 'denied' })
+
+      const descendantScope = await setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'include descendants',
+        rules: [{
+          subjectType: 'department',
+          subjectRef: directory.parentDepartmentId,
+          includeChildren: true,
+        }],
+      })
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).resolves.toMatchObject({
+        basis: {
+          kind: 'visibility',
+          scopeRevisionRuleId: descendantScope.ruleIds[0],
+        },
+      })
+      await expect(listElearningLearnerCourses(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+      })).resolves.toEqual([
+        expect.objectContaining({
+          courseId: seed.courseId,
+          courseVersionId: seed.versionId,
+          access: { kind: 'visibility', required: false },
+        }),
+      ])
+
+      const overlapping = await setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'overlapping rules',
+        rules: [
+          { subjectType: 'user', subjectRef: seed.userId },
+          {
+            subjectType: 'department',
+            subjectRef: directory.parentDepartmentId,
+            includeChildren: true,
+          },
+        ],
+      })
+      const overlappingAccess = await resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })
+      expect(overlappingAccess.basis).toMatchObject({
+        kind: 'visibility',
+        scopeRevisionRuleId: [...overlapping.ruleIds].sort()[0],
+      })
+
+      const externalIds = await client.query(
+        `SELECT id, external_department_id
+           FROM directory_departments
+          WHERE id = ANY($1::uuid[])`,
+        [[directory.parentDepartmentId, directory.childDepartmentId]],
+      )
+      const childExternalId = String(
+        externalIds.rows.find((row) => row.id === directory.childDepartmentId)
+          ?.external_department_id,
+      )
+      await client.query(
+        `UPDATE directory_departments
+            SET external_parent_department_id = $1
+          WHERE id = $2`,
+        [childExternalId, directory.parentDepartmentId],
+      )
+      const cyclic = await setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'cycle-safe hierarchy',
+        rules: [{
+          subjectType: 'department',
+          subjectRef: directory.parentDepartmentId,
+          includeChildren: true,
+        }],
+      })
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).resolves.toMatchObject({
+        basis: { scopeRevisionRuleId: cyclic.ruleIds[0] },
+      })
+      await expect(resolveElearningAudienceMembers(db, {
+        orgId: seed.orgId,
+        rules: [{
+          subjectType: 'department',
+          subjectRef: directory.parentDepartmentId,
+          includeChildren: true,
+        }],
+      })).resolves.toEqual([seed.userId])
+    })
+  })
+
+  it('uses exact same-org directory positions and ignores the global user profile field', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const seed = await seedPublishedVideoCourse(client, { orgId: actor('org-position') })
+      const position = `${NS}-Engineer`
+      await client.query('UPDATE users SET position = $1 WHERE id = $2', [position, seed.userId])
+      await client.query(
+        'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)',
+        [seed.userId, actor('org-position-second')],
+      )
+      await expect(setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'global profile position is not org-scoped',
+        rules: [{ subjectType: 'position', subjectRef: ` ${position} ` }],
+      })).rejects.toMatchObject({ code: 'subject_not_found' })
+
+      const directory = await seedDirectoryMembership(client, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        title: position,
+      })
+      const directoryScope = await setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'directory position',
+        rules: [{ subjectType: 'position', subjectRef: position }],
+      })
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).resolves.toMatchObject({
+        basis: { scopeRevisionRuleId: directoryScope.ruleIds[0] },
+      })
+
+      await client.query(
+        `UPDATE directory_account_links SET link_status = 'unlinked'
+          WHERE directory_account_id = $1`,
+        [directory.accountId],
+      )
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).rejects.toMatchObject({ code: 'denied' })
+      await client.query(
+        `UPDATE directory_account_links SET link_status = 'linked'
+          WHERE directory_account_id = $1`,
+        [directory.accountId],
+      )
+      await client.query(
+        'UPDATE directory_accounts SET is_active = FALSE WHERE id = $1',
+        [directory.accountId],
+      )
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).rejects.toMatchObject({ code: 'denied' })
+      await client.query(
+        'UPDATE directory_accounts SET is_active = TRUE WHERE id = $1',
+        [directory.accountId],
+      )
+      await client.query(
+        `UPDATE directory_integrations SET status = 'inactive' WHERE id = $1`,
+        [directory.integrationId],
+      )
+      await expect(resolveElearningCourseAccess(db, {
+        orgId: seed.orgId,
+        userId: seed.userId,
+        courseVersionId: seed.versionId,
+      })).rejects.toMatchObject({ code: 'denied' })
+
+      const otherOrg = actor('org-position-other')
+      await client.query(
+        `UPDATE directory_integrations SET status = 'active' WHERE id = $1`,
+        [directory.integrationId],
+      )
+      await client.query('UPDATE directory_accounts SET title = NULL WHERE id = $1', [directory.accountId])
+      await seedDirectoryMembership(client, {
+        orgId: otherOrg,
+        userId: seed.userId,
+        title: `${position}-foreign`,
+      })
+      await expect(setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'cross-org linked account',
+        rules: [{ subjectType: 'position', subjectRef: `${position}-foreign` }],
+      })).rejects.toMatchObject({ code: 'subject_not_found' })
+    })
+  })
+
+  it('rejects global role rules until an org-scoped role membership store exists', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const seed = await seedPublishedVideoCourse(client, { orgId: actor('org-role') })
+      const roleId = actor(`role-${randomUUID().slice(0, 8)}`)
+      await client.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [roleId, roleId])
+      await client.query(
+        'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)',
+        [seed.userId, roleId],
+      )
+      const before = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM elearning_scope_revisions WHERE org_id = $1) AS revisions,
+           (SELECT count(*)::int FROM elearning_scope_revision_rules WHERE org_id = $1) AS rules`,
+        [seed.orgId],
+      )
+      await expect(setElearningCourseScope(db, {
+        orgId: seed.orgId,
+        actorId: actor('scope-admin'),
+        courseId: seed.courseId,
+        reason: 'global role has no org provenance',
+        rules: [{ subjectType: 'role', subjectRef: roleId } as never],
+      })).rejects.toMatchObject({ code: 'unsupported_subject' })
+      const after = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM elearning_scope_revisions WHERE org_id = $1) AS revisions,
+           (SELECT count(*)::int FROM elearning_scope_revision_rules WHERE org_id = $1) AS rules`,
+        [seed.orgId],
+      )
+      expect(after.rows).toEqual(before.rows)
+    })
+  })
+
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {
     await withRolledBackDb(async (client, db) => {
       const seed = await seedPublishedVideoCourse(client, { orgId: actor('org-shrink') })
@@ -684,9 +1023,9 @@ describe('elearning L1 scope/access gate (real DB)', () => {
         orgId: seed.orgId,
         actorId: actor('scope-admin'),
         courseId: seed.courseId,
-        reason: 'unsupported',
-        rules: [{ subjectType: 'department', subjectRef: 'd1' } as never],
-      })).rejects.toMatchObject({ code: 'unsupported_subject' })
+        reason: 'invalid department id',
+        rules: [{ subjectType: 'department', subjectRef: 'd1' }],
+      })).rejects.toMatchObject({ code: 'invalid_input' })
       await expect(setElearningCourseScope(db, {
         orgId: seed.orgId,
         actorId: actor('scope-admin'),

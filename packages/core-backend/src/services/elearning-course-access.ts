@@ -4,6 +4,11 @@
  * Visibility never creates an assignment. An active assignment wins when both
  * bases match; scope access is limited to the active course head/version.
  */
+import {
+  ElearningAudienceResolverError,
+  listElearningAudienceCourseMatches,
+  matchElearningAudienceRule,
+} from './elearning-audience-resolver'
 
 export type ElearningCourseAccessErrorCode =
   | 'not_found'
@@ -163,32 +168,58 @@ export async function resolveElearningCourseAccess(
   const activeRevisionId = scope.rows[0]?.active_revision_id
   if (activeRevisionId == null) fail('denied')
 
-  const rule = await db.query(
-    `/* elearning-access:match-rule */
-     SELECT r.id
-       FROM elearning_scope_revision_rules r
-      WHERE r.org_id = $1
-        AND r.scope_revision_id = $2
-        AND (
-          (r.subject_type = 'all' AND r.subject_ref IS NULL)
-          OR
-          (r.subject_type = 'user' AND r.subject_ref = $3)
-        )
-      ORDER BY r.id ASC
-      LIMIT 1
-      FOR SHARE OF r`,
-    [orgId, requireUuid(activeRevisionId), userId],
-  )
-  if (!rule.rows[0]) fail('denied')
+  let rule: Awaited<ReturnType<typeof matchElearningAudienceRule>>
+  try {
+    rule = await matchElearningAudienceRule(db, {
+      orgId,
+      userId,
+      scopeRevisionId: requireUuid(activeRevisionId),
+    })
+  } catch (error) {
+    if (error instanceof ElearningAudienceResolverError) fail('unavailable')
+    throw error
+  }
+  if (!rule) fail('denied')
   return {
     courseId,
     courseVersionId: versionId,
     basis: {
       kind: 'visibility',
       assignmentMemberId: null,
-      scopeRevisionRuleId: requireUuid(rule.rows[0].id),
+      scopeRevisionRuleId: rule.ruleId,
       required: false,
     },
+  }
+}
+
+function mapAccessCandidate(row: Record<string, unknown>): ElearningCourseAccessCandidate {
+  const courseId = requireUuid(row.course_id)
+  const courseVersionId = requireUuid(row.course_version_id)
+  if (row.assignment_member_id != null) {
+    return {
+      courseId,
+      courseVersionId,
+      basis: {
+        kind: 'assignment',
+        assignmentMemberId: requireUuid(row.assignment_member_id),
+        scopeRevisionRuleId: null,
+        required: true,
+      },
+      assignmentDeadline: optionalDate(row.assignment_deadline),
+      assignmentAssignedAt: optionalDate(row.assignment_assigned_at),
+    }
+  }
+  return {
+    courseId,
+    courseVersionId,
+    basis: {
+      kind: 'visibility',
+      assignmentMemberId: null,
+      scopeRevisionRuleId: requireUuid(row.scope_revision_rule_id),
+      required: false,
+    },
+    assignmentDeadline: null,
+    assignmentAssignedAt: null,
   }
 }
 
@@ -201,8 +232,8 @@ export async function listElearningCourseAccessCandidates(
   const limit = input.limit
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) fail('unavailable')
 
-  const result = await db.query(
-    `/* elearning-access:list */
+  const assignments = await db.query(
+    `/* elearning-access:list-assignments */
      WITH assignment_access AS (
        SELECT DISTINCT ON (m.course_version_id)
          v.course_id,
@@ -210,8 +241,7 @@ export async function listElearningCourseAccessCandidates(
          m.id AS assignment_member_id,
          NULL::uuid AS scope_revision_rule_id,
          a.deadline AS assignment_deadline,
-         m.assigned_at AS assignment_assigned_at,
-         0 AS priority
+         m.assigned_at AS assignment_assigned_at
        FROM elearning_assignment_members m
        JOIN elearning_assignments a
          ON a.org_id = m.org_id AND a.id = m.assignment_id
@@ -225,52 +255,6 @@ export async function listElearningCourseAccessCandidates(
          AND c.status IN ('active', 'archived')
          AND v.status IN ('published', 'retired')
        ORDER BY m.course_version_id, m.assigned_at ASC, m.id ASC
-     ),
-     visibility_access AS (
-       SELECT DISTINCT ON (c.id)
-         c.id AS course_id,
-         c.active_version_id AS course_version_id,
-         NULL::uuid AS assignment_member_id,
-         rule.id AS scope_revision_rule_id,
-         NULL::timestamptz AS assignment_deadline,
-         NULL::timestamptz AS assignment_assigned_at,
-         1 AS priority
-       FROM elearning_courses c
-       JOIN elearning_course_versions v
-         ON v.org_id = c.org_id AND v.id = c.active_version_id AND v.status = 'published'
-       JOIN elearning_scopes s
-         ON s.org_id = c.org_id AND s.id = c.scope_id
-       JOIN elearning_scope_revision_rules rule
-         ON rule.org_id = s.org_id AND rule.scope_revision_id = s.active_revision_id
-       WHERE c.org_id = $1
-         AND c.status = 'active'
-         AND (
-           (rule.subject_type = 'all' AND rule.subject_ref IS NULL)
-           OR
-           (rule.subject_type = 'user' AND rule.subject_ref = $2)
-         )
-       ORDER BY c.id, rule.id ASC
-     ),
-     access_union AS (
-       SELECT * FROM assignment_access
-       UNION ALL
-       SELECT * FROM visibility_access
-     ),
-     deduplicated AS (
-       SELECT DISTINCT ON (course_version_id)
-         course_id,
-         course_version_id,
-         assignment_member_id,
-         scope_revision_rule_id,
-         assignment_deadline,
-         assignment_assigned_at,
-         priority
-       FROM access_union
-       ORDER BY
-         course_version_id,
-         priority ASC,
-         assignment_member_id ASC,
-         scope_revision_rule_id ASC
      )
      SELECT
        course_id,
@@ -279,40 +263,40 @@ export async function listElearningCourseAccessCandidates(
        scope_revision_rule_id,
        assignment_deadline,
        assignment_assigned_at
-     FROM deduplicated
-     ORDER BY priority ASC, assignment_assigned_at ASC NULLS LAST, course_version_id ASC
+     FROM assignment_access
+     ORDER BY assignment_assigned_at ASC, course_version_id ASC
      LIMIT $3`,
     [orgId, userId, limit],
   )
+  const assigned = assignments.rows.map(mapAccessCandidate)
+  if (assigned.length >= limit) return assigned
 
-  return result.rows.map((row) => {
-    const courseId = requireUuid(row.course_id)
-    const courseVersionId = requireUuid(row.course_version_id)
-    if (row.assignment_member_id != null) {
-      return {
-        courseId,
-        courseVersionId,
-        basis: {
-          kind: 'assignment' as const,
-          assignmentMemberId: requireUuid(row.assignment_member_id),
-          scopeRevisionRuleId: null,
-          required: true as const,
-        },
-        assignmentDeadline: optionalDate(row.assignment_deadline),
-        assignmentAssignedAt: optionalDate(row.assignment_assigned_at),
-      }
-    }
-    return {
-      courseId,
-      courseVersionId,
+  let audienceMatches: Awaited<ReturnType<typeof listElearningAudienceCourseMatches>>
+  try {
+    audienceMatches = await listElearningAudienceCourseMatches(db, {
+      orgId,
+      userId,
+      excludedCourseVersionIds: assigned.map((candidate) => candidate.courseVersionId),
+      limit: limit - assigned.length,
+    })
+  } catch (error) {
+    if (error instanceof ElearningAudienceResolverError) fail('unavailable')
+    throw error
+  }
+  if (audienceMatches.length === 0) return assigned
+  return [
+    ...assigned,
+    ...audienceMatches.map((match): ElearningCourseAccessCandidate => ({
+      courseId: match.courseId,
+      courseVersionId: match.courseVersionId,
       basis: {
-        kind: 'visibility' as const,
+        kind: 'visibility',
         assignmentMemberId: null,
-        scopeRevisionRuleId: requireUuid(row.scope_revision_rule_id),
-        required: false as const,
+        scopeRevisionRuleId: match.ruleId,
+        required: false,
       },
       assignmentDeadline: null,
       assignmentAssignedAt: null,
-    }
-  })
+    })),
+  ]
 }

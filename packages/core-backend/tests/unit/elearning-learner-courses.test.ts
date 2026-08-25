@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs'
 import * as path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { ELEARNING_AUDIENCE_RULE_SCAN_LIMIT } from '../../src/services/elearning-audience-resolver'
 import { ELEARNING_MEDIA_MIME } from '../../src/services/elearning-media-validation'
 import {
   ELEARNING_WATCH_POLICY_VERSION,
@@ -28,6 +29,7 @@ const ATTEMPT = '55555555-5555-4555-8555-555555555555'
 const ATTEMPT_B = '56565656-5656-4565-8565-565656565656'
 const MEMBER = '67676767-6767-4676-8676-676767676767'
 const SCOPE_RULE = '78787878-7878-4787-8787-787878787878'
+const SCOPE_REVISION = '89898989-8989-4989-8989-898989898989'
 const ASSIGNED_AT = '2026-01-02T03:04:05.000Z'
 const DEADLINE = '2026-12-31T08:00:00.000Z'
 const COMPLETED_AT = '2026-01-03T04:05:06.000Z'
@@ -43,6 +45,10 @@ const SERVICE_SOURCE = path.join(
 const ACCESS_SOURCE = path.join(
   __dirname,
   '../../src/services/elearning-course-access.ts',
+)
+const AUDIENCE_SOURCE = path.join(
+  __dirname,
+  '../../src/services/elearning-audience-resolver.ts',
 )
 
 const PUBLIC_COURSE_KEYS = [
@@ -95,7 +101,7 @@ const SECRET_TOKENS = [
 ]
 
 function tagOf(sql: string): string | null {
-  const match = /\/\* (elearning-(?:learner-courses|access):[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:learner-courses|access|audience):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
 }
 
@@ -192,25 +198,75 @@ function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
         params.push(queryParams)
         if (rows instanceof Error) throw rows
         const tag = tagOf(sql)
-        if (tag === 'elearning-access:list') {
+        if (tag === 'elearning-access:list-assignments') {
           const seen = new Set<string>()
           const candidates = rows.flatMap((row) => {
+            if (row.access_kind === 'visibility') return []
             const versionId = String(row.course_version_id)
             if (seen.has(versionId)) return []
             seen.add(versionId)
-            const visibility = row.access_kind === 'visibility'
             return [{
               course_id: row.course_id,
               course_version_id: row.course_version_id,
-              assignment_member_id: visibility ? null : (row.assignment_member_id ?? MEMBER),
-              scope_revision_rule_id: visibility
-                ? (row.scope_revision_rule_id ?? SCOPE_RULE)
-                : null,
-              assignment_deadline: visibility ? null : row.assignment_deadline,
-              assignment_assigned_at: visibility ? null : row.assignment_assigned_at,
+              assignment_member_id: row.assignment_member_id ?? MEMBER,
+              scope_revision_rule_id: null,
+              assignment_deadline: row.assignment_deadline,
+              assignment_assigned_at: row.assignment_assigned_at,
             }]
-          })
+          }).slice(0, Number(queryParams[2]))
           return { rows: candidates, rowCount: candidates.length }
+        }
+        if (tag === 'elearning-audience:list-course-matches') {
+          if (rows.some((row) => row.audience_scan_overflow === true)) {
+            return {
+              rows: [{
+                scan_overflow: true,
+                course_id: null,
+                course_version_id: null,
+                rule_id: null,
+                scope_revision_id: null,
+              }],
+              rowCount: 1,
+            }
+          }
+          const seen = new Set<string>()
+          const excluded = new Set(
+            Array.isArray(queryParams[2]) ? queryParams[2].map(String) : [],
+          )
+          const candidates = rows.flatMap((row) => {
+            if (row.access_kind !== 'visibility') return []
+            const versionId = String(row.course_version_id)
+            if (seen.has(versionId) || excluded.has(versionId)) return []
+            const ruleId = String(row.scope_revision_rule_id ?? SCOPE_RULE)
+            seen.add(versionId)
+            return [{
+              course_id: row.course_id,
+              course_version_id: row.course_version_id,
+              rule_id: ruleId,
+              scope_revision_id: SCOPE_REVISION,
+            }]
+          }).slice(0, Number(queryParams[3]))
+          return { rows: candidates, rowCount: candidates.length }
+        }
+        if (tag === 'elearning-audience:load-rule-ids') {
+          const ruleIds = Array.isArray(queryParams[1]) ? queryParams[1].map(String) : []
+          return {
+            rows: ruleIds.map((ruleId) => ({
+              rule_id: ruleId,
+              scope_revision_id: SCOPE_REVISION,
+              subject_type: 'all',
+              subject_ref: null,
+              include_children: false,
+            })),
+            rowCount: ruleIds.length,
+          }
+        }
+        if (tag === 'elearning-audience:resolve-membership') {
+          const rules = JSON.parse(String(queryParams[1])) as Array<Record<string, unknown>>
+          return {
+            rows: rules.map((rule) => ({ rule_key: rule.rule_key, user_id: USER })),
+            rowCount: rules.length,
+          }
         }
         if (tag === 'elearning-learner-courses:details') {
           const versionIds = queryParams[2]
@@ -236,6 +292,7 @@ describe('elearning learner courses source SQL', () => {
   it('separates bounded access discovery from redacted course details', async () => {
     const source = await fs.readFile(SERVICE_SOURCE, 'utf8')
     const accessSource = await fs.readFile(ACCESS_SOURCE, 'utf8')
+    const audienceSource = await fs.readFile(AUDIENCE_SOURCE, 'utf8')
     expect(source).toContain('listElearningCourseAccessCandidates')
     expect(source).toContain('/* elearning-learner-courses:details */')
     expect(source).toContain('unnest($3::uuid[], $4::uuid[], $5::uuid[]) WITH ORDINALITY')
@@ -245,15 +302,18 @@ describe('elearning learner courses source SQL', () => {
     expect(source).toContain('current_rule.id = access.scope_revision_rule_id')
     expect(source).toContain('current_rule.scope_revision_id = current_scope.active_revision_id')
     expect(source).toContain('ORDER BY access.ordinality ASC')
-    expect(accessSource).toContain('/* elearning-access:list */')
+    expect(accessSource).toContain('/* elearning-access:list-assignments */')
+    expect(audienceSource).toContain('/* elearning-audience:list-course-matches */')
     expect(accessSource).toContain('assignment_access AS (')
-    expect(accessSource).toContain('visibility_access AS (')
     expect(accessSource).toContain('m.revoked_at IS NULL')
-    expect(accessSource).toContain("c.status = 'active'")
-    expect(accessSource).toContain("rule.subject_type = 'all'")
-    expect(accessSource).toContain("rule.subject_type = 'user'")
-    expect(accessSource).toContain('ORDER BY c.id, rule.id ASC')
+    expect(audienceSource).toContain("course.status = 'active'")
+    expect(accessSource).toContain('listElearningAudienceCourseMatches')
+    expect(audienceSource).toContain('ORDER BY course_version_id ASC, rule_id ASC')
+    expect(ELEARNING_AUDIENCE_RULE_SCAN_LIMIT).toBe(10_000)
+    expect(audienceSource).toContain('bounded_course_rules AS (')
+    expect(audienceSource).toContain('TRUE AS scan_overflow')
     expect(accessSource).toContain('LIMIT $3')
+    expect(audienceSource).toContain('LIMIT $4')
     expect(source).toContain("c.status IN ('active', 'archived')")
     expect(source).toContain("v.status IN ('published', 'retired')")
     expect(source).toContain("i.item_type = 'video'")
@@ -322,12 +382,21 @@ describe('elearning learner courses input and SQL dispatch', () => {
       orgId: ` ${ORG} `,
       userId: ` ${USER} `,
     })).resolves.toEqual([])
-    expect(queries).toHaveLength(1)
-    expect(tagOf(queries[0])).toBe('elearning-access:list')
-    expect(params).toEqual([[ORG, USER, ELEARNING_LEARNER_COURSES_LIMIT + 1]])
+    expect(queries).toHaveLength(2)
+    expect(queries.map(tagOf)).toEqual([
+      'elearning-access:list-assignments',
+      'elearning-audience:list-course-matches',
+    ])
+    expect(params).toEqual([
+      [ORG, USER, ELEARNING_LEARNER_COURSES_LIMIT + 1],
+      [ORG, USER, [], ELEARNING_LEARNER_COURSES_LIMIT + 1],
+    ])
     expect(queries[0]).toContain('LIMIT $3')
     expect(queries[0]).toContain('revoked_at IS NULL')
-    expect(queries[0]).toContain('visibility_access AS (')
+    expect(queries[1]).toContain(`LIMIT ${ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1}`)
+    expect(queries[1]).toContain(
+      `count(*) > ${ELEARNING_AUDIENCE_RULE_SCAN_LIMIT} AS overflow`,
+    )
   })
 
   it('maps query failures to values-free unavailable', async () => {
@@ -336,6 +405,25 @@ describe('elearning learner courses input and SQL dispatch', () => {
       () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
       'unavailable',
     )
+  })
+
+  it('fail-closes a bounded audience scan overflow without loading details', async () => {
+    const { db, queries } = createMemoryDb([baseRow({
+      access_kind: 'visibility',
+      assignment_member_id: null,
+      scope_revision_rule_id: SCOPE_RULE,
+      assignment_deadline: null,
+      assignment_assigned_at: null,
+      audience_scan_overflow: true,
+    })])
+    await expectAsyncCode(
+      () => listElearningLearnerCourses(db, { orgId: ORG, userId: USER }),
+      'unavailable',
+    )
+    expect(queries.map(tagOf)).toEqual([
+      'elearning-access:list-assignments',
+      'elearning-audience:list-course-matches',
+    ])
   })
 })
 

@@ -1,4 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import {
+  ElearningAudienceResolverError,
+  validateElearningAudienceRules,
+  type ElearningAudienceRuleInput,
+} from './elearning-audience-resolver'
 
 export type ElearningScopeErrorCode =
   | 'invalid_input'
@@ -25,9 +30,7 @@ export interface ElearningScopeDb extends ElearningScopeQueryable {
   transaction<T>(fn: (tx: ElearningScopeQueryable) => Promise<T>): Promise<T>
 }
 
-export type ElearningScopeRuleInput =
-  | { subjectType: 'all'; subjectRef?: null; includeChildren?: false }
-  | { subjectType: 'user'; subjectRef: string; includeChildren?: false }
+export type ElearningScopeRuleInput = ElearningAudienceRuleInput
 
 export interface SetElearningCourseScopeInput {
   orgId: string
@@ -69,48 +72,6 @@ function storedUuid(value: unknown): string {
   return value.toLowerCase()
 }
 
-function normalizeRules(rules: unknown): ElearningScopeRuleInput[] {
-  // An empty revision is the explicit, auditable "visible to nobody" state.
-  if (!Array.isArray(rules) || rules.length > 100) fail('invalid_input')
-  const normalized = rules.map((raw) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid_input')
-    const row = raw as Record<string, unknown>
-    const keys = Object.keys(row)
-    if (keys.some((key) => !['subjectType', 'subjectRef', 'includeChildren'].includes(key))) {
-      fail('invalid_input')
-    }
-    if (row.includeChildren !== undefined && row.includeChildren !== false) fail('invalid_input')
-    if (row.subjectType === 'all') {
-      if (row.subjectRef !== undefined && row.subjectRef !== null) fail('invalid_input')
-      return { subjectType: 'all' as const, subjectRef: null, includeChildren: false as const }
-    }
-    if (row.subjectType === 'user') {
-      return {
-        subjectType: 'user' as const,
-        subjectRef: requireText(row.subjectRef),
-        includeChildren: false as const,
-      }
-    }
-    if (['department', 'position', 'role'].includes(String(row.subjectType))) {
-      fail('unsupported_subject')
-    }
-    fail('invalid_input')
-  })
-
-  normalized.sort((left, right) => {
-    const leftKey = `${left.subjectType}:${left.subjectRef ?? ''}`
-    const rightKey = `${right.subjectType}:${right.subjectRef ?? ''}`
-    return leftKey.localeCompare(rightKey)
-  })
-  const seen = new Set<string>()
-  for (const rule of normalized) {
-    const key = `${rule.subjectType}:${rule.subjectRef ?? ''}`
-    if (seen.has(key)) fail('invalid_input')
-    seen.add(key)
-  }
-  return normalized
-}
-
 export async function setElearningCourseScope(
   db: ElearningScopeDb,
   input: SetElearningCourseScopeInput,
@@ -119,7 +80,6 @@ export async function setElearningCourseScope(
   const actorId = requireText(input.actorId)
   const courseId = requireUuid(input.courseId)
   const reason = requireText(input.reason)
-  const rules = normalizeRules(input.rules)
 
   return db.transaction(async (tx) => {
     try {
@@ -138,31 +98,10 @@ export async function setElearningCourseScope(
       )
       if (!course.rows[0]) fail('not_found')
 
-      const userRefs = rules.flatMap((rule) =>
-        rule.subjectType === 'user' ? [rule.subjectRef] : [],
-      )
-      if (userRefs.length > 0) {
-        const memberships = await tx.query(
-          `/* elearning-scope:load-user-subjects */
-           SELECT uo.user_id
-             FROM user_orgs uo
-             JOIN users u ON u.id = uo.user_id
-            WHERE uo.org_id = $1
-              AND uo.user_id = ANY($2::text[])
-              AND uo.is_active = TRUE
-              AND u.is_active = TRUE
-            ORDER BY uo.user_id
-            FOR SHARE OF u, uo`,
-          [orgId, userRefs],
-        )
-        const resolved = new Set(memberships.rows.map((row) => row.user_id))
-        if (
-          resolved.size !== userRefs.length
-          || userRefs.some((userRef) => !resolved.has(userRef))
-        ) {
-          fail('subject_not_found')
-        }
-      }
+      const rules = await validateElearningAudienceRules(tx, {
+        orgId,
+        rules: input.rules,
+      })
 
       let scopeId: string
       if (course.rows[0].scope_id == null) {
@@ -224,8 +163,15 @@ export async function setElearningCourseScope(
           `/* elearning-scope:insert-rule */
            INSERT INTO elearning_scope_revision_rules (
              id, org_id, scope_revision_id, subject_type, subject_ref, include_children
-           ) VALUES ($1, $2, $3, $4, $5, FALSE)`,
-          [ruleId, orgId, revisionId, rule.subjectType, rule.subjectRef ?? null],
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            ruleId,
+            orgId,
+            revisionId,
+            rule.subjectType,
+            rule.subjectRef,
+            rule.includeChildren,
+          ],
         )
       }
 
@@ -242,6 +188,11 @@ export async function setElearningCourseScope(
       return { courseId, scopeId, revisionId, revision, ruleIds }
     } catch (error) {
       if (error instanceof ElearningScopeError) throw error
+      if (error instanceof ElearningAudienceResolverError) {
+        if (error.code === 'invalid_input') fail('invalid_input')
+        if (error.code === 'subject_not_found') fail('subject_not_found')
+        if (error.code === 'unsupported_subject') fail('unsupported_subject')
+      }
       fail('unavailable')
     }
   })

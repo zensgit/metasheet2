@@ -760,8 +760,8 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     const unsupportedResponse = await serve(unsupported.app)
       .put(`/api/elearning/courses/${REQUEST_ID}/scope`)
       .send({
-        reason: 'department rule',
-        rules: [{ subjectType: 'department', subjectRef: 'd1' }],
+        reason: 'role rule',
+        rules: [{ subjectType: 'role', subjectRef: 'training_operator' }],
       })
     expect(unsupportedResponse.status).toBe(422)
     expect(unsupportedResponse.body).toEqual({ error: 'unsupported_subject' })

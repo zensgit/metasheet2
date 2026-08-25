@@ -7831,32 +7831,86 @@
         }
       },
       "ElearningScopeRule": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "subjectType"
-        ],
-        "description": "L1 scope foundation rule. `all` requires subjectRef absent/null;\n`user` requires a non-empty active same-org user id. includeChildren,\nwhen present, must be false. Department, position, and role rules are\nreserved by the storage model but are not accepted by this live API.\n",
-        "properties": {
-          "subjectType": {
-            "type": "string",
-            "enum": [
-              "all",
-              "user"
-            ]
+        "description": "L1 visibility rule. Subjects are resolved from fresh, active, same-org\ndatabase state. `department.subjectRef` is the directory department UUID;\nonly department rules may set includeChildren true. Position matches the\ntrimmed, case-sensitive title on an active same-org directory account.\nPlatform roles are not accepted until an org-scoped role-membership store\nexists. `all` requires subjectRef absent/null.\n",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subjectType"
+            ],
+            "properties": {
+              "subjectType": {
+                "type": "string",
+                "enum": [
+                  "all"
+                ]
+              },
+              "subjectRef": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  null
+                ]
+              },
+              "includeChildren": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              }
+            }
           },
-          "subjectRef": {
-            "type": "string",
-            "minLength": 1,
-            "nullable": true
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subjectType",
+              "subjectRef"
+            ],
+            "properties": {
+              "subjectType": {
+                "type": "string",
+                "enum": [
+                  "department"
+                ]
+              },
+              "subjectRef": {
+                "$ref": "#/components/schemas/ElearningUuid"
+              },
+              "includeChildren": {
+                "type": "boolean"
+              }
+            }
           },
-          "includeChildren": {
-            "type": "boolean",
-            "enum": [
-              false
-            ]
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "subjectType",
+              "subjectRef"
+            ],
+            "properties": {
+              "subjectType": {
+                "type": "string",
+                "enum": [
+                  "position",
+                  "user"
+                ]
+              },
+              "subjectRef": {
+                "type": "string",
+                "minLength": 1
+              },
+              "includeChildren": {
+                "type": "boolean",
+                "enum": [
+                  false
+                ]
+              }
+            }
           }
-        }
+        ]
       },
       "ElearningScopeUpdateRequest": {
         "type": "object",
@@ -23172,7 +23226,7 @@
       "put": {
         "operationId": "setElearningCourseScope",
         "summary": "Append and activate a course visibility-scope revision",
-        "description": "Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nActor and authoritative org come from JWT. This changes only who may\ndiscover and self-study an active published course. It never creates,\nrevokes, or reclassifies an assignment. Current live rules are `all`\nand same-org active `user`; an empty rule array means visible to nobody.\n",
+        "description": "Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nActor and authoritative org come from JWT. This changes only who may\ndiscover and self-study an active published course. It never creates,\nrevokes, or reclassifies an assignment. Current live rules are `all`,\nsame-org active `department`, same-org directory `position`, and same-org\nactive `user`; an empty rule array means visible to nobody. Platform role\nrules return unsupported_subject until org-scoped role membership exists.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23222,11 +23276,11 @@
             "$ref": "#/components/responses/ElearningError"
           },
           "404": {
-            "description": "Content surface flags off, course not found, or user subject not found",
+            "description": "Content surface flags off, course not found, or audience subject not found",
             "$ref": "#/components/responses/ElearningError"
           },
           "422": {
-            "description": "unsupported_subject for reserved department, position, or role rules",
+            "description": "unsupported_subject for role rules without org-scoped role membership",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {
