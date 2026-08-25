@@ -186,7 +186,7 @@ L1–L2 需 ~18 张，其余随阶段建。
 ## 5. 权限、范围与前端
 
 ### 5.1 权限码与角色
-`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin_elearning_viewer|plugin_elearning_operator|plugin_elearning_admin`，由 core 迁移调用 `buildPluginRoleSeeds({ pluginId: 'plugin-elearning', ... })` 生成并落库——`buildPluginRoleId` 规范化角色 ID 为下划线，`buildPluginPermissionCode` 则保留连字符权限命名空间；禁止在插件 `activate()` 中另造动态角色 ID。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23575-23660` 样板）。
+`elearning:read|write|grade|stats|admin`（种子迁移照抄 `zzzz20260117090000` 的 DO $$ + ON CONFLICT 范式；`elearning:admin` 语义=全局，参照 attendance 成文界定）；角色模板 `plugin_elearning_viewer|plugin_elearning_operator|plugin_elearning_admin`，由 core 迁移分别调用 `buildPluginRoleId('plugin-elearning', kind)` 与 `buildPluginPermissionCode('elearning', action)` 生成并落库——两个 helper 的 namespace 参数有意不同：角色 ID 保留插件前缀并规范化为下划线，权限码沿用已发布的 `elearning:*` 域；禁止调用会把两者强制耦合为同一 namespace 的 `buildPluginRoleSeeds`，也禁止在插件 `activate()` 中另造动态角色 ID。CJS 插件拿不到 core `rbacGuard`——照 attendance 自建 `withPermission/withAnyPermission`（`plugin-attendance/index.cjs:23575-23660` 样板）。
 
 ### 5.2 管理范围
 `elearning_admin_scopes(user_id, dept_id, include_children)`；**所有管理面 详情/列表/统计/导出 查询强制携带范围谓词，默认拒绝**；列表不得返回范围外行。design-lock 评审时评估与 `delegated_role_admin_scopes` 合并。
@@ -369,7 +369,7 @@ v1：system base **仅全局 `elearning:admin`（与平台 admin）可用**—�
 | 审9 | exact-head 终检 `0eba89154b`：门1 测试假绿 P1；普通 RATIFIED 会被读成 L0 开工；锁文竞品名；`users.position` 钉 legacy SQL；审阅记录/活动 pin 未齐 | 采纳。门1加真实 DB 会话硬约束（`RBAC_BYPASS=false`/`RBAC_TOKEN_TRUST=false`，禁 trusted-token fixture）。**审9 当时**唯一合法状态 = `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED`（当时不授权 L0/V0.1/代码/迁移/flag/实施 PR）。锁文去品牌化。`users.position` 改钉 `zzzz20260529190000:11-15`。§14-① 审1–审9；§4.1 活动合同 pin `@96b6416717`（历史行保留旧 SHA） | 文首、§2、§3、§4.1、§4.3、§11、门1、§13、§14、附录 |
 | 审10 机械 | 第五跳刷新至 `origin/main` `@22ae2a1c07`；13 个新增提交中，活动合同锚点仅 `plugin-attendance/index.cjs` 有交集 | 纯机械重钉，不改合同：`withAnyPermission/withPermission` 样板由 `:23529-23614` 更新为 `:23575-23660`；其余承重锚点继承有效。**审10 当时的历史状态**仍为 `RATIFIED — DESIGN CONTRACT ONLY；IMPLEMENTATION PARKED` | 文首、§5.1、§14-③ |
 | 2026-08-25 实施授权 amendment | Owner 将本合同内 L0–L6 与 M 轨整体实施设为开发目标并分阶段 unpark | 状态改为 `RATIFIED — DESIGN CONTRACT；L0–L6 PHASED IMPLEMENTATION UNPARKED；PRODUCTION ENABLEMENT PARKED`；允许默认 OFF 的实现与 PR，保留合并、部署、生产启用、真实数据与真实业务环境外部调用的独立批准门；L6 七项仍逐项过需求门 | 文首、§0、§11、§14-⑤ |
-| 2026-08-26 角色模板勘误 amendment | §5.1 文字 ID 与其指定的 `buildPluginRoleId` 规范化结果冲突，且误留插件动态 provision 解释空间 | 以仓内 helper 与已成文迁移模式为准：角色 ID 改为 `plugin_elearning_viewer|plugin_elearning_operator|plugin_elearning_admin`，权限码仍为 `elearning:*`；角色由 core 迁移生成并落库，禁止在插件 `activate()` 中另造动态 ID | §5.1 |
+| 2026-08-26 角色模板勘误 amendment | §5.1 文字 ID 与其指定的 `buildPluginRoleId` 规范化结果冲突，且误留插件动态 provision 解释空间；实施核对又发现 `buildPluginRoleSeeds('plugin-elearning')` 会错误生成 `plugin-elearning:*` 权限 | 角色 ID 改为 `plugin_elearning_viewer|plugin_elearning_operator|plugin_elearning_admin`；core 迁移分别用角色 namespace `plugin-elearning` 与权限 namespace `elearning` 调两个 helper，权限码保持 `elearning:*`；禁用耦合 namespace 的 seeds helper，禁止插件激活时另造动态 ID | §5.1 |
 
 ## 14. Ratify 前置（顺序执行）
 
