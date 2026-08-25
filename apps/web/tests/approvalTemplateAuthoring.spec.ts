@@ -1,4 +1,7 @@
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
+import { reactive } from 'vue'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, inject, nextTick, provide, ref, type App as VueApp, type InjectionKey } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
@@ -21,7 +24,14 @@ import {
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
-let routeParams: Record<string, string> = {}
+// REACTIVE route params (external round 4): the view now watches route.params.id to reload on
+// in-place navigation, so the mock must be a reactive source or the watcher can never fire in
+// tests. Plain assignments below go through the same reactive object.
+const routeMock = reactive({ params: {} as Record<string, string>, query: {}, path: '/approval-templates/new' })
+function setRouteParams(next: Record<string, string>): void {
+  routeMock.params = next
+  routeMock.path = next.id ? `/approval-templates/${next.id}/edit` : '/approval-templates/new'
+}
 
 vi.mock('vue-router', async () => {
   const actual = await vi.importActual<typeof import('vue-router')>('vue-router')
@@ -32,12 +42,7 @@ vi.mock('vue-router', async () => {
       replace: replaceSpy,
       back: vi.fn(),
     }),
-    useRoute: () => ({
-      params: routeParams,
-      query: {},
-      path: routeParams.id ? `/approval-templates/${routeParams.id}/edit` : '/approval-templates/new',
-      meta: {},
-    }),
+    useRoute: () => routeMock,
   }
 })
 
@@ -65,10 +70,36 @@ const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
+  // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
+  // inside the view's load-failure catch — a mock module without this export makes that catch
+  // itself throw, which escapes onMounted as an unhandled rejection and reds the whole lane run
+  // (rc=1 with every test green: exactly the shape the E-round3 negative first surfaced).
+  ApprovalApiError: class ApprovalApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status = 0, code?: string) {
+      super(message)
+      this.name = 'ApprovalApiError'
+      this.status = status
+      this.code = code
+    }
+  },
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
-  getTemplate: (id: string) => getTemplateSpy(id),
+  // Server-faithful (round 4): the real GET /templates/:id returns a template whose id IS the
+  // requested id. Fixtures via buildTemplate() default to 'tpl_1' while tests route to
+  // 'tpl_gap_options' etc. — harmless under the old presence-only gate, fatal under the equality
+  // gate (which is the FIX, not the bug). Align at the seam: a resolved fixture still carrying
+  // the default id inherits the requested one; a fixture that PINNED a non-default id keeps it,
+  // so genuine-mismatch tests stay constructible.
+  getTemplate: async (id: string) => {
+    const template = await getTemplateSpy(id)
+    if (template && typeof template === 'object' && (template as { id?: string }).id === 'tpl_1' && id !== 'tpl_1') {
+      return { ...(template as object), id } as typeof template
+    }
+    return template
+  },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 
@@ -357,6 +388,10 @@ async function mountView() {
   installStubs(app)
   app.mount(container)
   await nextTick()
+  await Promise.resolve()
+  // One extra microtask hop: the server-faithful getTemplate seam (round 4) awaits the spy before
+  // aligning the id, so template hydration lands one tick later than the bare-spy shape the
+  // original waits were tuned to.
   await Promise.resolve()
   await nextTick()
 }
@@ -1176,7 +1211,7 @@ describe('approval template authoring helpers', () => {
 
 describe('TemplateAuthoringView', () => {
   beforeEach(() => {
-    routeParams = {}
+    setRouteParams({})
     canManageTemplates.value = true
     approvalCanvasV2.value = false
     createTemplateSpy.mockReset()
@@ -1357,6 +1392,404 @@ describe('TemplateAuthoringView', () => {
     expect(badge?.textContent?.trim()).toBe('1 项不完善')
   })
 
+  // ── B0 (owner-approved draft-save UX slice, 20260824) ──────────────────────────────────────────
+  it('B0: 保存草稿 on a brand-new, untouched draft succeeds — auto-seeds a placeholder key/name instead of blocking (the owner\'s exact repro: publish-grade validation used to block this)', async () => {
+    await mountView()
+
+    // Nothing typed at all — key/name are both blank, exactly the state that used to render
+    // "模板 Key 必填 / 模板名称必填" and refuse to save.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = createTemplateSpy.mock.calls[0]?.[0] as any
+    expect(payload.key).toBeTruthy()
+    expect(payload.name).toBe('未命名审批')
+    // No blocking validation summary — this is a genuine SUCCESS path, not a suppressed error.
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')).toBeNull()
+    // The seeded values round-trip back into the visible Key/Name inputs.
+    const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
+    const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
+    expect(keyInput.value).toBe(payload.key)
+    expect(nameInput.value).toBe('未命名审批')
+  })
+
+  it('E-round3 P2: an EDIT route whose template failed to load can neither save nor create — the poisoned no-templateId draft is fenced at BOTH layers', async () => {
+    // Reproduced by the external review on the real mounted path: getTemplate rejects, the draft
+    // stays the empty no-templateId fallback, canSave stayed true, and save fell through
+    // persistDraft's CREATE branch — minting a fresh 未命名审批 template from an edit URL.
+    setRouteParams({ id: 'tpl_load_fails' })
+    getTemplateSpy.mockRejectedValue(new Error('boom'))
+    await mountView()
+    await flushUi()
+
+    // Load error surfaced; the save button is disabled (UI gate).
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    // BELT: force-enable the DOM button and click — handleSave re-checks canSave reactively, so
+    // even a DOM-attribute drift cannot reach the write path while layer 1 stands. (Measured:
+    // layer 2 is UNREACHABLE through the mounted surface while layer 1 stands — handleSave's own
+    // canSave check blocks first — so layer 2 is pinned STRUCTURALLY in the companion test below,
+    // the same impossible-by-design situation as the E-P3 helper pin.)
+    saveBtn.disabled = false
+    saveBtn.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+  })
+
+  it('E-round3 P2 layer 2 (structural): persistDraft refuses the edit-route→create branch BEFORE validate — executable lines only', () => {
+    // Behavioural pinning of this defence is impossible by design: handleSave re-checks canSave
+    // inside the handler, so no mounted interaction can reach persistDraft while layer 1 stands —
+    // and with layer 1 removed, this defence is what stops the create. Executable-lines source
+    // pin (the #5140/#5161 saga idiom): comments stripped, the refusal must precede validate().
+    const source = readFileSync(
+      join(__dirname, '../src/views/approval/TemplateAuthoringView.vue'),
+      'utf8',
+    )
+    const startIdx = source.indexOf('async function persistDraft(')
+    expect(startIdx).toBeGreaterThan(0)
+    const body = source.slice(startIdx, source.indexOf('\n}', startIdx))
+    const executable = body
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    const refusalIdx = executable.search(/if \(isEditMode\.value && draft\.value\.templateId !== templateId\.value\) \{/)
+    const validateIdx = executable.indexOf('await validate()')
+    expect(refusalIdx).toBeGreaterThan(-1)
+    expect(validateIdx).toBeGreaterThan(-1)
+    expect(refusalIdx).toBeLessThan(validateIdx)
+    expect(executable).toMatch(/模板尚未加载成功/)
+    // …and the refusal actually RETURNS (gate NIT-8 on 696c7459a3, measured: dropping only the
+    // `return null` kept this pin green at 137/137 while the defence stopped defending — the if
+    // fired, set the message, and fell straight through into the create branch anyway).
+    expect(executable.slice(refusalIdx, validateIdx)).toMatch(/return null/)
+  })
+
+  it('E-round4 P2: switching /:id/edit params on a reused instance reloads, and the stale-template window can neither update the OLD id nor create', async () => {
+    // Reproduced by the external review: Vue Router reuses the component across param changes;
+    // the load ran only in onMounted, so after /tpl_a/edit -> /tpl_b/edit the draft still held
+    // tpl_a and 保存 called updateTemplate('tpl_a', …) from tpl_b's URL.
+    setRouteParams({ id: 'tpl_a' })
+    let releaseB: (value: unknown) => void = () => {}
+    getTemplateSpy.mockImplementation((id: string) => {
+      if (id === 'tpl_b') return new Promise((resolve) => { releaseB = resolve })
+      return Promise.resolve(buildTemplate({ id, key: `k_${id}`, name: `模板 ${id}` }))
+    })
+    await mountView()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('k_tpl_a')
+
+    // Route param switches in place; tpl_b's fetch is IN FLIGHT (never resolves yet).
+    setRouteParams({ id: 'tpl_b' })
+    await flushUi()
+
+    // THE WINDOW: draft still holds tpl_a under tpl_b's URL. Layer 1 — save disabled.
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    // Layer 2 belt — even force-enabled, nothing may write: not update (wrong id), not create.
+    saveBtn.disabled = false
+    saveBtn.click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+
+    // Reload lands -> the gate reopens on the RIGHT template.
+    releaseB(buildTemplate({ id: 'tpl_b', key: 'k_tpl_b', name: '模板 tpl_b' }))
+    await flushUi()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('k_tpl_b')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(updateTemplateSpy.mock.calls[0]?.[0]).toBe('tpl_b')
+  })
+
+  it('E-round4 P2 (failed reload — the UNSHIELDED window): tpl_b fetch rejects, loading clears, and the tpl_a draft under the tpl_b URL still cannot save', async () => {
+    // The in-flight window above is shielded by `loading` (canSave already blocks on it), which
+    // MASKS the equality gates — measured: weakening either gate back to presence stayed green
+    // against that case alone. The discriminating window is a FAILED reload: loading is false
+    // again, the draft still holds tpl_a, the route says tpl_b — only the equality predicates
+    // stand between this state and updateTemplate('tpl_a', …) from tpl_b's URL.
+    getTemplateSpy.mockImplementation((id: string) => {
+      if (id === 'tpl_b') return Promise.reject(new Error('boom'))
+      return Promise.resolve(buildTemplate({ id, key: `k_${id}`, name: `模板 ${id}` }))
+    })
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('k_tpl_a')
+
+    setRouteParams({ id: 'tpl_b' })
+    await flushUi()
+    await flushUi()
+
+    // Layer 1: equality gate (loading is false now — only the id mismatch disables).
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+    // Layer 2: force-enabled click must refuse — not update tpl_a, not create.
+    saveBtn.disabled = false
+    saveBtn.click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+  })
+
+  it('P3-4 (gate on 6d6c6013cd): an edit->new transition arriving MID-LOAD does not strand loading — the new-template page stays saveable', async () => {
+    // Reproduced by the gate: the !isEditMode branch returned before the try/finally, so the
+    // in-flight edit load's finally deferred to the newer ticket and NOBODY cleared loading —
+    // /new rendered permanently unsaveable with no error. Unreachable today (/new always
+    // remounts), but one router.push from this view would have made it live.
+    let releaseA: (value: unknown) => void = () => {}
+    getTemplateSpy.mockImplementation(() => new Promise((resolve) => { releaseA = resolve }))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+
+    // Switch to /new while tpl_a's fetch is still in flight.
+    setRouteParams({})
+    await flushUi()
+    releaseA(buildTemplate({ id: 'tpl_a' })) // superseded response lands late; must change nothing
+    await flushUi()
+    await flushUi()
+
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(false)
+    saveBtn.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-round5 P2 (Canvas V2 ON): switching /tpl_a/edit -> /tpl_b/edit re-seeds the form builder — B fields display, edit, and SAVE as B', async () => {
+    // Reproduced by the external review: ApprovalFormBuilder reads the draft ONCE per epoch by
+    // design; the route reload replaced the parent draft but never bumped formBuilderSessionEpoch,
+    // so basic info showed B while the form designer still showed A's fields. Becomes an ordinary
+    // path once #5141 defaults the canvas ON.
+    approvalCanvasV2.value = true
+    getTemplateSpy.mockImplementation((id: string) => Promise.resolve(buildTemplate({
+      id, key: `k_${id}`, name: `模板 ${id}`,
+      // `reviewer` retained: the default approvalGraph's form_user assignee references it, and
+      // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
+      // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
+      formSchema: { fields: [
+        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
+      ] },
+    })))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+    expect(container!.textContent).toContain('字段 tpl_a')
+
+    setRouteParams({ id: 'tpl_b' })
+    await flushUi()
+    await flushUi()
+    await flushUi()
+
+    // The builder shows B's fields — and A's are GONE (the reviewer's exact symptom).
+    const builder = container!.querySelector('[data-testid="approval-form-builder"]') as HTMLElement
+    expect(builder).not.toBeNull()
+    expect(builder.textContent).toContain('字段 tpl_b')
+    expect(builder.textContent).not.toContain('字段 tpl_a')
+
+    // …and what SAVES is B: field list from B's schema, update targeted at tpl_b.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(updateTemplateSpy.mock.calls[0]?.[0]).toBe('tpl_b')
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.fields.map((f: any) => f.id)).toEqual(['reviewer', 'field_tpl_b'])
+  })
+
+  it('E-round5 P2 (Canvas V2 ON): switching /tpl_a/edit -> /new re-seeds the builder to the empty starter', async () => {
+    approvalCanvasV2.value = true
+    getTemplateSpy.mockImplementation((id: string) => Promise.resolve(buildTemplate({
+      id, key: `k_${id}`, name: `模板 ${id}`,
+      // `reviewer` retained: the default approvalGraph's form_user assignee references it, and
+      // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
+      // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
+      formSchema: { fields: [
+        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
+      ] },
+    })))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+    expect(container!.textContent).toContain('字段 tpl_a')
+
+    setRouteParams({})
+    await flushUi()
+    await flushUi()
+
+    const builder = container!.querySelector('[data-testid="approval-form-builder"]') as HTMLElement
+    expect(builder).not.toBeNull()
+    expect(builder.textContent).not.toContain('字段 tpl_a')
+    // New-route positive control through the V2 surface: the empty starter saves via CREATE.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-round4 P2 (stale response): a SLOW previous route\'s fetch resolving LAST cannot overwrite the current route\'s draft', async () => {
+    // The sequence-ticket guard: tpl_a's fetch is slow, the user switches to tpl_b, tpl_b
+    // resolves first — then tpl_a's response finally arrives and must be DROPPED.
+    let releaseA: (value: unknown) => void = () => {}
+    getTemplateSpy.mockImplementation((id: string) => {
+      if (id === 'tpl_a') return new Promise((resolve) => { releaseA = resolve })
+      return Promise.resolve(buildTemplate({ id, key: `k_${id}`, name: `模板 ${id}` }))
+    })
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+
+    setRouteParams({ id: 'tpl_b' })
+    await flushUi()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('k_tpl_b')
+
+    // The OLD route's response lands late — draft must stay tpl_b, and saving must update tpl_b.
+    releaseA(buildTemplate({ id: 'tpl_a', key: 'k_tpl_a', name: '模板 tpl_a' }))
+    await flushUi()
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('k_tpl_b')
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(updateTemplateSpy.mock.calls[0]?.[0]).toBe('tpl_b')
+  })
+
+  it('E-round3 P2 positive controls: a NEW route still creates; a LOADED edit route still updates', async () => {
+    // Control 1 — new-template route: the gate must not break creation.
+    setRouteParams({})
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    app?.unmount()
+    container?.remove()
+
+    // Control 2 — edit route that loads successfully: still updates, never creates.
+    setRouteParams({ id: 'tpl_ok' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({}))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1) // unchanged from control 1
+  })
+
+  it('B0 (gate P2-1 on 9948f3be5a): saving an EXISTING template with cleared key/name BLOCKS with 必填 — it must never be silently re-keyed', async () => {
+    // The ungated seeder silently re-keyed an existing template to a draft_* placeholder and
+    // renamed it 未命名审批 on save — and template.key is the business_key stamped on every
+    // initiated instance. Proven by the gate with an old-implementation control; pinned here:
+    // seeding is for NEW drafts only, existing templates block exactly as they did before B0.
+    setRouteParams({ id: 'tpl_seed_gate' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({}))
+    await mountView()
+    await flushUi()
+
+    const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
+    const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
+    expect(keyInput.value).not.toBe('')
+    for (const input of [keyInput, nameInput]) {
+      input.value = ''
+      input.dispatchEvent(new Event('input'))
+    }
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Blocked, loudly — and NOTHING was sent to the server.
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('模板 Key 必填')
+    expect(summary!.textContent).toContain('模板名称必填')
+    // And the inputs were NOT quietly refilled with placeholders.
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('')
+  })
+
+  it('B0: an option-less select field no longer blocks 保存草稿 (server accepts `options: []`) — the SAME draft still fails the PUBLISH checklist', async () => {
+    setRouteParams({ id: 'tpl_gap_options' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          {
+            id: 'reviewer',
+            type: 'user',
+            label: '审批人',
+            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+          },
+          { id: 'priority', type: 'select', label: '优先级', options: [] },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')).toBeNull()
+
+    // Publish stays strict: the checklist's "表单字段" bucket still fails on the SAME gap.
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const fieldsItem = container!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')
+    expect(fieldsItem?.getAttribute('data-ok')).toBe('false')
+    expect(fieldsItem?.textContent).toContain('需要至少一个选项')
+  })
+
+  it('B0: the header "N项不完善" affordance counts the SAME gaps the publish checklist does, is clickable, and reveals the list via the existing validationErrors/scroll machinery', async () => {
+    setRouteParams({ id: 'tpl_gap_counter' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          {
+            id: 'reviewer',
+            type: 'user',
+            label: '审批人',
+            visibilityRule: { fieldId: 'amount', operator: 'notEmpty' },
+          },
+          { id: 'priority', type: 'select', label: '优先级', options: [] },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    const counter = container!.querySelector('[data-testid="approval-template-incomplete-count"]') as HTMLButtonElement
+    expect(counter).not.toBeNull()
+    expect(counter.textContent?.trim()).toBe('1 项不完善')
+
+    counter.click()
+    await flushUi()
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary?.textContent).toContain('需要至少一个选项')
+    // Same DOM node the blocked-save path already uses to scroll+focus (mutation-provable: if the
+    // click stopped calling scrollAuthoringTarget, this assertion catches it as well as the
+    // existing "reveals and focuses field validation errors" test does for the save path).
+    expect(document.activeElement).toBe(summary)
+  })
+
+  it('B0: once every gap is resolved, the counter disappears entirely (no "0 项不完善" theater, matching the existing basic-info badge convention)', async () => {
+    setRouteParams({ id: 'tpl_gap_resolved' })
+    getTemplateSpy.mockResolvedValue(buildTemplate())
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-incomplete-count"]')).toBeNull()
+  })
+
   it('creates a common purchase template as a draft without publishing', async () => {
     await mountView()
 
@@ -1394,7 +1827,7 @@ describe('TemplateAuthoringView', () => {
   }
 
   it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the self-approver toggle (E) together, editable', async () => {
-    routeParams = { id: 'tpl_combo' }
+    setRouteParams({ id: 'tpl_combo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } }),
     }))
@@ -1408,7 +1841,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('combined view A2: the same template carrying fieldPermissions is editable (T1-4) — no unsupported alert, save enabled, per-field access selector renders the hidden value', async () => {
-    routeParams = { id: 'tpl_combo_fp' }
+    setRouteParams({ id: 'tpl_combo_fp' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true }, fieldPermissions: [{ fieldId: 'amount', access: 'hidden' }] }),
     }))
@@ -1427,7 +1860,7 @@ describe('TemplateAuthoringView', () => {
     // The default template is LINEAR (fields amount + reviewer) so the field-permissions editor is
     // live. This drives the @update:model-value → onStepFieldAccessChange → setStepFieldPermission →
     // save-payload wire that a pure-helper test can't see (wire-vs-fixture discipline).
-    routeParams = { id: 'tpl_t14_write' }
+    setRouteParams({ id: 'tpl_t14_write' })
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
     await flushUi()
@@ -1456,7 +1889,7 @@ describe('TemplateAuthoringView', () => {
   it('T1-4 routing hint: hiding a form_field_user routing-driver field renders the routing hint and does NOT block save (non-blocking)', async () => {
     // The default template's approval step resolves its approver from the `reviewer` form field
     // (form_field_user), so `reviewer` is a routing driver.
-    routeParams = { id: 'tpl_t14_routing' }
+    setRouteParams({ id: 'tpl_t14_routing' })
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
     await flushUi()
@@ -1474,7 +1907,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('direct_manager reads back editable: a saved direct_manager template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
-    routeParams = { id: 'tpl_dm' }
+    setRouteParams({ id: 'tpl_dm' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -1507,7 +1940,7 @@ describe('TemplateAuthoringView', () => {
   }
 
   it('G-5 wiring: changing an approval-node source via the SFC control writes it to the save payload; mode/policy/autoApprovalPolicy + cc + edges preserved', async () => {
-    routeParams = { id: 'tpl_g5' }
+    setRouteParams({ id: 'tpl_g5' })
     const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
     await mountView()
@@ -1550,7 +1983,7 @@ describe('TemplateAuthoringView', () => {
   // unchanged) is proven by ApprovalAssigneeResolver.ts's unmodified `sources.forEach` + dedup
   // (verified by source read, not re-tested here — this file only covers the FE authoring surface).
   it('P1-B: add a 2nd source card via the REAL "＋添加审批人" control → save payload carries 2 sources; remove one → save payload carries 1 (both survive the SAME node, edges/cc byte-identical)', async () => {
-    routeParams = { id: 'tpl_p1b_multicard' }
+    setRouteParams({ id: 'tpl_p1b_multicard' })
     const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
     await mountView()
@@ -1605,7 +2038,7 @@ describe('TemplateAuthoringView', () => {
   // source. This proves the default is `requester` (valid unconditionally) by driving the FULL save
   // path with the new card COMPLETELY untouched — not just inspecting the model.
   it('P1-B: clicking "＋添加审批人" alone (no further configuration) keeps the template save-able — the new card defaults to a VALID zero-config kind, not the roster\'s raw first entry', async () => {
-    routeParams = { id: 'tpl_p1b_add_default_valid' }
+    setRouteParams({ id: 'tpl_p1b_add_default_valid' })
     const graph = buildG5ComplexGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph }))
     await mountView()
@@ -1630,7 +2063,7 @@ describe('TemplateAuthoringView', () => {
   // (manual-ID ordinary path removed). cc forces the preserved-graph (complex) path.
   describe('G-B2-18: complex-node assignee picker', () => {
     it('renders the user picker (not the role picker) for static_user; no ordinary manual-ID control', async () => {
-      routeParams = { id: 'tpl_g5_static_user' }
+      setRouteParams({ id: 'tpl_g5_static_user' })
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['legacy-user-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
@@ -1650,7 +2083,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('renders the role picker for static_role; no ordinary manual-ID control', async () => {
-      routeParams = { id: 'tpl_g5_static_role' }
+      setRouteParams({ id: 'tpl_g5_static_role' })
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
@@ -1668,7 +2101,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('multi-id static_user selection preserved through save without a manual-ID control', async () => {
-      routeParams = { id: 'tpl_g5_multi_user' }
+      setRouteParams({ id: 'tpl_g5_multi_user' })
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1', 'u2'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
@@ -1685,7 +2118,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('switching source kind swaps typed pickers (no manual-ID surface)', async () => {
-      routeParams = { id: 'tpl_g5_kind_switch' }
+      setRouteParams({ id: 'tpl_g5_kind_switch' })
       getTemplateSpy.mockResolvedValue(buildTemplate({
         approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['mgr'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
       }))
@@ -1734,7 +2167,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('§1 active-exposure guard (mounted): opening a mapped (preset-shipped) template and saving keeps amountConsistencyCheck in the payload', async () => {
-    routeParams = { id: 'tpl_amt' }
+    setRouteParams({ id: 'tpl_amt' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ formSchema: { fields: amtFields, amountConsistencyCheck: amtMapping } as any, approvalGraph: amtGraph as any }))
     await mountView()
     await flushUi()
@@ -1747,7 +2180,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('G-5 wiring: a LEGACY approval node (assigneeType/assigneeIds, no assigneeSources) shows NO source editor but still renders read-only', async () => {
-    routeParams = { id: 'tpl_g5_legacy' }
+    setRouteParams({ id: 'tpl_g5_legacy' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildG5ComplexGraph({ assigneeType: 'role', assigneeIds: ['legacy_role'], approvalMode: 'single' }),
     }))
@@ -1760,7 +2193,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('G-5 sentinel hint: an approval node whose static_role carries the placeholder sentinel shows the in-editor hint', async () => {
-    routeParams = { id: 'tpl_sentinel' }
+    setRouteParams({ id: 'tpl_sentinel' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -1770,7 +2203,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('G-5 sentinel hint: a normal static_role (real role id) shows NO placeholder hint', async () => {
-    routeParams = { id: 'tpl_realrole' }
+    setRouteParams({ id: 'tpl_realrole' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildG5ComplexGraph({ assigneeSources: [{ kind: 'static_role', roleIds: ['finance-approvers'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -1780,7 +2213,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('D-3 topology: clicking "add condition branch" grows the condition graph and saves the new structure', async () => {
-    routeParams = { id: 'tpl_topo' }
+    setRouteParams({ id: 'tpl_topo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: {
         nodes: [
@@ -1865,7 +2298,7 @@ describe('TemplateAuthoringView', () => {
   }
 
   it('P1-D: condition branch cards show 优先级 N chips matching configured branch order (3-branch fixture)', async () => {
-    routeParams = { id: 'tpl_priority' }
+    setRouteParams({ id: 'tpl_priority' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
     await flushUi()
@@ -1910,7 +2343,7 @@ describe('TemplateAuthoringView', () => {
   // header's verbatim "...全部不满足时走默认分支。" is the SAME false claim when no default is
   // configured, so it must be gated identically — visibility, not the verbatim string, is gated).
   it('P1-D/P1-2: default branch card AND header hint render the default-flow claim when defaultEdgeKey is set (positive control)', async () => {
-    routeParams = { id: 'tpl_default_copy' }
+    setRouteParams({ id: 'tpl_default_copy' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
     await flushUi()
@@ -1931,7 +2364,7 @@ describe('TemplateAuthoringView', () => {
   // empty-state line instead, matching real executor routing (first outgoing edge, i.e. 优先级 1's
   // branch, not an undefined "default").
   it('P1-D/P1-2: default branch card renders the honest empty-state line AND the header hint is absent when no defaultEdgeKey is set (negative test)', async () => {
-    routeParams = { id: 'tpl_no_default' }
+    setRouteParams({ id: 'tpl_no_default' })
     const graph = buildThreeBranchConditionGraph()
     const cond = graph.nodes.find((n: any) => n.key === 'cond_1') as any
     delete cond.config.defaultEdgeKey
@@ -1953,7 +2386,7 @@ describe('TemplateAuthoringView', () => {
   // P2-6 (D0 §4.1, verbatim): priority chips must convey evaluation direction, and the condition
   // inspector header carries the mandated evaluation-order hint exactly once.
   it('P1-D/P2-6: priority-1 chip carries the "最高" direction cue and the header hint is the verbatim D0 §4.1 string', async () => {
-    routeParams = { id: 'tpl_priority_direction' }
+    setRouteParams({ id: 'tpl_priority_direction' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
     await mountView()
     await flushUi()
@@ -1973,7 +2406,7 @@ describe('TemplateAuthoringView', () => {
   // authoring header, linking to the existing TemplateDetailView.vue version-history section. No new
   // version storage — pure navigation, gated on "saved template WITH at least one recorded version".
   it('P1-D: header 版本历史 link renders for a saved template with recorded history and navigates to the detail view', async () => {
-    routeParams = { id: 'tpl_version_link' }
+    setRouteParams({ id: 'tpl_version_link' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_version_link', latestVersionId: 'ver_9' }))
     await mountView()
     await flushUi()
@@ -1985,14 +2418,14 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('P1-D: header 版本历史 link is absent for a brand-new (unsaved) template', async () => {
-    routeParams = {}
+    setRouteParams({})
     await mountView()
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-template-version-history-link"]')).toBeNull()
   })
 
   it('P1-D: header 版本历史 link is absent for a saved template with no recorded version yet', async () => {
-    routeParams = { id: 'tpl_no_history' }
+    setRouteParams({ id: 'tpl_no_history' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_no_history', latestVersionId: null }))
     await mountView()
     await flushUi()
@@ -2048,7 +2481,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('keeps approval mode, self-approval, and field permissions editable in graph authoring', async () => {
-    routeParams = { id: 'tpl_graph_policy' }
+    setRouteParams({ id: 'tpl_graph_policy' })
     getTemplateSpy.mockResolvedValue(
       buildTemplate({
         approvalGraph: buildG5ComplexGraph({
@@ -2079,7 +2512,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
-    routeParams = { id: 'tpl_formula_condition' }
+    setRouteParams({ id: 'tpl_formula_condition' })
     const graph = {
       nodes: [
         { key: 'start', type: 'start', name: '发起', config: {} },
@@ -2125,7 +2558,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
-    routeParams = { id: 'tpl_formula_dry_run' }
+    setRouteParams({ id: 'tpl_formula_dry_run' })
     const graph = {
       nodes: [
         { key: 'start', type: 'start', name: '发起', config: {} },
@@ -2217,7 +2650,7 @@ describe('TemplateAuthoringView', () => {
   }
 
   it('keeps the experimental Canvas V2 surface absent while its explicit feature flag is off', async () => {
-    routeParams = { id: 'tpl_canvas_off' }
+    setRouteParams({ id: 'tpl_canvas_off' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
     await flushUi()
@@ -2229,7 +2662,7 @@ describe('TemplateAuthoringView', () => {
 
   it('D-1 canvas: toggling to 画布视图 renders the graph visually (nodes + SVG edges), no false validity warning', async () => {
     approvalCanvasV2.value = true
-    routeParams = { id: 'tpl_canvas' }
+    setRouteParams({ id: 'tpl_canvas' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
     await flushUi()
@@ -2242,7 +2675,7 @@ describe('TemplateAuthoringView', () => {
 
   it('D-1/D-3 canvas: adding a condition branch ON THE CANVAS grows it and saves the new structure', async () => {
     approvalCanvasV2.value = true
-    routeParams = { id: 'tpl_canvas2' }
+    setRouteParams({ id: 'tpl_canvas2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
     await flushUi()
@@ -2278,7 +2711,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {
-    routeParams = { id: 'tpl_nested_guard' }
+    setRouteParams({ id: 'tpl_nested_guard' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: {
         nodes: [
@@ -2310,7 +2743,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('dept_head reads back editable: a saved dept_head template is NOT fail-closed (no unsupported alert, save enabled, sourceKind hydrated)', async () => {
-    routeParams = { id: 'tpl_dh' }
+    setRouteParams({ id: 'tpl_dh' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -2323,7 +2756,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('continuous_managers reads back editable: a saved continuous_managers template is NOT fail-closed (sourceKind + levels input hydrated)', async () => {
-    routeParams = { id: 'tpl_cm' }
+    setRouteParams({ id: 'tpl_cm' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'continuous_managers', levels: 3 }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
     }))
@@ -2337,7 +2770,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('Lock-1 §K4: continuous_dept_heads reads back editable: a saved continuous_dept_heads template is NOT fail-closed (sourceKind + levels input hydrated, registry-admitted)', async () => {
-    routeParams = { id: 'tpl_dh' }
+    setRouteParams({ id: 'tpl_dh' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'continuous_dept_heads', levels: 2 }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
     }))
@@ -2351,7 +2784,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('Lock-1 §K5-b: dept_head_at_level reads back editable: a saved dept_head_at_level template is NOT fail-closed (sourceKind + level input hydrated, registry-admitted)', async () => {
-    routeParams = { id: 'tpl_dhal' }
+    setRouteParams({ id: 'tpl_dhal' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'dept_head_at_level', level: 2 }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -2365,7 +2798,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('Lock-1 §K1: user_group reads back editable: a saved user_group template is NOT fail-closed (sourceKind + typed group multi-select hydrated, registry-admitted)', async () => {
-    routeParams = { id: 'tpl_ug' }
+    setRouteParams({ id: 'tpl_ug' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'user_group', groupIds: ['grp-1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
     }))
@@ -2379,7 +2812,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('Lock-1 §K3: prior_node_approver reads back editable on a 2-step linear graph: sourceKind + the TYPED prior-step picker hydrated (registry-admitted, reference resolved to the earlier step)', async () => {
-    routeParams = { id: 'tpl_k3' }
+    setRouteParams({ id: 'tpl_k3' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: {
         nodes: [
@@ -2406,7 +2839,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('updates an existing supported template without replacing it through create', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
 
@@ -2421,7 +2854,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('wires the visibility subform through the mounted view into the saved payload', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate()) // fields[1] reviewer depends on `amount` (notEmpty)
     await mountView()
     await flushUi()
@@ -2453,7 +2886,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('clearing the dependency in the mounted view drops the rule from the saved payload', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate())
     await mountView()
     await flushUi()
@@ -2535,7 +2968,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('UPDATE mode: unchecking allowRevoke on an EXISTING published template and publishing in the SAME sitting reaches the server (was silently discarded)', async () => {
-    routeParams = { id: 'tpl_seq' }
+    setRouteParams({ id: 'tpl_seq' })
     // The REAL backend's PATCH response carries the active published policy forward unchanged
     // (Lock-6 L6-P1) — this override matches that contract; the shared beforeEach default omits
     // `policy` entirely, which would mask this exact bug behind an unrealistic mock.
@@ -2563,7 +2996,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('positive control: republishing WITHOUT touching allowRevoke still carries the persisted value unchanged (the fix does not disturb the untouched round trip, gate P-1)', async () => {
-    routeParams = { id: 'tpl_seq_untouched' }
+    setRouteParams({ id: 'tpl_seq_untouched' })
     updateTemplateSpy.mockImplementation(async (id: string, payload: Record<string, unknown>) => ({
       ...buildTemplate({ id, status: 'published', activeVersionId: 'ver_1', policy: { allowRevoke: false } }),
       ...payload,
@@ -2662,7 +3095,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('B2-03: a starter-preset placeholder role fails ONLY the "审批人占位" checklist item (fields/flow stay ✓) and disables the confirm button', async () => {
-    routeParams = { id: 'tpl_sentinel_publish' }
+    setRouteParams({ id: 'tpl_sentinel_publish' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildG5ComplexGraph({
         assigneeSources: [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }],
@@ -2793,7 +3226,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('hydrating a template with a persisted tier pre-selects the matching radio, and republishing WITHOUT touching it round-trips unchanged', async () => {
-      routeParams = { id: 'tpl_dedup_hydrate' }
+      setRouteParams({ id: 'tpl_dedup_hydrate' })
       const persistedPolicy = { allowRevoke: true, autoApproval: { mergeAdjacentApprover: true } }
       getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_dedup_hydrate', status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }))
       // L6-P1 (docs/development/approval-lock6-requester-global-policy-20260817.md §1): the REAL
@@ -2826,7 +3259,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('gate X-1: a locked (both-true) persisted combination disables the radio group and republishing preserves it byte-unchanged', async () => {
-      routeParams = { id: 'tpl_dedup_locked' }
+      setRouteParams({ id: 'tpl_dedup_locked' })
       const persistedPolicy = { allowRevoke: true, autoApproval: { dedupeHistoricalApprover: true, mergeAdjacentApprover: true } }
       getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_dedup_locked', status: 'published', activeVersionId: 'ver_1', policy: persistedPolicy }))
       // See the sibling hydrate test above for why this override is needed (L6-P1 §1 PATCH-response
@@ -2858,7 +3291,7 @@ describe('TemplateAuthoringView', () => {
     })
 
     it('M8 honesty: the control never touches a node-level policy field — switching tiers never clears mergeWithRequester on any step (gate A-4 spirit at the FE boundary)', async () => {
-      routeParams = { id: 'tpl_dedup_a4' }
+      setRouteParams({ id: 'tpl_dedup_a4' })
       const a4Graph = {
         nodes: [
           { key: 'start', type: 'start', name: '发起', config: {} },
@@ -2943,7 +3376,7 @@ describe('TemplateAuthoringView', () => {
     // with the form editable + the graph rendered read-only (structured node list), and SAVE is
     // enabled — the save re-emits the SAME graph (anti-flatten), it does not project to a linear
     // start→approval→end chain.
-    routeParams = { id: 'tpl_parallel' }
+    setRouteParams({ id: 'tpl_parallel' })
     const parallelGraph = {
       nodes: [
         { key: 'start', type: 'start', name: '发起', config: {} },
@@ -2989,7 +3422,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('T8: disables the self-approver toggle when the template opens read-only', async () => {
-    routeParams = { id: 'tpl_locked' }
+    setRouteParams({ id: 'tpl_locked' })
     // A bogus config key forces fail-closed read-only while the approval step row
     // (and its merge checkbox) still renders.
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -3193,7 +3626,7 @@ describe('TemplateAuthoringView', () => {
   }
 
   it('D1 hygiene negatives: ordinary visible text has no fixture raw IDs, field-id editors, manual-ID, or JSON', async () => {
-    routeParams = { id: 'tpl_d1_hygiene' }
+    setRouteParams({ id: 'tpl_d1_hygiene' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: d1HygieneFormSchemaBlank as any,
       approvalGraph: buildD1HygieneComplexGraph() as any,
@@ -3262,7 +3695,7 @@ describe('TemplateAuthoringView', () => {
   })
 
   it('D1 hygiene positives: typed user/role/field/CC pickers mounted; untouched save payload unchanged', async () => {
-    routeParams = { id: 'tpl_d1_hygiene_save' }
+    setRouteParams({ id: 'tpl_d1_hygiene_save' })
     const graph = buildD1HygieneComplexGraph()
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: d1HygieneFormSchemaLabeled as any,
@@ -3325,7 +3758,7 @@ describe('TemplateAuthoringView', () => {
   // without it, selecting a date_range field here would either be impossible (silently narrowing to
   // OD-L8-5(c)) or offer a bare option that always fails publish (an inert control).
   it('OD-L8-5(a): the visibility depends-on picker offers a date_range field ONLY as two endpoint options, and the chosen endpoint reaches the saved payload', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: {
         fields: [
@@ -3384,7 +3817,7 @@ describe('TemplateAuthoringView', () => {
   // would be an M7 inert control (always selectable, never publishable). The number-field leg is a
   // mandatory positive control: without it, an accidentally-emptied options list would also pass.
   it('OD-L8-5(c): the condition rule field picker excludes date_range entirely while a sibling number field remains selectable', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: {
         fields: [
@@ -3423,7 +3856,7 @@ describe('TemplateAuthoringView', () => {
   // always excluded them), but a date_range field's endpoints ARE validly selectable while it IS
   // date_range, so retyping AWAY can orphan a dotted `${id}.start`/`.end` dependency mid-session.
   it('retyping a date_range field AWAY clears a dependent visibility rule pointing at its dotted endpoint (reverse-direction stale sweep)', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: {
         fields: [
@@ -3460,7 +3893,7 @@ describe('TemplateAuthoringView', () => {
   // `if (field.type === 'explanation') continue` guard from a no-op: deleting it alone left every
   // reachable spec green. The number-field leg is a mandatory positive control.
   it('Lock-8 L8-A: the visibility depends-on picker excludes an explanation field entirely (no bare option, no endpoint options), while a sibling number field remains selectable', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: {
         fields: [
@@ -3488,7 +3921,7 @@ describe('TemplateAuthoringView', () => {
   // nothing distinguished this PR's `&& field.type !== 'explanation'` guard from a no-op: deleting
   // it alone left every reachable spec green.
   it('Lock-8 L8-A: the condition rule field picker excludes an explanation field entirely while a sibling number field remains selectable', async () => {
-    routeParams = { id: 'tpl_1' }
+    setRouteParams({ id: 'tpl_1' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       formSchema: {
         fields: [
@@ -3565,7 +3998,7 @@ describe('TemplateAuthoringView', () => {
 
     it('hydration gate: while an edit-mode template fetch is in flight, the legacy fallback renders (never an empty Designer 2.0 shell); once hydration resolves, the builder mounts seeded with the REAL fetched fields, not the empty placeholder', async () => {
       approvalCanvasV2.value = true
-      routeParams = { id: 'tpl_1' }
+      setRouteParams({ id: 'tpl_1' })
       let resolveFetch: ((value: unknown) => void) | null = null
       getTemplateSpy.mockImplementation(
         () => new Promise((resolve) => { resolveFetch = resolve }),
