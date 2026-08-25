@@ -403,7 +403,24 @@ describe('platform apps router catalog feature predicate', () => {
       id: 'elearning',
       displayName: '学习中心',
       pluginStatus: 'active',
-      navigation: [],
+      navigation: [
+        {
+          id: 'elearning-learner',
+          title: '学习中心',
+          path: '/learn',
+          icon: 'book',
+          order: 70,
+          location: 'main-nav',
+        },
+        {
+          id: 'elearning-admin',
+          title: '云课堂管理',
+          path: '/admin/elearning',
+          icon: 'settings',
+          order: 10,
+          location: 'admin',
+        },
+      ],
       featureFlags: ['elearning'],
       instance: null,
     })
