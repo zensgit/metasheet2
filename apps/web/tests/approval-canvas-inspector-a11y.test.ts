@@ -163,8 +163,7 @@ describe('ApprovalCanvasNodeInspector L0-1 tab strip a11y (structural)', () => {
 describe('ApprovalCanvasNodeInspector B1 footer action bar (structural)', () => {
   it('keeps stable footer/action data-testids, outside the scrolling body', () => {
     expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-footer"/)
-    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-cancel"/)
-    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-confirm"/)
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-footer-close"/)
     // The footer is a sibling of `.template-authoring__canvas-inspector-body` (the scrolling
     // region), declared AFTER it closes — never nested inside it.
     const bodyOpenIndex = INSPECTOR_SRC.indexOf('template-authoring__canvas-inspector-body')
@@ -182,9 +181,10 @@ describe('ApprovalCanvasNodeInspector B1 footer action bar (structural)', () => 
     )
   })
 
-  it('confirm/cancel labels are business copy, not internal identifiers', () => {
-    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-cancel"[\s\S]{0,80}>\s*取消\s*</)
-    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-confirm"[\s\S]{0,80}>\s*确定\s*</)
+  it('the footer carries a SINGLE 关闭 (E-P2-3: the 取消/确定 pair both aliased close over live-committing fields — a cancel that cannot discard — and RATIFIED A-8 forbids Save/Cancel/Apply outright)', () => {
+    expect(INSPECTOR_SRC).toMatch(/data-testid="approval-canvas-inspector-footer-close"[\s\S]{0,80}>\s*关闭\s*</)
+    expect(INSPECTOR_SRC).not.toMatch(/data-testid="approval-canvas-inspector-cancel"/)
+    expect(INSPECTOR_SRC).not.toMatch(/data-testid="approval-canvas-inspector-confirm"/)
   })
 })
 

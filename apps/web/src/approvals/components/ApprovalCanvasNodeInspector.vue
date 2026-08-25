@@ -383,25 +383,19 @@ provide(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, {
       </template>
     </div>
     <!-- B1: fixed bottom action bar — a sibling of the scrolling body, never inside it, so it
-         stays pinned regardless of tab content height. Every field (incl. the B2 inline
-         title-rename) already commits live via blur/Enter, same as before this slice — there is
-         no staged/uncommitted edit buffer for 取消 to meaningfully discard, so both buttons are
-         presentation-parity aliases for the existing 关闭 action (see PR description). -->
+         stays pinned regardless of tab content height. ONE button, 关闭 (E-P2-3, external review
+         2026-08-25): every field commits live on blur/Enter — there is NO staged edit buffer —
+         so a 取消 here would claim to discard changes it cannot discard, and the RATIFIED A-8
+         invariant (no Save/Cancel/Apply controls anywhere in the inspector) forbids the pair
+         outright. 关闭 is pure navigation, identical to the header ×. A real 取消/确定 needs a
+         delta lock defining full staging/rollback semantics first. -->
     <div class="template-authoring__canvas-inspector-footer" data-testid="approval-canvas-inspector-footer">
       <el-button
         size="small"
-        data-testid="approval-canvas-inspector-cancel"
+        data-testid="approval-canvas-inspector-footer-close"
         @click="emit('close')"
       >
-        取消
-      </el-button>
-      <el-button
-        type="primary"
-        size="small"
-        data-testid="approval-canvas-inspector-confirm"
-        @click="emit('close')"
-      >
-        确定
+        关闭
       </el-button>
     </div>
   </aside>

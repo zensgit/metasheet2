@@ -1379,6 +1379,38 @@ describe('TemplateAuthoringView', () => {
     expect(nameInput.value).toBe('未命名审批')
   })
 
+  it('B0 (gate P2-1 on 9948f3be5a): saving an EXISTING template with cleared key/name BLOCKS with 必填 — it must never be silently re-keyed', async () => {
+    // The ungated seeder silently re-keyed an existing template to a draft_* placeholder and
+    // renamed it 未命名审批 on save — and template.key is the business_key stamped on every
+    // initiated instance. Proven by the gate with an old-implementation control; pinned here:
+    // seeding is for NEW drafts only, existing templates block exactly as they did before B0.
+    routeParams = { id: 'tpl_seed_gate' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({}))
+    await mountView()
+    await flushUi()
+
+    const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
+    const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
+    expect(keyInput.value).not.toBe('')
+    for (const input of [keyInput, nameInput]) {
+      input.value = ''
+      input.dispatchEvent(new Event('input'))
+    }
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    // Blocked, loudly — and NOTHING was sent to the server.
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('模板 Key 必填')
+    expect(summary!.textContent).toContain('模板名称必填')
+    // And the inputs were NOT quietly refilled with placeholders.
+    expect((container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value).toBe('')
+  })
+
   it('B0: an option-less select field no longer blocks 保存草稿 (server accepts `options: []`) — the SAME draft still fails the PUBLISH checklist', async () => {
     routeParams = { id: 'tpl_gap_options' }
     getTemplateSpy.mockResolvedValue(buildTemplate({

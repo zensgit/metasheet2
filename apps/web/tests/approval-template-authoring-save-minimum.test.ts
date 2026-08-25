@@ -8,6 +8,8 @@
  * / `validateDetailColumnsDraft` (the functions under test) for the exact line citations — this
  * file only pins the BEHAVIOR, not the citations.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   createEmptyStepDraft,
@@ -257,3 +259,29 @@ describe('B0: seedDraftIdentityForSave', () => {
     expect(errors).not.toContain('模板名称必填')
   })
 })
+
+describe('E-P3: the view composes the save minimum through the ONE helper', () => {
+  // Behavioural pinning is impossible BY DESIGN here: the helper and a hand-rolled composition
+  // are identical today — any future divergence is exactly the drift the single definition
+  // exists to prevent, and it would be invisible to a black-box test at the moment the helper is
+  // unwired. So the pin is structural, on EXECUTABLE lines only (full-line comments stripped —
+  // the #5140/#5161 saga's lesson): validate() must call collectTemplateSaveMinimum, and must
+  // not re-compose the two validators by hand.
+  it('validate() calls collectTemplateSaveMinimum and does not hand-compose the validators', () => {
+    const source = readFileSync(
+      join(__dirname, '../src/views/approval/TemplateAuthoringView.vue'),
+      'utf8',
+    )
+    const startIdx = source.indexOf('async function validate(')
+    expect(startIdx).toBeGreaterThan(0)
+    const body = source.slice(startIdx, source.indexOf('\n}', startIdx))
+    const executable = body
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    expect(executable).toMatch(/^\s*const minimum = collectTemplateSaveMinimum\(draft\.value, unsupportedReason\.value\)/m)
+    expect(executable).not.toMatch(/^\s*const \w+ = validateTemplateFormFields\(/m)
+    expect(executable).not.toMatch(/^\s*const \w+ = validateTemplateApprovalFlow\(/m)
+  })
+})
+

@@ -2324,14 +2324,41 @@ export function validateTemplateDraft(
  * doc comments for the exact, evidence-cited list) is accepted by the server and becomes a counted
  * "N项不完善" publish-checklist gap instead of a save block.
  */
+export interface TemplateSaveMinimumResult {
+  formErrors: string[]
+  flowErrors: string[]
+  all: string[]
+}
+
+/**
+ * The ONE definition of what blocks 保存草稿 — the view routes with the parts and gates with
+ * `.all` (P3, external review 2026-08-25: the first shape of this helper had no production call
+ * site — the view composed the two validators by hand, so nothing prevented the two compositions
+ * from drifting apart).
+ *
+ * Identity (模板 Key/名称 必填) needs NO separate leg here: `validateTemplateFormFields`
+ * unconditionally includes `validateTemplateBasicInfo` (see :2057) and the identity checks are
+ * NOT minimal-gated — a blank key/name blocks save through formErrors. What made the gate's
+ * P2-1 regression possible was never a validation gap: it was `seedDraftIdentityForSave` FILLING
+ * the blanks before validation ran. That seeder is now new-drafts-only, so for existing
+ * templates the blanks reach these validators and block, exactly as pre-B0. (An earlier fix
+ * round added a duplicate identityErrors leg here — removed when its mutation run proved the
+ * composition behaviourally identical without it: the strings would have rendered twice.)
+ */
+export function collectTemplateSaveMinimum(
+  draft: TemplateAuthoringDraft,
+  unsupportedReason?: string | null,
+): TemplateSaveMinimumResult {
+  const formErrors = validateTemplateFormFields(draft, unsupportedReason, null, { minimal: true })
+  const flowErrors = validateTemplateApprovalFlow(draft, { minimal: true })
+  return { formErrors, flowErrors, all: [...formErrors, ...flowErrors] }
+}
+
 export function validateTemplateSaveMinimum(
   draft: TemplateAuthoringDraft,
   unsupportedReason?: string | null,
 ): string[] {
-  return [
-    ...validateTemplateFormFields(draft, unsupportedReason, null, { minimal: true }),
-    ...validateTemplateApprovalFlow(draft, { minimal: true }),
-  ]
+  return collectTemplateSaveMinimum(draft, unsupportedReason).all
 }
 
 let templateKeySeq = 0
@@ -2363,6 +2390,13 @@ function generateTemplateKey(): string {
  * already non-blank, so a draft that already has real values is never touched.
  */
 export function seedDraftIdentityForSave(draft: TemplateAuthoringDraft): TemplateAuthoringDraft {
+  // NEW DRAFTS ONLY (gate P2-1 on 9948f3be5a, mounted-probe proven with an old-implementation
+  // control): without this gate, saving an EXISTING template whose author had cleared the
+  // key/name inputs silently re-keyed it to a draft_* placeholder and renamed it 未命名审批 —
+  // and template.key is the business_key stamped on every initiated instance. Existing
+  // templates now BLOCK on blank identity (collectTemplateSaveMinimum's identityErrors)
+  // exactly as they did before B0.
+  if (draft.templateId) return draft
   const key = draft.key.trim()
   const name = draft.name.trim()
   if (key && name) return draft

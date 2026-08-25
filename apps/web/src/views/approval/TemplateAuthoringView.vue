@@ -1472,6 +1472,7 @@ import {
   validateTemplateFormFields,
   validateTemplateApprovalFlow,
   validateTemplateBasicInfo,
+  collectTemplateSaveMinimum,
   seedDraftIdentityForSave,
   type AuthoringValidationIssue,
   placeholderRoleNodeKeys,
@@ -2792,11 +2793,26 @@ function onRemoveNode(nodeKey: string): void {
 // node state alongside `config`, generically, with no change needed here. A blank/whitespace name
 // clears the override — `graphNodeLabel` already falls back to the node-type label for `undefined`.
 function onRenameCanvasNode(nodeKey: string, name: string): void {
-  const node = draft.value.preservedGraph?.nodes.find((candidate) => candidate.key === nodeKey)
-  if (!node) return
+  // THROUGH THE UNIFIED HISTORY, not a direct draft mutation (E-P2-4, external review
+  // 2026-08-25): the first shape wrote draft.preservedGraph in place, so rename produced no
+  // history entry — undo stayed disabled after a rename, and a later topology undo resurrected
+  // stale names. A topology op records a snapshot pair with inverse in the SAME undo stack every
+  // other structural edit uses; renaming to the current name is an identity op and records
+  // nothing. (mergeLiveNodeConfigsOntoTopology no longer overlays live names for the same
+  // reason — see its comment.)
   const trimmed = name.trim()
-  if (trimmed) node.name = trimmed
-  else delete node.name
+  runTopologyOp(
+    (graph) => ({
+      nodes: graph.nodes.map((node) => {
+        if (node.key !== nodeKey) return node
+        if (trimmed) return { ...node, name: trimmed }
+        const { name: _dropped, ...rest } = node
+        return rest
+      }),
+      edges: graph.edges,
+    }),
+    { kind: 'node', nodeKey },
+  )
 }
 function topologyEdgeCount(nodeKey: string, dir: 'source' | 'target'): number {
   return (draft.value.preservedGraph?.edges ?? []).filter((edge) => edge[dir] === nodeKey).length
@@ -3889,10 +3905,13 @@ function firstInvalidAuthoringSection(formErrors: string[]): AuthoringSectionId 
 // still `validateTemplateFormFields`/`validateTemplateApprovalFlow` with NO `minimal` flag) before
 // ever reaching `persistDraft`, so relaxing what `validate()` itself checks never weakens publish.
 async function validate(): Promise<boolean> {
+  // Seeding is a NO-OP for existing templates (see seedDraftIdentityForSave — gate P2-1); their
+  // blank identity blocks below instead. The save-blocking set has ONE definition —
+  // collectTemplateSaveMinimum — and this is its production call site (E-P3).
   draft.value = seedDraftIdentityForSave(draft.value)
-  const formErrors = validateTemplateFormFields(draft.value, unsupportedReason.value, null, { minimal: true })
-  const flowErrors = validateTemplateApprovalFlow(draft.value, { minimal: true })
-  validationErrors.value = [...formErrors, ...flowErrors]
+  const minimum = collectTemplateSaveMinimum(draft.value, unsupportedReason.value)
+  const formErrors = minimum.formErrors
+  validationErrors.value = minimum.all
   if (validationErrors.value.length > 0) {
     activeAuthoringSection.value = firstInvalidAuthoringSection(formErrors)
     ElMessage.warning('请先修正模板配置')
