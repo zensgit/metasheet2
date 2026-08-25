@@ -1,6 +1,15 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v5(2026-08-26 四次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v6(2026-08-26 五次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+
+> **v6 修订说明**(第五轮权威合同对账):①明确 B 的 ratify 同时是对已 ratify
+> FWB-0 §1/D4 中「建实例时一次冻结」的**精确增量修订**, 与已上线 Lock-7 的 pending
+> 办理写入一致;②撤回 SQL census 可盘点浏览器本地发起草稿的不可行声明,
+> 这类草稿只由客户端 capability 与服务端提交终检处理;③把七路径的边界收窄为
+> 「可携带已发布明细 schema 的模板型审批路径」,并要求机械盘点所有
+> `form_snapshot` 写入器;当前考勤直写器是固定非明细形状,不冒充第八条明细路径。
+> ④明细逐行映射保留已有 FWB 全有或全无的缺值语义,不暗中过滤空行或压缩
+> `row_index`。
 
 > **v5 修订说明**(第四轮代码对账):①把错误的「提交即冻结」改为真实的**终态冻结**合同:办理节点可在
 > `pending` 期间同事务更新 `form_snapshot` 并追加 revision,批准终态与 completion event 同事务后快照才稳定;
@@ -48,6 +57,21 @@
 - **A2(三缝原则)**:关联记录(引用进)、FWB(批准后快照出)、automation 桥(表事件触发审批)。
   新能力必须落在三缝上,不开第四条。
 
+### 1.1 权威与增量修订边界
+
+Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务中原位更新
+`approval_instances.form_snapshot` 并追加 revision。因此,若 owner ratify B,该裁决**仅**
+将 `approval-form-writeback-fwb0-designlock-20260712.md` §1 与 D4 中的数据源口径修订为:
+
+- FWB 服务端按 `instanceId` 读取 `status='approved'` 的**批准终态
+  `form_snapshot`**;pending 期 Lock-7 办理写入可能已改变其中的值。
+- 建实例时的快照是初始证据,不再是 FWB 的永久不可变值。FWB 仍绝不读动作
+  请求原始载荷、当前模板草稿或事件载荷中的表单值;事件只携身份。
+- FWB-0 的权限、类型、记录绑定、原子性、审计与其他验证义务全部保持不变。
+
+本文合并本身不产生上述权威转换;owner 必须在§7 对 B 单独记录 ratify。
+未 ratify B 时,本节仅是待决的精确 delta,不得被当成已更改 FWB-0。
+
 三相成本分析(为何不做「表单内嵌可编辑网格」):提交前 1~20 行/单人/分钟级——嵌千行级协作网格
 是阻抗错配;**审批中**要把按节点字段权限(#5143 已交付)投影到按人/角色的表权限——两个权限模型
 的乘积,是嵌表方案的真实硬核成本;审批后「数据进表」已被 FWB 解决。宜搭「平铺方式」是表格在
@@ -71,10 +95,13 @@
 范围:①复制行;②上/下移;③删除确认;④xlsx 批量导入到原生明细行(复用仓内 pinned SheetJS,
 但使用审批域自己的有界解析 adapter,不直接依赖考勤 UI 模块;公开免登表单禁用导入);⑤序号列。
 
-**行数边界合同(v5 固定数值与传输,审阅 P2-2/P2-5)**:
+**行数边界合同(v6 固定数值与传输,审阅 P2-2/P2-5)**:
 - 现状:`maxRows` 可不填,服务端仅校验非负整数,**无系统硬上限**;`minRows≥1` 时发起页初始
-  仍播种空数组(不自动出首行)。因此部署前须只读 census:全部已存草稿/已发布版本中
-  `minRows/maxRows > 200` 的字段,以及全部非终态实例/已存发起草稿中明细行数 `>200` 的快照。
+  仍播种空数组(不自动出首行)。因此部署前须只读 census:全部**服务端持久化**
+  模板草稿/已发布版本中 `minRows/maxRows > 200` 的字段,以及全部非终态实例中
+  明细行数 `>200` 的 `form_snapshot`。发起页草稿只存于浏览器 `localStorage`,
+  **不存在服务端草稿表供 SQL census**;不得将未盘点写成 0。旧本地草稿恢复后,
+  客户端 capability 显示超限原因,服务端提交终检对 201 行必须拒绝;不做静默截断或自动分批。
   任一非零先出 owner disposition,不得用上线时静默截断修数。终态历史快照保持不可变;B 包启用前
   另按可能命中明细展开规则的批准快照做 census,不能把 A 包的非终态 census 冒充 B 包证据。
 - **唯一权威值:**后端域模块导出 `APPROVAL_DETAIL_MAX_ROWS = 200`;复用现有认证
@@ -95,6 +122,13 @@
   ⑦办理节点 `applyHandlerFieldWrites` 在原位更新 `form_snapshot` 前按同一生效上限终检。
   客户端播种/手工添加/导入是 UX;服务端保存/发布/提交/办理写入四道才是权威合同。中和任一道服务端
   调用点都必须让自己的 200/201 判别测试变红。
+- **写入面完整性:**上述七条是**可携带已发布明细 schema 的模板型审批路径**,
+  不是对全仓 `form_snapshot` 写入器数量的猜测。A 必须增加 source-derived census,
+  机械枚举 core backend 与生产 plugins 中的所有 `approval_instances.form_snapshot`
+  INSERT/UPDATE/UPSERT 路径,并将每条精确分类为「模板型且可携带明细」或「固定形状且不可携带明细」。
+  当前 `plugins/plugin-attendance/index.cjs` 的考勤直写器属后者:它不绑定已发布模板版本/
+  明细 schema,所以 v1 不强行套用明细行上限。该排除必须有正控;新增未分类写入器或使固定形状
+  路径开始携带模板明细时,required guard 必须变红,先纳入上限合同才能放行。
 - **发布与回滚:**能力置于新旗 `APPROVAL_DETAIL_V11_ENABLED` 后,exact-literal `'true'` 才显示/启用;
   上述七路径全部受同一旗控制,默认 OFF;旗 OFF 时既有保存/发布/提交/办理写入行为逐字节不变。
   仓内现有 `global-history-flag-manifest.mjs` 的 source-derived/phantom 规则只接受 `MULTITABLE_*`,不能
@@ -148,6 +182,9 @@ safe);date 只收**文本单元格**中的严格 `YYYY-MM-DD`;datetime 只收带
    把日期序列或区域日期改成接受时对应测试必须红。
 5. mounted spec 同时进入 approval web guard 与 `run-required-web-tests.sh`;在 1440/1024/390 真浏览器
    验证表格横向滚动、行操作和键盘等价路径。旗 OFF 截图与当前 main 一致。
+6. 从 `localStorage` 恢复 201 行旧草稿时不清空用户数据,但提交必须在任何实例/
+   outbox 写入前拒绝。`form_snapshot` writer census 对当前精确类别集有正控;新增一个
+   未分类写入器、或让考勤固定形状开始绑定明细 schema,均须使 required guard 变红。
 
 ## 4. FWB v2:明细行展开投递(审批→表)
 
@@ -182,6 +219,10 @@ type FwbMappingSource =
   不得读取当前可变草稿 schema。
 - 同一映射可引用顶层字段(每行重复)或该明细行的 child 字段;不能引用其他明细组。确认哈希覆盖
   `mode + detailSourceFieldId + 完整 source 联合 + target + sourceTemplateVersionId`。
+- 逐行映射保留既有 `mapApprovalFormValues` 的**全有或全无**合同:对任一显式映射,
+  源格缺失、`null` 或空白字符串均在父 claim 前以 `missing_required_value` 拒绝整个
+  动作。不得因为 `minRows` 播种了空行就静默丢行、压缩 `row_index` 或只写部分列;
+  「可选映射」若未来需要,须独立设计,不由 v2 推断。
 - 源叶子 8 类(text/textarea/number/date/datetime/select/multi-select/user),目标闭集为
   text/date/select(number 待 D0-D4)。v1 矩阵:text/textarea→text;date→date;select→select,且
   选项使用 execute-time 目标闭集;datetime、multi-select、user、number 及其他所有格子明确拒绝。
@@ -273,7 +314,8 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
 3. **Parent claim/replay:**N=0/1/200 首次与重放均构造;两个 worker 同抢同一 N 行只能得到一个
    完整赢家。删除任一严格 replay 核对(行集/event/record id)时指定 corruption golden 必须红。
 4. **Nested mapping:**两个明细字段复用同一 child id,只读取指定组;不存在/跨组/类型漂移在
-   rule-save/rule-enable/execute 三时点 fail closed。顶层字段重复到每行有正控。
+   rule-save/rule-enable/execute 三时点 fail closed。顶层字段重复到每行有正控。一个显式映射格为
+   缺失/`null`/空白字符串时,父 claim 与所有业务写均为 0;删掉缺值门或改成跳行时指定测试必须变红。
 5. **Atomicity:**第 k 行 record/revision/provenance/outbox 四类故障逐一注入后,父 claim、N 类业务行、
    revision、子证据和 outbox 全部为 0;不存在「补剩余行」路径。
 6. **Event identity:**两行→两个不同 outbox event id→真实 durable adapter→两个下游效果;
@@ -397,18 +439,20 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 - (b) 行级引用+伴生列:填单中可刷新;提交时切断与表的联动并成为审批内副本,批准终态再冻结。量级:中-大。
 - 安全底线:服务端以发起人身份过表 ACL;发布时目录校验;跨 org 不通。
 
-## 7. 待 owner 裁决(v5:五个独立裁决包)
+## 7. 待 owner 裁决(v6:五个独立裁决包)
 
-**A. v1.1 录入效率包 — 建议 RATIFY v5。**裁决面收窄为:①系统硬上限固定 **200**、
+**A. v1.1 录入效率包 — 建议 RATIFY v6。**裁决面收窄为:①系统硬上限固定 **200**、
 嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
-③新旗默认 OFF,先补可分域 flag registry,census 非零先逐项处置;④钉钉嵌入端 390px 真浏览器实测为
+③新旗默认 OFF,先补可分域 flag registry,按「服务端持久数据」运行 census 且对
+`form_snapshot` 写入器做 source-derived 完整性分类;非零结果先逐项处置;④钉钉嵌入端 390px 真浏览器实测为
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
 
-**B. FWB v2 delta lock 包 — 建议 RATIFY v5。**裁决面为:①单一 detailSourceFieldId +
+**B. FWB v2 delta lock 包 — 建议 RATIFY v6。**裁决面为:①单一 detailSourceFieldId +
 判别式来源;②既有六元父 claim/helper/index 零改动 + additive 逐行溯源表;③一次父 claim、N 行同事务、
 严格 replay(含 N=0);④以 action-scoped FWB event 为父种子的逐行稳定 event id;⑤逐格类型矩阵;
-⑥新实例只追加;⑦终态冻结语义、A/FWB/durable 依赖、穷尽 dispatcher、历史批准快照 census、
+⑥新实例只追加;⑦按 §1.1 精确修订 FWB-0 数据源条款、终态冻结语义、缺值全有或全无、
+A/FWB/durable 依赖、穷尽 dispatcher、历史批准快照 census、
 滚动部署/回滚;⑧§4.5 十一道验证门。
 任何一项写成「实现时再定」都视为未裁。owner 未逐项接受前仍为 PROPOSED,不得开实现旗。
 
