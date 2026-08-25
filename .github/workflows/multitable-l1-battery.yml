@@ -5,7 +5,7 @@ run-name: "Multitable L1 Battery (staging): ${{ inputs.intent }}"
 # Owner-gated staging runner for the Time Machine O-2 enablement ladder's L1 exercise
 # battery (docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md §2,
 # "L1 — staging ENABLE triggers"). L1 is the FIRST rung where platform writers actually
-# collide with recovery-authority serialization (9/9 triggers ENABLE on staging, the 4
+# collide with recovery-authority serialization (9/9 triggers ENABLE on staging, the 5
 # app-side flags stay OFF). The battery (scripts/ops/multitable-l1-battery.mjs, a
 # SIBLING deliverable — NOT part of this workflow) holds an exclusive recovery-authority
 # lease and drives platform write surfaces over HTTP, asserting the writes collide with
@@ -389,7 +389,7 @@ jobs:
           if [ -z "$build_commit" ]; then
             build_commit="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$CONTAINER" 2>/dev/null || true)"
           fi
-          log "provenance: image=${image_digest:-<unset>} commit=${build_commit:-<unset>}"
+          printf '%s\n' "provenance: image=${image_digest:-<unset>} commit=${build_commit:-<unset>}"
 
           app_url="http://127.0.0.1:${port}"
 

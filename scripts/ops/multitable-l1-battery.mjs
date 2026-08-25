@@ -6,7 +6,7 @@
  * WHY THIS EXISTS
  * ---------------
  * At ladder L1 (`docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md` §2)
- * the nine recovery-authority triggers are ENABLED on staging while all four recovery flags stay
+ * the nine recovery-authority triggers are ENABLED on staging while all five recovery flags stay
  * OFF. With no recovery process holding a lease, organic traffic sees **zero** 40001 — so the
  * ladder's "zero unmapped 500" criterion is, under passive observation, satisfied by a system in
  * which the triggers never fire at all. Passive observation therefore cannot distinguish
@@ -1681,16 +1681,17 @@ export async function runBattery({ env = process.env, options } = {}) {
       shadowed_authority_functions: posture.shadowOffenders,
       unexpected_authority_triggers: posture.unexpectedTriggers,
       unexpected_authority_functions: posture.unexpectedFunctions,
-      // The battery is deliberately FLAG-AGNOSTIC. L1 is "triggers ENABLED, all four recovery
+      // The battery is deliberately FLAG-AGNOSTIC. L1 is "triggers ENABLED, all five recovery
       // flags OFF"; the battery requires no flag in any state and asserts nothing about them.
       // They are recorded only so the evidence names the posture the run observed.
       recovery_flags_observed: {
         MULTITABLE_HISTORY_CONTIGUITY_STRICT: env.MULTITABLE_HISTORY_CONTIGUITY_STRICT ?? null,
         MULTITABLE_ENABLE_WRITER_FENCE: env.MULTITABLE_ENABLE_WRITER_FENCE ?? null,
+        MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: env.MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION ?? null,
         MULTITABLE_ENABLE_SHEET_REVERT: env.MULTITABLE_ENABLE_SHEET_REVERT ?? null,
         MULTITABLE_ENABLE_PIT_RESET: env.MULTITABLE_ENABLE_PIT_RESET ?? null,
       },
-      flag_requirement: 'none — the battery runs at L1 posture and is independent of all four recovery flags',
+      flag_requirement: 'none — the battery runs at L1 posture and is independent of all five recovery flags',
     }
     if (!posture.armed) {
       const report = notArmedReport(posture)

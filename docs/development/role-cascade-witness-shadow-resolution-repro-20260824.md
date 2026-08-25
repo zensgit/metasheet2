@@ -76,11 +76,37 @@ names. The on-path case is not addressed, and the golden covers only the off-pat
 4. Add a real-DB negative golden for "live and decoy both on the path, decoy first", and a mutation
    that deletes the ambiguity gate must red it.
 
-## Operational status at time of writing
+## Operational status
 
-`gh run list --workflow=multitable-role-cascade-witness.yml` returns **zero runs**: the witness has
-never been dispatched against any target. No ABSENT verdict is in circulation and nothing needs
-retracting. The fix can land before first dispatch.
+> **⚠️ 2026-08-25 — this section originally claimed BOTH workflows had zero runs and that "nothing
+> needs retracting". That was wrong, and the correction is below. It is retained rather than
+> rewritten, because how the claim was produced matters more than the claim.**
+
+**How I got it wrong.** I ran `gh run list --workflow=multitable-l1-battery.yml` from a checkout
+that does not contain that workflow file. `gh` resolved nothing, returned empty, and I read *empty*
+as *zero runs*. The corroborating check, `gh workflow list | grep -i l1-battery`, missed for an
+unrelated reason: the registered name is `Multitable L1 Battery (Staging)` — a space, not a hyphen.
+Two independent reasons the absence claim never had a basis, and an empty read is not absence.
+
+**The facts, re-queried by workflow ID** (`338908393` / `340936157`):
+
+- **`Multitable L1 Battery (Staging)` was dispatched twice**, both on `main@36588a291e` — after
+  #5148, and **without** #5147. Run `32716557230` failed input validation and never reached a
+  database. Run `32716676483` ran on staging and returned `VERDICT: PASS`, rc 0.
+- That successful run **did produce a pre-fix judgement**:
+  `PHASE 0 VERDICT: EXEMPTION-VALID — no foreign key writes a recovery-authority-triggered child of
+  roles on a role delete, so the roles:delete NOT-DRIVEN reason still holds on this database`, with
+  `posture.role_delete_cascade_present = false` and `role_delete_triggered_children = []`
+  (artifact `multitable-l1-battery-staging-32716676483-1`). Its posture carries no
+  `role_delete_binding` key, which is itself corroboration that the run predates this PR.
+- **Disposition**: that run's **role-delete / cascade exemption leg is not trustworthy** — not
+  *wrong*, but *unverified*: it is precisely the class of conclusion this PR shows a mis-resolved or
+  impostor catalog can produce. **The other legs stand** (11/11 blocked, 11/11 cleared, 2/2
+  wrong-kind controls, residue check) — none of them depends on that predicate, and voiding them
+  would be overcorrection. The battery must be re-run on the **exact merged main** after this lands
+  before that leg can be relied on.
+- **The independent witness workflow (`340936157`) is still zero-run** — that half holds, and is now
+  established by an ID query rather than a name that may not resolve.
 
 ## Fix, and what each door is for
 
@@ -118,9 +144,9 @@ because a skipped golden is not a green one:
 | --- | --- | --- |
 | `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 64/64, 0 skipped |
 | `multitable-l1-battery.test.mjs` (contract) | — | 63/63 |
-| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 43/43, 0 skipped |
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
-| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `multitable-recovery-schema-containment.test.mjs` | — | 29/29 |
 
 `evidence.posture.role_delete_cascade_present` and `…role_delete_triggered_children` are unchanged;
 `…role_delete_binding` is ADDED alongside them, so no consumer of the posture object loses a field.
@@ -211,9 +237,9 @@ Corrected at six sites, and the presence-control docblock rewritten rather than 
 | --- | --- | --- |
 | `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 67/67, 0 skipped |
 | `multitable-l1-battery.test.mjs` | — | 65/65 |
-| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 43/43, 0 skipped |
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
-| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `multitable-recovery-schema-containment.test.mjs` | — | 29/29 |
 | `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |
 
 
@@ -272,10 +298,10 @@ Corrected; that sentence would have pointed the next maintainer back at the defe
 | lane | arming | result |
 | --- | --- | --- |
 | `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 69/69, 0 skipped |
-| `multitable-l1-battery.test.mjs` | — | 67/67 |
-| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `multitable-l1-battery.test.mjs` | — | 68/68 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 43/43, 0 skipped |
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
-| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `multitable-recovery-schema-containment.test.mjs` | — | 29/29 |
 | `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |
 
 
@@ -320,8 +346,12 @@ that it does **not** touch the staging-window fact — that is a separate, still
 | lane | arming | result |
 | --- | --- | --- |
 | `multitable-role-cascade-witness.test.mjs` | `ROLE_CASCADE_WITNESS_DB_GOLDENS=1` | 70/70, 0 skipped |
-| `multitable-l1-battery.test.mjs` | — | 67/67 |
-| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 42/42, 0 skipped |
+| `multitable-l1-battery.test.mjs` | — | 68/68 |
+| `multitable-l1-battery-workflow.test.mjs` | `L1_BATTERY_DOCKER_GOLDENS=1` | 43/43, 0 skipped |
 | `create-l1-battery-admin-on-staging.test.mjs` | `L1_ADMIN_DOCKER_GOLDENS=1` | 29/29, 0 skipped |
-| `multitable-recovery-schema-containment.test.mjs` | — | 19/19 |
+| `multitable-recovery-schema-containment.test.mjs` | — | 29/29 |
 | `integration-guard-required-wiring-contract.test.mjs` | — | 62/62 |
+
+_Counts in the last table are post-merge with `main@778e9df133` (#5151 added its own cases to the
+containment and battery-workflow suites). Earlier tables in this document are the counts as of the
+round they describe and are left as written._

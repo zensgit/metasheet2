@@ -1,5 +1,15 @@
 # Time Machine — owner 决策清单(2026-08-21)
 
+> **当前权威状态（2026-08-24 20:30+08）**：F3 双主机 postdeploy-full 已 PASS（run
+> `32714983998`）；L1 电池已 PASS（run `32716676483`）；A1 已由 owner-directed Codex 在 #5042
+> 以 `RATIFY-A1 7067b49516b26ed4d8d5a64ebea624f0fed53ba9` ratify（comment `5395076709`）。
+> L1 观察窗从工件可证明时间 `2026-08-24T10:25:17.641Z` 起算，最早出窗点
+> `2026-08-25T10:25:17.641Z`；**尚未出窗**。旧证据只核了 4 个 flag；出窗前还须一次只读
+> `predeploy-flags + target=staging + posture=l1-armed` 补齐第五 flag 的 running/next-restart 见证。
+> L2+ 继续 HOLD，直至 E1（fence 先行、短暂 checkpoint
+> activation、strict 后置、五 flag rung witness）通过审阅并 ratify。下方带日期的旧状态段是发现过程，
+> 不得覆盖本块当前状态或被当作下一步清单。
+
 > ⚠️ **2026-08-21 修正(owner 复审后)**:本清单初版把 **B1「A1 前置已满足」写错了**——已**撤回**。
 > owner 复审在承重工具(L1 电池)上构造出**两个真缺陷**:P1 远端管理员凭据在 cancel/超时/失败时
 > 可能遗留在部署主机 `/tmp`;P2 posture 校验只查 trigger 名+tgenabled,**同名 trigger 在错表仍 9/9 ARMED**
@@ -61,8 +71,26 @@
 > 默认路径,无需任何 SET/options/ALTER),记录见
 > `docs/development/role-cascade-witness-shadow-resolution-repro-20260824.md`。
 >
-> **不需要撤回任何已发布结论**:`multitable-role-cascade-witness.yml` 与 `multitable-l1-battery.yml`
-> 至本次核验为止**运行次数均为 0**,该 witness 从未被 dispatch 过,没有 ABSENT 判决在流通。
+> **⚠️ 2026-08-25 更正 —— 本条原写的「两条 workflow 运行次数均为 0、没有结论在流通」是错的,已作废。**
+> 原句依据的是 `gh run list --workflow=multitable-l1-battery.yml`,而该命令是在一个**不含这个
+> workflow 文件**的检出里跑的:gh 解析不到,返回空,我把「空」读成了「零次运行」。同一轮的
+> `gh workflow list | grep -i l1-battery` 也漏了,因为注册名是 `Multitable L1 Battery (Staging)`
+> ——是空格不是连字符。两条独立的理由都说明那个「不存在」断言从一开始就没有依据。**按 workflow ID
+> 重查(`338908393` / `340936157`)后的事实是**:
+>
+> - **`Multitable L1 Battery (Staging)` 已 dispatch 两次**,均在 `main@36588a291e`(即 #5148 之后、
+>   **不含 #5147**):`32716557230` 输入校验失败(未触达数据库);`32716676483` 在 staging 成功,
+>   `VERDICT: PASS`、rc 0。
+> - 该成功件**确实产出了修复前判据的结论**:`PHASE 0 VERDICT: EXEMPTION-VALID — no foreign key
+>   writes a recovery-authority-triggered child of roles on a role delete, so the roles:delete
+>   NOT-DRIVEN reason still holds on this database`,`posture.role_delete_cascade_present = false`、
+>   `role_delete_triggered_children = []`(证据件 `multitable-l1-battery-staging-32716676483-1`)。
+>   其 posture 中**没有** `role_delete_binding` 字段,这本身即可佐证该运行早于 #5147。
+> - **处置**:该运行的 **role-delete / cascade exemption 这一条腿判为不可信**(不是判为错——是判为
+>   未经证实:它正是本 PR 证明可以由错解析或冒名 catalog 产出的那一类结论)。**其余各腿不受影响**
+>   (11/11 blocked、11/11 cleared、2/2 wrong-kind 控制、residue check 均不依赖该谓词),不一并作废。
+>   #5147 合入后须在**恰好的 merged-main** 上重跑电池,以取得可信的该腿结论。
+> - **独立 witness workflow(`340936157`)仍是零运行** —— 这一条按 ID 重查后仍然成立。
 >
 > 因此下方「一页看全」段中「role-cascade witness 的判据修复已随 #5131 合并落 main」一句所隐含的
 > 「该项缺口已关闭」**作废**;§B1a 中「唯一剩的缺口是分支未合并」的对应更正同样作废。**本条不触及
@@ -327,10 +355,15 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 
 ## B. 前置满足、随时可拍(压缩真正落袋的动作)
 
-**B1 · ratify 阶梯修正案 A1 —— ⛔ 前置尚未满足,暂不可 ratify**
-- 决策:在 **A1 承载 PR(#5042)** 留 `RATIFY-A1 <A1 内容的 exact-head SHA>` 批注,把 L1 窗口从 `≥2 日历日`
-  改为 `≥1 日历日 + 电池 PASS`。**注意授权只能绑 A1 承载 PR 的 exact content SHA,不能在电池 PR 上替代授权。**
-- 前置:**代码侧已闭合(范围限定:A1 电池基础设施这组——P1 凭据生命周期 / P2 canonical posture 校验 / F1 建号脚本 / F2 required check / F3 search_path 代码修复;不含 role-cascade witness 谓词,那是独立的另一产物,见下一条);仅 owner/ops 前置未满足**(截至 2026-08-22 第六轮复审;F2 状态已随 2026-08-24 复核更新)。已落 main:电池凭据(#5069/#5076)、search_path 根修(#5081)、context/台账(#5077/#5083/#5085)、建号脚本重写 + 提权修复(#5080/#5084)、电池 digest/sha 证据绑定(#5125)。**F2(设 required)已完成**(2026-08-24 经 `gh api .../branches/main/protection/required_status_checks` 核实,`contexts` 含 `recovery-schema-drift`)。**未满足的是 owner/ops**:F3 双主机新指纹证据、建号 + 电池实跑 PASS。**两者**齐备才可 ratify。
+**B1 · ratify 阶梯修正案 A1 —— ✅ 已完成；L1 观察窗进行中**
+- 批准：#5042 comment `5395076709`，exact content SHA = `7067b49516b26ed4d8d5a64ebea624f0fed53ba9`。
+  未使用本清单旧版建议的 `5b2376bb49`，因为 #5125 后来实质收窄 production 范围并补 A1.3 provenance。
+- 承重证据：F3 双主机 PASS run `32714983998`；电池 PASS run `32716676483`（11/11 blocked、
+  11/11 cleared、2/2 controls、6/9 triggers、43 not-driven、failures `[]`、residue 0）。
+- 生效合同：仅 staging L1 = `≥1 日历日 + 电池 PASS`；production 仍 ≥2 日；L6 ≥7 日不变。
+  最早出窗点 `2026-08-25T10:25:17.641Z`，到时仍须核无相关异常及其余 L1 退出判据。
+- 历史前置记录：代码侧 P1/P2、F1/F2/F3、role-cascade witness、pending=0、建号与电池均已闭合；
+  下列“原写/更正”段保留为审阅轨迹，不再代表当前待办。
   **原写「……staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)……三者齐备才可 ratify」,已更正(见文首「五次更新」)**:staging 迁移窗口已于
   2026-08-24T05:44–05:54Z 执行,`Applied: 337 / Pending: 0`(`run 32694623829` / `run 32694880864` /
   `run 32695040817`),该项**已满足**,故 owner/ops 前置由三项减为两项。已闭合缺陷存档:
@@ -358,11 +391,10 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
   05:44–05:54Z 完成(`Applied: 337 / Pending: 0`,`run 32694623829` / `run 32694880864` /
   `run 32695040817`);**其余两项**(F3 双主机新指纹证据、建号 + 电池实跑 PASS)的完成状态确实不受
   本次更正影响,仍按 §B1 开头所记未满足。
-- 修复后序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
-  owner 授权 staging 电池实跑 → **PASS 后再 ratify A1**。
+- 已执行序列:凭据修复 → canonical posture 校验 → 变异测试 → 修正本清单/文档 → exact-head 独立复门 →
+  owner 授权 staging 电池实跑 → PASS → A1 ratify。
 - 门审边界(修好后仍适用):干净电池只观测 **12/55 census 站点(分母已随 #5128 由 48 升至 55,见 §D2-F8;driven 集合本身未变,仍是 12)+ 6/9 触发器**——更强信号非更广,压窗 = "深换广"。
-- 后果:未 ratify 期间原 `≥2 天` 判据继续生效,无损失。
-- 载体:A1 = #5042;电池修复轮全落 main(#5069/#5076/#5077/#5080/#5081/#5083/#5084/#5125);**代码侧 F1 硬前置已解除(#5084)**;F2 已完成(2026-08-24 核实);**#5039→#5094 的 staging 迁移积压已于 2026-08-24 应用完毕(`pending = 0`,见 §A)**;A1-ratify 剩 owner 侧前提**两项**(F3 主机证据 / 建号+实跑 PASS)。原写此处第三项「#5039→#5094 pending≠0」,已更正。
+- 载体:A1 = #5042；修复与 ops 前置全部完成。当前剩余是 L1 日历窗及 L2+ E1 更正门，不再是 A1 前置。
 
 ### C1a · P3-INFO-1 subject_type 枚举(已查证,结论=满足)
 
@@ -398,8 +430,11 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 - **F2 · 设漂移守卫为 required —— ✅ 已完成(2026-08-24 核实)**:check context 实名 **`recovery-schema-drift`**(job 名,非文件名),已对每个 PR 稳定产生(#5075)。
   **F3 复门证实这是安全必需**(非可选):否则有人 revert `public.` 限定符后重生成指纹 → required 全绿而 shadow 重开,只非-required 反例能抓。**owner 已在 branch protection 把 `recovery-schema-drift` 加入 required**(2026-08-24 经 `gh api repos/zensgit/metasheet2/branches/main/protection/required_status_checks` 核实,`contexts` 数组含该 context)。
 - **F3 · search_path 根修 —— 已落 main(#5081 `d3289945e1`)**:新迁移 schema-qualified 调用 + 固定 `SET search_path=pg_catalog,public`;函数指纹 `14c180aa→e4a78f6c`;triggers 不变 9/9 DISABLED;真库反例全 5 触发器路径均被防(复门 APPROVE)。
-  **⚠️ ops 协调**:迁移使 prod 函数变新指纹**仅在迁移跑时生效**;镜像落但迁移未应用时跑 postdeploy-full 会 FAIL 在 config 字段=**预期(config-field)非 drift**,迁移须先于 containment/L1 dispatch。**⚠️ 待补:新指纹的双主机 postdeploy-full 证据尚未取**(2026-08-24 复核仍成立:`Multitable Recovery-Flag Containment Check` 的最近一次运行仍是 `run 32321464042`,2026-08-20,即本文档已标注的 **pre-fix 点内**观测;此后无新运行)。
-  **2026-08-24 五次更新补记(只补"迁移先于 containment"这一层,不改上面的待补项)**:上述 ops 排序前置在 **staging 侧已满足**——F3 迁移 `zzzz20260821120000_recovery_authority_functions_fix_search_path` 已随 2026-08-24 窗口应用到 staging(在 16 条之内,见 §A),且 staging 镜像已重部署到 `c345c6b405`(见 §A-2),其 containment helper sha 与 workflow 钉值相等。**故 staging 腿现已具备"跑得起来"的条件;但双主机(prod + staging)新指纹 `e4a78f6c…` 的 postdeploy-full 证据本身依然未取**,该项仍开着。
+  **ops 证据已闭合**:F3 迁移必须先于 containment/L1 dispatch；该顺序已在两侧满足。双主机
+  `postdeploy-full` run `32714983998` 见 prod + staging 的 4 个当时受检 flag 均 OFF、triggers 9/9
+  `4d68217d…`、functions 6/6 `e4a78f6c…`、FK 0/0，最终 `VERDICT: PASS`。本次修正新增的第五个
+  checkpoint-activation flag 不得倒填为该旧 run 的证据；它由新的 rung-aware witness 在后续每个 posture
+  中精确核验。
 - **F4 · 旧 Time Machine PR 处置 —— ✅ 已完成(2026-08-24 逐个核实)**:七个 PR 里五个已 **CLOSED**(经 `gh pr view --json state,closedAt` 核实,均在 2026-08-22T04:08–04:09Z 关闭,判定 superseded):#4216(`04:08:11Z`)、#4219(`04:08:15Z`)、#4204(`04:08:38Z`)、#4200(`04:08:42Z`)、#3805(`04:09:08Z`)。另两个是 owner 明文标注**故意 PARKED、禁止 sweep-close**、按设计保持 **OPEN**(不是遗漏):**#4205**(R13 Lane B T-state 设计,owner 评论 2026-08-21:是未来 T-state 工作的 ratify 前置输入,决策点在阶梯 L6 soak 之后)、**#4224**(R13-C retention↔Reset 设计锁,owner 评论 2026-08-22 的"F4 disposition sweep":内容尚未落地,是 §D2 所记 Phase D 一半的唯一草拟设计输入)。
 - **F5 · P3(第四轮):#5080 golden readiness 竞态 — ✅ CLOSED**:`pg_isready` 后即连目标库(可能库未建好即返回)——PR 跑一度 19/20。**已改为目标库上 `SELECT 1` 循环(`waitForTargetDbQueryable`),随 F1 同轮落 main #5084 `162679992e`**;goldens 连跑无 flake。
 - **F6 · P3-1(可选硬化)**:`recovery-authorization-stability.ts` 的函数指纹与 containment 常量无机械交叉守卫——将来改一份漏另一份会静默再破生产 lease。可加一条断言绑定。
@@ -487,19 +522,11 @@ revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L
 > **A1 是阶梯的修正案、不是 L0 的勾选项**——它决定 L1 窗口按 `≥2 天` 还是 `≥1 天 + 电池 PASS` 计,
 > 与 L0 是否满足是两件事;原速记 `差 A1` 把两者并列,易致误读。本条只记录状态,不代 owner 拍板。
 
-L0(差 A1)→ L1 staging ENABLE triggers(flag 全 OFF)→ **⚠️ L2 及其之后 HOLD**(CONTIGUITY_STRICT;
-验收证据不可产出,见 §D2-F10;HOLD 直至 owner 就阶梯 erratum 三点 ratify:(a) 新顺序——fence 不晚于
-strict、(b) 把第五个 flag `MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 的 flag 清单、
-(c) 明确由哪一级负责 provision trust checkpoint;三点未 ratify 前,L2 按当前级序的验收证据产不出,见 §D2-F10)→ L3
-WRITER_FENCE(同处 HOLD 范围)→ L4/L5 canary(同受 §D2-F10 影响,同处 HOLD 范围)→ **L6 soak ≥7 日历日**
-→ L7+ 生产重放全序。
-**每级你亲授 + 观察窗**。
-**L1 窗口现行已 ratify 判据是 `≥2 日历日`(电池在窗口内跑,不替代天数)**;修正案 A1 拟把窗口收窄为
-`≥1 日历日 + 电池 PASS`,但 **A1 目前 Status: PROPOSED,未 ratify 前上文 `≥2 天` 判据原样生效**(见 §B1、
-enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该数字假设 A1 已 ratify**(L1 记 ≥1 天);
-按**现行未 ratify** 的 `≥2 天` 判据,L1 段本身多占 1 个日历日,地板相应更高(其余各级观察窗的实际
-长度本文未逐级列出,不在此处折算)。
-另需:目标主机跑一次**回滚后 postdeploy-full**(L0 §5 的 owner-gated 半条,本地演练不覆盖)。
+L0 ✅ → **L1 staging ARMED / 旧四 flag 已证 OFF / 第五 flag 待只读补证 / 观察中**（A1 已 ratify，最早
+`2026-08-25T10:25:17.641Z` 出窗；补证命令见文首）→ **⚠️ L2 及其之后 HOLD**。解除 HOLD 的唯一当前载体是 ladder
+修正案 E1：L2 writer fence → L2-C 短暂 checkpoint activation + 具名 canary checkpoint → activation OFF →
+L3 strict → L4/L5 canary；五 flag 与每个 rung 用固定 `posture` 正向 PASS。E1 未 ratify 前不得续接 L2。
+L6 soak ≥7 日历日与 production 独立授权均不变。
 
 ---
 > ⚠️ **第五轮 owner 复核观察(2026-08-21)**:F3 迁移已在 prod 执行,但部署窗口内有一次健康探针 `curl rc=7`;新指纹 `e4a78f6c` 的**双主机 postdeploy-full 证据尚未取**,staging 也未验证。**不能据此称 main 全绿或 prod 已稳定** —— F2 之后须先取双主机 postdeploy-full 证据(见 F3)再往下走。
@@ -512,6 +539,10 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 > (2026-08-24 窗口 16 条之内,见 §A)、镜像已重部署到 `c345c6b405`、containment helper sha 与
 > workflow 钉值相等(见 §A-2)。**但"具备执行条件"不等于"已验证":staging 腿的 postdeploy-full
 > 仍未跑,指纹证据仍未取。** 故本行整体结论保持不变,只是其失败原因不再会是「镜像太旧」。
+>
+> **2026-08-24 六次更新（执行证据）**：上述待补项已由双主机 run `32714983998` 闭合：prod +
+> staging 均见 4 flag OFF、triggers 9/9 `4d68217d…`、functions 6/6 `e4a78f6c…`、FK 0/0，
+> `VERDICT: PASS (postdeploy-full)`。五次更新的“仍未取”只保留为当时状态，不再是待办。
 
 **最短路径(2026-08-22 深审后重排 —— ⚠️ 原顺序是循环的,见下)**
 
@@ -521,7 +552,8 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
 > **正解:L1 按现行已 ratify 的 ≥2 日历日判据先开,电池在窗口内跑,PASS 后再 ratify A1,并按新判据 ≥1 天出窗。**
 
 1. **F2** ✅ 已完成(owner 已加 check context `recovery-schema-drift` 到 branch protection,2026-08-24 核实)∥ **F4** ✅ 已完成(5 关闭 + 2 owner 明文 PARKED,见 §D2-F4)∥ owner 落墨 C1 天花板裁决(仍待拍板)
-2. **文档修正一票** ✅ 已完成:指纹权威表(ladder §5.2,已核实存在)、armed 预期红(ladder §5.3,已核实存在)、redeploy 前置(本文档 §A-2)、清单指向 #5094(已核实,本文档 §A)
+2. **文档修正一票** ✅ 已完成:指纹权威表(ladder §5.2)、armed 的 rung-aware 正向 PASS
+   (ladder §5.3)、redeploy 前置(本文档 §A-2)、清单指向 #5094(本文档 §A)。
 3. **电池 workflow 补 digest 捕获 + 脚本 sha pin** ✅ 已完成(#5125 `7067b49516`,即 B4;详见 §B1a)
 4. **#5094 交付执行** ✅ **已完成**(2026-08-24 窗口):pinned SHA = `c345c6b405`。**实际执行顺序按时间戳为**:
    备份(05:46:32Z)→ 克隆彩排(`run 32694623829`,05:47:40–47:46Z,彩排库 `321→337`、`Pending: 0`,
@@ -536,11 +568,15 @@ enablement-ladder 文档 §修正案 A1)。压缩后地板约 9 天——**该�
    重部署 = `run 32694880864`(`deploy`,success,目标 `c345c6b405`,`d3289945e1` 为其祖先——
    compare API `ahead_by=63, behind_by=0`);确认 = `run 32695040817`(四处 `337/0`)。
    原写「**⚠️ …… —— 原计划缺失的硬前置**(见 §A-2)」:该硬前置**已解除**(§A-2 三条 bullet 逐条更正见该节)。
-6. **双主机 postdeploy-full**:取 triggers `4d68217d…` + functions `e4a78f6c…` PASS(=F3 证据,同时重绿 L0 item2)
-7. **建号**(用 `scripts/ops/create-l1-battery-admin-on-staging.sh`;两枚 secrets 已设)
-8. **owner 按现行 ≥2 天判据开 L1**:enable 9/9 → 立即 postdeploy-full(**trigger 腿预期红 = `505926e3…`**,flag 腿全绿)
-9. **窗口内** dispatch 电池(intent `L1-open-battery-run-1`)→ PASS(证据绑镜像 digest)
-10. **ratify A1 于 #5042**(建议绑 merge commit `5b2376bb49`,并在批注声明所用 SHA 形式)→ 出窗 → **STOP:L2 及其之后 HOLD**,待 owner ratify 阶梯 erratum(fence 不晚于 strict、`MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION` 纳入阶梯 §0 flag 清单、明确由哪一级 provision trust checkpoint;机制见 §D2-F10)。**本条最短路径到此为止,不得续接 L2**——主序列已声明 HOLD,此清单若仍写 `→ L2` 即构成绕过。
+6. **双主机 postdeploy-full** ✅ run `32714983998`（新指纹双侧 PASS）。
+7. **建号** ✅（修复后 helper，单事务、无凭据残留）。
+8. **L1 开钟** ✅ 9/9 ARMED、旧四 flag OFF；第五个 checkpoint-activation flag 不在旧 witness
+   范围内，须由新 `posture=l1-armed` 的只读 flag witness 补证。起算采用电池工件时间
+   `2026-08-24T10:25:17.641Z`。
+9. **窗口内电池** ✅ run `32716676483` PASS，provenance 三元组齐全。
+10. **A1 ratify** ✅ #5042 comment `5395076709`，绑定 `7067b49516…`；**当前等待 L1 到时并取一次
+    `predeploy-flags/staging/l1-armed` 五 flag 补证，合成一次性出窗证据后 STOP:L2+**，直至 E1 exact
+    SHA 被 owner ratify。旧 `5b2376bb49` 建议已作废。
 11. **L4 前 X2 一行修复 — ✅ 已修复(#5114)**;census 覆盖缺口 — ✅ 已随 #5128(`e9944cbfed8`,已 MERGED)补齐(见 §D2-F7)。⚠️ 与 §D2-F10 独立:即便 L4 打开,revert/reset 仍会在无 checkpoint 时于 preview/execute 两处拒绝。
 
 **F1 已闭合;不再有"修复前不建号"的阻断。** 原写「——但第 5 步(staging 重部署+迁移)未完成前,第 6/7/9 步都会以难诊断的方式失败。」,**已更正(见文首「五次更新」)**:第 5 步已于 2026-08-24 完成(重部署 `c345c6b405` + `Pending: 0`),该"难诊断失败"的前提不再成立。**但这只解除镜像/迁移这一层**——第 6/7/9 步各自的 owner/ops 门(第 6 步取证本身即 §D2-F3 的待补项;第 9 步须先经第 8 步 arm 9/9)不受影响,仍按上文各条。
