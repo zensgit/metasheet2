@@ -58,6 +58,8 @@ epoch 的活跃席位；只有当前轮完成后，才在同一事务中把台�
 
 **AS-I3 — 旧轮决策不丢。** 后加签 actor 的当前动作是当前轮的一次真实 approve；当前轮
 尚未处理的兄弟席位、已写入的旧轮 approve 记录及 threshold 计数均保持原义。
+原图缺省或显式 `single` 也必须保持当前 linear first-wins 语义：actor 的一票完成 origin
+轮并停用其余活跃兄弟，不能被新的共享 helper 误解释为 `all`。
 
 **AS-I4 — 新轮聚合独立。** 延迟轮的**初始激活集合**只含请求时冻结的被加签人；一人时
 规范化为 `all`，两人及以上时请求必须显式给出 `all | any`。不得继承原节点的
@@ -104,7 +106,9 @@ breakdown 时会 no-op，不能作为这条语义门；旧轮完成后的 post-c
 business-calendar 解析继续沿用 T3-2 的 fail-open：provider 缺失、无日历或抛错时用 wall-clock
 deadline，不得让同一实例在创建时可运行、后加签激活时却 500。remind 扫描后的清除必须把扫描
 快照中的 deadline/effect/activation seq 原样传入 CAS；不得在清除前重读 live seq，旧扫描不得
-清掉新轮 deadline。
+清掉新轮 deadline。`remind` 只有在该 CAS 恰好更新一行后才能解析当前收件人并调用通知器；CAS
+为零时不得解析或通知。该顺序维持现有 single-shot/best-effort 提醒语义，但禁止旧扫描向新轮
+审批人发送错误提醒；把提醒本身改成 durable delivery 不在本 delta 范围内。
 
 **AS-I13 — pending 目标失效可恢复且不降门槛。** 目标在请求后、激活前失去用户/组织活跃性
 时，不得照常激活、静默删人或降低 `all | any` 集合。触发旧轮完成的动作整体回滚并返回统一
@@ -244,18 +248,22 @@ approve/after-sign 事务整体回滚，旧席位保持 active，返回 409
 `target_user_id`；成员 timeline 需要的显示名从受权目录按 seat 精确解析，未解析者显示
 values-free 占位，不回退 raw ID。现有 `before | parallel` 记录形状不在本锁中改变。
 
-成员 history/timeline 在轮尚为 `pending` 时也必须可展示被加签人。平台 history 查询只允许把
+成员 history/timeline 在轮尚为 `pending` 时也必须可展示被加签人。两条成员读取链都必须执行
+同一投影与合成：分页的 `routes/approval-history.ts`，以及
+`ApprovalBridgeService.loadLocalHistory`。二者只允许把
 `metadata->>'deferredRoundId'` 投影为内部 alias，不得投影整块 metadata；服务端用该 alias 读取
 seat rows，并用**实例 org-scoped** 的最小显示名查询解析，不得直接调用当前全局
 `resolveDirectoryUsersByIds`（它不按 org 限定且返回 id/name/email）。wire DTO 只返回显示名与
 目标计数，不返回 user id、email、round id 或 seat id；内部 alias 必须像
 `lock9_attachment_ids_raw` 一样在返回前剥离。无法解析的席位使用统一 values-free 占位。FE 不得
 等 assignment 激活后才显示姓名，否则 pending 阶段会出现“已后加签但没有对象”的不可解释状态。
+分页读取器必须先按内部 round alias 把审计对折成一个逻辑动作，再对逻辑动作执行
+`COUNT/LIMIT/OFFSET`；不得先分页再在单页内合成，否则跨页的同一动作会重复显示或改变总数。
 
 后加签请求写两条既有 action vocabulary 的记录：
 
-1. `approve`：表示 actor 在旧轮的真实决定，携带旧 `nodeEntryEpoch` 与该轮
-   `aggregateComplete`；
+1. `approve`：表示 actor 在旧轮的真实决定，携带旧 `nodeEntryEpoch`、该轮
+   `aggregateComplete` 与内部 `deferredRoundId`；
 2. `add_sign`：表示创建延迟轮，携带 `deferredRoundId`、`addSignMode:'after'`、
    `addSignAggregation` 和目标数量。普通 timeline 合成展示一次“同意并后加签”，不得显示两条
    看似独立的用户动作。
@@ -309,19 +317,20 @@ round/seat 原始 ID。取消表示放弃本次后加签并恢复 origin 轮继�
    活跃用户 + 实例同组织 exact-set 硬门；
 3. 读取当前唯一 epoch。若返回 NULL（迁移前旧 assignment 轮），409
    `APPROVAL_AFTER_SIGN_LEGACY_EPOCH_UNSUPPORTED`，actor/台账/audit/version 零变化；不得用
-   `0` 哨兵或临时 backfill 绕过。非 NULL 时按原节点真实 `approvalMode` 计算“actor 这一票之后
-   旧轮是否完成”；
+   `0` 哨兵或临时 backfill 绕过。非 NULL 时按原节点真实 `approvalMode`（含缺省规范化的
+   `single`）计算“actor 这一票之后旧轮是否完成”；
 4. 插入 `pending` 轮和 seat rows；
 5. 消费 actor assignment，写 `approve` + `add_sign` records；
 6. 若旧轮未完成，只 bump instance version 并提交；兄弟席位保持旧 epoch；
-7. 若旧轮完成，先按现有 `any`/`threshold` 规则取消未决兄弟，再调用 §3.3 的共享激活 helper；
+7. 若旧轮完成，先按现有 `single`/`any`/`threshold` 规则停用或审计取消未决兄弟，再调用 §3.3
+   的共享激活 helper；`single` 必须保留 linear 路径当前的 blanket-deactivate first-wins 语义；
    helper 必须对刚写入或既有 pending seat 执行相同的第二次 exact-set。返回
    `deferredRoundActivated:true` 时不得调用 `resolveAfterApprove`，实例留在同一图节点；返回
    `false` 说明当前 origin epoch 没有 pending 轮，调用方必须继续既有 `resolveAfterApprove`；
 8. enqueue 新激活席位的 task-created durable events，提交后走既有 legacy emit；flag-OFF durable
    语义保持既有路径。
 
-旧轮聚合计算不能复制第二套 `all/any/threshold` 分支。实现必须提取一条共享的“消费一票并
+旧轮聚合计算不能复制第二套 `single/all/any/threshold` 分支。实现必须提取一条共享的“消费一票并
 判断当前轮是否完成”内部路径，让普通 approve 与 after-sign 的旧轮消费共同调用；删除任一调用点
 应由接线测试变红。
 
@@ -367,8 +376,10 @@ assignments。并发测试必须证明 candidate 为空时不会先空增一次 
 
 remind 路径同时收窄：`scanNodeTimeouts` 返回扫描到的 deadline/effect 与实例
 `node_activation_seq`；调用方必须把这三个**扫描快照值**传给 `markNodeTimeoutFired`，后者只在
-三者仍完全相等时 CAS 清除 deadline/effect，不得在 mark 内重读 live seq。
-旧扫描在同节点新轮激活后必须 0 行，不得清空第 8 步的新值。transfer/jump 继续沿用现有实例
+三者仍完全相等时 CAS 清除 deadline/effect，不得在 mark 内重读 live seq。调用方必须先取得
+`markNodeTimeoutFired` 的一行 CAS 结果，再解析 active assignees 并调用 `onNodeReminder`；零行时
+跳过二者。旧扫描在同节点新轮激活后必须 0 行，不得通知新轮审批人，也不得清空第 8 步的新值。
+transfer/jump 继续沿用现有实例
 `FOR UPDATE` + metrics `FOR UPDATE` 事务，不另造第二条写路径。
 
 ### 3.4 active 轮的聚合与完成
@@ -433,6 +444,11 @@ Lock-1 OD-L1-3 已 ratify `prior_node_approver` 只读取 latest epoch；延迟�
 仍返回 200 并按既有图前进；共享 helper 返回 `deferredRoundActivated:false`，metrics、seq、台账、
 outbox 不产生额外写入。把“0 pending”改回异常或在 no-op 前锁 metrics/bump seq 时测试红。
 
+**AS-G2b origin single。** 原节点有两个及以上活跃席位，分别以缺省 `approvalMode` 和显式
+`single` 建立真库正控；actor 执行 after-sign 后 origin 轮立即完成、其余 origin 席位全部 inactive、
+延迟轮激活且节点不前进。把共享消费路径中的 `single` 删除、改成 `all`，或绕回仅
+`all/any/threshold` 的分支时指定测试红。
+
 **AS-G3 多席位 all。** actor 后加签后，兄弟仍可 200 approve，期间 active epoch distinct 始终
 为 1；最后兄弟完成时激活新轮，绝不出现 MIXED；新轮全员完成后前进。
 
@@ -486,7 +502,9 @@ transfer、reassign、handover 保持 active 轮 epoch，不取消、不 bump。
 500。metrics 行缺失/更新失败必须回滚激活；删除事务内六列 reset、恢复
 `emitNodeActivationMetric`、恢复旧轮 post-commit `emitNodeDecisionMetric`，或让旧 remind scan
 无 CAS 地清除时，各自时间控制测试红。旧 remind fixture 必须把扫描到的
-deadline/effect/activation seq 传入 mark；若 mark 改为重读 live seq，旧扫描会命中新轮并使测试红。
+deadline/effect/activation seq 传入 mark。构造旧扫描完成后、mark 前激活新轮的交错：mark 必须
+返回零，收件人解析器与通知器调用次数都为零；若 mark 改为重读 live seq、通知先于 CAS，或忽略
+CAS affected-row，旧扫描会命中新轮并使测试红。
 
 **AS-G14 comment policy。** `commentRequired:'always'` 的 after-sign 无评论被拒；普通 optional
 配置成功。before/parallel 在同一模板下保持当前 main 响应，不得把新门扩到旧模式。不得因动作名
@@ -507,7 +525,9 @@ version 均不变；普通 approve 的 legacy fallback 与 before/parallel 回�
 轮仍 pending、尚无 assignment 时就能显示 seat 对应的授权目录名称与计数。history SQL 不投影整块
 metadata，org-scoped 显示查询不调用全局 directory helper，内部 alias 在 wire 前剥离，wire 不返回
 deferred round/seat/user id/email；无法解析者只显示 values-free 占位。权限受限查看者不看到 raw
-target IDs。下一节点的 `prior_node_approver` 继续只读取 latest epoch，延迟轮完成后不得把 origin
+target IDs。分页 route 与 `ApprovalBridgeService.loadLocalHistory` 必须产生同一个合成动作形状；用
+page size 1 让 `approve`/`add_sign` 原始行跨页，仍只能得到一个逻辑动作、正确 total 且任一页不泄漏
+内部 alias，证明合成发生在 `COUNT/LIMIT/OFFSET` 之前。下一节点的 `prior_node_approver` 继续只读取 latest epoch，延迟轮完成后不得把 origin
 round deciders 重新 union 进来。
 
 **AS-G18 crash replay。** durable delivery ON 时，在事务提交后、adapter 前崩溃并重启：新轮 task
@@ -556,8 +576,10 @@ Runtime authorization: NONE until this block is ratified.
 - Kimi K3：只读架构反例复核，独立确认“重刷 epoch”会重置 threshold 计数，“当前 epoch”会
   退化为并加签，延迟轮是完整语义的唯一结构方案；其建议的“先做单席位拒绝”未被本文采纳为
   最终产品替代物，只保留为 owner 选项；
-- Grok：对 exact baseline 做四轮只读 refute-first 审阅。除确认延迟轮方向外，先后促成：共享
+- Grok：前四轮对 exact baseline 做只读 refute-first 审阅。除确认延迟轮方向外，先后促成：共享
   helper 的 no-pending 零写入分支与第二次身份 exact-set/`FOR SHARE`、同节点 metrics 六列事务
   重置与旧扫描快照 CAS、实例作用域 pending 恢复、flag-OFF 在途排空、after-only 协议/评论门、
   严格目标基数、终结矩阵、pending timeline 的 org-scoped 显示投影及 Lock-1 latest-epoch 兼容。
-  最终复核对当前文本结论为 0 P1/0 P2。运行时代码、flag 与 UAT 仍未授权。
+  后续第五轮重新对执行分支和读取器做反例审阅，发现并由本文收口三项 P2：缺省/显式 `single`
+  origin first-wins、两条成员 history 读取链的分页前合成、以及 remind 必须先以扫描快照 CAS 再
+  解析/通知。运行时代码、flag 与 UAT 仍未授权；不得沿用第五轮前的 0 P1/0 P2 结论。
