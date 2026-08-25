@@ -138,6 +138,30 @@
   (activation flag observed OFF again, fence still ON). This is the exit criterion for L2-C:
   a checkpoint now exists for the canary sheet, and the environment is back to `l2-fence`.
 
+### 3.3 Hand the canary ids to the acceptance harness — it must NOT mint its own sheet
+
+The T8-2 acceptance harness `packages/core-backend/scripts/reset-acceptance.mjs` that §5 runs is a pure
+HTTP client. It provisions its own drill RECORDS, but it must never provision its own SHEET: the covering
+trust checkpoint minted in §3.2 is bound to THIS named canary sheet, and §5 explicitly does not repeat
+checkpoint provisioning. A sheet the harness mints for itself therefore has no covering checkpoint and
+refuses `NO_COVERING_CHECKPOINT` on every preview, forever — the rung would be structurally unrunnable.
+
+- [ ] Write the canary base id and the canary sheet id from §3.2 into the drill log, and pass them to the
+  harness process as `RESET_CANARY_BASE_ID` and `RESET_CANARY_SHEET_ID`. **Both or neither** — one alone
+  is a config error (exit 2). These two are operator-side inputs to a local process, not host
+  configuration: they are not feature flags and are not registered in the global-history flag manifest.
+- [ ] `RESET_CANARY_SHEET_ID` must name the SAME sheet §3.2 activated the checkpoint on — that is, exactly
+  a sheet the operator would list in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` of
+  §3.1. A neighbouring sheet in the same canary base does not inherit the checkpoint.
+- [ ] With the pair UNSET the harness still runs the scenarios that legitimately own their fixtures — the
+  flag-off inertness pair, the D2 sheet-admin refusal, the typed-confirm refusal and the size-ceiling
+  refusal, each of which refuses UPSTREAM of the covering-checkpoint gate — but the reset-BEHAVIOR
+  scenarios SKIP with a stated reason and the run exits **2**, never 0. A green L5 can only come from a
+  run against the designated sheet; a run with no designated canary can never report L5 as passed.
+- [ ] Every run appends drill records and one stamped `number` field to the canary sheet. That is the same
+  canary data §6 has the operator delete or reset after the drill — do not point the harness at any sheet
+  outside the drill log's declared canary set, and never at a customer sheet.
+
 ## 4. L4 drill — sheet revert canary
 
 > **HOLD / DO NOT EXECUTE until E1 is ratified.** Requires §3 (L2-C) already completed for
@@ -271,7 +295,9 @@ is exactly the ladder §4 shape (FK `KEY SHARE` vs row-level `FOR UPDATE`), reac
 > **HOLD / DO NOT EXECUTE until E1 is ratified.** Requires §3 (L2-C) already completed for
 > this canary sheet, same as L4 — the covering checkpoint is a sheet-level trust floor, not a
 > per-rung one, so L5 does not repeat checkpoint provisioning if §3/§4 already ran it for this
-> sheet.
+> sheet. Because L5 does not provision one, the acceptance harness must REUSE the §3 canary
+> sheet via `RESET_CANARY_BASE_ID` / `RESET_CANARY_SHEET_ID` (§3.3) rather than minting its own;
+> without them the harness skips the reset-behavior scenarios and exits 2 by construction.
 
 Same discipline as §4 with the reset endpoints
 (`POST /api/.../sheets/:sheetId/reset-preview` / `reset-execute`), confirming posture
@@ -313,6 +339,7 @@ Same discipline as §4 with the reset endpoints
 | Authority lease stability + fail-closed unavailable | `packages/core-backend/tests/integration/multitable-recovery-authority-stability-realdb.test.ts`, `packages/core-backend/tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts` |
 | Foreign-fence availability, deadlock-freedom (§4.5) | `packages/core-backend/tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts` |
 | Trust-checkpoint activation route + fence/flag gating (§3 L2-C) | `packages/core-backend/src/routes/univer-meta.ts` (`POST /sheets/:sheetId/trust-checkpoint-activate`, ~L10162), `packages/core-backend/src/multitable/history-trust-checkpoint.ts` (`activateCheckpoint`, `selectCheckpointByAnchorSeq`) |
+| Acceptance-harness canary reuse + request shapes (§3.3, §5) | `packages/core-backend/scripts/reset-acceptance.mjs`, `packages/core-backend/tests/unit/reset-acceptance-request-shape.test.ts` |
 | 40001→409 classifier + census + per-surface behaviour legs | `packages/core-backend/src/db/recovery-conflict.ts`, `packages/core-backend/tests/unit/recovery-conflict-census.test.ts`, `packages/core-backend/tests/integration/recovery-conflict-classifier-realdb.test.ts` |
 | Register-path atomicity under 40001 | `packages/core-backend/tests/integration/auth-register-atomicity.db.test.ts` |
 | Trigger/function inertness fingerprints (containment) | `scripts/ops/multitable-recovery-schema-containment.mjs` |

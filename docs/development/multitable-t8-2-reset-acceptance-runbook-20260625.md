@@ -39,24 +39,42 @@ The harness auto-detects the flag state: with the flag **off** it runs (a) and s
 BASE_URL=https://<staging> ADMIN_TOKEN=<sheet-admin JWT> \
   node packages/core-backend/scripts/reset-acceptance.mjs        # expect (a) PASS
 
-# 2) Enable the flag in staging, then re-run for (b)–(g):
+# 2) Enable the flag in staging, then re-run for (b)–(g). The canary ids are REQUIRED here — see
+#    "Owner-designated canary target" below; without them (d)/(e)/(g) SKIP and the run exits 2.
 #    set MULTITABLE_ENABLE_PIT_RESET=true in the staging env and redeploy/restart, then:
 BASE_URL=https://<staging> ADMIN_TOKEN=<sheet-admin JWT> EDITOR_TOKEN=<editor JWT> \
+  RESET_CANARY_BASE_ID=<L2-C canary base id> RESET_CANARY_SHEET_ID=<L2-C canary sheet id> \
   RESET_MAX_RECORDS=<staging MULTITABLE_SHEET_REVERT_MAX_RECORDS, if small> \
   node packages/core-backend/scripts/reset-acceptance.mjs        # expect (b)–(g) PASS
 ```
-Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error.
+Exit 0 = all run scenarios passed; 1 = a failure; 2 = config/setup error (an unready trust substrate, a half-set
+`RESET_CANARY_*` pair, or a flag-on run with no designated canary — where (d)/(e)/(g) could not run at all).
+
+### Owner-designated canary target (`RESET_CANARY_BASE_ID` / `RESET_CANARY_SHEET_ID`)
+The flag-on run additionally needs an ACTIVE trust checkpoint covering the anchor **on the sheet under test**
+(409 `NO_COVERING_CHECKPOINT` otherwise). That checkpoint is minted once, by an owner, on a named canary sheet
+during the transient L2-C window (`scripts/ops/multitable-o2-canary-drill.md` §3), and L5 must **not** re-provision
+one — so a sheet the harness mints for itself can never carry one. Set both ids to the L2-C canary base/sheet (the
+sheet the operator listed in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST`) and the harness creates
+no base and no sheet, only records. **Both or neither**: one alone is a config error (exit 2). With the pair unset
+the harness still runs (a)/(b)/(c)/(f) — all of which refuse upstream of the covering-checkpoint gate — but (d), (e)
+and (g) SKIP with a stated reason and the run exits 2. L5 is never reported green off a self-made sheet.
 
 ### What the harness provisions (API-automated) vs manual prerequisites
-- **Automated** (HTTP, isolated per run): a fresh acceptance base + sheet + a `number` field; pre-T records A,B; a
+- **Automated** (HTTP): a `number` field stamped with the run timestamp; pre-T records A,B; a
   pre-T **history anchor**(原文写 `asOf` T——该参数已被 exact-anchor 契约移除:路由对任何非空 `asOf` 返回
   `exact-anchor-required`,harness 现经 `GET .../records/:id/history` 取 `historyBatchId` 作为锚,见
   `reset-acceptance-request-shape.test.ts` 的契约钉);post-T records C,D (the delete-set; D is editor-created when `EDITOR_TOKEN` is present so scenario (d)
   exercises a lock held by another actor) + a post-T change to A (to prove the revert); record lock (d);
   drift record (e); ceiling seeding for (f) on a **separate throwaway sheet** (only if `RESET_MAX_RECORDS` is small) —
   it never touches the main sheet, so **(g) still runs in the same flag-on run**: one run covers (b)–(g).
+  The acceptance **base + sheet** are minted per run ONLY when `RESET_CANARY_*` is unset; with the pair set they are
+  reused verbatim and the run appends its records to the designated canary sheet (delete/reset that canary data after
+  the drill, per the canary runbook §6).
 - **Manual prerequisites** (do NOT fake): the two JWTs (`ADMIN_TOKEN` = sheet-admin/`multitable:share`,
-  `EDITOR_TOKEN` = `multitable:write` without share); toggling `MULTITABLE_ENABLE_PIT_RESET`; setting a small
+  `EDITOR_TOKEN` = `multitable:write` without share); the L2-C canary base/sheet ids for `RESET_CANARY_BASE_ID` /
+  `RESET_CANARY_SHEET_ID` (the harness never mints a checkpoint, so it cannot substitute for L2-C);
+  toggling `MULTITABLE_ENABLE_PIT_RESET`; setting a small
   `MULTITABLE_SHEET_REVERT_MAX_RECORDS` if you want (f) (default 5000 is impractical to seed). Scenario (b) skips
   without `EDITOR_TOKEN`; scenario (d) also skips without `EDITOR_TOKEN` because admin-created/admin-locked records are
   editable by the locker/creator under current lock semantics; (f) skips without a small `RESET_MAX_RECORDS`.

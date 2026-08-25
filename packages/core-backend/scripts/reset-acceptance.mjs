@@ -36,22 +36,40 @@
  * authorization) — it DETECTS an unready trust substrate on its first flag-ON preview and exits 2
  * (config/setup error) with the exact remediation, rather than reporting seven confusing scenario FAILs.
  *
+ * OWNER-DESIGNATED CANARY TARGET (2026-08-25 — the reason this harness can execute L5 at all):
+ * a covering trust checkpoint is minted ONCE, by an owner, on a NAMED canary sheet during the transient
+ * L2-C window (canary drill runbook §3), and L5 explicitly must NOT re-provision one — so a sheet this
+ * harness mints for itself can NEVER carry a covering checkpoint, and every reset-BEHAVIOR scenario on
+ * such a sheet is structurally unreachable (`NO_COVERING_CHECKPOINT`, forever). The harness therefore
+ * REUSES an owner-designated target when `RESET_CANARY_BASE_ID` + `RESET_CANARY_SHEET_ID` are set: it
+ * creates NO base and NO sheet, and still mints no checkpoint. Those ids must name the SAME canary sheet
+ * the operator listed in the route-layer `MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST` (canary drill
+ * runbook §3.3) — the sheet whose checkpoint L2-C minted. With the pair UNSET the harness keeps
+ * self-provisioning, but ONLY for the scenarios that legitimately own their fixtures and refuse BEFORE
+ * the covering-checkpoint gate ((a) flag-off 403, (b) D2 403, (c) typed-confirm 400, (f) ceiling 413);
+ * the reset-behavior scenarios (d)/(e)/(g) then SKIP with an explicit reason and the run exits 2 — L5 is
+ * never reported green off a self-made sheet.
+ *
  * Usage:
  *   BASE_URL=https://staging.example ADMIN_TOKEN=<jwt> [EDITOR_TOKEN=<jwt>] [RESET_MAX_RECORDS=<n>] \
+ *     [RESET_CANARY_BASE_ID=<id> RESET_CANARY_SHEET_ID=<id>] \
  *     node packages/core-backend/scripts/reset-acceptance.mjs
  *
  *   ADMIN_TOKEN  — a sheet-admin (canManageSheetAccess / multitable:share). REQUIRED.
  *   EDITOR_TOKEN — a normal record editor (multitable:write, NOT share). Optional; scenario (b) skips if absent.
  *   RESET_MAX_RECORDS — if set to the env's MULTITABLE_SHEET_REVERT_MAX_RECORDS, enables the (f) 413 ceiling test.
+ *   RESET_CANARY_BASE_ID / RESET_CANARY_SHEET_ID — the owner-designated canary base + sheet to REUSE.
+ *     Both or neither (one alone is a config error, exit 2). REQUIRED for the flag-ON L5 acceptance run.
  *
  * Flag handling: run ONCE with the flag OFF (proves (a) — Reset is inert), then enable
  * MULTITABLE_ENABLE_PIT_RESET (AND MULTITABLE_ENABLE_WRITER_FENCE AND
- * MULTITABLE_HISTORY_CONTIGUITY_STRICT, AND provision a trust checkpoint on the target sheet — see
- * above) and run AGAIN (runs (b)-(g)). The harness auto-detects the flag state and runs the matching
- * scenarios.
+ * MULTITABLE_HISTORY_CONTIGUITY_STRICT, AND point RESET_CANARY_* at the canary sheet whose checkpoint
+ * L2-C already minted — see above) and run AGAIN (runs (b)-(g)). The harness auto-detects the flag state
+ * and runs the matching scenarios.
  *
- * Exit: 0 = all run scenarios passed; 1 = a scenario failed; 2 = config/setup error (including an unready
- * trust substrate on the flag-ON run).
+ * Exit: 0 = all run scenarios passed; 1 = a scenario failed; 2 = config/setup error (an unready trust
+ * substrate, a half-set RESET_CANARY_* pair, or a flag-ON run with no designated canary — where (d)/(e)/(g)
+ * could not be executed at all).
  */
 
 const BASE = (process.env.BASE_URL || '').replace(/\/$/, '')
@@ -104,6 +122,33 @@ export function buildResetExecuteBody({ previewIdentity, confirm } = {}) {
   return body
 }
 
+// ---- owner-designated canary target (PURE — no I/O) --------------------------------------------------
+
+/**
+ * Resolve the owner-designated canary target from the environment. PURE and call-time (never a
+ * module-load capture), so a hermetic test can drive every branch by setting `env` alone.
+ *
+ * Contract (canary drill runbook §3.3): BOTH ids or NEITHER. One alone is a config error rather than a
+ * silent half-reuse — a designated sheet inside a self-minted base (or vice versa) is exactly the
+ * mismatched shape that produced the structural `NO_COVERING_CHECKPOINT` this pair exists to fix.
+ *
+ * @returns {{kind:'designated', baseId:string, sheetId:string} | {kind:'none'} | {kind:'invalid', reason:string}}
+ */
+export function resolveCanaryTarget(env = process.env) {
+  const baseId = String(env.RESET_CANARY_BASE_ID ?? '').trim()
+  const sheetId = String(env.RESET_CANARY_SHEET_ID ?? '').trim()
+  if (!baseId && !sheetId) return { kind: 'none' }
+  if (!baseId || !sheetId) {
+    return {
+      kind: 'invalid',
+      reason:
+        'RESET_CANARY_BASE_ID and RESET_CANARY_SHEET_ID must be set together ' +
+        `(RESET_CANARY_BASE_ID=${baseId ? 'set' : 'unset'}, RESET_CANARY_SHEET_ID=${sheetId ? 'set' : 'unset'}).`,
+    }
+  }
+  return { kind: 'designated', baseId, sheetId }
+}
+
 // ---- setup (HTTP self-provision; any step without a clean API is documented in the runbook, not faked) ----
 
 /** Discover a REAL, resolvable historyBatchId for a record's `create` revision via the read-only
@@ -126,17 +171,33 @@ async function discoverCreateBatchId(sheetId, recordId) {
   return batchId
 }
 
-async function setup() {
+/**
+ * Provision this run's fixtures. When `canary.kind === 'designated'` the base and sheet are REUSED
+ * verbatim — no `POST /bases`, no `POST /sheets` — because the covering trust checkpoint L5 consumes was
+ * minted on THAT sheet during L2-C and can never exist on a sheet this harness mints for itself. Records
+ * (the drill fixtures) are still created either way; a checkpoint is created in NEITHER case.
+ */
+export async function setup(canary = resolveCanaryTarget()) {
   const stamp = Date.now()
-  const base = await api('POST', '/bases', ADMIN, { name: `RESET-ACCEPT ${stamp}` })
-  if (base.status !== 200 && base.status !== 201) throw new Error(`create base failed: ${base.status} ${JSON.stringify(base.body)}`)
-  const baseId = base.body?.data?.id || base.body?.data?.base?.id || base.body?.id
-  const sheet = await api('POST', '/sheets', ADMIN, { baseId, name: `RS ${stamp}` })
-  if (sheet.status !== 200 && sheet.status !== 201) throw new Error(`create sheet failed: ${sheet.status} ${JSON.stringify(sheet.body)}`)
-  const sheetId = sheet.body?.data?.id || sheet.body?.data?.sheet?.id || sheet.body?.id
-  if (!baseId || !sheetId) throw new Error(`could not read baseId/sheetId from create responses (baseId=${baseId} sheetId=${sheetId})`)
-  // fields (best-effort; the revert assertion in (g) needs at least one editable field)
-  const f = await api('POST', '/fields', ADMIN, { sheetId, name: 'Salary', type: 'number' })
+  let baseId
+  let sheetId
+  if (canary.kind === 'designated') {
+    baseId = canary.baseId
+    sheetId = canary.sheetId
+    log(`Canary target: REUSING owner-designated base/sheet (RESET_CANARY_BASE_ID / RESET_CANARY_SHEET_ID).`)
+    log('  No base, no sheet and no trust checkpoint are created — L5 consumes the checkpoint L2-C already minted.')
+  } else {
+    const base = await api('POST', '/bases', ADMIN, { name: `RESET-ACCEPT ${stamp}` })
+    if (base.status !== 200 && base.status !== 201) throw new Error(`create base failed: ${base.status} ${JSON.stringify(base.body)}`)
+    baseId = base.body?.data?.id || base.body?.data?.base?.id || base.body?.id
+    const sheet = await api('POST', '/sheets', ADMIN, { baseId, name: `RS ${stamp}` })
+    if (sheet.status !== 200 && sheet.status !== 201) throw new Error(`create sheet failed: ${sheet.status} ${JSON.stringify(sheet.body)}`)
+    sheetId = sheet.body?.data?.id || sheet.body?.data?.sheet?.id || sheet.body?.id
+  }
+  if (!baseId || !sheetId) throw new Error(`could not read baseId/sheetId (baseId=${baseId} sheetId=${sheetId})`)
+  // fields (best-effort; the revert assertion in (g) needs at least one editable field). Stamped so a
+  // REUSED canary sheet — which already carries the previous drill's field — never collides on name.
+  const f = await api('POST', '/fields', ADMIN, { sheetId, name: `Salary ${stamp}`, type: 'number' })
   const salaryId = f.body?.data?.id || f.body?.data?.field?.id || f.body?.id || null
   const mkRec = async (data, token = ADMIN) => {
     const r = await api('POST', '/records', token, { sheetId, data })
@@ -156,13 +217,29 @@ async function setup() {
   // by a lock held by another actor. If D is admin-created/admin-locked, current lock semantics allow the creator/locker
   // to proceed, which would be a harness false negative rather than a Reset bug.
   const D = await mkRec(salaryId ? { [salaryId]: 400 } : { name: 'd' }, EDITOR || ADMIN)
-  return { baseId, sheetId, salaryId, A, B, C, D, anchorBatchId, dLockedByEditor: Boolean(EDITOR) }
+  return { baseId, sheetId, salaryId, A, B, C, D, anchorBatchId, dLockedByEditor: Boolean(EDITOR), canaryDesignated: canary.kind === 'designated' }
 }
 
-async function run() {
+/** Values-free config/setup abort (exit 2). Returns the same summary shape `finish()` does. */
+function configError(...lines) {
+  for (const line of lines) console.error(line)
+  process.exitCode = 2
+  return { pass, fail, skip, exitCode: 2 }
+}
+
+/** The one reason (d)/(e)/(g) are skipped rather than run — stated once, printed on every skip. */
+const NO_CANARY_REASON =
+  'no owner-designated canary (RESET_CANARY_BASE_ID / RESET_CANARY_SHEET_ID unset) — the self-minted sheet ' +
+  'has no covering trust checkpoint and L5 must not provision one'
+
+export async function run() {
   log(`\nT8-2 Reset acceptance — ${BASE}${MOUNT}\n`)
+  const canary = resolveCanaryTarget()
+  if (canary.kind === 'invalid') {
+    return configError(`\nFATAL (config/setup): ${canary.reason}`, 'See scripts/ops/multitable-o2-canary-drill.md §3.3.')
+  }
   // ---- flag-state probe ----
-  const ctx = await setup()
+  const ctx = await setup(canary)
   const probe = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
   const flagOff = probe.status === 403 && code(probe) === 'RESET_DISABLED'
 
@@ -172,7 +249,8 @@ async function run() {
     const ex = await api('POST', `/sheets/${ctx.sheetId}/reset-execute`, ADMIN, buildResetExecuteBody({ previewIdentity: 'x', confirm: 'reset' }))
     ok('(a) flag-OFF reset-execute → 403 RESET_DISABLED', ex.status === 403 && code(ex) === 'RESET_DISABLED', `got ${ex.status}/${code(ex)}`)
     log('\n→ (a) covers the inert/off state. ENABLE MULTITABLE_ENABLE_PIT_RESET (+ MULTITABLE_ENABLE_WRITER_FENCE')
-    log('  + MULTITABLE_HISTORY_CONTIGUITY_STRICT + a trust checkpoint on the target sheet) and re-run for (b)–(g).')
+    log('  + MULTITABLE_HISTORY_CONTIGUITY_STRICT) and re-run with RESET_CANARY_BASE_ID / RESET_CANARY_SHEET_ID')
+    log('  pointed at the L2-C canary sheet (the one carrying the checkpoint) for (b)–(g).')
     return finish()
   }
 
@@ -182,28 +260,53 @@ async function run() {
   // detect, don't provision: this harness never flips a flag or mints a checkpoint on its own. A miss
   // here means every scenario below would fail for the SAME environmental reason, not seven distinct
   // bugs — report it once, precisely, and stop before manufacturing confusing noise.
+  //
+  // The probe is UNCONDITIONAL, and the branch is on WHICH refusal comes back rather than on whether a
+  // canary was designated: the covering-checkpoint gate sits strictly downstream of both the trust pair
+  // (`requireRecoveryTrust`, univer-meta.ts ~L10635) and the live-sheet ceiling (~L10637), so a
+  // NO_COVERING_CHECKPOINT reply PROVES the trust env is ready and (b)/(c)/(f) are meaningful — whereas
+  // skipping the probe would let (f) red 409 for a purely environmental reason.
   const substrateProbe = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
   const substrateCode = code(substrateProbe)
-  if (substrateProbe.status === 409 && (substrateCode === 'RECOVERY_TRUST_REQUIRED' || substrateCode === 'NO_COVERING_CHECKPOINT')) {
-    console.error(`\nFATAL (config/setup): reset-preview refused ${substrateCode} — the exact-anchor trust substrate is not ready on this environment.`)
-    console.error('Remediation:')
-    console.error('  - MULTITABLE_ENABLE_WRITER_FENCE=true and MULTITABLE_HISTORY_CONTIGUITY_STRICT=true must both')
-    console.error('    be set on the target host (in addition to MULTITABLE_ENABLE_PIT_RESET).')
-    if (substrateCode === 'NO_COVERING_CHECKPOINT') {
-      console.error('  - a trust checkpoint must be activated for THIS sheet first: OWNER-GATED')
-      console.error('    POST /sheets/:sheetId/trust-checkpoint-activate — see scripts/ops/multitable-o2-canary-drill.md')
-      console.error('    §3 "L2-C" for the exact prerequisites and expected refusals.')
-    }
-    process.exitCode = 2
-    return
+  // (d)/(e)/(g) are the reset-BEHAVIOR scenarios: each needs an executable preview, hence a covering
+  // checkpoint. (b)/(c)/(f) refuse upstream of that gate and stay valid on a self-provisioned sheet.
+  let resetBehaviorRunnable = true
+  if (substrateProbe.status === 409 && substrateCode === 'RECOVERY_TRUST_REQUIRED') {
+    return configError(
+      `\nFATAL (config/setup): reset-preview refused ${substrateCode} — the exact-anchor trust substrate is not ready on this environment.`,
+      'Remediation:',
+      '  - MULTITABLE_ENABLE_WRITER_FENCE=true and MULTITABLE_HISTORY_CONTIGUITY_STRICT=true must both',
+      '    be set on the target host (in addition to MULTITABLE_ENABLE_PIT_RESET).',
+    )
   }
-  if (substrateProbe.status !== 200) {
-    console.error(`\nFATAL (config/setup): baseline reset-preview for the discovered anchor did not return 200 (got ${substrateProbe.status}/${substrateCode}).`)
-    console.error('This usually means the discovered historyBatchId did not resolve — verify MULTITABLE_ENABLE_WRITER_FENCE')
-    console.error('was already ON when this run\'s setup() created its records, and that no other environment issue is present.')
-    console.error(`Response: ${JSON.stringify(substrateProbe.body)}`)
-    process.exitCode = 2
-    return
+  if (substrateProbe.status === 409 && substrateCode === 'NO_COVERING_CHECKPOINT') {
+    if (ctx.canaryDesignated) {
+      // A DESIGNATED sheet with no covering checkpoint is a genuine operator-sequencing miss: L2-C has
+      // not been run for this sheet (or its checkpoint was pruned). L5 must not provision one, so stop.
+      return configError(
+        `\nFATAL (config/setup): reset-preview refused ${substrateCode} on the DESIGNATED canary sheet.`,
+        'The trust pair is satisfied (this refusal sits downstream of it), so the missing piece is the checkpoint itself.',
+        'Remediation:',
+        '  - run the transient L2-C provisioning window for THIS sheet first: OWNER-GATED',
+        '    POST /sheets/:sheetId/trust-checkpoint-activate — see scripts/ops/multitable-o2-canary-drill.md',
+        '    §3 "L2-C" for the exact prerequisites and expected refusals.',
+        '  - verify RESET_CANARY_SHEET_ID names the SAME sheet L2-C minted the checkpoint on (the sheet listed',
+        '    in the route-layer MULTITABLE_TRUST_CHECKPOINT_SHEET_ALLOWLIST) — a neighbouring sheet in the same',
+        '    canary base does NOT inherit it.',
+      )
+    }
+    // No canary designated: the sheet under test was minted by this run, so it can never carry a covering
+    // checkpoint (L5 does not provision one). This is a config gap, not seven scenario bugs — run the
+    // scenarios that legitimately own their fixtures, SKIP the reset-behavior ones, and exit 2.
+    resetBehaviorRunnable = false
+    log('Canary: NONE designated. (d)/(e)/(g) cannot run — see the skip reasons below; this run exits 2.\n')
+  } else if (substrateProbe.status !== 200) {
+    return configError(
+      `\nFATAL (config/setup): baseline reset-preview for the discovered anchor did not return 200 (got ${substrateProbe.status}/${substrateCode}).`,
+      'This usually means the discovered historyBatchId did not resolve — verify MULTITABLE_ENABLE_WRITER_FENCE',
+      "was already ON when this run's setup() created its records, and that no other environment issue is present.",
+      `Response: ${JSON.stringify(substrateProbe.body)}`,
+    )
   }
 
   // (b) editor (not sheet-admin) → 403
@@ -219,7 +322,9 @@ async function run() {
   }
 
   // (e) preview drift → 409 (delete-set re-enumeration); run before (d)/(g) so the sheet is still pristine
-  {
+  if (!resetBehaviorRunnable) {
+    skipped('(e) post-preview new record → execute 409 (delete-set divergence)', NO_CANARY_REASON)
+  } else {
     const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
     const id1 = pv.body?.data?.previewIdentity
     const E = await api('POST', '/records', ADMIN, { sheetId: ctx.sheetId, data: ctx.salaryId ? { [ctx.salaryId]: 500 } : { name: 'e-drift' } })
@@ -233,7 +338,9 @@ async function run() {
   }
 
   // (d) locked post-T target → 409 RESET_BLOCKED + ZERO writes
-  if (EDITOR && ctx.dLockedByEditor) {
+  if (!resetBehaviorRunnable) {
+    skipped('(d) locked target → 409 RESET_BLOCKED', NO_CANARY_REASON)
+  } else if (EDITOR && ctx.dLockedByEditor) {
     await api('POST', `/records/${ctx.D}/lock`, EDITOR, { sheetId: ctx.sheetId, locked: true })
     const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
     const id = pv.body?.data?.previewIdentity
@@ -266,7 +373,9 @@ async function run() {
   } else skipped('(f) ceiling → 413', 'set RESET_MAX_RECORDS=<small> (matching staging MULTITABLE_SHEET_REVERT_MAX_RECORDS) to enable')
 
   // (g) HAPPY PATH → post-T soft-deleted (trash) + survivors reverted
-  {
+  if (!resetBehaviorRunnable) {
+    skipped('(g) happy-path reset (post-T soft-deleted + survivors reverted)', NO_CANARY_REASON)
+  } else {
     const pv = await api('POST', `/sheets/${ctx.sheetId}/reset-preview`, ADMIN, buildResetPreviewBody(ctx.anchorBatchId))
     const id = pv.body?.data?.previewIdentity
     const delIds = pv.body?.data?.deleteRecordIds || []
@@ -282,12 +391,28 @@ async function run() {
     log('  covered by backend goldens, not re-asserted here: the `source=restore` revision write, and that C/D land in the')
     log('  recycle bin (`meta_records_trash`) — confirm the trash side once by hand; recoverable, not hard-deleted.')
   }
-  return finish()
+  return finish({ l5Unaccepted: !resetBehaviorRunnable })
 }
 
-function finish() {
+/**
+ * Print the summary, set the process exit code, and RETURN it (so a hermetic test can assert the code
+ * without reading the harness's own `process.exitCode` out from under vitest).
+ *
+ * `l5Unaccepted` means the flag-ON run could not execute (d)/(e)/(g) at all. That is exit 2
+ * (config/setup), never 0 — a run whose only L5 evidence is "skipped" must not read as green. A real
+ * scenario FAIL still wins with exit 1: a wrong answer is louder than a missing one.
+ */
+function finish({ l5Unaccepted = false } = {}) {
   log(`\n── summary: ${pass} passed, ${fail} failed, ${skip} skipped ──`)
-  process.exitCode = fail > 0 ? 1 : 0
+  if (l5Unaccepted) {
+    console.error('\nL5 NOT ACCEPTED: the reset-behavior scenarios (d)/(e)/(g) did not run.')
+    console.error(`Reason: ${NO_CANARY_REASON}.`)
+    console.error('Re-run with RESET_CANARY_BASE_ID / RESET_CANARY_SHEET_ID pointed at the L2-C canary sheet')
+    console.error('(scripts/ops/multitable-o2-canary-drill.md §3.3). Exiting 2 (config/setup), not 0.')
+  }
+  const exitCode = fail > 0 ? 1 : l5Unaccepted ? 2 : 0
+  process.exitCode = exitCode
+  return { pass, fail, skip, exitCode }
 }
 
 async function main() {
