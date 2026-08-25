@@ -798,20 +798,27 @@ assert_deploy_migrate_env_safe() {
   # this PR guards against elsewhere (a zero-read is not a read of zero). printenv distinguishes
   # natively: rc=0 set (possibly empty — empty is genuinely safe, all three consumers treat only
   # non-empty / exact-true as active), rc=1 unset, anything else = THE PROBE FAILED.
-  local name value rc
+  local name value rc probe_err probe_err_txt
   for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
     rc=0
-    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>/dev/null)" || rc=$?
+    # stdout carries the VALUE (captured, never printed); stderr carries only docker's own
+    # diagnostics — discarding it (the first shape did) left a failed probe as a bare rc with
+    # nothing to debug from. Kept, and surfaced ONLY on the failed-probe branch.
+    probe_err="$(mktemp "${OUTPUT_DIR}/.probe-err.XXXXXX")"
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>"$probe_err")" || rc=$?
     case "$rc" in
       0)
+        rm -f "$probe_err"
         [[ -z "$value" ]] \
           || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
         ;;
       1)
-        : # printenv: variable unset — the only observation besides set-empty that certifies SAFE
+        rm -f "$probe_err" # printenv: variable unset — besides set-empty, the only SAFE observation
         ;;
       *)
-        fail "could not observe ${name} on the running backend (docker exec rc=${rc}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
+        probe_err_txt="$(head -c 200 "$probe_err" | tr '\n' ' ')"
+        rm -f "$probe_err"
+        fail "could not observe ${name} on the running backend (docker exec rc=${rc}: ${probe_err_txt}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
         ;;
     esac
   done
@@ -1338,6 +1345,167 @@ action_residue_sweep() {
   log "residue-sweep OK: all 29 §7 checks are zero"
 }
 
+# Values-free classification of the persistent runner override — the read-only collection the
+# deploy-order decision depends on (owner-endorsed review, 2026-08-25). The OVERRIDE_FILE has
+# THREE writer-produced shapes plus absence, and action=deploy OVERWRITES it unconditionally with
+# only the none/rd-window shapes — so a deploy over a live soak override silently clears the W4/W7
+# allowlists. Before any deploy, the operator needs: which shape is on disk, which of the four
+# candidate flags are live in the backend container, and whether disk and container AGREE (drift
+# between them means the file was rewritten without a recreate, or vice versa — an unexplained
+# environment, so fail loud). NO VALUES are ever read into this function's output: file flags are
+# detected by KEY name only, live flags by printenv EXIT CODE only (stdout discarded unread), so
+# soak org slugs cannot leak into logs or artifacts.
+classify_runner_override() {
+  local out="${OUTPUT_DIR}/override-shape.txt"
+  local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME}"
+  local rd_set="ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ATTENDANCE_SCHEDULER_ENABLED"
+  local soak_set
+  soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
+  soak_set="${soak_set% }"
+
+  local file_present=false file_sha="" file_names="" all_upper_keys="" all_upper_count=0 backend_key_count=0
+  if [[ -f "$OVERRIDE_FILE" && ! -r "$OVERRIDE_FILE" ]]; then
+    # Present but unreadable: an environment we cannot explain. Classify as unexpected rather
+    # than letting an empty read pass as the none shape — an empty read is not a read of empty.
+    file_present=true
+    file_names="__UNREADABLE__"
+  elif [[ -f "$OVERRIDE_FILE" ]]; then
+    file_present=true
+    file_sha="$(hash_value "$OVERRIDE_FILE")"
+    # KEY names only. Env keys in every writer-produced shape are UPPER_SNAKE and indented;
+    # yaml structure keys (services/backend/web/environment/image) are lowercase; full-line
+    # comments start at column 0. A key this pattern cannot see cannot silently pass either —
+    # unknown UPPER keys land in file_names and force shape=unexpected below.
+    # grep/awk exit 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
+    # (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the left of
+    # `||` (the sole call site is `classify_runner_override || status_rc=1`), so an unguarded
+    # failing substitution would NOT abort on a host — it silently yields empty names and a calm
+    # `none`, the UNSAFE direction. Readability was checked above, so rc>=2 cannot hide an
+    # unreadable file behind the trailing `|| true`.
+    #
+    # SCOPED TO services.backend.environment (P2-2, external review of 4141c27832): the round-1
+    # grep collected EVERY indented UPPER key in the file, so two rd-window keys placed under
+    # services.web.environment classified as rd-window and matched the BACKEND's live env —
+    # certifying agreement between one service's file entry and a different service's runtime.
+    # The awk walks the writer-produced shape only; `all_upper_keys` keeps the old broad sweep,
+    # and any UPPER key OUTSIDE the backend environment block forces `unexpected` below.
+    # FULL parent path services.backend.environment (external review round 3, reproduced: a
+    # legal `x-template:` extension block containing backend.environment satisfied BOTH the set
+    # guard and the count guard, because this same mis-scoped walk fed both — `  backend:` was
+    # matched under ANY top-level key). `svc` tracks the top-level context: set only by a
+    # column-0 `services:` line, cleared by any other column-0 key.
+    file_names="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
+    ' "$OVERRIDE_FILE" | sort -u | tr '\n' ' ' || true)"
+    file_names="${file_names% }"
+    all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
+    all_upper_keys="${all_upper_keys% }"
+    # COUNTS, not only the deduped set (requal-2 P3-a, gate-measured false: a web-block key whose
+    # NAME already appears in the backend block collapses into the set comparison — both-blocks
+    # duplicates classified rd-window). Same broad pattern counted raw vs the backend-scoped walk.
+    all_upper_count="$(grep -cE '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" || true)"
+    backend_key_count="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
+      END {print c+0}
+    ' "$OVERRIDE_FILE" || true)"
+  fi
+
+  local shape
+  if [[ "$file_present" == false ]]; then shape="absent"
+  elif [[ "$all_upper_keys" != "$file_names" || "$all_upper_count" -ne "$backend_key_count" ]]; then
+    # P2-2: env-looking keys exist OUTSIDE services.backend.environment (another service, or a
+    # structure the scoped parser cannot read). Whatever this file is, it is not a writer product
+    # and its effect on the backend cannot be certified from names alone.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -qE '^[[:space:]]+environment:' "$OVERRIDE_FILE"; then
+    # P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+    # spellings this parser does not read — a hand-edited file in any of them parsed as a CALM
+    # none, inverting this function's own fail-loud principle. An environment block whose keys
+    # we cannot enumerate is an environment we cannot explain. ANCHORED as an indented mapping
+    # key (requal P3 on 4141c27832, gate-verified): the bare substring falsely tripped on a
+    # comment line saying "no environment: block on purpose" and on an image tag containing
+    # `environment:` — both classified a true none as unexpected.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]]; then shape="none"
+  elif [[ "$file_names" == "$rd_set" ]]; then shape="rd-window"
+  elif [[ "$file_names" == "$soak_set" ]]; then shape="soak-w4w7"
+  else shape="unexpected"
+  fi
+
+  # Live side: NAMES only, in ONE observation (P2-1 round 2, external review of 4141c27832).
+  # The round-1 shape probed PATH first and then looped four more docker execs — so a channel
+  # that died AFTER the control (container stopped, daemon lost) made the four candidate reads
+  # return rc=1, which reads as "observed unset": zero observations, confident green, reproduced
+  # by the reviewer at that exact timing. Control and data are now the SAME invocation: PATH is
+  # checked in-container (exit 9 if even PATH is unreadable), the candidate names are enumerated
+  # in-container, and only the SET NAMES cross the boundary — printenv's value output is
+  # discarded inside the container, so no value ever reaches the host. ANY nonzero exit — daemon
+  # down, container gone, sh missing, PATH unreadable — is a failed probe, never an observation.
+  local live_names="" probe_failed=false enum_out enum_rc
+  # Names are passed as ARGV ("$@" after the `_` $0 slot), never spliced into the script TEXT
+  # (requal-2 NIT on 74dad9e0ab, gate-measured: a name containing `$(...)` really executes under
+  # the text-splice form. Both soak names are constants today, so it was unreachable — but a
+  # mechanism does not stay unreachable by promise, and killing it costs two characters).
+  enum_rc=0
+  enum_out="$(docker exec "$BACKEND_CONTAINER" sh -c '
+    printenv PATH >/dev/null 2>&1 || exit 9
+    for n in "$@"; do
+      if printenv "$n" >/dev/null 2>&1; then printf "%s\n" "$n"; fi
+    done
+  ' _ $candidates 2>/dev/null)" || enum_rc=$?
+  if [[ "$enum_rc" -ne 0 ]]; then
+    probe_failed=true
+  fi
+
+  local match live_sorted live_render
+  if [[ "$probe_failed" == true ]]; then
+    match="indeterminate"
+    live_render="unobserved"
+  else
+    # Names only — and only names we ASKED about: anything else in the output means the
+    # in-container enumerator was tampered with or the channel corrupted; refuse it.
+    live_sorted="$(printf '%s\n' $enum_out | sort -u | tr '\n' ' ')"
+    live_sorted="$(echo "$live_sorted" | tr -s ' ')"; live_sorted="${live_sorted% }"; live_sorted="${live_sorted# }"
+    local answered
+    for answered in $live_sorted; do
+      case " $candidates " in
+        *" $answered "*) : ;;
+        *) match="indeterminate"; live_render="unobserved"; probe_failed=true ;;
+      esac
+    done
+    if [[ "$probe_failed" != true ]]; then
+      [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
+      live_render="${live_sorted:-none}"
+    fi
+  fi
+
+  {
+    echo "override_shape=${shape}"
+    echo "override_file_present=${file_present}"
+    echo "override_file_sha256=${file_sha:-none}"
+    echo "file_flag_names=${file_names:-none}"
+    echo "live_flag_names=${live_render}"
+    echo "file_live_match=${match}"
+  } | tee "$out"
+
+  # FAIL LOUD, never silently: an unexpected shape, a disk/live disagreement, or a failed probe
+  # each mean the environment is not explained — the collection still WROTE everything above,
+  # but the action must not exit 0 over it.
+  [[ "$shape" != "unexpected" ]] || return 1
+  [[ "$match" == true ]] || return 1
+  return 0
+}
+
 action_status() {
   snapshot_staging_ps
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" 2>&1 \
@@ -1349,6 +1517,10 @@ action_status() {
   log "live build.commit: ${live_commit:-<unreachable>}"
 
   local status_rc=0
+  # Values-free override classification FIRST: it needs no running container for the file side,
+  # and a stopped/unreachable container fails the probe's PATH positive control, degrading the
+  # verdict to file_live_match=indeterminate (never a confident green over zero observations).
+  classify_runner_override || status_rc=1
   if docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     prepare_container_runner
     staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list.txt" || status_rc=1
@@ -1368,6 +1540,7 @@ action_status() {
   {
     echo "action=status"
     echo "live_commit=${live_commit:-unreachable}"
+    grep '^override_shape=' "${OUTPUT_DIR}/override-shape.txt" 2>/dev/null || echo "override_shape=unrecorded"
     echo "status_rc=${status_rc}"
   } > "${OUTPUT_DIR}/summary.txt"
   return "$status_rc"
