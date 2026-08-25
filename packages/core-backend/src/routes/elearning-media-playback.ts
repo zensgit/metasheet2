@@ -18,7 +18,7 @@ import {
   readElearningMediaPlaybackSigningSecret,
   verifyElearningMediaPlaybackToken,
   type ElearningPlaybackErrorCode,
-  type ElearningPlaybackQueryable,
+  type ElearningPlaybackDb,
 } from '../services/elearning-media-playback'
 import {
   ELEARNING_MEDIA_RANGE_MAX_BYTES,
@@ -39,7 +39,7 @@ const PLAYBACK_STATUS: Record<ElearningPlaybackErrorCode, number> = {
 }
 
 export interface ElearningMediaPlaybackRouteDeps {
-  db: ElearningPlaybackQueryable
+  db: ElearningPlaybackDb
   getStore: () => ElearningMediaRangeReadableStore | null
   env?: NodeJS.ProcessEnv
   now?: () => Date
@@ -62,7 +62,9 @@ function failClosed(res: Response, error: unknown): void {
   res.status(500).json({ error: 'internal_error' })
 }
 
-function readExactToken(req: Request): { ok: true; token: string } | { ok: false; reason: 'missing' | 'multiple' } {
+function readExactToken(
+  req: Request,
+): { ok: true; token: string } | { ok: false; reason: 'missing' | 'multiple' } {
   const raw = req.query.token
   if (raw === undefined) return { ok: false, reason: 'missing' }
   if (Array.isArray(raw)) return { ok: false, reason: 'multiple' }
@@ -128,7 +130,12 @@ export function createElearningMediaPlaybackRouter(
       }
 
       const now = deps.now ? deps.now() : new Date()
-      const claims = verifyToken(token.token, secret, requestEnv.JWT_SECRET, now)
+      const claims = verifyToken(
+        token.token,
+        secret,
+        requestEnv.JWT_SECRET,
+        now,
+      )
       const auth = await authorize(deps.db, {
         token: token.token,
         orgId: claims.org,

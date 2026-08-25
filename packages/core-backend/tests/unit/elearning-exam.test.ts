@@ -33,6 +33,10 @@ const QUESTION_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const QUESTION_C = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const VERSION = '44444444-4444-4444-8444-444444444444'
 const MEMBER = '55555555-5555-4555-8555-555555555555'
+const COURSE = '66666666-6666-4666-8666-666666666666'
+const SCOPE = '77777777-7777-4777-8777-777777777777'
+const SCOPE_REVISION = '88888888-8888-4888-8888-888888888888'
+const SCOPE_RULE = '99999999-9999-4999-8999-999999999999'
 
 const PUBLIC_START_KEYS = [
   'attemptId',
@@ -191,8 +195,81 @@ function assertPublicSubmitJson(payload: unknown): Record<string, unknown> {
 }
 
 function examQueryTag(sql: string): string | null {
-  const match = /\/\* (elearning-exam:[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:exam|access):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
+}
+
+interface AccessMem {
+  memberId: string | null
+  courseStatus: string
+  versionStatus: string
+  activeVersionId: string | null
+  scopeId: string | null
+  scopeRevisionId: string | null
+  scopeRuleId: string | null
+  scopeSubjectType: 'all' | 'user'
+  scopeSubjectRef: string | null
+}
+
+function defaultAccessMem(): AccessMem {
+  return {
+    memberId: MEMBER,
+    courseStatus: 'active',
+    versionStatus: 'published',
+    activeVersionId: VERSION,
+    scopeId: null,
+    scopeRevisionId: null,
+    scopeRuleId: null,
+    scopeSubjectType: 'all',
+    scopeSubjectRef: null,
+  }
+}
+
+function queryAccessMemory(
+  tag: string | null,
+  params: unknown[],
+  access: AccessMem,
+): { rows: Array<Record<string, unknown>>; rowCount: number } | null {
+  if (tag === 'elearning-access:lock-course') {
+    if (params[0] !== ORG || params[1] !== VERSION) return { rows: [], rowCount: 0 }
+    return {
+      rows: [{
+        course_id: COURSE,
+        course_status: access.courseStatus,
+        active_version_id: access.activeVersionId,
+        scope_id: access.scopeId,
+        version_status: access.versionStatus,
+      }],
+      rowCount: 1,
+    }
+  }
+  if (tag === 'elearning-access:lock-assignment') {
+    if (
+      access.memberId
+      && params[0] === ORG
+      && params[1] === USER
+      && params[2] === VERSION
+    ) {
+      return { rows: [{ id: access.memberId }], rowCount: 1 }
+    }
+    return { rows: [], rowCount: 0 }
+  }
+  if (tag === 'elearning-access:lock-scope') {
+    if (params[0] !== ORG || params[1] !== access.scopeId || !access.scopeRevisionId) {
+      return { rows: [], rowCount: 0 }
+    }
+    return { rows: [{ active_revision_id: access.scopeRevisionId }], rowCount: 1 }
+  }
+  if (tag === 'elearning-access:match-rule') {
+    if (params[0] !== ORG || params[1] !== access.scopeRevisionId || !access.scopeRuleId) {
+      return { rows: [], rowCount: 0 }
+    }
+    const matches = access.scopeSubjectType !== 'user' || access.scopeSubjectRef === params[2]
+    return matches
+      ? { rows: [{ id: access.scopeRuleId }], rowCount: 1 }
+      : { rows: [], rowCount: 0 }
+  }
+  return null
 }
 
 interface SubmitMemAttempt {
@@ -211,12 +288,15 @@ interface SubmitMemAttempt {
 
 interface SubmitMem {
   attempt: SubmitMemAttempt
-  memberId: string | null
+  access: AccessMem
   grades: Array<{ details: unknown; score: unknown; maxScore: unknown }>
   lockKeys: string[]
 }
 
-function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
+function createSubmitMemoryDb(
+  seed: Partial<SubmitMemAttempt> = {},
+  accessSeed: Partial<AccessMem> = {},
+): {
   db: ElearningExamDb
   mem: SubmitMem
 } {
@@ -236,7 +316,7 @@ function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
       passed: null,
       ...seed,
     },
-    memberId: MEMBER,
+    access: { ...defaultAccessMem(), ...accessSeed },
     grades: [],
     lockKeys: [],
   }
@@ -267,24 +347,15 @@ function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
           total_score: attempt.totalScore,
           passed: attempt.passed,
           user_id: attempt.userId,
-          course_status: 'active',
-          version_status: 'published',
+          course_status: mem.access.courseStatus,
+          version_status: mem.access.versionStatus,
           exam_status: 'published',
         }],
         rowCount: 1,
       }
     }
-    if (tag === 'elearning-exam:load-member') {
-      if (
-        mem.memberId
-        && params[0] === ORG
-        && params[1] === USER
-        && params[2] === attempt.versionId
-      ) {
-        return { rows: [{ id: mem.memberId }], rowCount: 1 }
-      }
-      return { rows: [], rowCount: 0 }
-    }
+    const accessResult = queryAccessMemory(tag, params, mem.access)
+    if (accessResult) return accessResult
     if (tag === 'elearning-exam:save-answers') {
       if (params[1] !== ORG || params[2] !== attempt.id || attempt.status !== 'started') {
         return { rows: [], rowCount: 0 }
@@ -765,12 +836,15 @@ function emptyAnswers() {
 
 interface StartMem {
   attempts: SubmitMemAttempt[]
-  memberId: string | null
+  access: AccessMem
   lockKeys: string[]
   priorVideoIncomplete: boolean
 }
 
-function createStartMemoryDb(seed: Partial<SubmitMemAttempt> & { started?: boolean } = {}): {
+function createStartMemoryDb(
+  seed: Partial<SubmitMemAttempt> & { started?: boolean } = {},
+  accessSeed: Partial<AccessMem> = {},
+): {
   db: ElearningExamDb
   mem: StartMem
 } {
@@ -793,7 +867,7 @@ function createStartMemoryDb(seed: Partial<SubmitMemAttempt> & { started?: boole
           ...seed,
         }]
       : [],
-    memberId: MEMBER,
+    access: { ...defaultAccessMem(), ...accessSeed },
     lockKeys: [],
     priorVideoIncomplete: false,
   }
@@ -816,8 +890,8 @@ function createStartMemoryDb(seed: Partial<SubmitMemAttempt> & { started?: boole
           item_type: 'exam',
           position: 2,
           exam_id: EXAM,
-          version_status: 'published',
-          course_status: 'active',
+          version_status: mem.access.versionStatus,
+          course_status: mem.access.courseStatus,
         }],
         rowCount: 1,
       }
@@ -826,12 +900,8 @@ function createStartMemoryDb(seed: Partial<SubmitMemAttempt> & { started?: boole
       if (params[0] !== ORG || params[1] !== EXAM) return { rows: [], rowCount: 0 }
       return { rows: [{ status: 'published', pass_score: 20, max_attempts: 3 }], rowCount: 1 }
     }
-    if (tag === 'elearning-exam:load-member') {
-      if (mem.memberId && params[0] === ORG && params[1] === USER && params[2] === VERSION) {
-        return { rows: [{ id: mem.memberId }], rowCount: 1 }
-      }
-      return { rows: [], rowCount: 0 }
-    }
+    const accessResult = queryAccessMemory(tag, params, mem.access)
+    if (accessResult) return accessResult
     if (tag === 'elearning-exam:load-prior-videos') {
       if (mem.priorVideoIncomplete) return { rows: [{ id: ITEM }], rowCount: 1 }
       return { rows: [], rowCount: 0 }
@@ -912,6 +982,26 @@ describe('elearning exam start own answers', () => {
     expect(mem.attempts).toHaveLength(1)
     expect(mem.attempts[0]?.answers).toBeNull()
     expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, ITEM)])
+  })
+
+  it('starts a self-study exam from an active visibility rule without an assignment', async () => {
+    const { db, mem } = createStartMemoryDb(
+      { started: false },
+      {
+        memberId: null,
+        scopeId: SCOPE,
+        scopeRevisionId: SCOPE_REVISION,
+        scopeRuleId: SCOPE_RULE,
+        scopeSubjectType: 'all',
+      },
+    )
+    await expect(startElearningExam(db, {
+      orgId: ORG,
+      userId: USER,
+      itemId: ITEM,
+    })).resolves.toMatchObject({ status: 'started', duplicate: false })
+    expect(mem.attempts).toHaveLength(1)
+    expect(mem.access.memberId).toBeNull()
   })
 
   it('replays a started attempt with canonical saved answers and does not insert a second row', async () => {

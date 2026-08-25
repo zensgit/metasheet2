@@ -21,15 +21,22 @@
 
     <article
       v-for="course in courses"
-      :key="course.courseId"
+      :key="course.courseVersionId"
       class="elearning-course"
       :data-testid="`elearning-course-${course.courseId}`"
+      :data-course-version-id="course.courseVersionId"
     >
       <h2>{{ course.title }}</h2>
       <dl class="elearning-meta">
         <div>
+          <dt>{{ elearningLabel('learner.access', isZh) }}</dt>
+          <dd>{{ course.access.required
+            ? elearningLabel('learner.required', isZh)
+            : elearningLabel('learner.selfStudy', isZh) }}</dd>
+        </div>
+        <div>
           <dt>{{ elearningLabel('learner.deadline', isZh) }}</dt>
-          <dd>{{ course.assignment.deadline || elearningLabel('learner.deadlineNone', isZh) }}</dd>
+          <dd>{{ course.assignment?.deadline || elearningLabel('learner.deadlineNone', isZh) }}</dd>
         </div>
         <div>
           <dt>{{ elearningLabel('learner.videoProgress', isZh) }}</dt>
@@ -66,7 +73,7 @@
       </div>
 
       <video
-        v-if="activeCourseId === course.courseId && playbackSrc"
+        v-if="activeCourseVersionId === course.courseVersionId && playbackSrc"
         class="elearning-video"
         data-testid="elearning-learner-video"
         controls
@@ -92,7 +99,7 @@
       </p>
 
       <form
-        v-if="examCourseId === course.courseId && paper"
+        v-if="examCourseVersionId === course.courseVersionId && paper"
         class="elearning-exam"
         data-testid="elearning-exam-form"
         @submit.prevent="void submitExam()"
@@ -139,7 +146,7 @@
       </form>
 
       <p
-        v-if="examCourseId === course.courseId && examResult"
+        v-if="examCourseVersionId === course.courseVersionId && examResult"
         class="elearning-result"
         data-testid="elearning-exam-result"
       >
@@ -157,7 +164,7 @@ import {
   ElearningApiError,
   elearningPlaybackSourceUrl,
   getElearningCapabilities,
-  isElearningV01Ready,
+  isElearningLearnerReady,
   issueElearningPlaybackTicket,
   listMyElearningCourses,
   sendElearningHeartbeat,
@@ -190,9 +197,9 @@ const busy = ref(false)
 const ready = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
-const activeCourseId = ref<string | null>(null)
+const activeCourseVersionId = ref<string | null>(null)
 const playbackSrc = ref('')
-const examCourseId = ref<string | null>(null)
+const examCourseVersionId = ref<string | null>(null)
 const paper = ref<ElearningPublicPaper | null>(null)
 const attemptId = ref<string | null>(null)
 const answers = ref<Record<string, string[]>>({})
@@ -335,18 +342,22 @@ function isUsablePlaybackTicket(
   return parsedExpiryMs - nowMs > TICKET_RENEWAL_MIN_DELAY_MS
 }
 
-function ownsPendingWatchStart(epoch: number, courseId: string): boolean {
-  return viewMounted && epoch === watchEpoch && activeCourseId.value === courseId
+function ownsPendingWatchStart(epoch: number, courseVersionId: string): boolean {
+  return viewMounted && epoch === watchEpoch && activeCourseVersionId.value === courseVersionId
 }
 
-function isCurrentPlaybackContext(epoch: number, courseId: string | null, itemId: string | null): boolean {
+function isCurrentPlaybackContext(
+  epoch: number,
+  courseVersionId: string | null,
+  itemId: string | null,
+): boolean {
   return (
     viewMounted
     && !watchStopped
     && epoch === watchEpoch
-    && courseId != null
+    && courseVersionId != null
     && itemId != null
-    && activeCourseId.value === courseId
+    && activeCourseVersionId.value === courseVersionId
     && activeItemId === itemId
   )
 }
@@ -360,11 +371,11 @@ function schedulePlaybackTicketRenewal(expiresAt: string, ttlSeconds: number): v
   clearTicketRenewalTimer()
   if (!viewMounted || watchStopped || !activeItemId) return
   const epoch = watchEpoch
-  const courseId = activeCourseId.value
+  const courseVersionId = activeCourseVersionId.value
   const itemId = activeItemId
   ticketRenewalTimer = window.setTimeout(() => {
     ticketRenewalTimer = null
-    void renewPlaybackTicket(epoch, courseId, itemId)
+    void renewPlaybackTicket(epoch, courseVersionId, itemId)
   }, ticketRenewalDelayMs(expiresAt, ttlSeconds))
 }
 
@@ -417,13 +428,13 @@ async function settleTicketRenewalRestore(video: HTMLVideoElement): Promise<void
 
 async function renewPlaybackTicket(
   epoch: number,
-  courseId: string | null,
+  courseVersionId: string | null,
   itemId: string | null,
 ): Promise<void> {
-  if (!isCurrentPlaybackContext(epoch, courseId, itemId) || !itemId) return
+  if (!isCurrentPlaybackContext(epoch, courseVersionId, itemId) || !itemId) return
   try {
     const ticket = await issueElearningPlaybackTicket(itemId)
-    if (!isCurrentPlaybackContext(epoch, courseId, itemId)) return
+    if (!isCurrentPlaybackContext(epoch, courseVersionId, itemId)) return
     if (!isUsablePlaybackTicket(ticket, itemId)) {
       rejectPlaybackTicket()
       return
@@ -431,18 +442,18 @@ async function renewPlaybackTicket(
     applyRenewedPlaybackTicket(ticket.token)
     schedulePlaybackTicketRenewal(ticket.expiresAt, ticket.ttlSeconds)
   } catch (error) {
-    if (!isCurrentPlaybackContext(epoch, courseId, itemId)) return
+    if (!isCurrentPlaybackContext(epoch, courseVersionId, itemId)) return
     writeStatus(formatError(error), 'error')
     stopWatchSession()
   }
 }
 
 function applyServerWatchProgress(
-  courseId: string,
+  courseVersionId: string,
   watch: Pick<ElearningWatchState, 'status' | 'effectiveMs' | 'maxPositionMs'>,
 ): void {
   courses.value = courses.value.map((course) => {
-    if (course.courseId !== courseId) return course
+    if (course.courseVersionId !== courseVersionId) return course
     return {
       ...course,
       video: {
@@ -488,7 +499,7 @@ function isNaturalVideoEnd(video: HTMLVideoElement | null): boolean {
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
-  if (!isElearningV01Ready(capabilities)) {
+  if (!isElearningLearnerReady(capabilities)) {
     throw new ElearningApiError('feature_disabled', 404)
   }
   ready.value = true
@@ -533,8 +544,8 @@ async function flushHeartbeatQueue(): Promise<void> {
         break
       }
       lastSequence = result.lastSequence
-      if (activeCourseId.value) {
-        applyServerWatchProgress(activeCourseId.value, result)
+      if (activeCourseVersionId.value) {
+        applyServerWatchProgress(activeCourseVersionId.value, result)
       }
       if (result.status === 'completed') {
         stopWatchSession()
@@ -718,15 +729,15 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
   sessionId = null
   videoNode = null
   playbackSrc.value = ''
-  activeCourseId.value = course.courseId
+  activeCourseVersionId.value = course.courseVersionId
   const epoch = watchEpoch
-  const courseId = course.courseId
+  const courseVersionId = course.courseVersionId
   const itemId = course.video.itemId
   try {
     const watch = await startElearningWatch(itemId)
-    if (!ownsPendingWatchStart(epoch, courseId)) return
+    if (!ownsPendingWatchStart(epoch, courseVersionId)) return
     const ticket = await issueElearningPlaybackTicket(itemId)
-    if (!ownsPendingWatchStart(epoch, courseId)) return
+    if (!ownsPendingWatchStart(epoch, courseVersionId)) return
     if (!isUsablePlaybackTicket(ticket, itemId)) {
       writeStatus(formatError(null), 'error')
       return
@@ -735,15 +746,15 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
     sessionId = watch.sessionId
     watchStopped = false
     activeItemId = itemId
-    applyServerWatchProgress(courseId, watch)
+    applyServerWatchProgress(courseVersionId, watch)
     resumePositionMs = watch.status === 'in_progress' ? watch.maxPositionMs : null
     playbackSrc.value = elearningPlaybackSourceUrl(ticket.token)
     schedulePlaybackTicketRenewal(ticket.expiresAt, ticket.ttlSeconds)
-    if (watch.status === 'completed' && ownsPendingWatchStart(epoch, courseId)) {
+    if (watch.status === 'completed' && ownsPendingWatchStart(epoch, courseVersionId)) {
       await refreshCourses()
     }
   } catch (error) {
-    if (!ownsPendingWatchStart(epoch, courseId)) return
+    if (!ownsPendingWatchStart(epoch, courseVersionId)) return
     writeStatus(formatError(error), 'error')
   } finally {
     if (epoch === watchEpoch) {
@@ -764,7 +775,7 @@ async function startExam(course: ElearningLearnerCourse): Promise<void> {
     pendingDraft = null
     examEpoch += 1
     const result = await startElearningExam(course.exam.itemId)
-    examCourseId.value = course.courseId
+    examCourseVersionId.value = course.courseVersionId
     paper.value = result.paper
     attemptId.value = result.attemptId
     examResult.value = null

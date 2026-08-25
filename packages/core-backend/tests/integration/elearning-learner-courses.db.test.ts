@@ -1,5 +1,5 @@
 /**
- * E-learning V0.1 learner assigned-course list gate (real PostgreSQL).
+ * E-learning learner assigned-or-visible course-list gate (real PostgreSQL).
  *
  * Assumes content/assessment + watch-progress migrations have already been
  * applied by the caller. Does not call up()/down() and does not write
@@ -19,9 +19,18 @@ import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzz
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
 import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import {
+  COURSE_SCOPE_IDENTITY_TRIGGER,
+  SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
+  SCOPE_RULES_DENY_MUTATION_TRIGGER,
+} from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
+import {
   listElearningLearnerCourses,
   type ElearningLearnerCoursesQueryable,
 } from '../../src/services/elearning-learner-courses'
+import {
+  setElearningCourseScope,
+  type ElearningScopeDb,
+} from '../../src/services/elearning-scope'
 
 function applyDotEnv(filePath: string): void {
   let text: string
@@ -65,12 +74,37 @@ const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  { table: 'elearning_courses', name: COURSE_SCOPE_IDENTITY_TRIGGER },
+  { table: 'elearning_scope_revisions', name: SCOPE_REVISIONS_DENY_MUTATION_TRIGGER },
+  { table: 'elearning_scope_revision_rules', name: SCOPE_RULES_DENY_MUTATION_TRIGGER },
 ]
 
-const db: ElearningLearnerCoursesQueryable = {
+const db: ElearningLearnerCoursesQueryable & ElearningScopeDb = {
   async query(sql, params) {
     const result = await pool.query(sql, params as never)
     return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+  },
+  async transaction(handler) {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await handler({
+        async query(sql, params) {
+          const queryResult = await client.query(sql, params as never)
+          return {
+            rows: queryResult.rows as Array<Record<string, unknown>>,
+            rowCount: queryResult.rowCount,
+          }
+        },
+      })
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   },
 }
 
@@ -80,6 +114,28 @@ function orgId(suffix: string): string {
 
 function actor(suffix: string): string {
   return `${NS}-actor-${suffix}`
+}
+
+async function ensureActiveMembership(userId: string, org: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO users (
+       id, email, name, password_hash, role, permissions,
+       is_active, is_admin, activation_status, local_password_set,
+       must_change_password, created_at, updated_at
+     ) VALUES (
+       $1, $2, $3, 'x', 'user', '[]'::jsonb,
+       TRUE, FALSE, 'activated', TRUE,
+       FALSE, now(), now()
+     )
+     ON CONFLICT (id) DO UPDATE SET is_active = TRUE`,
+    [userId, `${userId}@learner-gate.test`, userId],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1, $2, TRUE)
+     ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+    [userId, org],
+  )
 }
 
 async function setTriggers(enabled: boolean): Promise<void> {
@@ -114,6 +170,26 @@ async function cleanupOrg(org: string): Promise<void> {
     )
     await pool.query('DELETE FROM elearning_course_versions WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_courses WHERE org_id = $1', [org])
+    await pool.query(
+      `UPDATE elearning_scopes
+          SET active_revision_id = NULL, latest_revision_id = NULL
+        WHERE org_id = $1`,
+      [org],
+    )
+    await pool.query('DELETE FROM elearning_scope_revision_rules WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM elearning_scope_revisions WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM elearning_scopes WHERE org_id = $1', [org])
+    await pool.query(
+      `DELETE FROM user_orgs
+        WHERE org_id = $1 AND user_id LIKE $2`,
+      [org, `${NS}%`],
+    )
+    await pool.query(
+      `DELETE FROM users u
+        WHERE u.id LIKE $1
+          AND NOT EXISTS (SELECT 1 FROM user_orgs uo WHERE uo.user_id = u.id)`,
+      [`${NS}%`],
+    )
   } finally {
     await setTriggers(true)
   }
@@ -450,7 +526,7 @@ function assertNoSecrets(payload: unknown, org: string, userId: string, otherUse
   expect(blob).not.toMatch(/"correct"/)
 }
 
-describe('elearning V0.1 learner assigned-course list (real DB)', () => {
+describe('elearning learner assigned-or-visible course list (real DB)', () => {
   const seededOrgIds: string[] = []
 
   afterEach(async () => {
@@ -486,6 +562,7 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
       courseVersionId: seed.versionId,
       title: 'Active assigned course',
       completed: false,
+      access: { kind: 'assignment', required: true },
     }))
     expect(rows[0].assignment).toEqual({
       deadline: '2000-01-01T00:00:00.000Z',
@@ -504,6 +581,90 @@ describe('elearning V0.1 learner assigned-course list (real DB)', () => {
     expect(rows[0].exam.itemId).not.toBe(seed.extraExamItemId)
     expect(rows[0].exam.latestAttempt).toBeNull()
     assertNoSecrets(rows, org, userId, otherUserId, seed.storageKey)
+  })
+
+  it('lists visible self-study without an assignment and prefers a later valid assignment', async () => {
+    const org = orgId('visibility')
+    seededOrgIds.push(org)
+    const userId = actor('learner')
+    const otherUserId = actor('other')
+    const seed = await seedCourse({
+      org,
+      userId,
+      otherUserId,
+      title: 'Visible self-study course',
+      assignedAt: '2026-02-02T00:00:00.000Z',
+    })
+    await pool.query(
+      `UPDATE elearning_courses
+          SET active_version_id = $1, latest_version_id = $1, updated_at = now()
+        WHERE org_id = $2 AND id = $3`,
+      [seed.versionId, org, seed.courseId],
+    )
+    await pool.query(
+      `UPDATE elearning_assignment_members
+          SET revoked_at = now(), revoked_by = $2, revocation_reason = 'scope-only test'
+        WHERE org_id = $1 AND id = $3`,
+      [org, actor('revoker'), seed.memberId],
+    )
+    await ensureActiveMembership(userId, org)
+    await setElearningCourseScope(db, {
+      orgId: org,
+      actorId: actor('scope-admin'),
+      courseId: seed.courseId,
+      reason: 'enable self-study',
+      rules: [{ subjectType: 'user', subjectRef: userId }],
+    })
+
+    const visible = await listElearningLearnerCourses(db, { orgId: org, userId })
+    expect(visible).toHaveLength(1)
+    expect(visible[0]).toEqual(expect.objectContaining({
+      courseId: seed.courseId,
+      courseVersionId: seed.versionId,
+      access: { kind: 'visibility', required: false },
+      assignment: null,
+    }))
+
+    let shrunk = false
+    const shrinkingDb: ElearningLearnerCoursesQueryable = {
+      async query(sql, params) {
+        if (!shrunk && sql.includes('/* elearning-learner-courses:details */')) {
+          shrunk = true
+          await setElearningCourseScope(db, {
+            orgId: org,
+            actorId: actor('scope-admin'),
+            courseId: seed.courseId,
+            reason: 'shrink between catalog queries',
+            rules: [],
+          })
+        }
+        return db.query(sql, params)
+      },
+    }
+    await expect(listElearningLearnerCourses(shrinkingDb, {
+      orgId: org,
+      userId,
+    })).rejects.toMatchObject({ code: 'unavailable' })
+    expect(shrunk).toBe(true)
+
+    const assigned = await insertAssignment({
+      org,
+      versionId: seed.versionId,
+      userId,
+      assignedAt: '2026-02-03T00:00:00.000Z',
+      deadline: '2026-12-31T00:00:00.000Z',
+    })
+    const required = await listElearningLearnerCourses(db, { orgId: org, userId })
+    expect(required).toHaveLength(1)
+    expect(required[0]).toEqual(expect.objectContaining({
+      access: { kind: 'assignment', required: true },
+      assignment: {
+        deadline: '2026-12-31T00:00:00.000Z',
+        assignedAt: '2026-02-03T00:00:00.000Z',
+      },
+    }))
+    expect(assigned.memberId).not.toBe(seed.memberId)
+    assertNoSecrets(required, org, userId, otherUserId, seed.storageKey)
   })
 
   it('keeps archived+retired assigned access and excludes revoked, withdrawn, draft, and cross-org rows', async () => {

@@ -1,5 +1,5 @@
 /**
- * Read-only V0.1 learner assigned-course list (assignment-only named pilot).
+ * Read-only learner course list for assignments and visible self-study.
  * One row per course version. Public values and errors are values-free.
  */
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
@@ -7,6 +7,10 @@ import {
   ELEARNING_WATCH_POLICY_VERSION,
   ELEARNING_WATCH_THRESHOLD_BPS,
 } from './elearning-watch-progress'
+import {
+  listElearningCourseAccessCandidates,
+  type ElearningCourseAccessCandidate,
+} from './elearning-course-access'
 
 export const ELEARNING_LEARNER_COURSES_LIMIT = 100 as const
 
@@ -46,6 +50,11 @@ export interface ElearningLearnerAssignment {
   assignedAt: string
 }
 
+export interface ElearningLearnerAccess {
+  kind: 'assignment' | 'visibility'
+  required: boolean
+}
+
 export interface ElearningLearnerVideo {
   itemId: string
   durationMs: number
@@ -76,32 +85,31 @@ export interface ElearningLearnerCourse {
   courseId: string
   courseVersionId: string
   title: string
-  assignment: ElearningLearnerAssignment
+  access: ElearningLearnerAccess
+  assignment: ElearningLearnerAssignment | null
   video: ElearningLearnerVideo
   exam: ElearningLearnerExam
   completed: boolean
 }
 
-const LIST_SQL = `/* elearning-learner-courses:list */
-WITH assigned_heads AS (
-  SELECT DISTINCT ON (m.course_version_id)
-    m.course_version_id AS course_version_id,
-    m.assigned_at AS assigned_at,
-    a.deadline AS deadline
-  FROM elearning_assignment_members m
-  JOIN elearning_assignments a
-    ON a.org_id = m.org_id AND a.id = m.assignment_id
-  WHERE m.org_id = $1
-    AND m.user_id = $2
-    AND m.revoked_at IS NULL
-  ORDER BY m.course_version_id ASC, m.assigned_at ASC, m.id ASC
+const DETAILS_SQL = `/* elearning-learner-courses:details */
+WITH access_input AS (
+  SELECT
+    course_version_id,
+    assignment_member_id,
+    scope_revision_rule_id,
+    ordinality
+  FROM unnest($3::uuid[], $4::uuid[], $5::uuid[]) WITH ORDINALITY AS input(
+    course_version_id,
+    assignment_member_id,
+    scope_revision_rule_id,
+    ordinality
+  )
 )
 SELECT
   c.id AS course_id,
   v.id AS course_version_id,
   c.title AS title,
-  assigned_heads.deadline AS assignment_deadline,
-  assigned_heads.assigned_at AS assignment_assigned_at,
   video.item_id AS video_item_id,
   video.duration_ms AS video_duration_ms,
   progress.status AS video_status,
@@ -129,9 +137,9 @@ SELECT
       AND any_pass.status = 'graded'
       AND any_pass.passed IS TRUE
   ) AS any_passed
-FROM assigned_heads
+FROM access_input access
 JOIN elearning_course_versions v
-  ON v.org_id = $1 AND v.id = assigned_heads.course_version_id
+  ON v.org_id = $1 AND v.id = access.course_version_id
 JOIN elearning_courses c
   ON c.org_id = v.org_id AND c.id = v.course_id
 JOIN LATERAL (
@@ -188,10 +196,43 @@ LEFT JOIN LATERAL (
   ORDER BY att.attempt_no DESC, att.id DESC
   LIMIT 1
 ) attempt ON TRUE
-WHERE c.status IN ('active', 'archived')
+WHERE (
+  access.assignment_member_id IS NOT NULL
+  AND access.scope_revision_rule_id IS NULL
+  AND c.status IN ('active', 'archived')
   AND v.status IN ('published', 'retired')
-ORDER BY assigned_heads.assigned_at ASC, assigned_heads.course_version_id ASC
-LIMIT ${ELEARNING_LEARNER_COURSES_LIMIT}`
+  AND EXISTS (
+    SELECT 1
+    FROM elearning_assignment_members current_member
+    WHERE current_member.org_id = $1
+      AND current_member.id = access.assignment_member_id
+      AND current_member.user_id = $2
+      AND current_member.course_version_id = v.id
+      AND current_member.revoked_at IS NULL
+  )
+) OR (
+  access.assignment_member_id IS NULL
+  AND access.scope_revision_rule_id IS NOT NULL
+  AND c.status = 'active'
+  AND v.status = 'published'
+  AND c.active_version_id = v.id
+  AND EXISTS (
+    SELECT 1
+    FROM elearning_scopes current_scope
+    JOIN elearning_scope_revision_rules current_rule
+      ON current_rule.org_id = current_scope.org_id
+     AND current_rule.scope_revision_id = current_scope.active_revision_id
+    WHERE current_scope.org_id = $1
+      AND current_scope.id = c.scope_id
+      AND current_rule.id = access.scope_revision_rule_id
+      AND (
+        (current_rule.subject_type = 'all' AND current_rule.subject_ref IS NULL)
+        OR
+        (current_rule.subject_type = 'user' AND current_rule.subject_ref = $2)
+      )
+  )
+)
+ORDER BY access.ordinality ASC`
 
 function fail(code: ElearningLearnerCoursesErrorCode): never {
   throw new ElearningLearnerCoursesError(code)
@@ -434,18 +475,33 @@ function mapLatestAttempt(row: Record<string, unknown>): ElearningLearnerExamAtt
   }
 }
 
-function mapCourse(row: Record<string, unknown>): ElearningLearnerCourse {
+function mapCourse(
+  row: Record<string, unknown>,
+  candidate: ElearningCourseAccessCandidate,
+): ElearningLearnerCourse {
+  const courseId = requireUuid(row.course_id)
+  const courseVersionId = requireUuid(row.course_version_id)
+  if (courseId !== candidate.courseId || courseVersionId !== candidate.courseVersionId) {
+    fail('unavailable')
+  }
   const video = mapVideo(row)
   const latestAttempt = mapLatestAttempt(row)
   const anyPassed = requireBoolean(row.any_passed)
+  const assignment = candidate.basis.kind === 'assignment'
+    ? {
+        deadline: candidate.assignmentDeadline,
+        assignedAt: candidate.assignmentAssignedAt ?? fail('unavailable'),
+      }
+    : null
   return {
-    courseId: requireUuid(row.course_id),
-    courseVersionId: requireUuid(row.course_version_id),
+    courseId,
+    courseVersionId,
     title: requireTitle(row.title),
-    assignment: {
-      deadline: optionalIsoTimestamp(row.assignment_deadline),
-      assignedAt: requireIsoTimestamp(row.assignment_assigned_at),
+    access: {
+      kind: candidate.basis.kind,
+      required: candidate.basis.required,
     },
+    assignment,
     video,
     exam: {
       itemId: requireUuid(row.exam_item_id),
@@ -464,19 +520,39 @@ export async function listElearningLearnerCourses(
   const userId = requireActor(input.userId)
 
   try {
-    const result = await db.query(LIST_SQL, [orgId, userId])
+    const candidates = await listElearningCourseAccessCandidates(db, {
+      orgId,
+      userId,
+      limit: ELEARNING_LEARNER_COURSES_LIMIT + 1,
+    })
+    if (candidates.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
+    if (candidates.length === 0) return []
+
+    const versionIds = candidates.map((candidate) => candidate.courseVersionId)
+    const assignmentMemberIds = candidates.map((candidate) => candidate.basis.assignmentMemberId)
+    const scopeRevisionRuleIds = candidates.map((candidate) => candidate.basis.scopeRevisionRuleId)
+    const result = await db.query(DETAILS_SQL, [
+      orgId,
+      userId,
+      versionIds,
+      assignmentMemberIds,
+      scopeRevisionRuleIds,
+    ])
     if (!Array.isArray(result.rows)) fail('unavailable')
     if (result.rows.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
-    const courses: ElearningLearnerCourse[] = []
-    const seen = new Set<string>()
+    const details = new Map<string, ElearningLearnerCourse>()
+    const candidateByVersion = new Map(
+      candidates.map((candidate) => [candidate.courseVersionId, candidate] as const),
+    )
     for (const row of result.rows) {
       if (!row || typeof row !== 'object' || Array.isArray(row)) fail('unavailable')
-      const course = mapCourse(row)
-      if (seen.has(course.courseVersionId)) fail('unavailable')
-      seen.add(course.courseVersionId)
-      courses.push(course)
+      const versionId = requireUuid(row.course_version_id)
+      const candidate = candidateByVersion.get(versionId)
+      if (!candidate || details.has(versionId)) fail('unavailable')
+      details.set(versionId, mapCourse(row, candidate))
     }
-    return courses
+    if (details.size !== candidates.length) fail('unavailable')
+    return candidates.map((candidate) => details.get(candidate.courseVersionId) ?? fail('unavailable'))
   } catch (error) {
     if (error instanceof ElearningLearnerCoursesError) throw error
     fail('unavailable')

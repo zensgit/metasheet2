@@ -154,7 +154,11 @@ export interface ElearningLearnerCourse {
   courseId: string
   courseVersionId: string
   title: string
-  assignment: ElearningLearnerAssignment
+  access: {
+    kind: 'assignment' | 'visibility'
+    required: boolean
+  }
+  assignment: ElearningLearnerAssignment | null
   video: ElearningLearnerVideo
   exam: ElearningLearnerExam
   completed: boolean
@@ -564,6 +568,15 @@ export function isElearningV01Ready(payload: ElearningCapabilities): boolean {
   )
 }
 
+export function isElearningLearnerReady(payload: ElearningCapabilities): boolean {
+  return (
+    payload.enabled === true
+    && payload.capabilities.content === true
+    && payload.capabilities.assessment === true
+    && payload.capabilities.media === true
+  )
+}
+
 export async function getElearningCapabilities(): Promise<ElearningCapabilities> {
   const payload = await requestJson('/api/elearning/capabilities', 200, { method: 'GET' })
   return parseCapabilities(payload, 200)
@@ -574,6 +587,7 @@ function parseLearnerCourse(value: unknown, status: number): ElearningLearnerCou
     'courseId',
     'courseVersionId',
     'title',
+    'access',
     'assignment',
     'video',
     'exam',
@@ -581,20 +595,31 @@ function parseLearnerCourse(value: unknown, status: number): ElearningLearnerCou
   ])) {
     failShape(status)
   }
-  if (!isPlainObject(value.assignment) || !exactKeys(value.assignment, ['deadline', 'assignedAt'])) {
+  if (!isPlainObject(value.access) || !exactKeys(value.access, ['kind', 'required'])) {
     failShape(status)
   }
+  if (value.access.kind !== 'assignment' && value.access.kind !== 'visibility') failShape(status)
+  const required = requireBoolean(value.access.required, status)
+  if ((value.access.kind === 'assignment') !== required) failShape(status)
+  if (value.assignment !== null && (
+    !isPlainObject(value.assignment)
+    || !exactKeys(value.assignment, ['deadline', 'assignedAt'])
+  )) failShape(status)
+  if ((value.access.kind === 'assignment') !== (value.assignment !== null)) failShape(status)
   if (!isPlainObject(value.exam) || !exactKeys(value.exam, ['itemId', 'latestAttempt'])) failShape(status)
-  const deadline = value.assignment.deadline
-  if (deadline !== null && typeof deadline !== 'string') failShape(status)
+  const deadline = value.assignment?.deadline
+  if (deadline !== undefined && deadline !== null && typeof deadline !== 'string') failShape(status)
   return {
     courseId: requireUuid(value.courseId, status),
     courseVersionId: requireUuid(value.courseVersionId, status),
     title: requireNonEmptyString(value.title, status),
-    assignment: {
-      deadline,
-      assignedAt: requireNonEmptyString(value.assignment.assignedAt, status),
-    },
+    access: { kind: value.access.kind, required },
+    assignment: value.assignment === null
+      ? null
+      : {
+          deadline: deadline ?? null,
+          assignedAt: requireNonEmptyString(value.assignment.assignedAt, status),
+        },
     video: parseLearnerVideo(value.video, status),
     exam: {
       itemId: requireUuid(value.exam.itemId, status),

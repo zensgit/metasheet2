@@ -208,17 +208,71 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/courses/{courseId}/scope:
+    put:
+      operationId: setElearningCourseScope
+      summary: Append and activate a course visibility-scope revision
+      description: |
+        Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+        Actor and authoritative org come from JWT. This changes only who may
+        discover and self-study an active published course. It never creates,
+        revokes, or reclassifies an assignment. Current live rules are `all`
+        and same-org active `user`; an empty rule array means visible to nobody.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: courseId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningScopeUpdateRequest'
+      responses:
+        '200':
+          description: Immutable revision and normalized rule ids now active on the course scope.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningScopeUpdateResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Content surface flags off, course not found, or user subject not found
+          $ref: '#/components/responses/ElearningError'
+        '422':
+          description: unsupported_subject for reserved department, position, or role rules
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/me/courses:
     get:
       operationId: listMyElearningCourses
-      summary: List the current learner's assigned V0.1 courses
+      summary: List the current learner's assigned and visible courses
       description: |
         RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus
-        ASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.
+        ASSESSMENT). No JSON body. At most 100 course versions. Actor/org from JWT.
+        Assignment access wins when both bases match; visibility access is optional
+        self-study and returns assignment null.
       security: [ { bearerAuth: [] } ]
       responses:
         '200':
-          description: Assigned courses with video progress and latest exam attempt. No answer keys.
+          description: Accessible courses with access basis, video progress, and latest exam attempt. No answer keys.
           content:
             application/json:
               schema:

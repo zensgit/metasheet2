@@ -18,7 +18,7 @@ import {
   type ElearningMediaPlaybackClaims,
   type ElearningPlaybackByteRange,
   type ElearningPlaybackErrorCode,
-  type ElearningPlaybackQueryable,
+  type ElearningPlaybackDb,
 } from '../../src/services/elearning-media-playback'
 import {
   ELEARNING_MEDIA_RANGE_MAX_BYTES,
@@ -53,7 +53,6 @@ const FLAG_ON = {
 const FLAG_NAMES = [
   'ELEARNING_ENABLED',
   'ELEARNING_CONTENT_ENABLED',
-  'ELEARNING_ASSIGNMENT_ENABLED',
   'ELEARNING_MEDIA_ENABLED',
 ] as const
 
@@ -86,7 +85,11 @@ const CLAIMS: ElearningMediaPlaybackClaims = {
   exp: 1787659800,
 }
 
-const TOKEN = signElearningMediaPlaybackToken(CLAIMS, PLAYBACK_SECRET, JWT_SECRET)
+const TOKEN = signElearningMediaPlaybackToken(
+  CLAIMS,
+  PLAYBACK_SECRET,
+  JWT_SECRET,
+)
 
 const pinned = usePinnedServer()
 function serve(app: express.Express) {
@@ -94,11 +97,22 @@ function serve(app: express.Express) {
   return request(pinned.url())
 }
 
-function dummyDb(): ElearningPlaybackQueryable {
-  return { query: async () => ({ rows: [], rowCount: 0 }) }
+function dummyDb(): ElearningPlaybackDb {
+  const query: ElearningPlaybackDb['query'] = async () => ({
+    rows: [],
+    rowCount: 0,
+  })
+  return {
+    query,
+    transaction: async (handler) => handler({ query }),
+  }
 }
 
-function sliceStore(file: Buffer = FILE): ElearningMediaRangeReadableStore & { reads: Array<{ key: string; start: number; end: number }> } {
+function sliceStore(
+  file: Buffer = FILE,
+): ElearningMediaRangeReadableStore & {
+  reads: Array<{ key: string; start: number; end: number }>
+} {
   const reads: Array<{ key: string; start: number; end: number }> = []
   return {
     reads,
@@ -109,7 +123,9 @@ function sliceStore(file: Buffer = FILE): ElearningMediaRangeReadableStore & { r
   }
 }
 
-function playbackAuth(over: Partial<ElearningMediaPlaybackAuthorization> = {}): ElearningMediaPlaybackAuthorization {
+function playbackAuth(
+  over: Partial<ElearningMediaPlaybackAuthorization> = {},
+): ElearningMediaPlaybackAuthorization {
   return {
     storageKey: STORAGE_KEY,
     mimeType: 'video/mp4',
@@ -162,20 +178,22 @@ function binary(req: request.Test): request.Test {
   })
 }
 
-function makeApp(over: {
-  env?: NodeJS.ProcessEnv
-  db?: ElearningPlaybackQueryable
-  store?: ElearningMediaRangeReadableStore | null
-  getStore?: () => ElearningMediaRangeReadableStore | null
-  getStoreThrow?: unknown
-  now?: () => Date
-  verify?: typeof verifyElearningMediaPlaybackToken
-  authorize?: typeof import('../../src/services/elearning-media-playback').authorizeElearningMediaPlayback
-  parseRange?: typeof parseElearningMediaHttpByteRange
-  readSecret?: typeof import('../../src/services/elearning-media-playback').readElearningMediaPlaybackSigningSecret
-  watchEnabled?: typeof isElearningWatchSurfaceEnabled
-  order?: string[]
-} = {}) {
+function makeApp(
+  over: {
+    env?: NodeJS.ProcessEnv
+    db?: ElearningPlaybackDb
+    store?: ElearningMediaRangeReadableStore | null
+    getStore?: () => ElearningMediaRangeReadableStore | null
+    getStoreThrow?: unknown
+    now?: () => Date
+    verify?: typeof verifyElearningMediaPlaybackToken
+    authorize?: typeof import('../../src/services/elearning-media-playback').authorizeElearningMediaPlayback
+    parseRange?: typeof parseElearningMediaHttpByteRange
+    readSecret?: typeof import('../../src/services/elearning-media-playback').readElearningMediaPlaybackSigningSecret
+    watchEnabled?: typeof isElearningWatchSurfaceEnabled
+    order?: string[]
+  } = {},
+) {
   const order = over.order ?? []
   const store = over.store === undefined ? sliceStore() : over.store
   const getStore = over.getStore ?? (() => {
@@ -209,19 +227,21 @@ function makeApp(over: {
   return { app, router, store, getStore, order }
 }
 
-function stubbed(over: {
-  env?: NodeJS.ProcessEnv
-  range?: ElearningPlaybackByteRange
-  auth?: ElearningMediaPlaybackAuthorization
-  store?: ElearningMediaRangeReadableStore | null
-  getStore?: () => ElearningMediaRangeReadableStore | null
-  getStoreThrow?: unknown
-  authorizeError?: unknown
-  verifyError?: unknown
-  parseError?: unknown
-  parseRange?: typeof parseElearningMediaHttpByteRange
-  order?: string[]
-} = {}) {
+function stubbed(
+  over: {
+    env?: NodeJS.ProcessEnv
+    range?: ElearningPlaybackByteRange
+    auth?: ElearningMediaPlaybackAuthorization
+    store?: ElearningMediaRangeReadableStore | null
+    getStore?: () => ElearningMediaRangeReadableStore | null
+    getStoreThrow?: unknown
+    authorizeError?: unknown
+    verifyError?: unknown
+    parseError?: unknown
+    parseRange?: typeof parseElearningMediaHttpByteRange
+    order?: string[]
+  } = {},
+) {
   const order = over.order ?? []
   const store = over.store === undefined ? sliceStore() : over.store
   return makeApp({
@@ -258,37 +278,59 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     expect(isElearningWatchSurfaceEnabled({} as NodeJS.ProcessEnv)).toBe(false)
     for (const name of FLAG_NAMES) {
       for (const value of LOOKALIKES) {
-        const env = { ...FLAG_ON, [name]: value } as unknown as NodeJS.ProcessEnv
-        expect(createElearningMediaPlaybackRouter({
-          db: dummyDb(),
-          getStore: () => sliceStore(),
-          env,
-        })).toBeNull()
+        const env = {
+          ...FLAG_ON,
+          [name]: value,
+        } as unknown as NodeJS.ProcessEnv
+        expect(
+          createElearningMediaPlaybackRouter({
+            db: dummyDb(),
+            getStore: () => sliceStore(),
+            env,
+          }),
+        ).toBeNull()
       }
     }
-    expect(createElearningMediaPlaybackRouter({
-      db: dummyDb(),
-      getStore: () => sliceStore(),
-      env: {
-        ...FLAG_ON,
-        [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: undefined,
-      } as unknown as NodeJS.ProcessEnv,
-    })).toBeNull()
-    expect(createElearningMediaPlaybackRouter({
-      db: dummyDb(),
-      getStore: () => sliceStore(),
-      env: { ...FLAG_ON, [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: 'short' } as unknown as NodeJS.ProcessEnv,
-    })).toBeNull()
-    expect(createElearningMediaPlaybackRouter({
-      db: dummyDb(),
-      getStore: () => sliceStore(),
-      env: { ...FLAG_ON, [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: 'dev-secret-key' } as unknown as NodeJS.ProcessEnv,
-    })).toBeNull()
-    expect(createElearningMediaPlaybackRouter({
-      db: dummyDb(),
-      getStore: () => sliceStore(),
-      env: { ...FLAG_ON, [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: JWT_SECRET } as unknown as NodeJS.ProcessEnv,
-    })).toBeNull()
+    expect(
+      createElearningMediaPlaybackRouter({
+        db: dummyDb(),
+        getStore: () => sliceStore(),
+        env: {
+          ...FLAG_ON,
+          [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: undefined,
+        } as unknown as NodeJS.ProcessEnv,
+      }),
+    ).toBeNull()
+    expect(
+      createElearningMediaPlaybackRouter({
+        db: dummyDb(),
+        getStore: () => sliceStore(),
+        env: {
+          ...FLAG_ON,
+          [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: 'short',
+        } as unknown as NodeJS.ProcessEnv,
+      }),
+    ).toBeNull()
+    expect(
+      createElearningMediaPlaybackRouter({
+        db: dummyDb(),
+        getStore: () => sliceStore(),
+        env: {
+          ...FLAG_ON,
+          [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: 'dev-secret-key',
+        } as unknown as NodeJS.ProcessEnv,
+      }),
+    ).toBeNull()
+    expect(
+      createElearningMediaPlaybackRouter({
+        db: dummyDb(),
+        getStore: () => sliceStore(),
+        env: {
+          ...FLAG_ON,
+          [ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]: JWT_SECRET,
+        } as unknown as NodeJS.ProcessEnv,
+      }),
+    ).toBeNull()
     const router = createElearningMediaPlaybackRouter({
       db: dummyDb(),
       getStore: () => sliceStore(),
@@ -302,7 +344,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
       authorize: async () => playbackAuth(),
     })
     expect(router).not.toBeNull()
-    const routes = (router as express.Router).stack.filter((layer) => layer.route)
+    const routes = (router as express.Router).stack.filter(
+      (layer) => layer.route,
+    )
     expect(routes).toHaveLength(1)
     expect(routes[0]?.route?.path).toBe(PATH)
     expect(routes[0]?.route?.methods).toEqual({ get: true })
@@ -312,26 +356,63 @@ describe('elearning media playback routes (token-auth range GET)', () => {
   })
 
   test('absent / start-end / open / suffix Range return exact bytes and headers', async () => {
-    const cases: Array<{ range?: string; status: 200 | 206; start: number; end: number; contentRange: string | null }> = [
+    const cases: Array<{
+      range?: string
+      status: 200 | 206
+      start: number
+      end: number
+      contentRange: string | null
+    }> = [
       { status: 200, start: 0, end: 9, contentRange: null },
-      { range: 'bytes=2-5', status: 206, start: 2, end: 5, contentRange: 'bytes 2-5/10' },
-      { range: 'bytes=8-', status: 206, start: 8, end: 9, contentRange: 'bytes 8-9/10' },
-      { range: 'bytes=-4', status: 206, start: 6, end: 9, contentRange: 'bytes 6-9/10' },
+      {
+        range: 'bytes=2-5',
+        status: 206,
+        start: 2,
+        end: 5,
+        contentRange: 'bytes 2-5/10',
+      },
+      {
+        range: 'bytes=8-',
+        status: 206,
+        start: 8,
+        end: 9,
+        contentRange: 'bytes 8-9/10',
+      },
+      {
+        range: 'bytes=-4',
+        status: 206,
+        start: 6,
+        end: 9,
+        contentRange: 'bytes 6-9/10',
+      },
     ]
     for (const row of cases) {
       const app = stubbed()
       const store = app.store as ReturnType<typeof sliceStore>
       store.reads.length = 0
-      let req = binary(serve(app.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`))
+      let req = binary(
+        serve(app.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`),
+      )
       if (row.range) req = req.set('Range', row.range)
       const res = await req
       const expected = FILE.subarray(row.start, row.end + 1)
       expectPlaybackHeaders(res, row.status, expected.length, row.contentRange)
       expect(Buffer.from(res.body)).toEqual(expected)
-      expect(Buffer.from(res.body).length).toBe(Number(res.headers['content-length']))
-      expect(store.reads).toEqual([{ key: STORAGE_KEY, start: row.start, end: row.end }])
-      expect(app.order.filter((step) => step === 'verify' || step === 'authorize' || step === 'parse' || step === 'getStore'))
-        .toEqual(['verify', 'authorize', 'parse', 'getStore'])
+      expect(Buffer.from(res.body).length).toBe(
+        Number(res.headers['content-length']),
+      )
+      expect(store.reads).toEqual([
+        { key: STORAGE_KEY, start: row.start, end: row.end },
+      ])
+      expect(
+        app.order.filter(
+          (step) =>
+            step === 'verify' ||
+            step === 'authorize' ||
+            step === 'parse' ||
+            step === 'getStore',
+        ),
+      ).toEqual(['verify', 'authorize', 'parse', 'getStore'])
     }
   })
 
@@ -348,14 +429,18 @@ describe('elearning media playback routes (token-auth range GET)', () => {
         },
       },
     })
-    const capRes = await serve(capped.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const capRes = await serve(capped.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(capRes.status).toBe(500)
     expect(capRes.body).toEqual({ error: 'internal_error' })
-    expect(storeReads).toEqual([{
-      key: STORAGE_KEY,
-      start: 0,
-      end: ELEARNING_MEDIA_RANGE_MAX_BYTES - 1,
-    }])
+    expect(storeReads).toEqual([
+      {
+        key: STORAGE_KEY,
+        start: 0,
+        end: ELEARNING_MEDIA_RANGE_MAX_BYTES - 1,
+      },
+    ])
 
     let oversizeGet = 0
     const oversize = stubbed({
@@ -376,7 +461,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
         },
       },
     })
-    const overRes = await serve(oversize.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const overRes = await serve(oversize.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(overRes.status).toBe(500)
     expect(overRes.body).toEqual({ error: 'internal_error' })
     assertValuesFree(overRes.body)
@@ -396,7 +483,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     expect(empty.body).toEqual({ error: 'invalid_input' })
     assertValuesFree(empty.body, TOKEN)
 
-    const multi = await serve(app.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}&token=other`)
+    const multi = await serve(app.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}&token=other`,
+    )
     expect(multi.status).toBe(400)
     expect(multi.body).toEqual({ error: 'invalid_input' })
     assertValuesFree(multi.body, TOKEN)
@@ -413,7 +502,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
 
     const [payloadB64] = TOKEN.split('.')
     const badSig = `${payloadB64}.${'A'.repeat(43)}`
-    const bad = await serve(app.app).get(`${PATH}?token=${encodeURIComponent(badSig)}`)
+    const bad = await serve(app.app).get(
+      `${PATH}?token=${encodeURIComponent(badSig)}`,
+    )
     expect(bad.status).toBe(401)
     expect(bad.body).toEqual({ error: 'invalid_token' })
     assertValuesFree(bad.body, badSig)
@@ -422,7 +513,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
       now: () => new Date(NOW.getTime() + 601_000),
       authorize: async () => playbackAuth(),
     })
-    const expiredRes = await serve(expired.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const expiredRes = await serve(expired.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(expiredRes.status).toBe(401)
     expect(expiredRes.body).toEqual({ error: 'token_expired' })
     assertValuesFree(expiredRes.body, TOKEN)
@@ -452,19 +545,27 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     for (const [code, status] of AUTH_ERRORS) {
       const app = stubbed({ authorizeError: new ElearningPlaybackError(code) })
       const res = await serve(app.app)
-        .get(`${PATH}?token=${encodeURIComponent(TOKEN)}&orgId=evil-org&userId=evil-user`)
+        .get(
+          `${PATH}?token=${encodeURIComponent(TOKEN)}&orgId=evil-org&userId=evil-user`,
+        )
         .set('Range', RANGE_ECHO)
       expect(res.status).toBe(status)
       expect(res.body).toEqual({ error: code })
       assertValuesFree(res.body, RANGE_ECHO)
-      expect(app.order.filter((step) => step === 'verify' || step === 'authorize' || step === 'getStore'))
-        .toEqual(['verify', 'authorize'])
+      expect(
+        app.order.filter(
+          (step) =>
+            step === 'verify' || step === 'authorize' || step === 'getStore',
+        ),
+      ).toEqual(['verify', 'authorize'])
     }
   })
 
   test('missing store, store throw, and byte-length mismatch are values-free 5xx and send no extra bytes', async () => {
     const missing = stubbed({ store: null })
-    const missingRes = await serve(missing.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const missingRes = await serve(missing.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(missingRes.status).toBe(503)
     expect(missingRes.body).toEqual({ error: 'unavailable' })
     assertValuesFree(missingRes.body)
@@ -472,11 +573,15 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     const boom = stubbed({
       store: {
         async getRange() {
-          throw new Error(`store fail ${STORAGE_KEY} ${PLAYBACK_SECRET} ${RANGE_ECHO}`)
+          throw new Error(
+            `store fail ${STORAGE_KEY} ${PLAYBACK_SECRET} ${RANGE_ECHO}`,
+          )
         },
       },
     })
-    const boomRes = await serve(boom.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const boomRes = await serve(boom.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(boomRes.status).toBe(500)
     expect(boomRes.body).toEqual({ error: 'internal_error' })
     assertValuesFree(boomRes.body, RANGE_ECHO)
@@ -489,9 +594,13 @@ describe('elearning media playback routes (token-auth range GET)', () => {
         },
       },
     })
-    const shortRes = await binary(serve(short.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`))
+    const shortRes = await binary(
+      serve(short.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`),
+    )
     expect(shortRes.status).toBe(500)
-    expect(JSON.parse(Buffer.from(shortRes.body).toString('utf8'))).toEqual({ error: 'internal_error' })
+    expect(JSON.parse(Buffer.from(shortRes.body).toString('utf8'))).toEqual({
+      error: 'internal_error',
+    })
     expect(Buffer.from(shortRes.body).length).not.toBe(SIZE)
     assertValuesFree(JSON.parse(Buffer.from(shortRes.body).toString('utf8')))
 
@@ -502,7 +611,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
         },
       },
     })
-    const longRes = await binary(serve(long.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`))
+    const longRes = await binary(
+      serve(long.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`),
+    )
     expect(longRes.status).toBe(500)
     const longBody = JSON.parse(Buffer.from(longRes.body).toString('utf8'))
     expect(longBody).toEqual({ error: 'internal_error' })
@@ -514,7 +625,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     const env = { ...FLAG_ON } as unknown as NodeJS.ProcessEnv
     const flagged = stubbed({ env })
     env.ELEARNING_MEDIA_ENABLED = 'false'
-    const off = await serve(flagged.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const off = await serve(flagged.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(off.status).toBe(404)
     expect(off.body).toEqual({ error: 'not_found' })
     expect(flagged.order).toEqual([])
@@ -522,7 +635,9 @@ describe('elearning media playback routes (token-auth range GET)', () => {
     const secretEnv = { ...FLAG_ON } as unknown as NodeJS.ProcessEnv
     const secreting = stubbed({ env: secretEnv })
     delete secretEnv[ELEARNING_MEDIA_PLAYBACK_SECRET_ENV]
-    const unavailable = await serve(secreting.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}`)
+    const unavailable = await serve(secreting.app).get(
+      `${PATH}?token=${encodeURIComponent(TOKEN)}`,
+    )
     expect(unavailable.status).toBe(503)
     expect(unavailable.body).toEqual({ error: 'unavailable' })
     assertValuesFree(unavailable.body, TOKEN)
@@ -558,13 +673,22 @@ describe('elearning media playback routes (token-auth range GET)', () => {
       },
     })
     const res = await binary(
-      serve(clocked.app).get(`${PATH}?token=${encodeURIComponent(TOKEN)}&orgId=evil&userId=evil`),
+      serve(clocked.app).get(
+        `${PATH}?token=${encodeURIComponent(TOKEN)}&orgId=evil&userId=evil`,
+      ),
     )
     expectPlaybackHeaders(res, 200, SIZE, null)
     expect(Buffer.from(res.body)).toEqual(FILE)
     expect(seen).toEqual([NOW])
     expect(store.reads).toEqual([{ key: STORAGE_KEY, start: 0, end: SIZE - 1 }])
-    expect(order.filter((step) => step === 'verify' || step === 'authorize' || step === 'parse' || step === 'getStore'))
-      .toEqual(['verify', 'authorize', 'parse', 'getStore'])
+    expect(
+      order.filter(
+        (step) =>
+          step === 'verify' ||
+          step === 'authorize' ||
+          step === 'parse' ||
+          step === 'getStore',
+      ),
+    ).toEqual(['verify', 'authorize', 'parse', 'getStore'])
   })
 })

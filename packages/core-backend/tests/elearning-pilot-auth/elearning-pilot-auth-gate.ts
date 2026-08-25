@@ -11,9 +11,13 @@ import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import express from 'express'
 import jwt from 'jsonwebtoken'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import request from 'supertest'
 
+import {
+  SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
+  SCOPE_RULES_DENY_MUTATION_TRIGGER,
+} from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
 import { authenticate } from '../../src/middleware/auth'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
@@ -95,14 +99,20 @@ const STAMP = `${Date.now().toString(36)}-${randomUUID()}`
 const NS = `el-auth-${STAMP}`
 const ROLE_ID = `${NS}-reader`
 const WRITE_ROLE_ID = `${NS}-writer`
+const ADMIN_ROLE_ID = `${NS}-admin`
 const ORG_A = `${NS}-org-a`
 const ORG_B = `${NS}-org-b`
 const FORGED_ORG = `${NS}-forged-org`
+const SCOPE_COURSE_ID = randomUUID()
 
 const LEARNER_COURSES: ElearningLearnerCourse[] = [{
   courseId: '11111111-1111-4111-8111-111111111111',
   courseVersionId: '22222222-2222-4222-8222-222222222222',
   title: 'Pilot course',
+  access: {
+    kind: 'assignment',
+    required: true,
+  },
   assignment: {
     deadline: null,
     assignedAt: '2026-01-02T03:04:05.000Z',
@@ -122,10 +132,52 @@ const LEARNER_COURSES: ElearningLearnerCourse[] = [{
   completed: false,
 }]
 
-const dummyDb = {
-  query: async () => ({ rows: [], rowCount: 0 }),
-  transaction: async (handler: (tx: { query: typeof dummyDb.query }) => Promise<unknown>) =>
-    handler({ query: dummyDb.query }),
+async function queryWithClient(
+  client: PoolClient,
+  sql: string,
+  params?: unknown[],
+) {
+  const result = await client.query(sql, params as never)
+  return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+}
+
+const database = {
+  async query(sql: string, params?: unknown[]) {
+    const result = await pool.query(sql, params as never)
+    return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+  },
+  async transaction<T>(handler: (tx: { query: typeof database.query }) => Promise<T>): Promise<T> {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const tx = {
+        query: (sql: string, params?: unknown[]) => queryWithClient(client, sql, params),
+      }
+      const result = await handler(tx)
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  },
+}
+
+async function scopeRevisionCount(): Promise<number> {
+  const result = await pool.query(
+    `SELECT count(*)::integer AS count
+       FROM elearning_scope_revisions r
+      WHERE r.org_id = $1
+        AND r.scope_id = (
+          SELECT c.scope_id
+            FROM elearning_courses c
+           WHERE c.org_id = $1 AND c.id = $2
+        )`,
+    [ORG_A, SCOPE_COURSE_ID],
+  )
+  return Number(result.rows[0]?.count ?? 0)
 }
 
 function signToken(claims: Record<string, unknown>): string {
@@ -142,10 +194,11 @@ function valuesFree(body: unknown): void {
 describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', () => {
   const readerId = randomUUID()
   const writerId = randomUUID()
+  const adminId = randomUUID()
   const legacyId = randomUUID()
   const outsiderId = randomUUID()
   const forgedId = randomUUID()
-  const createdUserIds = [readerId, writerId, legacyId, outsiderId, forgedId]
+  const createdUserIds = [readerId, writerId, adminId, legacyId, outsiderId, forgedId]
   const pinned = usePinnedServer()
   const learnerCalls: Array<{ orgId: string; userId: string }> = []
 
@@ -154,18 +207,24 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       `INSERT INTO permissions (code, name, description)
        VALUES
          ('elearning:read', 'E-learning Read', 'Read published learning content and own attempts'),
-         ('elearning:write', 'E-learning Write', 'Create learning content')
+         ('elearning:write', 'E-learning Write', 'Create learning content'),
+         ('elearning:admin', 'E-learning Admin', 'Administer learning content and scope')
        ON CONFLICT (code) DO NOTHING`,
     )
     await pool.query(
-      `INSERT INTO roles (id, name) VALUES ($1, $2), ($3, $4) ON CONFLICT (id) DO NOTHING`,
-      [ROLE_ID, ROLE_ID, WRITE_ROLE_ID, WRITE_ROLE_ID],
+      `INSERT INTO roles (id, name)
+       VALUES ($1, $2), ($3, $4), ($5, $6)
+       ON CONFLICT (id) DO NOTHING`,
+      [ROLE_ID, ROLE_ID, WRITE_ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID, ADMIN_ROLE_ID],
     )
     await pool.query(
       `INSERT INTO role_permissions (role_id, permission_code)
-       VALUES ($1, 'elearning:read'), ($2, 'elearning:write')
+       VALUES
+         ($1, 'elearning:read'),
+         ($2, 'elearning:write'),
+         ($3, 'elearning:admin')
        ON CONFLICT DO NOTHING`,
-      [ROLE_ID, WRITE_ROLE_ID],
+      [ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID],
     )
 
     async function insertUser(id: string, tag: string): Promise<void> {
@@ -186,14 +245,21 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
 
     await insertUser(readerId, 'reader')
     await insertUser(writerId, 'writer')
+    await insertUser(adminId, 'admin')
     await insertUser(legacyId, 'legacy')
     await insertUser(outsiderId, 'outsider')
     await insertUser(forgedId, 'forged')
 
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active)
-       VALUES ($1, $2, TRUE), ($3, $2, TRUE), ($4, $2, TRUE), ($4, $5, TRUE), ($6, $2, TRUE)`,
-      [readerId, ORG_A, writerId, legacyId, ORG_B, forgedId],
+       VALUES
+         ($1, $2, TRUE),
+         ($3, $2, TRUE),
+         ($4, $2, TRUE),
+         ($4, $5, TRUE),
+         ($6, $2, TRUE),
+         ($7, $2, TRUE)`,
+      [readerId, ORG_A, writerId, adminId, ORG_B, legacyId, forgedId],
     )
 
     for (const userId of [readerId, legacyId, outsiderId]) {
@@ -219,6 +285,22 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
        ON CONFLICT DO NOTHING`,
       [writerId],
     )
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      [adminId, ADMIN_ROLE_ID],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       VALUES ($1, 'elearning:admin')
+       ON CONFLICT DO NOTHING`,
+      [adminId],
+    )
+
+    await pool.query(
+      `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+       VALUES ($1, $2, 'Auth gate scope course', 'active', $3)`,
+      [SCOPE_COURSE_ID, ORG_A, adminId],
+    )
 
     // Namespace admission for every principal, including forgedId (roles/permissions
     // stay empty). A 403 then cannot be a later namespace denial.
@@ -234,7 +316,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     }
 
     const runtime = createElearningPilotRuntime({
-      db: dummyDb as never,
+      db: database as never,
       env: FLAG_EXAM_ON,
       listElearningLearnerCourses: async (_db, input) => {
         learnerCalls.push({ orgId: input.orgId, userId: input.userId })
@@ -269,6 +351,53 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   afterAll(async () => {
     try {
       await pool.query(
+        `DELETE FROM elearning_courses WHERE org_id = $1 AND id = $2`,
+        [ORG_A, SCOPE_COURSE_ID],
+      )
+      await pool.query(
+        `UPDATE elearning_scopes
+            SET active_revision_id = NULL, latest_revision_id = NULL
+          WHERE org_id = $1 AND created_by = $2`,
+        [ORG_A, adminId],
+      )
+      await pool.query(
+        `ALTER TABLE elearning_scope_revision_rules
+         DISABLE TRIGGER ${SCOPE_RULES_DENY_MUTATION_TRIGGER}`,
+      )
+      await pool.query(
+        `ALTER TABLE elearning_scope_revisions
+         DISABLE TRIGGER ${SCOPE_REVISIONS_DENY_MUTATION_TRIGGER}`,
+      )
+      try {
+        await pool.query(
+          `DELETE FROM elearning_scope_revision_rules
+            WHERE org_id = $1
+              AND scope_revision_id IN (
+                SELECT id FROM elearning_scope_revisions
+                 WHERE org_id = $1 AND actor_id = $2
+              )`,
+          [ORG_A, adminId],
+        )
+        await pool.query(
+          `DELETE FROM elearning_scope_revisions
+            WHERE org_id = $1 AND actor_id = $2`,
+          [ORG_A, adminId],
+        )
+      } finally {
+        await pool.query(
+          `ALTER TABLE elearning_scope_revisions
+           ENABLE TRIGGER ${SCOPE_REVISIONS_DENY_MUTATION_TRIGGER}`,
+        )
+        await pool.query(
+          `ALTER TABLE elearning_scope_revision_rules
+           ENABLE TRIGGER ${SCOPE_RULES_DENY_MUTATION_TRIGGER}`,
+        )
+      }
+      await pool.query(
+        `DELETE FROM elearning_scopes WHERE org_id = $1 AND created_by = $2`,
+        [ORG_A, adminId],
+      )
+      await pool.query(
         `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
         [createdUserIds],
       )
@@ -290,9 +419,12 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       )
       await pool.query(
         `DELETE FROM role_permissions WHERE role_id = ANY($1::text[])`,
-        [[ROLE_ID, WRITE_ROLE_ID]],
+        [[ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID]],
       )
-      await pool.query(`DELETE FROM roles WHERE id = ANY($1::text[])`, [[ROLE_ID, WRITE_ROLE_ID]])
+      await pool.query(
+        `DELETE FROM roles WHERE id = ANY($1::text[])`,
+        [[ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID]],
+      )
 
       const residue = await pool.query(
         `SELECT 'user_namespace_admissions' AS rel FROM user_namespace_admissions WHERE user_id = ANY($1::text[])
@@ -308,7 +440,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
          SELECT 'role_permissions' FROM role_permissions WHERE role_id = ANY($2::text[])
          UNION ALL
          SELECT 'roles' FROM roles WHERE id = ANY($2::text[])`,
-        [createdUserIds, [ROLE_ID, WRITE_ROLE_ID]],
+        [createdUserIds, [ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID]],
       )
       expect(residue.rows).toEqual([])
     } finally {
@@ -428,6 +560,87 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.status).toBe(403)
     expect(res.body).toEqual({ error: 'Insufficient permissions' })
     expect(learnerCalls).toHaveLength(0)
+    valuesFree(res.body)
+  })
+
+  it('tenant-bound elearning:admin appends one real scope revision', async () => {
+    const before = await scopeRevisionCount()
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/scope`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reason: 'auth gate visibility', rules: [] })
+    expect(res.status).toBe(200)
+    expect(Object.keys(res.body).sort()).toEqual([
+      'courseId',
+      'revision',
+      'revisionId',
+      'ruleIds',
+      'scopeId',
+    ])
+    expect(res.body.courseId).toBe(SCOPE_COURSE_ID)
+    expect(res.body.revision).toBe(1)
+    expect(res.body.ruleIds).toEqual([])
+    expect(await scopeRevisionCount()).toBe(before + 1)
+    valuesFree(res.body)
+  })
+
+  it('elearning:write without admin cannot append a scope revision', async () => {
+    const before = await scopeRevisionCount()
+    const token = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/scope`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reason: 'must not write', rules: [] })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'Insufficient permissions' })
+    expect(await scopeRevisionCount()).toBe(before)
+    valuesFree(res.body)
+  })
+
+  it('same admin in another org cannot append to the first org course', async () => {
+    const before = await scopeRevisionCount()
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_B,
+    })
+    const res = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/scope`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ reason: 'cross-org must fail', rules: [] })
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    expect(await scopeRevisionCount()).toBe(before)
+    valuesFree(res.body)
+  })
+
+  it('tenant-less admin token plus forged x-tenant-id cannot append a scope revision', async () => {
+    const before = await scopeRevisionCount()
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+    })
+    const res = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/scope`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', ORG_A)
+      .send({ reason: 'forged tenant must fail', rules: [] })
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(await scopeRevisionCount()).toBe(before)
     valuesFree(res.body)
   })
 

@@ -20,6 +20,9 @@ export type ElearningLabelKey =
   | 'learner.subtitle'
   | 'learner.loading'
   | 'learner.empty'
+  | 'learner.access'
+  | 'learner.required'
+  | 'learner.selfStudy'
   | 'learner.deadline'
   | 'learner.deadlineNone'
   | 'learner.videoProgress'
@@ -86,11 +89,14 @@ export type ElearningLabelKey =
 const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = {
   'learner.title': { en: 'Learning Center', zh: '学习中心' },
   'learner.subtitle': {
-    en: 'Watch assigned courses. Exams open only after the server confirms the video is complete.',
-    zh: '观看已指派课程。考试仅在服务端确认视频完成后开放。',
+    en: 'Learn required or visible self-study courses. Exams open only after the server confirms the video is complete.',
+    zh: '学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。',
   },
   'learner.loading': { en: 'Loading courses...', zh: '正在加载课程…' },
-  'learner.empty': { en: 'No assigned courses.', zh: '暂无已指派课程。' },
+  'learner.empty': { en: 'No available courses.', zh: '暂无可学习课程。' },
+  'learner.access': { en: 'Learning type', zh: '学习类型' },
+  'learner.required': { en: 'Required', zh: '必修' },
+  'learner.selfStudy': { en: 'Self-study', zh: '自学' },
   'learner.deadline': { en: 'Deadline', zh: '截止日期' },
   'learner.deadlineNone': { en: 'None', zh: '无' },
   'learner.videoProgress': { en: 'Video progress', zh: '视频进度' },

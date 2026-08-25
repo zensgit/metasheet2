@@ -1090,7 +1090,7 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
     expect(await countOrg('elearning_completion_evidence', org)).toBe(0)
   })
 
-  it('does not reuse a revoked-member session; rebinds a fresh chain and lets heartbeat succeed', async () => {
+  it('rebinds a revoked assignment basis in place without resetting the event chain', async () => {
     const org = orgId('reassign')
     seededOrgIds.push(org)
     const seed = await seedPublishedAssignment({ org })
@@ -1122,13 +1122,13 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
       userId: seed.userId,
       itemId: seed.itemId,
     })
-    expect(restarted.sessionId).not.toBe(started.sessionId)
+    expect(restarted.sessionId).toBe(started.sessionId)
     expect(restarted).toEqual(expect.objectContaining({
       status: 'in_progress',
-      lastSequence: 0,
-      lastClientPositionMs: 0,
-      effectiveMs: 0,
-      maxPositionMs: 0,
+      lastSequence: 1,
+      lastClientPositionMs: 4_000,
+      effectiveMs: credited.effectiveMs,
+      maxPositionMs: credited.maxPositionMs,
       creditedMs: 0,
       duplicate: false,
     }))
@@ -1147,23 +1147,17 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
          FROM elearning_learning_sessions WHERE org_id = $1 ORDER BY started_at`,
       [org],
     )
-    expect(sessions.rows).toHaveLength(2)
+    expect(sessions.rows).toHaveLength(1)
     expect(sessions.rows[0]).toEqual(expect.objectContaining({
       id: started.sessionId,
-      status: 'closed',
-      assignment_member_id: seed.memberId,
-    }))
-    expect(sessions.rows[0].closed_at).not.toBeNull()
-    expect(Number(sessions.rows[0].effective_ms)).toBe(credited.effectiveMs)
-    expect(sessions.rows[1]).toEqual(expect.objectContaining({
-      id: restarted.sessionId,
       status: 'active',
       assignment_member_id: newMemberId,
-      last_sequence: 0,
+      last_sequence: 1,
       closed_at: null,
     }))
-    expect(Number(sessions.rows[1].effective_ms)).toBe(0)
-    expect(Number(sessions.rows[1].max_position_ms)).toBe(0)
+    expect(sessions.rows[0].closed_at).toBeNull()
+    expect(Number(sessions.rows[0].effective_ms)).toBe(credited.effectiveMs)
+    expect(Number(sessions.rows[0].max_position_ms)).toBe(credited.maxPositionMs)
 
     const progress = await pool.query(
       `SELECT assignment_member_id, status, effective_ms, max_position_ms, completed_at
@@ -1176,8 +1170,8 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
       status: 'in_progress',
       completed_at: null,
     }))
-    expect(Number(progress.rows[0].effective_ms)).toBe(0)
-    expect(Number(progress.rows[0].max_position_ms)).toBe(0)
+    expect(Number(progress.rows[0].effective_ms)).toBe(credited.effectiveMs)
+    expect(Number(progress.rows[0].max_position_ms)).toBe(credited.maxPositionMs)
 
     const events = await pool.query<{ session_id: string; sequence: number; kind: string }>(
       `SELECT session_id, sequence, kind FROM elearning_progress_events WHERE org_id = $1 ORDER BY received_at, sequence`,
@@ -1186,7 +1180,6 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
     expect(events.rows).toEqual([
       { session_id: started.sessionId, sequence: 0, kind: 'start' },
       { session_id: started.sessionId, sequence: 1, kind: 'heartbeat' },
-      { session_id: restarted.sessionId, sequence: 0, kind: 'start' },
     ])
     expect(await countOrg('elearning_completion_evidence', org)).toBe(0)
 
@@ -1200,14 +1193,14 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
       sessionId: restarted.sessionId!,
       orgId: org,
       userId: seed.userId,
-      sequence: 1,
-      positionMs: 3_000,
+      sequence: 2,
+      positionMs: 8_000,
       playing: true,
     })
     expect(beat.duplicate).toBe(false)
     expect(beat.status).toBe('in_progress')
     expect(beat.creditedMs).toBeGreaterThan(0)
-    expect(beat.effectiveMs).toBe(beat.creditedMs)
+    expect(beat.effectiveMs).toBe(credited.effectiveMs + beat.creditedMs)
   })
 
   it('reuses an unrevoked active session when another valid member exists', async () => {
@@ -1279,7 +1272,7 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
       status: 'completed',
       effectiveMs: done.effectiveMs,
     }))
-    expect(seen.some((sql) => sql.includes('elearning-watch:load-member'))).toBe(true)
+    expect(seen.some((sql) => sql.includes('elearning-access:lock-assignment'))).toBe(true)
     expect(seen.some((sql) => sql.includes('elearning-watch:insert-session'))).toBe(false)
     expect(seen.some((sql) => sql.includes('elearning-watch:rebind-progress'))).toBe(false)
     const progress = await pool.query(
@@ -1359,7 +1352,7 @@ describe('elearning V0.1 watch-progress service gate (real DB)', () => {
       assertValuesFree(error, org, seed.userId)
     }
 
-    expect(seen.some((sql) => sql.includes('elearning-watch:load-member'))).toBe(true)
+    expect(seen.some((sql) => sql.includes('elearning-access:lock-assignment'))).toBe(true)
     expect(seen.some((sql) => sql.includes('elearning-watch:insert-session'))).toBe(false)
     expect(seen.some((sql) => sql.includes('elearning-watch:insert-event'))).toBe(false)
     expect(seen.some((sql) => sql.includes('elearning-watch:insert-evidence'))).toBe(false)

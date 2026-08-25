@@ -1,9 +1,14 @@
 /**
- * Transactional V0.1 video watch engine (assignment-only named pilot).
+ * Transactional video watch engine.
  * Client events are start|heartbeat only. Completion, credit, and evidence
  * are server-derived. Returned values and errors are values-free.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import {
+  ElearningCourseAccessError,
+  resolveElearningCourseAccess,
+  type ElearningCourseAccessBasis,
+} from './elearning-course-access.js'
 
 export const ELEARNING_WATCH_POLICY_VERSION = 'video-v1-90pct' as const
 export const ELEARNING_WATCH_THRESHOLD_BPS = 9000 as const
@@ -200,6 +205,28 @@ function asText(value: unknown): string | null {
   return value
 }
 
+async function resolveWatchAccess(
+  tx: ElearningWatchQueryable,
+  orgId: string,
+  userId: string,
+  versionId: string,
+): Promise<ElearningCourseAccessBasis> {
+  try {
+    return (await resolveElearningCourseAccess(tx, {
+      orgId,
+      userId,
+      courseVersionId: versionId,
+    })).basis
+  } catch (error) {
+    if (!(error instanceof ElearningCourseAccessError)) throw error
+    if (error.code === 'withdrawn') fail('course_withdrawn')
+    if (error.code === 'denied') fail('assignment_unavailable')
+    if (error.code === 'unsupported_version') fail('unsupported_item')
+    if (error.code === 'not_found') fail('not_found')
+    fail('unavailable')
+  }
+}
+
 async function advisoryLock(
   tx: ElearningWatchQueryable,
   orgId: string,
@@ -293,30 +320,6 @@ async function loadWatchableItem(
   return { itemId: loadedId, versionId, mediaId, durationMs }
 }
 
-async function lockUnrevokedMember(
-  tx: ElearningWatchQueryable,
-  orgId: string,
-  userId: string,
-  versionId: string,
-): Promise<string> {
-  const result = await tx.query(
-    `/* elearning-watch:load-member */
-     SELECT m.id
-       FROM elearning_assignment_members m
-      WHERE m.org_id = $1
-        AND m.user_id = $2
-        AND m.course_version_id = $3
-        AND m.revoked_at IS NULL
-      ORDER BY m.id ASC
-      LIMIT 1
-      FOR UPDATE OF m`,
-    [orgId, userId, versionId],
-  )
-  const memberId = asText(result.rows[0]?.id)
-  if (!memberId) fail('assignment_unavailable')
-  return memberId
-}
-
 interface ProgressRow {
   id: string
   status: 'in_progress' | 'completed'
@@ -355,7 +358,8 @@ async function lockProgress(
 
 interface SessionRow {
   id: string
-  memberId: string
+  assignmentMemberId: string | null
+  scopeRevisionRuleId: string | null
   versionId: string
   itemId: string
   status: string
@@ -364,7 +368,6 @@ interface SessionRow {
   effectiveMs: number
   maxPositionMs: number
   rollingEventDigest: string
-  memberRevoked: boolean
   elapsedMs: number
 }
 
@@ -379,6 +382,7 @@ async function lockActiveSession(
      SELECT
        s.id,
        s.assignment_member_id,
+       s.scope_revision_rule_id,
        s.course_version_id,
        s.course_version_item_id,
        s.status,
@@ -386,16 +390,13 @@ async function lockActiveSession(
        s.last_client_position_ms,
        s.effective_ms,
        s.max_position_ms,
-       s.rolling_event_digest,
-       mem.revoked_at
+       s.rolling_event_digest
        FROM elearning_learning_sessions s
-       JOIN elearning_assignment_members mem
-         ON mem.org_id = s.org_id AND mem.id = s.assignment_member_id
       WHERE s.org_id = $1
         AND s.user_id = $2
         AND s.course_version_item_id = $3
         AND s.status = 'active'
-      FOR UPDATE OF s, mem`,
+      FOR UPDATE OF s`,
     [orgId, userId, itemId],
   )
   const row = result.rows[0]
@@ -405,15 +406,26 @@ async function lockActiveSession(
 
 function parseSessionRow(row: Record<string, unknown>, elapsedMs: number): SessionRow {
   const id = asText(row.id)
-  const memberId = asText(row.assignment_member_id)
+  const assignmentMemberId = asText(row.assignment_member_id)
+  const scopeRevisionRuleId = asText(row.scope_revision_rule_id)
   const versionId = asText(row.course_version_id)
   const itemId = asText(row.course_version_item_id)
   const status = asText(row.status)
   const digest = asText(row.rolling_event_digest)
-  if (!id || !memberId || !versionId || !itemId || !status || !digest) fail('unavailable')
+  if (
+    !id
+    || !versionId
+    || !itemId
+    || !status
+    || !digest
+    || (assignmentMemberId === null) === (scopeRevisionRuleId === null)
+  ) {
+    fail('unavailable')
+  }
   return {
     id,
-    memberId,
+    assignmentMemberId,
+    scopeRevisionRuleId,
     versionId,
     itemId,
     status,
@@ -422,7 +434,6 @@ function parseSessionRow(row: Record<string, unknown>, elapsedMs: number): Sessi
     effectiveMs: requireRowInt(row.effective_ms),
     maxPositionMs: requireRowInt(row.max_position_ms),
     rollingEventDigest: digest,
-    memberRevoked: row.revoked_at != null,
     elapsedMs,
   }
 }
@@ -464,7 +475,7 @@ export async function startElearningWatch(
     await lockCourseHead(tx, orgId, itemId)
     const item = await loadWatchableItem(tx, orgId, itemId)
     // Completed progress is retained but does not grant visibility/access.
-    const memberId = await lockUnrevokedMember(tx, orgId, userId, item.versionId)
+    const access = await resolveWatchAccess(tx, orgId, userId, item.versionId)
     const progress = await lockProgress(tx, orgId, userId, item.itemId)
     if (progress?.status === 'completed') {
       return stateFrom(
@@ -481,7 +492,15 @@ export async function startElearningWatch(
     }
 
     const existing = await lockActiveSession(tx, orgId, userId, item.itemId)
-    if (existing && !existing.memberRevoked) {
+    if (existing) {
+      if (!progress) fail('unavailable')
+      await rebindInProgressAccess(tx, {
+        orgId,
+        userId,
+        itemId: item.itemId,
+        sessionId: existing.id,
+        access,
+      })
       return stateFrom(
         existing.id,
         'in_progress',
@@ -495,16 +514,14 @@ export async function startElearningWatch(
       )
     }
 
-    if (existing?.memberRevoked) {
-      if (!progress) fail('unavailable')
-      await closeRevokedSession(tx, orgId, existing.id)
-      await rebindInProgressRollup(tx, orgId, userId, item.itemId, memberId)
-    }
+    // An in-progress rollup without its active event chain is not resumable:
+    // cumulative credit must never outlive the digest that proves it.
+    if (progress) fail('unavailable')
 
     const sessionId = await insertActiveStart(tx, {
       orgId,
       userId,
-      memberId,
+      access,
       versionId: item.versionId,
       itemId: item.itemId,
     })
@@ -512,10 +529,19 @@ export async function startElearningWatch(
       await tx.query(
         `/* elearning-watch:insert-progress */
          INSERT INTO elearning_progress (
-           org_id, assignment_member_id, course_version_id, course_version_item_id,
-           user_id, status, effective_ms, max_position_ms, completed_at, required_at_completion
-         ) VALUES ($1, $2, $3, $4, $5, 'in_progress', 0, 0, NULL, TRUE)`,
-        [orgId, memberId, item.versionId, item.itemId, userId],
+           org_id, assignment_member_id, scope_revision_rule_id, course_version_id,
+           course_version_item_id, user_id, status, effective_ms, max_position_ms,
+           completed_at, required_at_completion
+         ) VALUES ($1, $2, $3, $4, $5, $6, 'in_progress', 0, 0, NULL, $7)`,
+        [
+          orgId,
+          access.assignmentMemberId,
+          access.scopeRevisionRuleId,
+          item.versionId,
+          item.itemId,
+          userId,
+          access.required,
+        ],
       )
     }
 
@@ -528,7 +554,7 @@ async function insertActiveStart(
   input: {
     orgId: string
     userId: string
-    memberId: string
+    access: ElearningCourseAccessBasis
     versionId: string
     itemId: string
   },
@@ -544,11 +570,20 @@ async function insertActiveStart(
   await tx.query(
     `/* elearning-watch:insert-session */
      INSERT INTO elearning_learning_sessions (
-       id, org_id, assignment_member_id, course_version_id, course_version_item_id,
-       user_id, status, last_sequence, last_client_position_ms, effective_ms,
-       max_position_ms, rolling_event_digest
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'active', 0, 0, 0, 0, $7)`,
-    [sessionId, input.orgId, input.memberId, input.versionId, input.itemId, input.userId, digest],
+       id, org_id, assignment_member_id, scope_revision_rule_id, course_version_id,
+       course_version_item_id, user_id, status, last_sequence, last_client_position_ms,
+       effective_ms, max_position_ms, rolling_event_digest
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', 0, 0, 0, 0, $8)`,
+    [
+      sessionId,
+      input.orgId,
+      input.access.assignmentMemberId,
+      input.access.scopeRevisionRuleId,
+      input.versionId,
+      input.itemId,
+      input.userId,
+      digest,
+    ],
   )
   await tx.query(
     `/* elearning-watch:insert-event */
@@ -561,42 +596,51 @@ async function insertActiveStart(
   return sessionId
 }
 
-async function closeRevokedSession(
+async function rebindInProgressAccess(
   tx: ElearningWatchQueryable,
-  orgId: string,
-  sessionId: string,
+  input: {
+    orgId: string
+    userId: string
+    itemId: string
+    sessionId: string
+    access: ElearningCourseAccessBasis
+  },
 ): Promise<void> {
-  const result = await tx.query(
-    `/* elearning-watch:close-revoked-session */
+  const session = await tx.query(
+    `/* elearning-watch:rebind-session-access */
      UPDATE elearning_learning_sessions
-        SET status = 'closed',
-            closed_at = clock_timestamp()
-      WHERE org_id = $1 AND id = $2 AND status = 'active'`,
-    [orgId, sessionId],
+        SET assignment_member_id = $1,
+            scope_revision_rule_id = $2
+      WHERE org_id = $3 AND id = $4 AND status = 'active'`,
+    [
+      input.access.assignmentMemberId,
+      input.access.scopeRevisionRuleId,
+      input.orgId,
+      input.sessionId,
+    ],
   )
-  if (result.rowCount !== 1) fail('unavailable')
-}
+  if (session.rowCount !== 1) fail('unavailable')
 
-async function rebindInProgressRollup(
-  tx: ElearningWatchQueryable,
-  orgId: string,
-  userId: string,
-  itemId: string,
-  memberId: string,
-): Promise<void> {
-  const result = await tx.query(
+  const progress = await tx.query(
     `/* elearning-watch:rebind-progress */
      UPDATE elearning_progress
         SET assignment_member_id = $1,
-            effective_ms = 0,
-            max_position_ms = 0
-      WHERE org_id = $2
-        AND user_id = $3
-        AND course_version_item_id = $4
+            scope_revision_rule_id = $2,
+            required_at_completion = $3
+      WHERE org_id = $4
+        AND user_id = $5
+        AND course_version_item_id = $6
         AND status = 'in_progress'`,
-    [memberId, orgId, userId, itemId],
+    [
+      input.access.assignmentMemberId,
+      input.access.scopeRevisionRuleId,
+      input.access.required,
+      input.orgId,
+      input.userId,
+      input.itemId,
+    ],
   )
-  if (result.rowCount !== 1) fail('unavailable')
+  if (progress.rowCount !== 1) fail('unavailable')
 }
 
 async function peekSessionItem(
@@ -631,6 +675,7 @@ async function lockHeartbeatSession(
      SELECT
        s.id,
        s.assignment_member_id,
+       s.scope_revision_rule_id,
        s.course_version_id,
        s.course_version_item_id,
        s.status,
@@ -647,7 +692,6 @@ async function lockHeartbeatSession(
        c.status AS course_status,
        m.status AS media_status,
        m.duration_ms,
-       mem.revoked_at,
        GREATEST(
          0,
          FLOOR(EXTRACT(EPOCH FROM (clock_timestamp() - s.last_event_at)) * 1000)
@@ -663,17 +707,14 @@ async function lockHeartbeatSession(
        ON c.org_id = v.org_id AND c.id = v.course_id
      LEFT JOIN elearning_media m
        ON m.org_id = i.org_id AND m.id = i.media_id
-     JOIN elearning_assignment_members mem
-       ON mem.org_id = s.org_id AND mem.id = s.assignment_member_id
      WHERE s.org_id = $1 AND s.id = $2
-     FOR SHARE OF c FOR UPDATE OF s, mem`,
+     FOR SHARE OF c FOR UPDATE OF s`,
     [orgId, sessionId],
   )
   const row = result.rows[0]
   if (!row) fail('not_found')
   if (asText(row.user_id) !== userId) fail('not_found')
   if (asText(row.course_status) === 'withdrawn') fail('course_withdrawn')
-  if (row.revoked_at != null) fail('assignment_unavailable')
   const versionStatus = asText(row.version_status)
   if (versionStatus !== 'published' && versionStatus !== 'retired') fail('unsupported_item')
   if (asText(row.item_type) !== 'video') fail('unsupported_item')
@@ -731,8 +772,19 @@ export async function recordElearningHeartbeat(
     await advisoryLock(tx, orgId, userId, itemId)
     await lockCourseHead(tx, orgId, itemId)
     const { session, durationMs } = await lockHeartbeatSession(tx, orgId, sessionId, userId)
+    const access = await resolveWatchAccess(tx, orgId, userId, session.versionId)
     const progress = await lockProgress(tx, orgId, userId, session.itemId)
     if (!progress) fail('unavailable')
+
+    if (session.status === 'active' && progress.status === 'in_progress') {
+      await rebindInProgressAccess(tx, {
+        orgId,
+        userId,
+        itemId: session.itemId,
+        sessionId: session.id,
+        access,
+      })
+    }
 
     if (sequence <= session.lastSequence) {
       const prior = await loadEventPayload(tx, orgId, sessionId, sequence)
@@ -834,15 +886,18 @@ export async function recordElearningHeartbeat(
       await tx.query(
         `/* elearning-watch:insert-evidence */
          INSERT INTO elearning_completion_evidence (
-           org_id, assignment_member_id, course_version_id, course_version_item_id,
-           user_id, completion_policy_version, completion_threshold_bps, media_duration_ms,
-           effective_ms, max_position_ms, event_digest, evaluator_version, completed_at
+           org_id, assignment_member_id, scope_revision_rule_id, course_version_id,
+           course_version_item_id, user_id, completion_policy_version,
+           completion_threshold_bps, media_duration_ms, effective_ms, max_position_ms,
+           event_digest, evaluator_version, completed_at
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp()
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+           clock_timestamp()
          )`,
         [
           orgId,
-          session.memberId,
+          access.assignmentMemberId,
+          access.scopeRevisionRuleId,
           session.versionId,
           session.itemId,
           userId,
@@ -859,12 +914,13 @@ export async function recordElearningHeartbeat(
         `/* elearning-watch:complete-progress */
          UPDATE elearning_progress
             SET status = 'completed',
-                completed_at = clock_timestamp()
-          WHERE org_id = $1
-            AND user_id = $2
-            AND course_version_item_id = $3
+                completed_at = clock_timestamp(),
+                required_at_completion = $1
+          WHERE org_id = $2
+            AND user_id = $3
+            AND course_version_item_id = $4
             AND status = 'in_progress'`,
-        [orgId, userId, session.itemId],
+        [access.required, orgId, userId, session.itemId],
       )
       await tx.query(
         `/* elearning-watch:close-session */

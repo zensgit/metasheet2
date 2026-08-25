@@ -8,6 +8,10 @@ import {
   assertElearningMediaStorageKey,
   ELEARNING_MEDIA_RANGE_MAX_BYTES,
 } from './elearning-media-storage'
+import {
+  ElearningCourseAccessError,
+  resolveElearningCourseAccess,
+} from './elearning-course-access'
 
 export const ELEARNING_MEDIA_PLAYBACK_TOKEN_VERSION = 1 as const
 export const ELEARNING_MEDIA_PLAYBACK_TYP = 'elearning.media.playback' as const
@@ -69,6 +73,12 @@ export interface ElearningPlaybackQueryable {
     sql: string,
     params?: unknown[],
   ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>
+}
+
+export interface ElearningPlaybackDb extends ElearningPlaybackQueryable {
+  transaction<T>(
+    handler: (tx: ElearningPlaybackQueryable) => Promise<T>,
+  ): Promise<T>
 }
 
 export interface ElearningMediaPlaybackClaims {
@@ -248,8 +258,14 @@ export function signElearningMediaPlaybackToken(
   playbackSigningSecret: unknown,
   jwtSecret?: unknown,
 ): string {
-  const secret = requireElearningMediaPlaybackSigningSecret(playbackSigningSecret, jwtSecret)
-  const payloadB64 = Buffer.from(serializePlaybackClaims(claims), 'utf8').toString('base64url')
+  const secret = requireElearningMediaPlaybackSigningSecret(
+    playbackSigningSecret,
+    jwtSecret,
+  )
+  const payloadB64 = Buffer.from(
+    serializePlaybackClaims(claims),
+    'utf8',
+  ).toString('base64url')
   return `${payloadB64}.${signPayload(payloadB64, secret)}`
 }
 
@@ -307,7 +323,10 @@ export function verifyElearningMediaPlaybackToken(
   jwtSecret?: unknown,
   now: Date = new Date(),
 ): ElearningMediaPlaybackClaims {
-  const secret = requireElearningMediaPlaybackSigningSecret(playbackSigningSecret, jwtSecret)
+  const secret = requireElearningMediaPlaybackSigningSecret(
+    playbackSigningSecret,
+    jwtSecret,
+  )
   if (typeof token !== 'string' || token.trim() === '') fail('invalid_input')
   const parts = token.split('.')
   if (parts.length !== 2) fail('invalid_token')
@@ -334,7 +353,11 @@ function parseBytePos(raw: string): number | null {
   return value
 }
 
-function capAuthorizedSpan(start: number, end: number, fromSuffix: boolean): { start: number; end: number } {
+function capAuthorizedSpan(
+  start: number,
+  end: number,
+  fromSuffix: boolean,
+): { start: number; end: number } {
   const span = end - start + 1
   if (!Number.isSafeInteger(span) || span <= ELEARNING_MEDIA_RANGE_MAX_BYTES) {
     return { start, end }
@@ -452,7 +475,8 @@ async function loadPlayableMedia(
        ON c.org_id = v.org_id AND c.id = v.course_id
      LEFT JOIN elearning_media m
        ON m.org_id = i.org_id AND m.id = i.media_id
-     WHERE i.org_id = $1 AND i.id = $2`,
+     WHERE i.org_id = $1 AND i.id = $2
+     FOR SHARE OF i, v, c`,
     [orgId, itemId],
   )
   const row = result.rows[0]
@@ -477,32 +501,39 @@ async function loadPlayableMedia(
   } catch {
     fail('unavailable')
   }
-  return { itemId: loadedId, versionId, mediaId, storageKey, mimeType, sizeBytes }
+  return {
+    itemId: loadedId,
+    versionId,
+    mediaId,
+    storageKey,
+    mimeType,
+    sizeBytes,
+  }
 }
 
-async function requireUnrevokedMember(
+async function requireCourseAccess(
   db: ElearningPlaybackQueryable,
   orgId: string,
   userId: string,
   versionId: string,
 ): Promise<void> {
-  const result = await db.query(
-    `/* elearning-playback:load-member */
-     SELECT m.id
-       FROM elearning_assignment_members m
-      WHERE m.org_id = $1
-        AND m.user_id = $2
-        AND m.course_version_id = $3
-        AND m.revoked_at IS NULL
-      ORDER BY m.id ASC
-      LIMIT 1`,
-    [orgId, userId, versionId],
-  )
-  if (!asText(result.rows[0]?.id)) fail('assignment_unavailable')
+  try {
+    await resolveElearningCourseAccess(db, {
+      orgId,
+      userId,
+      courseVersionId: versionId,
+    })
+  } catch (error) {
+    if (!(error instanceof ElearningCourseAccessError)) fail('unavailable')
+    if (error.code === 'withdrawn') fail('course_withdrawn')
+    if (error.code === 'unsupported_version') fail('unsupported_item')
+    if (error.code === 'denied') fail('assignment_unavailable')
+    fail('unavailable')
+  }
 }
 
 export async function issueElearningMediaPlaybackTicket(
-  db: ElearningPlaybackQueryable,
+  db: ElearningPlaybackDb,
   input: IssueElearningMediaPlaybackInput,
 ): Promise<ElearningMediaPlaybackTicket> {
   const secret = requireElearningMediaPlaybackSigningSecret(
@@ -525,30 +556,32 @@ export async function issueElearningMediaPlaybackTicket(
   }
   const now = input.now ?? new Date()
   const iat = unixSeconds(now)
-  const playable = await loadPlayableMedia(db, orgId, itemId)
-  await requireUnrevokedMember(db, orgId, userId, playable.versionId)
-  const claims: ElearningMediaPlaybackClaims = {
-    v: ELEARNING_MEDIA_PLAYBACK_TOKEN_VERSION,
-    typ: ELEARNING_MEDIA_PLAYBACK_TYP,
-    org: orgId,
-    sub: userId,
-    item: playable.itemId,
-    media: playable.mediaId,
-    jti: randomUUID(),
-    iat,
-    exp: iat + ttlSeconds,
-  }
-  return {
-    token: signElearningMediaPlaybackToken(claims, secret, input.jwtSecret),
-    expiresAt: new Date(claims.exp * 1000).toISOString(),
-    ttlSeconds,
-    itemId: playable.itemId,
-    mediaId: playable.mediaId,
-  }
+  return db.transaction(async (tx) => {
+    const playable = await loadPlayableMedia(tx, orgId, itemId)
+    await requireCourseAccess(tx, orgId, userId, playable.versionId)
+    const claims: ElearningMediaPlaybackClaims = {
+      v: ELEARNING_MEDIA_PLAYBACK_TOKEN_VERSION,
+      typ: ELEARNING_MEDIA_PLAYBACK_TYP,
+      org: orgId,
+      sub: userId,
+      item: playable.itemId,
+      media: playable.mediaId,
+      jti: randomUUID(),
+      iat,
+      exp: iat + ttlSeconds,
+    }
+    return {
+      token: signElearningMediaPlaybackToken(claims, secret, input.jwtSecret),
+      expiresAt: new Date(claims.exp * 1000).toISOString(),
+      ttlSeconds,
+      itemId: playable.itemId,
+      mediaId: playable.mediaId,
+    }
+  })
 }
 
 export async function authorizeElearningMediaPlayback(
-  db: ElearningPlaybackQueryable,
+  db: ElearningPlaybackDb,
   input: AuthorizeElearningMediaPlaybackInput,
 ): Promise<ElearningMediaPlaybackAuthorization> {
   const orgId = requireActor(input.orgId)
@@ -562,14 +595,20 @@ export async function authorizeElearningMediaPlayback(
   if (!timingSafeStringEqual(claims.org, orgId) || !timingSafeStringEqual(claims.sub, userId)) {
     fail('invalid_token')
   }
-  const playable = await loadPlayableMedia(db, claims.org, claims.item)
-  if (!timingSafeStringEqual(playable.mediaId, claims.media)) fail('not_found')
-  await requireUnrevokedMember(db, claims.org, claims.sub, playable.versionId)
-  const range = parseElearningMediaHttpByteRange(input.rangeHeader, playable.sizeBytes)
-  return {
-    storageKey: playable.storageKey,
-    mimeType: playable.mimeType,
-    sizeBytes: playable.sizeBytes,
-    range,
-  }
+  return db.transaction(async (tx) => {
+    const playable = await loadPlayableMedia(tx, claims.org, claims.item)
+    if (!timingSafeStringEqual(playable.mediaId, claims.media))
+      fail('not_found')
+    await requireCourseAccess(tx, claims.org, claims.sub, playable.versionId)
+    const range = parseElearningMediaHttpByteRange(
+      input.rangeHeader,
+      playable.sizeBytes,
+    )
+    return {
+      storageKey: playable.storageKey,
+      mimeType: playable.mimeType,
+      sizeBytes: playable.sizeBytes,
+      range,
+    }
+  })
 }

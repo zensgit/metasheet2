@@ -26,6 +26,8 @@ const VIDEO = '33333333-3333-4333-8333-333333333333'
 const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
 const ATTEMPT = '55555555-5555-4555-8555-555555555555'
 const ATTEMPT_B = '56565656-5656-4565-8565-565656565656'
+const MEMBER = '67676767-6767-4676-8676-676767676767'
+const SCOPE_RULE = '78787878-7878-4787-8787-787878787878'
 const ASSIGNED_AT = '2026-01-02T03:04:05.000Z'
 const DEADLINE = '2026-12-31T08:00:00.000Z'
 const COMPLETED_AT = '2026-01-03T04:05:06.000Z'
@@ -38,11 +40,16 @@ const SERVICE_SOURCE = path.join(
   __dirname,
   '../../src/services/elearning-learner-courses.ts',
 )
+const ACCESS_SOURCE = path.join(
+  __dirname,
+  '../../src/services/elearning-course-access.ts',
+)
 
 const PUBLIC_COURSE_KEYS = [
   'courseId',
   'courseVersionId',
   'title',
+  'access',
   'assignment',
   'video',
   'exam',
@@ -50,6 +57,7 @@ const PUBLIC_COURSE_KEYS = [
 ] as const
 
 const PUBLIC_ASSIGNMENT_KEYS = ['deadline', 'assignedAt'] as const
+const PUBLIC_ACCESS_KEYS = ['kind', 'required'] as const
 const PUBLIC_VIDEO_KEYS = [
   'itemId',
   'durationMs',
@@ -87,7 +95,7 @@ const SECRET_TOKENS = [
 ]
 
 function tagOf(sql: string): string | null {
-  const match = /\/\* (elearning-learner-courses:[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:learner-courses|access):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
 }
 
@@ -114,10 +122,12 @@ async function expectAsyncCode(fn: () => Promise<unknown>, code: string): Promis
 function assertPublicCourse(payload: unknown): Record<string, unknown> {
   const raw = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>
   expect(Object.keys(raw)).toEqual([...PUBLIC_COURSE_KEYS])
-  const assignment = raw.assignment as Record<string, unknown>
+  const access = raw.access as Record<string, unknown>
+  const assignment = raw.assignment as Record<string, unknown> | null
   const video = raw.video as Record<string, unknown>
   const exam = raw.exam as Record<string, unknown>
-  expect(Object.keys(assignment)).toEqual([...PUBLIC_ASSIGNMENT_KEYS])
+  expect(Object.keys(access)).toEqual([...PUBLIC_ACCESS_KEYS])
+  if (assignment !== null) expect(Object.keys(assignment)).toEqual([...PUBLIC_ASSIGNMENT_KEYS])
   expect(Object.keys(video)).toEqual([...PUBLIC_VIDEO_KEYS])
   expect(Object.keys(exam)).toEqual([...PUBLIC_EXAM_KEYS])
   if (exam.latestAttempt !== null) {
@@ -142,6 +152,9 @@ function baseRow(over: Record<string, unknown> = {}): Record<string, unknown> {
     title: TITLE,
     assignment_deadline: DEADLINE,
     assignment_assigned_at: ASSIGNED_AT,
+    access_kind: 'assignment',
+    assignment_member_id: MEMBER,
+    scope_revision_rule_id: null,
     video_item_id: VIDEO,
     video_duration_ms: 10_000,
     video_status: null,
@@ -177,22 +190,70 @@ function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
       query: async (sql, queryParams = []) => {
         queries.push(sql)
         params.push(queryParams)
-        expect(tagOf(sql)).toBe('elearning-learner-courses:list')
         if (rows instanceof Error) throw rows
-        return { rows, rowCount: rows.length }
+        const tag = tagOf(sql)
+        if (tag === 'elearning-access:list') {
+          const seen = new Set<string>()
+          const candidates = rows.flatMap((row) => {
+            const versionId = String(row.course_version_id)
+            if (seen.has(versionId)) return []
+            seen.add(versionId)
+            const visibility = row.access_kind === 'visibility'
+            return [{
+              course_id: row.course_id,
+              course_version_id: row.course_version_id,
+              assignment_member_id: visibility ? null : (row.assignment_member_id ?? MEMBER),
+              scope_revision_rule_id: visibility
+                ? (row.scope_revision_rule_id ?? SCOPE_RULE)
+                : null,
+              assignment_deadline: visibility ? null : row.assignment_deadline,
+              assignment_assigned_at: visibility ? null : row.assignment_assigned_at,
+            }]
+          })
+          return { rows: candidates, rowCount: candidates.length }
+        }
+        if (tag === 'elearning-learner-courses:details') {
+          const versionIds = queryParams[2]
+          const assignmentMemberIds = queryParams[3]
+          const scopeRevisionRuleIds = queryParams[4]
+          if (!Array.isArray(versionIds)) throw new Error('missing version id array')
+          if (!Array.isArray(assignmentMemberIds)) throw new Error('missing assignment member array')
+          if (!Array.isArray(scopeRevisionRuleIds)) throw new Error('missing scope rule array')
+          if (
+            versionIds.length !== assignmentMemberIds.length
+            || versionIds.length !== scopeRevisionRuleIds.length
+          ) throw new Error('misaligned access arrays')
+          const selected = rows.filter((row) => versionIds.includes(String(row.course_version_id)))
+          return { rows: selected, rowCount: selected.length }
+        }
+        throw new Error(`unexpected query: ${sql}`)
       },
     },
   }
 }
 
 describe('elearning learner courses source SQL', () => {
-  it('pins one bounded DISTINCT ON list with explicit aliases, V0.1 media, and redacted columns', async () => {
+  it('separates bounded access discovery from redacted course details', async () => {
     const source = await fs.readFile(SERVICE_SOURCE, 'utf8')
-    expect(source).toContain('/* elearning-learner-courses:list */')
-    expect(source).toContain('SELECT DISTINCT ON (m.course_version_id)')
-    expect(source).toContain('m.org_id = $1')
-    expect(source).toContain('m.user_id = $2')
-    expect(source).toContain('m.revoked_at IS NULL')
+    const accessSource = await fs.readFile(ACCESS_SOURCE, 'utf8')
+    expect(source).toContain('listElearningCourseAccessCandidates')
+    expect(source).toContain('/* elearning-learner-courses:details */')
+    expect(source).toContain('unnest($3::uuid[], $4::uuid[], $5::uuid[]) WITH ORDINALITY')
+    expect(source).toContain('current_member.id = access.assignment_member_id')
+    expect(source).toContain('current_member.revoked_at IS NULL')
+    expect(source).toContain('current_scope.id = c.scope_id')
+    expect(source).toContain('current_rule.id = access.scope_revision_rule_id')
+    expect(source).toContain('current_rule.scope_revision_id = current_scope.active_revision_id')
+    expect(source).toContain('ORDER BY access.ordinality ASC')
+    expect(accessSource).toContain('/* elearning-access:list */')
+    expect(accessSource).toContain('assignment_access AS (')
+    expect(accessSource).toContain('visibility_access AS (')
+    expect(accessSource).toContain('m.revoked_at IS NULL')
+    expect(accessSource).toContain("c.status = 'active'")
+    expect(accessSource).toContain("rule.subject_type = 'all'")
+    expect(accessSource).toContain("rule.subject_type = 'user'")
+    expect(accessSource).toContain('ORDER BY c.id, rule.id ASC')
+    expect(accessSource).toContain('LIMIT $3')
     expect(source).toContain("c.status IN ('active', 'archived')")
     expect(source).toContain("v.status IN ('published', 'retired')")
     expect(source).toContain("i.item_type = 'video'")
@@ -217,13 +278,10 @@ describe('elearning learner courses source SQL', () => {
     expect(source).toContain("any_pass.status = 'graded'")
     expect(source).toContain('any_pass.passed IS TRUE')
     expect(source).toContain(') AS any_passed')
-    expect(source).toContain('ORDER BY assigned_heads.assigned_at ASC, assigned_heads.course_version_id ASC')
-    expect(source).toContain('LIMIT ${ELEARNING_LEARNER_COURSES_LIMIT}')
     expect(source).toContain('c.id AS course_id')
     expect(source).toContain('v.id AS course_version_id')
     expect(source).toContain('c.title AS title')
-    expect(source).toContain('assigned_heads.deadline AS assignment_deadline')
-    expect(source).toContain('assigned_heads.assigned_at AS assignment_assigned_at')
+    expect(source).not.toContain('assigned_heads')
     expect(source).toContain('video.item_id AS video_item_id')
     expect(source).toContain('exam.item_id AS exam_item_id')
     expect(source).not.toMatch(/SELECT\s+\*/)
@@ -258,26 +316,18 @@ describe('elearning learner courses input and SQL dispatch', () => {
     expect(queries).toEqual([])
   })
 
-  it('sends exact org+user params and the tagged list SQL once', async () => {
+  it('sends exact org+user+limit to access discovery and stops when no course is visible', async () => {
     const { db, queries, params } = createMemoryDb([])
     await expect(listElearningLearnerCourses(db, {
       orgId: ` ${ORG} `,
       userId: ` ${USER} `,
     })).resolves.toEqual([])
     expect(queries).toHaveLength(1)
-    expect(tagOf(queries[0])).toBe('elearning-learner-courses:list')
-    expect(params).toEqual([[ORG, USER]])
-    expect(queries[0]).toContain('LIMIT 100')
-    expect(queries[0]).toContain('DISTINCT ON (m.course_version_id)')
+    expect(tagOf(queries[0])).toBe('elearning-access:list')
+    expect(params).toEqual([[ORG, USER, ELEARNING_LEARNER_COURSES_LIMIT + 1]])
+    expect(queries[0]).toContain('LIMIT $3')
     expect(queries[0]).toContain('revoked_at IS NULL')
-    expect(queries[0]).toContain(`i.completion_policy_version = '${ELEARNING_WATCH_POLICY_VERSION}'`)
-    expect(queries[0]).toContain(`i.completion_threshold_bps = ${ELEARNING_WATCH_THRESHOLD_BPS}`)
-    expect(queries[0]).toContain(`media.mime_type = '${ELEARNING_MEDIA_MIME}'`)
-    expect(queries[0]).toContain(`media.magic_mime_type = '${ELEARNING_MEDIA_MIME}'`)
-    expect(queries[0]).toContain('EXISTS (')
-    expect(queries[0]).toContain("any_pass.status = 'graded'")
-    expect(queries[0]).toContain('any_pass.passed IS TRUE')
-    expect(queries[0]).toContain(') AS any_passed')
+    expect(queries[0]).toContain('visibility_access AS (')
   })
 
   it('maps query failures to values-free unavailable', async () => {
@@ -313,6 +363,10 @@ describe('elearning learner courses public mapping', () => {
       courseId: COURSE,
       courseVersionId: VERSION,
       title: TITLE,
+      access: {
+        kind: 'assignment',
+        required: true,
+      },
       assignment: {
         deadline: '2000-01-01T00:00:00.000Z',
         assignedAt: ASSIGNED_AT,
@@ -331,6 +385,20 @@ describe('elearning learner courses public mapping', () => {
       },
       completed: false,
     })
+  })
+
+  it('returns visible self-study as optional access with no fabricated assignment', async () => {
+    const { db } = createMemoryDb([baseRow({
+      access_kind: 'visibility',
+      assignment_member_id: null,
+      scope_revision_rule_id: SCOPE_RULE,
+      assignment_deadline: null,
+      assignment_assigned_at: null,
+    })])
+    const [row] = await listElearningLearnerCourses(db, { orgId: ORG, userId: USER })
+    const publicRow = assertPublicCourse(row)
+    expect(publicRow.access).toEqual({ kind: 'visibility', required: false })
+    expect(publicRow.assignment).toBeNull()
   })
 
   it('preserves assigned_at, version id order and collapses duplicate versions fail-closed', async () => {

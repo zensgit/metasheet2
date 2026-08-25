@@ -4,6 +4,11 @@
  * values-free: public types never include answer_key, correct ids, or explanation.
  */
 import { randomUUID } from 'node:crypto'
+
+import {
+  ElearningCourseAccessError,
+  resolveElearningCourseAccess,
+} from './elearning-course-access'
 import {
   ELEARNING_EXAM_AUTO_GRADER,
   ELEARNING_EXAM_GRADE_KIND,
@@ -285,26 +290,25 @@ async function lockExamItem(
   }
 }
 
-async function lockUnrevokedMember(
+async function requireCourseAccess(
   tx: ElearningExamQueryable,
   orgId: string,
   userId: string,
   versionId: string,
 ): Promise<void> {
-  const result = await tx.query(
-    `/* elearning-exam:load-member */
-     SELECT m.id
-       FROM elearning_assignment_members m
-      WHERE m.org_id = $1
-        AND m.user_id = $2
-        AND m.course_version_id = $3
-        AND m.revoked_at IS NULL
-      ORDER BY m.id ASC
-      LIMIT 1
-      FOR UPDATE OF m`,
-    [orgId, userId, versionId],
-  )
-  if (!asText(result.rows[0]?.id)) fail('assignment_unavailable')
+  try {
+    await resolveElearningCourseAccess(tx, {
+      orgId,
+      userId,
+      courseVersionId: versionId,
+    })
+  } catch (error) {
+    if (!(error instanceof ElearningCourseAccessError)) fail('unavailable')
+    if (error.code === 'withdrawn') fail('course_withdrawn')
+    if (error.code === 'unsupported_version') fail('unsupported_item')
+    if (error.code === 'denied') fail('assignment_unavailable')
+    fail('unavailable')
+  }
 }
 
 async function requireCompletedPriorVideos(
@@ -452,7 +456,7 @@ export async function startElearningExam(
       await advisoryLock(tx, orgId, userId, itemId)
       const item = await lockExamItem(tx, orgId, itemId)
       if (item.examId !== examId || item.itemId !== itemId) fail('unavailable')
-      await lockUnrevokedMember(tx, orgId, userId, item.versionId)
+      await requireCourseAccess(tx, orgId, userId, item.versionId)
       await requireCompletedPriorVideos(tx, orgId, userId, item.versionId, item.position)
 
       const attempts = await lockUserAttempts(tx, orgId, item.examId, userId, item.itemId)
@@ -638,7 +642,7 @@ export async function submitElearningExam(
       await advisoryLock(tx, orgId, userId, peeked.itemId)
       const attempt = await lockAttempt(tx, orgId, attemptId, userId)
       if (attempt.examId !== peeked.examId || attempt.itemId !== peeked.itemId) fail('unavailable')
-      await lockUnrevokedMember(tx, orgId, userId, attempt.versionId)
+      await requireCourseAccess(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
 
       if (attempt.status === 'graded') {
@@ -709,7 +713,7 @@ export async function saveElearningExamAnswers(
       await advisoryLock(tx, orgId, userId, peeked.itemId)
       const attempt = await lockAttempt(tx, orgId, attemptId, userId)
       if (attempt.examId !== peeked.examId || attempt.itemId !== peeked.itemId) fail('unavailable')
-      await lockUnrevokedMember(tx, orgId, userId, attempt.versionId)
+      await requireCourseAccess(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
       if (attempt.status !== 'started') fail('conflict')
 

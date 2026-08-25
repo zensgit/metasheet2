@@ -1,9 +1,9 @@
 /**
- * E-learning V0.1 named-pilot HTTP surface: assignment, watch, playback ticket, exams,
- * composite course publish, learner assigned-course list.
+ * E-learning HTTP surface: scope, assignment, watch, playback ticket, exams,
+ * composite course publish, and learner available-course list.
  *
- * Unmounted factory. Registers nothing unless master+CONTENT+ASSIGNMENT+MEDIA are exact 'true'.
- * Exam, publish, and learner-list routes additionally recheck ASSESSMENT. Identity,
+ * Unmounted factory. Registers nothing unless master+CONTENT are exact 'true'.
+ * Every route rechecks its independent capability flags. Identity,
  * authoritative org, then RBAC run before JSON/service. Learner/actor/org are injected —
  * never taken from the client. Publish uses a dedicated 1 MiB JSON parser; a body just
  * over that limit is a values-free 413. Other JSON routes stay at 16 KiB. Learner GET
@@ -14,6 +14,8 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import { json, Router } from 'express'
 
 import {
+  isElearningAssignmentSurfaceEnabled,
+  isElearningContentSurfaceEnabled,
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
 } from '../elearning/feature-flags'
@@ -49,8 +51,14 @@ import {
   ElearningPlaybackError,
   issueElearningMediaPlaybackTicket,
   type ElearningPlaybackErrorCode,
-  type ElearningPlaybackQueryable,
+  type ElearningPlaybackDb,
 } from '../services/elearning-media-playback'
+import {
+  ElearningScopeError,
+  setElearningCourseScope,
+  type ElearningScopeDb,
+  type ElearningScopeErrorCode,
+} from '../services/elearning-scope'
 import {
   ElearningWatchError,
   recordElearningHeartbeat,
@@ -62,10 +70,23 @@ import {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const ASSIGN_KEYS = new Set(['targetUserId', 'courseVersionId', 'sourceKey', 'deadline'])
+const ASSIGN_KEYS = new Set([
+  'targetUserId',
+  'courseVersionId',
+  'sourceKey',
+  'deadline',
+])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
 const SUBMIT_KEYS = new Set(['answers'])
-const PUBLISH_KEYS = new Set(['requestId', 'title', 'mediaId', 'passScore', 'maxAttempts', 'questions'])
+const PUBLISH_KEYS = new Set([
+  'requestId',
+  'title',
+  'mediaId',
+  'passScore',
+  'maxAttempts',
+  'questions',
+])
+const SCOPE_KEYS = new Set(['reason', 'rules'])
 const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
@@ -127,16 +148,25 @@ const LEARNER_STATUS: Record<ElearningLearnerCoursesErrorCode, number> = {
   unavailable: 503,
 }
 
+const SCOPE_STATUS: Record<ElearningScopeErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  subject_not_found: 404,
+  unsupported_subject: 422,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
 export interface ElearningPilotRouteDeps {
-  db: ElearningDirectAssignmentDb
-    & ElearningWatchDb
-    & ElearningPlaybackQueryable
-    & ElearningExamDb
-    & ElearningCoursePublishDb
-    & ElearningLearnerCoursesQueryable
+  db: ElearningDirectAssignmentDb &
+    ElearningWatchDb &
+    ElearningPlaybackDb &
+    ElearningExamDb &
+    ElearningCoursePublishDb &
+    ElearningLearnerCoursesQueryable &
+    ElearningScopeDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -153,6 +183,7 @@ export interface ElearningPilotRouteDeps {
   submitElearningExam?: typeof submitElearningExam
   publishElearningCourse?: typeof publishElearningCourse
   listElearningLearnerCourses?: typeof listElearningLearnerCourses
+  setElearningCourseScope?: typeof setElearningCourseScope
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -166,7 +197,11 @@ function parseJson(req: Request, res: Response, next: NextFunction): void {
   })
 }
 
-function parsePublishJson(req: Request, res: Response, next: NextFunction): void {
+function parsePublishJson(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
   publishJsonParser(req, res, (error?: unknown) => {
     if (!error) return next()
     if (!req.readableEnded) req.resume()
@@ -185,7 +220,10 @@ function readObject(body: unknown): Record<string, unknown> | null {
   return body as Record<string, unknown>
 }
 
-function rejectUnknownKeys(body: Record<string, unknown>, allowed: ReadonlySet<string>): boolean {
+function rejectUnknownKeys(
+  body: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): boolean {
   return Object.keys(body).some((key) => !allowed.has(key))
 }
 
@@ -209,8 +247,10 @@ function invalid(res: Response): void {
   res.status(400).json({ error: 'invalid_input' })
 }
 
-export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Router | null {
-  if (!isElearningWatchSurfaceEnabled(envOf(deps))) return null
+export function createElearningPilotRouter(
+  deps: ElearningPilotRouteDeps,
+): Router | null {
+  if (!isElearningContentSurfaceEnabled(envOf(deps))) return null
 
   const assignDirect = deps.assignElearningDirect ?? assignElearningDirect
   const startWatch = deps.startElearningWatch ?? startElearningWatch
@@ -220,7 +260,9 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
   const saveExamAnswers = deps.saveElearningExamAnswers ?? saveElearningExamAnswers
   const submitExam = deps.submitElearningExam ?? submitElearningExam
   const publishCourse = deps.publishElearningCourse ?? publishElearningCourse
-  const listLearnerCourses = deps.listElearningLearnerCourses ?? listElearningLearnerCourses
+  const listLearnerCourses =
+    deps.listElearningLearnerCourses ?? listElearningLearnerCourses
+  const setCourseScope = deps.setElearningCourseScope ?? setElearningCourseScope
   const router = Router()
 
   const asyncHandler =
@@ -231,7 +273,11 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       })
     }
 
-  const requireWatchFlags = (_req: Request, res: Response, next: NextFunction): void => {
+  const requireWatchFlags = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
     if (!isElearningWatchSurfaceEnabled(envOf(deps))) {
       res.status(404).json({ error: 'not_found' })
       return
@@ -239,7 +285,35 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
     next()
   }
 
-  const requireExamFlags = (_req: Request, res: Response, next: NextFunction): void => {
+  const requireContentFlags = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
+    if (!isElearningContentSurfaceEnabled(envOf(deps))) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
+  const requireAssignmentFlags = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
+    if (!isElearningAssignmentSurfaceEnabled(envOf(deps))) {
+      res.status(404).json({ error: 'not_found' })
+      return
+    }
+    next()
+  }
+
+  const requireExamFlags = (
+    _req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
     if (!isElearningExamSurfaceEnabled(envOf(deps))) {
       res.status(404).json({ error: 'not_found' })
       return
@@ -247,7 +321,11 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
     next()
   }
 
-  const requireIdentity = (req: Request, res: Response, next: NextFunction): void => {
+  const requireIdentity = (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
     if (!deps.viewerId(req)) {
       res.status(401).json({ error: 'unauthenticated' })
       return
@@ -255,7 +333,11 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
     next()
   }
 
-  const requireOrg = (req: Request, res: Response, next: NextFunction): void => {
+  const requireOrg = (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void => {
     if (!deps.orgId(req)) {
       res.status(403).json({ error: 'ORG_CONTEXT_REQUIRED' })
       return
@@ -265,10 +347,16 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
 
   const gate = (
     guard: RequestHandler,
-    surface: 'watch' | 'exam' = 'watch',
+    surface: 'content' | 'assignment' | 'watch' | 'exam' = 'watch',
     parser: RequestHandler | null = parseJson,
   ): RequestHandler[] => [
-    surface === 'exam' ? requireExamFlags : requireWatchFlags,
+    surface === 'content'
+      ? requireContentFlags
+      : surface === 'assignment'
+        ? requireAssignmentFlags
+        : surface === 'exam'
+          ? requireExamFlags
+          : requireWatchFlags,
     requireIdentity,
     requireOrg,
     guard,
@@ -278,11 +366,16 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
   const recheck = (
     req: Request,
     res: Response,
-    surface: 'watch' | 'exam' = 'watch',
+    surface: 'content' | 'assignment' | 'watch' | 'exam' = 'watch',
   ): { actorId: string; orgId: string } | null => {
-    const enabled = surface === 'exam'
-      ? isElearningExamSurfaceEnabled(envOf(deps))
-      : isElearningWatchSurfaceEnabled(envOf(deps))
+    const enabled =
+      surface === 'content'
+        ? isElearningContentSurfaceEnabled(envOf(deps))
+        : surface === 'assignment'
+          ? isElearningAssignmentSurfaceEnabled(envOf(deps))
+          : surface === 'exam'
+            ? isElearningExamSurfaceEnabled(envOf(deps))
+            : isElearningWatchSurfaceEnabled(envOf(deps))
     if (!enabled) {
       res.status(404).json({ error: 'not_found' })
       return null
@@ -302,9 +395,9 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
 
   router.post(
     '/api/elearning/assignments/direct',
-    ...gate(deps.adminGuard),
+    ...gate(deps.adminGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
-      const ctx = recheck(req, res)
+      const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
       const body = readObject(req.body)
       if (!body || rejectUnknownKeys(body, ASSIGN_KEYS)) {
@@ -343,6 +436,43 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
       } catch (error) {
         if (error instanceof ElearningDirectAssignmentError) {
           res.status(ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.put(
+    '/api/elearning/courses/:courseId/scope',
+    ...gate(deps.adminGuard, 'content'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'content')
+      if (!ctx) return
+      const courseId = uuidParam(req, 'courseId')
+      const body = readObject(req.body)
+      if (
+        !courseId ||
+        !body ||
+        rejectUnknownKeys(body, SCOPE_KEYS) ||
+        !Object.prototype.hasOwnProperty.call(body, 'reason') ||
+        !Object.prototype.hasOwnProperty.call(body, 'rules')
+      ) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await setCourseScope(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          courseId,
+          reason: body.reason as string,
+          rules: body.rules as never,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningScopeError) {
+          res.status(SCOPE_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })

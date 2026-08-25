@@ -47,6 +47,7 @@ const COURSE = '11111111-1111-4111-8111-111111111111'
 const COURSE_PROGRESS = '12121212-1212-4121-8121-121212121212'
 const COURSE_DONE = '13131313-1313-4131-8131-131313131313'
 const VERSION = '22222222-2222-4222-8222-222222222222'
+const VERSION_B = '23232323-2323-4232-8232-232323232323'
 const VIDEO = '33333333-3333-4333-8333-333333333333'
 const VIDEO_B = '35353535-3535-4353-8353-353535353535'
 const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
@@ -99,6 +100,10 @@ function heartbeatBodies(): Array<{ sequence: number; positionMs: number; playin
 
 function courseEl(root: HTMLElement, courseId: string): HTMLElement {
   return root.querySelector(`[data-testid="elearning-course-${courseId}"]`) as HTMLElement
+}
+
+function courseVersionEl(root: HTMLElement, versionId: string): HTMLElement {
+  return root.querySelector(`[data-course-version-id="${versionId}"]`) as HTMLElement
 }
 
 function courseQuery<T extends Element>(root: HTMLElement, courseId: string, testId: string): T {
@@ -179,10 +184,17 @@ function vid(over: Record<string, unknown> = {}) {
 }
 
 function course(over: Record<string, unknown> = {}) {
+  const courseId = typeof over.courseId === 'string' ? over.courseId : COURSE
+  const courseVersionId = typeof over.courseVersionId === 'string'
+    ? over.courseVersionId
+    : courseId === COURSE
+      ? VERSION
+      : courseId
   return {
-    courseId: COURSE,
-    courseVersionId: VERSION,
+    courseId,
+    courseVersionId,
     title: '示范课',
+    access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
     video: vid(),
     exam: { itemId: EXAM_ITEM, latestAttempt: null },
@@ -444,6 +456,65 @@ describe('ElearningLearnerView', () => {
     expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)?.textContent).toContain('未开始')
     expect(root.querySelector(`[data-testid="elearning-course-${COURSE_PROGRESS}"]`)?.textContent).toContain('学习中')
     expect(root.querySelector(`[data-testid="elearning-course-${COURSE_DONE}"]`)?.textContent).toContain('已完成')
+  })
+
+  it('isolates watch and exam state by course version when one course exposes old assigned and current visible versions', async () => {
+    useLocale().setLocale('en')
+    h.list.mockResolvedValue({
+      courses: [
+        completedVideoCourse({
+          courseId: COURSE,
+          courseVersionId: VERSION,
+          title: 'Assigned retired version',
+          access: { kind: 'assignment', required: true },
+        }),
+        completedVideoCourse({
+          courseId: COURSE,
+          courseVersionId: VERSION_B,
+          title: 'Current self-study version',
+          access: { kind: 'visibility', required: false },
+          assignment: null,
+          video: vid({
+            itemId: VIDEO_B,
+            status: 'completed',
+            effectiveMs: 4500,
+            maxPositionMs: 5000,
+            completedAt: '2026-01-03T04:05:06.000Z',
+          }),
+          exam: {
+            itemId: '45454545-4545-4454-8454-454545454545',
+            latestAttempt: null,
+          },
+        }),
+      ],
+    })
+    h.startWatch.mockResolvedValue(watchState({
+      status: 'in_progress',
+      effectiveMs: 2000,
+      maxPositionMs: 2500,
+    }))
+    h.ticket.mockResolvedValue(playbackTicket({ itemId: VIDEO_B }))
+
+    const root = mountView()
+    await flushUi()
+    const oldVersion = courseVersionEl(root, VERSION)
+    const currentVersion = courseVersionEl(root, VERSION_B)
+    expect(oldVersion).toBeTruthy()
+    expect(currentVersion).toBeTruthy()
+
+    ;(currentVersion.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledWith('45454545-4545-4454-8454-454545454545')
+    expect(oldVersion.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(currentVersion.querySelector('[data-testid="elearning-exam-form"]')).toBeTruthy()
+
+    ;(currentVersion.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.startWatch).toHaveBeenCalledWith(VIDEO_B)
+    expect(oldVersion.querySelector('[data-testid="elearning-learner-video"]')).toBeNull()
+    expect(currentVersion.querySelector('[data-testid="elearning-learner-video"]')).toBeTruthy()
+    expect(oldVersion.querySelector('[data-testid="elearning-video-progress"]')?.textContent).toBe('Completed')
+    expect(currentVersion.querySelector('[data-testid="elearning-video-progress"]')?.textContent).toBe('In progress 40%')
   })
 
   it('starts authorized watch+ticket, sends monotonic playing heartbeats, and a final playing beat on ended', async () => {

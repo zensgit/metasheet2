@@ -4864,6 +4864,59 @@ components:
         memberId:
           $ref: '#/components/schemas/ElearningUuid'
         duplicate: { type: boolean }
+    ElearningScopeRule:
+      type: object
+      additionalProperties: false
+      required: [subjectType]
+      description: |
+        L1 scope foundation rule. `all` requires subjectRef absent/null;
+        `user` requires a non-empty active same-org user id. includeChildren,
+        when present, must be false. Department, position, and role rules are
+        reserved by the storage model but are not accepted by this live API.
+      properties:
+        subjectType:
+          type: string
+          enum: [all, user]
+        subjectRef:
+          type: string
+          minLength: 1
+          nullable: true
+        includeChildren:
+          type: boolean
+          enum: [false]
+    ElearningScopeUpdateRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, rules]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+        rules:
+          type: array
+          maxItems: 100
+          description: Empty array is the explicit auditable visible-to-nobody revision.
+          items:
+            $ref: '#/components/schemas/ElearningScopeRule'
+    ElearningScopeUpdateResult:
+      type: object
+      additionalProperties: false
+      required: [courseId, scopeId, revisionId, revision, ruleIds]
+      properties:
+        courseId:
+          $ref: '#/components/schemas/ElearningUuid'
+        scopeId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revision:
+          type: integer
+          minimum: 1
+        ruleIds:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningUuid'
     ElearningLearnerAssignment:
       type: object
       additionalProperties: false
@@ -4876,6 +4929,17 @@ components:
         assignedAt:
           type: string
           format: date-time
+    ElearningLearnerAccess:
+      type: object
+      additionalProperties: false
+      required: [kind, required]
+      properties:
+        kind:
+          type: string
+          enum: [assignment, visibility]
+        required:
+          type: boolean
+          description: True only for assignment access; visibility is optional self-study.
     ElearningLearnerVideo:
       type: object
       additionalProperties: false
@@ -4946,7 +5010,7 @@ components:
     ElearningLearnerCourse:
       type: object
       additionalProperties: false
-      required: [courseId, courseVersionId, title, assignment, video, exam, completed]
+      required: [courseId, courseVersionId, title, access, assignment, video, exam, completed]
       properties:
         courseId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -4955,8 +5019,12 @@ components:
         title:
           type: string
           minLength: 1
+        access:
+          $ref: '#/components/schemas/ElearningLearnerAccess'
         assignment:
-          $ref: '#/components/schemas/ElearningLearnerAssignment'
+          allOf:
+            - $ref: '#/components/schemas/ElearningLearnerAssignment'
+          nullable: true
         video:
           $ref: '#/components/schemas/ElearningLearnerVideo'
         exam:

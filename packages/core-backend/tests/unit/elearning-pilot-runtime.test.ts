@@ -13,7 +13,7 @@ import type { ElearningExamDb } from '../../src/services/elearning-exam'
 import type { ElearningLearnerCoursesQueryable } from '../../src/services/elearning-learner-courses'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
-  type ElearningPlaybackQueryable,
+  type ElearningPlaybackDb,
 } from '../../src/services/elearning-media-playback'
 import type { ElearningWatchDb } from '../../src/services/elearning-watch-progress'
 import { usePinnedServer } from '../utils/pinned-server'
@@ -35,12 +35,7 @@ const FLAG_EXAM_ON = {
   ELEARNING_ASSESSMENT_ENABLED: 'true',
 } as unknown as NodeJS.ProcessEnv
 
-const FLAG_NAMES = [
-  'ELEARNING_ENABLED',
-  'ELEARNING_CONTENT_ENABLED',
-  'ELEARNING_ASSIGNMENT_ENABLED',
-  'ELEARNING_MEDIA_ENABLED',
-] as const
+const FLAG_NAMES = ['ELEARNING_ENABLED', 'ELEARNING_CONTENT_ENABLED'] as const
 
 const LOOKALIKES: Array<string | undefined> = [
   undefined, '', 'false', 'FALSE', '0', '1', 'yes', 'on', 'TRUE', 'True', ' true', 'true ',
@@ -101,17 +96,19 @@ const EXAM_START_RESULT = {
   paper: {
     domain: 'elearning.exam.paper.v1' as const,
     version: 1 as const,
-    questions: [{
-      position: 1,
-      questionRevisionId: Q1,
-      questionType: 'single_choice' as const,
-      prompt: 'Pick one',
-      options: [
-        { id: 'a', text: 'alpha' },
-        { id: 'b', text: 'beta' },
-      ],
-      points: 10,
-    }],
+    questions: [
+      {
+        position: 1,
+        questionRevisionId: Q1,
+        questionType: 'single_choice' as const,
+        prompt: 'Pick one',
+        options: [
+          { id: 'a', text: 'alpha' },
+          { id: 'b', text: 'beta' },
+        ],
+        points: 10,
+      },
+    ],
   },
   answers: { [Q1]: [] },
   duplicate: false,
@@ -136,16 +133,18 @@ const PUBLISH_BODY = {
   mediaId: MEDIA,
   passScore: 10,
   maxAttempts: 3,
-  questions: [{
-    questionType: 'single_choice',
-    prompt: 'Pick one',
-    options: [
-      { id: 'a', text: 'alpha' },
-      { id: 'b', text: 'beta' },
-    ],
-    correctOptionIds: ['a'],
-    points: 10,
-  }],
+  questions: [
+    {
+      questionType: 'single_choice',
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      correctOptionIds: ['a'],
+      points: 10,
+    },
+  ],
 }
 
 const PUBLISH_RESULT = {
@@ -159,31 +158,37 @@ const PUBLISH_RESULT = {
   totalScore: 10,
 }
 
-const LEARNER_COURSES = [{
-  courseId: REQUEST_ID,
-  courseVersionId: VERSION,
-  title: 'Pilot course',
-  assignment: {
-    deadline: null,
-    assignedAt: '2026-01-02T03:04:05.000Z',
+const LEARNER_COURSES = [
+  {
+    courseId: REQUEST_ID,
+    courseVersionId: VERSION,
+    title: 'Pilot course',
+    access: { kind: 'assignment' as const, required: true as const },
+    assignment: {
+      deadline: null,
+      assignedAt: '2026-01-02T03:04:05.000Z',
+    },
+    video: {
+      itemId: ITEM,
+      durationMs: 10_000,
+      status: 'not_started' as const,
+      effectiveMs: 0,
+      maxPositionMs: 0,
+      completedAt: null,
+    },
+    exam: {
+      itemId: EXAM_ITEM_ID,
+      latestAttempt: null,
+    },
+    completed: false,
   },
-  video: {
-    itemId: ITEM,
-    durationMs: 10_000,
-    status: 'not_started' as const,
-    effectiveMs: 0,
-    maxPositionMs: 0,
-    completedAt: null,
-  },
-  exam: {
-    itemId: EXAM_ITEM_ID,
-    latestAttempt: null,
-  },
-  completed: false,
-}]
+]
 
 const INDEX_SRC = join(__dirname, '../../src/index.ts')
-const RUNTIME_SRC = join(__dirname, '../../src/services/elearning-pilot-runtime.ts')
+const RUNTIME_SRC = join(
+  __dirname,
+  '../../src/services/elearning-pilot-runtime.ts',
+)
 const ROUTE_SRC = join(__dirname, '../../src/routes/elearning-pilot.ts')
 
 const pinned = usePinnedServer()
@@ -194,12 +199,12 @@ function serve(app: express.Express) {
 
 function dummyDb(
   onUse?: () => void,
-): ElearningDirectAssignmentDb
-  & ElearningWatchDb
-  & ElearningPlaybackQueryable
-  & ElearningExamDb
-  & ElearningCoursePublishDb
-  & ElearningLearnerCoursesQueryable {
+): ElearningDirectAssignmentDb &
+  ElearningWatchDb &
+  ElearningPlaybackDb &
+  ElearningExamDb &
+  ElearningCoursePublishDb &
+  ElearningLearnerCoursesQueryable {
   return {
     query: async () => {
       onUse?.()
@@ -221,13 +226,18 @@ function stripTsComments(src: string): string {
 describe('elearning pilot runtime (flag-gated production wiring)', () => {
   test('flag OFF / lookalikes → factory returns null (no runtime)', () => {
     expect(isElearningWatchSurfaceEnabled({} as NodeJS.ProcessEnv)).toBe(false)
-    expect(createElearningPilotRuntime({
-      db: dummyDb(),
-      env: {} as NodeJS.ProcessEnv,
-    })).toBeNull()
+    expect(
+      createElearningPilotRuntime({
+        db: dummyDb(),
+        env: {} as NodeJS.ProcessEnv,
+      }),
+    ).toBeNull()
     for (const flag of FLAG_NAMES) {
       for (const value of LOOKALIKES) {
-        const env = { ...FLAG_ON, [flag]: value } as unknown as NodeJS.ProcessEnv
+        const env = {
+          ...FLAG_ON,
+          [flag]: value,
+        } as unknown as NodeJS.ProcessEnv
         expect(createElearningPilotRuntime({ db: dummyDb(), env })).toBeNull()
       }
     }
@@ -245,22 +255,32 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
 
   test('defaults wrap authenticate on /api/elearning and use rbacGuard elearning admin plus learner-read any', () => {
     const runtimeSrc = readFileSync(RUNTIME_SRC, 'utf8')
-    expect(runtimeSrc).toMatch(/router\.use\(\s*['"]\/api\/elearning['"]\s*,\s*(opts\.authenticate\s*\?\?\s*)?authenticate\s*\)/)
+    expect(runtimeSrc).toMatch(
+      /router\.use\(\s*['"]\/api\/elearning['"]\s*,\s*(opts\.authenticate\s*\?\?\s*)?authenticate\s*\)/,
+    )
     expect(runtimeSrc).toMatch(/rbacGuard\('elearning',\s*'admin'\)/)
     expect(runtimeSrc).toMatch(
       /rbacGuardAny\(\s*\[\s*'elearning:read'\s*,\s*'elearning:write'\s*,\s*'elearning:admin'\s*\]\s*\)/,
     )
-    expect(runtimeSrc).not.toMatch(/readGuard:\s*opts\.readGuard\s*\?\?\s*rbacGuard\('elearning',\s*'read'\)/)
+    expect(runtimeSrc).not.toMatch(
+      /readGuard:\s*opts\.readGuard\s*\?\?\s*rbacGuard\('elearning',\s*'read'\)/,
+    )
     expect(runtimeSrc).toMatch(/req\.authenticatedTenantId/)
     expect(runtimeSrc).toMatch(/req\.user/)
-    expect(runtimeSrc).toMatch(/ELEARNING_MEDIA_PLAYBACK_SECRET_ENV|ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET/)
+    expect(runtimeSrc).toMatch(
+      /ELEARNING_MEDIA_PLAYBACK_SECRET_ENV|ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET/,
+    )
     expect(runtimeSrc).toMatch(/issueElearningMediaPlaybackTicket/)
     expect(runtimeSrc).toMatch(/startElearningExam/)
     expect(runtimeSrc).toMatch(/submitElearningExam/)
     expect(runtimeSrc).toMatch(/publishElearningCourse/)
     expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
-    expect(runtimeSrc).toMatch(/opts\.publishElearningCourse\s*\?\?\s*publishElearningCourse/)
-    expect(runtimeSrc).toMatch(/opts\.listElearningLearnerCourses\s*\?\?\s*listElearningLearnerCourses/)
+    expect(runtimeSrc).toMatch(
+      /opts\.publishElearningCourse\s*\?\?\s*publishElearningCourse/,
+    )
+    expect(runtimeSrc).toMatch(
+      /opts\.listElearningLearnerCourses\s*\?\?\s*listElearningLearnerCourses/,
+    )
     expect(runtimeSrc).not.toMatch(/authorizeElearningMediaPlayback/)
     expect(runtimeSrc).not.toMatch(/getBootedElearningMediaRangeStore/)
     expect(runtimeSrc).not.toMatch(/pool\.query|db\.query/)
@@ -273,14 +293,20 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
 
     const routeSrc = readFileSync(ROUTE_SRC, 'utf8')
     expect(routeSrc).toMatch(/json\(\s*\{\s*limit:\s*16\s*\*\s*1024\s*\}\s*\)/)
-    expect(routeSrc).toMatch(/json\(\s*\{\s*limit:\s*1024\s*\*\s*1024\s*\}\s*\)/)
+    expect(routeSrc).toMatch(
+      /json\(\s*\{\s*limit:\s*1024\s*\*\s*1024\s*\}\s*\)/,
+    )
     expect(routeSrc).toMatch(/parseError\.status === 413|entity\.too\.large/)
     expect(routeSrc).toMatch(/payload_too_large/)
     expect(routeSrc).toMatch(/\/api\/elearning\/courses\/publish/)
     expect(routeSrc).toMatch(/\/api\/elearning\/me\/courses/)
-    expect(routeSrc).toMatch(/res\.status\(\s*200\s*\)\.json\(\s*\{\s*courses:\s*result\s*\}\s*\)/)
+    expect(routeSrc).toMatch(
+      /res\.status\(\s*200\s*\)\.json\(\s*\{\s*courses:\s*result\s*\}\s*\)/,
+    )
     expect(routeSrc).toMatch(/rbacGuard\('elearning',\s*'admin'\)|adminGuard/)
-    expect(routeSrc).toMatch(/gate\(\s*deps\.adminGuard,\s*'exam',\s*parsePublishJson\s*\)/)
+    expect(routeSrc).toMatch(
+      /gate\(\s*deps\.adminGuard,\s*'exam',\s*parsePublishJson\s*\)/,
+    )
     expect(routeSrc).toMatch(/gate\(\s*deps\.readGuard,\s*'exam',\s*null\s*\)/)
   })
 
@@ -395,48 +421,62 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
 
     order.length = 0
     const ok = await serve(app)
-      .post(`/api/elearning/assignments/direct?orgId=evil-org&actorId=evil-actor`)
+      .post(
+        `/api/elearning/assignments/direct?orgId=evil-org&actorId=evil-actor`,
+      )
       .set('x-user-id', 'header-user')
       .set('x-tenant-id', 'header-org')
       .send(ASSIGN_BODY)
     expect(ok.status).toBe(201)
     expect(ok.body).toEqual(ASSIGN_RESULT)
-    expect(assignCalls).toEqual([{
-      orgId: ORG,
-      actorId: ACTOR,
-      targetUserId: TARGET,
-      courseVersionId: VERSION,
-      sourceKey: SOURCE,
-      deadline: undefined,
-    }])
+    expect(assignCalls).toEqual([
+      {
+        orgId: ORG,
+        actorId: ACTOR,
+        targetUserId: TARGET,
+        courseVersionId: VERSION,
+        sourceKey: SOURCE,
+        deadline: undefined,
+      },
+    ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
     const ticket = await serve(app)
-      .post(`/api/elearning/watch/items/${ITEM}/playback-ticket?orgId=evil-org&userId=evil-user`)
+      .post(
+        `/api/elearning/watch/items/${ITEM}/playback-ticket?orgId=evil-org&userId=evil-user`,
+      )
       .send({})
     expect(ticket.status).toBe(200)
     expect(ticket.body).toEqual(TICKET_RESULT)
     expect(JSON.stringify(ticket.body)).not.toContain(PLAYBACK_SECRET)
     expect(JSON.stringify(ticket.body)).not.toContain(JWT_SECRET)
     expect(JSON.stringify(ticket.body)).not.toMatch(/storage_key|storageKey/)
-    expect(ticketCalls).toEqual([{
-      orgId: ORG,
-      userId: ACTOR,
-      itemId: ITEM,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-    }])
+    expect(ticketCalls).toEqual([
+      {
+        orgId: ORG,
+        userId: ACTOR,
+        itemId: ITEM,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+      },
+    ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
     const examStart = await serve(app)
-      .post(`/api/elearning/exams/items/${ITEM}/start?orgId=evil-org&userId=evil-user`)
+      .post(
+        `/api/elearning/exams/items/${ITEM}/start?orgId=evil-org&userId=evil-user`,
+      )
       .send({})
     expect(examStart.status).toBe(200)
     expect(examStart.body).toEqual(EXAM_START_RESULT)
-    expect(JSON.stringify(examStart.body)).not.toMatch(/answer_key|answerKey|explanation|"correct"/)
-    expect(examStartCalls).toEqual([{ orgId: ORG, userId: ACTOR, itemId: ITEM }])
+    expect(JSON.stringify(examStart.body)).not.toMatch(
+      /answer_key|answerKey|explanation|"correct"/,
+    )
+    expect(examStartCalls).toEqual([
+      { orgId: ORG, userId: ACTOR, itemId: ITEM },
+    ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
@@ -445,12 +485,14 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       .send(SUBMIT_BODY)
     expect(examSubmit.status).toBe(200)
     expect(examSubmit.body).toEqual(EXAM_SUBMIT_RESULT)
-    expect(examSubmitCalls).toEqual([{
-      orgId: ORG,
-      userId: ACTOR,
-      attemptId: ATTEMPT,
-      answers: ANSWERS,
-    }])
+    expect(examSubmitCalls).toEqual([
+      {
+        orgId: ORG,
+        userId: ACTOR,
+        attemptId: ATTEMPT,
+        answers: ANSWERS,
+      },
+    ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
@@ -484,23 +526,27 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
 
     order.length = 0
     const publish = await serve(app)
-      .post(`/api/elearning/courses/publish?orgId=evil-org&actorId=evil-actor&userId=evil-user`)
+      .post(
+        `/api/elearning/courses/publish?orgId=evil-org&actorId=evil-actor&userId=evil-user`,
+      )
       .set('x-user-id', 'header-user')
       .set('x-tenant-id', 'header-org')
       .send(PUBLISH_BODY)
     expect(publish.status).toBe(201)
     expect(publish.body).toEqual(PUBLISH_RESULT)
     expect(JSON.stringify(publish.body)).not.toContain(PLAYBACK_SECRET)
-    expect(publishCalls).toEqual([{
-      orgId: ORG,
-      actorId: ACTOR,
-      requestId: REQUEST_ID,
-      title: PUBLISH_BODY.title,
-      mediaId: MEDIA,
-      passScore: 10,
-      maxAttempts: 3,
-      questions: PUBLISH_BODY.questions,
-    }])
+    expect(publishCalls).toEqual([
+      {
+        orgId: ORG,
+        actorId: ACTOR,
+        requestId: REQUEST_ID,
+        title: PUBLISH_BODY.title,
+        mediaId: MEDIA,
+        passScore: 10,
+        maxAttempts: 3,
+        questions: PUBLISH_BODY.questions,
+      },
+    ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
@@ -522,7 +568,9 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(Array.isArray(learner.body)).toBe(false)
     expect(JSON.stringify(learner.body)).not.toContain(PLAYBACK_SECRET)
     expect(JSON.stringify(learner.body)).not.toContain(JWT_SECRET)
-    expect(JSON.stringify(learner.body)).not.toMatch(/storage_key|storageKey|answer_key|answerKey|paper_snapshot|sha256/)
+    expect(JSON.stringify(learner.body)).not.toMatch(
+      /storage_key|storageKey|answer_key|answerKey|paper_snapshot|sha256/,
+    )
     expect(JSON.stringify(learner.body)).not.toContain('explanation')
     expect(JSON.stringify(learner.body)).not.toMatch(/"correct"/)
     expect(learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
@@ -549,8 +597,14 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       db: dummyDb(),
       env: FLAG_EXAM_ON,
       authenticate: authenticateMw,
-      adminGuard: (_req, _res, next) => { order.push('rbac'); next() },
-      readGuard: (_req, _res, next) => { order.push('rbac'); next() },
+      adminGuard: (_req, _res, next) => {
+        order.push('rbac')
+        next()
+      },
+      readGuard: (_req, _res, next) => {
+        order.push('rbac')
+        next()
+      },
       assignElearningDirect: async (_db, input) => {
         assignCalls.push(input)
         order.push('service')
@@ -662,8 +716,12 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(underPublish.status).toBe(201)
     expect(underPublish.body).toEqual(PUBLISH_RESULT)
     expect(publishCalls).toHaveLength(1)
-    expect((publishCalls[0] as { orgId: string; actorId: string }).orgId).toBe(ORG)
-    expect((publishCalls[0] as { orgId: string; actorId: string }).actorId).toBe(ACTOR)
+    expect((publishCalls[0] as { orgId: string; actorId: string }).orgId).toBe(
+      ORG,
+    )
+    expect(
+      (publishCalls[0] as { orgId: string; actorId: string }).actorId,
+    ).toBe(ACTOR)
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
@@ -691,7 +749,9 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(overPublish.status).toBe(413)
     expect(overPublish.body).toEqual({ error: 'payload_too_large' })
     expect(JSON.stringify(overPublish.body)).not.toContain(PLAYBACK_SECRET)
-    expect(JSON.stringify(overPublish.body)).not.toMatch(/too large|entity|limit|bytes/i)
+    expect(JSON.stringify(overPublish.body)).not.toMatch(
+      /too large|entity|limit|bytes/i,
+    )
     expect(publishCalls).toHaveLength(0)
     expect(order).toEqual(['jwt', 'rbac'])
 
@@ -703,7 +763,9 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(learner.status).toBe(200)
     expect(learner.body).toEqual({ courses: LEARNER_COURSES })
     expect(Object.keys(learner.body)).toEqual(['courses'])
-    expect(JSON.stringify(learner.body)).not.toMatch(/storage_key|storageKey|answer_key|answerKey|paper_snapshot/)
+    expect(JSON.stringify(learner.body)).not.toMatch(
+      /storage_key|storageKey|answer_key|answerKey|paper_snapshot/,
+    )
     expect(learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
   })
@@ -713,11 +775,19 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const src = stripTsComments(raw)
     expect(src).toMatch(/createElearningPilotRuntime/)
     expect(src).toMatch(/this\.app\.use\(\s*elearningPilotRuntime\.router\s*\)/)
-    expect(src).toMatch(/createElearningPilotRuntime\(\s*\{\s*db:\s*poolManager\.get\(\)\s*\}\s*\)/)
+    expect(src).toMatch(
+      /createElearningPilotRuntime\(\s*\{\s*db:\s*poolManager\.get\(\)\s*\}\s*\)/,
+    )
 
-    const setupAt = src.search(/private\s+setupMiddleware\s*\(\s*\)\s*:\s*void\s*\{/)
-    const setupEndAt = src.search(/private\s+installGlobalErrorHandler\s*\(\s*\)\s*:\s*void\s*\{/)
-    const startAt = src.search(/async\s+start\s*\(\s*\)\s*:\s*Promise\s*<\s*void\s*>\s*\{/)
+    const setupAt = src.search(
+      /private\s+setupMiddleware\s*\(\s*\)\s*:\s*void\s*\{/,
+    )
+    const setupEndAt = src.search(
+      /private\s+installGlobalErrorHandler\s*\(\s*\)\s*:\s*void\s*\{/,
+    )
+    const startAt = src.search(
+      /async\s+start\s*\(\s*\)\s*:\s*Promise\s*<\s*void\s*>\s*\{/,
+    )
     expect(setupAt).toBeGreaterThanOrEqual(0)
     expect(setupEndAt).toBeGreaterThan(setupAt)
     expect(startAt).toBeGreaterThan(setupEndAt)
@@ -725,8 +795,12 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const setupSrc = src.slice(setupAt, setupEndAt)
     const startSrc = src.slice(startAt)
     const createAt = setupSrc.search(/createElearningPilotRuntime/)
-    const mountAt = setupSrc.search(/this\.app\.use\(\s*elearningPilotRuntime\.router\s*\)/)
-    const jsonAt = setupSrc.search(/this\.app\.use\(\s*express\.json\(\s*\{\s*limit:\s*['"]10mb['"]\s*\}\s*\)\s*\)/)
+    const mountAt = setupSrc.search(
+      /this\.app\.use\(\s*elearningPilotRuntime\.router\s*\)/,
+    )
+    const jsonAt = setupSrc.search(
+      /this\.app\.use\(\s*express\.json\(\s*\{\s*limit:\s*['"]10mb['"]\s*\}\s*\)\s*\)/,
+    )
     expect(createAt).toBeGreaterThanOrEqual(0)
     expect(mountAt).toBeGreaterThan(createAt)
     expect(jsonAt).toBeGreaterThan(mountAt)
@@ -781,7 +855,10 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(ticket.body).toEqual(TICKET_RESULT)
     expect(JSON.stringify(ticket.body)).not.toContain(PLAYBACK_SECRET)
     expect(ticketCalls).toHaveLength(1)
-    expect((ticketCalls[0] as { playbackSigningSecret: string }).playbackSigningSecret).toBe(PLAYBACK_SECRET)
+    expect(
+      (ticketCalls[0] as { playbackSigningSecret: string })
+        .playbackSigningSecret,
+    ).toBe(PLAYBACK_SECRET)
 
     const publish = await serve(app).post('/api/elearning/courses/publish').send(PUBLISH_BODY)
     expect(publish.status).toBe(404)

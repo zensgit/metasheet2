@@ -8443,6 +8443,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/courses/{courseId}/scope": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Append and activate a course visibility-scope revision
+         * @description Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. This changes only who may
+         *     discover and self-study an active published course. It never creates,
+         *     revokes, or reclassifies an assignment. Current live rules are `all`
+         *     and same-org active `user`; an empty rule array means visible to nobody.
+         */
+        put: operations["setElearningCourseScope"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/me/courses": {
         parameters: {
             query?: never;
@@ -8451,9 +8475,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List the current learner's assigned V0.1 courses
+         * List the current learner's assigned and visible courses
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus
-         *     ASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.
+         *     ASSESSMENT). No JSON body. At most 100 course versions. Actor/org from JWT.
+         *     Assignment access wins when both bases match; visibility access is optional
+         *     self-study and returns assignment null.
          */
         get: operations["listMyElearningCourses"];
         put?: never;
@@ -17501,11 +17527,42 @@ export interface components {
             memberId: components["schemas"]["ElearningUuid"];
             duplicate: boolean;
         };
+        /**
+         * @description L1 scope foundation rule. `all` requires subjectRef absent/null;
+         *     `user` requires a non-empty active same-org user id. includeChildren,
+         *     when present, must be false. Department, position, and role rules are
+         *     reserved by the storage model but are not accepted by this live API.
+         */
+        ElearningScopeRule: {
+            /** @enum {string} */
+            subjectType: "all" | "user";
+            subjectRef?: string | null;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        };
+        ElearningScopeUpdateRequest: {
+            reason: string;
+            /** @description Empty array is the explicit auditable visible-to-nobody revision. */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningScopeUpdateResult: {
+            courseId: components["schemas"]["ElearningUuid"];
+            scopeId: components["schemas"]["ElearningUuid"];
+            revisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+            ruleIds: components["schemas"]["ElearningUuid"][];
+        };
         ElearningLearnerAssignment: {
             /** Format: date-time */
             deadline: string | null;
             /** Format: date-time */
             assignedAt: string;
+        };
+        ElearningLearnerAccess: {
+            /** @enum {string} */
+            kind: "assignment" | "visibility";
+            /** @description True only for assignment access; visibility is optional self-study. */
+            required: boolean;
         };
         ElearningLearnerVideo: {
             itemId: components["schemas"]["ElearningUuid"];
@@ -17540,7 +17597,8 @@ export interface components {
             courseId: components["schemas"]["ElearningUuid"];
             courseVersionId: components["schemas"]["ElearningUuid"];
             title: string;
-            assignment: components["schemas"]["ElearningLearnerAssignment"];
+            access: components["schemas"]["ElearningLearnerAccess"];
+            assignment: components["schemas"]["ElearningLearnerAssignment"] | null;
             video: components["schemas"]["ElearningLearnerVideo"];
             exam: components["schemas"]["ElearningLearnerExam"];
             completed: boolean;
@@ -18951,6 +19009,46 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    setElearningCourseScope: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningScopeUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Immutable revision and normalized rule ids now active on the course scope. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningScopeUpdateResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            403: components["responses"]["ElearningError"];
+            /** @description Content surface flags off, course not found, or user subject not found */
+            404: components["responses"]["ElearningError"];
+            /** @description unsupported_subject for reserved department, position, or role rules */
+            422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     listMyElearningCourses: {
         parameters: {
             query?: never;
@@ -18960,7 +19058,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Assigned courses with video progress and latest exam attempt. No answer keys. */
+            /** @description Accessible courses with access basis, video progress, and latest exam attempt. No answer keys. */
             200: {
                 headers: {
                     [name: string]: unknown;

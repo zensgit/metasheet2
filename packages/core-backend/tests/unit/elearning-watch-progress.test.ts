@@ -21,10 +21,14 @@ const ORG = 'org-watch-1'
 const USER = 'user-watch-1'
 const ITEM = '11111111-1111-4111-8111-111111111111'
 const VERSION = '22222222-2222-4222-8222-222222222222'
+const COURSE = '77777777-7777-4777-8777-777777777777'
 const MEMBER = '33333333-3333-4333-8333-333333333333'
 const MEMBER_B = '66666666-6666-4666-8666-666666666666'
 const MEDIA = '44444444-4444-4444-8444-444444444444'
 const SESSION = '55555555-5555-4555-8555-555555555555'
+const SCOPE = '88888888-8888-4888-8888-888888888888'
+const SCOPE_REVISION = '99999999-9999-4999-8999-999999999999'
+const SCOPE_RULE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 
 const LOOKALIKES: Array<string | undefined> = [
   undefined,
@@ -60,6 +64,13 @@ interface ItemRow {
   courseStatus: string
   mediaStatus: string
   durationMs: number
+  courseId?: string
+  activeVersionId?: string | null
+  scopeId?: string | null
+  scopeRevisionId?: string | null
+  scopeRuleId?: string | null
+  scopeSubjectType?: 'all' | 'user'
+  scopeSubjectRef?: string | null
 }
 
 interface MemberRow {
@@ -71,7 +82,8 @@ interface MemberRow {
 
 interface SessionRow {
   id: string
-  memberId: string
+  memberId: string | null
+  scopeRuleId: string | null
   versionId: string
   itemId: string
   userId: string
@@ -97,7 +109,8 @@ interface EventRow {
 
 interface ProgressRow {
   id: string
-  memberId: string
+  memberId: string | null
+  scopeRuleId: string | null
   versionId: string
   itemId: string
   userId: string
@@ -105,10 +118,12 @@ interface ProgressRow {
   effectiveMs: number
   maxPositionMs: number
   completedAt: number | null
+  required: boolean
 }
 
 interface EvidenceRow {
-  memberId: string
+  memberId: string | null
+  scopeRuleId: string | null
   versionId: string
   itemId: string
   policyVersion: string
@@ -132,7 +147,7 @@ interface Mem {
 }
 
 function tagOf(sql: string): string | null {
-  const match = /\/\* (elearning-watch:[a-z-]+) \*\//.exec(sql)
+  const match = /\/\* (elearning-(?:watch|access):[a-z-]+) \*\//.exec(sql)
   return match ? match[1] : null
 }
 
@@ -200,13 +215,43 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
         rowCount: 1,
       }
     }
-    if (tag === 'elearning-watch:load-member') {
+    if (tag === 'elearning-access:lock-course') {
+      if (!item || item.versionId !== params[1]) return { rows: [], rowCount: 0 }
+      return {
+        rows: [{
+          course_id: item.courseId ?? COURSE,
+          course_status: item.courseStatus,
+          active_version_id: item.activeVersionId === undefined
+            ? item.versionId
+            : item.activeVersionId,
+          scope_id: item.scopeId ?? null,
+          version_status: item.versionStatus,
+        }],
+        rowCount: 1,
+      }
+    }
+    if (tag === 'elearning-access:lock-assignment') {
       const rows = mem.members
         .filter((m) => m.userId === params[1] && m.versionId === params[2] && m.revokedAt === null)
         .sort((a, b) => a.id.localeCompare(b.id))
         .slice(0, 1)
         .map((m) => ({ id: m.id }))
       return { rows, rowCount: rows.length }
+    }
+    if (tag === 'elearning-access:lock-scope') {
+      if (!item || item.scopeId !== params[1] || item.scopeRevisionId == null) {
+        return { rows: [], rowCount: 0 }
+      }
+      return { rows: [{ active_revision_id: item.scopeRevisionId }], rowCount: 1 }
+    }
+    if (tag === 'elearning-access:match-rule') {
+      if (!item || item.scopeRuleId == null || item.scopeRevisionId !== params[1]) {
+        return { rows: [], rowCount: 0 }
+      }
+      const matches = item.scopeSubjectType !== 'user' || item.scopeSubjectRef === params[2]
+      return matches
+        ? { rows: [{ id: item.scopeRuleId }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
     }
     if (tag === 'elearning-watch:load-progress') {
       const row = mem.progress.find((p) => p.userId === params[1] && p.itemId === params[2])
@@ -226,12 +271,8 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
         (s) => s.userId === params[1] && s.itemId === params[2] && s.status === 'active',
       )
       if (!row) return { rows: [], rowCount: 0 }
-      const member = mem.members.find((m) => m.id === row.memberId)
       return {
-        rows: [{
-          ...sessionQueryRow(row),
-          revoked_at: member === undefined ? 'missing' : member.revokedAt,
-        }],
+        rows: [sessionQueryRow(row)],
         rowCount: 1,
       }
     }
@@ -247,7 +288,6 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
       expect(sql).toContain('FOR SHARE OF c')
       const row = mem.sessions.find((s) => s.id === params[1])
       if (!row || !item) return { rows: [], rowCount: 0 }
-      const member = mem.members.find((m) => m.id === row.memberId)
       const elapsed = Math.max(0, mem.now - row.lastEventAt)
       return {
         rows: [{
@@ -260,7 +300,6 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
           course_status: item.courseStatus,
           media_status: item.mediaStatus,
           duration_ms: String(item.durationMs),
-          revoked_at: member === undefined ? 'missing' : member.revokedAt,
           elapsed_ms: String(elapsed),
         }],
         rowCount: 1,
@@ -282,16 +321,17 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
     if (tag === 'elearning-watch:insert-session') {
       mem.sessions.push({
         id: String(params[0]),
-        memberId: String(params[2]),
-        versionId: String(params[3]),
-        itemId: String(params[4]),
-        userId: String(params[5]),
+        memberId: params[2] == null ? null : String(params[2]),
+        scopeRuleId: params[3] == null ? null : String(params[3]),
+        versionId: String(params[4]),
+        itemId: String(params[5]),
+        userId: String(params[6]),
         status: 'active',
         lastSequence: 0,
         lastClientPositionMs: 0,
         effectiveMs: 0,
         maxPositionMs: 0,
-        rollingEventDigest: String(params[6]),
+        rollingEventDigest: String(params[7]),
         lastEventAt: mem.now,
         closedAt: null,
       })
@@ -313,14 +353,16 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
     if (tag === 'elearning-watch:insert-progress') {
       mem.progress.push({
         id: 'progress-1',
-        memberId: String(params[1]),
-        versionId: String(params[2]),
-        itemId: String(params[3]),
-        userId: String(params[4]),
+        memberId: params[1] == null ? null : String(params[1]),
+        scopeRuleId: params[2] == null ? null : String(params[2]),
+        versionId: String(params[3]),
+        itemId: String(params[4]),
+        userId: String(params[5]),
         status: 'in_progress',
         effectiveMs: 0,
         maxPositionMs: 0,
         completedAt: null,
+        required: Boolean(params[6]),
       })
       return { rows: [], rowCount: 1 }
     }
@@ -346,26 +388,28 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
     }
     if (tag === 'elearning-watch:insert-evidence') {
       mem.evidence.push({
-        memberId: String(params[1]),
-        versionId: String(params[2]),
-        itemId: String(params[3]),
-        policyVersion: String(params[5]),
-        thresholdBps: Number(params[6]),
-        durationMs: Number(params[7]),
-        effectiveMs: Number(params[8]),
-        maxPositionMs: Number(params[9]),
-        eventDigest: String(params[10]),
-        evaluatorVersion: String(params[11]),
+        memberId: params[1] == null ? null : String(params[1]),
+        scopeRuleId: params[2] == null ? null : String(params[2]),
+        versionId: String(params[3]),
+        itemId: String(params[4]),
+        policyVersion: String(params[6]),
+        thresholdBps: Number(params[7]),
+        durationMs: Number(params[8]),
+        effectiveMs: Number(params[9]),
+        maxPositionMs: Number(params[10]),
+        eventDigest: String(params[11]),
+        evaluatorVersion: String(params[12]),
       })
       return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-watch:complete-progress') {
       const row = mem.progress.find(
-        (p) => p.userId === params[1] && p.itemId === params[2] && p.status === 'in_progress',
+        (p) => p.userId === params[2] && p.itemId === params[3] && p.status === 'in_progress',
       )
       if (!row) return { rows: [], rowCount: 0 }
       row.status = 'completed'
       row.completedAt = mem.now
+      row.required = Boolean(params[0])
       return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-watch:close-session') {
@@ -375,21 +419,21 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningWatchDb; mem: M
       row.closedAt = mem.now
       return { rows: [], rowCount: 1 }
     }
-    if (tag === 'elearning-watch:close-revoked-session') {
-      const row = mem.sessions.find((s) => s.id === params[1] && s.status === 'active')
+    if (tag === 'elearning-watch:rebind-session-access') {
+      const row = mem.sessions.find((s) => s.id === params[3] && s.status === 'active')
       if (!row) return { rows: [], rowCount: 0 }
-      row.status = 'closed'
-      row.closedAt = mem.now
+      row.memberId = params[0] == null ? null : String(params[0])
+      row.scopeRuleId = params[1] == null ? null : String(params[1])
       return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-watch:rebind-progress') {
       const row = mem.progress.find(
-        (p) => p.userId === params[2] && p.itemId === params[3] && p.status === 'in_progress',
+        (p) => p.userId === params[4] && p.itemId === params[5] && p.status === 'in_progress',
       )
       if (!row) return { rows: [], rowCount: 0 }
-      row.memberId = String(params[0])
-      row.effectiveMs = 0
-      row.maxPositionMs = 0
+      row.memberId = params[0] == null ? null : String(params[0])
+      row.scopeRuleId = params[1] == null ? null : String(params[1])
+      row.required = Boolean(params[2])
       return { rows: [], rowCount: 1 }
     }
     throw new Error(`unexpected query: ${sql}`)
@@ -419,6 +463,7 @@ function sessionQueryRow(row: SessionRow): Record<string, unknown> {
   return {
     id: row.id,
     assignment_member_id: row.memberId,
+    scope_revision_rule_id: row.scopeRuleId,
     course_version_id: row.versionId,
     course_version_item_id: row.itemId,
     status: row.status,
@@ -441,6 +486,7 @@ function seededSession(over: Partial<SessionRow> = {}): SessionRow {
   return {
     id: SESSION,
     memberId: MEMBER,
+    scopeRuleId: null,
     versionId: VERSION,
     itemId: ITEM,
     userId: USER,
@@ -473,6 +519,7 @@ function seededProgress(over: Partial<ProgressRow> = {}): ProgressRow {
   return {
     id: 'progress-1',
     memberId: MEMBER,
+    scopeRuleId: null,
     versionId: VERSION,
     itemId: ITEM,
     userId: USER,
@@ -480,6 +527,30 @@ function seededProgress(over: Partial<ProgressRow> = {}): ProgressRow {
     effectiveMs: 0,
     maxPositionMs: 0,
     completedAt: null,
+    required: true,
+    ...over,
+  }
+}
+
+function scopeVisibleItem(over: Partial<ItemRow> = {}): ItemRow {
+  return {
+    id: ITEM,
+    versionId: VERSION,
+    itemType: 'video',
+    policyVersion: ELEARNING_WATCH_POLICY_VERSION,
+    thresholdBps: ELEARNING_WATCH_THRESHOLD_BPS,
+    mediaId: MEDIA,
+    versionStatus: 'published',
+    courseStatus: 'active',
+    mediaStatus: 'ready',
+    durationMs: 10_000,
+    courseId: COURSE,
+    activeVersionId: VERSION,
+    scopeId: SCOPE,
+    scopeRevisionId: SCOPE_REVISION,
+    scopeRuleId: SCOPE_RULE,
+    scopeSubjectType: 'all',
+    scopeSubjectRef: null,
     ...over,
   }
 }
@@ -497,7 +568,7 @@ function assertValuesFree(error: unknown): void {
 }
 
 describe('isElearningWatchSurfaceEnabled', () => {
-  it('requires exact true for master + content + assignment + media', () => {
+  it('requires exact true for master + content + media but not assignment', () => {
     expect(isElearningWatchSurfaceEnabled({} as NodeJS.ProcessEnv)).toBe(false)
     expect(isElearningWatchSurfaceEnabled(ALL_ON)).toBe(true)
     expect(isElearningWatchSurfaceEnabled({
@@ -516,7 +587,7 @@ describe('isElearningWatchSurfaceEnabled', () => {
       expect(isElearningWatchSurfaceEnabled({
         ...ALL_ON,
         ELEARNING_ASSIGNMENT_ENABLED: value,
-      } as NodeJS.ProcessEnv)).toBe(false)
+      } as NodeJS.ProcessEnv)).toBe(true)
       expect(isElearningWatchSurfaceEnabled({
         ...ALL_ON,
         ELEARNING_MEDIA_ENABLED: value,
@@ -713,7 +784,8 @@ describe('startElearningWatch', () => {
     expect(second.sessionId).toBe(SESSION)
     expect(mem.sessions).toHaveLength(1)
     expect(mem.events.filter((e) => e.kind === 'start')).toHaveLength(1)
-    expect(mem.queries.filter((q) => q.includes('elearning-watch:load-member'))).toHaveLength(2)
+    expect(mem.queries.filter((q) => q.includes('elearning-access:lock-assignment')))
+      .toHaveLength(2)
     expect(mem.queries.some((q) => q.includes('elearning-watch:insert-session'))).toBe(false)
   })
 
@@ -736,7 +808,8 @@ describe('startElearningWatch', () => {
       'elearning-watch:lock',
       'elearning-watch:lock-course',
       'elearning-watch:load-item',
-      'elearning-watch:load-member',
+      'elearning-access:lock-course',
+      'elearning-access:lock-assignment',
       'elearning-watch:load-progress',
     ])
     expect(mem.sessions).toHaveLength(0)
@@ -850,7 +923,132 @@ describe('startElearningWatch', () => {
       .resolves.toMatchObject({ status: 'in_progress' })
   })
 
-  it('closes a revoked-member active session, resets the rollup, and opens a fresh evidence chain', async () => {
+  it('starts and completes self-study with a visibility rule and freezes optional evidence', async () => {
+    const { db, mem } = createMemoryDb({
+      item: scopeVisibleItem(),
+      members: [],
+    })
+    const started = await startElearningWatch(db, { orgId: ORG, userId: USER, itemId: ITEM })
+    expect(mem.sessions[0]).toEqual(expect.objectContaining({
+      memberId: null,
+      scopeRuleId: SCOPE_RULE,
+    }))
+    expect(mem.progress[0]).toEqual(expect.objectContaining({
+      memberId: null,
+      scopeRuleId: SCOPE_RULE,
+      required: false,
+    }))
+
+    mem.now += 20_000
+    const completed = await recordElearningHeartbeat(db, {
+      sessionId: started.sessionId!,
+      orgId: ORG,
+      userId: USER,
+      sequence: 1,
+      positionMs: 10_000,
+      playing: true,
+    })
+    expect(completed.status).toBe('completed')
+    expect(mem.evidence).toEqual([
+      expect.objectContaining({
+        memberId: null,
+        scopeRuleId: SCOPE_RULE,
+      }),
+    ])
+    expect(mem.progress[0]).toEqual(expect.objectContaining({
+      status: 'completed',
+      required: false,
+    }))
+  })
+
+  it('prefers assignment over matching visibility and freezes the course as required', async () => {
+    const { db, mem } = createMemoryDb({ item: scopeVisibleItem() })
+    const started = await startElearningWatch(db, { orgId: ORG, userId: USER, itemId: ITEM })
+    expect(mem.sessions[0]).toEqual(expect.objectContaining({
+      memberId: MEMBER,
+      scopeRuleId: null,
+    }))
+    expect(mem.progress[0].required).toBe(true)
+    expect(mem.queries.some((sql) => sql.includes('elearning-access:match-rule'))).toBe(false)
+
+    mem.now += 20_000
+    await recordElearningHeartbeat(db, {
+      sessionId: started.sessionId!,
+      orgId: ORG,
+      userId: USER,
+      sequence: 1,
+      positionMs: 10_000,
+      playing: true,
+    })
+    expect(mem.evidence).toEqual([
+      expect.objectContaining({ memberId: MEMBER, scopeRuleId: null }),
+    ])
+    expect(mem.progress[0].required).toBe(true)
+  })
+
+  it('blocks new credit after scope shrink without mutating the event chain or rollup', async () => {
+    const { db, mem } = createMemoryDb({
+      item: scopeVisibleItem(),
+      members: [],
+    })
+    const started = await startElearningWatch(db, { orgId: ORG, userId: USER, itemId: ITEM })
+    mem.now += 10_000
+    const first = await recordElearningHeartbeat(db, {
+      sessionId: started.sessionId!,
+      orgId: ORG,
+      userId: USER,
+      sequence: 1,
+      positionMs: 4_000,
+      playing: true,
+    })
+    expect(first.effectiveMs).toBe(4_000)
+    mem.item!.scopeRuleId = null
+    mem.now += 10_000
+
+    await expect(recordElearningHeartbeat(db, {
+      sessionId: started.sessionId!,
+      orgId: ORG,
+      userId: USER,
+      sequence: 2,
+      positionMs: 8_000,
+      playing: true,
+    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+    expect(mem.events).toHaveLength(2)
+    expect(mem.sessions[0]).toEqual(expect.objectContaining({
+      lastSequence: 1,
+      effectiveMs: 4_000,
+      scopeRuleId: SCOPE_RULE,
+    }))
+    expect(mem.progress[0]).toEqual(expect.objectContaining({
+      effectiveMs: 4_000,
+      scopeRuleId: SCOPE_RULE,
+      status: 'in_progress',
+    }))
+  })
+
+  it('does not let visibility open archived courses or retired versions', async () => {
+    const archived = createMemoryDb({
+      item: scopeVisibleItem({ courseStatus: 'archived' }),
+      members: [],
+    })
+    await expect(startElearningWatch(archived.db, {
+      orgId: ORG,
+      userId: USER,
+      itemId: ITEM,
+    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+
+    const retired = createMemoryDb({
+      item: scopeVisibleItem({ versionStatus: 'retired' }),
+      members: [],
+    })
+    await expect(startElearningWatch(retired.db, {
+      orgId: ORG,
+      userId: USER,
+      itemId: ITEM,
+    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+  })
+
+  it('rebinds a revoked assignment basis in place without resetting credited progress', async () => {
     const { db, mem } = createMemoryDb({
       members: [
         { id: MEMBER, userId: USER, versionId: VERSION, revokedAt: 'now' },
@@ -882,73 +1080,53 @@ describe('startElearningWatch', () => {
       })],
     })
     const state = await startElearningWatch(db, { orgId: ORG, userId: USER, itemId: ITEM })
-    expect(state.sessionId).not.toBe(SESSION)
+    expect(state.sessionId).toBe(SESSION)
     expect(state).toEqual(expect.objectContaining({
       status: 'in_progress',
-      lastSequence: 0,
-      lastClientPositionMs: 0,
-      effectiveMs: 0,
-      maxPositionMs: 0,
+      lastSequence: 1,
+      lastClientPositionMs: 4_000,
+      effectiveMs: 4_000,
+      maxPositionMs: 4_000,
       creditedMs: 0,
     }))
-    expect(mem.sessions).toHaveLength(2)
+    expect(mem.sessions).toHaveLength(1)
     expect(mem.sessions[0]).toEqual(expect.objectContaining({
       id: SESSION,
-      status: 'closed',
-      closedAt: mem.now,
-      memberId: MEMBER,
+      status: 'active',
+      closedAt: null,
+      memberId: MEMBER_B,
       effectiveMs: 4_000,
     }))
-    expect(mem.sessions[1]).toEqual(expect.objectContaining({
-      id: state.sessionId,
-      status: 'active',
-      memberId: MEMBER_B,
-      lastSequence: 0,
-      effectiveMs: 0,
-      maxPositionMs: 0,
-      closedAt: null,
-    }))
     expect(mem.sessions[0].rollingEventDigest).toBe('old-digest')
-    expect(mem.sessions[1].rollingEventDigest).toBe(rollElearningWatchEventDigest('', {
-      sequence: 0,
-      kind: 'start',
-      reportedPositionMs: 0,
-      playing: false,
-      creditedMs: 0,
-    }))
-    expect(mem.sessions[1].rollingEventDigest).not.toBe('old-digest')
     expect(mem.progress).toEqual([
       expect.objectContaining({
         memberId: MEMBER_B,
         status: 'in_progress',
-        effectiveMs: 0,
-        maxPositionMs: 0,
+        effectiveMs: 4_000,
+        maxPositionMs: 4_000,
         completedAt: null,
       }),
     ])
-    expect(mem.events.filter((e) => e.kind === 'start')).toHaveLength(2)
-    expect(mem.events.filter((e) => e.sessionId === state.sessionId)).toEqual([
-      expect.objectContaining({ sequence: 0, kind: 'start', creditedMs: 0 }),
-    ])
+    expect(mem.events.filter((e) => e.kind === 'start')).toHaveLength(1)
 
     mem.now = 1_020_000
     const beat = await recordElearningHeartbeat(db, {
       sessionId: state.sessionId!,
       orgId: ORG,
       userId: USER,
-      sequence: 1,
-      positionMs: 4_000,
+      sequence: 2,
+      positionMs: 8_000,
       playing: true,
     })
     expect(beat.duplicate).toBe(false)
     expect(beat.status).toBe('in_progress')
     expect(beat.creditedMs).toBeGreaterThan(0)
-    expect(beat.effectiveMs).toBe(beat.creditedMs)
-    expect(mem.sessions[0].status).toBe('closed')
+    expect(beat.effectiveMs).toBe(4_000 + beat.creditedMs)
+    expect(mem.sessions[0].status).toBe('active')
     expect(mem.progress[0].memberId).toBe(MEMBER_B)
   })
 
-  it('reuses an unrevoked active session even when another valid member exists', async () => {
+  it('keeps one active chain and deterministically rebinds to the canonical valid member', async () => {
     const { db, mem } = createMemoryDb({
       members: [
         { id: MEMBER, userId: USER, versionId: VERSION, revokedAt: null },
@@ -962,11 +1140,11 @@ describe('startElearningWatch', () => {
     expect(state.sessionId).toBe(SESSION)
     expect(state.effectiveMs).toBe(2_000)
     expect(mem.sessions).toHaveLength(1)
-    expect(mem.sessions[0].memberId).toBe(MEMBER_B)
+    expect(mem.sessions[0].memberId).toBe(MEMBER)
     expect(mem.sessions[0].status).toBe('active')
     expect(mem.events.filter((e) => e.kind === 'start')).toHaveLength(1)
     expect(mem.progress[0]).toEqual(expect.objectContaining({
-      memberId: MEMBER_B,
+      memberId: MEMBER,
       effectiveMs: 2_000,
     }))
   })
@@ -994,7 +1172,8 @@ describe('startElearningWatch', () => {
       'elearning-watch:lock',
       'elearning-watch:lock-course',
       'elearning-watch:load-item',
-      'elearning-watch:load-member',
+      'elearning-access:lock-course',
+      'elearning-access:lock-assignment',
       'elearning-watch:load-progress',
     ])
     expect(mem.sessions).toHaveLength(0)
@@ -1011,6 +1190,7 @@ describe('startElearningWatch', () => {
   it('rejects completed progress when the only assignment member is revoked and leaves history untouched', async () => {
     const evidence: EvidenceRow = {
       memberId: MEMBER,
+      scopeRuleId: null,
       versionId: VERSION,
       itemId: ITEM,
       policyVersion: ELEARNING_WATCH_POLICY_VERSION,
@@ -1062,7 +1242,8 @@ describe('startElearningWatch', () => {
       'elearning-watch:lock',
       'elearning-watch:lock-course',
       'elearning-watch:load-item',
-      'elearning-watch:load-member',
+      'elearning-access:lock-course',
+      'elearning-access:lock-assignment',
     ])
     expect(mem.sessions).toEqual([
       expect.objectContaining({

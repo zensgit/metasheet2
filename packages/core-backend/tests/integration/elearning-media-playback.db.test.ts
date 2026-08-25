@@ -10,10 +10,14 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { Pool } from 'pg'
+import { Pool, type PoolClient } from 'pg'
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
 import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
+import {
+  SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
+  SCOPE_RULES_DENY_MUTATION_TRIGGER,
+} from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
 import { ELEARNING_MEDIA_RANGE_MAX_BYTES } from '../../src/services/elearning-media-storage'
 import {
   authorizeElearningMediaPlayback,
@@ -22,6 +26,7 @@ import {
   signElearningMediaPlaybackToken,
   verifyElearningMediaPlaybackToken,
   type ElearningMediaPlaybackClaims,
+  type ElearningPlaybackDb,
   type ElearningPlaybackQueryable,
 } from '../../src/services/elearning-media-playback'
 
@@ -43,14 +48,63 @@ const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  {
+    table: 'elearning_scope_revisions',
+    name: SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
+  },
+  {
+    table: 'elearning_scope_revision_rules',
+    name: SCOPE_RULES_DENY_MUTATION_TRIGGER,
+  },
 ]
 
-class PgPlaybackDb implements ElearningPlaybackQueryable {
-  constructor(private readonly target: Pool) {}
+class PgPlaybackDb implements ElearningPlaybackDb {
+  constructor(
+    private readonly target: Pool,
+    private readonly afterQuery?: (sql: string) => Promise<void>,
+  ) {}
 
   async query(sql: string, params?: unknown[]) {
     const result = await this.target.query(sql, params as never)
-    return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount }
+    return {
+      rows: result.rows as Array<Record<string, unknown>>,
+      rowCount: result.rowCount,
+    }
+  }
+
+  async transaction<T>(
+    handler: (tx: ElearningPlaybackQueryable) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.target.connect()
+    try {
+      await client.query('BEGIN')
+      const value = await handler(
+        new PgPlaybackTransaction(client, this.afterQuery),
+      )
+      await client.query('COMMIT')
+      return value
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+}
+
+class PgPlaybackTransaction implements ElearningPlaybackQueryable {
+  constructor(
+    private readonly client: PoolClient,
+    private readonly afterQuery?: (sql: string) => Promise<void>,
+  ) {}
+
+  async query(sql: string, params?: unknown[]) {
+    const result = await this.client.query(sql, params as never)
+    await this.afterQuery?.(sql)
+    return {
+      rows: result.rows as Array<Record<string, unknown>>,
+      rowCount: result.rowCount,
+    }
   }
 }
 
@@ -74,16 +128,38 @@ async function setTriggers(enabled: boolean): Promise<void> {
 async function cleanupOrg(org: string): Promise<void> {
   await setTriggers(false)
   try {
-    await pool.query('DELETE FROM elearning_completion_evidence WHERE org_id = $1', [org])
+    await pool.query(
+      'DELETE FROM elearning_completion_evidence WHERE org_id = $1',
+      [org],
+    )
     await pool.query('DELETE FROM elearning_progress WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_progress_events WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_learning_sessions WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_assignment_members WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_assignments WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_course_version_items WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_exam_questions WHERE org_id = $1', [org])
+    await pool.query(
+      'DELETE FROM elearning_progress_events WHERE org_id = $1',
+      [org],
+    )
+    await pool.query(
+      'DELETE FROM elearning_learning_sessions WHERE org_id = $1',
+      [org],
+    )
+    await pool.query(
+      'DELETE FROM elearning_assignment_members WHERE org_id = $1',
+      [org],
+    )
+    await pool.query('DELETE FROM elearning_assignments WHERE org_id = $1', [
+      org,
+    ])
+    await pool.query(
+      'DELETE FROM elearning_course_version_items WHERE org_id = $1',
+      [org],
+    )
+    await pool.query('DELETE FROM elearning_exam_questions WHERE org_id = $1', [
+      org,
+    ])
     await pool.query('DELETE FROM elearning_exams WHERE org_id = $1', [org])
-    await pool.query('DELETE FROM elearning_question_revisions WHERE org_id = $1', [org])
+    await pool.query(
+      'DELETE FROM elearning_question_revisions WHERE org_id = $1',
+      [org],
+    )
     await pool.query('DELETE FROM elearning_questions WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_media WHERE org_id = $1', [org])
     await pool.query(
@@ -92,11 +168,69 @@ async function cleanupOrg(org: string): Promise<void> {
         WHERE org_id = $1`,
       [org],
     )
-    await pool.query('DELETE FROM elearning_course_versions WHERE org_id = $1', [org])
+    await pool.query(
+      'DELETE FROM elearning_course_versions WHERE org_id = $1',
+      [org],
+    )
     await pool.query('DELETE FROM elearning_courses WHERE org_id = $1', [org])
+    await pool.query(
+      `UPDATE elearning_scopes
+          SET active_revision_id = NULL, latest_revision_id = NULL
+        WHERE org_id = $1`,
+      [org],
+    )
+    await pool.query(
+      'DELETE FROM elearning_scope_revision_rules WHERE org_id = $1',
+      [org],
+    )
+    await pool.query(
+      'DELETE FROM elearning_scope_revisions WHERE org_id = $1',
+      [org],
+    )
+    await pool.query('DELETE FROM elearning_scopes WHERE org_id = $1', [org])
   } finally {
     await setTriggers(true)
   }
+}
+
+function createQueryBarrier(tag: string): {
+  hit: Promise<void>
+  release: () => void
+  afterQuery: (sql: string) => Promise<void>
+} {
+  let hitResolve!: () => void
+  let releaseResolve!: () => void
+  let consumed = false
+  const hit = new Promise<void>((resolve) => {
+    hitResolve = resolve
+  })
+  const released = new Promise<void>((resolve) => {
+    releaseResolve = resolve
+  })
+  return {
+    hit,
+    release: releaseResolve,
+    async afterQuery(sql) {
+      if (consumed || !sql.includes(`/* ${tag} */`)) return
+      consumed = true
+      hitResolve()
+      await released
+    },
+  }
+}
+
+async function waitForBackendLock(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const state = await pool.query(
+      `SELECT wait_event_type
+         FROM pg_stat_activity
+        WHERE pid = $1`,
+      [pid],
+    )
+    if (state.rows[0]?.wait_event_type === 'Lock') return
+    await new Promise<void>((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error('expected updater to wait on playback authorization lock')
 }
 
 interface Seed {
@@ -146,7 +280,14 @@ async function seedPublishedAssignment(input: {
        id, org_id, storage_key, mime_type, magic_mime_type,
        size_bytes, sha256, duration_ms, status, created_by
      ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', $4, $5, 10000, 'ready', $6)`,
-    [mediaId, input.org, storageKey, sizeBytes, 'a'.repeat(64), actor('uploader')],
+    [
+      mediaId,
+      input.org,
+      storageKey,
+      sizeBytes,
+      'a'.repeat(64),
+      actor('uploader'),
+    ],
   )
   await pool.query(
     `INSERT INTO elearning_questions (id, org_id, created_by) VALUES ($1, $2, $3)`,
@@ -202,7 +343,14 @@ async function seedPublishedAssignment(input: {
        id, org_id, course_version_id, source_key, request_hash, request_hash_version,
        deadline, assigned_by
      ) VALUES ($1, $2, $3, $4, $5, 1, NULL, $6)`,
-    [assignmentId, input.org, versionId, `${input.org}-src`, `hash-${assignmentId}`, actor('assigner')],
+    [
+      assignmentId,
+      input.org,
+      versionId,
+      `${input.org}-src`,
+      `hash-${assignmentId}`,
+      actor('assigner'),
+    ],
   )
   await pool.query(
     `INSERT INTO elearning_assignment_members (
@@ -228,7 +376,9 @@ async function seedPublishedAssignment(input: {
 
 function decodeClaims(token: string): ElearningMediaPlaybackClaims {
   const payload = token.split('.')[0]
-  return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as ElearningMediaPlaybackClaims
+  return JSON.parse(
+    Buffer.from(payload, 'base64url').toString('utf8'),
+  ) as ElearningMediaPlaybackClaims
 }
 
 async function insertAssignedPeer(seed: Seed, userId: string): Promise<void> {
@@ -240,7 +390,59 @@ async function insertAssignedPeer(seed: Seed, userId: string): Promise<void> {
   )
 }
 
-function assertValuesFree(payload: unknown, org: string, userId: string, storageKey: string): void {
+async function replaceAssignmentWithAllVisibility(seed: Seed): Promise<{
+  scopeId: string
+  revisionId: string
+}> {
+  const scopeId = randomUUID()
+  const revisionId = randomUUID()
+  await pool.query(
+    `INSERT INTO elearning_scopes (id, org_id, created_by)
+     VALUES ($1, $2, $3)`,
+    [scopeId, seed.org, actor('scope-author')],
+  )
+  await pool.query(
+    `INSERT INTO elearning_scope_revisions
+       (id, org_id, scope_id, revision, actor_id, reason)
+     VALUES ($1, $2, $3, 1, $4, 'initial visibility')`,
+    [revisionId, seed.org, scopeId, actor('scope-author')],
+  )
+  await pool.query(
+    `INSERT INTO elearning_scope_revision_rules
+       (org_id, scope_revision_id, subject_type, subject_ref, include_children)
+     VALUES ($1, $2, 'all', NULL, FALSE)`,
+    [seed.org, revisionId],
+  )
+  await pool.query(
+    `UPDATE elearning_scopes
+        SET active_revision_id = $1, latest_revision_id = $1, updated_at = now()
+      WHERE org_id = $2 AND id = $3`,
+    [revisionId, seed.org, scopeId],
+  )
+  await pool.query(
+    `UPDATE elearning_courses
+        SET scope_id = $1,
+            active_version_id = $2,
+            latest_version_id = $2,
+            updated_at = now()
+      WHERE org_id = $3 AND id = $4`,
+    [scopeId, seed.versionId, seed.org, seed.courseId],
+  )
+  await pool.query(
+    `UPDATE elearning_assignment_members
+        SET revoked_at = now(), revoked_by = $1, revocation_reason = 'visibility test'
+      WHERE org_id = $2 AND id = $3`,
+    [actor('revoker'), seed.org, seed.memberId],
+  )
+  return { scopeId, revisionId }
+}
+
+function assertValuesFree(
+  payload: unknown,
+  org: string,
+  userId: string,
+  storageKey: string,
+): void {
   const blob = JSON.stringify(payload)
   expect(blob).not.toContain(org)
   expect(blob).not.toContain(userId)
@@ -306,6 +508,150 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
     })
   })
 
+  it('linearizes authorization before a concurrent course withdrawal', async () => {
+    const org = orgId('withdraw-race')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedAssignment({ org })
+    const ticket = await issueElearningMediaPlaybackTicket(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.itemId,
+      playbackSigningSecret: PLAYBACK_SECRET,
+      jwtSecret: JWT_SECRET,
+      now: NOW,
+    })
+    const barrier = createQueryBarrier('elearning-access:lock-assignment')
+    const authorization = authorizeElearningMediaPlayback(
+      new PgPlaybackDb(pool, barrier.afterQuery),
+      {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      },
+    )
+    await barrier.hit
+
+    const updater = await pool.connect()
+    try {
+      await updater.query('BEGIN')
+      const pid = Number(
+        (await updater.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      )
+      const withdrawal = updater.query(
+        `UPDATE elearning_courses
+            SET status = 'withdrawn', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, seed.courseId],
+      )
+      await waitForBackendLock(pid)
+      barrier.release()
+      await expect(authorization).resolves.toMatchObject({
+        storageKey: seed.storageKey,
+      })
+      await withdrawal
+      await updater.query('COMMIT')
+    } catch (error) {
+      barrier.release()
+      await updater.query('ROLLBACK')
+      throw error
+    } finally {
+      updater.release()
+    }
+
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'course_withdrawn' })
+  })
+
+  it('linearizes visibility authorization before a concurrent scope shrink', async () => {
+    const org = orgId('scope-race')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedAssignment({ org })
+    const { scopeId } = await replaceAssignmentWithAllVisibility(seed)
+    const ticket = await issueElearningMediaPlaybackTicket(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.itemId,
+      playbackSigningSecret: PLAYBACK_SECRET,
+      jwtSecret: JWT_SECRET,
+      now: NOW,
+    })
+    const barrier = createQueryBarrier('elearning-access:match-rule')
+    const authorization = authorizeElearningMediaPlayback(
+      new PgPlaybackDb(pool, barrier.afterQuery),
+      {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      },
+    )
+    await barrier.hit
+
+    const updater = await pool.connect()
+    try {
+      await updater.query('BEGIN')
+      const revisionId = randomUUID()
+      await updater.query(
+        `INSERT INTO elearning_scope_revisions
+           (id, org_id, scope_id, revision, actor_id, reason)
+         VALUES ($1, $2, $3, 2, $4, 'remove all visibility')`,
+        [revisionId, org, scopeId, actor('scope-editor')],
+      )
+      await updater.query(
+        `INSERT INTO elearning_scope_revision_rules
+           (org_id, scope_revision_id, subject_type, subject_ref, include_children)
+         VALUES ($1, $2, 'user', $3, FALSE)`,
+        [org, revisionId, actor('other-learner')],
+      )
+      const pid = Number(
+        (await updater.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      )
+      const shrink = updater.query(
+        `UPDATE elearning_scopes
+            SET active_revision_id = $1, latest_revision_id = $1, updated_at = now()
+          WHERE org_id = $2 AND id = $3`,
+        [revisionId, org, scopeId],
+      )
+      await waitForBackendLock(pid)
+      barrier.release()
+      await expect(authorization).resolves.toMatchObject({
+        storageKey: seed.storageKey,
+      })
+      await shrink
+      await updater.query('COMMIT')
+    } catch (error) {
+      barrier.release()
+      await updater.query('ROLLBACK')
+      throw error
+    } finally {
+      updater.release()
+    }
+
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: ticket.token,
+        orgId: org,
+        userId: seed.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'assignment_unavailable' })
+  })
+
   it('returns a bounded first-chunk contract when Range is absent', async () => {
     const org = orgId('absent')
     seededOrgIds.push(org)
@@ -332,7 +678,9 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
     expect(auth.range.absent).toBe(true)
     expect(auth.range.start).toBe(0)
     expect(auth.range.length).toBe(ELEARNING_MEDIA_RANGE_MAX_BYTES)
-    expect(auth.range.length).toBeLessThanOrEqual(ELEARNING_MEDIA_RANGE_MAX_BYTES)
+    expect(auth.range.length).toBeLessThanOrEqual(
+      ELEARNING_MEDIA_RANGE_MAX_BYTES,
+    )
     expect(auth.range.complete).toBe(false)
     expect(auth.range.httpStatus).toBe(206)
     expect(auth.sizeBytes).toBe(seed.sizeBytes)
@@ -358,14 +706,16 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
         WHERE org_id = $2 AND id = $3`,
       [actor('revoker'), revokedOrg, revoked.memberId],
     )
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: revokedTicket.token,
-      orgId: revokedOrg,
-      userId: revoked.userId,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: NOW,
-    })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: revokedTicket.token,
+        orgId: revokedOrg,
+        userId: revoked.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'assignment_unavailable' })
 
     const withdrawnOrg = orgId('withdrawn')
     seededOrgIds.push(withdrawnOrg)
@@ -382,14 +732,16 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
       `UPDATE elearning_courses SET status = 'withdrawn' WHERE org_id = $1 AND id = $2`,
       [withdrawnOrg, withdrawn.courseId],
     )
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: withdrawnTicket.token,
-      orgId: withdrawnOrg,
-      userId: withdrawn.userId,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: NOW,
-    })).rejects.toMatchObject({ code: 'course_withdrawn' })
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: withdrawnTicket.token,
+        orgId: withdrawnOrg,
+        userId: withdrawn.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'course_withdrawn' })
 
     const liveOrg = orgId('live')
     seededOrgIds.push(liveOrg)
@@ -402,33 +754,39 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
       jwtSecret: JWT_SECRET,
       now: NOW,
     })
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: liveTicket.token,
-      orgId: orgId('other'),
-      userId: live.userId,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: NOW,
-    })).rejects.toMatchObject({ code: 'invalid_token' })
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: liveTicket.token,
+        orgId: orgId('other'),
+        userId: live.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_token' })
 
     const [payloadB64] = liveTicket.token.split('.')
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: `${payloadB64}.${'C'.repeat(43)}`,
-      orgId: liveOrg,
-      userId: live.userId,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: NOW,
-    })).rejects.toMatchObject({ code: 'invalid_token' })
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: `${payloadB64}.${'C'.repeat(43)}`,
+        orgId: liveOrg,
+        userId: live.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_token' })
 
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: liveTicket.token,
-      orgId: liveOrg,
-      userId: live.userId,
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: new Date(NOW.getTime() + 601_000),
-    })).rejects.toMatchObject({ code: 'token_expired' })
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: liveTicket.token,
+        orgId: liveOrg,
+        userId: live.userId,
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: new Date(NOW.getTime() + 601_000),
+      }),
+    ).rejects.toMatchObject({ code: 'token_expired' })
 
     const retiredOrg = orgId('retired')
     seededOrgIds.push(retiredOrg)
@@ -445,15 +803,17 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
       jwtSecret: JWT_SECRET,
       now: NOW,
     })
-    await expect(authorizeElearningMediaPlayback(db, {
-      token: retiredTicket.token,
-      orgId: retiredOrg,
-      userId: retired.userId,
-      rangeHeader: 'bytes=0-1',
-      playbackSigningSecret: PLAYBACK_SECRET,
-      jwtSecret: JWT_SECRET,
-      now: NOW,
-    })).resolves.toMatchObject({
+    await expect(
+      authorizeElearningMediaPlayback(db, {
+        token: retiredTicket.token,
+        orgId: retiredOrg,
+        userId: retired.userId,
+        rangeHeader: 'bytes=0-1',
+        playbackSigningSecret: PLAYBACK_SECRET,
+        jwtSecret: JWT_SECRET,
+        now: NOW,
+      }),
+    ).resolves.toMatchObject({
       storageKey: retired.storageKey,
       mimeType: retired.mimeType,
       sizeBytes: retired.sizeBytes,
@@ -521,9 +881,23 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
     const claims = decodeClaims(ticket.token)
     const otherMedia = randomUUID()
     expect(otherMedia).not.toBe(seed.mediaId)
-    const mismatched: ElearningMediaPlaybackClaims = { ...claims, media: otherMedia }
-    const token = signElearningMediaPlaybackToken(mismatched, PLAYBACK_SECRET, JWT_SECRET)
-    expect(verifyElearningMediaPlaybackToken(token, PLAYBACK_SECRET, JWT_SECRET, NOW)).toEqual(mismatched)
+    const mismatched: ElearningMediaPlaybackClaims = {
+      ...claims,
+      media: otherMedia,
+    }
+    const token = signElearningMediaPlaybackToken(
+      mismatched,
+      PLAYBACK_SECRET,
+      JWT_SECRET,
+    )
+    expect(
+      verifyElearningMediaPlaybackToken(
+        token,
+        PLAYBACK_SECRET,
+        JWT_SECRET,
+        NOW,
+      ),
+    ).toEqual(mismatched)
     try {
       await authorizeElearningMediaPlayback(db, {
         token,

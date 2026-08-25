@@ -911,9 +911,10 @@ jobs:
 
       # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
       # plus watch, direct-assignment, course-publish, exam, learner-courses,
-      # and media-playback service gates.
-      # Migrations above must already have applied the zzzz20260824* and
-      # zzzz20260825120000 files; these suites do not mutate kysely_migration.
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
       # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate
@@ -931,6 +932,7 @@ jobs:
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
+            tests/integration/elearning-scope-access.db.test.ts \
             tests/integration/elearning-media-playback.db.test.ts \
             tests/integration/elearning-role-templates.db.test.ts \
             --reporter=verbose

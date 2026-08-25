@@ -51,16 +51,27 @@ export function isElearningMediaSurfaceEnabled(env: NodeJS.ProcessEnv = process.
   return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
 }
 
+/** Content/catalog/scope surface requires only the master and CONTENT gates. */
+export function isElearningContentSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED, env)
+}
+
+/** Assignment writes additionally require the independent ASSIGNMENT capability. */
+export function isElearningAssignmentSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    isElearningContentSurfaceEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_ASSIGNMENT_ENABLED, env)
+  )
+}
+
 /**
- * Watch surface is live only when master AND CONTENT AND ASSIGNMENT AND MEDIA
- * are exact literal 'true'. Assessment is not part of this gate.
+ * Watching is available to either an assignment or a visibility rule, so the
+ * independent ASSIGNMENT capability must not gate it.
  */
 export function isElearningWatchSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return (
-    isElearningEnabled(env) &&
-    isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED, env) &&
-    isElearningFlagEnabled(ELEARNING_ASSIGNMENT_ENABLED, env) &&
-    isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
+    isElearningContentSurfaceEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED, env)
   )
 }
 

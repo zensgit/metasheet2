@@ -11,6 +11,7 @@ import {
   ElearningApiError,
   getElearningCapabilities,
   isElearningV01Ready,
+  isElearningLearnerReady,
   issueElearningPlaybackTicket,
   listMyElearningCourses,
   publishElearningCourse,
@@ -78,6 +79,7 @@ function learnerCourse(over: Record<string, unknown> = {}) {
     courseId: COURSE,
     courseVersionId: VERSION,
     title: '示范课',
+    access: { kind: 'assignment', required: true },
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
     video: {
       itemId: VIDEO,
@@ -231,6 +233,18 @@ describe('elearning client transport', () => {
     expect(JSON.stringify(result)).not.toMatch(/answerKey|explanation|storageKey|storage_key|"correct"/)
   })
 
+  it('accepts visible self-study without fabricating an assignment', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      courses: [learnerCourse({
+        access: { kind: 'visibility', required: false },
+        assignment: null,
+      })],
+    }))
+    const result = await listMyElearningCourses()
+    expect(result.courses[0]?.access).toEqual({ kind: 'visibility', required: false })
+    expect(result.courses[0]?.assignment).toBeNull()
+  })
+
   it('starts watch and playback ticket with empty JSON bodies', async () => {
     apiFetchMock
       .mockResolvedValueOnce(jsonResponse(200, watchState()))
@@ -373,6 +387,21 @@ describe('elearning client fail-closed validation', () => {
       })],
     }))
     await expect(listMyElearningCourses()).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+  })
+
+  it('rejects contradictory learner access and assignment shapes', async () => {
+    for (const course of [
+      learnerCourse({ access: { kind: 'visibility', required: true }, assignment: null }),
+      learnerCourse({ access: { kind: 'visibility', required: false } }),
+      learnerCourse({ access: { kind: 'assignment', required: true }, assignment: null }),
+      learnerCourse({ access: { kind: 'assignment', required: false } }),
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, { courses: [course] }))
+      await expect(listMyElearningCourses()).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 200,
+      })
+    }
   })
 
   it('rejects exam start payloads that include answerKey/correct/explanation', async () => {
@@ -609,5 +638,12 @@ describe('elearning capabilities client', () => {
     expect(isElearningV01Ready(capabilitiesDto({}, { media: false }) as typeof parkedOff)).toBe(false)
     expect(isElearningV01Ready(capabilitiesDto({}, { assignment: false, incentive: true, analytics: true }) as typeof parkedOff)).toBe(false)
     expect(isElearningV01Ready(capabilitiesDto({}, { incentive: true, analytics: true }) as typeof parkedOff)).toBe(true)
+    expect(isElearningLearnerReady(parkedOff)).toBe(true)
+    expect(isElearningLearnerReady(
+      capabilitiesDto({}, { assignment: false }) as typeof parkedOff,
+    )).toBe(true)
+    expect(isElearningLearnerReady(
+      capabilitiesDto({}, { assessment: false }) as typeof parkedOff,
+    )).toBe(false)
   })
 })

@@ -7830,6 +7830,89 @@
           }
         }
       },
+      "ElearningScopeRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "subjectType"
+        ],
+        "description": "L1 scope foundation rule. `all` requires subjectRef absent/null;\n`user` requires a non-empty active same-org user id. includeChildren,\nwhen present, must be false. Department, position, and role rules are\nreserved by the storage model but are not accepted by this live API.\n",
+        "properties": {
+          "subjectType": {
+            "type": "string",
+            "enum": [
+              "all",
+              "user"
+            ]
+          },
+          "subjectRef": {
+            "type": "string",
+            "minLength": 1,
+            "nullable": true
+          },
+          "includeChildren": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          }
+        }
+      },
+      "ElearningScopeUpdateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "rules"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Empty array is the explicit auditable visible-to-nobody revision.",
+            "items": {
+              "$ref": "#/components/schemas/ElearningScopeRule"
+            }
+          }
+        }
+      },
+      "ElearningScopeUpdateResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseId",
+          "scopeId",
+          "revisionId",
+          "revision",
+          "ruleIds"
+        ],
+        "properties": {
+          "courseId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "scopeId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "revisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ruleIds": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        }
+      },
       "ElearningLearnerAssignment": {
         "type": "object",
         "additionalProperties": false,
@@ -7846,6 +7929,27 @@
           "assignedAt": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "ElearningLearnerAccess": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "required"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "assignment",
+              "visibility"
+            ]
+          },
+          "required": {
+            "type": "boolean",
+            "description": "True only for assignment access; visibility is optional self-study."
           }
         }
       },
@@ -7978,6 +8082,7 @@
           "courseId",
           "courseVersionId",
           "title",
+          "access",
           "assignment",
           "video",
           "exam",
@@ -7994,8 +8099,16 @@
             "type": "string",
             "minLength": 1
           },
+          "access": {
+            "$ref": "#/components/schemas/ElearningLearnerAccess"
+          },
           "assignment": {
-            "$ref": "#/components/schemas/ElearningLearnerAssignment"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ElearningLearnerAssignment"
+              }
+            ],
+            "nullable": true
           },
           "video": {
             "$ref": "#/components/schemas/ElearningLearnerVideo"
@@ -23055,11 +23168,83 @@
         }
       }
     },
+    "/api/elearning/courses/{courseId}/scope": {
+      "put": {
+        "operationId": "setElearningCourseScope",
+        "summary": "Append and activate a course visibility-scope revision",
+        "description": "Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nActor and authoritative org come from JWT. This changes only who may\ndiscover and self-study an active published course. It never creates,\nrevokes, or reclassifies an assignment. Current live rules are `all`\nand same-org active `user`; an empty rule array means visible to nobody.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningScopeUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Immutable revision and normalized rule ids now active on the course scope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningScopeUpdateResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Content surface flags off, course not found, or user subject not found",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "422": {
+            "description": "unsupported_subject for reserved department, position, or role rules",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
     "/api/elearning/me/courses": {
       "get": {
         "operationId": "listMyElearningCourses",
-        "summary": "List the current learner's assigned V0.1 courses",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus\nASSESSMENT). No JSON body. At most 100 courses. Actor/org from JWT.\n",
+        "summary": "List the current learner's assigned and visible courses",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags (watch gate plus\nASSESSMENT). No JSON body. At most 100 course versions. Actor/org from JWT.\nAssignment access wins when both bases match; visibility access is optional\nself-study and returns assignment null.\n",
         "security": [
           {
             "bearerAuth": []
@@ -23067,7 +23252,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Assigned courses with video progress and latest exam attempt. No answer keys.",
+            "description": "Accessible courses with access basis, video progress, and latest exam attempt. No answer keys.",
             "content": {
               "application/json": {
                 "schema": {
