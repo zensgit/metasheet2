@@ -26,6 +26,7 @@ import ElearningAdminView from '../src/views/ElearningAdminView.vue'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const SOURCE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const LOCAL = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+const LOCAL_SECOND = '14141414-1414-4141-8141-141414141414'
 const VERSION = '22222222-2222-4222-8222-222222222222'
 const VIDEO = '33333333-3333-4333-8333-333333333333'
 const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
@@ -80,8 +81,8 @@ describe('ElearningAdminView', () => {
       },
     })
     let n = 0
-    const ids = [LOCAL, REQUEST, SOURCE]
-    uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => ids[n++] ?? LOCAL)
+    const ids = [LOCAL, REQUEST, SOURCE, LOCAL_SECOND]
+    uuidSpy = vi.spyOn(globalThis.crypto, 'randomUUID').mockImplementation(() => ids[n++] ?? LOCAL_SECOND)
     h.upload.mockResolvedValue({
       id: MEDIA,
       status: 'ready',
@@ -237,6 +238,7 @@ describe('ElearningAdminView', () => {
     await fillMinimum(root)
     ;(root.querySelector('[data-testid="elearning-admin-add-question"]') as HTMLButtonElement).click()
     await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-question-1"]')).toBeTruthy()
     fillInput(root.querySelector('[data-testid="elearning-admin-prompt-1"]') as HTMLTextAreaElement, 'Second prompt')
     const secondOptions = root.querySelectorAll('[data-testid="elearning-admin-question-1"] .elearning-option input[type="text"]')
     fillInput(secondOptions[0] as HTMLInputElement, 'Alpha')
