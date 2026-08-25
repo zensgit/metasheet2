@@ -330,6 +330,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     let capabilitiesMounted = false
     await elearningPlugin.activate({
       api: {
+        database,
         http: {
           addRoute(method, path, handler) {
             if (method !== elearningPlugin.CANONICAL_METHOD || path !== elearningPlugin.CANONICAL_PATH) {
