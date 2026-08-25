@@ -289,4 +289,3 @@ describe('E-P3: the view composes the save minimum through the ONE helper', () =
     expect(executable).toMatch(/validationErrors\.value = minimum\.all/)
   })
 })
-

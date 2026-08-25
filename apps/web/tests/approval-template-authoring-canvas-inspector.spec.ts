@@ -88,7 +88,17 @@ vi.mock('../src/approvals/api', () => ({
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
-  getTemplate: (id: string) => getTemplateSpy(id),
+  // Server-faithful seam (round 4, same as approvalTemplateAuthoring.spec.ts): the real
+  // GET /templates/:id answers WITH that id, and the view's equality gate now requires it.
+  // Fixtures carrying the shared default 'tpl_canvas_inspector' inherit the requested id.
+  getTemplate: async (id: string) => {
+    const template = await getTemplateSpy(id)
+    if (template && typeof template === 'object'
+      && (template as { id?: string }).id === 'tpl_canvas_inspector' && id !== 'tpl_canvas_inspector') {
+      return { ...(template as object), id } as typeof template
+    }
+    return template
+  },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
 }))
 

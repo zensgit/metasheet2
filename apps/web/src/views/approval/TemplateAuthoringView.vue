@@ -1815,12 +1815,16 @@ const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupported
 // A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
 // the author inserts their first condition or parallel gateway.
 const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
-// EDIT ROUTE REQUIRES A LOADED TEMPLATE (external review round 3, P2 — reproduced on the real
-// mounted path: getTemplate rejects, loadError renders, draft stays the empty no-templateId
-// fallback, and save fell through persistDraft's create branch, minting a fresh 未命名审批
-// template from an EDIT url). The poisoned state is precisely "edit mode without templateId" —
-// gated on that, not on loadError, which topology ops reuse for non-load messages.
-const editRouteLoaded = computed(() => !isEditMode.value || Boolean(draft.value.templateId))
+// EDIT ROUTE REQUIRES THE LOADED TEMPLATE TO BE **THIS ROUTE'S** TEMPLATE (external review
+// rounds 3+4, both reproduced on the real mounted path). Round 3: getTemplate rejects, draft
+// stays the empty no-templateId fallback, and save fell through persistDraft's create branch —
+// minting a fresh 未命名审批 template from an EDIT url. Round 4: the route param SWITCHES
+// (/tpl_a/edit -> /tpl_b/edit) on a reused component instance — the load ran only in onMounted,
+// so draft still held tpl_a and 保存 called updateTemplate('tpl_a', …) from tpl_b's URL. The
+// predicate is therefore EQUALITY with the current route id, not mere presence — presence is the
+// round-3 subset (`'' !== 'tpl_b'`). Anchored on draft.templateId (set only by
+// draftFromTemplate after a successful fetch), not on loadError, which topology ops reuse.
+const editRouteLoaded = computed(() => !isEditMode.value || draft.value.templateId === templateId.value)
 const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
   if (!isEditMode.value && !isDraftDirty.value) return '新模板'
@@ -2789,15 +2793,14 @@ function onRemoveNode(nodeKey: string): void {
   if (selectedCanvasNode.value === nodeKey) clearCanvasSelection()
 }
 // B2 — parent owns the mutation (component doc comment "parent owns selection and all
-// mutations"), applying `name` the same way `step.name` is applied for a linear node: a direct
-// write to the node object's `name` field on `draft.preservedGraph`, not a new parallel edit-map
-// alongside G-2 (condition) / G-3 (parallel) / G-4 (cc) / G-5 (approvalNode) — those four passes
-// only ever rebuild `config`, never `name`, so a direct write here survives `buildApprovalGraph`
-// untouched (verified: `applyApprovalNodeEditsToGraph` et al. spread `{ ...cloneJson(node), config
-// }`, carrying whatever `name` the source node already has). Also survives topology undo/redo:
-// `mergeLiveNodeConfigsOntoTopology` (approvalAuthoringHistory.ts) already treats `name` as "live"
-// node state alongside `config`, generically, with no change needed here. A blank/whitespace name
-// clears the override — `graphNodeLabel` already falls back to the node-type label for `undefined`.
+// mutations"). HOW it applies (rewritten 2026-08-25, twice flagged stale — the text below this
+// line previously described a direct write to `draft.preservedGraph` with the live-name overlay
+// keeping renames alive across topology undo; BOTH halves of that design are gone, E-P2-4):
+// rename runs a topology op through the UNIFIED authoring history, so it is undo/redo-able like
+// every structural edit — and `mergeLiveNodeConfigsOntoTopology` deliberately no longer overlays
+// live names, because with rename in history, stack ordering provides what the overlay faked and
+// the overlay's only remaining effect was making rename itself un-undoable. A blank/whitespace
+// name clears the override (`graphNodeLabel` falls back to the node-type label), equally undoable.
 function onRenameCanvasNode(nodeKey: string, name: string): void {
   // THROUGH THE UNIFIED HISTORY, not a direct draft mutation (E-P2-4, external review
   // 2026-08-25): the first shape wrote draft.preservedGraph in place, so rename produced no
@@ -3838,7 +3841,14 @@ function moveStep(index: number, delta: -1 | 1) {
   draft.value.steps = swap(draft.value.steps, index, delta) ?? draft.value.steps
 }
 
+// Round-4 stale-response guard: navigations can overlap (slow tpl_a fetch, user switches to
+// tpl_b, tpl_b resolves first, tpl_a resolves LAST) — without a sequence check the older
+// response would overwrite the newer route's draft. Each load takes a ticket; only the holder
+// of the CURRENT ticket may apply its result or touch shared loading state.
+let templateLoadSeq = 0
+
 async function loadTemplateForEdit() {
+  const seq = ++templateLoadSeq
   selectedCanvasNode.value = null
   movingCanvasNode.value = null
   canvasZoom.value = 1
@@ -3861,6 +3871,7 @@ async function loadTemplateForEdit() {
   loadError.value = null
   try {
     const template = await getTemplate(templateId.value)
+    if (seq !== templateLoadSeq) return // superseded by a newer navigation — drop this response
     unsupportedReason.value = unsupportedTemplateAuthoringReason(template)
     graphReadOnlyMessage.value = graphReadOnlyReason(template)
     draft.value = draftFromTemplate(template)
@@ -3873,8 +3884,12 @@ async function loadTemplateForEdit() {
     reseedFormHistoryFromDraft()
     snapshotDraft()
   } catch (error: unknown) {
+    if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
   } finally {
+    if (seq !== templateLoadSeq) {
+      // the newer navigation owns loading/hydration state now
+    } else {
     loading.value = false
     // F4 hydration gate: set exactly ONCE per view instance, success or failure — `draft.value`
     // holds whatever the load produced (the real template, or the pre-existing empty fallback on
@@ -3882,6 +3897,7 @@ async function loadTemplateForEdit() {
     // `draft.value` reassignment (e.g. after save) never re-triggers this — see
     // `reseedFormBuilderSessionIfActive` for the ONE deliberate, explicit resync path.
     formSessionHydrated.value = true
+    }
   }
 }
 
@@ -3929,10 +3945,11 @@ async function validate(): Promise<boolean> {
 }
 
 async function persistDraft() {
-  // WRITE-PATH DEFENCE, independent of the canSave UI gate (same review): an edit route whose
-  // template never loaded must NEVER fall through to the create branch — templateId is falsy in
-  // exactly that state, and create would mint a duplicate template from an edit URL.
-  if (isEditMode.value && !draft.value.templateId) {
+  // WRITE-PATH DEFENCE, independent of the canSave UI gate (external review rounds 3+4): the
+  // draft must be THIS route's template. `!==` covers both poisoned states — never-loaded
+  // (`'' !== 'tpl_b'`, would fall through to CREATE and mint a duplicate) and stale-after-
+  // route-switch (`'tpl_a' !== 'tpl_b'`, would UPDATE the wrong template from tpl_b's URL).
+  if (isEditMode.value && draft.value.templateId !== templateId.value) {
     loadError.value = '模板尚未加载成功，无法保存 — 请刷新重试'
     return null
   }
@@ -4152,6 +4169,15 @@ const conditionNodeSummaries = computed(() =>
       lines: nodeConfigSummary(node),
     })),
 )
+
+// Round-4: Vue Router REUSES this component across /:id/edit param changes — onMounted alone
+// leaves the previous template's draft live under the new URL. Reload on every id change (and on
+// edit->new transitions, where loadTemplateForEdit resets to the empty starter synchronously).
+watch(templateId, (next, prev) => {
+  if (next === prev) return
+  if (!canManageTemplates.value) return
+  void loadTemplateForEdit()
+})
 
 onMounted(() => {
   if (!canManageTemplates.value) return
