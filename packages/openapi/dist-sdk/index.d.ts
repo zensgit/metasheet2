@@ -8443,6 +8443,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assignments/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Materialize an audience into one published-version assignment
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. Rules are normalized and
+         *     resolved once from current same-org active directory state, then the
+         *     resulting members are stored as assignment facts. Idempotent replay does
+         *     not resolve the audience again. At most 10,000 members may be materialized.
+         */
+        post: operations["assignElearningBatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/courses/{courseId}/scope": {
         parameters: {
             query?: never;
@@ -17529,6 +17553,23 @@ export interface components {
             memberId: components["schemas"]["ElearningUuid"];
             duplicate: boolean;
         };
+        ElearningBatchAssignmentRequest: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            sourceKey: string;
+            /** Format: date-time */
+            deadline?: string | null;
+            /**
+             * @description Duplicate selectors are canonicalized to one rule before hashing
+             *     and resolution. An empty array is structurally valid but resolves
+             *     to no members and returns 422 empty_audience.
+             */
+            rules: components["schemas"]["ElearningScopeRule"][];
+        };
+        ElearningBatchAssignmentResult: {
+            assignmentId: components["schemas"]["ElearningUuid"];
+            memberCount: number;
+            duplicate: boolean;
+        };
         /**
          * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
          *     database state. `department.subjectRef` is the directory department UUID;
@@ -19025,6 +19066,46 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description target_unavailable, course_unavailable, or conflict */
             409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    assignElearningBatch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningBatchAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Assignment id and bounded member count; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningBatchAssignmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found (flags off or course version missing) */
+            404: components["responses"]["ElearningError"];
+            /** @description course_unavailable or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
+            422: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

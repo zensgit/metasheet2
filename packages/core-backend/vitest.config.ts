@@ -1534,6 +1534,11 @@ export default defineConfig({
       // for immutable revisions plus same-org/same-parent/XOR/RESTRICT FKs.
       // Wired as a whole file into plugin-tests.yml after db:migrate.
       'tests/integration/elearning-scope-access.db.test.ts',
+      // E-learning L2 batch assignment + target-snapshot migration gates.
+      // Both require real PostgreSQL and are wired as whole-file arguments
+      // into plugin-tests.yml after db:migrate on the 20.x leg.
+      'tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts',
+      'tests/integration/elearning-batch-assignment.db.test.ts',
       // E-learning V0.1 protected-playback service gate. Requires real
       // PostgreSQL (ticket/authorize). Excluded from the no-DB job so a
       // missing DATABASE_URL cannot skip-green it; wired as a WHOLE FILE

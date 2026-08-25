@@ -14,6 +14,11 @@ import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
+import type {
+  AssignElearningBatchInput,
+  ElearningBatchAssignmentDb,
+  ElearningBatchAssignmentResult,
+} from './elearning-batch-assignment'
 import {
   publishElearningCourse,
   type ElearningCoursePublishDb,
@@ -66,6 +71,7 @@ export interface ElearningPilotRuntime {
 
 export interface ElearningPilotRuntimeOptions {
   db: ElearningDirectAssignmentDb &
+    ElearningBatchAssignmentDb &
     ElearningWatchDb &
     ElearningPlaybackDb &
     ElearningExamDb &
@@ -82,6 +88,10 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningDirectAssignmentDb,
     input: AssignElearningDirectInput,
   ) => Promise<ElearningDirectAssignmentResult>
+  assignElearningBatch?: (
+    db: ElearningBatchAssignmentDb,
+    input: AssignElearningBatchInput,
+  ) => Promise<ElearningBatchAssignmentResult>
   startElearningWatch?: (
     db: ElearningWatchDb,
     input: StartElearningWatchInput,
@@ -156,6 +166,7 @@ export function createElearningPilotRuntime(
     readGuard: opts.readGuard ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
     env,
     assignElearningDirect: opts.assignElearningDirect,
+    assignElearningBatch: opts.assignElearningBatch,
     startElearningWatch: opts.startElearningWatch,
     recordElearningHeartbeat: opts.recordElearningHeartbeat,
     issueElearningMediaPlaybackTicket: issuePlayback,

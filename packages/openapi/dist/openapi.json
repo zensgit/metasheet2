@@ -7830,6 +7830,59 @@
           }
         }
       },
+      "ElearningBatchAssignmentRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "courseVersionId",
+          "sourceKey",
+          "rules"
+        ],
+        "properties": {
+          "courseVersionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "sourceKey": {
+            "type": "string",
+            "minLength": 1
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 100,
+            "description": "Duplicate selectors are canonicalized to one rule before hashing\nand resolution. An empty array is structurally valid but resolves\nto no members and returns 422 empty_audience.\n",
+            "items": {
+              "$ref": "#/components/schemas/ElearningScopeRule"
+            }
+          }
+        }
+      },
+      "ElearningBatchAssignmentResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "assignmentId",
+          "memberCount",
+          "duplicate"
+        ],
+        "properties": {
+          "assignmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "memberCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
       "ElearningScopeRule": {
         "description": "L1 visibility rule. Subjects are resolved from fresh, active, same-org\ndatabase state. `department.subjectRef` is the directory department UUID;\nonly department rules may set includeChildren true. Position matches the\ntrimmed, case-sensitive title on an active same-org directory account.\nPlatform roles are not accepted until an org-scoped role-membership store\nexists. `all` requires subjectRef absent/null.\n",
         "oneOf": [
@@ -23236,6 +23289,72 @@
           },
           "409": {
             "description": "target_unavailable, course_unavailable, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/assignments/batch": {
+      "post": {
+        "operationId": "assignElearningBatch",
+        "summary": "Materialize an audience into one published-version assignment",
+        "description": "Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nActor and authoritative org come from JWT. Rules are normalized and\nresolved once from current same-org active directory state, then the\nresulting members are stored as assignment facts. Idempotent replay does\nnot resolve the audience again. At most 10,000 members may be materialized.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningBatchAssignmentRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Assignment id and bounded member count; duplicate true on replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningBatchAssignmentResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found (flags off or course version missing)",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_unavailable or idempotency conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "422": {
+            "description": "subject_not_found, unsupported_subject, empty_audience, or audience_too_large",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

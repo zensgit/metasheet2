@@ -109,7 +109,7 @@ function isSubjectType(value: unknown): value is ElearningAudienceSubjectType {
     && (ELEARNING_AUDIENCE_SUBJECT_TYPES as readonly string[]).includes(value)
 }
 
-function normalizeRules(rules: unknown): ElearningAudienceRule[] {
+export function normalizeElearningAudienceRules(rules: unknown): ElearningAudienceRule[] {
   // An empty revision is the explicit, auditable "visible to nobody" state.
   if (!Array.isArray(rules) || rules.length > 100) fail('invalid_input')
   const normalized = rules.map((raw): ElearningAudienceRule => {
@@ -212,6 +212,8 @@ async function resolveMatches(
   orgId: string,
   rules: MatchInputRule[],
   userIds?: readonly string[],
+  maxUniqueUsers?: number,
+  collapseRuleMatches = false,
 ): Promise<Map<string, Set<string>>> {
   if (rules.length === 0) return new Map()
   const result = await db.query(
@@ -318,11 +320,26 @@ async function resolveMatches(
                AND account.user_id = eligible.user_id
            )
          )
+     ),
+     bounded_users AS (
+       SELECT DISTINCT user_id
+       FROM matches
+       ORDER BY user_id ASC
+       LIMIT $4::bigint
      )
-     SELECT DISTINCT rule_key, user_id
+     SELECT DISTINCT
+       CASE WHEN $5::boolean THEN '__member__' ELSE matches.rule_key END AS rule_key,
+       matches.user_id
      FROM matches
-     ORDER BY rule_key ASC, user_id ASC`,
-    [orgId, matchPayload(rules), userIds ? [...userIds] : null],
+     JOIN bounded_users ON bounded_users.user_id = matches.user_id
+     ORDER BY 1 ASC, matches.user_id ASC`,
+    [
+      orgId,
+      matchPayload(rules),
+      userIds ? [...userIds] : null,
+      maxUniqueUsers ?? null,
+      collapseRuleMatches,
+    ],
   )
 
   const matches = new Map<string, Set<string>>()
@@ -345,7 +362,7 @@ export async function validateElearningAudienceRules(
   input: { orgId: string; rules: unknown },
 ): Promise<ElearningAudienceRule[]> {
   const orgId = requireText(input.orgId)
-  const rules = normalizeRules(input.rules)
+  const rules = normalizeElearningAudienceRules(input.rules)
   try {
     const userRefs = rules.flatMap((rule) => rule.subjectType === 'user' ? [rule.subjectRef] : [])
     if (userRefs.length > 0) {
@@ -391,14 +408,39 @@ export async function validateElearningAudienceRules(
       }
     }
 
-    const matchRules = asMatchRules(rules.filter(
-      (rule) => rule.subjectType === 'position',
-    ))
-    const matches = await resolveMatches(db, orgId, matchRules)
-    for (const rule of matchRules) {
-      if (
-        rule.subjectType === 'position' && !matches.has(rule.ruleKey)
-      ) {
+    const positionRefs = rules.flatMap(
+      (rule) => rule.subjectType === 'position' ? [rule.subjectRef] : [],
+    )
+    if (positionRefs.length > 0) {
+      const positions = await db.query(
+        `/* elearning-audience:validate-positions */
+         SELECT requested.subject_ref
+           FROM unnest($2::text[]) AS requested(subject_ref)
+          WHERE EXISTS (
+            SELECT 1
+              FROM directory_accounts account
+              JOIN directory_integrations integration
+                ON integration.id = account.integration_id
+               AND integration.org_id = $1
+               AND integration.status = 'active'
+              JOIN directory_account_links link
+                ON link.directory_account_id = account.id
+               AND link.link_status = 'linked'
+              JOIN users platform_user
+                ON platform_user.id = link.local_user_id
+               AND platform_user.is_active = TRUE
+              JOIN user_orgs membership
+                ON membership.user_id = platform_user.id
+               AND membership.org_id = $1
+               AND membership.is_active = TRUE
+             WHERE account.is_active = TRUE
+               AND btrim(account.title) = requested.subject_ref
+          )
+          ORDER BY requested.subject_ref ASC`,
+        [orgId, positionRefs],
+      )
+      const found = new Set(positions.rows.map((row) => storedText(row.subject_ref)))
+      if (positionRefs.some((positionRef) => !found.has(positionRef))) {
         fail('subject_not_found')
       }
     }
@@ -411,13 +453,26 @@ export async function validateElearningAudienceRules(
 
 export async function resolveElearningAudienceMembers(
   db: ElearningAudienceQueryable,
-  input: { orgId: string; rules: unknown },
+  input: { orgId: string; rules: unknown; maxMembers?: number },
 ): Promise<string[]> {
   const orgId = requireText(input.orgId)
+  if (
+    input.maxMembers !== undefined
+    && (!Number.isSafeInteger(input.maxMembers) || input.maxMembers < 1)
+  ) {
+    fail('invalid_input')
+  }
   const rules = await validateElearningAudienceRules(db, { orgId, rules: input.rules })
   try {
     const matchRules = asMatchRules(rules)
-    const matches = await resolveMatches(db, orgId, matchRules)
+    const matches = await resolveMatches(
+      db,
+      orgId,
+      matchRules,
+      undefined,
+      input.maxMembers,
+      true,
+    )
     const members = new Set<string>()
     for (const users of matches.values()) {
       for (const userId of users) members.add(userId)

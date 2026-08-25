@@ -398,6 +398,11 @@ jobs:
       - name: E-learning L0 jobs CI wiring contract
         run: node --test scripts/ops/elearning-jobs-ci-wiring.test.mjs
 
+      # E-learning L2 batch assignment CI two-point wiring: focused units stay
+      # in the no-DB canary and both real-Postgres suites run post-migrate.
+      - name: E-learning L2 batch assignment CI wiring contract
+        run: node --test scripts/ops/elearning-batch-assignment-ci-wiring.test.mjs
+
       # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
       # excluded) and named as a whole-file arg of the unit canary; real-DB
       # suites stay in the post-migrate 20.x steps; frontend specs stay in
@@ -839,6 +844,9 @@ jobs:
         # Whole-file args so a name filter matching zero tests cannot skip-green.
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/elearning-batch-assignment-routes.test.ts \
+            tests/unit/elearning-batch-assignment-runtime.test.ts \
+            tests/unit/elearning-batch-assignment.test.ts \
             tests/unit/elearning-course-publish.test.ts \
             tests/unit/elearning-direct-assignment.test.ts \
             tests/unit/elearning-exam.test.ts \
@@ -939,6 +947,8 @@ jobs:
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
             tests/integration/elearning-scope-access.db.test.ts \
+            tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts \
+            tests/integration/elearning-batch-assignment.db.test.ts \
             tests/integration/elearning-media-playback.db.test.ts \
             tests/integration/elearning-role-templates.db.test.ts \
             tests/integration/elearning-jobs.db.test.ts \

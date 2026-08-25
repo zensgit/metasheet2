@@ -27,6 +27,12 @@ import {
   type PublishElearningCourseInput,
 } from '../services/elearning-course-publish'
 import {
+  assignElearningBatch,
+  ElearningBatchAssignmentError,
+  type ElearningBatchAssignmentDb,
+  type ElearningBatchAssignmentErrorCode,
+} from '../services/elearning-batch-assignment'
+import {
   assignElearningDirect,
   ElearningDirectAssignmentError,
   type ElearningDirectAssignmentDb,
@@ -76,6 +82,12 @@ const ASSIGN_KEYS = new Set([
   'sourceKey',
   'deadline',
 ])
+const BATCH_ASSIGN_KEYS = new Set([
+  'courseVersionId',
+  'sourceKey',
+  'deadline',
+  'rules',
+])
 const HEARTBEAT_KEYS = new Set(['sequence', 'positionMs', 'playing'])
 const SUBMIT_KEYS = new Set(['answers'])
 const PUBLISH_KEYS = new Set([
@@ -94,6 +106,18 @@ const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
   not_found: 404,
   target_unavailable: 409,
   course_unavailable: 409,
+  conflict: 409,
+  unavailable: 503,
+}
+
+const BATCH_ASSIGNMENT_STATUS: Record<ElearningBatchAssignmentErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  course_unavailable: 409,
+  subject_not_found: 422,
+  unsupported_subject: 422,
+  empty_audience: 422,
+  audience_too_large: 422,
   conflict: 409,
   unavailable: 503,
 }
@@ -161,6 +185,7 @@ const publishJsonParser = json({ limit: 1024 * 1024 })
 
 export interface ElearningPilotRouteDeps {
   db: ElearningDirectAssignmentDb &
+    ElearningBatchAssignmentDb &
     ElearningWatchDb &
     ElearningPlaybackDb &
     ElearningExamDb &
@@ -175,6 +200,7 @@ export interface ElearningPilotRouteDeps {
   readGuard: RequestHandler
   env?: NodeJS.ProcessEnv
   assignElearningDirect?: typeof assignElearningDirect
+  assignElearningBatch?: typeof assignElearningBatch
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -253,6 +279,7 @@ export function createElearningPilotRouter(
   if (!isElearningContentSurfaceEnabled(envOf(deps))) return null
 
   const assignDirect = deps.assignElearningDirect ?? assignElearningDirect
+  const assignBatch = deps.assignElearningBatch ?? assignElearningBatch
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -436,6 +463,59 @@ export function createElearningPilotRouter(
       } catch (error) {
         if (error instanceof ElearningDirectAssignmentError) {
           res.status(ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/assignments/batch',
+    ...gate(deps.adminGuard, 'assignment'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const body = readObject(req.body)
+      if (
+        !body
+        || rejectUnknownKeys(body, BATCH_ASSIGN_KEYS)
+        || !Object.prototype.hasOwnProperty.call(body, 'rules')
+      ) {
+        invalid(res)
+        return
+      }
+      const courseVersionId = readUuid(body.courseVersionId)
+      const sourceKey = readRequiredString(body.sourceKey)
+      if (!courseVersionId || !sourceKey) {
+        invalid(res)
+        return
+      }
+      let deadline: string | null | undefined
+      if (Object.prototype.hasOwnProperty.call(body, 'deadline')) {
+        const rawDeadline = body.deadline
+        if (typeof rawDeadline === 'string') {
+          deadline = rawDeadline
+        } else if (rawDeadline === null) {
+          deadline = null
+        } else {
+          invalid(res)
+          return
+        }
+      }
+      try {
+        const result = await assignBatch(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          courseVersionId,
+          sourceKey,
+          deadline,
+          rules: body.rules,
+        })
+        res.status(201).json(result)
+      } catch (error) {
+        if (error instanceof ElearningBatchAssignmentError) {
+          res.status(BATCH_ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })

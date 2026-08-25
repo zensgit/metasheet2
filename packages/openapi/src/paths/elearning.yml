@@ -208,6 +208,55 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/assignments/batch:
+    post:
+      operationId: assignElearningBatch
+      summary: Materialize an audience into one published-version assignment
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+        Actor and authoritative org come from JWT. Rules are normalized and
+        resolved once from current same-org active directory state, then the
+        resulting members are stored as assignment facts. Idempotent replay does
+        not resolve the audience again. At most 10,000 members may be materialized.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningBatchAssignmentRequest'
+      responses:
+        '201':
+          description: Assignment id and bounded member count; duplicate true on replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningBatchAssignmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found (flags off or course version missing)
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_unavailable or idempotency conflict
+          $ref: '#/components/responses/ElearningError'
+        '422':
+          description: subject_not_found, unsupported_subject, empty_audience, or audience_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/courses/{courseId}/scope:
     put:
       operationId: setElearningCourseScope
