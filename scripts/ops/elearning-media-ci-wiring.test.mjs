@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import yaml from 'js-yaml'
 import {
   isQuotedInTestExclude,
   isSuiteWiredInRealDbStep,
+  parseYamlDocument,
   realDbStepWholeFileArgs,
   requireExecutableRealDbStep,
   REAL_DB_STEP_IDS,
@@ -181,13 +181,17 @@ function invocationFileArgs(line) {
 }
 
 function parseYaml(text) {
-  const doc = yaml.load(text)
+  // Shared fail-closed python3 + PyYAML bridge — this file runs in the required no-DB `test`
+  // job BEFORE `pnpm install`, so `js-yaml` is not importable on a clean runner.
+  const doc = parseYamlDocument(text)
   assert.ok(doc && typeof doc === 'object', 'workflow YAML must parse')
   return doc
 }
 
 function workflowOn(doc) {
-  return doc.on ?? doc.true
+  // YAML 1.1 `on:` is a boolean. js-yaml would expose it as `"true"`; the shared PyYAML
+  // bridge stringifies keys with Python `str()`, so the trigger block lands under `"True"`.
+  return doc.on ?? doc.true ?? doc.True
 }
 
 function commentBlockStarting(text, headingRe, label) {
