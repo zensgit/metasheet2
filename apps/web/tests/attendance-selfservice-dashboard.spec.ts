@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
@@ -902,6 +903,130 @@ describe('Attendance self-service dashboard', () => {
     expect(details.open).toBe(false)
     expect(orgInput!.value).toBe('collapsed-entry-org')
     expect(vi.mocked(apiFetch).mock.calls.length).toBe(callsBeforeExpand)
+  })
+
+  it('below-fold IA: history range is visible while collapsed; request/makeup is a secondary disclosure', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const filters = container!.querySelector('[data-attendance-history-filters]') as HTMLDetailsElement
+    const range = container!.querySelector('[data-attendance-history-filter-range]')
+    const history = container!.querySelector('[data-attendance-overview-history]')
+    const calendar = container!.querySelector('.attendance__card--calendar')
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    const form = container!.querySelector('#attendance-request-work-date')
+    const summary = container!.querySelector('#attendance-overview-requests')
+    const anomalies = container!.querySelector('#attendance-overview-request-report')
+
+    expect(filters).toBeTruthy()
+    expect(filters.open).toBe(false)
+    expect(range?.textContent).toMatch(/\d{4}-\d{2}-\d{2}\s+–\s+\d{4}-\d{2}-\d{2}/)
+    expect(history).toBeTruthy()
+    expect(history?.classList.contains('attendance__grid--overview-history')).toBe(true)
+    expect(calendar).toBeTruthy()
+    expect(requestTools).toBeTruthy()
+    expect(requestTools.open).toBe(false)
+    expect(requestTools.contains(form)).toBe(true)
+    expect(requestTools.contains(calendar)).toBe(false)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelectorAll('[data-attendance-request-tools]')).toHaveLength(1)
+
+    const order = [
+      '[data-attendance-history-filters]',
+      '#attendance-overview-requests',
+      '.attendance__card--calendar',
+      '[data-attendance-request-tools]',
+      '#attendance-overview-request-report',
+    ].map(selector => domOrderIndex(container!, selector))
+    expect(order[0]).toBeLessThan(order[1])
+    expect(order[1]).toBeLessThan(order[2])
+    expect(order[2]).toBeLessThan(order[3])
+    expect(order[3]).toBeLessThan(order[4])
+    expect(summary).toBeTruthy()
+    expect(anomalies).toBeTruthy()
+  })
+
+  it('below-fold IA: expanding history filters keeps the request/makeup disclosure closed and does not refetch', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const filters = container!.querySelector('[data-attendance-history-filters]') as HTMLDetailsElement
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    const orgInput = container!.querySelector<HTMLInputElement>('input[name="orgId"]')!
+    const fromInput = container!.querySelector<HTMLInputElement>('input[name="fromDate"]')!
+    const rangeBefore = container!.querySelector('[data-attendance-history-filter-range]')?.textContent
+    orgInput.value = 'kept-org'
+    orgInput.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    const callsBefore = vi.mocked(apiFetch).mock.calls.length
+    filters.querySelector('summary')!.click()
+    await flushUi()
+
+    expect(filters.open).toBe(true)
+    expect(requestTools.open).toBe(false)
+    expect(orgInput.value).toBe('kept-org')
+    expect(fromInput.value).toBeTruthy()
+    expect(container!.querySelector('[data-attendance-history-filter-range]')?.textContent).toContain('kept-org')
+    expect(container!.querySelector('[data-attendance-history-filter-range]')?.textContent).toContain(rangeBefore?.split(' · ')[0] || '')
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(callsBefore)
+  })
+
+  it('below-fold IA: a quick action opens the request/makeup disclosure without a second form', async () => {
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const requestTools = container!.querySelector('[data-attendance-request-tools]') as HTMLDetailsElement
+    expect(requestTools.open).toBe(false)
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+
+    expect(requestTools.open).toBe(true)
+    expect(container!.querySelectorAll('#attendance-request-work-date')).toHaveLength(1)
+    expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('leave')
+  })
+
+  it('below-fold overflow contract: history surfaces stay within 1440 and 390', async () => {
+    // jsdom does not paint CSS grid, so this is a layout-contract pin (classes + source
+    // rules), not a browser screenshot of scrollWidth. A real 1440/390 paint check
+    // still needs a browser.
+    const viewCss = readFileSync(new URL('../src/views/AttendanceView.vue', import.meta.url), 'utf8')
+    const workspaceCss = readFileSync(new URL('../src/views/attendance/AttendanceEmployeeWorkspace.vue', import.meta.url), 'utf8')
+    expect(viewCss).toMatch(/\.attendance__grid--overview-history\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/)
+    expect(viewCss).toMatch(/\.attendance__grid--overview-history\s*>\s*\*\s*\{[^}]*min-width:\s*0/)
+    expect(viewCss).toMatch(/\.attendance--overview\s+\.attendance__calendar-header\s*\{[^}]*flex-wrap:\s*wrap/)
+    expect(workspaceCss).toMatch(/\.attendance-ew__history-filters-panel\s*\{[^}]*minmax\(140px,\s*1fr\)/)
+    expect(workspaceCss).toMatch(/\.attendance-ew__history-filters-panel\s+\.attendance__field[\s\S]*?max-width:\s*100%/)
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    const selectors = [
+      '[data-attendance-history-filters]',
+      '[data-attendance-overview-history]',
+      '.attendance__card--calendar',
+      '[data-attendance-request-tools]',
+      '#attendance-overview-requests',
+      '#attendance-overview-request-report',
+    ]
+
+    for (const width of [1440, 390] as const) {
+      container!.style.width = `${width}px`
+      container!.style.maxWidth = `${width}px`
+      container!.style.minWidth = '0'
+
+      for (const selector of selectors) {
+        const el = container!.querySelector<HTMLElement>(selector)
+        expect(el, `${selector} at ${width}`).toBeTruthy()
+        expect(el!.getAttribute('style') || '', `${selector} inline style at ${width}`).not.toMatch(/min-width:\s*(?:[4-9]\d{2}|[1-9]\d{3})px/)
+        expect(el!.className).not.toMatch(/w-\[\d{4}px\]/)
+      }
+    }
   })
 
   it('W2/4355 statusMessage visibility guard: stays outside the disclosure and visible while filters are collapsed', async () => {

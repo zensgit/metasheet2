@@ -167,6 +167,10 @@
         :self-rules-configured-rule-summary="selfRulesConfiguredRuleSummary"
         :self-rules-warning-codes="selfRulesWarningCodes"
         :format-self-rules-warning="formatSelfRulesWarning"
+        :history-from-date="fromDate"
+        :history-to-date="toDate"
+        :history-org-id="orgId"
+        :history-user-id="targetUserId"
         :attendance-status-guide-items="attendanceStatusGuideItems"
         @punch="punch"
         @retry-punch-note="retryPunchWithOutdoorNote"
@@ -219,6 +223,12 @@
         keeps the status guide last). This first extraction does not move
         this handler-dense block into AttendanceEmployeeWorkspace — see the
         component's file header comment.
+
+        Below-the-fold (2026-08-25): overview uses a single-column history
+        grid so the calendar is the primary historical surface. The request/
+        makeup form stays the same DOM (same ids, one copy) but is a
+        collapsed-by-default details — not an equal-weight sibling of the
+        calendar. Quick actions and approval-center deep links open it.
       -->
       <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
         <div class="attendance__requests-header">
@@ -465,7 +475,12 @@
         </div>
       </section>
 
-      <section class="attendance__grid" v-if="showOverview || showReports">
+      <section
+        class="attendance__grid"
+        :class="{ 'attendance__grid--overview-history': showOverview }"
+        :data-attendance-overview-history="showOverview ? 'true' : undefined"
+        v-if="showOverview || showReports"
+      >
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
           <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
@@ -592,8 +607,18 @@
           </div>
         </div>
 
-        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
-          <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+        <details
+          v-if="showOverview"
+          class="attendance__card attendance__card--request-tools"
+          data-attendance-request-tools
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)"
+        >
+          <summary class="attendance__details-summary attendance__request-tools-summary">
+            <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+            <span class="attendance__field-hint">
+              {{ tr('Leave, overtime, swap, and makeup punch', '请假、加班、换班与补卡') }}
+            </span>
+          </summary>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'self-request-center' context
                help — the ④「查看计算依据/审计记录」deep link into the W5-1 decision-trace surface
@@ -927,7 +952,7 @@
               </li>
             </ul>
           </div>
-        </div>
+        </details>
 
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
           <div class="attendance__requests-header">
@@ -14819,10 +14844,25 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
   }
 }
 
+function revealOverviewHistoryDetails(target: Element | null): void {
+  if (target instanceof HTMLDetailsElement && !target.open) {
+    target.open = true
+  }
+}
+
+function revealOverviewRequestTools(): void {
+  if (typeof document === 'undefined') return
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  revealOverviewHistoryDetails(tools)
+}
+
 async function scrollToOverviewSection(id: AttendanceOverviewSectionId, focusTargetId?: string): Promise<void> {
   if (typeof document === 'undefined') return
   await nextTick()
   const target = overviewSectionElements.get(id) ?? document.getElementById(id)
+  if (id === ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies) {
+    revealOverviewHistoryDetails(target)
+  }
   if (target instanceof HTMLElement) {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -15548,6 +15588,10 @@ async function focusInitialAttendanceSection(): Promise<void> {
     hydrateAttendanceGroupFromRoute(props.routeGroupContext)
     return
   }
+  if (showOverview.value && attendancePluginActive.value && props.initialRequestId.trim()) {
+    await nextTick()
+    revealOverviewRequestTools()
+  }
   const targetId = props.initialSectionId.trim()
   if (!targetId || !attendancePluginActive.value) return
 
@@ -15560,6 +15604,7 @@ async function focusInitialAttendanceSection(): Promise<void> {
   await nextTick()
   const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
+    revealOverviewHistoryDetails(target)
     target.scrollIntoView({ behavior: 'auto', block: 'start' })
   }
 }
@@ -29903,6 +29948,17 @@ defineExpose({
   gap: 20px;
 }
 
+.attendance__grid--overview-history {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__grid--overview-history > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .attendance__card {
   background: #fff;
   border: 1px solid #e0e0e0;
@@ -30108,6 +30164,35 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance--overview .attendance__card--calendar {
+  grid-column: 1 / -1;
+}
+
+.attendance__card--request-tools {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__card--request-tools:not([open]) {
+  box-shadow: none;
+  background: #f8fafc;
+}
+
+.attendance__request-tools-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ms-space-2, 8px) var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+.attendance__request-tools-summary h3 {
+  margin: 0;
 }
 
 .attendance__calendar-header {
@@ -30115,6 +30200,11 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.attendance--overview .attendance__calendar-header {
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .attendance__calendar-nav {
