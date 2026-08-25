@@ -3220,6 +3220,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/employee-quick-action-icons": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Employee-readable 常用 pictogram keys (icon ids only)
+         * @description Returns only the four icon keys. Does not expose the admin settings document.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            ok?: boolean;
+                            data?: {
+                                /** @enum {string} */
+                                makeup: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                leave: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                overtime: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                                /** @enum {string} */
+                                swap: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/export": {
         parameters: {
             query?: never;
@@ -16229,6 +16282,16 @@ export interface components {
                 radiusMeters?: number;
             } | null;
             minPunchIntervalMinutes?: number;
+            employeeQuickActionIcons?: {
+                /** @enum {string} */
+                makeup?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                leave?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                overtime?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+                /** @enum {string} */
+                swap?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
+            };
         };
         Spreadsheet: {
             id?: string;

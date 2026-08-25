@@ -10,7 +10,9 @@
 
 ## 0. 一句话结论
 
-**接管处于路线第 1 步(演示)与第 3 步(迁移)之间:代码侧的使能件已全部建成但一条未合并;真正的关键路径是两件不需要写代码的事——客户只读窗口授权,和一份卡了 32 天的设计锁裁定。**
+**接管处于路线第 1 步(演示)与第 3 步(迁移)之间。真正的关键路径是两件不需要写代码的事——客户只读窗口 / 一次性导出授权(登记册 R-07),和 `/erp/*` 端点封闭与历史访问排查(R-08(i))。**
+
+> **2026-08-23 更正:原文两句均已失效。** (1)"代码侧的使能件已全部建成"——不成立,源→`ext_` 的 mapper 已合入却**未接线**,见 §4;(2)"一份卡了 32 天的设计锁裁定"——该锁已由登记册 **R-03 裁为维持挂起**,**已离开关键路径**,见 §3/O-1。
 
 ---
 
@@ -30,7 +32,7 @@
 
 > **本节曾在写下几小时后就自我推翻** —— 原文写着"接管的全部产出目前都不在 main 上",而同日下午 11 条即已合入。一份自称活文档的东西必须先守自己讲的更新纪律,故此处如实记录该失效并改为按状态分组。
 
-### 已合入 main(11)
+### 已合入 main(19,2026-08-23 复核)
 
 | PR | 内容 |
 |---|---|
@@ -40,22 +42,28 @@
 | #5061 / #5062 / #5066 | 开表请求瘦身 · comments/summary 改 POST 并封顶 · WorkflowDesigner 懒加载 |
 | #5068 | 行级溯源面板 |
 | #5065 → #5074 → #5079 → #5101 | pack 契约与安装器 → 安装排演 → pack 感知刷新写集 → 安装 ledger + dry-run/install 路由(含 migration 076) |
+| #5108 | catalog 接线:宿主填充 `stockPreparationCustomerPacks`(env 指向**文件**,两端 fail-closed);#5101 的安装路由由此才在真实服务器上可达 |
+| #5110 / #5111 / #5115 / #5119 | 账本 freshness pass · 单项目竖切 · 首载写入器 ADR · **决策登记册**(编号真源) |
+| #5118 | 源→`ext_` 字段 mapper + 权威 `ext_` id 更正 —— **注意:mapper 未接线,见 §4** |
+| #5120 | 从已提交 fixture 清除客户字典 + 复发守卫 |
+| #5034 | P0-S 安全加固(BPMN 运行时 fail-closed 闸门 + plugin-scope / `ensureFields` reconcile 守卫);**`ensureFields` 默认已翻为 `refuse`** |
 
-### 未合入(3)
+### 未合入(2,2026-08-23)
 
 | PR | 状态 | 说明 |
 |---|---|---|
-| #5034 | OPEN | P0-S 安全加固。改 `ensureFields` 默认为拒绝,爆炸半径是全仓每个 provisioning 调用方,**建议单独合并、独享一次 CI** |
-| #5067 | OPEN / 冲突 | 通用落表适配器所有权写守卫。CI 曾全绿;复核方要求阻止合并,两条理由的修复证据已附在 PR 上,待在最新 main 上重跑复核 |
-| #5108 | OPEN | **catalog 接线修复**:宿主从未填充 `stockPreparationCustomerPacks`,导致 #5101 的安装路由在真实服务器上不可达(任何 packId 均被拒)。env 指向文件,两端 fail-closed |
+| #5067 | OPEN / MERGEABLE / CLEAN | 通用落表适配器所有权写守卫。已在当前 main 上重基、无冲突。登记册 **R-12 已裁"合"** —— main 上适配器零所有权意识且无条件注册,**绕墙是活的**,不合并不是中立选项 |
+| #5117 | OPEN / MERGEABLE / CLEAN | 合成 SQL BOM 源 fixture + 计划覆盖守卫(不需要真库) |
 
-**因此 §0 的"代码侧使能件已建成"需附一句限定:通用 C6 所有权守卫(#5067)与 P0-S 加固(#5034)尚未进入 main,`lib/adapters/` 下无 ownership guard —— "通用 insertRows/updateRows 已闭环保护人工列"在 main 上不成立。**
+**因此"代码侧使能件已建成"需附一句限定:P0-S 加固(#5034)已于 2026-08-23 合入,但通用 C6 所有权守卫(#5067)**仍未进 main**,`lib/adapters/` 下无 ownership guard —— "通用 insertRows/updateRows 已闭环保护人工列"在 main 上**仍不成立**。**
 
 ## 3. owner 决策队列(全部无代码依赖)
 
+> **编号真源已迁至同目录 `decision-register.md`(#5119)。** 本表保留为原出处索引;任何裁定**以登记册为准**,本表同步标注。
+
 | # | 决策 | 影响 | 现状 |
 |---|---|---|---|
-| O-1 | **裁定 D2 binding 载体设计锁(PR #4520)** | **一次 ratify 解开三条线**(V2 后续刀 + 通用备料的设计与执行两条计划) | OPEN **32 天**,PROPOSED |
+| O-1 | D2 binding 载体设计锁(PR #4520) | ~~一次 ratify 解开三条线~~ —— **该说法已被登记册 R-03 推翻**:"G2 承载迁移的图号↔K3 登记表"不成立(登记表是 K3 API 一次性物化的专用 registry,G2 是图号**语法** profile 且排在 G0 之后),且 #4520 自述 ratify 即开实现刀、违双线上限 | **PARKED**(R-03:不 ratify,维持挂起)—— **已离开关键路径** |
 | O-2 | 客户只读窗口授权(备料 MySQL 库) | 迁移与对账的前置 | 未取得 |
 | O-3 | 凭据轮换 + `/erp/*` 端点封闭 | 客户现系统已知暴露,**默认视为已泄露** | 未执行 |
 | O-4 | `stock-prep:read/operate/admin` 权限词表与迁移 | V4 前置;现状权限过宽(需 `integration:write`) | 仍开放 |
@@ -77,7 +85,7 @@ MetaSheet provisioning 用确定性 id(`stableMetaId` = 前缀 + `sha1(parts.joi
 
 ## 3c. 三处经复核纠正的认知(2026-08-22)
 
-1. **"没有任何测试断言过 ext_ 值到达"—— 说过头了。** `__tests__/stock-preparation-pack-aware-refresh.test.cjs:377-378` 与 ~:600-604 确实把 ext_ 值推过了真实的 planner 与 apply。准确表述:**没有任何生产代码从任何源产出过 ext_ 值** —— planner→记录 这半段是真的且有测试,**源→planner 这半段不存在**。缺的是展开/导入边界上的一个 mapper,不是 planner 的工作。
+1. **"没有任何测试断言过 ext_ 值到达"—— 说过头了。** `__tests__/stock-preparation-pack-aware-refresh.test.cjs:377-378` 与 ~:600-604 确实把 ext_ 值推过了真实的 planner 与 apply。准确表述:**没有任何生产代码从任何源产出过 ext_ 值** —— planner→记录 这半段是真的且有测试,**源→planner 这半段不存在**。缺的是展开/导入边界上的一个 mapper,不是 planner 的工作。**#5118 已经把这个 mapper 建出来了,但没有接线**(见 §4),所以本条结论到今天为止一字未变。
 2. **未映射的 ext_ PLM 列是惰性失效,不是破坏性。** `pickFields` 只挑 `row[field] !== undefined` 的键(`lib/stock-preparation-conflict-planner.cjs:871-877`),所以那些列会静默陈旧,**不会被写 null**。
 3. **给安装器加严格类型校验,今天一条都不会触发** —— 手搭列根本读不到、全判 `missing`。该校验只在存在认领机制之后才 materialize;而彼时它会把"假成功"变成"硬拒绝",因此**类型协调策略必须与之同时定案**。
 
@@ -87,7 +95,8 @@ MetaSheet provisioning 用确定性 id(`stableMetaId` = 前缀 + `sha1(parts.joi
 |---|---|
 | **V3 抽取债** | #5079/#5101 建的 pack registry 是 **V3「最小场景注册」本该拥有的东西**;并往 `stock-preparation-conflict-planner.cjs` 加了领域逻辑——正是 V3 要抽取的模块。按章程("以客户能用为验收,不预先建设通用性")发货,**债记在 #5101 正文**。 |
 | **`ext_` 守卫接线缺口** | `assertExtensionFieldIdValid` **只在 repair 路径**(`stock-preparation-target-provisioning.cjs:525`、`mvp-provisioning.cjs:392`),**不在 ensure 路径**。pack 安装器走 ensure 路径写 `ext_` 列,靠自己的归一器自检。任何"ensure 已被平台守卫覆盖"的假设都是错的。 |
-| **提案文档 stale** | 通用化提案仍写"V2 runtime 在 Charter ratify 前 NO-GO",而 **Charter 已于 2026-07-21 RATIFIED**。两份文档在 main 上互相矛盾,**会误导每一个先读提案的人**(本线已被误导过一次)。 |
+| **`ext_` mapper 未接线** | #5118 合入了源→`ext_` 的 mapper(`lib/stock-preparation-ext-field-mapping.cjs`)与 `computeDryRun` 的 `extFieldMapping` 形参,但**两处路由包装器都不传它**,`lib/http-routes.cjs` 对 `extFieldMapping` **零引用**。故 §3c 第 1 条的"没有任何生产代码从任何源产出过 `ext_` 值"**在 main 上仍然成立**。这是一周内**第二起"建好但不可达"**(前一起:#5101 的安装路由要等 #5108 填 catalog 才可达)。 |
+| ~~**提案文档 stale**~~ **已修** | 通用化提案曾写"V2 runtime 在 Charter ratify 前 NO-GO"(Charter 实际已于 2026-07-21 RATIFIED),**#5102 已就地更正**;但那份更正**自己**又留下"一次 owner ratify 可解开三条线"一句,已由 R-03 推翻并于本次一并更正。教训:**更正块本身也会 stale**,推翻一条陈述时必须回头改它的每一处副本。 |
 | **大 BOM 路径未接** | 只有小 BOM 的 dry-run/apply 对供给 `installedFieldProperties`(二者必须同步移动,否则 plan revision 失配)。 |
 | **迁移必须先做身份归一** | 源系统字段字典有 10 处不一致,含 `提前周期`(中文字面量)与 Java 属性 `normalLeadDays` 对不上、`taskCode` vs `productCode` 同物异名——**直接按 identity 映射会在 MetaSheet 里生成两个独立字段**。 |
 | **本机 pin 重算不可信** | 若干被 pin 的 migration **blob 本身含 CRLF**,而 `.gitattributes` 声明 `eol=lf`:全新 checkout / CI 归一为 LF 与 pin 一致,长期 checkout 保留原字节 → 整份重算多出约 49 处**假**漂移。**只重算真正改动的行,或在全新 worktree 里算。** |

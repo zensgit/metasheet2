@@ -132,6 +132,69 @@ TARGET_MIGRATION_IMAGE=""
 TARGET_MIGRATION_IMAGE_ID=""
 TARGET_MIGRATION_REPO_DIGEST=""
 TARGET_MIGRATION_ENV_FILE=""
+# P1-1/P2-4 hardening (2026-08-24, staging-review-adjudication-20260824.md): the running
+# backend's Config.Env is NOT copied verbatim into TARGET_MIGRATION_ENV_FILE any more (that
+# copy previously carried every staging secret PLUS any inherited MIGRATION_EXCLUDE /
+# MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET straight into every migrate
+# `docker run`). Only names on THIS allowlist are written. Each entry below is the FULL
+# migrate-path env surface as read from source. CENSUS METHOD (corrected 2026-08-25 — the
+# original claim named 5 files and said "zero other reads found", but the real IMPORT CLOSURE of
+# migrate.ts is 9 files and one of the unnamed four DID read an env var; a census whose scope is
+# smaller than the code it vouches for produces honest-looking absences): walk the full import
+# closure of migrate.ts (incl. core/logger.ts, context/request-context.ts,
+# integration/metrics/metrics.ts), grep `process\.env\.` in
+# every file, plus every file under src/db/migrations|migrations/:
+#   DATABASE_URL                    - connection-pool.ts:200 secretManager.get('DATABASE_URL', ...)
+#   NODE_ENV                        - connection-pool.ts:200,207 (required/ssl gate);
+#                                      SecretManager.ts:69,74 (fallback + provider-required gate).
+#                                      Staging pins NODE_ENV=production (docker/app.staging.env.example:6)
+#                                      — dropping it would silently fall back to the image's own
+#                                      Dockerfile ENV default (also production), so this is about
+#                                      staying in explicit lockstep with the running backend, not a
+#                                      behavior change by itself.
+#   DB_SSL                          - connection-pool.ts:205 sslDisabledByEnv. MUST-HAVE: staging
+#                                      pins DB_SSL=false (docker/app.staging.env.example:28) against a
+#                                      non-SSL postgres; NODE_ENV=production is always true inside the
+#                                      migration container (image default), so omitting DB_SSL flips
+#                                      ssl ON and breaks the connection (adjudication P1-1 refinement 2).
+#   DB_SSL_REJECT_UNAUTHORIZED      - connection-pool.ts:209
+#   DB_SSL_CA                       - connection-pool.ts:210
+#   DB_SSL_CERT                     - connection-pool.ts:211
+#   DB_SSL_KEY                      - connection-pool.ts:212
+#   DB_POOL_MAX                     - connection-pool.ts:222
+#   DB_POOL_MIN                     - connection-pool.ts:223
+#   DB_IDLE_TIMEOUT                 - connection-pool.ts:226
+#   DB_CONNECT_TIMEOUT              - connection-pool.ts:227
+#   DB_QUERY_TIMEOUT                - connection-pool.ts:234
+#   DB_STATEMENT_TIMEOUT            - connection-pool.ts:235
+#   DB_SLOW_MS                      - connection-pool.ts:238 (also read directly at :58)
+#   APP_NAME                        - connection-pool.ts:242 (pg application_name)
+#   STORAGE_BASE_URL                - zzzz20260710140000_add_files_storage_key.ts:77 (backfill
+#                                      migration; already applied on staging, kept for generality
+#                                      per the adjudication — a rollback/replay could still read it)
+#   SECRET_PROVIDER                 - SecretManager.ts:74 (selects env|file|vault)
+#   SECRET_FILE_PATH                - SecretManager.ts:79 (only consulted when SECRET_PROVIDER=file;
+#                                      passed through so the migration container keeps whatever
+#                                      provider mode the running backend actually uses — NOT asserting
+#                                      env-provider, which the adjudication offers as an alternative
+#                                      but which would need its own separate verification the runner
+#                                      cannot make today)
+#   LOG_LEVEL                       - core/logger.ts:78 (in migrate.ts's import closure; unset
+#                                      falls back to 'info' — inert today, allowlisted so the
+#                                      census and the allowlist describe the same closure)
+# Deliberately NOT allowlisted: ALLOW_SECRET_FALLBACK (SecretManager.ts:69) — staging's template
+# never sets it and its absence is fail-CLOSED-safe (a genuinely missing required secret throws
+# rather than silently degrading), consistent with this allowlist's containment goal. Also never
+# allowlisted: MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL / ALLOW_DB_RESET — those
+# three are handled by the separate detect-and-abort + forced -e neutralization below
+# (materialize_target_migration_env, target_migrate_exec), never by silent inclusion here.
+TARGET_MIGRATION_ENV_ALLOWLIST=(
+  DATABASE_URL NODE_ENV
+  DB_SSL DB_SSL_REJECT_UNAUTHORIZED DB_SSL_CA DB_SSL_CERT DB_SSL_KEY
+  DB_POOL_MAX DB_POOL_MIN DB_IDLE_TIMEOUT DB_CONNECT_TIMEOUT
+  DB_QUERY_TIMEOUT DB_STATEMENT_TIMEOUT DB_SLOW_MS APP_NAME
+  STORAGE_BASE_URL SECRET_PROVIDER SECRET_FILE_PATH LOG_LEVEL
+)
 # Fixed, clearly-synthetic rehearsal DB name for action=migrate. Lives inside the SAME
 # postgres container/server as staging, never on a different host, and is always dropped
 # (created fresh each run — never assumed to persist).
@@ -269,16 +332,98 @@ staging_exec_env() {
     shift
   done
   [[ "${1:-}" == "--" ]] && shift
-  docker exec "${env_flags[@]}" "$BACKEND_CONTAINER" "$@"
+  docker exec ${env_flags[@]+"${env_flags[@]}"} "$BACKEND_CONTAINER" "$@"
 }
 
 cleanup_target_migration_runtime() {
-  # Config.Env contains credentials. It is materialized only because docker run has no safe
-  # "inherit another container's env" primitive; never copy it to OUTPUT_DIR or print it.
+  # The env file carries a (now allowlist-narrowed, but still real) DB DSN and possibly a
+  # secrets-file path. It is materialized only because docker run has no safe "inherit
+  # another container's env" primitive; never copy it to OUTPUT_DIR or print it.
+  # P2-4 hardening (2026-08-24): overwrite-before-unlink (shred) when available, so a crash
+  # between materialization and this cleanup does not leave forensically-recoverable
+  # plaintext disk blocks behind after the unlink. Falls back to a plain rm -f on hosts
+  # without shred(1) — still correct, just the pre-hardening guarantee (mode 0600 + rm).
   if [[ -n "${TARGET_MIGRATION_ENV_FILE:-}" ]]; then
-    rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    if command -v shred >/dev/null 2>&1; then
+      shred -u -z -n 1 -- "$TARGET_MIGRATION_ENV_FILE" 2>/dev/null || rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    else
+      rm -f -- "$TARGET_MIGRATION_ENV_FILE"
+    fi
     TARGET_MIGRATION_ENV_FILE=""
   fi
+}
+
+materialize_target_migration_env() {
+  # P1-1 hardening (2026-08-24, staging-review-adjudication-20260824.md): previously this
+  # copied the running backend's ENTIRE Config.Env verbatim into TARGET_MIGRATION_ENV_FILE,
+  # so an inherited MIGRATION_EXCLUDE / MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL /
+  # ALLOW_DB_RESET reached the migration container's process.env unfiltered — silently
+  # shrinking the manifest `--list`/`--confirm` certify while `Pending: 0` stays green
+  # (migration-provider.ts:267-272,309-311). Two independent layers now:
+  #   (a) detect-and-FAIL-LOUD (preferred, per the adjudication's refinement 1): if the
+  #       INHERITED env carries any of the three hazard variables in a hazardous state,
+  #       abort naming ONLY the variable name(s) — never the value — before writing
+  #       anything to disk. This is either host-side env drift or an undocumented owner
+  #       ruling the runner must not silently honor (migration-provider.ts's own docblock:
+  #       "never a normal deploy switch" / staging audit 20260519:132 "do not hide this
+  #       with a broad MIGRATION_EXCLUDE until ... explicitly accepted").
+  #   (b) allowlist (defense-in-depth / least-privilege, TARGET_MIGRATION_ENV_ALLOWLIST
+  #       above): only pass through names the migrate path actually reads. The three
+  #       hazard vars are deliberately never on that allowlist, so even if (a) somehow
+  #       didn't fire they still would not reach the file this way.
+  # target_migrate_exec below ALSO forces -e MIGRATION_EXCLUDE=/…=false/…=false on every
+  # migrate-family docker run as a third, independent backstop (docker applies trailing -e
+  # after --env-file, so it always wins regardless of what (a)/(b) let through).
+  local allowlist_csv
+  allowlist_csv="$(printf '%s,' "${TARGET_MIGRATION_ENV_ALLOWLIST[@]}")"
+  # Reject multiline/NUL values: Docker's env-file grammar cannot preserve them byte-for-byte.
+  # The JSON and resulting secret file are never emitted to logs or artifacts.
+  docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" \
+    | TARGET_ENV_FILE="$TARGET_MIGRATION_ENV_FILE" TARGET_ENV_ALLOWLIST_CSV="$allowlist_csv" python3 -c '
+import json, os, sys
+
+values = json.load(sys.stdin)
+if not isinstance(values, list) or not values:
+    raise SystemExit("running backend has no Config.Env")
+
+pairs = []
+for value in values:
+    if not isinstance(value, str) or "=" not in value or any(c in value for c in ("\n", "\r", "\0")):
+        raise SystemExit("running backend has an env entry incompatible with a secure env-file")
+    name, _, val = value.partition("=")
+    pairs.append((name, val))
+
+# (a) detect-and-fail-loud: values-free by construction (only names ever reach the message).
+def is_truthy(v):
+    return v.strip().lower() == "true"
+
+hazards = []
+for name, val in pairs:
+    if name == "MIGRATION_EXCLUDE" and val.strip() != "":
+        hazards.append(name)
+    elif name == "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL" and is_truthy(val):
+        hazards.append(name)
+    elif name == "ALLOW_DB_RESET" and is_truthy(val):
+        hazards.append(name)
+if hazards:
+    names = ", ".join(sorted(set(hazards)))
+    raise SystemExit(
+        "ABORT: the running backend'"'"'s inherited environment carries hazardous "
+        "migration-control variable(s): " + names + " (value withheld). This can silently "
+        "narrow or reset the migration manifest that Pending:0 certifies. This is either "
+        "host-side env drift or an owner ruling this runner must not silently honor -- "
+        "resolve it as its own change, never by rerunning this action."
+    )
+
+# (b) allowlist: only names the migrate path actually reads (see the bash comment above
+# TARGET_MIGRATION_ENV_ALLOWLIST for the per-entry source justification).
+allowlist = set(n for n in os.environ["TARGET_ENV_ALLOWLIST_CSV"].split(",") if n)
+filtered = [f"{name}={val}" for name, val in pairs if name in allowlist]
+
+path = os.environ["TARGET_ENV_FILE"]
+with open(path, "w", encoding="utf-8", newline="\n") as handle:
+    handle.write("\n".join(filtered) + "\n")
+'
 }
 
 prepare_target_migration_image() {
@@ -300,21 +445,7 @@ prepare_target_migration_image() {
   mkdir -p "$RUNNER_PERSIST_DIR"
   TARGET_MIGRATION_ENV_FILE="$(mktemp "${RUNNER_PERSIST_DIR}/.target-migrate-env.XXXXXX")"
   chmod 0600 "$TARGET_MIGRATION_ENV_FILE"
-  # Reject multiline/NUL values: Docker's env-file grammar cannot preserve them byte-for-byte.
-  # The JSON and resulting secret file are never emitted to logs or artifacts.
-  docker inspect -f '{{json .Config.Env}}' "$BACKEND_CONTAINER" \
-    | TARGET_ENV_FILE="$TARGET_MIGRATION_ENV_FILE" python3 -c '
-import json, os, sys
-values = json.load(sys.stdin)
-if not isinstance(values, list) or not values:
-    raise SystemExit("running backend has no Config.Env")
-for value in values:
-    if not isinstance(value, str) or "=" not in value or any(c in value for c in ("\n", "\r", "\0")):
-        raise SystemExit("running backend has an env entry incompatible with a secure env-file")
-path = os.environ["TARGET_ENV_FILE"]
-with open(path, "w", encoding="utf-8", newline="\n") as handle:
-    handle.write("\n".join(values) + "\n")
-'
+  materialize_target_migration_env
 
   {
     echo "image=${TARGET_MIGRATION_IMAGE}"
@@ -335,11 +466,150 @@ target_migrate_exec() {
   [[ "${1:-}" == "--" ]] && shift
   [[ -n "$TARGET_MIGRATION_IMAGE" && -r "$TARGET_MIGRATION_ENV_FILE" ]] \
     || fail "target migration runtime was not prepared"
+  # P1-1 hardening, layer 3 (defense-in-depth backstop behind materialize_target_migration_env's
+  # detect-and-abort + allowlist): force the three hazard vars off on EVERY migrate-family
+  # docker run, unconditionally. `docker run` applies `-e` flags AFTER `--env-file` and later
+  # `-e NAME=value` wins for a repeated NAME, so these three placed after the caller's own
+  # env_flags always have the final word — including for a hypothetical future caller that
+  # tried to pass one of these three names itself. None of the three has a legitimate runner
+  # use: this runner never invokes --reset (ALLOW_DB_RESET is only read by `migrate.ts --reset`);
+  # MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL is documented "never a normal deploy switch"
+  # (migration-provider.ts); MIGRATION_EXCLUDE changes are owner-ruled, separate-PR material
+  # (staging audit 20260519:132, precedent #4228), never a runner default.
   docker run --rm --pull=never \
     --network "container:${BACKEND_CONTAINER}" \
     --env-file "$TARGET_MIGRATION_ENV_FILE" \
-    "${env_flags[@]}" \
+    ${env_flags[@]+"${env_flags[@]}"} \
+    -e "MIGRATION_EXCLUDE=" \
+    -e "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=false" \
+    -e "ALLOW_DB_RESET=false" \
     "$TARGET_MIGRATION_IMAGE" "$@"
+}
+
+list_migration_name_universe() {
+  # P1-2 hardening (2026-08-24): filesystem enumeration INSIDE the pinned target image —
+  # bypasses Kysely's getMigrations() (and therefore process.env / MIGRATION_EXCLUDE)
+  # entirely. Dockerfile.backend COPIES the whole `packages` tree — source, not just the
+  # compiled dist — into the runner image (Dockerfile.backend:9,43), so these directories
+  # are guaranteed present in TARGET_MIGRATION_IMAGE with basenames identical to what the
+  # compiled provider reads. Verified against migration-provider.ts's actual folder
+  # candidates and directory contents (2026-08-24), not assumed:
+  #   - packages/core-backend/src/db/migrations/*.ts — the TS provider folder
+  #     (getProviderFolderCandidates; compiles to the dist twin migrate.js actually loads).
+  #     Every non-underscore-prefixed .ts file there carries a real `up` export (checked);
+  #     names starting with `_` (`_patterns.ts`, `_template.ts`) are shared helper code, not
+  #     migrations, and the provider itself skips them the same way
+  #     (migration-provider.ts's addProviderMigrations: `if (name.startsWith("_")) continue`)
+  #     — the `_*` skip below exists for exactly that file, not defensively.
+  #   - packages/core-backend/src/db/migrations/*.sql — raw legacy .sql files that ALSO
+  #     live in this same directory (20250925_create_view_tables.sql,
+  #     20250926_create_audit_tables.sql) and are picked up by
+  #     getSqlFolderCandidates's `../../../src/db/migrations` candidate. Missing this glob
+  #     was caught in review: it would have silently narrowed the universe (opposite of the
+  #     canary's purpose) for these two names specifically.
+  #   - packages/core-backend/migrations/*.sql — the top-level raw-SQL folder
+  #     (getSqlFolderCandidates's `../../../migrations` candidate; 076 and its siblings).
+  #     Contains a non-.sql `claudedocs/` subdirectory the provider never loads — the .sql
+  #     glob already excludes it, no extra filtering needed.
+  # No --network, no --env-file, no credentials: this step reads nothing but filenames, so
+  # it cannot leak anything and needs no allowlist.
+  docker run --rm --pull=never "$TARGET_MIGRATION_IMAGE" sh -c '
+    for f in /app/packages/core-backend/src/db/migrations/*.ts; do
+      [ -f "$f" ] || continue
+      b=$(basename "$f")
+      case "$b" in .*|_*) continue ;; esac
+      echo "${b%.ts}"
+    done
+    for f in /app/packages/core-backend/src/db/migrations/*.sql /app/packages/core-backend/migrations/*.sql; do
+      [ -f "$f" ] || continue
+      b=$(basename "$f")
+      case "$b" in .*|_*) continue ;; esac
+      echo "${b%.sql}"
+    done
+  ' | sort -u
+}
+
+list_migration_names_applied() {
+  # list_migration_names_applied <db-name>
+  # Direct psql read of kysely_migration's own `name` column — bypasses process.env and the
+  # Node migration provider entirely (no docker run of the migration image at all here), so
+  # this is immune to the exclusion vector by construction, independently of the fixes
+  # above and of list_migration_name_universe.
+  docker exec "$POSTGRES_CONTAINER" psql -U "$MIGRATE_BACKUP_PG_USER" -d "$1" -tA \
+    -c "SELECT name FROM kysely_migration ORDER BY name;" 2>/dev/null \
+    | tr -d '\r' | sed '/^$/d' | sort -u
+}
+
+compute_in_play_migrations() {
+  # compute_in_play_migrations <real-db-name>
+  # "In play" = migration names present in the pinned image's own migrations directories
+  # (the full, env-immune filesystem manifest from list_migration_name_universe) that are
+  # NOT YET recorded in the real DB's kysely_migration ledger (also env-immune, read
+  # directly via psql). Because BOTH sources bypass process.env entirely, this set cannot
+  # be shrunk by an inherited MIGRATION_EXCLUDE the way `migrate.js --list`'s own Pending
+  # count could before materialize_target_migration_env/target_migrate_exec were hardened —
+  # which is exactly why confirm_in_play_migrations below doubles as P1-1's canary: kysely
+  # 0.28.8's Migrator.getMigrations() maps over PROVIDER ENTRIES ONLY, so a name excluded
+  # from the provider is simply absent from the result and `--confirm` returns exit 2 "not
+  # found among the known migrations" for it (migrate.ts's commandConfirm), never exit 0.
+  local real_db="$1"
+  list_migration_name_universe > "${OUTPUT_DIR}/migration-name-universe.txt"
+  [[ -s "${OUTPUT_DIR}/migration-name-universe.txt" ]] \
+    || fail "migration name universe is empty — refusing to compute an in-play set from nothing (image filesystem read failed?)"
+  list_migration_names_applied "$real_db" > "${OUTPUT_DIR}/migration-applied-before.txt"
+  # Sanity floor (review, 2026-08-24): an empty-but-successful psql read is always wrong
+  # for a live staging DB carrying 300+ historically-applied migrations, and silently
+  # treats the ENTIRE universe as in-play — hundreds of unnecessary --confirm docker runs
+  # inside the migration window, none of them informative. The caller cross-checks this
+  # same count against the provider's own Applied:N (a second, independent env-immune-ish
+  # source) before trusting either.
+  [[ -s "${OUTPUT_DIR}/migration-applied-before.txt" ]] \
+    || fail "psql read of kysely_migration returned zero applied names for a live staging DB — refusing to treat the entire migration universe as in-play"
+  comm -23 "${OUTPUT_DIR}/migration-name-universe.txt" "${OUTPUT_DIR}/migration-applied-before.txt" \
+    > "${OUTPUT_DIR}/migration-in-play.txt"
+}
+
+assert_applied_counts_agree() {
+  # assert_applied_counts_agree <psql-applied-names-file> <provider-list-output-file>
+  # Cross-check (review, 2026-08-24): the psql-derived applied count
+  # (list_migration_names_applied, env-immune) and the provider's own `Applied: N` (from a
+  # `--list` run against the SAME real DB) are two INDEPENDENT sources for "how many
+  # migrations are already applied" — they must agree. This is what makes the in-play
+  # canary trustworthy rather than merely present: a silent divergence here (a stale read,
+  # a provider-side surprise) would otherwise flow straight into
+  # confirm_in_play_migrations as either a false-empty (nothing gets confirmed) or
+  # false-huge (the whole 300+-name universe gets re-confirmed) in-play set. Also serves as
+  # the sanity floor: a live staging DB always has a large positive applied count, so a
+  # zero/unreadable psql count is treated as a hard failure, never as "nothing to compare."
+  local psql_file="$1" provider_list_file="$2"
+  local applied_count_psql applied_count_provider
+  applied_count_psql="$(wc -l < "$psql_file" | tr -d '[:space:]')"
+  applied_count_provider="$(grep -oE '^Applied: [0-9]+$' "$provider_list_file" | awk '{print $2}')"
+  [[ "$applied_count_psql" =~ ^[0-9]+$ && "$applied_count_psql" -gt 0 ]] \
+    || fail "psql-derived applied-migration count is not a positive integer ('${applied_count_psql}') — refusing to trust it for the in-play computation"
+  [[ -n "$applied_count_provider" ]] \
+    || fail "could not read a 'Applied: N' line from ${provider_list_file}"
+  [[ "$applied_count_psql" == "$applied_count_provider" ]] \
+    || fail "applied-migration count mismatch: psql (env-immune) read ${applied_count_psql}, provider --list reported ${applied_count_provider} — investigate before proceeding (see ${psql_file} vs ${provider_list_file}); refusing to trust either source alone"
+}
+
+confirm_in_play_migrations() {
+  # confirm_in_play_migrations <names-file>
+  # Per-name --confirm for EVERY migration this deploy has in play (P1-2): `--latest`/
+  # `--list` exiting 0 / Pending:0 is NOT proof any SPECIFIC migration ran (an
+  # empty/excluded/no-op/partially-applied set all reach the same green line — migrate.ts's
+  # commandConfirm docblock). Fails loud, naming the specific migration, on the first
+  # non-applied/unknown name.
+  local names_file="$1" name out
+  : > "${OUTPUT_DIR}/confirm-in-play.txt"
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    out=""
+    out="$(target_migrate_exec -- node "$MIGRATE_JS" --confirm "$name" < /dev/null 2>&1 || true)"
+    printf '%s\n' "$out" >> "${OUTPUT_DIR}/confirm-in-play.txt"
+    grep -q "^migration \"${name}\" is applied\$" <<< "$out" \
+      || fail "named confirmation for in-play migration '${name}' did not pass (see confirm-in-play.txt): ${out}"
+  done < "$names_file"
 }
 
 require_sha() {
@@ -510,6 +780,50 @@ auth_round_trip() {
 
 # --- actions ---------------------------------------------------------------------------
 
+# F1 (2026-08-25, gate on 5b4b38d925 + independent external review — both found it): action=deploy's
+# inline migrate runs in the RUNNING backend container via staging_exec and inherits its WHOLE
+# environment. A container-level MIGRATION_EXCLUDE narrows the manifest INVISIBLY: excluded names
+# vanish from `--list` (the provider drops them), `Pending: 0` goes green over unapplied
+# migrations, and the alignment report cannot catch it — it has no filesystem census of its own
+# and parses the SAME `--list` text, so an exclusion pushes it TOWARD the pass branch. Meanwhile
+# action=migrate aborts loud on the identical host state. Same class as the target-migrate hazard
+# handling above: detect-and-abort first (visibility — a set hazard var is a misconfiguration to
+# surface, not to silently mask), then forced `-e` neutralization OF ALL THREE NAMES at every
+# exec (belt — N3: the first shape forced only MIGRATION_EXCLUDE while this comment claimed all
+# three), so weakening either layer alone still leaves the other standing.
+assert_deploy_migrate_env_safe() {
+  # PROBE HONESTY (N2, gate on c5be6a54e8): the first shape of this helper ended the probe with
+  # `|| true`, which collapsed EVERY nonzero exit — docker exec rc=125, missing printenv rc=127 —
+  # into value="" and certified SAFE without having observed anything. That is the exact class
+  # this PR guards against elsewhere (a zero-read is not a read of zero). printenv distinguishes
+  # natively: rc=0 set (possibly empty — empty is genuinely safe, all three consumers treat only
+  # non-empty / exact-true as active), rc=1 unset, anything else = THE PROBE FAILED.
+  local name value rc probe_err probe_err_txt
+  for name in MIGRATION_EXCLUDE MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL ALLOW_DB_RESET; do
+    rc=0
+    # stdout carries the VALUE (captured, never printed); stderr carries only docker's own
+    # diagnostics — discarding it (the first shape did) left a failed probe as a bare rc with
+    # nothing to debug from. Kept, and surfaced ONLY on the failed-probe branch.
+    probe_err="$(mktemp "${OUTPUT_DIR}/.probe-err.XXXXXX")"
+    value="$(docker exec "$BACKEND_CONTAINER" printenv "$name" 2>"$probe_err")" || rc=$?
+    case "$rc" in
+      0)
+        rm -f "$probe_err"
+        [[ -z "$value" ]] \
+          || fail "running backend container carries ${name} (value not printed) — deploy's inline migrate would inherit it and the migration ledger would lie; unset it on the container before deploying"
+        ;;
+      1)
+        rm -f "$probe_err" # printenv: variable unset — besides set-empty, the only SAFE observation
+        ;;
+      *)
+        probe_err_txt="$(head -c 200 "$probe_err" | tr '\n' ' ')"
+        rm -f "$probe_err"
+        fail "could not observe ${name} on the running backend (docker exec rc=${rc}: ${probe_err_txt}) — refusing to certify the deploy migrate env as safe on a FAILED probe; a zero-read is not a read of zero"
+        ;;
+    esac
+  done
+}
+
 action_deploy() {
   require_sha
   require_compose_v2
@@ -602,7 +916,8 @@ action_deploy() {
   # AFTER (must end pending=0). The alignment report runs in-container from the deployed
   # image's own /app/scripts copy so its file scan matches the deployed migration set.
   prepare_container_runner
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
+  assert_deploy_migrate_env_safe
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-before.txt"
   docker cp "${OUTPUT_DIR}/migrate-list-before.txt" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/migrate-list-before.txt"
   staging_exec node /app/scripts/ops/staging-migration-alignment-report.mjs \
     --migrate-list-file "${CONTAINER_RUNNER_DIR}/migrate-list-before.txt" \
@@ -613,8 +928,8 @@ action_deploy() {
     fail "migration alignment report says do_not_run_full_migrate — STOP per bundle §3.2; follow docs/development/staging-migration-alignment-runbook-verification-20260519.md"
   fi
 
-  staging_exec node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
-  staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-run.log"
+  staging_exec_env "MIGRATION_EXCLUDE=" "MIGRATION_INCLUDE_SUPERSEDED_LEGACY_SQL=" "ALLOW_DB_RESET=" -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/migrate-list-after.txt" \
     || fail "migrations did not end at pending=0 (see migrate-list-after.txt)"
 
@@ -1030,6 +1345,167 @@ action_residue_sweep() {
   log "residue-sweep OK: all 29 §7 checks are zero"
 }
 
+# Values-free classification of the persistent runner override — the read-only collection the
+# deploy-order decision depends on (owner-endorsed review, 2026-08-25). The OVERRIDE_FILE has
+# THREE writer-produced shapes plus absence, and action=deploy OVERWRITES it unconditionally with
+# only the none/rd-window shapes — so a deploy over a live soak override silently clears the W4/W7
+# allowlists. Before any deploy, the operator needs: which shape is on disk, which of the four
+# candidate flags are live in the backend container, and whether disk and container AGREE (drift
+# between them means the file was rewritten without a recreate, or vice versa — an unexplained
+# environment, so fail loud). NO VALUES are ever read into this function's output: file flags are
+# detected by KEY name only, live flags by printenv EXIT CODE only (stdout discarded unread), so
+# soak org slugs cannot leak into logs or artifacts.
+classify_runner_override() {
+  local out="${OUTPUT_DIR}/override-shape.txt"
+  local candidates="ATTENDANCE_SCHEDULER_ENABLED ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ${SOAK_W4_ENV_NAME} ${SOAK_W7_ENV_NAME}"
+  local rd_set="ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED ATTENDANCE_SCHEDULER_ENABLED"
+  local soak_set
+  soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
+  soak_set="${soak_set% }"
+
+  local file_present=false file_sha="" file_names="" all_upper_keys="" all_upper_count=0 backend_key_count=0
+  if [[ -f "$OVERRIDE_FILE" && ! -r "$OVERRIDE_FILE" ]]; then
+    # Present but unreadable: an environment we cannot explain. Classify as unexpected rather
+    # than letting an empty read pass as the none shape — an empty read is not a read of empty.
+    file_present=true
+    file_names="__UNREADABLE__"
+  elif [[ -f "$OVERRIDE_FILE" ]]; then
+    file_present=true
+    file_sha="$(hash_value "$OVERRIDE_FILE")"
+    # KEY names only. Env keys in every writer-produced shape are UPPER_SNAKE and indented;
+    # yaml structure keys (services/backend/web/environment/image) are lowercase; full-line
+    # comments start at column 0. A key this pattern cannot see cannot silently pass either —
+    # unknown UPPER keys land in file_names and force shape=unexpected below.
+    # grep/awk exit 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
+    # (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the left of
+    # `||` (the sole call site is `classify_runner_override || status_rc=1`), so an unguarded
+    # failing substitution would NOT abort on a host — it silently yields empty names and a calm
+    # `none`, the UNSAFE direction. Readability was checked above, so rc>=2 cannot hide an
+    # unreadable file behind the trailing `|| true`.
+    #
+    # SCOPED TO services.backend.environment (P2-2, external review of 4141c27832): the round-1
+    # grep collected EVERY indented UPPER key in the file, so two rd-window keys placed under
+    # services.web.environment classified as rd-window and matched the BACKEND's live env —
+    # certifying agreement between one service's file entry and a different service's runtime.
+    # The awk walks the writer-produced shape only; `all_upper_keys` keeps the old broad sweep,
+    # and any UPPER key OUTSIDE the backend environment block forces `unexpected` below.
+    # FULL parent path services.backend.environment (external review round 3, reproduced: a
+    # legal `x-template:` extension block containing backend.environment satisfied BOTH the set
+    # guard and the count guard, because this same mis-scoped walk fed both — `  backend:` was
+    # matched under ANY top-level key). `svc` tracks the top-level context: set only by a
+    # column-0 `services:` line, cleared by any other column-0 key.
+    file_names="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
+    ' "$OVERRIDE_FILE" | sort -u | tr '\n' ' ' || true)"
+    file_names="${file_names% }"
+    all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
+    all_upper_keys="${all_upper_keys% }"
+    # COUNTS, not only the deduped set (requal-2 P3-a, gate-measured false: a web-block key whose
+    # NAME already appears in the backend block collapses into the set comparison — both-blocks
+    # duplicates classified rd-window). Same broad pattern counted raw vs the backend-scoped walk.
+    all_upper_count="$(grep -cE '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" || true)"
+    backend_key_count="$(awk '
+      /^[^ ]/ {svc = ($0=="services:") ? 1 : 0; inb=0; ine=0; next}
+      svc && $0=="  backend:" {inb=1; next}
+      svc && inb && /^  [^ ]/ {inb=0}
+      svc && inb && $0=="    environment:" {ine=1; next}
+      svc && inb && ine && /^    [^ ]/ {ine=0}
+      svc && inb && ine && /^      [A-Z_][A-Z0-9_]*: / {c++}
+      END {print c+0}
+    ' "$OVERRIDE_FILE" || true)"
+  fi
+
+  local shape
+  if [[ "$file_present" == false ]]; then shape="absent"
+  elif [[ "$all_upper_keys" != "$file_names" || "$all_upper_count" -ne "$backend_key_count" ]]; then
+    # P2-2: env-looking keys exist OUTSIDE services.backend.environment (another service, or a
+    # structure the scoped parser cannot read). Whatever this file is, it is not a writer product
+    # and its effect on the backend cannot be certified from names alone.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -qE '^[[:space:]]+environment:' "$OVERRIDE_FILE"; then
+    # P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
+    # spellings this parser does not read — a hand-edited file in any of them parsed as a CALM
+    # none, inverting this function's own fail-loud principle. An environment block whose keys
+    # we cannot enumerate is an environment we cannot explain. ANCHORED as an indented mapping
+    # key (requal P3 on 4141c27832, gate-verified): the bare substring falsely tripped on a
+    # comment line saying "no environment: block on purpose" and on an image tag containing
+    # `environment:` — both classified a true none as unexpected.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]]; then shape="none"
+  elif [[ "$file_names" == "$rd_set" ]]; then shape="rd-window"
+  elif [[ "$file_names" == "$soak_set" ]]; then shape="soak-w4w7"
+  else shape="unexpected"
+  fi
+
+  # Live side: NAMES only, in ONE observation (P2-1 round 2, external review of 4141c27832).
+  # The round-1 shape probed PATH first and then looped four more docker execs — so a channel
+  # that died AFTER the control (container stopped, daemon lost) made the four candidate reads
+  # return rc=1, which reads as "observed unset": zero observations, confident green, reproduced
+  # by the reviewer at that exact timing. Control and data are now the SAME invocation: PATH is
+  # checked in-container (exit 9 if even PATH is unreadable), the candidate names are enumerated
+  # in-container, and only the SET NAMES cross the boundary — printenv's value output is
+  # discarded inside the container, so no value ever reaches the host. ANY nonzero exit — daemon
+  # down, container gone, sh missing, PATH unreadable — is a failed probe, never an observation.
+  local live_names="" probe_failed=false enum_out enum_rc
+  # Names are passed as ARGV ("$@" after the `_` $0 slot), never spliced into the script TEXT
+  # (requal-2 NIT on 74dad9e0ab, gate-measured: a name containing `$(...)` really executes under
+  # the text-splice form. Both soak names are constants today, so it was unreachable — but a
+  # mechanism does not stay unreachable by promise, and killing it costs two characters).
+  enum_rc=0
+  enum_out="$(docker exec "$BACKEND_CONTAINER" sh -c '
+    printenv PATH >/dev/null 2>&1 || exit 9
+    for n in "$@"; do
+      if printenv "$n" >/dev/null 2>&1; then printf "%s\n" "$n"; fi
+    done
+  ' _ $candidates 2>/dev/null)" || enum_rc=$?
+  if [[ "$enum_rc" -ne 0 ]]; then
+    probe_failed=true
+  fi
+
+  local match live_sorted live_render
+  if [[ "$probe_failed" == true ]]; then
+    match="indeterminate"
+    live_render="unobserved"
+  else
+    # Names only — and only names we ASKED about: anything else in the output means the
+    # in-container enumerator was tampered with or the channel corrupted; refuse it.
+    live_sorted="$(printf '%s\n' $enum_out | sort -u | tr '\n' ' ')"
+    live_sorted="$(echo "$live_sorted" | tr -s ' ')"; live_sorted="${live_sorted% }"; live_sorted="${live_sorted# }"
+    local answered
+    for answered in $live_sorted; do
+      case " $candidates " in
+        *" $answered "*) : ;;
+        *) match="indeterminate"; live_render="unobserved"; probe_failed=true ;;
+      esac
+    done
+    if [[ "$probe_failed" != true ]]; then
+      [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
+      live_render="${live_sorted:-none}"
+    fi
+  fi
+
+  {
+    echo "override_shape=${shape}"
+    echo "override_file_present=${file_present}"
+    echo "override_file_sha256=${file_sha:-none}"
+    echo "file_flag_names=${file_names:-none}"
+    echo "live_flag_names=${live_render}"
+    echo "file_live_match=${match}"
+  } | tee "$out"
+
+  # FAIL LOUD, never silently: an unexpected shape, a disk/live disagreement, or a failed probe
+  # each mean the environment is not explained — the collection still WROTE everything above,
+  # but the action must not exit 0 over it.
+  [[ "$shape" != "unexpected" ]] || return 1
+  [[ "$match" == true ]] || return 1
+  return 0
+}
+
 action_status() {
   snapshot_staging_ps
   curl -sS --max-time 10 "$STAGING_WEB_HEALTH_URL" > "${OUTPUT_DIR}/health-web.json" 2>&1 \
@@ -1041,6 +1517,10 @@ action_status() {
   log "live build.commit: ${live_commit:-<unreachable>}"
 
   local status_rc=0
+  # Values-free override classification FIRST: it needs no running container for the file side,
+  # and a stopped/unreachable container fails the probe's PATH positive control, degrading the
+  # verdict to file_live_match=indeterminate (never a confident green over zero observations).
+  classify_runner_override || status_rc=1
   if docker inspect -f '{{.State.Running}}' "$BACKEND_CONTAINER" 2>/dev/null | grep -qx 'true'; then
     prepare_container_runner
     staging_exec node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/migrate-list.txt" || status_rc=1
@@ -1060,6 +1540,7 @@ action_status() {
   {
     echo "action=status"
     echo "live_commit=${live_commit:-unreachable}"
+    grep '^override_shape=' "${OUTPUT_DIR}/override-shape.txt" 2>/dev/null || echo "override_shape=unrecorded"
     echo "status_rc=${status_rc}"
   } > "${OUTPUT_DIR}/summary.txt"
   return "$status_rc"
@@ -1282,6 +1763,30 @@ action_migrate_rehearse() {
   log "rehearsal: dropping any prior ${REHEARSAL_DB} left by an aborted run"
   cleanup_rehearsal
   trap 'cleanup_rehearsal; cleanup_target_migration_runtime' EXIT
+  # P2-4 hardening (2026-08-24): explicit HUP/INT/TERM registration, not relying on the
+  # EXIT trap alone. CORRECTION during review: on the bash versions actually tested here
+  # (3.2 and 5.3, foreground-command and pipeline cases both), a bare `trap ... EXIT` DID
+  # already run on an uncaught SIGHUP/SIGINT/SIGTERM — so this is NOT closing a demonstrated
+  # "signal leaves the secret file behind" hole on those bash builds. It ships anyway
+  # because that behavior is bash's own implementation detail, not a documented contract
+  # (the manual only promises EXIT's ACTION runs "on exit from the shell"; nothing commits
+  # bash, on every version/platform this runner may ever run on, to also invoke it on every
+  # uncaught deadly signal) — explicit registration is the portable, self-documenting
+  # contract instead of an implicit one, and OOM-kill (SIGKILL) / host reboot remain
+  # uncatchable by ANY trap regardless, EXIT included. What IS genuinely load-bearing here:
+  # bash does NOT auto-terminate a process after running a trapped signal's handler (unlike
+  # the EXIT pseudo-signal, which fires as the shell is already on its way out) — without
+  # the explicit `exit 1` below, a HUP/INT/TERM handler that only ran cleanup would leave
+  # the process hung, still consuming the migration window. Registered SEPARATELY from the
+  # EXIT trap (not combined into one `trap ... EXIT HUP INT TERM`): a handler that also
+  # covers EXIT and unconditionally calls `exit N` would clobber the script's real exit code
+  # on the ordinary successful-completion path, where only EXIT fires. The EXIT trap above
+  # fires again as part of this handler's own `exit` (harmless — cleanup_rehearsal is
+  # DROP-IF-EXISTS/rm -f, cleanup_target_migration_runtime no-ops once TARGET_MIGRATION_ENV_FILE
+  # is cleared). Mutation-proven via `trap -p` registration, not a signal-delivery A/B (that
+  # comparison is exactly what did not discriminate in the bash versions tested — see the
+  # pipeline test file for the measurement).
+  trap 'cleanup_rehearsal; cleanup_target_migration_runtime; exit 1' HUP INT TERM
 
   log "rehearsal: creating ${REHEARSAL_DB} (clearly-synthetic fixed name; same postgres server as staging)"
   docker exec "$POSTGRES_CONTAINER" psql -U "$pg_user" -d postgres -v ON_ERROR_STOP=1 \
@@ -1406,15 +1911,29 @@ action_migrate_rehearse() {
 
   log "rehearsal: green — dropping ${REHEARSAL_DB} and the in-container dump copy"
   cleanup_rehearsal
-  trap - EXIT
+  trap - EXIT HUP INT TERM
   log "rehearsal OK"
 }
 
 action_migrate_apply() {
   # Step 4: only reached if action_migrate_rehearse fully succeeded. Same before/after
   # pending-list discipline as action_deploy's migration step, against the REAL staging DB.
+  local backend_dsn real_db
+  backend_dsn="$(resolve_backend_database_url)"
+  real_db="$(dsn_database_name "$backend_dsn")"
+  [[ -n "$real_db" ]] || fail "could not resolve the real staging DB name for the in-play migration computation"
+
   log "apply: migrate-list BEFORE (real staging DB)"
   target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-before.txt"
+
+  # P1-2 (2026-08-24): compute the in-play set BEFORE running migrate, from two sources
+  # that are both immune to process.env (see compute_in_play_migrations) — done up front so
+  # the set reflects what SHOULD be applied by this run, independent of anything the apply
+  # step itself might do to the ledger.
+  log "apply: computing the in-play migration set (image filesystem manifest minus already-applied, both env-immune)"
+  compute_in_play_migrations "$real_db"
+
+  assert_applied_counts_agree "${OUTPUT_DIR}/migration-applied-before.txt" "${OUTPUT_DIR}/apply-migrate-list-before.txt"
 
   log "apply: running migrate.js against the REAL staging DB (rehearsal was green)"
   target_migrate_exec -- node "$MIGRATE_JS" < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-run.log"
@@ -1422,16 +1941,32 @@ action_migrate_apply() {
   target_migrate_exec -- node "$MIGRATE_JS" --list < /dev/null 2>&1 | tee "${OUTPUT_DIR}/apply-migrate-list-after.txt"
   grep -q '^Pending: 0$' "${OUTPUT_DIR}/apply-migrate-list-after.txt" \
     || fail "staging migrate did not end at pending=0 after apply (see apply-migrate-list-after.txt); restore from ${MIGRATE_BACKUP_PATH} if needed (runbook §Failure modes)"
+
+  # Named invariant, independent of the mechanically-derived set below: 076 underlies the
+  # stock-prep write path and is confirmed explicitly by name regardless of whether it was
+  # already applied via the stock-prep window (and therefore absent from migration-in-play.txt).
   target_migrate_exec -- node "$MIGRATE_JS" --confirm 076_create_integration_stock_prep_pack_installs < /dev/null 2>&1 \
     | tee "${OUTPUT_DIR}/confirm-076.txt"
   grep -q '^migration "076_create_integration_stock_prep_pack_installs" is applied$' "${OUTPUT_DIR}/confirm-076.txt" \
     || fail "named confirmation for 076_create_integration_stock_prep_pack_installs.sql did not pass"
+
+  # P1-2: confirm EVERY migration this deploy had in play, by name, mechanically derived
+  # (never hardcoded) — this covers the 0817/0818 approval four
+  # (approval-parity-verification-report-20260818.md:431,448-449) AND the closeout-chain
+  # four (S1 org_id / Migration B backfill / provisioning / gap-closer) AND anything else
+  # added since, without maintaining a second hand-written name list.
+  log "apply: confirming $(wc -l < "${OUTPUT_DIR}/migration-in-play.txt" | tr -d '[:space:]') in-play migration(s) by name"
+  confirm_in_play_migrations "${OUTPUT_DIR}/migration-in-play.txt"
+
   log "apply OK: staging migrate ended at pending=0"
 }
 
 action_migrate() {
   require_sha
+  # P2-4: EXIT + HUP/INT/TERM registered separately — see the identical note at the clone
+  # rehearsal step's first trap, above, for why (exit-code safety on the ordinary path).
   trap cleanup_target_migration_runtime EXIT
+  trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
   prepare_container_runner
   prepare_target_migration_image
   assert_migration_rollout_flags_off before
@@ -1447,6 +1982,7 @@ action_migrate() {
   action_migrate_backup
   action_migrate_rehearse
   trap cleanup_target_migration_runtime EXIT
+  trap 'cleanup_target_migration_runtime; exit 1' HUP INT TERM
   action_migrate_apply
 
   # Step 5: post-checks.
@@ -1477,7 +2013,7 @@ action_migrate() {
     echo "result=ok"
   } > "${OUTPUT_DIR}/summary.txt"
   cleanup_target_migration_runtime
-  trap - EXIT
+  trap - EXIT HUP INT TERM
   log "migrate OK: backup=${MIGRATE_BACKUP_PATH} rehearsal=ok apply=ok"
 }
 

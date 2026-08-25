@@ -171,6 +171,17 @@ hermetic 守卫 13 测试在无 node_modules 纯净树 13/13,已接入 obs-kit c
   (b)另立生产授权 workflow,然后**另行 ratify**,不由 A1 顺带继承。
   > 生产那条级联 FK 目前是 **INFERRED-STRONG**(据生产迁移账);**一条只读 SQL 即可定案**——在生产库跑电池的
   > `ROLE_CASCADE_WITNESS_QUERY`。建议 ratify 前顺手跑掉,以确认本条收窄的依据。
+  >
+  > **⚠️ 2026-08-24 更正 —— 这条建议在修复落地前不可执行。** 上句写于该查询以
+  > `to_regclass('roles')` 绑定 `roles` 的版本;`to_regclass` 走 SESSION 的 `search_path`,任何被优先
+  > 解析到的同名 decoy(连接角色自己拥有的 `"$user"` schema、`SET search_path`、DSN `options=`、
+  > `ALTER ROLE … SET`,或一张 `CREATE TEMP TABLE roles`)都会把查询悄悄改指向,零行随即被判为
+  > `CASCADE ABSENT (premise CONFIRMED)` / exit 0 —— 也就是说,**「顺手跑一条只读 SQL 定案」恰好会
+  > 在这条路径上产生一个看起来最干净的假阴性**。已在 PG 15 上端到端复现,见
+  > `role-cascade-witness-shadow-resolution-repro-20260824.md`。修复(改为绑定
+  > `<canonical>.roles`,并新增四道 INDETERMINATE 闸)与真库负例见对应 PR;符号名同步改为
+  > `buildRoleCascadeWitnessQuery(canonicalSchema)`。**修复合入前,不要对生产跑这条查询,也不要
+  > dispatch witness / 电池两条 workflow。**
 - **明确不变**：L6 soak ≥7 日历日**不动**（它买的是一个完整周周期的日历节律——周末形态、
   weekly cron、备份窗——合成负载伪造不了；租约饥饿/死锁积累是慢显影病灶，soak 是唯一
   在真实节奏下行使它们的机会）；A1 本身不改 L2–L5（本就无日历约束），其不可执行顺序由下文

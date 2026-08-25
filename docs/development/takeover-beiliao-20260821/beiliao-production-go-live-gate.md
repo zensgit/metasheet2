@@ -14,10 +14,40 @@
 **在范围内**:备料主表及卫星表的读写、PLM 只读同步、历史迁移与双轨对账、按项目号切换。
 **明确不在范围内**:任何 K3 外部写回(**永久禁止**,见 G-4);CRM / 派工 / 项目等后续需求(章程已封存)。
 
-**前置事实(2026-08-22 核实)**:
-- 接管全部产出仍在未合并 PR(#5044 文档与章程、#5065 pack、#5074 排演、#5079 刷新守卫);`main` 上尚无接管代码。
-- 客户现系统已知暴露:匿名可达的 `/erp/*` 写端点、明文凭据。**默认视为已泄露。**
-- 备料 pack 目前**没有任何可执行安装入口**(无 HTTP 路由 / CLI / UI),只能从测试调用。
+**前置事实(2026-08-23 复核后重写)**:
+- 接管产出**已有 19 条合入 `main`**,未合入 2 条(#5067 所有权写守卫、#5117 合成源 fixture,均 26/26 全绿、MERGEABLE/CLEAN)。
+- 客户现系统已知暴露:匿名可达的 `/erp/*` 写端点、明文凭据。**默认视为已泄露。**(唯一未过期的一条)
+- 备料 pack **已有可执行安装入口**:四条路由注册在 `plugins/plugin-integration-core/lib/http-routes.cjs:132-136`(list / installs / dry-run / install,admin 门禁,pack 永不由请求提供),宿主侧 catalog 由 #5108 填在 `packages/core-backend/src/plugin-runtime-config.ts:95`。
+
+> **两条前置事实曾长期为假。** 上文原写「`main` 上尚无接管代码」与「没有任何可执行安装入口」,自 #5100(`21a24b45a`)建档后**一次未改**,而 #5122 的「docs freshness pass」只保鲜了审批线的两份报告,**恰好漏掉了这份唯一决定 go/no-go 的文档**。这正是本文 §3(1) 自己规定的活文档纪律失守一次的记录——**保鲜必须覆盖判据文档,否则先保鲜的是最不需要保鲜的那份**。
+
+**gate 备料的代码缺陷(2026-08-23,两条,不是一条)**:
+
+1. **mapper 未接线** —— 源→`ext_` 的 mapper 已合入(#5118)但两条刷新路由只传 `installedFieldProperties`,从不传 `extFieldMapping`,生产代码里没有任何地方构造过一个。修复在 [#5126](https://github.com/zensgit/metasheet2/pull/5126)。
+
+2. **pack 目标与 apply 目标互斥** —— 本文此前写「唯一一条」,**说少了这一条**,而且它此前不在任何账本里。
+   - pack 的 `targetObjectId` **硬编码**为 canonical(`lib/stock-preparation-customer-pack.cjs:446` 取 `STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId`),且 `targetObjectId` **不在 `PACK_KEYS`**(`:67`)里 —— 任何 pack、任何请求都改不动它。
+   - apply 对同一个 objectId **无条件 403**(`lib/stock-preparation-table-actions.cjs:998-1005`,`STOCK_PREP_APPLY_SANDBOX_ONLY` / `prod_canonical`),在 policy 被读之前就拒;且 `objectId` 省略时**默认当作 canonical**,一样拒。
+   - **两个集合不相交**:pack 只能把 `ext_` 列装到 canonical,apply 只能写非 canonical。于是 sandbox 目标上根本没有 `ext_` 列,安装账本按 `action.target.objectId` 查不到 → 可写 band 里没有 `ext_` → **mapper 刚算出来的值在写入前一层被静默丢掉**。
+   - 影响:即使 #5126 合入,**合成数据也跑不出一个落表的 `ext_` 值**。最小修法是允许 pack 装到 `plm_stock_preparation_sandbox` 命名空间(复用 `lib/stock-preparation-target-provisioning.cjs:61-79` 已有的校验),约 1–2 天。
+
+> 本条的教训与上一条同源:**"唯一"这种量化断言,写下时就该跑一次穷举去证否。** 上面那句「唯一 gate 备料的代码缺陷」是本文 2026-08-23 自己新写的,几小时后即被一次系统盘点推翻。
+
+---
+
+## 0b. 部署窗口开始前必须先量的一件事(跨线耦合,2026-08-23 新增)
+
+**一次纯备料的部署,可能因为审批线的迁移而整体失败。**
+
+`packages/core-backend/src/db/migration-provider.ts` 自己写明:**生产与 on-prem 的 `db:migrate` 既不用该排除清单也不用 `MIGRATION_EXCLUDE`,跑全部迁移**;而 kysely 把整条链包在**一个事务**里。
+
+Lock-11 的两支迁移(`zzzz20260823050000_provision_zero_membership_active_users.ts`、`zzzz20260823100000_backfill_approval_instance_org_id.ts`)以 **`user_orgs` 恰好只有一个 distinct active org** 为前提,前提不成立即**抛错**(错误只报数量,不报是哪些)。
+
+**后果**:目标实例若已有 ≥2 个 active org → 迁移抛错 → 整条链回滚 → `db:migrate` 退出 1 → **备料自己一行代码没错,部署照样失败**。
+
+**退出条件**:在排定部署窗口**之前**(不是窗口里),对目标库量一次 distinct active org 数量并记录结果(values-free:只记数量)。数量 ≠ 1 时,先与审批线裁定处置,再排窗口。
+
+**谁可推动**:运维 + 技术负责人。零客户依赖,今天就能做。
 
 ---
 

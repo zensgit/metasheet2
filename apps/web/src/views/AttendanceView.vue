@@ -1,5 +1,5 @@
 <template>
-  <div class="attendance">
+  <div class="attendance" :class="{ 'attendance--overview': showOverview }">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -11,8 +11,8 @@
       <p class="attendance__empty" v-else>{{ tr('Enable the attendance plugin to use this page.', '启用考勤插件后可使用此页面。') }}</p>
     </div>
     <template v-else>
-      <header class="attendance__header" v-if="showOverview || showReports">
-        <div>
+      <header class="attendance__header" v-if="showOverview || showReports" data-attendance-overview-header>
+        <div class="attendance__header-copy">
           <h2 class="attendance__title">
             {{ showReports ? tr('Attendance Reports', '考勤报表') : tr('Attendance', '考勤') }}
           </h2>
@@ -24,6 +24,16 @@
             }}
           </p>
         </div>
+        <!--
+          Trailing slot on overview: reserved for a compact session-org switcher
+          (#5145 Draft). Keep this node empty on main so that PR can land a
+          control here without fighting first-viewport layout.
+        -->
+        <div
+          v-if="showOverview"
+          class="attendance__header-aside"
+          data-attendance-overview-header-aside
+        />
         <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
           <span class="attendance__status-chip">
             {{ tr('Records', '记录') }} {{ recordsTotal }}
@@ -138,6 +148,7 @@
         :request-decision-comment-label="requestDecisionCommentLabel"
         :describe-request-status="describeRequestStatus"
         :self-service-quick-action-hint="selfServiceQuickActionHint"
+        :employee-quick-action-icons="employeeOverviewQuickActionIcons"
         :annual-self-balance-loading="annualSelfBalanceLoading"
         :annual-self-balance-error="annualSelfBalanceError"
         :annual-self-balance-summary="annualSelfBalanceSummary"
@@ -2857,6 +2868,10 @@
                     min="1"
                   />
                 </label>
+                <AttendanceEmployeeQuickActionIconsField
+                  v-model="adminConfig.settingsForm.employeeQuickActionIcons"
+                  :tr="tr"
+                />
               </div>
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
@@ -10081,6 +10096,13 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
+import {
+  DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+  resolveEmployeeQuickActionIcons,
+  type EmployeeQuickActionIcons,
+} from './attendance/attendanceEmployeeWorkspaceCommonIcons'
+import { useAttendanceAdminConfig } from './attendance/useAttendanceAdminConfig'
 import { resolveAttendanceOverviewAttention } from './attendance/attendanceOverviewPriority'
 import {
   buildCalendarPolicyOverrideDiagnostics,
@@ -10807,6 +10829,7 @@ interface AttendanceSettings {
     radiusMeters: number
   } | null
   minPunchIntervalMinutes?: number
+  employeeQuickActionIcons?: EmployeeQuickActionIcons
   multiShiftDay?: {
     enabled?: boolean
     maxSlots?: number
@@ -13359,6 +13382,11 @@ const selfServiceQuickActionHint = computed(() => {
   )
 })
 
+// Employee overview icons come from the employee-readable channel, not admin settings.
+const employeeOverviewQuickActionIcons = ref<EmployeeQuickActionIcons>({
+  ...DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
+})
+
 const reportsFiltersActive = computed(() =>
   requestReportStatusFilter.value !== 'all'
   || requestReportTypeFilter.value !== 'all'
@@ -15860,6 +15888,24 @@ const isMakeupRequest = computed(() =>
 const isOvertimeRequest = computed(() => requestForm.requestType === 'overtime')
 const isShiftSwapRequest = computed(() => requestForm.requestType === 'shift_swap')
 const isLeaveOrOvertimeRequest = computed(() => isLeaveRequest.value || isOvertimeRequest.value)
+
+const adminConfig = useAttendanceAdminConfig({
+  adminForbidden,
+  apiFetchWithTimeout,
+  buildQuery,
+  createApiError,
+  createForbiddenError,
+  defaultTimezone,
+  getOrgId: () => normalizedOrgId(),
+  setStatus,
+  setStatusFromError: (error, fallbackMessage, context) => {
+    const mapped = context === 'save-settings' || context === 'save-rule' || context === 'admin'
+      ? context
+      : 'admin'
+    setStatusFromError(error, fallbackMessage, mapped)
+  },
+  tr,
+})
 
 const settingsForm = reactive({
   autoAbsenceEnabled: false,
@@ -22302,6 +22348,7 @@ async function refreshAll(): Promise<boolean> {
     if (showOverview.value) {
       tasks.push(
         loadSelfAttendanceRules(),
+        loadEmployeeQuickActionIcons(),
         loadLeaveTypes({ activeOnly: true }),
         loadOvertimeRules({ activeOnly: true }),
         loadShiftSwapRequests(),
@@ -22975,6 +23022,11 @@ function applySettingsToForm(settings: AttendanceSettings) {
   settingsForm.geoFenceLng = settings.geoFence?.lng?.toString() ?? ''
   settingsForm.geoFenceRadius = settings.geoFence?.radiusMeters?.toString() ?? ''
   settingsForm.minPunchIntervalMinutes = settings.minPunchIntervalMinutes ?? 1
+  const quickIcons = resolveEmployeeQuickActionIcons(settings.employeeQuickActionIcons)
+  adminConfig.settingsForm.employeeQuickActionIcons.makeup = quickIcons.makeup
+  adminConfig.settingsForm.employeeQuickActionIcons.leave = quickIcons.leave
+  adminConfig.settingsForm.employeeQuickActionIcons.overtime = quickIcons.overtime
+  adminConfig.settingsForm.employeeQuickActionIcons.swap = quickIcons.swap
 }
 
 function addHolidayOverride() {
@@ -24280,6 +24332,7 @@ async function saveSettings() {
       ipAllowlist,
       geoFence,
       minPunchIntervalMinutes: Number(settingsForm.minPunchIntervalMinutes) || 0,
+      employeeQuickActionIcons: resolveEmployeeQuickActionIcons(adminConfig.settingsForm.employeeQuickActionIcons),
     }
 
     const response = await apiFetchWithTimeout('/api/attendance/settings', {
@@ -24298,6 +24351,7 @@ async function saveSettings() {
     const savedSettings = (data.data || payload) as AttendanceSettings
     attendanceSettings.value = savedSettings
     applySettingsToForm(savedSettings)
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(savedSettings.employeeQuickActionIcons)
     setStatus(tr('Settings updated.', '设置已更新。'))
   } catch (error: any) {
     setStatusFromError(error, tr('Failed to save settings', '保存设置失败'), 'save-settings')
@@ -24811,6 +24865,17 @@ async function loadAnnualSelfBalance(leaveTypeCode: string = 'annual'): Promise<
     annualSelfBalanceError.value = readErrorMessage(error, tr('Failed to load your leave balance', '加载您的休假余额失败'))
   } finally {
     annualSelfBalanceLoading.value = false
+  }
+}
+
+async function loadEmployeeQuickActionIcons(): Promise<void> {
+  try {
+    const response = await apiFetch('/api/attendance/employee-quick-action-icons')
+    const data = await response.json().catch(() => null)
+    if (!response.ok || !data?.ok) return
+    employeeOverviewQuickActionIcons.value = resolveEmployeeQuickActionIcons(data.data)
+  } catch {
+    // Visual-only channel: keep last known / defaults. Do not fail overview refresh.
   }
 }
 
@@ -29491,22 +29556,48 @@ defineExpose({
   gap: 24px;
   padding: 24px;
   color: #2b2b2b;
+  min-width: 0;
+}
+
+.attendance--overview {
+  gap: 16px;
+  padding: 16px 20px 24px;
+  background-color: #f4f6fa;
+  background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
 }
 
 .attendance__header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance__header-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.attendance__header-aside {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
 .attendance__title {
-  font-size: 22px;
-  margin-bottom: 4px;
+  font-size: 18px;
+  line-height: 1.25;
+  margin: 0 0 2px;
 }
 
 .attendance__subtitle {
+  margin: 0;
   color: #666;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .attendance__actions {

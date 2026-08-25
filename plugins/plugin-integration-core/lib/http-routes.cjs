@@ -323,6 +323,13 @@ const {
   resolveCustomerPackCatalogConfig,
 } = require('./stock-preparation-customer-pack-catalog.cjs')
 const { loadPackInstalledFieldProperties } = require('./stock-preparation-pack-installed-fields.cjs')
+// The OTHER half of the pack line: a pack says WHICH tenant `ext_` columns exist, this says WHERE
+// their values come from. Server-held and built once at registration, exactly like the catalog
+// above. Absent config -> null -> the refresh path is byte-identical to one that never heard of it.
+const {
+  StockPreparationExtFieldMappingConfigError,
+  createConfiguredExtFieldMapping,
+} = require('./stock-preparation-ext-field-mapping-config.cjs')
 // #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
 // structure-only (rows always []), admin-gated, values-free evidence, no external write.
 const {
@@ -485,6 +492,9 @@ function inferHttpStatus(error) {
   if (error instanceof StockPreparationOptionSyncError) return error.status
   if (error instanceof StockPreparationCustomerPackInstallError) return error.status
   if (error instanceof StockPreparationCustomerPackCatalogError) return error.status
+  // Registration-time only in practice (the mapping is built once, before any request), but mapped
+  // anyway so it can never surface as an untyped 500 if a future call site builds one lazily.
+  if (error instanceof StockPreparationExtFieldMappingConfigError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -2679,6 +2689,16 @@ function createHandlers(services, options = {}) {
   const customerPackCatalog = createCustomerPackCatalog({
     packs: resolveCustomerPackCatalogConfig(context && context.config),
   })
+  // SERVER-HELD source->`ext_` mapping, built here for the same reason and with the same posture as
+  // the catalog above: once, at activation, so a malformed deploy-time mapping fails visibly here
+  // rather than on a deployer's first dry-run. Its pack comes from the catalog, never from the
+  // mapping config itself, so "which `ext_` columns exist and who owns them" keeps exactly one
+  // authority. Absent config -> null -> both refresh routes omit `extFieldMapping` entirely, which
+  // is byte-identical to the behaviour before the mapper existed.
+  const stockPreparationExtFieldMapping = createConfiguredExtFieldMapping({
+    config: context && context.config,
+    packCatalog: customerPackCatalog,
+  })
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -2742,6 +2762,43 @@ function createHandlers(services, options = {}) {
       objectId,
       logger: routeLogger,
     })
+  }
+
+  // FRESHNESS-DIVERGENCE NOTICE for the large-BOM job family.
+  //
+  // The two small-BOM refresh routes apply the configured source->`ext_` mapping. The large-BOM
+  // routes do NOT: they expand into a stored job and plan out of that artifact, and neither call
+  // supplies `extFieldMapping` or `installedFieldProperties` (the latter has never been supplied on
+  // this path — see the note above `computeDryRun` in stock-preparation-table-actions.cjs).
+  //
+  // The consequence is NOT "no `ext_` write". Without `installedFieldProperties` the planner's
+  // writable band is template-only (derivePackAwarePlmWritableFields, packAware=false), so
+  // `pickFields` leaves every `ext_` id out of the update patch — and a patch does not blank what it
+  // omits. Any `ext_` value an earlier SMALL-path refresh wrote therefore SURVIVES while every
+  // canonical column around it moves to today's source. The row reads as fresh while its tenant
+  // columns sit at an older epoch, which in a 备料 table is a worse failure than a missing value.
+  //
+  // Which path a project takes is not the operator's choice and is not monotonic either:
+  // `read_time_limit_exceeded` is in LARGE_BOM_BOUNDED_ERROR_TYPES, so one unchanged project can go
+  // small one day and large the next purely because the source was slow.
+  //
+  // So the divergence is ANNOUNCED rather than left silent, on every response in this family.
+  // CONDITIONAL on purpose: with no mapping configured the payload is byte-identical to what it was
+  // before this key existed, which is what keeps the inertness guarantee provable. Values-free — a
+  // mappingId is a slug and a mappingVersion an integer, both schema, never a source cell.
+  //
+  // Deliberately NOT a 409. Refusing large BOMs whenever a mapping is configured would turn a
+  // freshness divergence into "large projects cannot be refreshed at all" for a capability that is
+  // dormant by default — a strictly worse trade than the one it would fix.
+  function largeBomJobResponse(payload) {
+    if (!stockPreparationExtFieldMapping) return payload
+    return {
+      ...payload,
+      extFieldMappingConfiguredButNotAppliedOnThisPath: {
+        mappingId: stockPreparationExtFieldMapping.mappingId,
+        mappingVersion: stockPreparationExtFieldMapping.mappingVersion,
+      },
+    }
   }
 
   function stockPreparationSqlServerRunInput(req) {
@@ -3872,6 +3929,11 @@ function createHandlers(services, options = {}) {
         // no pack, or a read failure) omits the parameter and the planner takes its legacy path.
         // The apply route below resolves it the SAME way so the two agree on the plan revision.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        // The source->`ext_` mapping, from server config. null when unconfigured, which
+        // `computeDryRun` treats as absent — no `ext_` key is produced and the plan is what it was.
+        // Configured: the SAME object the apply route passes, so both routes expand the same rows
+        // and agree on the dry-run revision. It is never request-influenced.
+        extFieldMapping: stockPreparationExtFieldMapping,
       }))
     },
 
@@ -3948,6 +4010,10 @@ function createHandlers(services, options = {}) {
         // Same projection the dry-run route resolved, resolved the same way: apply recomputes the
         // plan and compares revisions, so the two routes must read the bands from one seam.
         installedFieldProperties: await resolveInstalledFieldProperties(req, action),
+        // Same mapping the dry-run route used, for the same reason: apply RE-EXPANDS the source and
+        // compares its revision against the token. A mapping on one route and not the other would
+        // make every apply fail TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
+        extFieldMapping: stockPreparationExtFieldMapping,
         recordsApi: getMultitableRecordsApi(),
         tokenStore: context.storage,
         policyStore: context.storage,
@@ -3975,7 +4041,7 @@ function createHandlers(services, options = {}) {
         parameters,
         principal: requestPrincipal(req),
       })
-      return sendOk(res, publicBackgroundExpansionJob(job), 202)
+      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)), 202)
     },
 
     async tableActionLargeBomExpansionJobGet(req, res) {
@@ -3989,7 +4055,7 @@ function createHandlers(services, options = {}) {
         actionId,
         jobId: firstString(requestParams(req).jobId),
       })
-      return sendOk(res, publicBackgroundExpansionJob(job))
+      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)))
     },
 
     async tableActionLargeBomExpansionJobRun(req, res) {
@@ -4014,7 +4080,7 @@ function createHandlers(services, options = {}) {
         sourceAdapter,
         expansionOptions: largeBomExpansionOptionsForAction(action),
       })
-      return sendOk(res, publicBackgroundExpansionJob(job))
+      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)))
     },
 
     async tableActionLargeBomExpansionJobPlan(req, res) {
@@ -4056,7 +4122,7 @@ function createHandlers(services, options = {}) {
         existingRows,
         conflictPolicyReview,
       })
-      return sendOk(res, publicBackgroundExpansionJob(planned))
+      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(planned)))
     },
 
     async tableActionLargeBomApplyJobStart(req, res) {
@@ -4076,7 +4142,7 @@ function createHandlers(services, options = {}) {
         permission: applyPermissionForUser(user),
         acceptManualConfirmHold: confirm.acceptManualConfirmHold === true,
       })
-      return sendOk(res, publicCheckpointApplyJob(job), 202)
+      return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)), 202)
     },
 
     async tableActionLargeBomApplyJobGet(req, res) {
@@ -4092,7 +4158,7 @@ function createHandlers(services, options = {}) {
         applyJobId: firstString(requestParams(req).applyJobId),
       })
       assertApplyJobMatchesExpansion(job, jobId)
-      return sendOk(res, publicCheckpointApplyJob(job))
+      return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
     },
 
     async tableActionLargeBomApplyJobRun(req, res) {
@@ -4134,7 +4200,7 @@ function createHandlers(services, options = {}) {
         applyJobId: pendingJob.jobId,
         recordsApi: scopedRecordsApi,
       })
-      return sendOk(res, publicCheckpointApplyJob(job))
+      return sendOk(res, largeBomJobResponse(publicCheckpointApplyJob(job)))
     },
 
     async tableActionLargeBomExpansionJobCancel(req, res) {
@@ -4150,7 +4216,7 @@ function createHandlers(services, options = {}) {
         jobId: firstString(requestParams(req).jobId),
         principal: requestPrincipal(req),
       })
-      return sendOk(res, publicBackgroundExpansionJob(job))
+      return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)))
     },
 
     async tableActionConflictPoliciesList(req, res) {
