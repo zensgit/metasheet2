@@ -1167,7 +1167,7 @@ if (!api) {
   throw new Error('ApprovalGraphNodeConfigEditor requires APPROVAL_NODE_CONFIG_EDITOR_KEY')
 }
 
-// ── Lock-0 L0-1 tab presentation (optional — absent in the flat/list "辅助编辑模式" surface) ──
+// ── Lock-0 L0-1 tab presentation (optional — absent in the flag-off flat renderer) ──
 const tabsCtx = inject(APPROVAL_CANVAS_INSPECTOR_TABS_KEY, undefined)
 const isTabbed = computed(() => Boolean(tabsCtx?.active.value))
 const activeTabId = computed(() => (isTabbed.value ? tabsCtx!.activeTab.value : null))

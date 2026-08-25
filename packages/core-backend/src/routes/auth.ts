@@ -298,8 +298,8 @@ function buildFeaturePayload(authUser: User) {
     // B3-07 (#4195): surfaces the APPROVAL_ATTACHMENTS_ENABLED master flag (D5, default OFF) to the
     // web client so the fill view swaps the B2-28 placeholder for the real uploader ONLY flag-ON.
     approvalAttachments: isApprovalAttachmentsEnabled(),
-    // Canvas V2 is an independent, default-OFF authoring rollout. It is never inferred from admin
-    // role, product mode, or plugin state; the legacy structured editor remains the fallback.
+    // Canvas V2 is the default authoring surface. It is never inferred from admin role, product
+    // mode, or plugin state; an explicit false env value selects the operator rollback renderer.
     approvalCanvasV2: isApprovalCanvasV2Enabled(),
     // FWB production authoring (write_approval_form_values). Surfaces APPROVAL_FWB_WRITEBACK_ENABLED
     // (default OFF) so the automation rule editor can offer the mapping UI only when execution is

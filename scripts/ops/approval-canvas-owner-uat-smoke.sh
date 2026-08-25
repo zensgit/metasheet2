@@ -27,32 +27,34 @@ log "cwd=${ROOT_DIR}"
 log "SKIP_TESTS=${SKIP_TESTS}"
 
 # ---------------------------------------------------------------------------
-# 1) Frontend product default: approvalCanvasV2 remains false
-#    (DEFAULT_FEATURES / featureDefaults surface in featureFlags.ts)
+# 1) Frontend pre-session fallback remains false. The authenticated backend session is authoritative
+#    and now supplies true when the env flag is unset; this local fallback avoids inferring access
+#    before that session probe completes.
 # ---------------------------------------------------------------------------
 FEATURE_FLAGS="apps/web/src/stores/featureFlags.ts"
 if [[ ! -f "$FEATURE_FLAGS" ]]; then
   fail "missing ${FEATURE_FLAGS}"
 else
   if grep -qE 'approvalCanvasV2:\s*false' "$FEATURE_FLAGS"; then
-    ok "approvalCanvasV2 default false in ${FEATURE_FLAGS}"
+    ok "approvalCanvasV2 pre-session fallback is false in ${FEATURE_FLAGS}"
   else
-    fail "expected approvalCanvasV2: false in ${FEATURE_FLAGS} (featureDefaults/DEFAULT_FEATURES)"
+    fail "expected approvalCanvasV2: false pre-session fallback in ${FEATURE_FLAGS}"
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# 2) Backend env gate: APPROVAL_CANVAS_V2_ENABLED strict true only via flag service
+# 2) Backend env gate: unset or exact true selects Canvas; every other value selects rollback.
+#    This source-shape pin is paired with the behavioral unit below.
 # ---------------------------------------------------------------------------
 FLAG_SVC="packages/core-backend/src/services/approval-canvas-flag.ts"
 if [[ ! -f "$FLAG_SVC" ]]; then
   fail "missing ${FLAG_SVC}"
 else
   if grep -q "APPROVAL_CANVAS_V2_ENABLED" "$FLAG_SVC" \
-    && grep -qE "=== ['\"]true['\"]" "$FLAG_SVC"; then
-    ok "APPROVAL_CANVAS_V2_ENABLED strict === 'true' gate in approval-canvas-flag.ts"
+    && grep -Fq "return value === '' || value === 'true'" "$FLAG_SVC"; then
+    ok "APPROVAL_CANVAS_V2_ENABLED unset-or-exact-true contract in approval-canvas-flag.ts"
   else
-    fail "expected APPROVAL_CANVAS_V2_ENABLED === 'true' only in ${FLAG_SVC}"
+    fail "expected unset-or-exact-true Canvas contract in ${FLAG_SVC}"
   fi
 fi
 
@@ -126,13 +128,16 @@ require_file "apps/web/tests/approval-g5c-authoring-scenarios.test.ts"
 # 5) Optional focused vitest. Skippable via SKIP_TESTS=1.
 # ---------------------------------------------------------------------------
 if [[ "$SKIP_TESTS" == "1" ]]; then
-  ok "SKIP_TESTS=1 — skipping focused vitest (history + g5c + residual)"
+    ok "SKIP_TESTS=1 — skipping focused vitest (flag + history + g5c + residual)"
 else
   if ! command -v pnpm >/dev/null 2>&1; then
     log "WARN: pnpm not available — skipping focused vitest"
   else
-    log "Running focused vitest: history + g5c + residual always-on canaries"
-    if pnpm --filter @metasheet/web exec vitest run --watch=false \
+    log "Running focused vitest: Canvas flag contract + history + g5c + residual canaries"
+    if pnpm --filter @metasheet/core-backend exec vitest run --watch=false \
+      tests/unit/approval-canvas-flag.test.ts \
+      --reporter=dot \
+      && pnpm --filter @metasheet/web exec vitest run --watch=false \
       tests/approval-authoring-history.test.ts \
       tests/approval-g5c-authoring-scenarios.test.ts \
       tests/approval-form-authoring-history.test.ts \
@@ -141,9 +146,9 @@ else
       tests/approval-canvas-inspector-a11y.test.ts \
       tests/approval-form-palette-focus.test.ts \
       --reporter=dot; then
-      ok "focused vitest (history + g5c + residual) passed"
+      ok "focused vitest (flag + history + g5c + residual) passed"
     else
-      fail "focused vitest (history + g5c + residual) failed"
+      fail "focused vitest (flag + history + g5c + residual) failed"
     fi
   fi
 fi

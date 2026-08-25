@@ -315,7 +315,7 @@ export function addFormField(
     // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above — this
     // command layer feeds the Designer 2.0 canvas track (ApprovalFormFieldInspector.vue). F4
     // (approval-form-builder-parity-delta-design-20260811.md §5 F4) mounts that track in production
-    // behind `approvalCanvasV2` (default OFF) — it is no longer categorically unmounted, but
+    // behind `approvalCanvasV2` (default ON) — it is no longer categorically unmounted, but
     // ApprovalFormFieldInspector.vue still has NO authoring affordance for these three keys (out of
     // Lock-8's citation scope, §1.3 names ApprovalFormInlineEditor.vue only); a freshly-added
     // `number` field simply carries no display props, same as today, on EITHER surface.

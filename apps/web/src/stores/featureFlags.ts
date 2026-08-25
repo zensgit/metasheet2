@@ -28,8 +28,8 @@ export interface ProductFeatures {
    */
   approvalAttachments: boolean
   /**
-   * Approval Canvas V2 authoring surface. Default OFF and enabled only by an explicit backend
-   * session value or the existing authorized development override.
+   * Approval Canvas V2 authoring surface. The backend defaults it ON; an explicit false session
+   * value or authorized development override selects the operator rollback surface.
    */
   approvalCanvasV2: boolean
   /**
@@ -375,7 +375,8 @@ function resolveFeatures(
     backend.approvalAttachments,
   )
 
-  // Canvas V2 follows the same explicit-only rollout discipline as approval attachments/mobile.
+  // Canvas V2 is still session-authoritative: the backend now defaults it ON, while an explicit
+  // false response selects the operator rollback surface. No role or product-mode inference.
   const approvalCanvasV2 = boolOrDefault(
     override.approvalCanvasV2,
     backend.approvalCanvasV2,

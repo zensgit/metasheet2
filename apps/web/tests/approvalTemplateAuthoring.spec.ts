@@ -2438,12 +2438,17 @@ describe('TemplateAuthoringView', () => {
     const insert = container!.querySelector('[data-testid^="approval-step-insert-condition-after-"]') as HTMLButtonElement
     insert.click()
     await flushUi()
-    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).toBeNull()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
-    expect(container!.querySelector('[data-node-type="condition"]')).not.toBeNull()
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    const conditionNode = container!.querySelector(
+      '[data-testid="approval-canvas-node"][data-node-type="condition"] [data-testid="approval-canvas-node-select"]',
+    ) as HTMLButtonElement
+    expect(conditionNode).not.toBeNull()
+    conditionNode.click()
     await flushUi()
-    const field = container!.querySelector('[data-testid="approval-condition-rule-field"]') as HTMLSelectElement
+    const field = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-rule-field"]',
+    ) as HTMLSelectElement
     field.value = 'field_1'
     field.dispatchEvent(new Event('change'))
     setInput('approval-template-key', 'conditional')
@@ -2464,9 +2469,15 @@ describe('TemplateAuthoringView', () => {
     insert.click()
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]')).toHaveLength(6)
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
+    const parallelNode = container!.querySelector(
+      '[data-testid="approval-canvas-node"][data-node-type="parallel"] [data-testid="approval-canvas-node-select"]',
+    ) as HTMLButtonElement
+    expect(parallelNode).not.toBeNull()
+    parallelNode.click()
     await flushUi()
-    const joinMode = container!.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
+    const joinMode = container!.querySelector(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-parallel-join-mode"]',
+    ) as HTMLSelectElement
     joinMode.value = 'any'
     joinMode.dispatchEvent(new Event('change'))
     setInput('approval-template-key', 'parallel')
@@ -2660,14 +2671,14 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
   })
 
-  it('D-1 canvas: toggling to 画布视图 renders the graph visually (nodes + SVG edges), no false validity warning', async () => {
+  it('D-1 canvas: renders the graph directly with no legacy view toggle or false validity warning', async () => {
     approvalCanvasV2.value = true
     setRouteParams({ id: 'tpl_canvas' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-graph-view-toggle"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).toBeNull()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(4) // 4 nodes rendered
     expect(container!.querySelectorAll('[data-testid="approval-canvas-edge"]').length).toBe(4) // 4 edges rendered
     expect(container!.querySelector('[data-testid="approval-canvas-validity"]')).toBeNull() // a valid graph → no warning
@@ -2678,8 +2689,6 @@ describe('TemplateAuthoringView', () => {
     setRouteParams({ id: 'tpl_canvas2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCanvasConditionGraph() }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     const before = container!.querySelectorAll('[data-testid="approval-canvas-node"]').length
     // D0: topology actions live on the selected-node inspector (no node button clusters).
@@ -2693,13 +2702,13 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     expect(container!.querySelectorAll('[data-testid="approval-canvas-node"]').length).toBe(before + 1) // new node on canvas
     // P1 fix (review #4433 F1): the canvas-added branch seeds an INCOMPLETE starter rule too —
-    // configure it in the list view before the save can go through (empty branch never saves clean).
+    // configure it in the inspector before the save can go through (empty branch never saves clean).
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
     expect(updateTemplateSpy).not.toHaveBeenCalled()
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
-    await flushUi()
-    const ruleFields = container!.querySelectorAll('[data-testid="approval-condition-rule-field"]')
+    const ruleFields = container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-rule-field"]',
+    )
     const newRuleField = ruleFields[ruleFields.length - 1] as HTMLSelectElement
     newRuleField.value = 'amount'
     newRuleField.dispatchEvent(new Event('change'))
@@ -4234,4 +4243,3 @@ describe('L8-C: formatted-number authoring (docs/development/approval-lock8-fiel
     expect(unauthorable).not.toBeNull()
   })
 })
-
