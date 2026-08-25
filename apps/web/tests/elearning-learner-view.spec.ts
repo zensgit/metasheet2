@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 const h = vi.hoisted(() => ({
   capabilities: vi.fn(),
@@ -125,6 +126,7 @@ describe('ElearningLearnerView', () => {
   }
 
   beforeEach(() => {
+    useLocale().setLocale('zh-CN')
     h.capabilities.mockReset()
     h.list.mockReset()
     h.startWatch.mockReset()
@@ -186,6 +188,7 @@ describe('ElearningLearnerView', () => {
     app = null
     container = null
     vi.useRealTimers()
+    useLocale().setLocale('en')
     vi.clearAllMocks()
   })
 
@@ -196,6 +199,61 @@ describe('ElearningLearnerView', () => {
     expect(root.textContent).toContain('示范课')
     const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
     expect(examBtn.disabled).toBe(true)
+  })
+
+  it('renders English learner chrome when locale is en and keeps course titles as data', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    const text = root.textContent ?? ''
+    expect(text).toContain('Learning Center')
+    expect(text).toContain('Start learning')
+    expect(text).toContain('Start exam')
+    expect(text).toContain('Deadline')
+    expect(text).toContain('None')
+    expect(text).toContain('Not started')
+    expect(text).toContain('Incomplete')
+    expect(text).toContain('示范课')
+    expect(text).not.toContain('学习中心')
+    expect(text).not.toContain('开始学习')
+    expect(text).not.toContain('未开始')
+  })
+
+  it('renders Chinese learner chrome when locale is zh-CN', async () => {
+    useLocale().setLocale('zh-CN')
+    const root = mountView()
+    await flushUi()
+    const text = root.textContent ?? ''
+    expect(text).toContain('学习中心')
+    expect(text).toContain('开始学习')
+    expect(text).toContain('开始考试')
+    expect(text).toContain('截止日期')
+    expect(text).toContain('未开始')
+    expect(text).toContain('未完成')
+    expect(text).toContain('示范课')
+    expect(text).not.toContain('Learning Center')
+    expect(text).not.toContain('Start learning')
+    expect(text).not.toContain('Not started')
+  })
+
+  it('switches learner chrome live when locale changes', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    expect(root.textContent).toContain('Learning Center')
+    expect(root.textContent).toContain('Start learning')
+    expect(root.textContent).toContain('Not started')
+    expect(root.textContent).toContain('示范课')
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(root.textContent).toContain('学习中心')
+    expect(root.textContent).toContain('开始学习')
+    expect(root.textContent).toContain('未开始')
+    expect(root.textContent).toContain('示范课')
+    expect(root.textContent).not.toContain('Learning Center')
+    expect(root.textContent).not.toContain('Start learning')
+    expect(root.textContent).not.toContain('Not started')
   })
 
   it('starts authorized watch+ticket, sends monotonic playing heartbeats, and a final playing beat on ended', async () => {

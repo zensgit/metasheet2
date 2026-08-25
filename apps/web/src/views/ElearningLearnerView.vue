@@ -1,8 +1,8 @@
 <template>
   <section class="elearning-learner" aria-labelledby="elearning-learner-title">
     <header class="elearning-learner__header">
-      <h1 id="elearning-learner-title">学习中心</h1>
-      <p>观看已指派课程。考试仅在服务端确认视频完成后开放。</p>
+      <h1 id="elearning-learner-title">{{ elearningLabel('learner.title', isZh) }}</h1>
+      <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
     </header>
 
     <p
@@ -16,8 +16,8 @@
       {{ status }}
     </p>
 
-    <p v-if="loading && courses.length === 0" class="elearning-muted">正在加载课程…</p>
-    <p v-else-if="courses.length === 0 && statusTone !== 'error'" class="elearning-muted">暂无已指派课程。</p>
+    <p v-if="loading && courses.length === 0" class="elearning-muted">{{ elearningLabel('learner.loading', isZh) }}</p>
+    <p v-else-if="courses.length === 0 && statusTone !== 'error'" class="elearning-muted">{{ elearningLabel('learner.empty', isZh) }}</p>
 
     <article
       v-for="course in courses"
@@ -28,16 +28,16 @@
       <h2>{{ course.title }}</h2>
       <dl class="elearning-meta">
         <div>
-          <dt>截止日期</dt>
-          <dd>{{ course.assignment.deadline || '无' }}</dd>
+          <dt>{{ elearningLabel('learner.deadline', isZh) }}</dt>
+          <dd>{{ course.assignment.deadline || elearningLabel('learner.deadlineNone', isZh) }}</dd>
         </div>
         <div>
-          <dt>视频进度</dt>
-          <dd>{{ videoStatusLabel(course.video.status) }}</dd>
+          <dt>{{ elearningLabel('learner.videoProgress', isZh) }}</dt>
+          <dd>{{ elearningVideoStatusLabel(course.video.status, isZh) }}</dd>
         </div>
         <div>
-          <dt>课程完成</dt>
-          <dd>{{ course.completed ? '已完成' : '未完成' }}</dd>
+          <dt>{{ elearningLabel('learner.courseCompletion', isZh) }}</dt>
+          <dd>{{ course.completed ? elearningLabel('status.completed', isZh) : elearningLabel('status.incomplete', isZh) }}</dd>
         </div>
       </dl>
 
@@ -49,7 +49,7 @@
           :disabled="busy"
           @click="void startWatch(course)"
         >
-          开始学习
+          {{ elearningLabel('learner.startWatch', isZh) }}
         </button>
         <button
           type="button"
@@ -59,7 +59,7 @@
           :aria-disabled="course.video.status !== 'completed'"
           @click="void startExam(course)"
         >
-          开始考试
+          {{ elearningLabel('learner.startExam', isZh) }}
         </button>
       </div>
 
@@ -75,7 +75,7 @@
         @seeking="onSeeking($event)"
         @seeked="onSeeked($event)"
       >
-        您的浏览器不支持视频播放。
+        {{ elearningLabel('learner.videoUnsupported', isZh) }}
       </video>
 
       <p
@@ -83,8 +83,7 @@
         class="elearning-result"
         data-testid="elearning-latest-attempt"
       >
-        最近成绩：{{ course.exam.latestAttempt.autoScore }} / {{ course.exam.latestAttempt.totalScore }}
-        · {{ course.exam.latestAttempt.passed ? '通过' : '未通过' }}
+        {{ elearningLatestAttempt(course.exam.latestAttempt.autoScore, course.exam.latestAttempt.totalScore, course.exam.latestAttempt.passed, isZh) }}
       </p>
 
       <form
@@ -99,7 +98,7 @@
           class="elearning-exam-question"
         >
           <legend>{{ question.position }}. {{ question.prompt }}</legend>
-          <p class="elearning-muted">分值 {{ question.points }}</p>
+          <p class="elearning-muted">{{ elearningQuestionPoints(question.points, isZh) }}</p>
           <label
             v-for="option in question.options"
             :key="option.id"
@@ -121,7 +120,7 @@
           data-testid="elearning-submit-exam"
           :disabled="busy"
         >
-          提交答卷
+          {{ elearningLabel('learner.submitExam', isZh) }}
         </button>
       </form>
 
@@ -130,8 +129,7 @@
         class="elearning-result"
         data-testid="elearning-exam-result"
       >
-        得分 {{ examResult.autoScore }} / {{ examResult.totalScore }}
-        · {{ examResult.passed ? '通过' : '未通过' }}
+        {{ elearningExamScore(examResult.autoScore, examResult.totalScore, examResult.passed, isZh) }}
       </p>
     </article>
   </section>
@@ -139,6 +137,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   ElearningApiError,
@@ -156,6 +155,16 @@ import {
   type ElearningPublicPaper,
   type ElearningQuestionType,
 } from '../services/elearning'
+import {
+  elearningExamScore,
+  elearningFailure,
+  elearningLabel,
+  elearningLatestAttempt,
+  elearningQuestionPoints,
+  elearningVideoStatusLabel,
+} from './elearningLabels'
+
+const { isZh } = useLocale()
 
 const courses = ref<ElearningLearnerCourse[]>([])
 const loading = ref(false)
@@ -189,15 +198,9 @@ let pendingBeats: PendingBeat[] = []
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return `失败：${error.code}（${error.status}）`
+    return elearningFailure(error.code, error.status, isZh.value)
   }
-  return '失败：request_failed（0）'
-}
-
-function videoStatusLabel(status: ElearningLearnerCourse['video']['status']): string {
-  if (status === 'completed') return '已完成'
-  if (status === 'in_progress') return '学习中'
-  return '未开始'
+  return elearningFailure('request_failed', 0, isZh.value)
 }
 
 function bindVideo(event: Event): HTMLVideoElement | null {

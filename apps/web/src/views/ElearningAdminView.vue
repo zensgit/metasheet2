@@ -1,13 +1,13 @@
 <template>
   <section class="elearning-admin" aria-labelledby="elearning-admin-title">
     <header class="elearning-admin__header">
-      <h1 id="elearning-admin-title">云课堂管理</h1>
-      <p>上传一段 MP4、编写客观题后发布并直接指派给一名学员。</p>
+      <h1 id="elearning-admin-title">{{ elearningLabel('admin.title', isZh) }}</h1>
+      <p>{{ elearningLabel('admin.subtitle', isZh) }}</p>
     </header>
 
     <form class="elearning-admin__form" @submit.prevent="void submitPublishAndAssign()">
       <label class="elearning-field">
-        <span>课程视频（MP4）</span>
+        <span>{{ elearningLabel('admin.videoFile', isZh) }}</span>
         <input
           data-testid="elearning-admin-file"
           type="file"
@@ -18,7 +18,7 @@
       </label>
 
       <label class="elearning-field">
-        <span>课程标题</span>
+        <span>{{ elearningLabel('admin.courseTitle', isZh) }}</span>
         <input
           v-model="title"
           data-testid="elearning-admin-title-input"
@@ -31,7 +31,7 @@
       </label>
 
       <fieldset class="elearning-questions">
-        <legend>客观题</legend>
+        <legend>{{ elearningLabel('admin.questions', isZh) }}</legend>
         <article
           v-for="(question, qIndex) in questions"
           :key="question.localId"
@@ -40,19 +40,19 @@
         >
           <div class="elearning-question__row">
             <label class="elearning-field">
-              <span>题型</span>
+              <span>{{ elearningLabel('admin.questionType', isZh) }}</span>
               <select
                 :value="question.questionType"
                 :disabled="busy || published !== null"
                 @change="onQuestionTypeEvent($event, qIndex)"
               >
-                <option value="single_choice">单选</option>
-                <option value="multiple_choice">多选</option>
-                <option value="true_false">判断</option>
+                <option value="single_choice">{{ elearningLabel('admin.questionTypeSingle', isZh) }}</option>
+                <option value="multiple_choice">{{ elearningLabel('admin.questionTypeMultiple', isZh) }}</option>
+                <option value="true_false">{{ elearningLabel('admin.questionTypeTrueFalse', isZh) }}</option>
               </select>
             </label>
             <label class="elearning-field elearning-field--narrow">
-              <span>分值</span>
+              <span>{{ elearningLabel('admin.points', isZh) }}</span>
               <input
                 v-model.number="question.points"
                 type="number"
@@ -69,12 +69,12 @@
               :disabled="busy || published !== null"
               @click="removeQuestion(qIndex)"
             >
-              删除本题
+              {{ elearningLabel('admin.removeQuestion', isZh) }}
             </button>
           </div>
 
           <label class="elearning-field">
-            <span>题干</span>
+            <span>{{ elearningLabel('admin.prompt', isZh) }}</span>
             <textarea
               v-model="question.prompt"
               :data-testid="`elearning-admin-prompt-${qIndex}`"
@@ -85,7 +85,7 @@
           </label>
 
           <fieldset class="elearning-options">
-            <legend>选项与正确答案</legend>
+            <legend>{{ elearningLabel('admin.optionsLegend', isZh) }}</legend>
             <label
               v-for="(option, oIndex) in question.options"
               :key="option.id"
@@ -97,7 +97,7 @@
                 :value="option.id"
                 :checked="question.correctOptionIds.includes(option.id)"
                 :disabled="busy || published !== null"
-                :aria-label="`正确答案 ${option.id}`"
+                :aria-label="elearningCorrectOptionAria(option.id, isZh)"
                 @change="onCorrectEvent($event, qIndex, option.id)"
               >
               <input
@@ -105,7 +105,7 @@
                 type="text"
                 required
                 :disabled="busy || published !== null || question.questionType === 'true_false'"
-                :aria-label="`选项 ${oIndex + 1}`"
+                :aria-label="elearningOptionAria(oIndex + 1, isZh)"
               >
               <button
                 v-if="question.questionType !== 'true_false' && question.options.length > 2"
@@ -114,7 +114,7 @@
                 :disabled="busy || published !== null"
                 @click="removeOption(qIndex, oIndex)"
               >
-                删除选项
+                {{ elearningLabel('admin.removeOption', isZh) }}
               </button>
             </label>
             <button
@@ -124,7 +124,7 @@
               :disabled="busy || published !== null || question.options.length >= 20"
               @click="addOption(qIndex)"
             >
-              添加选项
+              {{ elearningLabel('admin.addOption', isZh) }}
             </button>
           </fieldset>
         </article>
@@ -135,13 +135,13 @@
           data-testid="elearning-admin-add-question"
           @click="addQuestion"
         >
-          添加题目
+          {{ elearningLabel('admin.addQuestion', isZh) }}
         </button>
       </fieldset>
 
       <div class="elearning-admin__grid">
         <label class="elearning-field">
-          <span>及格分</span>
+          <span>{{ elearningLabel('admin.passScore', isZh) }}</span>
           <input
             v-model.number="passScore"
             data-testid="elearning-admin-pass-score"
@@ -153,7 +153,7 @@
           >
         </label>
         <label class="elearning-field">
-          <span>最大尝试次数</span>
+          <span>{{ elearningLabel('admin.maxAttempts', isZh) }}</span>
           <input
             v-model.number="maxAttempts"
             data-testid="elearning-admin-max-attempts"
@@ -165,7 +165,7 @@
           >
         </label>
         <label class="elearning-field">
-          <span>指派对象（用户 ID）</span>
+          <span>{{ elearningLabel('admin.targetUser', isZh) }}</span>
           <input
             v-model="targetUserId"
             data-testid="elearning-admin-target"
@@ -176,7 +176,7 @@
           >
         </label>
         <label class="elearning-field">
-          <span>截止日期（可选）</span>
+          <span>{{ elearningLabel('admin.deadline', isZh) }}</span>
           <input
             v-model="deadlineLocal"
             data-testid="elearning-admin-deadline"
@@ -193,7 +193,7 @@
           data-testid="elearning-admin-publish"
           :disabled="busy || published !== null || !ready"
         >
-          {{ busy && published === null ? '正在发布…' : '发布并指派' }}
+          {{ busy && published === null ? elearningLabel('admin.publishing', isZh) : elearningLabel('admin.publish', isZh) }}
         </button>
         <button
           v-if="published !== null && !assigned"
@@ -203,7 +203,7 @@
           :disabled="busy || !ready"
           @click="void retryAssign()"
         >
-          {{ busy ? '正在重试指派…' : '重试指派' }}
+          {{ busy ? elearningLabel('admin.retrying', isZh) : elearningLabel('admin.retry', isZh) }}
         </button>
       </div>
     </form>
@@ -223,6 +223,7 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useLocale } from '../composables/useLocale'
 import {
   assignElearningDirect,
   ElearningApiError,
@@ -234,6 +235,15 @@ import {
   type ElearningDirectAssignmentRequest,
   type ElearningQuestionType,
 } from '../services/elearning'
+import {
+  elearningAssignIncomplete,
+  elearningCorrectOptionAria,
+  elearningFailure,
+  elearningLabel,
+  elearningOptionAria,
+} from './elearningLabels'
+
+const { isZh } = useLocale()
 
 interface OptionDraft {
   id: string
@@ -294,9 +304,9 @@ function newQuestion(): QuestionDraft {
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return `失败：${error.code}（${error.status}）`
+    return elearningFailure(error.code, error.status, isZh.value)
   }
-  return '失败：request_failed（0）'
+  return elearningFailure('request_failed', 0, isZh.value)
 }
 
 function onFileChange(event: Event): void {
@@ -396,29 +406,30 @@ function readDeadlineIso(): string | undefined {
 }
 
 function validateForm(): string | null {
-  if (!file.value) return '请选择一个 MP4 文件。'
-  if (title.value.trim() === '') return '请填写课程标题。'
-  if (!Number.isSafeInteger(passScore.value) || passScore.value < 0) return '及格分须为非负整数。'
-  if (!Number.isSafeInteger(maxAttempts.value) || maxAttempts.value < 1) return '最大尝试次数须为正整数。'
-  if (targetUserId.value.trim() === '') return '请填写指派对象。'
-  if (questions.value.length < 1) return '至少需要一道客观题。'
+  const zh = isZh.value
+  if (!file.value) return elearningLabel('validation.mp4Required', zh)
+  if (title.value.trim() === '') return elearningLabel('validation.titleRequired', zh)
+  if (!Number.isSafeInteger(passScore.value) || passScore.value < 0) return elearningLabel('validation.passScoreInteger', zh)
+  if (!Number.isSafeInteger(maxAttempts.value) || maxAttempts.value < 1) return elearningLabel('validation.maxAttemptsInteger', zh)
+  if (targetUserId.value.trim() === '') return elearningLabel('validation.targetRequired', zh)
+  if (questions.value.length < 1) return elearningLabel('validation.questionRequired', zh)
   let total = 0
   for (const question of questions.value) {
-    if (question.prompt.trim() === '') return '请填写题干。'
-    if (!Number.isSafeInteger(question.points) || question.points < 1) return '分值须为正整数。'
+    if (question.prompt.trim() === '') return elearningLabel('validation.promptRequired', zh)
+    if (!Number.isSafeInteger(question.points) || question.points < 1) return elearningLabel('validation.pointsInteger', zh)
     if (question.questionType === 'true_false') {
-      if (question.options.length !== 2) return '判断题必须恰好两个选项。'
+      if (question.options.length !== 2) return elearningLabel('validation.trueFalseOptions', zh)
     } else if (question.options.length < 2) {
-      return '选择题至少需要两个选项。'
+      return elearningLabel('validation.choiceOptions', zh)
     }
-    if (question.options.some((option) => option.text.trim() === '')) return '请填写全部选项。'
-    if (question.correctOptionIds.length < 1) return '请选择正确答案。'
+    if (question.options.some((option) => option.text.trim() === '')) return elearningLabel('validation.optionsRequired', zh)
+    if (question.correctOptionIds.length < 1) return elearningLabel('validation.correctRequired', zh)
     if (question.questionType !== 'multiple_choice' && question.correctOptionIds.length !== 1) {
-      return '单选和判断题只能有一个正确答案。'
+      return elearningLabel('validation.singleCorrect', zh)
     }
     total += question.points
   }
-  if (passScore.value > total) return '及格分不能大于总分。'
+  if (passScore.value > total) return elearningLabel('validation.passScoreTooHigh', zh)
   return null
 }
 
@@ -453,12 +464,12 @@ async function runAssign(): Promise<boolean> {
     await assignElearningDirect(payload)
     assigned.value = true
     statusTone.value = 'info'
-    status.value = '课程已发布并完成指派。'
+    status.value = elearningLabel('admin.assignSuccess', isZh.value)
     return true
   } catch (error) {
     assigned.value = false
     statusTone.value = 'partial'
-    status.value = `课程已发布，指派未完成。${formatError(error)} 可重试指派，无需重新发布。`
+    status.value = elearningAssignIncomplete(formatError(error), isZh.value)
     return false
   }
 }

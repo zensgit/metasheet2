@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App as VueApp } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 
 const h = vi.hoisted(() => ({
   capabilities: vi.fn(),
@@ -62,6 +63,7 @@ describe('ElearningAdminView', () => {
   }
 
   beforeEach(() => {
+    useLocale().setLocale('zh-CN')
     h.capabilities.mockReset()
     h.upload.mockReset()
     h.publish.mockReset()
@@ -110,6 +112,7 @@ describe('ElearningAdminView', () => {
     app = null
     container = null
     uuidSpy?.mockRestore()
+    useLocale().setLocale('en')
     vi.clearAllMocks()
   })
 
@@ -133,7 +136,35 @@ describe('ElearningAdminView', () => {
     await flushUi()
   }
 
-  it('renders compact Chinese admin labels for the named demo only', async () => {
+  function expectParkedSurfacesAbsent(text: string): void {
+    expect(text).not.toContain('班级')
+    expect(text).not.toContain('排课')
+    expect(text).not.toContain('教室')
+    expect(text).not.toContain('Class schedule')
+  }
+
+  it('renders English admin chrome when locale is en and excludes parked surfaces', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    const text = root.textContent ?? ''
+    expect(text).toContain('Cloud Classroom Admin')
+    expect(text).toContain('Course title')
+    expect(text).toContain('Objective questions')
+    expect(text).toContain('Passing score')
+    expect(text).toContain('Maximum attempts')
+    expect(text).toContain('Assignee')
+    expect(text).toContain('Publish and assign')
+    expect(text).not.toContain('云课堂管理')
+    expect(text).not.toContain('课程标题')
+    expect(text).not.toContain('发布并指派')
+    expect(root.querySelector('.elearning-option input[type="radio"]')?.getAttribute('aria-label')).toBe('Correct answer a')
+    expect(root.querySelector('.elearning-option input[type="text"]')?.getAttribute('aria-label')).toBe('Option 1')
+    expectParkedSurfacesAbsent(text)
+  })
+
+  it('renders Chinese admin chrome when locale is zh-CN and excludes parked surfaces', async () => {
+    useLocale().setLocale('zh-CN')
     const root = mountView()
     await flushUi()
     const text = root.textContent ?? ''
@@ -144,9 +175,51 @@ describe('ElearningAdminView', () => {
     expect(text).toContain('最大尝试次数')
     expect(text).toContain('指派对象')
     expect(text).toContain('发布并指派')
-    expect(text).not.toContain('班级')
-    expect(text).not.toContain('排课')
-    expect(text).not.toContain('教室')
+    expect(text).not.toContain('Cloud Classroom Admin')
+    expect(text).not.toContain('Course title')
+    expect(text).not.toContain('Publish and assign')
+    expect(root.querySelector('.elearning-option input[type="radio"]')?.getAttribute('aria-label')).toBe('正确答案 a')
+    expect(root.querySelector('.elearning-option input[type="text"]')?.getAttribute('aria-label')).toBe('选项 1')
+    expectParkedSurfacesAbsent(text)
+  })
+
+  it('switches admin chrome live when locale changes', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    expect(root.textContent).toContain('Cloud Classroom Admin')
+    expect(root.textContent).toContain('Publish and assign')
+    expect(root.querySelector('.elearning-option input[type="radio"]')?.getAttribute('aria-label')).toBe('Correct answer a')
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(root.textContent).toContain('云课堂管理')
+    expect(root.textContent).toContain('发布并指派')
+    expect(root.textContent).not.toContain('Cloud Classroom Admin')
+    expect(root.textContent).not.toContain('Publish and assign')
+    expect(root.querySelector('.elearning-option input[type="radio"]')?.getAttribute('aria-label')).toBe('正确答案 a')
+    expect(root.querySelector('.elearning-option input[type="text"]')?.getAttribute('aria-label')).toBe('选项 1')
+  })
+
+  it('surfaces English validation when the MP4 is missing', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    fillInput(root.querySelector('[data-testid="elearning-admin-title-input"]') as HTMLInputElement, 'Demo')
+    fillInput(root.querySelector('[data-testid="elearning-admin-prompt-0"]') as HTMLTextAreaElement, 'Pick')
+    const optionTexts = root.querySelectorAll('.elearning-option input[type="text"]')
+    fillInput(optionTexts[0] as HTMLInputElement, 'Yes')
+    fillInput(optionTexts[1] as HTMLInputElement, 'No')
+    const correct = root.querySelector('.elearning-option input[type="radio"]') as HTMLInputElement
+    correct.checked = true
+    correct.dispatchEvent(new Event('change', { bubbles: true }))
+    fillInput(root.querySelector('[data-testid="elearning-admin-target"]') as HTMLInputElement, 'user-1')
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toBe('Please select an MP4 file.')
+    expect(h.upload).not.toHaveBeenCalled()
+    expect(h.publish).not.toHaveBeenCalled()
   })
 
   it('publishes then direct-assigns with retained UUID request and source keys', async () => {
