@@ -889,6 +889,7 @@ jobs:
             tests/unit/elearning-training-plan.test.ts \
             tests/unit/elearning-training-plan-assignment-routes.test.ts \
             tests/unit/elearning-training-plan-assignment.test.ts \
+            tests/unit/elearning-training-plan-revocation.test.ts \
             tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
             tests/unit/elearning-watch-progress.test.ts \
             --reporter=dot

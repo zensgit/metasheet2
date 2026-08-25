@@ -8173,6 +8173,35 @@
           }
         }
       },
+      "ElearningTrainingPlanRevocationResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "planAssignmentId",
+          "revoked",
+          "revokedMemberCount",
+          "duplicate"
+        ],
+        "properties": {
+          "planAssignmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "revoked": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "revokedMemberCount": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
       "ElearningTrainingPlanItem": {
         "type": "object",
         "additionalProperties": false,
@@ -23825,7 +23854,7 @@
       "put": {
         "operationId": "revokeElearningAssignmentMember",
         "summary": "Explicitly revoke one assignment member",
-        "description": "Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nBody key `reason` only, trimmed length 1..500. Actor and authoritative\norg come from JWT. First call sets revoked_at to server time. Same\nnormalized reason is duplicate true. A different reason is conflict.\nCross-org or missing member is 404. Progress, evidence, attempts, and\nthe parent assignment are never deleted or reset.\n",
+        "description": "Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nBody key `reason` only, trimmed length 1..500. Actor and authoritative\norg come from JWT. First call sets revoked_at to server time. Same\nnormalized reason is duplicate true. A different reason is conflict.\nCross-org or missing member is 404. Progress, evidence, attempts, and\nthe parent assignment are never deleted or reset. A training-plan child\nreturns 409 and must use the plan-assignment revocation operation.\n",
         "security": [
           {
             "bearerAuth": []
@@ -24084,6 +24113,78 @@
           },
           "422": {
             "description": "subject_not_found, unsupported_subject, empty_audience, or audience_too_large",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/training-plan-assignments/{planAssignmentId}/revocation": {
+      "put": {
+        "operationId": "revokeElearningTrainingPlanAssignment",
+        "summary": "Atomically revoke every child obligation in one plan assignment",
+        "description": "Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.\nActor and authoritative org come from JWT. The operation writes one\nplan-level revocation triplet and revokes every materialized child\nassignment member in the same transaction. Same normalized reason is\nduplicate true; a different reason conflicts. Individual child-member\nrevocation is rejected so one plan cohort cannot split across courses.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "planAssignmentId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningAssignmentRevocationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revoked true. duplicate true on same-reason replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningTrainingPlanRevocationResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment flags off or plan assignment missing in this org",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "Already revoked with a different reason",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

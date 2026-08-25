@@ -173,12 +173,20 @@ const REVOKE_LOCK_SQL = `/* elearning-lifecycle:revoke-lock */
 SELECT pg_advisory_xact_lock(hashtext($1))`
 
 const LOAD_MEMBER_SQL = `/* elearning-lifecycle:load-member */
-SELECT id, assignment_id, revocation_reason, revoked_at
- FROM elearning_assignment_members
- WHERE org_id = $1
-   AND assignment_id = $2
-   AND id = $3
- FOR UPDATE`
+SELECT
+  member.id,
+  member.assignment_id,
+  member.revocation_reason,
+  member.revoked_at,
+  plan_link.training_plan_assignment_id
+ FROM elearning_assignment_members member
+ LEFT JOIN elearning_training_plan_assignment_items plan_link
+   ON plan_link.org_id = member.org_id
+  AND plan_link.assignment_id = member.assignment_id
+ WHERE member.org_id = $1
+   AND member.assignment_id = $2
+   AND member.id = $3
+ FOR UPDATE OF member`
 
 const REVOKE_MEMBER_SQL = `/* elearning-lifecycle:revoke-member */
 UPDATE elearning_assignment_members
@@ -399,6 +407,7 @@ export async function revokeElearningAssignmentMember(
       const loadedId = requireUuid(row.id)
       const loadedAssignmentId = requireUuid(row.assignment_id)
       if (loadedId !== memberId || loadedAssignmentId !== assignmentId) fail('unavailable')
+      if (row.training_plan_assignment_id != null) fail('conflict')
 
       if (row.revoked_at != null) {
         const storedReason = asText(row.revocation_reason)

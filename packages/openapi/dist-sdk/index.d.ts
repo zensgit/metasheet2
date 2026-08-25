@@ -8508,7 +8508,8 @@ export interface paths {
          *     org come from JWT. First call sets revoked_at to server time. Same
          *     normalized reason is duplicate true. A different reason is conflict.
          *     Cross-org or missing member is 404. Progress, evidence, attempts, and
-         *     the parent assignment are never deleted or reset.
+         *     the parent assignment are never deleted or reset. A training-plan child
+         *     returns 409 and must use the plan-assignment revocation operation.
          */
         put: operations["revokeElearningAssignmentMember"];
         post?: never;
@@ -8585,6 +8586,31 @@ export interface paths {
          *     course state. At most 100 courses and 10,000 members.
          */
         post: operations["assignElearningTrainingPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plan-assignments/{planAssignmentId}/revocation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Atomically revoke every child obligation in one plan assignment
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. The operation writes one
+         *     plan-level revocation triplet and revokes every materialized child
+         *     assignment member in the same transaction. Same normalized reason is
+         *     duplicate true; a different reason conflicts. Individual child-member
+         *     revocation is rejected so one plan cohort cannot split across courses.
+         */
+        put: operations["revokeElearningTrainingPlanAssignment"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -17765,6 +17791,13 @@ export interface components {
             memberCount: number;
             duplicate: boolean;
         };
+        ElearningTrainingPlanRevocationResult: {
+            planAssignmentId: components["schemas"]["ElearningUuid"];
+            /** @enum {boolean} */
+            revoked: true;
+            revokedMemberCount: number;
+            duplicate: boolean;
+        };
         ElearningTrainingPlanItem: {
             courseVersionId: components["schemas"]["ElearningUuid"];
             position: number;
@@ -19513,6 +19546,46 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             /** @description subject_not_found, unsupported_subject, empty_audience, or audience_too_large */
             422: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    revokeElearningTrainingPlanAssignment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planAssignmentId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAssignmentRevocationRequest"];
+            };
+        };
+        responses: {
+            /** @description Revoked true. duplicate true on same-reason replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanRevocationResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off or plan assignment missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description Already revoked with a different reason */
+            409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

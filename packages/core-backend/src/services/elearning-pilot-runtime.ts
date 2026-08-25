@@ -79,6 +79,12 @@ import {
   type ElearningTrainingPlanAssignmentDb,
   type ElearningTrainingPlanAssignmentResult,
 } from './elearning-training-plan-assignment'
+import {
+  revokeElearningTrainingPlanAssignment,
+  type ElearningTrainingPlanRevocationDb,
+  type ElearningTrainingPlanRevocationResult,
+  type RevokeElearningTrainingPlanAssignmentInput,
+} from './elearning-training-plan-revocation'
 
 export interface ElearningPilotRuntime {
   router: ExpressRouter
@@ -94,7 +100,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningLearnerCoursesDb &
     ElearningScopeDb &
     ElearningTrainingPlanDb &
-    ElearningTrainingPlanAssignmentDb
+    ElearningTrainingPlanAssignmentDb &
+    ElearningTrainingPlanRevocationDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -153,6 +160,10 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningTrainingPlanAssignmentDb,
     input: AssignElearningTrainingPlanInput,
   ) => Promise<ElearningTrainingPlanAssignmentResult>
+  revokeElearningTrainingPlanAssignment?: (
+    db: ElearningTrainingPlanRevocationDb,
+    input: RevokeElearningTrainingPlanAssignmentInput,
+  ) => Promise<ElearningTrainingPlanRevocationResult>
 }
 
 function viewerId(req: Request): string | null {
@@ -213,6 +224,9 @@ export function createElearningPilotRuntime(
       opts.getElearningTrainingPlan ?? getElearningTrainingPlan,
     assignElearningTrainingPlan:
       opts.assignElearningTrainingPlan ?? assignElearningTrainingPlan,
+    revokeElearningTrainingPlanAssignment:
+      opts.revokeElearningTrainingPlanAssignment
+      ?? revokeElearningTrainingPlanAssignment,
   })
   if (!inner) return null
 

@@ -41,6 +41,12 @@ import {
   type ElearningTrainingPlanAssignmentErrorCode,
 } from '../services/elearning-training-plan-assignment'
 import {
+  revokeElearningTrainingPlanAssignment,
+  ElearningTrainingPlanRevocationError,
+  type ElearningTrainingPlanRevocationDb,
+  type ElearningTrainingPlanRevocationErrorCode,
+} from '../services/elearning-training-plan-revocation'
+import {
   assignElearningBatch,
   ElearningBatchAssignmentError,
   type ElearningBatchAssignmentDb,
@@ -235,6 +241,16 @@ const TRAINING_PLAN_ASSIGNMENT_STATUS: Record<
   unavailable: 503,
 }
 
+const TRAINING_PLAN_REVOCATION_STATUS: Record<
+  ElearningTrainingPlanRevocationErrorCode,
+  number
+> = {
+  invalid_input: 400,
+  not_found: 404,
+  conflict: 409,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
@@ -249,7 +265,8 @@ export interface ElearningPilotRouteDeps {
     ElearningScopeDb &
     ElearningAssignmentLifecycleDb &
     ElearningTrainingPlanDb &
-    ElearningTrainingPlanAssignmentDb
+    ElearningTrainingPlanAssignmentDb &
+    ElearningTrainingPlanRevocationDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -264,6 +281,7 @@ export interface ElearningPilotRouteDeps {
   publishElearningTrainingPlan?: typeof publishElearningTrainingPlan
   getElearningTrainingPlan?: typeof getElearningTrainingPlan
   assignElearningTrainingPlan?: typeof assignElearningTrainingPlan
+  revokeElearningTrainingPlanAssignment?: typeof revokeElearningTrainingPlanAssignment
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -363,6 +381,9 @@ export function createElearningPilotRouter(
     deps.getElearningTrainingPlan ?? getElearningTrainingPlan
   const assignTrainingPlan =
     deps.assignElearningTrainingPlan ?? assignElearningTrainingPlan
+  const revokeTrainingPlanAssignment =
+    deps.revokeElearningTrainingPlanAssignment
+    ?? revokeElearningTrainingPlanAssignment
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -785,6 +806,44 @@ export function createElearningPilotRouter(
       } catch (error) {
         if (error instanceof ElearningTrainingPlanAssignmentError) {
           res.status(TRAINING_PLAN_ASSIGNMENT_STATUS[error.code]).json({
+            error: error.code,
+          })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.put(
+    '/api/elearning/training-plan-assignments/:planAssignmentId/revocation',
+    ...gate(deps.adminGuard, 'assignment'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const planAssignmentId = uuidParam(req, 'planAssignmentId')
+      const body = readObject(req.body)
+      if (
+        !planAssignmentId
+        || !body
+        || rejectUnknownKeys(body, REVOKE_KEYS)
+        || !Object.prototype.hasOwnProperty.call(body, 'reason')
+        || typeof body.reason !== 'string'
+      ) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await revokeTrainingPlanAssignment(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          planAssignmentId,
+          reason: body.reason,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningTrainingPlanRevocationError) {
+          res.status(TRAINING_PLAN_REVOCATION_STATUS[error.code]).json({
             error: error.code,
           })
           return

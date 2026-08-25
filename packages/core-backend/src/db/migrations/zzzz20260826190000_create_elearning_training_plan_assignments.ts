@@ -36,6 +36,10 @@ export const TRAINING_PLAN_CHILD_MEMBER_REVOKE_FN =
   'elearning_training_plan_child_member_revoke_guard'
 export const TRAINING_PLAN_CHILD_MEMBER_REVOKE_TRIGGER =
   'trg_elearning_training_plan_child_member_revoke_guard'
+export const TRAINING_PLAN_ASSIGNMENT_REVOCATION_COMPLETE_FN =
+  'elearning_training_plan_assignment_revocation_complete'
+export const TRAINING_PLAN_ASSIGNMENT_REVOCATION_COMPLETE_TRIGGER =
+  'trg_elearning_training_plan_assignment_revocation_complete'
 export const TRAINING_PLAN_ASSIGNMENT_COMPLETE_FN =
   'elearning_training_plan_assignment_complete'
 export const TRAINING_PLAN_ASSIGNMENT_COMPLETE_GROUP_TRIGGER =
@@ -73,6 +77,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       member_ids text[] NOT NULL,
       course_count integer NOT NULL,
       member_count integer NOT NULL,
+      revoked_at timestamptz,
+      revoked_by text,
+      revocation_reason text,
       created_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT elearning_training_plan_assignments_org_id_id_uniq
         UNIQUE (org_id, id),
@@ -98,6 +105,23 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         CHECK (
           member_count BETWEEN 1 AND 10000
           AND member_count = cardinality(member_ids)
+        ),
+      CONSTRAINT elearning_training_plan_assignments_revoke_triplet_chk
+        CHECK (
+          (
+            revoked_at IS NULL
+            AND revoked_by IS NULL
+            AND revocation_reason IS NULL
+          )
+          OR
+          (
+            revoked_at IS NOT NULL
+            AND revoked_by IS NOT NULL
+            AND btrim(revoked_by) <> ''
+            AND revocation_reason IS NOT NULL
+            AND btrim(revocation_reason) <> ''
+            AND char_length(revocation_reason) <= 500
+          )
         ),
       CONSTRAINT elearning_training_plan_assignments_plan_version_fk
         FOREIGN KEY (org_id, training_plan_id, training_plan_version_id)
@@ -171,7 +195,32 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         RAISE EXCEPTION 'training plan assignments are append-only';
       END IF;
       IF TG_OP = 'UPDATE' THEN
-        RAISE EXCEPTION 'training plan assignments are immutable';
+        IF NEW.id IS DISTINCT FROM OLD.id
+           OR NEW.org_id IS DISTINCT FROM OLD.org_id
+           OR NEW.training_plan_id IS DISTINCT FROM OLD.training_plan_id
+           OR NEW.training_plan_version_id IS DISTINCT FROM OLD.training_plan_version_id
+           OR NEW.source_key IS DISTINCT FROM OLD.source_key
+           OR NEW.request_hash IS DISTINCT FROM OLD.request_hash
+           OR NEW.request_hash_version IS DISTINCT FROM OLD.request_hash_version
+           OR NEW.deadline IS DISTINCT FROM OLD.deadline
+           OR NEW.assigned_by IS DISTINCT FROM OLD.assigned_by
+           OR NEW.target_snapshot IS DISTINCT FROM OLD.target_snapshot
+           OR NEW.member_ids IS DISTINCT FROM OLD.member_ids
+           OR NEW.course_count IS DISTINCT FROM OLD.course_count
+           OR NEW.member_count IS DISTINCT FROM OLD.member_count
+           OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+          RAISE EXCEPTION 'training plan assignment identity and snapshot are immutable';
+        END IF;
+        IF OLD.revoked_at IS NOT NULL
+           OR NEW.revoked_at IS NULL
+           OR NEW.revoked_by IS NULL
+           OR btrim(NEW.revoked_by) = ''
+           OR NEW.revocation_reason IS NULL
+           OR btrim(NEW.revocation_reason) = ''
+           OR char_length(NEW.revocation_reason) > 500 THEN
+          RAISE EXCEPTION 'training plan assignment revocation is a one-way complete triplet';
+        END IF;
+        RETURN NEW;
       END IF;
 
       SELECT array_agg(member_id ORDER BY member_id)
@@ -408,17 +457,36 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     RETURNS trigger
     LANGUAGE plpgsql
     AS $fn$
+    DECLARE
+      plan_revoked_at timestamptz;
+      plan_revoked_by text;
+      plan_revocation_reason text;
     BEGIN
-      IF (
+      IF NOT (
         NEW.revoked_at IS DISTINCT FROM OLD.revoked_at
         OR NEW.revoked_by IS DISTINCT FROM OLD.revoked_by
         OR NEW.revocation_reason IS DISTINCT FROM OLD.revocation_reason
-      )
-      AND EXISTS (
-        SELECT 1
-        FROM elearning_training_plan_assignment_items link
-        WHERE link.org_id = OLD.org_id
-          AND link.assignment_id = OLD.assignment_id
+      ) THEN
+        RETURN NEW;
+      END IF;
+
+      SELECT
+        plan_assignment.revoked_at,
+        plan_assignment.revoked_by,
+        plan_assignment.revocation_reason
+      INTO plan_revoked_at, plan_revoked_by, plan_revocation_reason
+      FROM elearning_training_plan_assignment_items link
+      JOIN elearning_training_plan_assignments plan_assignment
+        ON plan_assignment.org_id = link.org_id
+       AND plan_assignment.id = link.training_plan_assignment_id
+      WHERE link.org_id = OLD.org_id
+        AND link.assignment_id = OLD.assignment_id;
+
+      IF FOUND AND (
+        plan_revoked_at IS NULL
+        OR NEW.revoked_at IS DISTINCT FROM plan_revoked_at
+        OR NEW.revoked_by IS DISTINCT FROM plan_revoked_by
+        OR NEW.revocation_reason IS DISTINCT FROM plan_revocation_reason
       ) THEN
         RAISE EXCEPTION 'training plan child members require plan-level revocation';
       END IF;
@@ -433,6 +501,50 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ON elearning_assignment_members
       FOR EACH ROW
       EXECUTE FUNCTION elearning_training_plan_child_member_revoke_guard()
+  `.execute(db)
+
+  await sql`
+    CREATE FUNCTION elearning_training_plan_assignment_revocation_complete()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $fn$
+    DECLARE
+      expected_member_facts bigint;
+      actual_member_facts bigint;
+      matching_revocations bigint;
+    BEGIN
+      expected_member_facts := NEW.course_count::bigint * NEW.member_count::bigint;
+      SELECT
+        count(*),
+        count(*) FILTER (
+          WHERE member.revoked_at IS NOT DISTINCT FROM NEW.revoked_at
+            AND member.revoked_by IS NOT DISTINCT FROM NEW.revoked_by
+            AND member.revocation_reason IS NOT DISTINCT FROM NEW.revocation_reason
+        )
+      INTO actual_member_facts, matching_revocations
+      FROM elearning_training_plan_assignment_items link
+      JOIN elearning_assignment_members member
+        ON member.org_id = link.org_id
+       AND member.assignment_id = link.assignment_id
+      WHERE link.org_id = NEW.org_id
+        AND link.training_plan_assignment_id = NEW.id;
+
+      IF NEW.revoked_at IS NULL
+         OR actual_member_facts IS DISTINCT FROM expected_member_facts
+         OR matching_revocations IS DISTINCT FROM expected_member_facts THEN
+        RAISE EXCEPTION 'training plan revocation must cover every child member atomically';
+      END IF;
+      RETURN NEW;
+    END;
+    $fn$
+  `.execute(db)
+
+  await sql`
+    CREATE CONSTRAINT TRIGGER trg_elearning_training_plan_assignment_revocation_complete
+      AFTER UPDATE ON elearning_training_plan_assignments
+      DEFERRABLE INITIALLY DEFERRED
+      FOR EACH ROW
+      EXECUTE FUNCTION elearning_training_plan_assignment_revocation_complete()
   `.execute(db)
 
   await sql`
@@ -512,6 +624,11 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       ON elearning_training_plan_assignments
   `.execute(db)
   await sql`DROP FUNCTION elearning_training_plan_assignment_complete()`.execute(db)
+  await sql`
+    DROP TRIGGER trg_elearning_training_plan_assignment_revocation_complete
+      ON elearning_training_plan_assignments
+  `.execute(db)
+  await sql`DROP FUNCTION elearning_training_plan_assignment_revocation_complete()`.execute(db)
   await sql`
     DROP TRIGGER trg_elearning_training_plan_child_member_revoke_guard
       ON elearning_assignment_members

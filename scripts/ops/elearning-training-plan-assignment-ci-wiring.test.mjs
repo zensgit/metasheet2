@@ -20,6 +20,7 @@ const wiringFile = 'scripts/ops/elearning-training-plan-assignment-ci-wiring.tes
 const unitFiles = [
   'tests/unit/elearning-training-plan-assignment-routes.test.ts',
   'tests/unit/elearning-training-plan-assignment.test.ts',
+  'tests/unit/elearning-training-plan-revocation.test.ts',
 ]
 const dbFile = 'tests/integration/elearning-training-plan-assignment.db.test.ts'
 
@@ -60,6 +61,7 @@ test('migration, service, route, OpenAPI, and production-auth proof are present'
   for (const file of [
     'packages/core-backend/src/db/migrations/zzzz20260826190000_create_elearning_training_plan_assignments.ts',
     'packages/core-backend/src/services/elearning-training-plan-assignment.ts',
+    'packages/core-backend/src/services/elearning-training-plan-revocation.ts',
     'packages/core-backend/src/routes/elearning-pilot.ts',
     'packages/core-backend/src/services/elearning-pilot-runtime.ts',
     'packages/openapi/src/paths/elearning.yml',
@@ -73,6 +75,8 @@ test('migration, service, route, OpenAPI, and production-auth proof are present'
   )
   assert.ok(authGate.includes('assignElearningTrainingPlan'))
   assert.ok(authGate.includes('/assign'))
+  assert.ok(authGate.includes('revokeElearningTrainingPlanAssignment'))
+  assert.ok(authGate.includes('/revocation'))
   assert.ok(authGate.includes('ORG_CONTEXT_REQUIRED'))
 })
 

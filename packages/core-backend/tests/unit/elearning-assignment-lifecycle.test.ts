@@ -58,6 +58,7 @@ type Mem = {
   progress: ProgressRow[]
   attempts: AttemptRow[]
   evidence: EvidenceRow[]
+  planAssignmentByChild: Record<string, string>
   queries: string[]
   failTag?: string
 }
@@ -96,6 +97,7 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningAssignmentLifec
     progress: [{ memberId: MEMBER_A, status: 'in_progress' }],
     attempts: [],
     evidence: [{ memberId: MEMBER_A }],
+    planAssignmentByChild: {},
     queries: [],
     ...seed,
   }
@@ -175,6 +177,8 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningAssignmentLifec
           assignment_id: row.assignmentId,
           revocation_reason: row.revocationReason,
           revoked_at: row.revokedAt,
+          training_plan_assignment_id:
+            mem.planAssignmentByChild[row.assignmentId] ?? null,
         }],
         rowCount: 1,
       }
@@ -492,6 +496,24 @@ describe('revokeElearningAssignmentMember', () => {
       memberId: MEMBER_A,
       reason: 'different reason',
     })).rejects.toMatchObject({ code: 'conflict' })
+  })
+
+  it('requires the plan-level operation for a training-plan child member', async () => {
+    const { db, mem } = createMemoryDb({
+      planAssignmentByChild: {
+        [ASSIGNMENT]: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+      },
+    })
+    await expect(revokeElearningAssignmentMember(db, {
+      orgId: ORG,
+      actorId: ACTOR,
+      assignmentId: ASSIGNMENT,
+      memberId: MEMBER_A,
+      reason: 'wrong cohort',
+    })).rejects.toEqual(new ElearningAssignmentLifecycleError('conflict'))
+    expect(mem.members[0]?.revokedAt).toBeNull()
+    expect(mem.queries.some((query) => query.includes('elearning-lifecycle:revoke-member')))
+      .toBe(false)
   })
 
   it('returns not_found for a cross-org row or a member that belongs to another assignment', async () => {

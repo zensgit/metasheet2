@@ -21,6 +21,7 @@ type TrainingPlanPublishRequest = components['schemas']['ElearningTrainingPlanPu
 type TrainingPlanPublishResult = components['schemas']['ElearningTrainingPlanPublishResult']
 type TrainingPlanAssignmentRequest = components['schemas']['ElearningTrainingPlanAssignmentRequest']
 type TrainingPlanAssignmentResult = components['schemas']['ElearningTrainingPlanAssignmentResult']
+type TrainingPlanRevocationResult = components['schemas']['ElearningTrainingPlanRevocationResult']
 type TrainingPlan = components['schemas']['ElearningTrainingPlan']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
 type WatchState = components['schemas']['ElearningWatchState']
@@ -133,6 +134,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/training-plans/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/{planId}']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/{planId}/assign']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/training-plan-assignments/{planAssignmentId}/revocation']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
@@ -171,6 +173,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/training-plans/{planId}/assign']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<TrainingPlanAssignmentResult>()
+    expectTypeOf<
+      paths['/api/elearning/training-plan-assignments/{planAssignmentId}/revocation']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<TrainingPlanRevocationResult>()
     expectTypeOf<
       paths['/api/elearning/me/courses']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<LearnerList>()
@@ -309,6 +314,12 @@ describe('elearning V0.1 OpenAPI paths', () => {
       planVersionId: string
       assignmentCount: number
       memberCount: number
+      duplicate: boolean
+    }>()
+    expectTypeOf<TrainingPlanRevocationResult>().toEqualTypeOf<{
+      planAssignmentId: string
+      revoked: true
+      revokedMemberCount: number
       duplicate: boolean
     }>()
     expectTypeOf<TrainingPlan>().toEqualTypeOf<{

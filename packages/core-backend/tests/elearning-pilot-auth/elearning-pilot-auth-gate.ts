@@ -30,6 +30,9 @@ import {
 import type {
   AssignElearningTrainingPlanInput,
 } from '../../src/services/elearning-training-plan-assignment'
+import type {
+  RevokeElearningTrainingPlanAssignmentInput,
+} from '../../src/services/elearning-training-plan-revocation'
 import { usePinnedServer } from '../utils/pinned-server'
 
 if (process.env.ELEARNING_PILOT_AUTH_GATE_SETUP !== '1') {
@@ -164,6 +167,17 @@ const TRAINING_PLAN_ASSIGNMENT_RESULT = {
   duplicate: false,
 }
 
+const TRAINING_PLAN_REVOCATION_BODY = {
+  reason: 'assigned in error',
+} as const
+
+const TRAINING_PLAN_REVOCATION_RESULT = {
+  planAssignmentId: TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId,
+  revoked: true as const,
+  revokedMemberCount: 1,
+  duplicate: false,
+}
+
 const LEARNER_COURSES: ElearningLearnerCourse[] = [{
   courseId: '11111111-1111-4111-8111-111111111111',
   courseVersionId: '22222222-2222-4222-8222-222222222222',
@@ -263,6 +277,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   const trainingPlanPublishCalls: PublishElearningTrainingPlanInput[] = []
   const trainingPlanGetCalls: GetElearningTrainingPlanInput[] = []
   const trainingPlanAssignmentCalls: AssignElearningTrainingPlanInput[] = []
+  const trainingPlanRevocationCalls: RevokeElearningTrainingPlanAssignmentInput[] = []
 
   beforeAll(async () => {
     await pool.query(
@@ -398,6 +413,10 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       assignElearningTrainingPlan: async (_db, input) => {
         trainingPlanAssignmentCalls.push(input)
         return TRAINING_PLAN_ASSIGNMENT_RESULT
+      },
+      revokeElearningTrainingPlanAssignment: async (_db, input) => {
+        trainingPlanRevocationCalls.push(input)
+        return TRAINING_PLAN_REVOCATION_RESULT
       },
     })
     if (!runtime) {
@@ -780,6 +799,65 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(noOrg.status).toBe(403)
     expect(noOrg.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
     expect(trainingPlanAssignmentCalls).toEqual([])
+  })
+
+  it('only DB-authorized admin can atomically revoke a plan assignment', async () => {
+    trainingPlanRevocationCalls.length = 0
+    const adminToken = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const revoked = await request(pinned.url())
+      .put(
+        `/api/elearning/training-plan-assignments/${TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId}/revocation?orgId=${encodeURIComponent(ORG_B)}`,
+      )
+      .set('Authorization', `Bearer ${adminToken}`)
+      .set('x-tenant-id', ORG_B)
+      .send(TRAINING_PLAN_REVOCATION_BODY)
+    expect(revoked.status).toBe(200)
+    expect(revoked.body).toEqual(TRAINING_PLAN_REVOCATION_RESULT)
+    expect(trainingPlanRevocationCalls).toEqual([{
+      orgId: ORG_A,
+      actorId: adminId,
+      planAssignmentId: TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId,
+      reason: TRAINING_PLAN_REVOCATION_BODY.reason,
+    }])
+    valuesFree(revoked.body)
+
+    trainingPlanRevocationCalls.length = 0
+    const writerToken = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const denied = await request(pinned.url())
+      .put(
+        `/api/elearning/training-plan-assignments/${TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId}/revocation`,
+      )
+      .set('Authorization', `Bearer ${writerToken}`)
+      .send(TRAINING_PLAN_REVOCATION_BODY)
+    expect(denied.status).toBe(403)
+    expect(denied.body).toEqual({ error: 'Insufficient permissions' })
+    expect(trainingPlanRevocationCalls).toEqual([])
+
+    const legacyToken = signToken({
+      userId: legacyId,
+      email: `${legacyId}@el-auth-gate.test`,
+      role: 'user',
+    })
+    const noOrg = await request(pinned.url())
+      .put(
+        `/api/elearning/training-plan-assignments/${TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId}/revocation`,
+      )
+      .set('Authorization', `Bearer ${legacyToken}`)
+      .set('x-tenant-id', ORG_A)
+      .send(TRAINING_PLAN_REVOCATION_BODY)
+    expect(noOrg.status).toBe(403)
+    expect(noOrg.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    expect(trainingPlanRevocationCalls).toEqual([])
   })
 
   it('the same admin receives not_found for a plan outside the JWT-bound org', async () => {

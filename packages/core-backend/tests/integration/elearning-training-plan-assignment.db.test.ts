@@ -16,12 +16,17 @@ import {
   TRAINING_PLAN_ASSIGNMENT_GROUP_GUARD_TRIGGER,
   TRAINING_PLAN_ASSIGNMENT_LINK_GUARD_TRIGGER,
   TRAINING_PLAN_ASSIGNMENT_LINK_IMMUTABLE_TRIGGER,
+  TRAINING_PLAN_ASSIGNMENT_REVOCATION_COMPLETE_TRIGGER,
   TRAINING_PLAN_ASSIGNMENT_DOWN_IN_USE,
   TRAINING_PLAN_CHILD_ASSIGNMENT_DEADLINE_TRIGGER,
   TRAINING_PLAN_CHILD_MEMBER_INSERT_TRIGGER,
   TRAINING_PLAN_CHILD_MEMBER_REVOKE_TRIGGER,
   down as downTrainingPlanAssignments,
 } from '../../src/db/migrations/zzzz20260826190000_create_elearning_training_plan_assignments'
+import {
+  ElearningAssignmentLifecycleError,
+  revokeElearningAssignmentMember,
+} from '../../src/services/elearning-assignment-lifecycle'
 import {
   publishElearningCourse,
   type ElearningCoursePublishDb,
@@ -36,6 +41,10 @@ import {
   type ElearningTrainingPlanAssignmentDb,
   type ElearningTrainingPlanAssignmentQueryable,
 } from '../../src/services/elearning-training-plan-assignment'
+import {
+  ElearningTrainingPlanRevocationError,
+  revokeElearningTrainingPlanAssignment,
+} from '../../src/services/elearning-training-plan-revocation'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -257,6 +266,7 @@ describe('e-learning atomic training-plan assignment real DB', () => {
       TRAINING_PLAN_ASSIGNMENT_GROUP_GUARD_TRIGGER,
       TRAINING_PLAN_ASSIGNMENT_LINK_GUARD_TRIGGER,
       TRAINING_PLAN_ASSIGNMENT_LINK_IMMUTABLE_TRIGGER,
+      TRAINING_PLAN_ASSIGNMENT_REVOCATION_COMPLETE_TRIGGER,
       TRAINING_PLAN_CHILD_ASSIGNMENT_DEADLINE_TRIGGER,
       TRAINING_PLAN_CHILD_MEMBER_INSERT_TRIGGER,
       TRAINING_PLAN_CHILD_MEMBER_REVOKE_TRIGGER,
@@ -405,6 +415,90 @@ describe('e-learning atomic training-plan assignment real DB', () => {
       () => { throw new Error('expected conflict') },
       (error) => expectCode(error, 'conflict'),
     )
+  })
+
+  it('revokes every child obligation atomically and blocks the single-member side door', async () => {
+    const orgId = org('revoke')
+    await seedUsers(orgId, 2)
+    const courses = await Promise.all([
+      seedPublishedCourse(orgId, 'revoke-a'),
+      seedPublishedCourse(orgId, 'revoke-b'),
+    ])
+    const plan = await seedPlan(orgId, courses.map((course) => course.courseVersionId))
+    const created = await assignElearningTrainingPlan(
+      db,
+      assignmentInput(orgId, plan.planId, 'revoke-run'),
+    )
+    const oneMember = await pool.query(
+      `SELECT member.id, member.assignment_id
+       FROM elearning_training_plan_assignment_items link
+       JOIN elearning_assignment_members member
+         ON member.org_id = link.org_id
+        AND member.assignment_id = link.assignment_id
+       WHERE link.org_id = $1 AND link.training_plan_assignment_id = $2
+       ORDER BY member.id
+       LIMIT 1`,
+      [orgId, created.planAssignmentId],
+    )
+    await expect(revokeElearningAssignmentMember(db, {
+      orgId,
+      actorId: actor('single-revoker'),
+      assignmentId: oneMember.rows[0].assignment_id,
+      memberId: oneMember.rows[0].id,
+      reason: 'must use plan operation',
+    })).rejects.toEqual(new ElearningAssignmentLifecycleError('conflict'))
+
+    const revoked = await revokeElearningTrainingPlanAssignment(db, {
+      orgId,
+      actorId: actor('plan-revoker'),
+      planAssignmentId: created.planAssignmentId,
+      reason: '  assigned in error  ',
+    })
+    expect(revoked).toEqual({
+      planAssignmentId: created.planAssignmentId,
+      revoked: true,
+      revokedMemberCount: 4,
+      duplicate: false,
+    })
+    const stored = await pool.query(
+      `SELECT
+         plan_assignment.revoked_by,
+         plan_assignment.revocation_reason,
+         count(member.*)::integer AS member_facts,
+         count(member.*) FILTER (
+           WHERE member.revoked_at = plan_assignment.revoked_at
+             AND member.revoked_by = plan_assignment.revoked_by
+             AND member.revocation_reason = plan_assignment.revocation_reason
+         )::integer AS matching_revocations
+       FROM elearning_training_plan_assignments plan_assignment
+       JOIN elearning_training_plan_assignment_items link
+         ON link.org_id = plan_assignment.org_id
+        AND link.training_plan_assignment_id = plan_assignment.id
+       JOIN elearning_assignment_members member
+         ON member.org_id = link.org_id
+        AND member.assignment_id = link.assignment_id
+       WHERE plan_assignment.org_id = $1 AND plan_assignment.id = $2
+       GROUP BY plan_assignment.id`,
+      [orgId, created.planAssignmentId],
+    )
+    expect(stored.rows).toEqual([{
+      revoked_by: actor('plan-revoker'),
+      revocation_reason: 'assigned in error',
+      member_facts: 4,
+      matching_revocations: 4,
+    }])
+    await expect(revokeElearningTrainingPlanAssignment(db, {
+      orgId,
+      actorId: actor('other-revoker'),
+      planAssignmentId: created.planAssignmentId,
+      reason: 'assigned in error',
+    })).resolves.toEqual({ ...revoked, duplicate: true })
+    await expect(revokeElearningTrainingPlanAssignment(db, {
+      orgId,
+      actorId: actor('other-revoker'),
+      planAssignmentId: created.planAssignmentId,
+      reason: 'different reason',
+    })).rejects.toEqual(new ElearningTrainingPlanRevocationError('conflict'))
   })
 
   it('isolates the same source key by org and serializes concurrent retries', async () => {
@@ -572,6 +666,37 @@ describe('e-learning atomic training-plan assignment real DB', () => {
       [orgId, assignmentId],
     )
     expect(activeCohort.rows).toEqual([{ active_members: 1 }])
+
+    const partialRevocation = await pool.connect()
+    try {
+      await partialRevocation.query('BEGIN')
+      await partialRevocation.query(
+        `UPDATE elearning_training_plan_assignments
+         SET revoked_at = now(), revoked_by = $3, revocation_reason = 'partial'
+         WHERE org_id = $1 AND id = $2`,
+        [orgId, created.planAssignmentId, input.actorId],
+      )
+      await expectSqlState('P0001', () => partialRevocation.query('COMMIT'))
+    } finally {
+      await partialRevocation.query('ROLLBACK').catch(() => undefined)
+      partialRevocation.release()
+    }
+    const afterPartial = await pool.query(
+      `SELECT
+         plan_assignment.revoked_at,
+         count(member.*) FILTER (WHERE member.revoked_at IS NULL)::integer AS active_members
+       FROM elearning_training_plan_assignments plan_assignment
+       JOIN elearning_training_plan_assignment_items link
+         ON link.org_id = plan_assignment.org_id
+        AND link.training_plan_assignment_id = plan_assignment.id
+       JOIN elearning_assignment_members member
+         ON member.org_id = link.org_id
+        AND member.assignment_id = link.assignment_id
+       WHERE plan_assignment.org_id = $1 AND plan_assignment.id = $2
+       GROUP BY plan_assignment.id`,
+      [orgId, created.planAssignmentId],
+    )
+    expect(afterPartial.rows).toEqual([{ revoked_at: null, active_members: 1 }])
 
     const client = await pool.connect()
     try {
