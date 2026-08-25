@@ -1815,7 +1815,13 @@ const readOnly = computed(() => !canManageTemplates.value || Boolean(unsupported
 // A draft enters graph authoring when it carries preservedGraph. Linear drafts are promoted when
 // the author inserts their first condition or parallel gateway.
 const graphReadOnly = computed(() => Boolean(draft.value.preservedGraph))
-const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value)
+// EDIT ROUTE REQUIRES A LOADED TEMPLATE (external review round 3, P2 — reproduced on the real
+// mounted path: getTemplate rejects, loadError renders, draft stays the empty no-templateId
+// fallback, and save fell through persistDraft's create branch, minting a fresh 未命名审批
+// template from an EDIT url). The poisoned state is precisely "edit mode without templateId" —
+// gated on that, not on loadError, which topology ops reuse for non-load messages.
+const editRouteLoaded = computed(() => !isEditMode.value || Boolean(draft.value.templateId))
+const canSave = computed(() => canManageTemplates.value && !unsupportedReason.value && !loading.value && editRouteLoaded.value)
 const draftStateLabel = computed(() => {
   if (!isEditMode.value && !isDraftDirty.value) return '新模板'
   return isDraftDirty.value ? '有未保存更改' : '已保存'
@@ -3923,6 +3929,13 @@ async function validate(): Promise<boolean> {
 }
 
 async function persistDraft() {
+  // WRITE-PATH DEFENCE, independent of the canSave UI gate (same review): an edit route whose
+  // template never loaded must NEVER fall through to the create branch — templateId is falsy in
+  // exactly that state, and create would mint a duplicate template from an edit URL.
+  if (isEditMode.value && !draft.value.templateId) {
+    loadError.value = '模板尚未加载成功，无法保存 — 请刷新重试'
+    return null
+  }
   if (!(await validate())) return null
   saving.value = true
   try {

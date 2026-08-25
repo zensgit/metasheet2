@@ -1,4 +1,6 @@
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { computed, createApp, defineComponent, h, inject, nextTick, provide, ref, type App as VueApp, type InjectionKey } from 'vue'
 import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
@@ -65,6 +67,20 @@ const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
+  // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
+  // inside the view's load-failure catch — a mock module without this export makes that catch
+  // itself throw, which escapes onMounted as an unhandled rejection and reds the whole lane run
+  // (rc=1 with every test green: exactly the shape the E-round3 negative first surfaced).
+  ApprovalApiError: class ApprovalApiError extends Error {
+    status: number
+    code?: string
+    constructor(message: string, status = 0, code?: string) {
+      super(message)
+      this.name = 'ApprovalApiError'
+      this.status = status
+      this.code = code
+    }
+  },
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
   updateTemplate: (id: string, payload: unknown) => updateTemplateSpy(id, payload),
   publishTemplate: (id: string, payload: unknown) => publishTemplateSpy(id, payload),
@@ -1377,6 +1393,77 @@ describe('TemplateAuthoringView', () => {
     const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
     expect(keyInput.value).toBe(payload.key)
     expect(nameInput.value).toBe('未命名审批')
+  })
+
+  it('E-round3 P2: an EDIT route whose template failed to load can neither save nor create — the poisoned no-templateId draft is fenced at BOTH layers', async () => {
+    // Reproduced by the external review on the real mounted path: getTemplate rejects, the draft
+    // stays the empty no-templateId fallback, canSave stayed true, and save fell through
+    // persistDraft's CREATE branch — minting a fresh 未命名审批 template from an edit URL.
+    routeParams = { id: 'tpl_load_fails' }
+    getTemplateSpy.mockRejectedValue(new Error('boom'))
+    await mountView()
+    await flushUi()
+
+    // Load error surfaced; the save button is disabled (UI gate).
+    const saveBtn = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    expect(saveBtn.disabled).toBe(true)
+
+    // BELT: force-enable the DOM button and click — handleSave re-checks canSave reactively, so
+    // even a DOM-attribute drift cannot reach the write path while layer 1 stands. (Measured:
+    // layer 2 is UNREACHABLE through the mounted surface while layer 1 stands — handleSave's own
+    // canSave check blocks first — so layer 2 is pinned STRUCTURALLY in the companion test below,
+    // the same impossible-by-design situation as the E-P3 helper pin.)
+    saveBtn.disabled = false
+    saveBtn.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+  })
+
+  it('E-round3 P2 layer 2 (structural): persistDraft refuses the edit-route→create branch BEFORE validate — executable lines only', () => {
+    // Behavioural pinning of this defence is impossible by design: handleSave re-checks canSave
+    // inside the handler, so no mounted interaction can reach persistDraft while layer 1 stands —
+    // and with layer 1 removed, this defence is what stops the create. Executable-lines source
+    // pin (the #5140/#5161 saga idiom): comments stripped, the refusal must precede validate().
+    const source = readFileSync(
+      join(__dirname, '../src/views/approval/TemplateAuthoringView.vue'),
+      'utf8',
+    )
+    const startIdx = source.indexOf('async function persistDraft(')
+    expect(startIdx).toBeGreaterThan(0)
+    const body = source.slice(startIdx, source.indexOf('\n}', startIdx))
+    const executable = body
+      .split('\n')
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+      .join('\n')
+    const refusalIdx = executable.search(/if \(isEditMode\.value && !draft\.value\.templateId\) \{/)
+    const validateIdx = executable.indexOf('await validate()')
+    expect(refusalIdx).toBeGreaterThan(-1)
+    expect(validateIdx).toBeGreaterThan(-1)
+    expect(refusalIdx).toBeLessThan(validateIdx)
+    expect(executable).toMatch(/模板尚未加载成功/)
+  })
+
+  it('E-round3 P2 positive controls: a NEW route still creates; a LOADED edit route still updates', async () => {
+    // Control 1 — new-template route: the gate must not break creation.
+    routeParams = {}
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    app?.unmount()
+    container?.remove()
+
+    // Control 2 — edit route that loads successfully: still updates, never creates.
+    routeParams = { id: 'tpl_ok' }
+    getTemplateSpy.mockResolvedValue(buildTemplate({}))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1) // unchanged from control 1
   })
 
   it('B0 (gate P2-1 on 9948f3be5a): saving an EXISTING template with cleared key/name BLOCKS with 必填 — it must never be silently re-keyed', async () => {

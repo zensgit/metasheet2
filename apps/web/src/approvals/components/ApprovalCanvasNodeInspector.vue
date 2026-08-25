@@ -61,11 +61,13 @@ const emit = defineEmits<{
   /** B2 — mints the FIRST write path for a canvas node's display name (verified: no such path
    *  existed before this slice — `approvalNodeEdit.ts`'s G-5 pass only ever touches `.config`,
    *  never `.name`; `graphNodeLabel` is read-only). Parent stays the sole owner of mutation, per
-   *  this component's existing "parent owns selection and all mutations" contract — it applies
-   *  `name` the SAME way the parent already applies a linear step's `step.name` (a direct write to
-   *  the node's `name` field, not a second parallel edit-map system alongside G-2..G-5, since
-   *  `name` is a plain top-level field those four passes deliberately never touch). Blank/whitespace
-   *  `name` means "clear the override" — `graphNodeLabel` already falls back to the node-type label. */
+   *  this component's existing "parent owns selection and all mutations" contract. HOW the parent
+   *  applies it (updated 2026-08-25 — the original text described a direct node-field write, the
+   *  shape E-P2-4 removed): `onRenameCanvasNode` runs a topology op through the UNIFIED authoring
+   *  history, so rename is undo/redo-able like every structural edit; there is no live-name
+   *  overlay in undo any more. Blank/whitespace `name` means "clear the override" —
+   *  `graphNodeLabel` already falls back to the node-type label — and clearing is equally
+   *  undoable. */
   rename: [nodeKey: string, name: string]
 }>()
 
