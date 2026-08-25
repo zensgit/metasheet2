@@ -1363,7 +1363,7 @@ classify_runner_override() {
   soak_set="$(printf '%s\n%s\n' "$SOAK_W4_ENV_NAME" "$SOAK_W7_ENV_NAME" | sort | tr '\n' ' ')"
   soak_set="${soak_set% }"
 
-  local file_present=false file_sha="" file_names=""
+  local file_present=false file_sha="" file_names="" all_upper_keys=""
   if [[ -f "$OVERRIDE_FILE" && ! -r "$OVERRIDE_FILE" ]]; then
     # Present but unreadable: an environment we cannot explain. Classify as unexpected rather
     # than letting an empty read pass as the none shape — an empty read is not a read of empty.
@@ -1376,24 +1376,46 @@ classify_runner_override() {
     # yaml structure keys (services/backend/web/environment/image) are lowercase; full-line
     # comments start at column 0. A key this pattern cannot see cannot silently pass either —
     # unknown UPPER keys land in file_names and force shape=unexpected below.
-    # grep exits 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
-    # CORRECTED (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the
-    # left of `||` (the sole call site is `classify_runner_override || status_rc=1`), so on a
-    # host the un-fixed line would NOT have aborted — it silently yielded empty file_names and a
-    # calm `none`, the UNSAFE direction. The executable test caught it only because its harness
-    # calls the function bare. Readability was checked above, so rc>=2 cannot hide an unreadable
-    # file behind the trailing `|| true`.
-    file_names="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
+    # grep/awk exit 1 on ZERO matches — the expected outcome for the none shape. MECHANISM
+    # (P3-1, gate on fa74e5cae1): errexit is SUPPRESSED for a function invoked on the left of
+    # `||` (the sole call site is `classify_runner_override || status_rc=1`), so an unguarded
+    # failing substitution would NOT abort on a host — it silently yields empty names and a calm
+    # `none`, the UNSAFE direction. Readability was checked above, so rc>=2 cannot hide an
+    # unreadable file behind the trailing `|| true`.
+    #
+    # SCOPED TO services.backend.environment (P2-2, external review of 4141c27832): the round-1
+    # grep collected EVERY indented UPPER key in the file, so two rd-window keys placed under
+    # services.web.environment classified as rd-window and matched the BACKEND's live env —
+    # certifying agreement between one service's file entry and a different service's runtime.
+    # The awk walks the writer-produced shape only; `all_upper_keys` keeps the old broad sweep,
+    # and any UPPER key OUTSIDE the backend environment block forces `unexpected` below.
+    file_names="$(awk '
+      $0=="  backend:" {inb=1; next}
+      inb && /^  [^ ]/ {inb=0}
+      inb && $0=="    environment:" {ine=1; next}
+      inb && ine && /^    [^ ]/ {ine=0}
+      inb && ine && /^      [A-Z_][A-Z0-9_]*: / {line=$0; sub(/^ +/,"",line); sub(/:.*/,"",line); print line}
+    ' "$OVERRIDE_FILE" | sort -u | tr '\n' ' ' || true)"
     file_names="${file_names% }"
+    all_upper_keys="$(grep -Eo '^[[:space:]]+[A-Z_][A-Z0-9_]*:' "$OVERRIDE_FILE" | tr -d ' \t:' | sort -u | tr '\n' ' ' || true)"
+    all_upper_keys="${all_upper_keys% }"
   fi
 
   local shape
   if [[ "$file_present" == false ]]; then shape="absent"
-  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -q 'environment:' "$OVERRIDE_FILE"; then
+  elif [[ "$all_upper_keys" != "$file_names" ]]; then
+    # P2-2: env-looking keys exist OUTSIDE services.backend.environment (another service, or a
+    # structure the scoped parser cannot read). Whatever this file is, it is not a writer product
+    # and its effect on the backend cannot be certified from names alone.
+    shape="unexpected"
+  elif [[ -z "$file_names" ]] && [[ -r "$OVERRIDE_FILE" ]] && grep -qE '^[[:space:]]+environment:' "$OVERRIDE_FILE"; then
     # P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
     # spellings this parser does not read — a hand-edited file in any of them parsed as a CALM
     # none, inverting this function's own fail-loud principle. An environment block whose keys
-    # we cannot enumerate is an environment we cannot explain.
+    # we cannot enumerate is an environment we cannot explain. ANCHORED as an indented mapping
+    # key (requal P3 on 4141c27832, gate-verified): the bare substring falsely tripped on a
+    # comment line saying "no environment: block on purpose" and on an image tag containing
+    # `environment:` — both classified a true none as unexpected.
     shape="unexpected"
   elif [[ -z "$file_names" ]]; then shape="none"
   elif [[ "$file_names" == "$rd_set" ]]; then shape="rd-window"
@@ -1401,29 +1423,25 @@ classify_runner_override() {
   else shape="unexpected"
   fi
 
-  # Live side: presence by EXIT CODE only — stdout goes to /dev/null UNREAD, so values never
-  # enter this function.
-  #
-  # POSITIVE CONTROL FOR THE PROBE CHANNEL (P2-2, gate on fa74e5cae1 — MEASURED, and it
-  # falsified this function's first shape): docker exec returns rc=1 both for "var unset" AND
-  # for most cannot-observe failures — stopped container, no such container, daemon unreachable
-  # all yield rc=1, not >1. rc alone cannot distinguish "observed unset" from "observed
-  # nothing", and the first shape would have printed a confident file_live_match=true over zero
-  # observations. PATH is set in every container this runner manages, so if PATH cannot be read
-  # through the SAME channel, nothing below is an observation and the verdict is indeterminate.
-  local name rc live_names="" probe_failed=false
-  if ! docker exec "$BACKEND_CONTAINER" printenv PATH >/dev/null 2>&1; then
-    probe_failed=true
-  else
-    for name in $candidates; do
-      rc=0
-      docker exec "$BACKEND_CONTAINER" printenv "$name" >/dev/null 2>&1 || rc=$?
-      case "$rc" in
-        0) live_names="${live_names:+$live_names }$name" ;;
-        1) : ;;
-        *) probe_failed=true ;;
-      esac
+  # Live side: NAMES only, in ONE observation (P2-1 round 2, external review of 4141c27832).
+  # The round-1 shape probed PATH first and then looped four more docker execs — so a channel
+  # that died AFTER the control (container stopped, daemon lost) made the four candidate reads
+  # return rc=1, which reads as "observed unset": zero observations, confident green, reproduced
+  # by the reviewer at that exact timing. Control and data are now the SAME invocation: PATH is
+  # checked in-container (exit 9 if even PATH is unreadable), the candidate names are enumerated
+  # in-container, and only the SET NAMES cross the boundary — printenv's value output is
+  # discarded inside the container, so no value ever reaches the host. ANY nonzero exit — daemon
+  # down, container gone, sh missing, PATH unreadable — is a failed probe, never an observation.
+  local live_names="" probe_failed=false enum_out enum_rc
+  enum_rc=0
+  enum_out="$(docker exec "$BACKEND_CONTAINER" sh -c '
+    printenv PATH >/dev/null 2>&1 || exit 9
+    for n in '"$candidates"'; do
+      if printenv "$n" >/dev/null 2>&1; then printf "%s\n" "$n"; fi
     done
+  ' 2>/dev/null)" || enum_rc=$?
+  if [[ "$enum_rc" -ne 0 ]]; then
+    probe_failed=true
   fi
 
   local match live_sorted live_render
@@ -1431,10 +1449,21 @@ classify_runner_override() {
     match="indeterminate"
     live_render="unobserved"
   else
-    live_sorted="$(printf '%s\n' $live_names | sort -u | tr '\n' ' ')"
+    # Names only — and only names we ASKED about: anything else in the output means the
+    # in-container enumerator was tampered with or the channel corrupted; refuse it.
+    live_sorted="$(printf '%s\n' $enum_out | sort -u | tr '\n' ' ')"
     live_sorted="$(echo "$live_sorted" | tr -s ' ')"; live_sorted="${live_sorted% }"; live_sorted="${live_sorted# }"
-    [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
-    live_render="${live_sorted:-none}"
+    local answered
+    for answered in $live_sorted; do
+      case " $candidates " in
+        *" $answered "*) : ;;
+        *) match="indeterminate"; live_render="unobserved"; probe_failed=true ;;
+      esac
+    done
+    if [[ "$probe_failed" != true ]]; then
+      [[ "$file_names" == "$live_sorted" ]] && match=true || match=false
+      live_render="${live_sorted:-none}"
+    fi
   fi
 
   {

@@ -1082,13 +1082,14 @@ ${envLines}  web:
   const run = (fileBody, liveSpec) => {
     const overridePath = join(dir, `ov-${Math.random().toString(36).slice(2, 8)}.yml`)
     if (fileBody !== null) writeFileSync(overridePath, fileBody)
-    // P2-1 (gate on fa74e5cae1): the first stub only returned an rc and never wrote stdout, so
-    // neutering the live probe's >/dev/null redirect left the whole suite green — the live-side
-    // values-free guard was untested. Real `docker exec … printenv NAME` WRITES THE VALUE to
-    // stdout on rc=0 (measured on docker 29.5.3), so the stub now does too: every rc=0 answer
-    // echoes a canary value first, and the values-free assertions below bite on the redirect.
-    const caseLines = Object.entries(liveSpec).map(([k, v]) =>
-      `      ${k}) ${v === 0 ? 'echo "org_secret_live_canary"; ' : ''}return ${v} ;;`).join('\n')
+    // The stub EMULATES docker exec's single sh -c protocol (P2-1 round 2): it runs the exact
+    // in-container script the classifier sends, under a shadow printenv that answers from
+    // liveSpec and — like the real printenv (measured on docker 29.5.3) — WRITES THE VALUE to
+    // stdout on rc=0. A classifier script that forgets to discard printenv's stdout therefore
+    // leaks the canary into the enumerator output, and the values-free assertions bite. Every
+    // invocation is counted: the whole classification must observe the container EXACTLY ONCE —
+    // a control-then-loop shape (the round-1 TOCTOU) makes 5 calls and reds the count pin.
+    const setCases = Object.entries(liveSpec).filter(([, v]) => v === 0).map(([k]) => k)
     const script = `#!/bin/bash
 set -euo pipefail
 OUTPUT_DIR="${dir}"
@@ -1097,17 +1098,28 @@ BACKEND_CONTAINER="fake-backend"
 SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
 SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
 docker() {
-  case "$4" in
-      PATH) echo "/usr/bin:org_secret_live_canary"; return 0 ;;
-${caseLines}
-      *) return 1 ;;
-  esac
+  echo call >> "${dir}/docker-calls.txt"
+  local body="$5"
+  (
+    printenv() {
+      case "$1" in
+        PATH) echo "/usr/bin:org_secret_live_canary"; return 0 ;;
+${setCases.map((k) => `        ${k}) echo "org_secret_live_canary"; return 0 ;;`).join('\n')}
+        *) return 1 ;;
+      esac
+    }
+    eval "$body"
+  )
 }
 ${fn}
 classify_runner_override
 `
+    rmSync(join(dir, 'docker-calls.txt'), { force: true })
     const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
-    return { r, report: readFileSync(join(dir, 'override-shape.txt'), 'utf8') }
+    const calls = existsSync(join(dir, 'docker-calls.txt'))
+      ? readFileSync(join(dir, 'docker-calls.txt'), 'utf8').trim().split('\n').filter(Boolean).length
+      : 0
+    return { r, report: readFileSync(join(dir, 'override-shape.txt'), 'utf8'), calls }
   }
 
   // absent file, nothing live -> absent, match=true, exit 0
@@ -1123,10 +1135,15 @@ classify_runner_override
 
   // rd-window file + both live -> rd-window, match=true, exit 0
   const rdEnv = '    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n'
-  ;({ r, report } = run(overrideOf(rdEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: 0 }))
+  let calls
+  ;({ r, report, calls } = run(overrideOf(rdEnv), { ATTENDANCE_SCHEDULER_ENABLED: 0, ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: 0 }))
   assert.equal(r.status, 0, `stderr=${r.stderr}\nreport=${report}`)
   assert.match(report, /^override_shape=rd-window$/m)
   assert.match(report, /^file_live_match=true$/m)
+  // P2-1 round 2 (TOCTOU): control and enumeration must be ONE observation. The round-1 shape
+  // probed PATH and then looped four more execs (5 calls); a channel dying between them turned
+  // "observed nothing" into "observed unset". Structurally pinned: exactly one docker call.
+  assert.equal(calls, 1, `the live side must observe the container EXACTLY once, saw ${calls}`)
 
   // soak file (with ORG VALUES) + both soak flags live -> soak-w4w7 AND the org slugs leak nowhere
   const soakEnv = `    environment:\n      ${W4_FLAG_NAME}: "org_secret_alpha,org_secret_beta"\n      ${W7_FLAG_NAME}: "org_secret_beta"\n`
@@ -1175,8 +1192,12 @@ ${fn}
 classify_runner_override
 `
   // DRIFT: file says rd-window, container has only the scheduler flag -> match=false, exit 1.
-  // (PATH answers rc=0 so the probe's positive control passes and the drift door is reached.)
-  let r = spawnSync('bash', ['-c', script('if [[ "$4" == "PATH" || "$4" == "ATTENDANCE_SCHEDULER_ENABLED" ]]; then echo "org_secret_live_canary"; return 0; else return 1; fi')], { encoding: 'utf8' })
+  // The stub emulates the single sh -c enumerator: shadow printenv answers PATH + scheduler.
+  const driftBody = `local body="$5"; (
+    printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED) echo "org_secret_live_canary"; return 0 ;; *) return 1 ;; esac; }
+    eval "$body"
+  )`
+  let r = spawnSync('bash', ['-c', script(driftBody)], { encoding: 'utf8' })
   assert.equal(r.status, 1, `drift must fail loud; stderr=${r.stderr}`)
   let report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
   assert.match(report, /^override_shape=rd-window$/m)
@@ -1200,6 +1221,42 @@ classify_runner_override
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('EXECUTABLE (override classification): env keys under the WRONG service never classify — backend-scoped parse', () => {
+  // P2-2 (external review of 4141c27832): the round-1 grep collected every indented UPPER key in
+  // the whole file, so two rd-window keys under services.web.environment classified as rd-window
+  // and matched the BACKEND's live env — certifying agreement between one service's file entry
+  // and a DIFFERENT service's runtime.
+  const fn = extractRunnerFunctions(['classify_runner_override', 'hash_value'])
+  const dir = mkdtempSync(join(tmpdir(), 'wr-ovsvc-'))
+  const cases = [
+    ['web-block', `services:\n  backend:\n    image: x\n  web:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n`],
+    ['both-blocks', `services:\n  backend:\n    image: x\n    environment:\n      ATTENDANCE_SCHEDULER_ENABLED: "true"\n  web:\n    image: x\n    environment:\n      ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED: "true"\n`],
+  ]
+  for (const [label, body] of cases) {
+    const overridePath = join(dir, `ov-${label}.yml`)
+    writeFileSync(overridePath, body)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local b="$5"; (
+  printenv() { case "$1" in PATH|ATTENDANCE_SCHEDULER_ENABLED|ATTENDANCE_NOTIFICATION_DELIVERY_WORKER_ENABLED) echo v; return 0 ;; *) return 1 ;; esac; }
+  eval "$b"
+); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 1, `${label}: keys outside services.backend.environment must refuse, not classify`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=unexpected$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
+  rmSync(dir, { recursive: true, force: true })
+})
+
 test('EXECUTABLE (override classification): legal-but-unparsed environment spellings are UNEXPECTED, never a calm none', () => {
   // P2-3 (gate on fa74e5cae1): quoted keys, flow maps and list-form entries are legal compose
   // spellings the key parser does not read; each parsed as none — the CALM shape — inverting the
@@ -1211,6 +1268,32 @@ test('EXECUTABLE (override classification): legal-but-unparsed environment spell
     ['flow-map', '    environment: { ATTENDANCE_SCHEDULER_ENABLED: "true" }\n'],
     ['quoted-key', '    environment:\n      "ATTENDANCE_SCHEDULER_ENABLED": "true"\n'],
   ]
+  // …and the door is ANCHORED (requal P3 on 4141c27832): a comment MENTIONING environment: and
+  // an image tag CONTAINING it are not environment blocks — both must stay a calm none.
+  const nonBlocks = [
+    ['comment-mention', '# deliberately no environment: block on purpose\n'],
+    ['image-tag-substring', ''],
+  ]
+  for (const [label, prefix] of nonBlocks) {
+    const overridePath = join(dir, `ov-nb-${label}.yml`)
+    const image = label === 'image-tag-substring' ? 'ghcr.io/zensgit/environment:abc123' : 'x'
+    writeFileSync(overridePath, `${prefix}services:\n  backend:\n    image: ${image}\n  web:\n    image: x\n`)
+    const script = `#!/bin/bash
+set -euo pipefail
+OUTPUT_DIR="${dir}"
+OVERRIDE_FILE="${overridePath}"
+BACKEND_CONTAINER="fake-backend"
+SOAK_W4_ENV_NAME="${W4_FLAG_NAME}"
+SOAK_W7_ENV_NAME="${W7_FLAG_NAME}"
+docker() { local b="$5"; ( printenv() { [[ "$1" == "PATH" ]] && return 0 || return 1; }; eval "$b" ); }
+${fn}
+classify_runner_override
+`
+    const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+    assert.equal(r.status, 0, `${label}: a mere mention of environment: must not fail a true none; stderr=${r.stderr}`)
+    const report = readFileSync(join(dir, 'override-shape.txt'), 'utf8')
+    assert.match(report, /^override_shape=none$/m, `${label} classified as ${report.match(/override_shape=(.*)/)?.[1]}`)
+  }
   for (const [label, envLines] of spellings) {
     const overridePath = join(dir, `ov-${label}.yml`)
     writeFileSync(overridePath, `services:\n  backend:\n    image: x\n${envLines}  web:\n    image: x\n`)
