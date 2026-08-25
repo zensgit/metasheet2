@@ -8518,6 +8518,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/training-plans/publish": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish an ordered plan that pins course versions
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+         *     Actor and authoritative org come from JWT. Items preserve request order,
+         *     use one-based positions, and pin currently published versions whose
+         *     course heads are active. At most 100 unique course versions. Idempotency
+         *     is scoped by authoritative org plus requestId.
+         */
+        post: operations["publishElearningTrainingPlan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/{planId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one plan and its pinned active version
+         * @description Admin L2 assignment operation. RBAC `elearning:admin`; no JSON body.
+         *     Authoritative org comes from JWT. Cross-org and missing plan ids return
+         *     not_found. The response is closed to head metadata and ordered pinned
+         *     course version ids; it contains no assignments, learners, answers, or scores.
+         */
+        get: operations["getElearningTrainingPlan"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/courses/{courseId}/scope": {
         parameters: {
             query?: never;
@@ -17657,6 +17704,42 @@ export interface components {
             revoked: true;
             duplicate: boolean;
         };
+        ElearningTrainingPlanPublishItem: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            required: boolean;
+        };
+        ElearningTrainingPlanPublishRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            title: string;
+            items: components["schemas"]["ElearningTrainingPlanPublishItem"][];
+        };
+        ElearningTrainingPlanPublishResult: {
+            planId: components["schemas"]["ElearningUuid"];
+            planVersionId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            duplicate: boolean;
+        };
+        ElearningTrainingPlanItem: {
+            courseVersionId: components["schemas"]["ElearningUuid"];
+            position: number;
+            required: boolean;
+        };
+        ElearningTrainingPlanActiveVersion: {
+            planVersionId: components["schemas"]["ElearningUuid"];
+            version: number;
+            /** @enum {string} */
+            status: "published";
+            items: components["schemas"]["ElearningTrainingPlanItem"][];
+        };
+        ElearningTrainingPlan: {
+            planId: components["schemas"]["ElearningUuid"];
+            title: string;
+            /** @enum {string} */
+            status: "active" | "archived";
+            activeVersion: components["schemas"]["ElearningTrainingPlanActiveVersion"];
+        };
         /**
          * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
          *     database state. `department.subjectRef` is the directory department UUID;
@@ -19272,6 +19355,78 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description conflict (already revoked with a different reason) */
             409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningTrainingPlanPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published plan/version ids and item count; duplicate true on replay. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlanPublishResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_unavailable or idempotency conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningTrainingPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stable plan head plus its active immutable version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningTrainingPlan"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment surface flags off or plan missing in this org */
+            404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

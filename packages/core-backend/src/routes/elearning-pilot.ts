@@ -27,6 +27,14 @@ import {
   type PublishElearningCourseInput,
 } from '../services/elearning-course-publish'
 import {
+  ElearningTrainingPlanError,
+  getElearningTrainingPlan,
+  publishElearningTrainingPlan,
+  type ElearningTrainingPlanDb,
+  type ElearningTrainingPlanErrorCode,
+  type PublishElearningTrainingPlanInput,
+} from '../services/elearning-training-plan'
+import {
   assignElearningBatch,
   ElearningBatchAssignmentError,
   type ElearningBatchAssignmentDb,
@@ -107,6 +115,7 @@ const PUBLISH_KEYS = new Set([
 ])
 const SCOPE_KEYS = new Set(['reason', 'rules'])
 const REVOKE_KEYS = new Set(['reason'])
+const TRAINING_PLAN_PUBLISH_KEYS = new Set(['requestId', 'title', 'items'])
 const EMPTY_KEYS = new Set<string>()
 
 const ASSIGNMENT_STATUS: Record<ElearningDirectAssignmentErrorCode, number> = {
@@ -195,6 +204,14 @@ const LIFECYCLE_STATUS: Record<ElearningAssignmentLifecycleErrorCode, number> = 
   unavailable: 503,
 }
 
+const TRAINING_PLAN_STATUS: Record<ElearningTrainingPlanErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  course_unavailable: 409,
+  conflict: 409,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
@@ -207,7 +224,8 @@ export interface ElearningPilotRouteDeps {
     ElearningCoursePublishDb &
     ElearningLearnerCoursesDb &
     ElearningScopeDb &
-    ElearningAssignmentLifecycleDb
+    ElearningAssignmentLifecycleDb &
+    ElearningTrainingPlanDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -219,6 +237,8 @@ export interface ElearningPilotRouteDeps {
   assignElearningBatch?: typeof assignElearningBatch
   listElearningAssignmentProgress?: typeof listElearningAssignmentProgress
   revokeElearningAssignmentMember?: typeof revokeElearningAssignmentMember
+  publishElearningTrainingPlan?: typeof publishElearningTrainingPlan
+  getElearningTrainingPlan?: typeof getElearningTrainingPlan
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -312,6 +332,10 @@ export function createElearningPilotRouter(
     deps.listElearningAssignmentProgress ?? listElearningAssignmentProgress
   const revokeMember =
     deps.revokeElearningAssignmentMember ?? revokeElearningAssignmentMember
+  const publishTrainingPlan =
+    deps.publishElearningTrainingPlan ?? publishElearningTrainingPlan
+  const getTrainingPlan =
+    deps.getElearningTrainingPlan ?? getElearningTrainingPlan
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -651,6 +675,63 @@ export function createElearningPilotRouter(
       } catch (error) {
         if (error instanceof ElearningAssignmentLifecycleError) {
           res.status(LIFECYCLE_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/training-plans/publish',
+    ...gate(deps.adminGuard, 'assignment'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const body = readObject(req.body)
+      if (!body || rejectUnknownKeys(body, TRAINING_PLAN_PUBLISH_KEYS)) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await publishTrainingPlan(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          requestId: body.requestId,
+          title: body.title,
+          items: body.items,
+        } as PublishElearningTrainingPlanInput)
+        res.status(201).json(result)
+      } catch (error) {
+        if (error instanceof ElearningTrainingPlanError) {
+          res.status(TRAINING_PLAN_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/training-plans/:planId',
+    ...gate(deps.adminGuard, 'assignment', null),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'assignment')
+      if (!ctx) return
+      const planId = uuidParam(req, 'planId')
+      if (!planId) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await getTrainingPlan(deps.db, {
+          orgId: ctx.orgId,
+          planId,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningTrainingPlanError) {
+          res.status(TRAINING_PLAN_STATUS[error.code]).json({ error: error.code })
           return
         }
         res.status(500).json({ error: 'internal_error' })

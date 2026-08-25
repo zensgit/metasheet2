@@ -374,6 +374,94 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/training-plans/publish:
+    post:
+      operationId: publishElearningTrainingPlan
+      summary: Publish an ordered plan that pins course versions
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
+        Actor and authoritative org come from JWT. Items preserve request order,
+        use one-based positions, and pin currently published versions whose
+        course heads are active. At most 100 unique course versions. Idempotency
+        is scoped by authoritative org plus requestId.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningTrainingPlanPublishRequest'
+      responses:
+        '201':
+          description: Published plan/version ids and item count; duplicate true on replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlanPublishResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_unavailable or idempotency conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/training-plans/{planId}:
+    get:
+      operationId: getElearningTrainingPlan
+      summary: Read one plan and its pinned active version
+      description: |
+        Admin L2 assignment operation. RBAC `elearning:admin`; no JSON body.
+        Authoritative org comes from JWT. Cross-org and missing plan ids return
+        not_found. The response is closed to head metadata and ordered pinned
+        course version ids; it contains no assignments, learners, answers, or scores.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: planId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Stable plan head plus its active immutable version.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningTrainingPlan'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assignment surface flags off or plan missing in this org
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/courses/{courseId}/scope:
     put:
       operationId: setElearningCourseScope

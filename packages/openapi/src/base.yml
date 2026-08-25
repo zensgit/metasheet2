@@ -4984,6 +4984,95 @@ components:
           type: boolean
           enum: [true]
         duplicate: { type: boolean }
+    ElearningTrainingPlanPublishItem:
+      type: object
+      additionalProperties: false
+      required: [courseVersionId, required]
+      properties:
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        required: { type: boolean }
+    ElearningTrainingPlanPublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, title, items]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningTrainingPlanPublishItem'
+    ElearningTrainingPlanPublishResult:
+      type: object
+      additionalProperties: false
+      required: [planId, planVersionId, status, itemCount, duplicate]
+      properties:
+        planId:
+          $ref: '#/components/schemas/ElearningUuid'
+        planVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [published]
+        itemCount:
+          type: integer
+          minimum: 1
+          maximum: 100
+        duplicate: { type: boolean }
+    ElearningTrainingPlanItem:
+      type: object
+      additionalProperties: false
+      required: [courseVersionId, position, required]
+      properties:
+        courseVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        position:
+          type: integer
+          minimum: 1
+          maximum: 100
+        required: { type: boolean }
+    ElearningTrainingPlanActiveVersion:
+      type: object
+      additionalProperties: false
+      required: [planVersionId, version, status, items]
+      properties:
+        planVersionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        version:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum: [published]
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ElearningTrainingPlanItem'
+    ElearningTrainingPlan:
+      type: object
+      additionalProperties: false
+      required: [planId, title, status, activeVersion]
+      properties:
+        planId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        status:
+          type: string
+          enum: [active, archived]
+        activeVersion:
+          $ref: '#/components/schemas/ElearningTrainingPlanActiveVersion'
     ElearningScopeRule:
       description: |
         L1 visibility rule. Subjects are resolved from fresh, active, same-org

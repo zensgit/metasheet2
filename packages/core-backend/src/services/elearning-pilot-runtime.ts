@@ -64,6 +64,15 @@ import {
   type SetElearningCourseScopeInput,
   type SetElearningCourseScopeResult,
 } from './elearning-scope'
+import {
+  getElearningTrainingPlan,
+  publishElearningTrainingPlan,
+  type ElearningTrainingPlan,
+  type ElearningTrainingPlanDb,
+  type ElearningTrainingPlanPublishResult,
+  type GetElearningTrainingPlanInput,
+  type PublishElearningTrainingPlanInput,
+} from './elearning-training-plan'
 
 export interface ElearningPilotRuntime {
   router: ExpressRouter
@@ -77,7 +86,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningExamDb &
     ElearningCoursePublishDb &
     ElearningLearnerCoursesDb &
-    ElearningScopeDb
+    ElearningScopeDb &
+    ElearningTrainingPlanDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -124,6 +134,14 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningScopeDb,
     input: SetElearningCourseScopeInput,
   ) => Promise<SetElearningCourseScopeResult>
+  publishElearningTrainingPlan?: (
+    db: ElearningTrainingPlanDb,
+    input: PublishElearningTrainingPlanInput,
+  ) => Promise<ElearningTrainingPlanPublishResult>
+  getElearningTrainingPlan?: (
+    db: ElearningTrainingPlanDb,
+    input: GetElearningTrainingPlanInput,
+  ) => Promise<ElearningTrainingPlan>
 }
 
 function viewerId(req: Request): string | null {
@@ -178,6 +196,10 @@ export function createElearningPilotRuntime(
       opts.listElearningLearnerCourses ?? listElearningLearnerCourses,
     setElearningCourseScope:
       opts.setElearningCourseScope ?? setElearningCourseScope,
+    publishElearningTrainingPlan:
+      opts.publishElearningTrainingPlan ?? publishElearningTrainingPlan,
+    getElearningTrainingPlan:
+      opts.getElearningTrainingPlan ?? getElearningTrainingPlan,
   })
   if (!inner) return null
 

@@ -22,6 +22,11 @@ import { authenticate } from '../../src/middleware/auth'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_PLAYBACK_SECRET_ENV } from '../../src/services/elearning-media-playback'
+import {
+  ElearningTrainingPlanError,
+  type GetElearningTrainingPlanInput,
+  type PublishElearningTrainingPlanInput,
+} from '../../src/services/elearning-training-plan'
 import { usePinnedServer } from '../utils/pinned-server'
 
 if (process.env.ELEARNING_PILOT_AUTH_GATE_SETUP !== '1') {
@@ -104,6 +109,39 @@ const ORG_A = `${NS}-org-a`
 const ORG_B = `${NS}-org-b`
 const FORGED_ORG = `${NS}-forged-org`
 const SCOPE_COURSE_ID = randomUUID()
+const TRAINING_PLAN_ID = randomUUID()
+const TRAINING_PLAN_VERSION_ID = randomUUID()
+const TRAINING_PLAN_COURSE_VERSION_ID = randomUUID()
+
+const TRAINING_PLAN_BODY = {
+  requestId: randomUUID(),
+  title: 'Auth gate training plan',
+  items: [{ courseVersionId: TRAINING_PLAN_COURSE_VERSION_ID, required: true }],
+} as const
+
+const TRAINING_PLAN_RESULT = {
+  planId: TRAINING_PLAN_ID,
+  planVersionId: TRAINING_PLAN_VERSION_ID,
+  status: 'published' as const,
+  itemCount: 1,
+  duplicate: false,
+}
+
+const TRAINING_PLAN_READ_RESULT = {
+  planId: TRAINING_PLAN_ID,
+  title: TRAINING_PLAN_BODY.title,
+  status: 'active' as const,
+  activeVersion: {
+    planVersionId: TRAINING_PLAN_VERSION_ID,
+    version: 1,
+    status: 'published' as const,
+    items: [{
+      courseVersionId: TRAINING_PLAN_COURSE_VERSION_ID,
+      position: 1,
+      required: true,
+    }],
+  },
+}
 
 const LEARNER_COURSES: ElearningLearnerCourse[] = [{
   courseId: '11111111-1111-4111-8111-111111111111',
@@ -201,6 +239,8 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   const createdUserIds = [readerId, writerId, adminId, legacyId, outsiderId, forgedId]
   const pinned = usePinnedServer()
   const learnerCalls: Array<{ orgId: string; userId: string }> = []
+  const trainingPlanPublishCalls: PublishElearningTrainingPlanInput[] = []
+  const trainingPlanGetCalls: GetElearningTrainingPlanInput[] = []
 
   beforeAll(async () => {
     await pool.query(
@@ -321,6 +361,17 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       listElearningLearnerCourses: async (_db, input) => {
         learnerCalls.push({ orgId: input.orgId, userId: input.userId })
         return LEARNER_COURSES
+      },
+      publishElearningTrainingPlan: async (_db, input) => {
+        trainingPlanPublishCalls.push(input)
+        return TRAINING_PLAN_RESULT
+      },
+      getElearningTrainingPlan: async (_db, input) => {
+        trainingPlanGetCalls.push(input)
+        if (input.orgId !== ORG_A || input.planId !== TRAINING_PLAN_ID) {
+          throw new ElearningTrainingPlanError('not_found')
+        }
+        return TRAINING_PLAN_READ_RESULT
       },
     })
     if (!runtime) {
@@ -588,6 +639,85 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.body.revision).toBe(1)
     expect(res.body.ruleIds).toEqual([])
     expect(await scopeRevisionCount()).toBe(before + 1)
+    valuesFree(res.body)
+  })
+
+  it('tenant-bound elearning:admin publishes and reads a plan with authoritative org/actor', async () => {
+    trainingPlanPublishCalls.length = 0
+    trainingPlanGetCalls.length = 0
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const publish = await request(pinned.url())
+      .post(`/api/elearning/training-plans/publish?orgId=${encodeURIComponent(ORG_B)}&actorId=forged`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', ORG_B)
+      .send(TRAINING_PLAN_BODY)
+    expect(publish.status).toBe(201)
+    expect(publish.body).toEqual(TRAINING_PLAN_RESULT)
+    expect(trainingPlanPublishCalls).toEqual([{
+      orgId: ORG_A,
+      actorId: adminId,
+      requestId: TRAINING_PLAN_BODY.requestId,
+      title: TRAINING_PLAN_BODY.title,
+      items: [{
+        courseVersionId: TRAINING_PLAN_COURSE_VERSION_ID,
+        required: true,
+      }],
+    }])
+    valuesFree(publish.body)
+
+    const read = await request(pinned.url())
+      .get(`/api/elearning/training-plans/${TRAINING_PLAN_ID}?orgId=${encodeURIComponent(ORG_B)}`)
+      .set('Authorization', `Bearer ${token}`)
+      .set('x-tenant-id', ORG_B)
+    expect(read.status).toBe(200)
+    expect(read.body).toEqual(TRAINING_PLAN_READ_RESULT)
+    expect(trainingPlanGetCalls).toEqual([{
+      orgId: ORG_A,
+      planId: TRAINING_PLAN_ID,
+    }])
+    valuesFree(read.body)
+  })
+
+  it('elearning:write without admin cannot publish a training plan', async () => {
+    trainingPlanPublishCalls.length = 0
+    const token = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const res = await request(pinned.url())
+      .post('/api/elearning/training-plans/publish')
+      .set('Authorization', `Bearer ${token}`)
+      .send(TRAINING_PLAN_BODY)
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'Insufficient permissions' })
+    expect(trainingPlanPublishCalls).toHaveLength(0)
+    valuesFree(res.body)
+  })
+
+  it('the same admin receives not_found for a plan outside the JWT-bound org', async () => {
+    trainingPlanGetCalls.length = 0
+    const token = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_B,
+    })
+    const res = await request(pinned.url())
+      .get(`/api/elearning/training-plans/${TRAINING_PLAN_ID}`)
+      .set('Authorization', `Bearer ${token}`)
+    expect(res.status).toBe(404)
+    expect(res.body).toEqual({ error: 'not_found' })
+    expect(trainingPlanGetCalls).toEqual([{
+      orgId: ORG_B,
+      planId: TRAINING_PLAN_ID,
+    }])
     valuesFree(res.body)
   })
 

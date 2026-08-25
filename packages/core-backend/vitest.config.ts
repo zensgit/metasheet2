@@ -1562,6 +1562,10 @@ export default defineConfig({
       // it; wired as a WHOLE FILE sibling of the schema/service gates in
       // plugin-tests.yml after db:migrate on the 20.x leg.
       'tests/integration/elearning-jobs.db.test.ts',
+      // E-learning L2 training-plan version pinning. Requires real PostgreSQL
+      // for same-org composite FKs, publish guards, immutable items, and the
+      // append-only request ledger. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-training-plan.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
