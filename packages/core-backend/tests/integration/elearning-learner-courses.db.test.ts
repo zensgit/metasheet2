@@ -25,6 +25,7 @@ import {
 } from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
 import {
   listElearningLearnerCourses,
+  type ElearningLearnerCoursesDb,
   type ElearningLearnerCoursesQueryable,
 } from '../../src/services/elearning-learner-courses'
 import {
@@ -626,19 +627,26 @@ describe('elearning learner assigned-or-visible course list (real DB)', () => {
     }))
 
     let shrunk = false
-    const shrinkingDb: ElearningLearnerCoursesQueryable = {
+    const shrinkingDb: ElearningLearnerCoursesDb = {
       async query(sql, params) {
-        if (!shrunk && sql.includes('/* elearning-learner-courses:details */')) {
-          shrunk = true
-          await setElearningCourseScope(db, {
-            orgId: org,
-            actorId: actor('scope-admin'),
-            courseId: seed.courseId,
-            reason: 'shrink between catalog queries',
-            rules: [],
-          })
-        }
         return db.query(sql, params)
+      },
+      async transaction(handler) {
+        return db.transaction(async (tx) => handler({
+          async query(sql, params) {
+            if (!shrunk && sql.includes('/* elearning-learner-courses:details */')) {
+              shrunk = true
+              await setElearningCourseScope(db, {
+                orgId: org,
+                actorId: actor('scope-admin'),
+                courseId: seed.courseId,
+                reason: 'shrink between catalog queries',
+                rules: [],
+              })
+            }
+            return tx.query(sql, params)
+          },
+        }))
       },
     }
     await expect(listElearningLearnerCourses(shrinkingDb, {

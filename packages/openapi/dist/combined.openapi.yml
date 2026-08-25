@@ -5873,6 +5873,26 @@ components:
             subjectType:
               type: string
               enum:
+                - role
+            subjectRef:
+              type: string
+              minLength: 1
+            includeChildren:
+              type: boolean
+              enum:
+                - false
+          description: >-
+            Accepted wire shape that returns unsupported_subject until
+            org-scoped role membership exists.
+        - type: object
+          additionalProperties: false
+          required:
+            - subjectType
+            - subjectRef
+          properties:
+            subjectType:
+              type: string
+              enum:
                 - position
                 - user
             subjectRef:

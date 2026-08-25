@@ -43,8 +43,8 @@ import {
 import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
+  type ElearningLearnerCoursesDb,
   type ElearningLearnerCoursesErrorCode,
-  type ElearningLearnerCoursesQueryable,
 } from '../services/elearning-learner-courses'
 import {
   ELEARNING_MEDIA_PLAYBACK_SECRET_ENV,
@@ -165,7 +165,7 @@ export interface ElearningPilotRouteDeps {
     ElearningPlaybackDb &
     ElearningExamDb &
     ElearningCoursePublishDb &
-    ElearningLearnerCoursesQueryable &
+    ElearningLearnerCoursesDb &
     ElearningScopeDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null

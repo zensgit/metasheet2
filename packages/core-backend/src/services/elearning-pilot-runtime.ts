@@ -37,7 +37,7 @@ import {
 import {
   listElearningLearnerCourses,
   type ElearningLearnerCourse,
-  type ElearningLearnerCoursesQueryable,
+  type ElearningLearnerCoursesDb,
   type ListElearningLearnerCoursesInput,
 } from './elearning-learner-courses'
 import {
@@ -70,7 +70,7 @@ export interface ElearningPilotRuntimeOptions {
     ElearningPlaybackDb &
     ElearningExamDb &
     ElearningCoursePublishDb &
-    ElearningLearnerCoursesQueryable &
+    ElearningLearnerCoursesDb &
     ElearningScopeDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
@@ -107,7 +107,7 @@ export interface ElearningPilotRuntimeOptions {
     input: PublishElearningCourseInput,
   ) => Promise<ElearningCoursePublishResult>
   listElearningLearnerCourses?: (
-    db: ElearningLearnerCoursesQueryable,
+    db: ElearningLearnerCoursesDb,
     input: ListElearningLearnerCoursesInput,
   ) => Promise<ElearningLearnerCourse[]>
   setElearningCourseScope?: (

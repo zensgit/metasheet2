@@ -17551,6 +17551,12 @@ export interface components {
             includeChildren?: boolean;
         } | {
             /** @enum {string} */
+            subjectType: "role";
+            subjectRef: string;
+            /** @enum {boolean} */
+            includeChildren?: false;
+        } | {
+            /** @enum {string} */
             subjectType: "position" | "user";
             subjectRef: string;
             /** @enum {boolean} */

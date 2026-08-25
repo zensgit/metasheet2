@@ -41,6 +41,12 @@ export interface ElearningLearnerCoursesQueryable {
   ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>
 }
 
+export interface ElearningLearnerCoursesDb extends ElearningLearnerCoursesQueryable {
+  transaction<T>(
+    handler: (tx: ElearningLearnerCoursesQueryable) => Promise<T>,
+  ): Promise<T>
+}
+
 export interface ListElearningLearnerCoursesInput {
   orgId: string
   userId: string
@@ -509,59 +515,64 @@ function mapCourse(
 }
 
 export async function listElearningLearnerCourses(
-  db: ElearningLearnerCoursesQueryable,
+  db: ElearningLearnerCoursesDb,
   input: ListElearningLearnerCoursesInput,
 ): Promise<ElearningLearnerCourse[]> {
   const orgId = requireActor(input.orgId)
   const userId = requireActor(input.userId)
 
   try {
-    const candidates = await listElearningCourseAccessCandidates(db, {
-      orgId,
-      userId,
-      limit: ELEARNING_LEARNER_COURSES_LIMIT + 1,
-    })
-    if (candidates.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
-    if (candidates.length === 0) return []
-
-    const visibilityRuleIds = [...new Set(candidates.flatMap((candidate) =>
-      candidate.basis.kind === 'visibility' ? [candidate.basis.scopeRevisionRuleId] : [],
-    ))]
-    if (visibilityRuleIds.length > 0) {
-      const matchedRuleIds = await matchElearningAudienceRuleIds(db, {
+    return await db.transaction(async (tx) => {
+      const candidates = await listElearningCourseAccessCandidates(tx, {
         orgId,
         userId,
-        ruleIds: visibilityRuleIds,
+        limit: ELEARNING_LEARNER_COURSES_LIMIT + 1,
       })
-      const matched = new Set(matchedRuleIds)
-      if (visibilityRuleIds.some((ruleId) => !matched.has(ruleId))) fail('unavailable')
-    }
+      if (candidates.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
+      if (candidates.length === 0) return []
 
-    const versionIds = candidates.map((candidate) => candidate.courseVersionId)
-    const assignmentMemberIds = candidates.map((candidate) => candidate.basis.assignmentMemberId)
-    const scopeRevisionRuleIds = candidates.map((candidate) => candidate.basis.scopeRevisionRuleId)
-    const result = await db.query(DETAILS_SQL, [
-      orgId,
-      userId,
-      versionIds,
-      assignmentMemberIds,
-      scopeRevisionRuleIds,
-    ])
-    if (!Array.isArray(result.rows)) fail('unavailable')
-    if (result.rows.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
-    const details = new Map<string, ElearningLearnerCourse>()
-    const candidateByVersion = new Map(
-      candidates.map((candidate) => [candidate.courseVersionId, candidate] as const),
-    )
-    for (const row of result.rows) {
-      if (!row || typeof row !== 'object' || Array.isArray(row)) fail('unavailable')
-      const versionId = requireUuid(row.course_version_id)
-      const candidate = candidateByVersion.get(versionId)
-      if (!candidate || details.has(versionId)) fail('unavailable')
-      details.set(versionId, mapCourse(row, candidate))
-    }
-    if (details.size !== candidates.length) fail('unavailable')
-    return candidates.map((candidate) => details.get(candidate.courseVersionId) ?? fail('unavailable'))
+      const visibilityRuleIds = [...new Set(candidates.flatMap((candidate) =>
+        candidate.basis.kind === 'visibility' ? [candidate.basis.scopeRevisionRuleId] : [],
+      ))]
+      if (visibilityRuleIds.length > 0) {
+        const matchedRuleIds = await matchElearningAudienceRuleIds(tx, {
+          orgId,
+          userId,
+          ruleIds: visibilityRuleIds,
+          lockDependencies: true,
+        })
+        const matched = new Set(matchedRuleIds)
+        if (visibilityRuleIds.some((ruleId) => !matched.has(ruleId))) fail('unavailable')
+      }
+
+      const versionIds = candidates.map((candidate) => candidate.courseVersionId)
+      const assignmentMemberIds = candidates.map((candidate) => candidate.basis.assignmentMemberId)
+      const scopeRevisionRuleIds = candidates.map((candidate) => candidate.basis.scopeRevisionRuleId)
+      const result = await tx.query(DETAILS_SQL, [
+        orgId,
+        userId,
+        versionIds,
+        assignmentMemberIds,
+        scopeRevisionRuleIds,
+      ])
+      if (!Array.isArray(result.rows)) fail('unavailable')
+      if (result.rows.length > ELEARNING_LEARNER_COURSES_LIMIT) fail('unavailable')
+      const details = new Map<string, ElearningLearnerCourse>()
+      const candidateByVersion = new Map(
+        candidates.map((candidate) => [candidate.courseVersionId, candidate] as const),
+      )
+      for (const row of result.rows) {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) fail('unavailable')
+        const versionId = requireUuid(row.course_version_id)
+        const candidate = candidateByVersion.get(versionId)
+        if (!candidate || details.has(versionId)) fail('unavailable')
+        details.set(versionId, mapCourse(row, candidate))
+      }
+      if (details.size !== candidates.length) fail('unavailable')
+      return candidates.map(
+        (candidate) => details.get(candidate.courseVersionId) ?? fail('unavailable'),
+      )
+    })
   } catch (error) {
     if (error instanceof ElearningLearnerCoursesError) throw error
     fail('unavailable')

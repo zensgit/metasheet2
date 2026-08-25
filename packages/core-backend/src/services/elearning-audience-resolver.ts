@@ -23,6 +23,7 @@ export type ElearningAudienceRuleInput =
   | { subjectType: 'all'; subjectRef?: null; includeChildren?: false }
   | { subjectType: 'department'; subjectRef: string; includeChildren?: boolean }
   | { subjectType: 'position'; subjectRef: string; includeChildren?: false }
+  | { subjectType: 'role'; subjectRef: string; includeChildren?: false }
   | { subjectType: 'user'; subjectRef: string; includeChildren?: false }
 
 export type ElearningAudienceRule =
@@ -802,7 +803,12 @@ export async function listElearningAudienceCourseMatches(
 
 export async function matchElearningAudienceRuleIds(
   db: ElearningAudienceQueryable,
-  input: { orgId: string; userId: string; ruleIds: readonly string[] },
+  input: {
+    orgId: string
+    userId: string
+    ruleIds: readonly string[]
+    lockDependencies?: boolean
+  },
 ): Promise<string[]> {
   const orgId = requireText(input.orgId)
   const userId = requireText(input.userId)
@@ -823,7 +829,13 @@ export async function matchElearningAudienceRuleIds(
        FOR SHARE OF rule`,
       [orgId, ruleIds],
     )
-    const matches = await matchStoredRules(db, orgId, userId, storedRules(result.rows))
+    const matches = await matchStoredRules(
+      db,
+      orgId,
+      userId,
+      storedRules(result.rows),
+      input.lockDependencies === true,
+    )
     return matches.map((rule) => rule.ruleId)
   } catch (error) {
     if (error instanceof ElearningAudienceResolverError) throw error

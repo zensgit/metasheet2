@@ -12,6 +12,7 @@ import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
   type ElearningLearnerCourse,
+  type ElearningLearnerCoursesDb,
   type ElearningLearnerCoursesQueryable,
 } from '../../src/services/elearning-learner-courses'
 
@@ -183,109 +184,114 @@ function baseRow(over: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
-  db: ElearningLearnerCoursesQueryable
+  db: ElearningLearnerCoursesDb
   queries: string[]
   params: unknown[][]
 } {
   const queries: string[] = []
   const params: unknown[][] = []
-  return {
-    queries,
-    params,
-    db: {
-      query: async (sql, queryParams = []) => {
-        queries.push(sql)
-        params.push(queryParams)
-        if (rows instanceof Error) throw rows
-        const tag = tagOf(sql)
-        if (tag === 'elearning-access:list-assignments') {
-          const seen = new Set<string>()
-          const candidates = rows.flatMap((row) => {
-            if (row.access_kind === 'visibility') return []
-            const versionId = String(row.course_version_id)
-            if (seen.has(versionId)) return []
-            seen.add(versionId)
-            return [{
-              course_id: row.course_id,
-              course_version_id: row.course_version_id,
-              assignment_member_id: row.assignment_member_id ?? MEMBER,
-              scope_revision_rule_id: null,
-              assignment_deadline: row.assignment_deadline,
-              assignment_assigned_at: row.assignment_assigned_at,
-            }]
-          }).slice(0, Number(queryParams[2]))
-          return { rows: candidates, rowCount: candidates.length }
+  const query: ElearningLearnerCoursesQueryable['query'] = async (
+    sql,
+    queryParams = [],
+  ) => {
+    queries.push(sql)
+    params.push(queryParams)
+    if (rows instanceof Error) throw rows
+    const tag = tagOf(sql)
+    if (tag === 'elearning-access:list-assignments') {
+      const seen = new Set<string>()
+      const candidates = rows.flatMap((row) => {
+        if (row.access_kind === 'visibility') return []
+        const versionId = String(row.course_version_id)
+        if (seen.has(versionId)) return []
+        seen.add(versionId)
+        return [{
+          course_id: row.course_id,
+          course_version_id: row.course_version_id,
+          assignment_member_id: row.assignment_member_id ?? MEMBER,
+          scope_revision_rule_id: null,
+          assignment_deadline: row.assignment_deadline,
+          assignment_assigned_at: row.assignment_assigned_at,
+        }]
+      }).slice(0, Number(queryParams[2]))
+      return { rows: candidates, rowCount: candidates.length }
+    }
+    if (tag === 'elearning-audience:list-course-matches') {
+      if (rows.some((row) => row.audience_scan_overflow === true)) {
+        return {
+          rows: [{
+            scan_overflow: true,
+            course_id: null,
+            course_version_id: null,
+            rule_id: null,
+            scope_revision_id: null,
+          }],
+          rowCount: 1,
         }
-        if (tag === 'elearning-audience:list-course-matches') {
-          if (rows.some((row) => row.audience_scan_overflow === true)) {
-            return {
-              rows: [{
-                scan_overflow: true,
-                course_id: null,
-                course_version_id: null,
-                rule_id: null,
-                scope_revision_id: null,
-              }],
-              rowCount: 1,
-            }
-          }
-          const seen = new Set<string>()
-          const excluded = new Set(
-            Array.isArray(queryParams[2]) ? queryParams[2].map(String) : [],
-          )
-          const candidates = rows.flatMap((row) => {
-            if (row.access_kind !== 'visibility') return []
-            const versionId = String(row.course_version_id)
-            if (seen.has(versionId) || excluded.has(versionId)) return []
-            const ruleId = String(row.scope_revision_rule_id ?? SCOPE_RULE)
-            seen.add(versionId)
-            return [{
-              course_id: row.course_id,
-              course_version_id: row.course_version_id,
-              rule_id: ruleId,
-              scope_revision_id: SCOPE_REVISION,
-            }]
-          }).slice(0, Number(queryParams[3]))
-          return { rows: candidates, rowCount: candidates.length }
-        }
-        if (tag === 'elearning-audience:load-rule-ids') {
-          const ruleIds = Array.isArray(queryParams[1]) ? queryParams[1].map(String) : []
-          return {
-            rows: ruleIds.map((ruleId) => ({
-              rule_id: ruleId,
-              scope_revision_id: SCOPE_REVISION,
-              subject_type: 'all',
-              subject_ref: null,
-              include_children: false,
-            })),
-            rowCount: ruleIds.length,
-          }
-        }
-        if (tag === 'elearning-audience:resolve-membership') {
-          const rules = JSON.parse(String(queryParams[1])) as Array<Record<string, unknown>>
-          return {
-            rows: rules.map((rule) => ({ rule_key: rule.rule_key, user_id: USER })),
-            rowCount: rules.length,
-          }
-        }
-        if (tag === 'elearning-learner-courses:details') {
-          const versionIds = queryParams[2]
-          const assignmentMemberIds = queryParams[3]
-          const scopeRevisionRuleIds = queryParams[4]
-          if (!Array.isArray(versionIds)) throw new Error('missing version id array')
-          if (!Array.isArray(assignmentMemberIds)) throw new Error('missing assignment member array')
-          if (!Array.isArray(scopeRevisionRuleIds)) throw new Error('missing scope rule array')
-          if (
-            versionIds.length !== assignmentMemberIds.length
-            || versionIds.length !== scopeRevisionRuleIds.length
-          ) throw new Error('misaligned access arrays')
-          const selected = rows.filter((row) => versionIds.includes(String(row.course_version_id)))
-          return { rows: selected, rowCount: selected.length }
-        }
-        throw new Error(`unexpected query: ${sql}`)
-      },
-    },
+      }
+      const seen = new Set<string>()
+      const excluded = new Set(
+        Array.isArray(queryParams[2]) ? queryParams[2].map(String) : [],
+      )
+      const candidates = rows.flatMap((row) => {
+        if (row.access_kind !== 'visibility') return []
+        const versionId = String(row.course_version_id)
+        if (seen.has(versionId) || excluded.has(versionId)) return []
+        const ruleId = String(row.scope_revision_rule_id ?? SCOPE_RULE)
+        seen.add(versionId)
+        return [{
+          course_id: row.course_id,
+          course_version_id: row.course_version_id,
+          rule_id: ruleId,
+          scope_revision_id: SCOPE_REVISION,
+        }]
+      }).slice(0, Number(queryParams[3]))
+      return { rows: candidates, rowCount: candidates.length }
+    }
+    if (tag === 'elearning-audience:load-rule-ids') {
+      const ruleIds = Array.isArray(queryParams[1]) ? queryParams[1].map(String) : []
+      return {
+        rows: ruleIds.map((ruleId) => ({
+          rule_id: ruleId,
+          scope_revision_id: SCOPE_REVISION,
+          subject_type: 'all',
+          subject_ref: null,
+          include_children: false,
+        })),
+        rowCount: ruleIds.length,
+      }
+    }
+    if (tag === 'elearning-audience:lock-principal') {
+      return { rows: [{ id: USER }], rowCount: 1 }
+    }
+    if (tag === 'elearning-audience:resolve-membership') {
+      const rules = JSON.parse(String(queryParams[1])) as Array<Record<string, unknown>>
+      return {
+        rows: rules.map((rule) => ({ rule_key: rule.rule_key, user_id: USER })),
+        rowCount: rules.length,
+      }
+    }
+    if (tag === 'elearning-learner-courses:details') {
+      const versionIds = queryParams[2]
+      const assignmentMemberIds = queryParams[3]
+      const scopeRevisionRuleIds = queryParams[4]
+      if (!Array.isArray(versionIds)) throw new Error('missing version id array')
+      if (!Array.isArray(assignmentMemberIds)) throw new Error('missing assignment member array')
+      if (!Array.isArray(scopeRevisionRuleIds)) throw new Error('missing scope rule array')
+      if (
+        versionIds.length !== assignmentMemberIds.length
+        || versionIds.length !== scopeRevisionRuleIds.length
+      ) throw new Error('misaligned access arrays')
+      const selected = rows.filter((row) => versionIds.includes(String(row.course_version_id)))
+      return { rows: selected, rowCount: selected.length }
+    }
+    throw new Error(`unexpected query: ${sql}`)
   }
+  const db: ElearningLearnerCoursesDb = {
+    query,
+    transaction: async (handler) => handler({ query }),
+  }
+  return { queries, params, db }
 }
 
 describe('elearning learner courses source SQL', () => {

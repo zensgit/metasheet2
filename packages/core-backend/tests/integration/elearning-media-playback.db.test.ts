@@ -18,6 +18,10 @@ import {
   SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
   SCOPE_RULES_DENY_MUTATION_TRIGGER,
 } from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
+import {
+  listElearningLearnerCourses,
+  type ElearningLearnerCoursesDb,
+} from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_RANGE_MAX_BYTES } from '../../src/services/elearning-media-storage'
 import {
   authorizeElearningMediaPlayback,
@@ -58,7 +62,7 @@ const ALL_TRIGGERS = [
   },
 ]
 
-class PgPlaybackDb implements ElearningPlaybackDb {
+class PgPlaybackDb implements ElearningPlaybackDb, ElearningLearnerCoursesDb {
   constructor(
     private readonly target: Pool,
     private readonly afterQuery?: (sql: string) => Promise<void>,
@@ -226,6 +230,23 @@ function createQueryBarrier(tag: string): {
       hitResolve()
       await released
     },
+  }
+}
+
+async function expectBarrierHit(hit: Promise<void>, label: string): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      hit,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`expected ${label} query lock`)),
+          1_000,
+        )
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
   }
 }
 
@@ -594,7 +615,7 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
         now: NOW,
       },
     )
-    await barrier.hit
+    await expectBarrierHit(barrier.hit, 'playback assignment dependency')
 
     const updater = await pool.connect()
     try {
@@ -783,6 +804,60 @@ describe('elearning V0.1 playback service gate (real DB)', () => {
         now: NOW,
       }),
     ).rejects.toMatchObject({ code: 'assignment_unavailable' })
+  })
+
+  it('holds directory-position membership through learner catalog details', async () => {
+    const org = orgId('catalog-directory-race')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedAssignment({ org })
+    const title = `${NS}-Catalog-Engineer`
+    const { linkId } = await seedDirectoryPosition(seed, title)
+    await replaceAssignmentWithVisibility(seed, {
+      subjectType: 'position',
+      subjectRef: title,
+    })
+    const barrier = createQueryBarrier('elearning-audience:lock-directory-accounts')
+    const listing = listElearningLearnerCourses(
+      new PgPlaybackDb(pool, barrier.afterQuery),
+      { orgId: org, userId: seed.userId },
+    )
+    await expectBarrierHit(barrier.hit, 'learner catalog directory dependency')
+
+    const updater = await pool.connect()
+    try {
+      await updater.query('BEGIN')
+      const pid = Number(
+        (await updater.query('SELECT pg_backend_pid() AS pid')).rows[0].pid,
+      )
+      const unlink = updater.query(
+        `UPDATE directory_account_links
+            SET link_status = 'unlinked', updated_at = now()
+          WHERE id = $1`,
+        [linkId],
+      )
+      await waitForBackendLock(pid)
+      barrier.release()
+      await expect(listing).resolves.toEqual([
+        expect.objectContaining({
+          courseId: seed.courseId,
+          courseVersionId: seed.versionId,
+          access: { kind: 'visibility', required: false },
+        }),
+      ])
+      await unlink
+      await updater.query('COMMIT')
+    } catch (error) {
+      barrier.release()
+      await updater.query('ROLLBACK')
+      throw error
+    } finally {
+      updater.release()
+    }
+
+    await expect(listElearningLearnerCourses(db, {
+      orgId: org,
+      userId: seed.userId,
+    })).resolves.toEqual([])
   })
 
   it('returns a bounded first-chunk contract when Range is absent', async () => {

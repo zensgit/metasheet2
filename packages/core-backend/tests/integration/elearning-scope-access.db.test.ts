@@ -6,10 +6,13 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
+import { COURSE_VERSIONS_STATE_TRIGGER } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import {
   resolveElearningCourseAccess,
 } from '../../src/services/elearning-course-access'
 import {
+  ELEARNING_AUDIENCE_RULE_SCAN_LIMIT,
+  listElearningAudienceCourseMatches,
   resolveElearningAudienceMembers,
 } from '../../src/services/elearning-audience-resolver'
 import { listElearningLearnerCourses } from '../../src/services/elearning-learner-courses'
@@ -617,6 +620,113 @@ describe('elearning L1 scope/access gate (real DB)', () => {
       expect(after.rows).toEqual(before.rows)
     })
   })
+
+  it('bounds the real catalog scan at 10,000 active scope rules', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = actor('org-scan-boundary')
+      const userId = actor('scan-learner')
+      const fixtureTable = 'elearning_audience_scan_fixture'
+      await seedActiveMembership(client, userId, orgId)
+      await client.query(
+        `CREATE TEMP TABLE ${fixtureTable} ON COMMIT DROP AS
+         SELECT
+           n,
+           md5($1 || ':course:' || n)::uuid AS course_id,
+           md5($1 || ':version:' || n)::uuid AS version_id,
+           md5($1 || ':scope:' || n)::uuid AS scope_id,
+           md5($1 || ':revision:' || n)::uuid AS revision_id,
+           md5($1 || ':rule:' || n)::uuid AS rule_id
+         FROM generate_series(1, $2::integer) AS series(n)`,
+        [orgId, ELEARNING_AUDIENCE_RULE_SCAN_LIMIT + 1],
+      )
+      await client.query(
+        `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+         SELECT course_id, $1, 'Audience scan fixture', 'active', $2
+         FROM ${fixtureTable}`,
+        [orgId, actor('scan-author')],
+      )
+      await client.query(
+        `INSERT INTO elearning_course_versions (
+           id, org_id, course_id, version, status, title, created_by
+         )
+         SELECT version_id, $1, course_id, 1, 'draft', 'Version 1', $2
+         FROM ${fixtureTable}`,
+        [orgId, actor('scan-author')],
+      )
+      await client.query(
+        `ALTER TABLE elearning_course_versions DISABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
+      )
+      await client.query(
+        `UPDATE elearning_course_versions version
+            SET status = 'published', updated_at = clock_timestamp()
+           FROM ${fixtureTable} fixture
+          WHERE version.org_id = $1 AND version.id = fixture.version_id`,
+        [orgId],
+      )
+      await client.query(
+        `ALTER TABLE elearning_course_versions ENABLE TRIGGER ${COURSE_VERSIONS_STATE_TRIGGER}`,
+      )
+      await client.query(
+        `INSERT INTO elearning_scopes (id, org_id, created_by)
+         SELECT scope_id, $1, $2 FROM ${fixtureTable}`,
+        [orgId, actor('scan-author')],
+      )
+      await client.query(
+        `INSERT INTO elearning_scope_revisions (
+           id, org_id, scope_id, revision, actor_id, reason
+         )
+         SELECT revision_id, $1, scope_id, 1, $2, 'scan boundary'
+         FROM ${fixtureTable}`,
+        [orgId, actor('scan-author')],
+      )
+      await client.query(
+        `INSERT INTO elearning_scope_revision_rules (
+           id, org_id, scope_revision_id, subject_type, subject_ref, include_children
+         )
+         SELECT rule_id, $1, revision_id, 'all', NULL, FALSE
+         FROM ${fixtureTable}`,
+        [orgId],
+      )
+      await client.query(
+        `UPDATE elearning_scopes scope
+            SET active_revision_id = fixture.revision_id,
+                latest_revision_id = fixture.revision_id,
+                updated_at = clock_timestamp()
+           FROM ${fixtureTable} fixture
+          WHERE scope.org_id = $1 AND scope.id = fixture.scope_id`,
+        [orgId],
+      )
+      await client.query(
+        `UPDATE elearning_courses course
+            SET scope_id = fixture.scope_id,
+                active_version_id = fixture.version_id,
+                latest_version_id = fixture.version_id,
+                updated_at = clock_timestamp()
+           FROM ${fixtureTable} fixture
+          WHERE course.org_id = $1 AND course.id = fixture.course_id`,
+        [orgId],
+      )
+      const firstVersion = await client.query(
+        `SELECT version_id::text AS version_id
+         FROM ${fixtureTable}
+         WHERE n = 1`,
+      )
+      const excludedVersionId = String(firstVersion.rows[0]?.version_id)
+
+      await expect(listElearningAudienceCourseMatches(db, {
+        orgId,
+        userId,
+        excludedCourseVersionIds: [excludedVersionId],
+        limit: 1,
+      })).resolves.toHaveLength(1)
+      await expect(listElearningAudienceCourseMatches(db, {
+        orgId,
+        userId,
+        excludedCourseVersionIds: [],
+        limit: 1,
+      })).rejects.toMatchObject({ code: 'unavailable' })
+    })
+  }, 30_000)
 
   it('uses an active scope revision for self-study, then an empty revision blocks continuation with zero writes', async () => {
     await withRolledBackDb(async (client, db) => {
