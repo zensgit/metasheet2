@@ -13,6 +13,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import {
   ELEARNING_EXAM_AUTO_GRADER,
   ELEARNING_EXAM_GRADE_KIND,
@@ -39,6 +40,7 @@ const NS = `el-exsvc-${STAMP}`
 const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
+  ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
 ]
 
 async function exec(target: Pool | PoolClient, sql: string, params?: unknown[]) {
@@ -938,7 +940,16 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
   it('rejects start when pass_score exceeds the frozen paper total and creates no attempt', async () => {
     const org = orgId('pass-over')
     seededOrgIds.push(org)
-    const seed = await seedPublishedExam({ org, passScore: 31 })
+    const seed = await seedPublishedExam({ org, passScore: 20 })
+    await setTriggers(false)
+    try {
+      await pool.query(
+        `UPDATE elearning_exams SET pass_score = 31, updated_at = now() WHERE org_id = $1 AND id = $2`,
+        [org, seed.examId],
+      )
+    } finally {
+      await setTriggers(true)
+    }
     await expect(startElearningExam(db, {
       orgId: org,
       userId: seed.userId,

@@ -20,6 +20,12 @@ import {
   ELEARNING_V01_WATCH_TABLES,
   LEARNING_SESSIONS_ONE_ACTIVE_INDEX,
 } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import {
+  ASSIGNMENTS_DENY_DELETE_TRIGGER,
+  ASSIGNMENTS_IDENTITY_TRIGGER,
+  ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  PROGRESS_EVENTS_DENY_UPDATE_TRIGGER,
+} from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -57,6 +63,7 @@ async function reject(fn: () => Promise<unknown>): Promise<PgError | null> {
 const ALL_IMMUTABILITY_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
+  ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
 ]
 
 async function setImmutabilityTriggers(enabled: boolean): Promise<void> {
@@ -148,7 +155,7 @@ async function insertRevision(org: string, id: string, questionId: string, revis
 async function insertExam(org: string, id: string): Promise<void> {
   await pool.query(
     `INSERT INTO elearning_exams (id, org_id, title, status, pass_score, max_attempts, created_by)
-     VALUES ($1, $2, 'Watch exam', 'draft', 60, 3, $3)`,
+     VALUES ($1, $2, 'Watch exam', 'draft', 10, 3, $3)`,
     [id, org, actor('author')],
   )
 }
@@ -1205,10 +1212,83 @@ describe('elearning V0.1 watch-progress schema gate (real DB)', () => {
       )
     }
 
-    const deleteAssignment = await reject(() =>
+    await pool.query(
+      `ALTER TABLE elearning_assignments DISABLE TRIGGER ${ASSIGNMENTS_DENY_DELETE_TRIGGER}`,
+    )
+    try {
+      const deleteAssignment = await reject(() =>
+        pool.query(`DELETE FROM elearning_assignments WHERE org_id = $1 AND id = $2`, [org, assignmentId]),
+      )
+      expect(deleteAssignment?.code).toBe('23503')
+      expect(deleteAssignment?.constraint).toBe('elearning_assignment_members_assignment_version_fk')
+    } finally {
+      await pool.query(
+        `ALTER TABLE elearning_assignments ENABLE TRIGGER ${ASSIGNMENTS_DENY_DELETE_TRIGGER}`,
+      )
+    }
+  })
+
+  it('freezes assignment identity, rejects assignment DELETE and progress-event UPDATE, and allows retention DELETE', async () => {
+    const org = orgId('ledger-append')
+    seededOrgIds.push(org)
+    const content = await seedContent(org)
+    const userId = actor('learner')
+    const assignmentId = await insertAssignment({
+      org,
+      versionId: content.versionId,
+      sourceKey: `${org}-src-append`,
+    })
+    const memberId = await insertMember({
+      org,
+      assignmentId,
+      versionId: content.versionId,
+      userId,
+    })
+    const sessionId = await insertSession({
+      org,
+      memberId,
+      versionId: content.versionId,
+      itemId: content.videoItemId,
+      userId,
+    })
+    const eventId = await insertEvent({
+      org,
+      sessionId,
+      versionId: content.versionId,
+      itemId: content.videoItemId,
+      userId,
+      sequence: 0,
+    })
+
+    const assignIdentity = await reject(() =>
+      pool.query(
+        `UPDATE elearning_assignments SET request_hash = 'tamper' WHERE org_id = $1 AND id = $2`,
+        [org, assignmentId],
+      ),
+    )
+    expect(String(assignIdentity?.message)).toMatch(/identity fields are immutable/)
+    expect(ASSIGNMENTS_IDENTITY_TRIGGER).toBe('trg_elearning_assignments_identity_guard')
+    const assignDelete = await reject(() =>
       pool.query(`DELETE FROM elearning_assignments WHERE org_id = $1 AND id = $2`, [org, assignmentId]),
     )
-    expect(deleteAssignment?.code).toBe('23503')
-    expect(deleteAssignment?.constraint).toBe('elearning_assignment_members_assignment_version_fk')
+    expect(String(assignDelete?.message)).toMatch(/assignments DELETE is not permitted/)
+
+    const eventUpdate = await reject(() =>
+      pool.query(
+        `UPDATE elearning_progress_events SET credited_ms = 1 WHERE org_id = $1 AND id = $2`,
+        [org, eventId],
+      ),
+    )
+    expect(String(eventUpdate?.message)).toMatch(/append-only: UPDATE is not permitted/)
+    expect(PROGRESS_EVENTS_DENY_UPDATE_TRIGGER).toBe('trg_elearning_progress_events_deny_update')
+    await pool.query(
+      `DELETE FROM elearning_progress_events WHERE org_id = $1 AND id = $2`,
+      [org, eventId],
+    )
+    const retained = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM elearning_progress_events WHERE org_id = $1 AND id = $2`,
+      [org, eventId],
+    )
+    expect(retained.rows[0].n).toBe(0)
   })
 })

@@ -19,6 +19,11 @@ import {
   ELEARNING_V01_TABLES,
   GRADING_RECORD_ATTEMPT_KIND_UNIQ,
 } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
+import {
+  ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  ELEARNING_V01_LEDGER_TRIGGERS,
+  MEDIA_DURATION_STATUS_CHK,
+} from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import { ELEARNING_PERMISSION_CODES } from '../../src/db/migrations/zzzz20260824121000_add_elearning_permissions'
 
 const DATABASE_URL = process.env.DATABASE_URL
@@ -56,15 +61,18 @@ async function reject(fn: () => Promise<unknown>): Promise<PgError | null> {
 
 async function setImmutabilityTriggers(enabled: boolean): Promise<void> {
   const verb = enabled ? 'ENABLE' : 'DISABLE'
-  for (const { table, name } of ELEARNING_V01_IMMUTABILITY_TRIGGERS) {
+  for (const { table, name } of [
+    ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
+    ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  ]) {
     await pool.query(`ALTER TABLE ${table} ${verb} TRIGGER ${name}`)
   }
 }
 
 async function cleanupOrg(org: string): Promise<void> {
-  // Production triggers refuse row DELETE/UPDATE on frozen tables. This
-  // independent whole-file gate may DISABLE every named immutability trigger
-  // for namespace cleanup, and MUST re-enable them in `finally`.
+  // Production triggers refuse DELETE on frozen/ledger rows. This independent
+  // whole-file gate disables only delete-blocking triggers for namespace
+  // cleanup and MUST re-enable them in `finally`.
   await setImmutabilityTriggers(false)
   try {
     await pool.query('DELETE FROM elearning_grading_records WHERE org_id = $1', [org])
@@ -116,8 +124,8 @@ async function insertMedia(org: string, id: string, status = 'ready'): Promise<v
     `INSERT INTO elearning_media (
        id, org_id, storage_key, mime_type, magic_mime_type,
        size_bytes, sha256, duration_ms, status, created_by
-     ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 60000, $5, $6)`,
-    [id, org, `${NS}/media/${id}`, 'a'.repeat(64), status, actor('uploader')],
+     ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, $5, $6, $7)`,
+    [id, org, `${NS}/media/${id}`, 'a'.repeat(64), status === 'ready' ? 60000 : null, status, actor('uploader')],
   )
 }
 
@@ -148,7 +156,7 @@ async function insertRevision(org: string, id: string, questionId: string, revis
 async function insertExam(org: string, id: string, status = 'draft'): Promise<void> {
   await pool.query(
     `INSERT INTO elearning_exams (id, org_id, title, status, pass_score, max_attempts, created_by)
-     VALUES ($1, $2, 'Pilot exam', $3, 60, 3, $4)`,
+     VALUES ($1, $2, 'Pilot exam', $3, 10, 3, $4)`,
     [id, org, status, actor('author')],
   )
 }
@@ -427,7 +435,7 @@ async function runLockBarrier(input: {
   }
 }
 
-async function seedGraph(org: string): Promise<{
+async function seedGraph(org: string, mediaStatus = 'ready'): Promise<{
   courseId: string
   versionId: string
   mediaId: string
@@ -450,7 +458,7 @@ async function seedGraph(org: string): Promise<{
       WHERE org_id = $2 AND id = $3`,
     [versionId, org, courseId],
   )
-  await insertMedia(org, mediaId)
+  await insertMedia(org, mediaId, mediaStatus)
   await insertQuestion(org, questionId)
   await insertRevision(org, revisionId, questionId)
   await insertExam(org, examId)
@@ -480,9 +488,14 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
             AND NOT t.tgisinternal
             AND t.tgname = ANY($1::text[])
           ORDER BY t.tgname`,
-        [ELEARNING_V01_IMMUTABILITY_TRIGGERS.map((row) => row.name)],
+        [[
+          ...ELEARNING_V01_IMMUTABILITY_TRIGGERS.map((row) => row.name),
+          ...ELEARNING_V01_LEDGER_TRIGGERS.map((row) => row.name),
+        ]],
       )
-      expect(result.rows).toHaveLength(ELEARNING_V01_IMMUTABILITY_TRIGGERS.length)
+      expect(result.rows).toHaveLength(
+        ELEARNING_V01_IMMUTABILITY_TRIGGERS.length + ELEARNING_V01_LEDGER_TRIGGERS.length,
+      )
       expect(result.rows.every((row) => row.tgenabled === 'O')).toBe(true)
     } finally {
       await pool.end()
@@ -501,11 +514,13 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [[
         'zzzz20260824120000_create_elearning_v01_content_assessment',
         'zzzz20260824121000_add_elearning_permissions',
+        'zzzz20260826120000_harden_elearning_v01_ledger',
       ]],
     )
     expect(result.rows.map((row) => row.name)).toEqual([
       'zzzz20260824120000_create_elearning_v01_content_assessment',
       'zzzz20260824121000_add_elearning_permissions',
+      'zzzz20260826120000_harden_elearning_v01_ledger',
     ])
   })
 
@@ -1248,11 +1263,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
   it('refuses to publish a version whose video media is not ready', async () => {
     const org = orgId('media-not-ready')
     seededOrgIds.push(org)
-    const graph = await seedGraph(org)
-    await pool.query(
-      `UPDATE elearning_media SET status = 'probing' WHERE org_id = $1 AND id = $2`,
-      [org, graph.mediaId],
-    )
+    const graph = await seedGraph(org, 'probing')
     await publishExam(org, graph.examId)
 
     const err = await reject(() => publishVersion(org, graph.versionId))
@@ -1681,6 +1692,41 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     expect(questions.rows[0].status).toBe('published')
   })
 
+  it('makes exam publish observe a points reduction that committed while holding the parent lock', async () => {
+    const org = orgId('race-points-reverse')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+
+    const outcome = await reject(() =>
+      runLockBarrier({
+        hold: async (holder) => {
+          await holder.query(
+            `UPDATE elearning_exam_questions
+                SET points = 5
+              WHERE org_id = $1 AND exam_id = $2`,
+            [org, graph.examId],
+          )
+        },
+        wait: (waiter) =>
+          waiter.query(
+            `UPDATE elearning_exams
+                SET status = 'published', updated_at = now()
+              WHERE org_id = $1 AND id = $2`,
+            [org, graph.examId],
+          ),
+      }),
+    )
+    expect(String(outcome?.message)).toMatch(/pass_score must be <= sum of question points/)
+
+    const result = await pool.query<{ points: string; status: string }>(
+      `SELECT
+          (SELECT points::text FROM elearning_exam_questions WHERE org_id = $1 AND exam_id = $2) AS points,
+          (SELECT status FROM elearning_exams WHERE org_id = $1 AND id = $2) AS status`,
+      [org, graph.examId],
+    )
+    expect(result.rows[0]).toEqual({ points: '5', status: 'draft' })
+  })
+
   it('serializes retire vs set-active so an active pointer cannot land on a retired version', async () => {
     const org = orgId('race-retire')
     seededOrgIds.push(org)
@@ -1833,5 +1879,282 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [ELEARNING_PERMISSION_CODES],
     )
     expect(grants.rows.map((row) => row.permission_code)).toEqual([...ELEARNING_PERMISSION_CODES].sort())
+  })
+
+  it('pins the complete ledger-hardening table, trigger, function, and event mapping', async () => {
+    type TriggerMapping = {
+      table_name: string
+      trigger_name: string
+      function_name: string
+      events: string[]
+      is_before: boolean
+      is_row: boolean
+    }
+    const triggers = await pool.query<TriggerMapping>(
+      `SELECT c.relname AS table_name,
+              t.tgname AS trigger_name,
+              p.proname AS function_name,
+              ARRAY_REMOVE(ARRAY[
+                CASE WHEN (t.tgtype & 4) = 4 THEN 'INSERT' END,
+                CASE WHEN (t.tgtype & 16) = 16 THEN 'UPDATE' END,
+                CASE WHEN (t.tgtype & 8) = 8 THEN 'DELETE' END,
+                CASE WHEN (t.tgtype & 32) = 32 THEN 'TRUNCATE' END
+              ], NULL)::text[] AS events,
+              (t.tgtype & 2) = 2 AS is_before,
+              (t.tgtype & 1) = 1 AS is_row
+         FROM pg_trigger t
+         JOIN pg_class c ON c.oid = t.tgrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_proc p ON p.oid = t.tgfoid
+        WHERE n.nspname = current_schema()
+          AND NOT t.tgisinternal
+          AND t.tgname = ANY($1::text[])
+        ORDER BY c.relname, t.tgname`,
+      [ELEARNING_V01_LEDGER_TRIGGERS.map((row) => row.name)],
+    )
+    expect(triggers.rows).toEqual([
+      {
+        table_name: 'elearning_assignments',
+        trigger_name: 'trg_elearning_assignments_deny_delete',
+        function_name: 'elearning_assignments_deny_delete',
+        events: ['DELETE'],
+        is_before: true,
+        is_row: true,
+      },
+      {
+        table_name: 'elearning_assignments',
+        trigger_name: 'trg_elearning_assignments_identity_guard',
+        function_name: 'elearning_assignments_identity_guard',
+        events: ['UPDATE'],
+        is_before: true,
+        is_row: true,
+      },
+      {
+        table_name: 'elearning_course_publish_requests',
+        trigger_name: 'trg_elearning_course_publish_requests_deny_mutation',
+        function_name: 'elearning_course_publish_requests_deny_mutation',
+        events: ['UPDATE', 'DELETE'],
+        is_before: true,
+        is_row: true,
+      },
+      {
+        table_name: 'elearning_exams',
+        trigger_name: 'trg_elearning_exams_state_guard_points',
+        function_name: 'elearning_exams_publish_points_guard',
+        events: ['UPDATE'],
+        is_before: true,
+        is_row: true,
+      },
+      {
+        table_name: 'elearning_media',
+        trigger_name: 'trg_elearning_media_state_guard',
+        function_name: 'elearning_media_state_guard',
+        events: ['UPDATE'],
+        is_before: true,
+        is_row: true,
+      },
+      {
+        table_name: 'elearning_progress_events',
+        trigger_name: 'trg_elearning_progress_events_deny_update',
+        function_name: 'elearning_progress_events_deny_update',
+        events: ['UPDATE'],
+        is_before: true,
+        is_row: true,
+      },
+    ])
+    const chk = await pool.query<{ conname: string; convalidated: boolean }>(
+      `SELECT conname, convalidated
+         FROM pg_constraint
+        WHERE conrelid = 'elearning_media'::regclass
+          AND conname = $1`,
+      [MEDIA_DURATION_STATUS_CHK],
+    )
+    expect(chk.rows).toEqual([{ conname: MEDIA_DURATION_STATUS_CHK, convalidated: true }])
+  })
+
+  it('enforces media update transitions, identity freeze, and duration shape', async () => {
+    const org = orgId('media-sm')
+    seededOrgIds.push(org)
+    const uploading = randomUUID()
+    const readyId = randomUUID()
+    await insertMedia(org, uploading, 'uploading')
+    await insertMedia(org, readyId, 'ready')
+
+    const sameStatus = await reject(() =>
+      pool.query(`UPDATE elearning_media SET updated_at = now() WHERE org_id = $1 AND id = $2`, [
+        org,
+        uploading,
+      ]),
+    )
+    expect(String(sameStatus?.message)).toMatch(/same-status updates are not permitted/)
+
+    const identity = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media SET storage_key = 'other', status = 'probing' WHERE org_id = $1 AND id = $2`,
+        [org, uploading],
+      ),
+    )
+    expect(String(identity?.message)).toMatch(/identity fields are immutable after insert/)
+
+    const skipProbe = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media SET status = 'ready', duration_ms = 1000, updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, uploading],
+      ),
+    )
+    expect(String(skipProbe?.message)).toMatch(/illegal status transition/)
+
+    const sameReady = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media SET status = 'ready', duration_ms = 1000, updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, readyId],
+      ),
+    )
+    expect(String(sameReady?.message)).toMatch(/same-status updates are not permitted/)
+
+    await pool.query(
+      `UPDATE elearning_media SET status = 'probing', updated_at = now() WHERE org_id = $1 AND id = $2`,
+      [org, uploading],
+    )
+
+    const readyZero = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media SET status = 'ready', duration_ms = 0, updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, uploading],
+      ),
+    )
+    expect(String(readyZero?.message)).toMatch(/ready requires duration_ms > 0/)
+
+    await pool.query(
+      `UPDATE elearning_media SET status = 'ready', duration_ms = 1000, updated_at = now()
+        WHERE org_id = $1 AND id = $2`,
+      [org, uploading],
+    )
+    const terminal = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media SET status = 'rejected', duration_ms = NULL, updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, uploading],
+      ),
+    )
+    expect(String(terminal?.message)).toMatch(/illegal status transition/)
+
+    const illegalInsert = await reject(() =>
+      pool.query(
+        `INSERT INTO elearning_media (
+           id, org_id, storage_key, mime_type, magic_mime_type,
+           size_bytes, sha256, duration_ms, status, created_by
+         ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 0, 'ready', $5)`,
+        [randomUUID(), org, `${NS}/media/bad-ready`, 'b'.repeat(64), actor('uploader')],
+      ),
+    )
+    expect(illegalInsert?.constraint).toBe(MEDIA_DURATION_STATUS_CHK)
+
+    const nonReadyDuration = await reject(() =>
+      pool.query(
+        `INSERT INTO elearning_media (
+           id, org_id, storage_key, mime_type, magic_mime_type,
+           size_bytes, sha256, duration_ms, status, created_by
+         ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 1000, 'uploading', $5)`,
+        [randomUUID(), org, `${NS}/media/bad-uploading`, 'c'.repeat(64), actor('uploader')],
+      ),
+    )
+    expect(nonReadyDuration?.constraint).toBe(MEDIA_DURATION_STATUS_CHK)
+  })
+
+  it('preserves uploading to rejected for stale reconciler shape', async () => {
+    const org = orgId('media-stale')
+    seededOrgIds.push(org)
+    const id = randomUUID()
+    await insertMedia(org, id, 'uploading')
+    await pool.query(
+      `UPDATE elearning_media SET status = 'rejected', updated_at = now() WHERE org_id = $1 AND id = $2`,
+      [org, id],
+    )
+    const row = await pool.query<{ status: string; duration_ms: string | null }>(
+      `SELECT status, duration_ms::text FROM elearning_media WHERE org_id = $1 AND id = $2`,
+      [org, id],
+    )
+    expect(row.rows[0].status).toBe('rejected')
+    expect(row.rows[0].duration_ms).toBeNull()
+  })
+
+  it('keeps ready media terminal after its course version is published', async () => {
+    const org = orgId('media-race')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+    await publishExam(org, graph.examId)
+
+    await publishVersion(org, graph.versionId)
+    const outcome = await reject(() =>
+      pool.query(
+        `UPDATE elearning_media
+            SET status = 'rejected', duration_ms = NULL, updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [org, graph.mediaId],
+      ),
+    )
+    expect(String(outcome?.message)).toMatch(/illegal status transition/)
+
+    const media = await pool.query<{ status: string }>(
+      `SELECT status FROM elearning_media WHERE org_id = $1 AND id = $2`,
+      [org, graph.mediaId],
+    )
+    expect(media.rows[0].status).toBe('ready')
+    const version = await pool.query<{ status: string }>(
+      `SELECT status FROM elearning_course_versions WHERE org_id = $1 AND id = $2`,
+      [org, graph.versionId],
+    )
+    expect(version.rows[0].status).toBe('published')
+  })
+
+  it('refuses exam publish when points sum is 0 or pass_score exceeds the sum', async () => {
+    const org = orgId('exam-points')
+    seededOrgIds.push(org)
+    const examZero = randomUUID()
+    const examOver = randomUUID()
+    const questionId = randomUUID()
+    const revisionId = randomUUID()
+    await insertQuestion(org, questionId)
+    await insertRevision(org, revisionId, questionId)
+    await insertExam(org, examZero)
+    await pool.query(
+      `INSERT INTO elearning_exam_questions (org_id, exam_id, question_revision_id, position, points)
+       VALUES ($1, $2, $3, 1, 0)`,
+      [org, examZero, revisionId],
+    )
+    const zero = await reject(() => publishExam(org, examZero))
+    expect(String(zero?.message)).toMatch(/sum of question points must be greater than 0/)
+
+    await insertExam(org, examOver)
+    await insertExamQuestion(org, examOver, revisionId)
+    await pool.query(
+      `UPDATE elearning_exams SET pass_score = 11, updated_at = now() WHERE org_id = $1 AND id = $2`,
+      [org, examOver],
+    )
+    const over = await reject(() => publishExam(org, examOver))
+    expect(String(over?.message)).toMatch(/pass_score must be <= sum of question points/)
+  })
+
+  it('preserves retention DELETE for an unfinished exam attempt', async () => {
+    const org = orgId('attempt-del')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+    const startedId = await insertAttempt({
+      org,
+      examId: graph.examId,
+      versionId: graph.versionId,
+      userId: actor('del-started'),
+      attemptNo: 1,
+    })
+    await pool.query(`DELETE FROM elearning_exam_attempts WHERE id = $1`, [startedId])
+    const remaining = await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM elearning_exam_attempts WHERE id = $1`,
+      [startedId],
+    )
+    expect(remaining.rows[0].n).toBe(0)
   })
 })

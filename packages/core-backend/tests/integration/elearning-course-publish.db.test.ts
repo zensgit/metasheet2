@@ -21,6 +21,15 @@ import {
   up as upElearningContentAssessment,
 } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import {
+  COURSE_PUBLISH_REQUESTS_DENY_TRIGGER,
+  ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  ELEARNING_V01_LEDGER_TRIGGERS,
+  MEDIA_DURATION_STATUS_CHK,
+  down as downElearningLedgerHardening,
+  up as upElearningLedgerHardening,
+} from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
+import { up as upElearningWatchProgress } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import {
   ELEARNING_COURSE_PUBLISH_REQUESTS_COURSE_FK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_FK,
   ELEARNING_COURSE_PUBLISH_REQUESTS_EXAM_ITEM_FK,
@@ -116,7 +125,10 @@ function actor(suffix: string): string {
 
 async function setTriggers(enabled: boolean): Promise<void> {
   const verb = enabled ? 'ENABLE' : 'DISABLE'
-  for (const { table, name } of ELEARNING_V01_IMMUTABILITY_TRIGGERS) {
+  for (const { table, name } of [
+    ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
+    ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  ]) {
     await pool.query(`ALTER TABLE ${table} ${verb} TRIGGER ${name}`)
   }
 }
@@ -183,7 +195,9 @@ async function seedMedia(input: {
       input.mimeType ?? ELEARNING_MEDIA_MIME,
       input.magicMimeType ?? ELEARNING_MEDIA_MIME,
       'a'.repeat(64),
-      input.durationMs === undefined ? 60_000 : input.durationMs,
+      input.durationMs === undefined
+        ? ((input.status ?? 'ready') === 'ready' ? 60_000 : null)
+        : input.durationMs,
       input.status ?? 'ready',
       actor('uploader'),
     ],
@@ -437,16 +451,26 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
     const probing = await seedMedia({ org, status: 'probing' })
     const rejected = await seedMedia({ org, status: 'rejected' })
     const wrongMime = await seedMedia({ org, mimeType: 'video/webm', magicMimeType: 'video/webm' })
-    const zeroDuration = await seedMedia({ org, durationMs: 0 })
-    const nullDuration = await seedMedia({ org, durationMs: null })
+    let zeroDuration: PgError | null = null
+    try {
+      await seedMedia({ org, durationMs: 0 })
+    } catch (error) {
+      zeroDuration = error as PgError
+    }
+    expect(zeroDuration?.constraint).toBe(MEDIA_DURATION_STATUS_CHK)
+    let nullDuration: PgError | null = null
+    try {
+      await seedMedia({ org, durationMs: null })
+    } catch (error) {
+      nullDuration = error as PgError
+    }
+    expect(nullDuration?.constraint).toBe(MEDIA_DURATION_STATUS_CHK)
 
     const cases: Array<{ input: PublishElearningCourseInput; code: string }> = [
       { input: publishInput(org, foreign), code: 'media_unavailable' },
       { input: publishInput(org, probing), code: 'media_unavailable' },
       { input: publishInput(org, rejected), code: 'media_unavailable' },
       { input: publishInput(org, wrongMime), code: 'media_unavailable' },
-      { input: publishInput(org, zeroDuration), code: 'media_unavailable' },
-      { input: publishInput(org, nullDuration), code: 'media_unavailable' },
       { input: publishInput(org, readyHome, { passScore: 26 }), code: 'invalid_input' },
     ]
 
@@ -463,7 +487,7 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
       expect(await graphResidue(org)).toBe(0)
       expect(await graphResidue(other)).toBe(0)
     }
-    expect(await countOrg('elearning_media', org)).toBe(6)
+    expect(await countOrg('elearning_media', org)).toBe(4)
     expect(await countOrg('elearning_media', other)).toBe(1)
   })
 
@@ -579,6 +603,43 @@ describe('elearning V0.1 course publish service gate (real DB)', () => {
     expect(await countOrg('elearning_course_publish_requests', org)).toBe(1)
   })
 
+  it('rejects UPDATE and DELETE of a publish request while canonical replay still succeeds', async () => {
+    const org = orgId('req-append')
+    seededOrgIds.push(org)
+    const mediaId = await seedMedia({ org })
+    const input = publishInput(org, mediaId)
+    const first = await publishElearningCourse(db, input)
+
+    let updateErr: Error | null = null
+    try {
+      await pool.query(
+        `UPDATE elearning_course_publish_requests SET request_hash = 'tamper' WHERE org_id = $1 AND source_key = $2`,
+        [org, input.requestId],
+      )
+    } catch (error) {
+      updateErr = error as Error
+    }
+    expect(String(updateErr?.message)).toMatch(/append-only: UPDATE is not permitted/)
+
+    let deleteErr: Error | null = null
+    try {
+      await pool.query(
+        `DELETE FROM elearning_course_publish_requests WHERE org_id = $1 AND source_key = $2`,
+        [org, input.requestId],
+      )
+    } catch (error) {
+      deleteErr = error as Error
+    }
+    expect(String(deleteErr?.message)).toMatch(/append-only: DELETE is not permitted/)
+
+    const replay = await publishElearningCourse(db, { ...input, actorId: actor('retry') })
+    expect(replay).toEqual(first)
+    expect(await countOrg('elearning_course_publish_requests', org)).toBe(1)
+    expect(COURSE_PUBLISH_REQUESTS_DENY_TRIGGER).toBe(
+      'trg_elearning_course_publish_requests_deny_mutation',
+    )
+  })
+
   it('converges concurrent exact replays onto one course graph', async () => {
     const org = orgId('race')
     seededOrgIds.push(org)
@@ -675,7 +736,9 @@ describe.sequential('elearning course-publish request ledger migration (isolated
        AS $fn$ SELECT public.gen_random_uuid() $fn$`,
     )
     await upElearningContentAssessment(testDb)
+    await upElearningWatchProgress(testDb)
     await upElearningCoursePublishRequests(testDb)
+    await upElearningLedgerHardening(testDb)
   })
 
   afterAll(async () => {
@@ -972,10 +1035,100 @@ describe.sequential('elearning course-publish request ledger migration (isolated
     expect(deleteCourse.code).toBe('23503')
   })
 
-  it('down() drops the scratch ledger and leaves the public table untouched', async () => {
+  it('quarantines legacy untrusted ready media, repairs non-ready duration residue, and validates', async () => {
+    await downElearningLedgerHardening(testDb)
+    const untrustedReadyId = randomUUID()
+    const nonReadyResidueId = randomUUID()
+    await testPool.query(
+      `INSERT INTO elearning_media (
+         id, org_id, storage_key, mime_type, magic_mime_type,
+         size_bytes, sha256, duration_ms, status, created_by
+       ) VALUES ($1, $2, $3, $4, $4, 1024, $5, NULL, 'ready', 'legacy-uploader')`,
+      [
+        untrustedReadyId,
+        `${schema}-legacy`,
+        `${schema}/media/${untrustedReadyId}`,
+        ELEARNING_MEDIA_MIME,
+        'b'.repeat(64),
+      ],
+    )
+    await testPool.query(
+      `INSERT INTO elearning_media (
+         id, org_id, storage_key, mime_type, magic_mime_type,
+         size_bytes, sha256, duration_ms, status, created_by
+       ) VALUES ($1, $2, $3, $4, $4, 1024, $5, 500, 'probing', 'legacy-uploader')`,
+      [
+        nonReadyResidueId,
+        `${schema}-legacy`,
+        `${schema}/media/${nonReadyResidueId}`,
+        ELEARNING_MEDIA_MIME,
+        'c'.repeat(64),
+      ],
+    )
+
+    await upElearningLedgerHardening(testDb)
+    const repaired = await testPool.query<{ id: string; status: string; duration_ms: string | null }>(
+      `SELECT id::text, status, duration_ms::text
+         FROM elearning_media
+        WHERE id = ANY($1::uuid[])
+        ORDER BY id`,
+      [[untrustedReadyId, nonReadyResidueId]],
+    )
+    expect(repaired.rows).toEqual(
+      [
+        { id: untrustedReadyId, status: 'rejected', duration_ms: null },
+        { id: nonReadyResidueId, status: 'probing', duration_ms: null },
+      ].sort((left, right) => left.id.localeCompare(right.id)),
+    )
+    const constraint = await testPool.query<{ convalidated: boolean }>(
+      `SELECT convalidated
+         FROM pg_constraint
+        WHERE conname = $1
+          AND conrelid = 'elearning_media'::regclass`,
+      [MEDIA_DURATION_STATUS_CHK],
+    )
+    expect(constraint.rows).toEqual([{ convalidated: true }])
+  })
+
+  it('down() drops the scratch hardening and request ledger while leaving the public table untouched', async () => {
     const publicBefore = await adminPool.query<{ rel: string | null }>(
       `SELECT to_regclass('public.${ELEARNING_COURSE_PUBLISH_REQUESTS_TABLE}')::text AS rel`,
     )
+    await downElearningLedgerHardening(testDb)
+    const hardening = await testPool.query<{
+      trigger_count: number
+      function_count: number
+      constraint_count: number
+    }>(
+      `SELECT
+          (SELECT count(*)::int
+             FROM pg_trigger t
+             JOIN pg_class c ON c.oid = t.tgrelid
+             JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = current_schema()
+              AND NOT t.tgisinternal
+              AND t.tgname = ANY($1::text[])) AS trigger_count,
+          (SELECT count(*)::int
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = current_schema()
+              AND p.proname = ANY($2::text[])) AS function_count,
+          (SELECT count(*)::int
+             FROM pg_constraint
+            WHERE conname = $3
+              AND conrelid = 'elearning_media'::regclass) AS constraint_count`,
+      [
+        ELEARNING_V01_LEDGER_TRIGGERS.map((row) => row.name),
+        ELEARNING_V01_LEDGER_TRIGGERS.map((row) => row.fn),
+        MEDIA_DURATION_STATUS_CHK,
+      ],
+    )
+    expect(hardening.rows[0]).toEqual({
+      trigger_count: 0,
+      function_count: 0,
+      constraint_count: 0,
+    })
+
     await downElearningCoursePublishRequests(testDb)
     const scratch = await testPool.query<{ rel: string | null }>(
       `SELECT to_regclass($1)::text AS rel`,

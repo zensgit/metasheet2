@@ -13,6 +13,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool, type PoolClient } from 'pg'
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import {
   ELEARNING_WATCH_EVALUATOR_VERSION,
   ELEARNING_WATCH_POLICY_VERSION,
@@ -39,6 +40,7 @@ const NS = `el-wsvc-${STAMP}`
 const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
+  ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
 ]
 
 async function exec(target: Pool, sql: string, params?: unknown[]) {
@@ -331,7 +333,7 @@ async function seedPublishedAssignment(input: {
   )
   await pool.query(
     `INSERT INTO elearning_exams (id, org_id, title, status, pass_score, max_attempts, created_by)
-     VALUES ($1, $2, 'Watch exam', 'draft', 60, 3, $3)`,
+     VALUES ($1, $2, 'Watch exam', 'draft', 10, 3, $3)`,
     [examId, input.org, actor('author')],
   )
   await pool.query(

@@ -13,6 +13,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import { ELEARNING_MEDIA_RANGE_MAX_BYTES } from '../../src/services/elearning-media-storage'
 import {
   authorizeElearningMediaPlayback,
@@ -41,6 +42,7 @@ const NOW = new Date('2026-08-25T12:00:00.000Z')
 const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
+  ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
 ]
 
 class PgPlaybackDb implements ElearningPlaybackQueryable {
@@ -165,7 +167,7 @@ async function seedPublishedAssignment(input: {
   )
   await pool.query(
     `INSERT INTO elearning_exams (id, org_id, title, status, pass_score, max_attempts, created_by)
-     VALUES ($1, $2, 'Playback exam', 'draft', 60, 3, $3)`,
+     VALUES ($1, $2, 'Playback exam', 'draft', 10, 3, $3)`,
     [examId, input.org, actor('author')],
   )
   await pool.query(

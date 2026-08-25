@@ -17,6 +17,7 @@ import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
 import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import {
   listElearningLearnerCourses,
   type ElearningLearnerCoursesQueryable,
@@ -63,6 +64,7 @@ const NS = `el-learn-${STAMP}`
 const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
+  ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
 ]
 
 const db: ElearningLearnerCoursesQueryable = {
