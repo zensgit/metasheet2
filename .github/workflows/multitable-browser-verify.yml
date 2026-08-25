@@ -34,6 +34,8 @@ on:
       # #4354: this shared browser lane also carries the attendance group workspace
       # viewport contract, so AttendanceView changes must re-run it.
       - 'apps/web/src/views/AttendanceView.vue'
+      - 'apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue'
+      - 'apps/web/src/views/attendance/attendanceOverviewRequestReveal.ts'
       - 'apps/web/verification/**'
       - 'apps/web/playwright.verification.config.ts'
       - '.github/workflows/multitable-browser-verify.yml'

@@ -167,6 +167,10 @@
         :self-rules-configured-rule-summary="selfRulesConfiguredRuleSummary"
         :self-rules-warning-codes="selfRulesWarningCodes"
         :format-self-rules-warning="formatSelfRulesWarning"
+        :history-from-date="fromDate"
+        :history-to-date="toDate"
+        :history-org-id="orgId"
+        :history-user-id="targetUserId"
         :attendance-status-guide-items="attendanceStatusGuideItems"
         @punch="punch"
         @retry-punch-note="retryPunchWithOutdoorNote"
@@ -177,15 +181,15 @@
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
         <template #historyFilters>
-          <label class="attendance__field" for="attendance-from-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
             <span>{{ tr('From', '开始') }}</span>
             <input id="attendance-from-date" name="fromDate" v-model="fromDate" type="date" />
           </label>
-          <label class="attendance__field" for="attendance-to-date">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-to-date">
             <span>{{ tr('To', '结束') }}</span>
             <input id="attendance-to-date" name="toDate" v-model="toDate" type="date" />
           </label>
-          <label class="attendance__field" for="attendance-org-id">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-org-id">
             <span>{{ tr('Org ID', '组织 ID') }}</span>
             <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
           </label>
@@ -193,7 +197,7 @@
                tab is even less gated (self-service, open to every authenticated user by design),
                so the admin-only-by-default AttendanceUserPickerField was NOT swapped in here
                either. See the report-export block's comment for the full reasoning. -->
-          <label class="attendance__field" for="attendance-user-id">
+          <label class="attendance__field attendance-ew__history-filter-control" for="attendance-user-id">
             <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
             <input
               id="attendance-user-id"
@@ -203,7 +207,7 @@
               :placeholder="tr('Current user', '当前用户')"
             />
           </label>
-          <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
+          <button class="attendance__btn attendance-ew__history-filter-control" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
             {{ tr('Refresh', '刷新') }}
           </button>
         </template>
@@ -219,6 +223,12 @@
         keeps the status guide last). This first extraction does not move
         this handler-dense block into AttendanceEmployeeWorkspace — see the
         component's file header comment.
+
+        Below-the-fold (2026-08-25): overview uses a single-column history
+        grid so the calendar is the primary historical surface. The request/
+        makeup form stays the same DOM (same ids, one copy) but is a
+        collapsed-by-default details — not an equal-weight sibling of the
+        calendar. Quick actions and approval-center deep links open it.
       -->
       <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
         <div class="attendance__requests-header">
@@ -465,7 +475,12 @@
         </div>
       </section>
 
-      <section class="attendance__grid" v-if="showOverview || showReports">
+      <section
+        class="attendance__grid"
+        :class="{ 'attendance__grid--overview-history': showOverview }"
+        :data-attendance-overview-history="showOverview ? 'true' : undefined"
+        v-if="showOverview || showReports"
+      >
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
           <small class="attendance__field-hint">{{ summaryTimezoneContextHint }}</small>
@@ -592,8 +607,20 @@
           </div>
         </div>
 
-        <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)">
-          <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+        <details
+          v-if="showOverview"
+          class="attendance__card attendance__card--request-tools"
+          data-attendance-request-tools
+          :open="overviewRequestToolsOpen"
+          @toggle="onOverviewRequestToolsToggle"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)"
+        >
+          <summary class="attendance__details-summary attendance__request-tools-summary">
+            <h3>{{ tr('Adjustment Request', '补卡申请') }}</h3>
+            <span class="attendance__field-hint">
+              {{ tr('Leave, overtime, swap, and makeup punch', '请假、加班、换班与补卡') }}
+            </span>
+          </summary>
           <small class="attendance__field-hint">{{ requestTimezoneContextHint }}</small>
           <!-- W5-2 (Wave 5 explainability design-lock §6/§9 W5-2): 'self-request-center' context
                help — the ④「查看计算依据/审计记录」deep link into the W5-1 decision-trace surface
@@ -927,7 +954,7 @@
               </li>
             </ul>
           </div>
-        </div>
+        </details>
 
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)">
           <div class="attendance__requests-header">
@@ -10264,6 +10291,7 @@ import {
 } from './attendance/halfDayLeaveHelper'
 import { ATTENDANCE_RULES_ME_OMIT_HEADERS } from './attendance/rulesMeContract'
 import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestReviewEntitlement'
+import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch } from '../utils/api'
 import { readErrorMessage } from '../utils/error'
@@ -14819,10 +14847,46 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
   }
 }
 
+const overviewRequestToolsOpen = ref(false)
+
+function onOverviewRequestToolsToggle(event: Event): void {
+  const target = event.currentTarget
+  if (target instanceof HTMLDetailsElement) {
+    overviewRequestToolsOpen.value = target.open
+  }
+}
+
+function revealOverviewHistoryDetails(target: Element | null): void {
+  if (target instanceof HTMLDetailsElement && !target.open) {
+    target.open = true
+  }
+}
+
+function revealOverviewRequestTools(): void {
+  overviewRequestToolsOpen.value = true
+  if (typeof document === 'undefined') return
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  revealOverviewHistoryDetails(tools)
+}
+
+function overviewRequestToolsElement(): HTMLElement | null {
+  if (typeof document === 'undefined') return null
+  const tools = document.querySelector('[data-attendance-request-tools]')
+  return tools instanceof HTMLElement ? tools : null
+}
+
 async function scrollToOverviewSection(id: AttendanceOverviewSectionId, focusTargetId?: string): Promise<void> {
   if (typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(id) ?? document.getElementById(id)
+  if (shouldRevealOverviewRequestTools(id)) {
+    revealOverviewRequestTools()
+  }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    id === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(id) ?? document.getElementById(id)
   if (target instanceof HTMLElement) {
     target.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
@@ -15549,6 +15613,13 @@ async function focusInitialAttendanceSection(): Promise<void> {
     return
   }
   const targetId = props.initialSectionId.trim()
+  const revealRequests = showOverview.value
+    && attendancePluginActive.value
+    && shouldRevealOverviewRequestTools(targetId, props.initialRequestId)
+  if (revealRequests) {
+    await nextTick()
+    revealOverviewRequestTools()
+  }
   if (!targetId || !attendancePluginActive.value) return
 
   if (showAdmin.value && !adminForbidden.value && isKnownAdminSectionId(targetId)) {
@@ -15558,8 +15629,17 @@ async function focusInitialAttendanceSection(): Promise<void> {
 
   if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
-  const target = overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
+  if (revealRequests) {
+    revealOverviewRequestTools()
+  }
+  const requestTools = overviewRequestToolsElement()
+  const target = (
+    showOverview.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requests
+      ? requestTools
+      : null
+  ) ?? overviewSectionElements.get(targetId) ?? document.getElementById(targetId)
   if (target instanceof HTMLElement) {
+    revealOverviewHistoryDetails(target)
     target.scrollIntoView({ behavior: 'auto', block: 'start' })
   }
 }
@@ -29637,6 +29717,18 @@ defineExpose({
   min-width: 180px;
 }
 
+/* Parent-owned slotted history filters: the 180px input min-width above
+   would overflow a 390px card. These classes live in this file so they
+   actually win over the slot content (child scoped CSS cannot). */
+.attendance-ew__history-filter-control,
+.attendance-ew__history-filter-control input,
+.attendance-ew__history-filter-control select {
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .attendance__input--invalid {
   border-color: #c0392b;
   box-shadow: 0 0 0 1px rgba(192, 57, 43, 0.2);
@@ -29903,6 +29995,17 @@ defineExpose({
   gap: 20px;
 }
 
+.attendance__grid--overview-history {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__grid--overview-history > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .attendance__card {
   background: #fff;
   border: 1px solid #e0e0e0;
@@ -30108,6 +30211,35 @@ defineExpose({
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance--overview .attendance__card--calendar {
+  grid-column: 1 / -1;
+}
+
+.attendance__card--request-tools {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance__card--request-tools:not([open]) {
+  box-shadow: none;
+  background: #f8fafc;
+}
+
+.attendance__request-tools-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ms-space-2, 8px) var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+.attendance__request-tools-summary h3 {
+  margin: 0;
 }
 
 .attendance__calendar-header {
@@ -30115,6 +30247,11 @@ defineExpose({
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.attendance--overview .attendance__calendar-header {
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .attendance__calendar-nav {

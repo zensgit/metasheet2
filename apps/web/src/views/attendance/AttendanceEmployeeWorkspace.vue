@@ -26,6 +26,11 @@
   Mobile: punch → 待办+申请 footer → 常用.
   缺卡 row uses the makeup 面性 icon; never the character 缺.
   No employee 自定义. Admin-only icon settings. Do not restyle further.
+
+  Below-the-fold follow-up (owner, 2026-08-25): history filters stay a
+  collapsed-by-default disclosure (OD-O2) but show the active range while
+  closed; expanded fields use a wrap-safe toolbar. Do not restyle the
+  locked first viewport.
 -->
 <template>
   <div class="attendance-ew">
@@ -435,10 +440,15 @@
       </div>
 
       <details class="attendance-ew__history-filters" data-attendance-history-filters>
-        <summary class="attendance__details-summary">
-          {{ tr('Date, org, and user filters', '日期 / 组织 / 用户筛选') }}
+        <summary class="attendance__details-summary attendance-ew__history-filters-summary">
+          <span class="attendance-ew__history-filters-title">
+            {{ tr('Date, org, and user filters', '日期 / 组织 / 用户筛选') }}
+          </span>
+          <span class="attendance-ew__history-filters-range" data-attendance-history-filter-range>
+            {{ historyFilterRangeLabel }}
+          </span>
         </summary>
-        <div class="attendance__filters">
+        <div class="attendance__filters attendance-ew__history-filters-panel">
           <slot name="historyFilters" />
         </div>
       </details>
@@ -582,6 +592,11 @@ const props = defineProps<{
   selfRulesConfiguredRuleSummary: string
   selfRulesWarningCodes: string[]
   formatSelfRulesWarning: (code: string) => string
+  // Display-only history-range hint on the collapsed OD-O2 disclosure.
+  historyFromDate?: string
+  historyToDate?: string
+  historyOrgId?: string
+  historyUserId?: string
 }>()
 
 defineEmits<{
@@ -628,6 +643,17 @@ const commonTiles = computed(() => [
     label: props.tr('Shift swap', '换班'),
   },
 ])
+
+const historyFilterRangeLabel = computed(() => {
+  const from = props.historyFromDate?.trim() || '—'
+  const to = props.historyToDate?.trim() || '—'
+  const extras: string[] = []
+  const org = props.historyOrgId?.trim()
+  const user = props.historyUserId?.trim()
+  if (org) extras.push(`${props.tr('Org', '组织')} ${org}`)
+  if (user) extras.push(`${props.tr('User', '用户')} ${user}`)
+  return extras.length > 0 ? `${from} – ${to} · ${extras.join(' · ')}` : `${from} – ${to}`
+})
 
 const greetingText = computed(() => greetingHeadline(props.tr, props.heroClockTime))
 
@@ -972,15 +998,37 @@ const hasRequestBody = computed(() =>
 
 .attendance-ew__history-filters {
   grid-column: 1 / -1;
-  border: none;
+  border: 1px solid rgba(31, 45, 82, 0.06);
   border-radius: 16px;
   padding: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
-  background: rgba(255, 255, 255, 0.72);
+  background: #fff;
   box-shadow: 0 4px 16px rgba(31, 45, 82, 0.04);
+  min-width: 0;
+  max-width: 100%;
 }
 
 .attendance-ew__history-filters[open] {
   background: #fff;
+}
+
+.attendance-ew__history-filters-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ms-space-2, 8px) var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+.attendance-ew__history-filters-title {
+  min-width: 0;
+}
+
+.attendance-ew__history-filters-range {
+  font-weight: 500;
+  color: var(--ms-text-2, #646a73);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
 }
 
 .attendance__filters {
@@ -988,6 +1036,23 @@ const hasRequestBody = computed(() =>
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.attendance-ew__history-filters-panel {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  align-items: end;
+  gap: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
+  padding-top: var(--ms-space-3, 12px);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.attendance-ew__history-filters-panel .attendance__field,
+.attendance-ew__history-filters-panel .attendance__btn {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .attendance__punch-note {
@@ -1396,6 +1461,10 @@ const hasRequestBody = computed(() =>
 
   .attendance__filters .attendance__field {
     width: 100%;
+  }
+
+  .attendance-ew__history-filters-panel {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .attendance-ew__balance-toggle .attendance__btn {
