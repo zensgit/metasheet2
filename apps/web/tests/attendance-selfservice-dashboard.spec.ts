@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
@@ -994,8 +995,8 @@ describe('Attendance self-service dashboard', () => {
     // jsdom does not paint CSS grid, so this is a layout-contract pin (classes + source
     // rules), not a browser screenshot of scrollWidth. A real 1440/390 paint check
     // still needs a browser.
-    const viewCss = readFileSync(new URL('../src/views/AttendanceView.vue', import.meta.url), 'utf8')
-    const workspaceCss = readFileSync(new URL('../src/views/attendance/AttendanceEmployeeWorkspace.vue', import.meta.url), 'utf8')
+    const viewCss = readFileSync(resolve(process.cwd(), 'src/views/AttendanceView.vue'), 'utf8')
+    const workspaceCss = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceEmployeeWorkspace.vue'), 'utf8')
     expect(viewCss).toMatch(/\.attendance__grid--overview-history\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/)
     expect(viewCss).toMatch(/\.attendance__grid--overview-history\s*>\s*\*\s*\{[^}]*min-width:\s*0/)
     expect(viewCss).toMatch(/\.attendance--overview\s+\.attendance__calendar-header\s*\{[^}]*flex-wrap:\s*wrap/)
