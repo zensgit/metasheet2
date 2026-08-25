@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
@@ -17,14 +17,33 @@ const FILE = 'tests/integration/elearning-v01-content-assessment-schema.db.test.
 const WATCH_FILE = 'tests/integration/elearning-v01-watch-progress-schema.db.test.ts'
 const SERVICE_FILE = 'tests/integration/elearning-watch-progress-service.db.test.ts'
 const ASSIGNMENT_FILE = 'tests/integration/elearning-direct-assignment.db.test.ts'
+const PUBLISH_FILE = 'tests/integration/elearning-course-publish.db.test.ts'
+const EXAM_FILE = 'tests/integration/elearning-exam-service.db.test.ts'
+const LEARNER_FILE = 'tests/integration/elearning-learner-courses.db.test.ts'
+const PLAYBACK_FILE = 'tests/integration/elearning-media-playback.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
+const MEDIA_DB_STEP_ID = 'elearning-v01-media-quota-real-db'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
+const INTEGRATION_DIR = join(repoRoot, 'packages/core-backend/tests/integration')
 const SUITE = join(repoRoot, 'packages/core-backend', FILE)
 const WATCH_SUITE = join(repoRoot, 'packages/core-backend', WATCH_FILE)
 const SERVICE_SUITE = join(repoRoot, 'packages/core-backend', SERVICE_FILE)
 const ASSIGNMENT_SUITE = join(repoRoot, 'packages/core-backend', ASSIGNMENT_FILE)
-const GATE_FILES = [FILE, WATCH_FILE, SERVICE_FILE, ASSIGNMENT_FILE]
+const PUBLISH_SUITE = join(repoRoot, 'packages/core-backend', PUBLISH_FILE)
+const EXAM_SUITE = join(repoRoot, 'packages/core-backend', EXAM_FILE)
+const LEARNER_SUITE = join(repoRoot, 'packages/core-backend', LEARNER_FILE)
+const PLAYBACK_SUITE = join(repoRoot, 'packages/core-backend', PLAYBACK_FILE)
+const GATE_FILES = [
+  FILE,
+  WATCH_FILE,
+  SERVICE_FILE,
+  ASSIGNMENT_FILE,
+  PUBLISH_FILE,
+  EXAM_FILE,
+  LEARNER_FILE,
+  PLAYBACK_FILE,
+]
 const CONTENT_MIGRATION = join(
   repoRoot,
   'packages/core-backend/src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment.ts',
@@ -67,12 +86,21 @@ test('plugin-tests.yml runs schema and watch-service gates as whole-file sibling
       false,
       `${file} must not be wired into the multitable real-DB step`,
     )
+    assert.equal(
+      realDbStepWholeFileArgs(wf, MEDIA_DB_STEP_ID).includes(file),
+      false,
+      `${file} must stay in the schema/service step, not the quota/reconciler step`,
+    )
   }
   const wired = realDbStepWholeFileArgs(wf, STEP_ID)
   assert.equal(wired.includes(FILE), true)
   assert.equal(wired.includes(WATCH_FILE), true)
   assert.equal(wired.includes(SERVICE_FILE), true)
   assert.equal(wired.includes(ASSIGNMENT_FILE), true)
+  assert.equal(wired.includes(PUBLISH_FILE), true)
+  assert.equal(wired.includes(EXAM_FILE), true)
+  assert.equal(wired.includes(LEARNER_FILE), true)
+  assert.equal(wired.includes(PLAYBACK_FILE), true)
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'schema gate step must not use a -t filter')
@@ -94,6 +122,10 @@ test('wired suites and content/watch migrations exist on disk', () => {
   assert.ok(existsSync(WATCH_SUITE), `wired suite packages/core-backend/${WATCH_FILE} must exist on disk`)
   assert.ok(existsSync(SERVICE_SUITE), `wired suite packages/core-backend/${SERVICE_FILE} must exist on disk`)
   assert.ok(existsSync(ASSIGNMENT_SUITE), `wired suite packages/core-backend/${ASSIGNMENT_FILE} must exist on disk`)
+  assert.ok(existsSync(PUBLISH_SUITE), `wired suite packages/core-backend/${PUBLISH_FILE} must exist on disk`)
+  assert.ok(existsSync(EXAM_SUITE), `wired suite packages/core-backend/${EXAM_FILE} must exist on disk`)
+  assert.ok(existsSync(LEARNER_SUITE), `wired suite packages/core-backend/${LEARNER_FILE} must exist on disk`)
+  assert.ok(existsSync(PLAYBACK_SUITE), `wired suite packages/core-backend/${PLAYBACK_FILE} must exist on disk`)
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
@@ -105,6 +137,10 @@ test('schema and watch-service gate sources throw when DATABASE_URL is missing (
     ['watch-progress', WATCH_SUITE],
     ['watch-progress-service', SERVICE_SUITE],
     ['direct-assignment-service', ASSIGNMENT_SUITE],
+    ['course-publish-service', PUBLISH_SUITE],
+    ['exam-service', EXAM_SUITE],
+    ['learner-courses-service', LEARNER_SUITE],
+    ['media-playback-service', PLAYBACK_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)
@@ -179,4 +215,85 @@ test('direct-assignment gate uses dual PoolClient pg_locks barriers for duplicat
   assert.equal(src.includes('playwright'), false)
   assert.equal(src.includes('setTimeout(res, 500)'), false)
   assert.equal(src.includes('setTimeout(resolve, 500)'), false)
+})
+
+test('every on-disk elearning real-DB suite is excluded and a whole-file arg of exactly one post-migrate step', () => {
+  const dbSuites = readdirSync(INTEGRATION_DIR)
+    .filter((name) => /^elearning-.*\.db\.test\.ts$/.test(name))
+    .map((name) => `tests/integration/${name}`)
+    .sort()
+  assert.ok(dbSuites.length > 0, 'at least one elearning real-DB suite must exist on disk')
+  for (const file of GATE_FILES) {
+    assert.equal(
+      dbSuites.includes(file),
+      true,
+      `schema-gate file ${file} must exist on disk as an elearning *.db.test.ts`,
+    )
+  }
+
+  const cfg = readFileSync(VITEST_CFG, 'utf8')
+  const wf = readFileSync(WORKFLOW, 'utf8')
+  const schemaWired = realDbStepWholeFileArgs(wf, STEP_ID)
+  const mediaWired = realDbStepWholeFileArgs(wf, MEDIA_DB_STEP_ID)
+  const approvalWired = realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.approval)
+  const multitableWired = realDbStepWholeFileArgs(wf, REAL_DB_STEP_IDS.multitable)
+  const union = new Set([...schemaWired, ...mediaWired])
+  const startPg = wf.indexOf('- name: Start Postgres')
+  const migrateAt = wf.indexOf('pnpm --filter @metasheet/core-backend db:migrate')
+  assert.ok(startPg >= 0, 'workflow must contain Start Postgres')
+  assert.ok(migrateAt >= 0, 'workflow must contain db:migrate')
+  assert.ok(startPg < migrateAt, 'Start Postgres must precede db:migrate')
+
+  for (const file of dbSuites) {
+    const abs = join(repoRoot, 'packages/core-backend', file)
+    assert.ok(existsSync(abs), `wired suite packages/core-backend/${file} must exist on disk`)
+    assert.ok(
+      isQuotedInTestExclude(cfg, file),
+      `test.exclude must contain the exact quoted entry '${file}'`,
+    )
+    assert.equal(
+      union.has(file),
+      true,
+      `${file} must be a whole-file arg of the schema/service or quota/reconciler real-DB step`,
+    )
+    const inSchema = schemaWired.includes(file) ? 1 : 0
+    const inMedia = mediaWired.includes(file) ? 1 : 0
+    assert.equal(
+      inSchema + inMedia,
+      1,
+      `${file} must appear in exactly one elearning post-migrate real-DB step`,
+    )
+    assert.equal(
+      approvalWired.includes(file),
+      false,
+      `${file} must not be wired into the approval real-DB step`,
+    )
+    assert.equal(
+      multitableWired.includes(file),
+      false,
+      `${file} must not be wired into the multitable real-DB step`,
+    )
+
+    const hits = []
+    for (let from = 0; ; ) {
+      const at = wf.indexOf(file, from)
+      if (at < 0) break
+      hits.push(at)
+      from = at + file.length
+    }
+    assert.equal(hits.length, 1, `${file} must appear exactly once in plugin-tests.yml`)
+    for (const at of hits) {
+      assert.ok(at > startPg, `${file} must appear only after Start Postgres`)
+      assert.ok(at > migrateAt, `${file} must appear only after db:migrate`)
+    }
+
+    const src = readFileSync(abs, 'utf8')
+    assert.equal(src.includes('describe.skip'), false, `${file} must not describe.skip`)
+    assert.equal(src.includes('.skip('), false, `${file} must not skip`)
+    assert.match(src, /if \(!DATABASE_URL\)/)
+    assert.match(src, /throw new Error/)
+    assert.match(src, /refusing skip-shaped green/)
+    assert.equal(src.includes('http.request'), false, `${file} must not use http.request`)
+    assert.equal(src.includes('supertest'), false, `${file} must not use supertest`)
+  }
 })

@@ -887,7 +887,8 @@ jobs:
           pnpm --filter @metasheet/core-backend db:migrate
 
       # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
-      # plus the watch and manual direct-assignment service gates.
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # and media-playback service gates.
       # Migrations above must already have applied the zzzz20260824* and
       # zzzz20260825120000 files; these suites do not mutate kysely_migration.
       # DATABASE_URL is required (bash :? and each suite throws).
@@ -903,6 +904,10 @@ jobs:
             tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
             tests/integration/elearning-watch-progress-service.db.test.ts \
             tests/integration/elearning-direct-assignment.db.test.ts \
+            tests/integration/elearning-course-publish.db.test.ts \
+            tests/integration/elearning-exam-service.db.test.ts \
+            tests/integration/elearning-learner-courses.db.test.ts \
+            tests/integration/elearning-media-playback.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.
