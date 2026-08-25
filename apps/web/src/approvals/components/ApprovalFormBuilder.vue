@@ -73,20 +73,89 @@
           @click="selectField(fields[index].localId)"
           @focusin="selectField(fields[index].localId)"
         >
-          <div class="approval-form-builder__card-main">
-            <span
-              v-if="selectedLocalId === fields[index].localId"
-              class="approval-form-builder__card-selected-mark"
-              data-testid="approval-form-builder-card-selected-mark"
+          <div class="approval-form-builder__card-content">
+            <div class="approval-form-builder__card-main">
+              <span
+                v-if="selectedLocalId === fields[index].localId"
+                class="approval-form-builder__card-selected-mark"
+                data-testid="approval-form-builder-card-selected-mark"
+              >
+                已选
+              </span>
+              <span class="approval-form-builder__card-label">
+                {{ fields[index].label.trim() || typeLabels[fields[index].type] }}
+              </span>
+              <span class="approval-form-builder__card-summary">
+                {{ cardSummary(fields[index]) }}
+              </span>
+            </div>
+
+            <!-- The requester form already renders detail fields as an editable table. Mirror that
+                 shape here so configuring columns immediately produces a faithful authoring
+                 preview instead of the previous opaque "N 个子字段" summary. Controls stay
+                 disabled: values belong to approval instances, not template authoring. -->
+            <div
+              v-if="fields[index].type === 'detail'"
+              class="approval-form-builder__detail-preview"
+              data-testid="approval-form-builder-detail-preview"
             >
-              已选
-            </span>
-            <span class="approval-form-builder__card-label">
-              {{ fields[index].label.trim() || typeLabels[fields[index].type] }}
-            </span>
-            <span class="approval-form-builder__card-summary">
-              {{ cardSummary(fields[index]) }}
-            </span>
+              <table
+                v-if="fields[index].detailColumns.length > 0"
+                class="approval-form-builder__detail-table"
+                :aria-label="`${fields[index].label.trim() || '明细'}子表格预览`"
+              >
+                <thead>
+                  <tr>
+                    <th
+                      v-for="column in fields[index].detailColumns"
+                      :key="column.localId"
+                      scope="col"
+                      :data-column-local-id="column.localId"
+                    >
+                      {{ detailColumnLabel(column) }}
+                      <span
+                        v-if="column.required"
+                        class="approval-form-builder__detail-required"
+                        aria-label="必填"
+                      >*</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td
+                      v-for="column in fields[index].detailColumns"
+                      :key="column.localId"
+                    >
+                      <textarea
+                        v-if="column.type === 'textarea'"
+                        disabled
+                        rows="1"
+                        :aria-label="`${detailColumnLabel(column)}输入预览`"
+                        :placeholder="detailPreviewPlaceholder(column)"
+                      />
+                      <select
+                        v-else-if="column.type === 'select' || column.type === 'multi-select' || column.type === 'user'"
+                        disabled
+                        :aria-label="`${detailColumnLabel(column)}选择预览`"
+                      >
+                        <option>{{ detailPreviewPlaceholder(column) }}</option>
+                      </select>
+                      <input
+                        v-else
+                        disabled
+                        :type="column.type === 'number' ? 'number' : 'text'"
+                        :aria-label="`${detailColumnLabel(column)}输入预览`"
+                        :placeholder="detailPreviewPlaceholder(column)"
+                      />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="approval-form-builder__detail-empty">
+                请在右侧添加子字段
+              </p>
+            </div>
           </div>
           <div v-if="!readOnly" class="approval-form-builder__card-actions">
             <button
@@ -222,6 +291,7 @@ import {
 } from '../approvalFormDragPayload'
 import type {
   AuthorableFieldType,
+  DetailColumnDraft,
   FieldAuthoringDraft,
   TemplateAuthoringDraft,
 } from '../templateAuthoring'
@@ -432,6 +502,20 @@ function cardSummary(field: FieldAuthoringDraft): string {
     parts.push(`${field.detailColumns.length} 个子字段`)
   }
   return parts.join(' · ')
+}
+
+function detailColumnLabel(column: DetailColumnDraft): string {
+  return column.label.trim() || (column.type === 'attachment' ? '附件' : typeLabels[column.type])
+}
+
+function detailPreviewPlaceholder(column: DetailColumnDraft): string {
+  const label = detailColumnLabel(column)
+  if (column.type === 'select' || column.type === 'multi-select' || column.type === 'user') {
+    return `请选择${label}`
+  }
+  if (column.type === 'date' || column.type === 'datetime') return `请选择${label}`
+  if (column.type === 'number') return `请输入${label}`
+  return column.original?.placeholder?.trim() || `请输入${label}`
 }
 
 function cardAccessibleName(field: FieldAuthoringDraft, index: number): string {
@@ -927,7 +1011,7 @@ defineExpose({
 
 .approval-form-builder__card {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   min-height: 56px;
@@ -936,6 +1020,11 @@ defineExpose({
   border-radius: 10px;
   background: var(--el-bg-color);
   cursor: pointer;
+}
+
+.approval-form-builder__card-content {
+  flex: 1;
+  min-width: 0;
 }
 
 .approval-form-builder__card.is-selected {
@@ -953,6 +1042,59 @@ defineExpose({
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.approval-form-builder__detail-preview {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+.approval-form-builder__detail-table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--el-bg-color);
+  font-size: 12px;
+}
+
+.approval-form-builder__detail-table th,
+.approval-form-builder__detail-table td {
+  min-width: 128px;
+  padding: 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  text-align: left;
+}
+
+.approval-form-builder__detail-table th {
+  background: var(--el-fill-color-light);
+  color: var(--el-text-color-regular);
+  font-weight: 500;
+}
+
+.approval-form-builder__detail-table input,
+.approval-form-builder__detail-table select,
+.approval-form-builder__detail-table textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 4px;
+  background: var(--el-fill-color-lighter);
+  color: var(--el-text-color-placeholder);
+  resize: none;
+}
+
+.approval-form-builder__detail-required {
+  margin-left: 2px;
+  color: var(--el-color-danger);
+}
+
+.approval-form-builder__detail-empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed var(--el-border-color);
+  color: var(--el-text-color-placeholder);
+  text-align: center;
 }
 
 .approval-form-builder__card-selected-mark {
