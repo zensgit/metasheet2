@@ -4,6 +4,6 @@
  * fail closed to that surface; only unset or the exact literal `true` selects Canvas.
  */
 export function isApprovalCanvasV2Enabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = String(env.APPROVAL_CANVAS_V2_ENABLED ?? '').trim().toLowerCase()
+  const value = env.APPROVAL_CANVAS_V2_ENABLED ?? ''
   return value === '' || value === 'true'
 }
