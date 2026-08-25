@@ -25,7 +25,7 @@ No graph contract, persistence shape, command algebra, or approval runtime seman
 | D2 | Ordinary UI contains no legacy view toggle or `辅助编辑模式` entry. |
 | D3 | Condition and parallel configuration used by save tests is performed through the Canvas inspector. |
 | D4 | Undo/redo, edge insertion, semantic drag, keyboard operation, inspector edits, and save payload tests remain green. |
-| D5 | Required Web Tests, approval web guard, frontend typecheck, and real-browser desktop/mobile smoke pass on the exact head. |
+| D5 | Required Web Tests, approval web guard, frontend typecheck, owner UAT smoke, and real-browser desktop/mobile smoke pass on the exact head. |
 
 ## 3. Rollback and removal
 

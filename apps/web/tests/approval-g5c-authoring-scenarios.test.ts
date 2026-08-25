@@ -39,6 +39,10 @@ import { buildVersionGraphOverlay } from '../src/approvals/versionGraphOverlay'
 import type { ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 
 const VIEW_PATH = join(__dirname, '../src/views/approval/TemplateAuthoringView.vue')
+const OWNER_UAT_SMOKE_PATH = join(
+  __dirname,
+  '../../../scripts/ops/approval-canvas-owner-uat-smoke.sh',
+)
 
 function identityFor(type: AuthorableFieldType, n: number): FormFieldIdentity {
   const base = {
@@ -342,6 +346,15 @@ describe('G5-C Canvas-only ordinary authoring surface', () => {
     // PR4 extract: shell components owned under approvals/components
     expect(src).toMatch(/ApprovalFlowCanvas/)
     expect(src).toMatch(/ApprovalCanvasNodeInspector/)
+  })
+
+  it('keeps the owner UAT smoke aligned with the default-ON backend contract', () => {
+    const smoke = readFileSync(OWNER_UAT_SMOKE_PATH, 'utf8')
+    expect(smoke).toContain("return value === '' || value === 'true'")
+    expect(smoke).toContain('tests/unit/approval-canvas-flag.test.ts')
+    expect(smoke).toContain('pre-session fallback is false')
+    expect(smoke).not.toContain('strict true only')
+    expect(smoke).not.toContain("expected APPROVAL_CANVAS_V2_ENABLED === 'true' only")
   })
 })
 
