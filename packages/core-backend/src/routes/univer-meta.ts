@@ -70,9 +70,19 @@ import {
   resolveRecoverySheetAuthority,
 } from '../multitable/recovery-authorization-stability'
 import {
+  acquireTrustCheckpointActivationLease,
   assertTrustCheckpointActivationAuthority,
-  isTrustCheckpointSheetAllowlisted,
+  assertTrustCheckpointSheetAllowlisted,
+  assertTrustCheckpointSheetExists,
   TrustCheckpointActivationForbiddenError,
+  TrustCheckpointAuthorityBusyError,
+  TrustCheckpointAuthorityUnavailableError,
+  TrustCheckpointSheetMissingError,
+  TrustCheckpointSheetNotAllowlistedError,
+  TRUST_CHECKPOINT_AUTHORITY_BUSY_CODE,
+  TRUST_CHECKPOINT_AUTHORITY_BUSY_MESSAGE,
+  TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_CODE,
+  TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_MESSAGE,
   TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE,
   TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE,
 } from '../multitable/trust-checkpoint-activation-authz'
@@ -263,6 +273,7 @@ import {
   backfillAutoNumberField,
 } from '../multitable/auto-number-service'
 import {
+  acquireCanonicalSheetFence,
   assertNoActiveWriterBlock,
   fenceWriterEntry,
   isWriterFenceEnabled,
@@ -10200,33 +10211,68 @@ export function univerMetaRouter(): Router {
         if (err instanceof TrustCheckpointActivationForbiddenError) return sendForbidden(res)
         throw err
       }
-      // Canary allowlist (fail-closed): the O-2 ladder's L2-C rung provisions a checkpoint for a NAMED
-      // synthetic sheet only and forbids bulk-provisioning customer sheets — that was convention, and this
-      // route accepted any sheet id. UNSET or EMPTY allowlist ⇒ refuse for EVERY sheet, so owner designation
-      // is a precondition by construction and this code names no sheet. Ordered AFTER the capability floor
-      // AND the DB-fresh pre-check above, so only an actor with CURRENT sheet-admin authority can observe
-      // the 409/404 distinction; ordered BEFORE the existence read so a designation-less deployment leaks
-      // no sheet-existence oracle to anyone.
-      if (!isTrustCheckpointSheetAllowlisted(sheetId)) {
-        return res.status(409).json({ ok: false, error: { code: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE, message: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE } })
-      }
-      const exists = await pool.query('SELECT 1 FROM meta_sheets WHERE id = $1', [sheetId])
-      if (exists.rows.length === 0) return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: `Sheet not found: ${sheetId}` } })
+      // NOTE — the canary allowlist and the sheet-existence read used to be adjudicated HERE, before the
+      // transaction. They are not any more: both are DIFFERENTIATED responses, and the pre-transaction
+      // DB-fresh check above is only a fast reject against a snapshot that a concurrent revoke can
+      // invalidate before the transaction even begins. Both now run INSIDE the transaction, after the
+      // actor authority lease has frozen the actor's authority and the post-lease FINAL authorization has
+      // confirmed it — see the ordered block below. That is what closes the post-revocation state oracle.
 
-      // Design lock §3: ONE fenced transaction — canonical fence first (serializes against every fenced
-      // writer AND any in-flight recovery; observes a durable block), then the cutover. Any failure —
-      // including the fail-closed unattributable-trash abort — rolls the whole activation back.
+      // Design lock §3 + actor authority lease (this slice): ONE transaction, in EXACTLY this order —
+      //
+      //   BEGIN → canonical sheet fence → actor authority lease → DB-fresh FINAL authorization
+      //         → durable-block / allowlist / existence adjudication → activateCheckpoint → COMMIT
+      //
+      // Every step's placement is load-bearing; none of them may be reordered "for latency".
+      // Any failure — a refused lease, a denied re-check, a durable block, the fail-closed
+      // unattributable-trash abort — rolls the WHOLE activation back: no checkpoint, no baselines.
       const result = await pool.transaction(async ({ query }) => {
-        await fenceWriterEntry(query as unknown as TrustCheckpointQueryFn, sheetId)
-        // DB-FRESH authority re-check, INSIDE the fence and INSIDE the transaction, BEFORE the cutover.
-        // The outer resolveSheetCapabilities above can be satisfied by JWT CLAIMS ALONE (multitable/
-        // access.ts `resolveRequestAccess` returns without any DB read when the token carries an admin
-        // role, and again when it carries a non-empty perms array), so on its own it lets a REVOKED user
-        // with an unexpired token mint the trust anchor that destructive recovery later resolves against.
-        // This re-derives the D2 floor from CURRENT rows via the shared recovery-authority resolver —
-        // claims may identify the actor, they can never widen the grant. Running it AFTER fenceWriterEntry
-        // is deliberate: a revoke that commits while the activation parks on the fence is observed here.
+        // 1. CANONICAL SHEET FENCE — this MUST remain the FIRST lock the transaction takes. Holding it,
+        //    the activation later takes a blocking `FOR KEY SHARE` on meta_sheets(sheetId) through the
+        //    checkpoint FK; seven production sites take `meta_sheets … FOR UPDATE` / delete that row and
+        //    none of them acquires this fence afterwards, so no wait-for cycle exists. Taking ANY
+        //    meta_sheets row lock ahead of this line constructs a real 40P01 (reproduced by the
+        //    lock-order census, and by this slice's FENCE-FIRST-ORDER golden).
+        //    `fenceWriterEntry` is split here rather than called whole: its durable-block half is a
+        //    differentiated adjudication and belongs after the final authorization (step 4a). The flag
+        //    gate `fenceWriterEntry` applies is already satisfied — the route refuses
+        //    TRUST_CHECKPOINT_FENCE_REQUIRED above when MULTITABLE_ENABLE_WRITER_FENCE is off, so this
+        //    line is only ever reached with the fence enabled.
+        await acquireCanonicalSheetFence(query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 2. ACTOR AUTHORITY LEASE — the EXISTING recovery-authority lease, on the EXISTING keys, for the
+        //    authenticated principal ONLY (never the body, the sheet id, or the allowlist). Non-waiting in
+        //    both directions, so it adds no blocking edge under the held fence. `busy` and `unavailable`
+        //    both THROW from inside the transaction and roll back immediately; only `ready` returns.
+        //    Exactly one attempt — no hidden auto-retry (an in-transaction re-poll would hold the fence
+        //    across attempts and starve every writer of this sheet).
+        await acquireTrustCheckpointActivationLease(req, query as unknown as TrustCheckpointQueryFn)
+
+        // 3. DB-FRESH FINAL AUTHORIZATION, under the fence AND under the lease. The outer
+        //    resolveSheetCapabilities can be satisfied by JWT CLAIMS ALONE (multitable/access.ts
+        //    `resolveRequestAccess` returns without any DB read when the token carries an admin role, and
+        //    again when it carries a non-empty perms array), so on its own it lets a REVOKED user with an
+        //    unexpired token mint the trust anchor destructive recovery later resolves against. This
+        //    re-derives the D2 floor from CURRENT rows — claims may identify the actor, never widen the
+        //    grant. Running it after the lease is what makes the answer STABLE to COMMIT: a revoke that
+        //    commits while the activation parks on the fence is observed here, and a revoke that would
+        //    otherwise land in the READ COMMITTED sliver between this read and the cutover is refused
+        //    40001 by the armed authority triggers instead.
         await assertTrustCheckpointActivationAuthority(req, query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 4. DIFFERENTIATED ADJUDICATION — only now, with authority confirmed against a frozen state.
+        // 4a. durable recovery writer block (the second half of the split fenceWriterEntry).
+        await assertNoActiveWriterBlock(query as unknown as TrustCheckpointQueryFn, sheetId)
+        // 4b. canary allowlist (fail-closed): the O-2 ladder's L2-C rung provisions a checkpoint for a
+        //     NAMED synthetic sheet only and forbids bulk-provisioning customer sheets. UNSET or EMPTY
+        //     allowlist ⇒ refuse for EVERY sheet, so owner designation is a precondition by construction
+        //     and this code names no sheet.
+        assertTrustCheckpointSheetAllowlisted(sheetId)
+        // 4c. existence — after the allowlist, so a designation-less deployment leaks no sheet-existence
+        //     oracle to anyone.
+        await assertTrustCheckpointSheetExists(query as unknown as TrustCheckpointQueryFn, sheetId)
+
+        // 5. CUTOVER.
         return activateCheckpoint(query as unknown as TrustCheckpointQueryFn, { sheetId })
       })
       return res.json({ ok: true, data: { checkpointId: result.checkpointId, trustedSinceSeq: result.trustedSinceSeq, baselineCount: result.baselineCount } })
@@ -10235,6 +10281,42 @@ export function univerMetaRouter(): Router {
         // In-transaction DB-fresh denial ⇒ the WHOLE transaction rolled back (no checkpoint, no baselines).
         // Same 403 envelope as the pre-transaction floor: a revoked actor learns "forbidden" and nothing else.
         return sendForbidden(res)
+      }
+      if (err instanceof TrustCheckpointAuthorityBusyError) {
+        // Lease `busy` ⇒ transaction rolled back before any write. Named + values-free + explicitly
+        // retryable; the retry is the operator's to issue, never this route's.
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: TRUST_CHECKPOINT_AUTHORITY_BUSY_CODE,
+            message: TRUST_CHECKPOINT_AUTHORITY_BUSY_MESSAGE,
+            details: { retryable: true },
+          },
+        })
+      }
+      if (err instanceof TrustCheckpointAuthorityUnavailableError) {
+        // Lease `unavailable` ⇒ the canonical authority substrate is not 9/9 ARMED. Fail closed: the
+        // transaction rolled back with zero checkpoint/baseline writes. NOT retryable — it needs an
+        // operator enablement rung, not another request. Values-free: the envelope discloses nothing
+        // about which part of the substrate is missing.
+        return res.status(409).json({
+          ok: false,
+          error: {
+            code: TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_CODE,
+            message: TRUST_CHECKPOINT_AUTHORITY_UNAVAILABLE_MESSAGE,
+            details: { retryable: false },
+          },
+        })
+      }
+      if (err instanceof TrustCheckpointSheetNotAllowlistedError) {
+        return res.status(409).json({ ok: false, error: { code: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE, message: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE } })
+      }
+      if (err instanceof TrustCheckpointSheetMissingError) {
+        // VALUES-FREE (owner fix, 2026-08-25): the error class already carries a fixed message;
+        // pasting the request's sheetId back here re-introduced a request value into a refusal
+        // observable by a caller without current authority. Pinned by the l5wire 404 golden,
+        // which asserts the SERIALISED body never contains the requested id.
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }
       if (err instanceof CheckpointUnattributableTrashError) {
         // Fail-closed abort (owner P1, L5): a trashed-only record whose vintage cannot be causally attributed
