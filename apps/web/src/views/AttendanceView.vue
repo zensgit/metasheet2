@@ -611,6 +611,8 @@
           v-if="showOverview"
           class="attendance__card attendance__card--request-tools"
           data-attendance-request-tools
+          :open="overviewRequestToolsOpen"
+          @toggle="onOverviewRequestToolsToggle"
           v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies)"
         >
           <summary class="attendance__details-summary attendance__request-tools-summary">
@@ -14845,6 +14847,15 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
   }
 }
 
+const overviewRequestToolsOpen = ref(false)
+
+function onOverviewRequestToolsToggle(event: Event): void {
+  const target = event.currentTarget
+  if (target instanceof HTMLDetailsElement) {
+    overviewRequestToolsOpen.value = target.open
+  }
+}
+
 function revealOverviewHistoryDetails(target: Element | null): void {
   if (target instanceof HTMLDetailsElement && !target.open) {
     target.open = true
@@ -14852,6 +14863,7 @@ function revealOverviewHistoryDetails(target: Element | null): void {
 }
 
 function revealOverviewRequestTools(): void {
+  overviewRequestToolsOpen.value = true
   if (typeof document === 'undefined') return
   const tools = document.querySelector('[data-attendance-request-tools]')
   revealOverviewHistoryDetails(tools)
