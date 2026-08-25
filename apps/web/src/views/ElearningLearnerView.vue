@@ -33,7 +33,7 @@
         </div>
         <div>
           <dt>{{ elearningLabel('learner.videoProgress', isZh) }}</dt>
-          <dd>{{ elearningVideoStatusLabel(course.video.status, isZh) }}</dd>
+          <dd data-testid="elearning-video-progress">{{ elearningLearnerVideoProgressLabel(course.video.status, course.video.effectiveMs, course.video.durationMs, isZh) }}</dd>
         </div>
         <div>
           <dt>{{ elearningLabel('learner.courseCompletion', isZh) }}</dt>
@@ -59,7 +59,9 @@
           :aria-disabled="course.video.status !== 'completed'"
           @click="void startExam(course)"
         >
-          {{ elearningLabel('learner.startExam', isZh) }}
+          {{ course.exam.latestAttempt?.status === 'started'
+            ? elearningLabel('learner.continueExam', isZh)
+            : elearningLabel('learner.startExam', isZh) }}
         </button>
       </div>
 
@@ -69,6 +71,8 @@
         data-testid="elearning-learner-video"
         controls
         :src="playbackSrc"
+        @loadedmetadata="tryApplyResumeCursor($event)"
+        @durationchange="tryApplyResumeCursor($event)"
         @play="onPlay($event)"
         @pause="onPause($event)"
         @ended="onEnded($event)"
@@ -92,6 +96,14 @@
         data-testid="elearning-exam-form"
         @submit.prevent="void submitExam()"
       >
+        <p
+          class="elearning-muted"
+          data-testid="elearning-exam-answer-progress"
+          role="status"
+          aria-live="polite"
+        >
+          {{ elearningExamAnswerProgress(answeredCount, paper.questions.length, isZh) }}
+        </p>
         <fieldset
           v-for="question in paper.questions"
           :key="question.questionRevisionId"
@@ -109,6 +121,7 @@
               :name="`elearning-answer-${question.questionRevisionId}`"
               :value="option.id"
               :checked="isSelected(question.questionRevisionId, option.id)"
+              :disabled="busy || examLocked"
               @change="onAnswerChange($event, question.questionRevisionId, option.id, question.questionType)"
             >
             <span>{{ option.text }}</span>
@@ -118,7 +131,7 @@
           type="submit"
           class="elearning-btn elearning-btn--primary"
           data-testid="elearning-submit-exam"
-          :disabled="busy"
+          :disabled="busy || !examFullyAnswered"
         >
           {{ elearningLabel('learner.submitExam', isZh) }}
         </button>
@@ -136,7 +149,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
@@ -147,6 +160,7 @@ import {
   issueElearningPlaybackTicket,
   listMyElearningCourses,
   sendElearningHeartbeat,
+  saveElearningExamAnswers,
   startElearningExam,
   startElearningWatch,
   submitElearningExam,
@@ -154,14 +168,16 @@ import {
   type ElearningLearnerCourse,
   type ElearningPublicPaper,
   type ElearningQuestionType,
+  type ElearningWatchState,
 } from '../services/elearning'
 import {
+  elearningExamAnswerProgress,
   elearningExamScore,
   elearningFailure,
   elearningLabel,
   elearningLatestAttempt,
+  elearningLearnerVideoProgressLabel,
   elearningQuestionPoints,
-  elearningVideoStatusLabel,
 } from './elearningLabels'
 
 const { isZh } = useLocale()
@@ -179,6 +195,23 @@ const paper = ref<ElearningPublicPaper | null>(null)
 const attemptId = ref<string | null>(null)
 const answers = ref<Record<string, string[]>>({})
 const examResult = ref<ElearningExamSubmitResult | null>(null)
+const examLocked = ref(false)
+
+const answeredCount = computed(() => {
+  if (!paper.value) return 0
+  let count = 0
+  for (const question of paper.value.questions) {
+    if ((answers.value[question.questionRevisionId] ?? []).length > 0) count += 1
+  }
+  return count
+})
+
+const examFullyAnswered = computed(() => {
+  if (!paper.value || paper.value.questions.length === 0) return false
+  return paper.value.questions.every(
+    (question) => (answers.value[question.questionRevisionId] ?? []).length > 0,
+  )
+})
 
 interface PendingBeat {
   playing: boolean
@@ -195,12 +228,34 @@ let watchStopped = false
 let watchEpoch = 0
 let videoNode: HTMLVideoElement | null = null
 let pendingBeats: PendingBeat[] = []
+let resumePositionMs: number | null = null
+let applyingResumeSeek = false
+let pendingDraft: Record<string, string[]> | null = null
+let saveWork: Promise<void> = Promise.resolve()
+let examEpoch = 0
+let statusSource: 'draft' | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
     return elearningFailure(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
+}
+
+function invalidateDraftStatusOwnership(): void {
+  statusSource = null
+}
+
+function writeStatus(text: string, tone: 'info' | 'error'): void {
+  invalidateDraftStatusOwnership()
+  statusTone.value = tone
+  status.value = text
+}
+
+function clearStatus(): void {
+  invalidateDraftStatusOwnership()
+  statusTone.value = 'info'
+  status.value = ''
 }
 
 function bindVideo(event: Event): HTMLVideoElement | null {
@@ -229,6 +284,42 @@ function stopWatchSession(): void {
   watchEpoch += 1
   clearHeartbeatTimer()
   pendingBeats = []
+  resumePositionMs = null
+  applyingResumeSeek = false
+}
+
+function applyServerWatchProgress(
+  courseId: string,
+  watch: Pick<ElearningWatchState, 'status' | 'effectiveMs' | 'maxPositionMs'>,
+): void {
+  courses.value = courses.value.map((course) => {
+    if (course.courseId !== courseId) return course
+    return {
+      ...course,
+      video: {
+        ...course.video,
+        status: watch.status,
+        effectiveMs: watch.effectiveMs,
+        maxPositionMs: watch.maxPositionMs,
+      },
+    }
+  })
+}
+
+function applyResumeCursor(video: HTMLVideoElement): void {
+  if (resumePositionMs == null) return
+  const durationSec = video.duration
+  if (!Number.isFinite(durationSec) || durationSec <= 0) return
+  const targetSec = Math.max(0, Math.min(resumePositionMs / 1000, durationSec))
+  resumePositionMs = null
+  const currentSec = Number.isFinite(video.currentTime) ? video.currentTime : 0
+  if (Math.abs(currentSec - targetSec) < 0.001) return
+  applyingResumeSeek = true
+  video.currentTime = targetSec
+}
+
+function releaseResumeSeek(): void {
+  applyingResumeSeek = false
 }
 
 function positionMs(): number {
@@ -293,6 +384,9 @@ async function flushHeartbeatQueue(): Promise<void> {
         break
       }
       lastSequence = result.lastSequence
+      if (activeCourseId.value) {
+        applyServerWatchProgress(activeCourseId.value, result)
+      }
       if (result.status === 'completed') {
         stopWatchSession()
         await refreshCourses()
@@ -301,8 +395,7 @@ async function flushHeartbeatQueue(): Promise<void> {
     }
   } catch (error) {
     if (drainEpoch === watchEpoch) {
-      statusTone.value = 'error'
-      status.value = formatError(error)
+      writeStatus(formatError(error), 'error')
       stopWatchSession()
     }
   } finally {
@@ -313,8 +406,14 @@ async function flushHeartbeatQueue(): Promise<void> {
   }
 }
 
+function tryApplyResumeCursor(event: Event): void {
+  const video = bindVideo(event)
+  if (video) applyResumeCursor(video)
+}
+
 function onPlay(event: Event): void {
   bindVideo(event)
+  releaseResumeSeek()
   if (!sessionId || watchStopped) return
   startHeartbeatTimer()
   enqueueBeat(true)
@@ -322,6 +421,7 @@ function onPlay(event: Event): void {
 
 function onPause(event: Event): void {
   const video = bindVideo(event)
+  if (applyingResumeSeek) return
   clearHeartbeatTimer()
   if (!sessionId || watchStopped) return
   if (isNaturalVideoEnd(video)) return
@@ -330,12 +430,14 @@ function onPause(event: Event): void {
 
 function onEnded(event: Event): void {
   bindVideo(event)
+  if (applyingResumeSeek) return
   clearHeartbeatTimer()
   enqueueBeat(true)
 }
 
 function onSeeking(event: Event): void {
   const video = bindVideo(event)
+  if (applyingResumeSeek) return
   clearHeartbeatTimer()
   if (!sessionId || watchStopped) return
   if (video?.ended) return
@@ -344,6 +446,10 @@ function onSeeking(event: Event): void {
 
 function onSeeked(event: Event): void {
   const video = bindVideo(event)
+  if (applyingResumeSeek) {
+    releaseResumeSeek()
+    return
+  }
   if (!sessionId || watchStopped || !video || video.paused || video.ended) return
   startHeartbeatTimer()
 }
@@ -352,12 +458,72 @@ function isSelected(questionRevisionId: string, optionId: string): boolean {
   return (answers.value[questionRevisionId] ?? []).includes(optionId)
 }
 
+function canonicalDraft(): Record<string, string[]> {
+  const payload: Record<string, string[]> = {}
+  if (!paper.value) return payload
+  for (const question of paper.value.questions) {
+    payload[question.questionRevisionId] = [...(answers.value[question.questionRevisionId] ?? [])]
+  }
+  return payload
+}
+
+function ownsDraftSave(attempt: string, epoch: number): boolean {
+  return epoch === examEpoch && attemptId.value === attempt
+}
+
+function applyDraftSaveFailure(error: unknown, attempt: string, epoch: number): void {
+  if (examLocked.value || !ownsDraftSave(attempt, epoch)) return
+  statusTone.value = 'error'
+  status.value = formatError(error)
+  statusSource = 'draft'
+}
+
+function clearOwnedDraftSaveError(attempt?: string, epoch?: number): void {
+  if (statusSource !== 'draft') return
+  if (attempt !== undefined && epoch !== undefined && !ownsDraftSave(attempt, epoch)) return
+  statusSource = null
+  statusTone.value = 'info'
+  status.value = ''
+}
+
+async function runPendingDraftSave(): Promise<void> {
+  while (pendingDraft && attemptId.value) {
+    const payload = pendingDraft
+    pendingDraft = null
+    const currentAttempt = attemptId.value
+    const epoch = examEpoch
+    try {
+      await saveElearningExamAnswers(currentAttempt, payload)
+      clearOwnedDraftSaveError(currentAttempt, epoch)
+    } catch (error) {
+      applyDraftSaveFailure(error, currentAttempt, epoch)
+      if (pendingDraft === null) return
+    }
+  }
+}
+
+function queueDraftSave(): void {
+  if (examLocked.value || !attemptId.value || !paper.value) return
+  pendingDraft = canonicalDraft()
+  saveWork = saveWork.then(runPendingDraftSave, runPendingDraftSave)
+}
+
+async function awaitExamDraftSaves(): Promise<void> {
+  let current = saveWork
+  await current
+  while (saveWork !== current) {
+    current = saveWork
+    await current
+  }
+}
+
 function onAnswerChange(
   event: Event,
   questionRevisionId: string,
   optionId: string,
   questionType: ElearningQuestionType,
 ): void {
+  if (examLocked.value) return
   const checked = event.target instanceof HTMLInputElement ? event.target.checked : false
   const current = answers.value[questionRevisionId] ?? []
   if (questionType === 'multiple_choice') {
@@ -367,18 +533,19 @@ function onAnswerChange(
         ? [...current.filter((id) => id !== optionId), optionId]
         : current.filter((id) => id !== optionId),
     }
-    return
+  } else {
+    answers.value = {
+      ...answers.value,
+      [questionRevisionId]: checked ? [optionId] : [],
+    }
   }
-  answers.value = {
-    ...answers.value,
-    [questionRevisionId]: checked ? [optionId] : [],
-  }
+  queueDraftSave()
 }
 
 async function startWatch(course: ElearningLearnerCourse): Promise<void> {
   if (busy.value || !ready.value) return
   busy.value = true
-  status.value = ''
+  clearStatus()
   stopWatchSession()
   sessionId = null
   videoNode = null
@@ -390,13 +557,14 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
     lastSequence = watch.lastSequence
     sessionId = watch.sessionId
     watchStopped = sessionId == null
+    applyServerWatchProgress(course.courseId, watch)
+    resumePositionMs = watch.status === 'in_progress' ? watch.maxPositionMs : null
     playbackSrc.value = elearningPlaybackSourceUrl(ticket.token)
     if (watch.status === 'completed') {
       await refreshCourses()
     }
   } catch (error) {
-    statusTone.value = 'error'
-    status.value = formatError(error)
+    writeStatus(formatError(error), 'error')
   } finally {
     busy.value = false
   }
@@ -405,17 +573,26 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
 async function startExam(course: ElearningLearnerCourse): Promise<void> {
   if (busy.value || !ready.value || course.video.status !== 'completed') return
   busy.value = true
-  status.value = ''
   try {
+    await awaitExamDraftSaves()
+    if (statusSource === 'draft') return
+    clearStatus()
+    examLocked.value = false
+    pendingDraft = null
+    examEpoch += 1
     const result = await startElearningExam(course.exam.itemId)
     examCourseId.value = course.courseId
     paper.value = result.paper
     attemptId.value = result.attemptId
     examResult.value = null
-    answers.value = Object.fromEntries(result.paper.questions.map((question) => [question.questionRevisionId, []]))
+    answers.value = Object.fromEntries(
+      result.paper.questions.map((question) => [
+        question.questionRevisionId,
+        [...(result.answers[question.questionRevisionId] ?? [])],
+      ]),
+    )
   } catch (error) {
-    statusTone.value = 'error'
-    status.value = formatError(error)
+    writeStatus(formatError(error), 'error')
   } finally {
     busy.value = false
   }
@@ -423,18 +600,20 @@ async function startExam(course: ElearningLearnerCourse): Promise<void> {
 
 async function submitExam(): Promise<void> {
   if (busy.value || !ready.value || !attemptId.value || !paper.value) return
+  if (!examFullyAnswered.value) return
+  examLocked.value = true
   busy.value = true
   try {
-    const payload: Record<string, string[]> = {}
-    for (const question of paper.value.questions) {
-      payload[question.questionRevisionId] = [...(answers.value[question.questionRevisionId] ?? [])]
-    }
+    await awaitExamDraftSaves()
+    const payload = canonicalDraft()
     examResult.value = await submitElearningExam(attemptId.value, payload)
     paper.value = null
+    pendingDraft = null
+    clearOwnedDraftSaveError()
     await refreshCourses()
   } catch (error) {
-    statusTone.value = 'error'
-    status.value = formatError(error)
+    examLocked.value = false
+    writeStatus(formatError(error), 'error')
   } finally {
     busy.value = false
   }
@@ -445,8 +624,7 @@ onMounted(() => {
   void ensureV01Ready()
     .then(() => refreshCourses())
     .catch((error) => {
-      statusTone.value = 'error'
-      status.value = formatError(error)
+      writeStatus(formatError(error), 'error')
     })
     .finally(() => {
       loading.value = false

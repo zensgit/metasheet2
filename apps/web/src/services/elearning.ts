@@ -205,6 +205,7 @@ export interface ElearningExamStartResult {
   attemptNo: number
   status: 'started'
   paper: ElearningPublicPaper
+  answers: Record<string, string[]>
   duplicate: boolean
 }
 
@@ -330,6 +331,13 @@ function postJson(path: string, expectedStatus: number, body: Record<string, unk
   })
 }
 
+function putJson(path: string, expectedStatus: number, body: Record<string, unknown>) {
+  return requestJson(path, expectedStatus, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
 function parseOption(value: unknown, status: number): ElearningPublicOption {
   if (!isPlainObject(value) || !exactKeys(value, ['id', 'text'])) failShape(status)
   return {
@@ -372,6 +380,56 @@ function parsePublicPaper(value: unknown, status: number): ElearningPublicPaper 
     domain: ELEARNING_PAPER_DOMAIN,
     version: ELEARNING_PAPER_VERSION,
     questions: value.questions.map((question) => parsePublicQuestion(question, status)),
+  }
+}
+
+function parseOwnAnswers(
+  value: unknown,
+  paper: ElearningPublicPaper,
+  status: number,
+): Record<string, string[]> {
+  if (!isPlainObject(value)) failShape(status)
+  const expected = paper.questions.map((question) => question.questionRevisionId)
+  if (!exactKeys(value, expected)) failShape(status)
+  const answers: Record<string, string[]> = {}
+  for (const question of paper.questions) {
+    const selected = value[question.questionRevisionId]
+    if (!Array.isArray(selected)) failShape(status)
+    const optionIds = new Set(question.options.map((option) => option.id))
+    const seen = new Set<string>()
+    const list: string[] = []
+    for (const entry of selected) {
+      if (typeof entry !== 'string' || entry.trim() === '' || !optionIds.has(entry) || seen.has(entry)) {
+        failShape(status)
+      }
+      seen.add(entry)
+      list.push(entry)
+    }
+    answers[question.questionRevisionId] = list
+  }
+  return answers
+}
+
+function parseExamStartResult(value: unknown, status: number): ElearningExamStartResult {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    'attemptId',
+    'attemptNo',
+    'status',
+    'paper',
+    'answers',
+    'duplicate',
+  ])) {
+    failShape(status)
+  }
+  if (value.status !== 'started') failShape(status)
+  const paper = parsePublicPaper(value.paper, status)
+  return {
+    attemptId: requireUuid(value.attemptId, status),
+    attemptNo: requireSafeInt(value.attemptNo, status, 1),
+    status: 'started',
+    paper,
+    answers: parseOwnAnswers(value.answers, paper, status),
+    duplicate: requireBoolean(value.duplicate, status),
   }
 }
 
@@ -669,17 +727,19 @@ export async function sendElearningHeartbeat(
 
 export async function startElearningExam(itemId: string): Promise<ElearningExamStartResult> {
   const payload = await postJson(`/api/elearning/exams/items/${encodeURIComponent(itemId)}/start`, 200, {})
-  if (!isPlainObject(payload) || !exactKeys(payload, ['attemptId', 'attemptNo', 'status', 'paper', 'duplicate'])) {
-    failShape(200)
-  }
-  if (payload.status !== 'started') failShape(200)
-  return {
-    attemptId: requireUuid(payload.attemptId, 200),
-    attemptNo: requireSafeInt(payload.attemptNo, 200, 1),
-    status: 'started',
-    paper: parsePublicPaper(payload.paper, 200),
-    duplicate: requireBoolean(payload.duplicate, 200),
-  }
+  return parseExamStartResult(payload, 200)
+}
+
+export async function saveElearningExamAnswers(
+  attemptId: string,
+  answers: Record<string, string[]>,
+): Promise<ElearningExamStartResult> {
+  const payload = await putJson(
+    `/api/elearning/exams/attempts/${encodeURIComponent(attemptId)}/answers`,
+    200,
+    { answers },
+  )
+  return parseExamStartResult(payload, 200)
 }
 
 export async function submitElearningExam(

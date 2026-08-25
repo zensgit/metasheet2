@@ -84,11 +84,14 @@ export interface SubmitElearningExamInput {
   answers: unknown
 }
 
+export type SaveElearningExamAnswersInput = SubmitElearningExamInput
+
 export interface ElearningExamStartResult {
   attemptId: string
   attemptNo: number
   status: 'started'
   paper: ElearningPublicPaper
+  answers: Record<string, string[]>
   duplicate: boolean
 }
 
@@ -123,10 +126,17 @@ function requireStoredUuid(value: unknown): string {
   return value.toLowerCase()
 }
 
+function ownAnswers(answers: Record<string, string[]>): Record<string, string[]> {
+  return Object.fromEntries(
+    Object.entries(answers).map(([key, value]) => [key, [...value]]),
+  )
+}
+
 function publicStartResult(
   attemptId: string,
   attemptNo: number,
   snapshot: ElearningPaperSnapshot,
+  answers: Record<string, string[]>,
   duplicate: boolean,
 ): ElearningExamStartResult {
   return {
@@ -134,6 +144,7 @@ function publicStartResult(
     attemptNo,
     status: 'started',
     paper: redactElearningPaperSnapshot(snapshot),
+    answers: ownAnswers(answers),
     duplicate,
   }
 }
@@ -446,7 +457,8 @@ export async function startElearningExam(
       const started = attempts.find((row) => row.status === 'started')
       if (started) {
         const snapshot = parseStoredSnapshot(started.paperSnapshot)
-        return publicStartResult(started.id, started.attemptNo, snapshot, true)
+        const answers = parseStoredAnswers(snapshot, started.answers)
+        return publicStartResult(started.id, started.attemptNo, snapshot, answers, true)
       }
       if (attempts.length >= item.maxAttempts) fail('max_attempts')
 
@@ -462,7 +474,13 @@ export async function startElearningExam(
          ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started')`,
         [attemptId, orgId, item.examId, item.versionId, userId, attemptNo, JSON.stringify(snapshot)],
       )
-      return publicStartResult(attemptId, attemptNo, snapshot, false)
+      return publicStartResult(
+        attemptId,
+        attemptNo,
+        snapshot,
+        canonicalizeElearningExamAnswers(snapshot, null),
+        false,
+      )
     } catch (error) {
       if (error instanceof ElearningExamError) throw error
       fail('unavailable')
@@ -606,8 +624,6 @@ export async function submitElearningExam(
         if (!elearningExamAnswersEqual(incoming, stored)) fail('conflict')
         return publicSubmitResult(attempt.id, attempt.attemptNo, gradeFromStored(attempt, snapshot), true)
       }
-      if (attempt.status !== 'started') fail('conflict')
-
       const canonical = canonicalizeElearningExamAnswers(snapshot, input.answers)
       const grade = scoreElearningExam(snapshot, canonical)
       const answersJson = JSON.stringify(canonical)
@@ -649,6 +665,45 @@ export async function submitElearningExam(
       )
       if (graded.rowCount !== 1) fail('unavailable')
       return publicSubmitResult(attempt.id, attempt.attemptNo, grade, false)
+    } catch (error) {
+      if (error instanceof ElearningExamError) throw error
+      fail('unavailable')
+    }
+  })
+}
+
+export async function saveElearningExamAnswers(
+  db: ElearningExamDb,
+  input: SaveElearningExamAnswersInput,
+): Promise<ElearningExamStartResult> {
+  const orgId = requireActor(input.orgId)
+  const userId = requireActor(input.userId)
+  const attemptId = requireUuid(input.attemptId)
+
+  return db.transaction(async (tx) => {
+    try {
+      const examId = await peekAttemptExamId(tx, orgId, attemptId, userId)
+      await advisoryLock(tx, orgId, userId, examId)
+      const attempt = await lockAttempt(tx, orgId, attemptId, userId)
+      if (attempt.examId !== examId) fail('unavailable')
+      await lockUnrevokedMember(tx, orgId, userId, attempt.versionId)
+      const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
+      if (attempt.status !== 'started') fail('conflict')
+
+      const canonical = canonicalizeElearningExamAnswers(snapshot, input.answers)
+      const stored = parseStoredAnswers(snapshot, attempt.answers)
+      if (elearningExamAnswersEqual(canonical, stored)) {
+        return publicStartResult(attempt.id, attempt.attemptNo, snapshot, canonical, true)
+      }
+      const saved = await tx.query(
+        `/* elearning-exam:save-answers */
+         UPDATE elearning_exam_attempts
+            SET answers = $1::jsonb
+          WHERE org_id = $2 AND id = $3 AND status = 'started'`,
+        [JSON.stringify(canonical), orgId, attempt.id],
+      )
+      if (saved.rowCount !== 1) fail('unavailable')
+      return publicStartResult(attempt.id, attempt.attemptNo, snapshot, canonical, false)
     } catch (error) {
       if (error instanceof ElearningExamError) throw error
       fail('unavailable')

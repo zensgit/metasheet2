@@ -50,6 +50,28 @@ function fillInput(el: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElemen
   el.dispatchEvent(new Event('change', { bubbles: true }))
 }
 
+function deferred<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (reason?: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+function operationStageText(root: HTMLElement): string | null {
+  return root.querySelector('[data-testid="elearning-admin-operation-stage"]')?.textContent?.trim() ?? null
+}
+
+function selectedFileText(root: HTMLElement): string | null {
+  return root.querySelector('[data-testid="elearning-admin-selected-file"]')?.textContent?.trim() ?? null
+}
+
 describe('ElearningAdminView', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
@@ -303,6 +325,132 @@ describe('ElearningAdminView', () => {
     })
   })
 
+  it('shows selected-file summary from File.name and clears it when the input is cleared', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    expect(selectedFileText(root)).toBeNull()
+
+    const fileInput = root.querySelector('[data-testid="elearning-admin-file"]') as HTMLInputElement
+    const file = new File([new Uint8Array([1, 2, 3])], 'lesson-one.mp4', { type: 'video/mp4' })
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [file] })
+    fileInput.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(selectedFileText(root)).toBe('Selected: lesson-one.mp4')
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(selectedFileText(root)).toBe('已选择：lesson-one.mp4')
+
+    Object.defineProperty(fileInput, 'files', { configurable: true, value: [] })
+    fileInput.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(selectedFileText(root)).toBeNull()
+  })
+
+  it('advances aria-live operation stage only after each pipeline promise resolves', async () => {
+    useLocale().setLocale('en')
+    const uploadGate = deferred<{
+      id: string
+      status: string
+      durationMs: number
+      sizeBytes: number
+      sha256: string
+    }>()
+    const publishGate = deferred<{
+      courseId: string
+      courseVersionId: string
+      videoItemId: string
+      examItemId: string
+      examId: string
+      status: string
+      questionCount: number
+      totalScore: number
+    }>()
+    const assignGate = deferred<{
+      assignmentId: string
+      memberId: string
+      duplicate: boolean
+    }>()
+    h.upload.mockReturnValueOnce(uploadGate.promise)
+    h.publish.mockReturnValueOnce(publishGate.promise)
+    h.assign.mockReturnValueOnce(assignGate.promise)
+
+    const root = mountView()
+    await fillMinimum(root)
+    expect(operationStageText(root)).toBeNull()
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(operationStageText(root)).toBe('Uploading video...')
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')?.textContent?.trim()).toBe('Uploading video...')
+    expect(h.upload).toHaveBeenCalledTimes(1)
+    expect(h.publish).not.toHaveBeenCalled()
+    expect(h.assign).not.toHaveBeenCalled()
+    expect(root.textContent).not.toMatch(/\d+%/)
+
+    uploadGate.resolve({
+      id: MEDIA,
+      status: 'ready',
+      durationMs: 4500,
+      sizeBytes: 12,
+      sha256: SHA256,
+    })
+    await flushUi(12)
+    expect(operationStageText(root)).toBe('Publishing course...')
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')?.textContent?.trim()).toBe('Publishing course...')
+    expect(h.publish).toHaveBeenCalledTimes(1)
+    expect(h.assign).not.toHaveBeenCalled()
+
+    publishGate.resolve({
+      courseId: COURSE,
+      courseVersionId: VERSION,
+      videoItemId: VIDEO,
+      examItemId: EXAM_ITEM,
+      examId: EXAM,
+      status: 'published',
+      questionCount: 1,
+      totalScore: 1,
+    })
+    await flushUi(12)
+    expect(operationStageText(root)).toBe('Assigning learner...')
+    expect(h.assign).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+
+    assignGate.resolve({
+      assignmentId: ASSIGNMENT,
+      memberId: MEMBER,
+      duplicate: false,
+    })
+    await flushUi(12)
+    expect(operationStageText(root)).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain(
+      'The course was published and assigned.',
+    )
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')?.textContent?.trim()).toBe('Publish and assign')
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('resets operation stage after upload error and keeps controls governed by busy/ready rules', async () => {
+    useLocale().setLocale('en')
+    const uploadGate = deferred<never>()
+    h.upload.mockReturnValueOnce(uploadGate.promise)
+    const root = mountView()
+    await fillMinimum(root)
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(operationStageText(root)).toBe('Uploading video...')
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+
+    uploadGate.reject(new ElearningApiError('upload_failed', 500))
+    await flushUi(12)
+    expect(operationStageText(root)).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toBe('Failed: upload_failed (500)')
+    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(false)
+    expect(h.publish).not.toHaveBeenCalled()
+    expect(h.assign).not.toHaveBeenCalled()
+  })
+
   it('publishes then direct-assigns with retained UUID request and source keys', async () => {
     const root = mountView()
     await fillMinimum(root)
@@ -330,16 +478,18 @@ describe('ElearningAdminView', () => {
       sourceKey: SOURCE,
     })
     expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('课程已发布并完成指派')
+    expect(operationStageText(root)).toBeNull()
   })
 
   it('shows partial success and retries assignment without republishing', async () => {
+    const retryAssignGate = deferred<{
+      assignmentId: string
+      memberId: string
+      duplicate: boolean
+    }>()
     h.assign
       .mockRejectedValueOnce(new ElearningApiError('target_unavailable', 409))
-      .mockResolvedValueOnce({
-        assignmentId: ASSIGNMENT,
-        memberId: MEMBER,
-        duplicate: false,
-      })
+      .mockReturnValueOnce(retryAssignGate.promise)
     const root = mountView()
     await fillMinimum(root)
     ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
@@ -351,10 +501,14 @@ describe('ElearningAdminView', () => {
     expect(status?.textContent).toContain('课程已发布，指派未完成')
     expect(status?.textContent).toContain('target_unavailable')
     expect(status?.textContent).toContain('409')
+    expect(operationStageText(root)).toBeNull()
     const retry = root.querySelector('[data-testid="elearning-admin-retry"]') as HTMLButtonElement
     expect(retry).toBeTruthy()
     retry.click()
     await flushUi(12)
+    expect(operationStageText(root)).toBe('正在指派学员…')
+    expect(root.textContent).not.toContain('正在上传视频')
+    expect(root.textContent).not.toContain('正在发布课程')
     expect(h.publish).toHaveBeenCalledTimes(1)
     expect(h.upload).toHaveBeenCalledTimes(1)
     expect(h.assign).toHaveBeenCalledTimes(2)
@@ -363,6 +517,14 @@ describe('ElearningAdminView', () => {
       courseVersionId: VERSION,
       sourceKey: SOURCE,
     })
+
+    retryAssignGate.resolve({
+      assignmentId: ASSIGNMENT,
+      memberId: MEMBER,
+      duplicate: false,
+    })
+    await flushUi(12)
+    expect(operationStageText(root)).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('完成指派')
   })
 

@@ -15,6 +15,13 @@
           :disabled="busy || published !== null"
           @change="onFileChange"
         >
+        <span
+          v-if="file"
+          class="elearning-selected-file"
+          data-testid="elearning-admin-selected-file"
+        >
+          {{ elearningSelectedFile(file.name, isZh) }}
+        </span>
       </label>
 
       <label class="elearning-field">
@@ -193,7 +200,7 @@
           data-testid="elearning-admin-publish"
           :disabled="busy || published !== null || !ready"
         >
-          {{ busy && published === null ? elearningLabel('admin.publishing', isZh) : elearningLabel('admin.publish', isZh) }}
+          {{ publishButtonLabel }}
         </button>
         <button
           v-if="published !== null && !assigned"
@@ -209,6 +216,16 @@
     </form>
 
     <p
+      v-if="operationStage"
+      class="elearning-operation-stage"
+      data-testid="elearning-admin-operation-stage"
+      role="status"
+      aria-live="polite"
+    >
+      {{ operationStageLabel }}
+    </p>
+
+    <p
       v-if="status"
       class="elearning-status"
       :class="{ 'elearning-status--error': statusTone === 'error', 'elearning-status--partial': statusTone === 'partial' }"
@@ -222,7 +239,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import {
   assignElearningDirect,
@@ -241,10 +258,13 @@ import {
   elearningFailure,
   elearningLabel,
   elearningOptionAria,
+  elearningSelectedFile,
   elearningTrueFalseOptions,
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+
+type OperationStage = 'uploading' | 'publishing' | 'assigning'
 
 interface OptionDraft {
   id: string
@@ -276,6 +296,24 @@ const busy = ref(false)
 const ready = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
+const operationStage = ref<OperationStage | null>(null)
+
+const operationStageLabel = computed(() => {
+  const stage = operationStage.value
+  if (stage === null) return ''
+  const zh = isZh.value
+  if (stage === 'uploading') return elearningLabel('admin.uploading', zh)
+  if (stage === 'publishing') return elearningLabel('admin.publishingCourse', zh)
+  return elearningLabel('admin.assigning', zh)
+})
+
+const publishButtonLabel = computed(() => {
+  const zh = isZh.value
+  if (!(busy.value && published.value === null)) return elearningLabel('admin.publish', zh)
+  if (operationStage.value === 'uploading') return elearningLabel('admin.uploading', zh)
+  if (operationStage.value === 'publishing') return elearningLabel('admin.publishingCourse', zh)
+  return elearningLabel('admin.publishing', zh)
+})
 
 function newLocalId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -473,6 +511,7 @@ async function runAssign(): Promise<boolean> {
 async function submitPublishAndAssign(): Promise<void> {
   if (busy.value || published.value || !ready.value) return
   status.value = ''
+  operationStage.value = null
   const invalid = validateForm()
   if (invalid) {
     statusTone.value = 'error'
@@ -482,8 +521,10 @@ async function submitPublishAndAssign(): Promise<void> {
   const selected = file.value
   if (!selected) return
   busy.value = true
+  operationStage.value = 'uploading'
   try {
     const media = await uploadElearningMedia(selected)
+    operationStage.value = 'publishing'
     const result = await publishElearningCourse({
       requestId: requestId.value,
       title: title.value.trim(),
@@ -500,11 +541,13 @@ async function submitPublishAndAssign(): Promise<void> {
     })
     published.value = result
     frozenAssignment.value = Object.freeze(buildAssignmentPayload(result.courseVersionId))
+    operationStage.value = 'assigning'
     await runAssign()
   } catch (error) {
     statusTone.value = 'error'
     status.value = formatError(error)
   } finally {
+    operationStage.value = null
     busy.value = false
   }
 }
@@ -512,10 +555,13 @@ async function submitPublishAndAssign(): Promise<void> {
 async function retryAssign(): Promise<void> {
   const current = published.value
   if (!current || assigned.value || busy.value || !ready.value || frozenAssignment.value == null) return
+  status.value = ''
   busy.value = true
+  operationStage.value = 'assigning'
   try {
     await runAssign()
   } finally {
+    operationStage.value = null
     busy.value = false
   }
 }
@@ -639,6 +685,24 @@ onMounted(() => {
 .elearning-btn--secondary,
 .elearning-btn--ghost {
   background: #eef3fb;
+  color: #123154;
+}
+
+.elearning-selected-file,
+.elearning-operation-stage {
+  margin: 0;
+  color: #5f7088;
+  font-size: 0.9rem;
+}
+
+.elearning-selected-file {
+  overflow-wrap: anywhere;
+}
+
+.elearning-operation-stage {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #eef7ff;
   color: #123154;
 }
 

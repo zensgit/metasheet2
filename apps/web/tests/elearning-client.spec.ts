@@ -15,6 +15,7 @@ import {
   listMyElearningCourses,
   publishElearningCourse,
   sendElearningHeartbeat,
+  saveElearningExamAnswers,
   startElearningExam,
   startElearningWatch,
   submitElearningExam,
@@ -257,6 +258,7 @@ describe('elearning client transport', () => {
         attemptNo: 1,
         status: 'started',
         paper: paper(),
+        answers: { [Q1]: [] },
         duplicate: false,
       }))
       .mockResolvedValueOnce(jsonResponse(200, {
@@ -272,10 +274,37 @@ describe('elearning client transport', () => {
     expect(lastCall().path).toBe(`/api/elearning/exams/items/${EXAM_ITEM}/start`)
     expect(lastJson()).toEqual({})
     expect(started.paper.questions[0]).not.toHaveProperty('answerKey')
+    expect(started.answers).toEqual({ [Q1]: [] })
+    expect(Object.keys(started)).toEqual(['attemptId', 'attemptNo', 'status', 'paper', 'answers', 'duplicate'])
     await submitElearningExam(ATTEMPT, { [Q1]: ['a'] })
     expect(lastCall().path).toBe(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
     expect(lastJson()).toEqual({ answers: { [Q1]: ['a'] } })
     assertNoIdentityOverrides(lastJson())
+  })
+
+  it('saves draft answers with PUT and parses the closed started DTO', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: paper(),
+      answers: { [Q1]: ['a'] },
+      duplicate: false,
+    }))
+    const saved = await saveElearningExamAnswers(ATTEMPT, { [Q1]: ['a'] })
+    expect(lastCall().path).toBe(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+    expect(lastCall().options.method).toBe('PUT')
+    expect(lastJson()).toEqual({ answers: { [Q1]: ['a'] } })
+    assertNoIdentityOverrides(lastJson())
+    expect(saved).toEqual({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: paper(),
+      answers: { [Q1]: ['a'] },
+      duplicate: false,
+    })
+    expect(JSON.stringify(saved)).not.toMatch(/answerKey|explanation|storageKey|storage_key|"correct"/)
   })
 
   it('builds a same-origin playback source from the ticket token', () => {
@@ -352,6 +381,48 @@ describe('elearning client fail-closed validation', () => {
           explanation: 'nope',
         }],
       },
+      answers: { [Q1]: [] },
+      duplicate: false,
+    }))
+    await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+  })
+
+  it('rejects start/save DTOs that omit answers, add extra keys, or leak secrets', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: paper(),
+      duplicate: false,
+    }))
+    await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: paper(),
+      answers: { [Q1]: ['a'] },
+      duplicate: false,
+      explanation: 'secret',
+    }))
+    await expect(saveElearningExamAnswers(ATTEMPT, { [Q1]: ['a'] })).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: paper(),
+      answers: { [Q1]: ['a'], extra: ['b'] },
       duplicate: false,
     }))
     await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({

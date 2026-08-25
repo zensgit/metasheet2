@@ -32,6 +32,7 @@ import {
 } from '../services/elearning-direct-assignment'
 import {
   ElearningExamError,
+  saveElearningExamAnswers,
   startElearningExam,
   submitElearningExam,
   type ElearningExamDb,
@@ -148,6 +149,7 @@ export interface ElearningPilotRouteDeps {
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
   startElearningExam?: typeof startElearningExam
+  saveElearningExamAnswers?: typeof saveElearningExamAnswers
   submitElearningExam?: typeof submitElearningExam
   publishElearningCourse?: typeof publishElearningCourse
   listElearningLearnerCourses?: typeof listElearningLearnerCourses
@@ -215,6 +217,7 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
   const startExam = deps.startElearningExam ?? startElearningExam
+  const saveExamAnswers = deps.saveElearningExamAnswers ?? saveElearningExamAnswers
   const submitExam = deps.submitElearningExam ?? submitElearningExam
   const publishCourse = deps.publishElearningCourse ?? publishElearningCourse
   const listLearnerCourses = deps.listElearningLearnerCourses ?? listElearningLearnerCourses
@@ -472,6 +475,40 @@ export function createElearningPilotRouter(deps: ElearningPilotRouteDeps): Route
           orgId: ctx.orgId,
           userId: ctx.actorId,
           itemId,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningExamError) {
+          res.status(EXAM_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.put(
+    '/api/elearning/exams/attempts/:attemptId/answers',
+    ...gate(deps.readGuard, 'exam'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      const attemptId = uuidParam(req, 'attemptId')
+      const body = readObject(req.body)
+      if (!attemptId || !body || rejectUnknownKeys(body, SUBMIT_KEYS)) {
+        invalid(res)
+        return
+      }
+      if (!Object.prototype.hasOwnProperty.call(body, 'answers')) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await saveExamAnswers(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          attemptId,
+          answers: body.answers,
         })
         res.status(200).json(result)
       } catch (error) {

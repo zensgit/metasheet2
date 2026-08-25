@@ -9,6 +9,7 @@ const h = vi.hoisted(() => ({
   ticket: vi.fn(),
   heartbeat: vi.fn(),
   startExam: vi.fn(),
+  saveExam: vi.fn(),
   submitExam: vi.fn(),
 }))
 
@@ -22,17 +23,25 @@ vi.mock('../src/services/elearning', async () => {
     issueElearningPlaybackTicket: h.ticket,
     sendElearningHeartbeat: h.heartbeat,
     startElearningExam: h.startExam,
+    saveElearningExamAnswers: h.saveExam,
     submitElearningExam: h.submitExam,
   }
 })
 
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
+  ElearningApiError,
   elearningPlaybackSourceUrl,
   type ElearningLearnerVideoStatus,
 } from '../src/services/elearning'
 import ElearningLearnerView from '../src/views/ElearningLearnerView.vue'
-import { elearningVideoStatusLabel } from '../src/views/elearningLabels'
+import {
+  elearningExamAnswerProgress,
+  elearningLabel,
+  elearningLearnerVideoProgressLabel,
+  elearningVideoStatusLabel,
+  elearningWatchProgressPercent,
+} from '../src/views/elearningLabels'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
 const COURSE_PROGRESS = '12121212-1212-4121-8121-121212121212'
@@ -43,7 +52,9 @@ const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
 const SESSION = '77777777-7777-4777-8777-777777777777'
 const SESSION_B = '99999999-9999-4999-8999-999999999999'
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
+const ATTEMPT_B = '86868686-8686-4868-8868-868686868686'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const Q2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEDIA = '66666666-6666-4666-8666-666666666666'
 
 async function flushUi(cycles = 10): Promise<void> {
@@ -66,20 +77,67 @@ function heartbeatBodies(): Array<{ sequence: number; positionMs: number; playin
   return h.heartbeat.mock.calls.map((call) => call[1] as { sequence: number; positionMs: number; playing: boolean })
 }
 
+function courseEl(root: HTMLElement, courseId: string): HTMLElement {
+  return root.querySelector(`[data-testid="elearning-course-${courseId}"]`) as HTMLElement
+}
+
+function courseQuery<T extends Element>(root: HTMLElement, courseId: string, testId: string): T {
+  return courseEl(root, courseId).querySelector(`[data-testid="${testId}"]`) as T
+}
+
+function progressText(root: HTMLElement, courseId: string): string {
+  return courseQuery(root, courseId, 'elearning-video-progress').textContent ?? ''
+}
+
+function completedVideoCourse(over: Record<string, unknown> = {}) {
+  return course({
+    video: vid({
+      status: 'completed',
+      effectiveMs: 4500,
+      maxPositionMs: 5000,
+      completedAt: '2026-01-03T04:05:06.000Z',
+    }),
+    ...over,
+  })
+}
+
+function selectOption(root: HTMLElement, value: string, checked = true): void {
+  const option = root.querySelector(`input[value="${value}"]`) as HTMLInputElement
+  option.checked = checked
+  option.dispatchEvent(new Event('change', { bubbles: true }))
+}
+
+function prepareVideo(video: HTMLVideoElement, durationSec: number, currentTime = 0): HTMLVideoElement {
+  Object.defineProperty(video, 'duration', { configurable: true, writable: true, value: durationSec })
+  Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: currentTime })
+  return video
+}
+
+function dispatchSeekCycle(video: HTMLVideoElement, startEvent: 'loadedmetadata' | 'durationchange'): void {
+  video.dispatchEvent(new Event(startEvent))
+  video.dispatchEvent(new Event('seeking'))
+  video.dispatchEvent(new Event('seeked'))
+}
+
+function vid(over: Record<string, unknown> = {}) {
+  return {
+    itemId: VIDEO,
+    durationMs: 5000,
+    status: 'not_started',
+    effectiveMs: 0,
+    maxPositionMs: 0,
+    completedAt: null,
+    ...over,
+  }
+}
+
 function course(over: Record<string, unknown> = {}) {
   return {
     courseId: COURSE,
     courseVersionId: VERSION,
     title: '示范课',
     assignment: { deadline: null, assignedAt: '2026-01-02T03:04:05.000Z' },
-    video: {
-      itemId: VIDEO,
-      durationMs: 5000,
-      status: 'not_started',
-      effectiveMs: 0,
-      maxPositionMs: 0,
-      completedAt: null,
-    },
+    video: vid(),
     exam: { itemId: EXAM_ITEM, latestAttempt: null },
     completed: false,
     ...over,
@@ -137,6 +195,7 @@ describe('ElearningLearnerView', () => {
     h.ticket.mockReset()
     h.heartbeat.mockReset()
     h.startExam.mockReset()
+    h.saveExam.mockReset()
     h.submitExam.mockReset()
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     h.capabilities.mockResolvedValue(v01Capabilities())
@@ -174,7 +233,30 @@ describe('ElearningLearnerView', () => {
           points: 10,
         }],
       },
+      answers: { [Q1]: [] },
     })
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => ({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      duplicate: false,
+      paper: {
+        domain: 'elearning.exam.paper.v1',
+        version: 1,
+        questions: [{
+          position: 1,
+          questionRevisionId: Q1,
+          questionType: 'single_choice',
+          prompt: 'Pick one',
+          options: [
+            { id: 'a', text: 'alpha' },
+            { id: 'b', text: 'beta' },
+          ],
+          points: 10,
+        }],
+      },
+      answers,
+    }))
     h.submitExam.mockResolvedValue({
       attemptId: ATTEMPT,
       attemptNo: 1,
@@ -390,18 +472,7 @@ describe('ElearningLearnerView', () => {
   })
 
   it('renders only the public paper, submits answers, and shows server autoScore/totalScore/pass', async () => {
-    h.list.mockResolvedValue({
-      courses: [course({
-        video: {
-          itemId: VIDEO,
-          durationMs: 5000,
-          status: 'completed',
-          effectiveMs: 4500,
-          maxPositionMs: 5000,
-          completedAt: '2026-01-03T04:05:06.000Z',
-        },
-      })],
-    })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
     h.startExam.mockResolvedValue({
       attemptId: ATTEMPT,
       attemptNo: 1,
@@ -425,6 +496,7 @@ describe('ElearningLearnerView', () => {
           storageKey: 'elearning-media/secret.mp4',
         }],
       },
+      answers: { [Q1]: [] },
     })
     const root = mountView()
     await flushUi()
@@ -437,14 +509,121 @@ describe('ElearningLearnerView', () => {
     expect(text).not.toContain('answerKey')
     expect(text).not.toContain('elearning-media/secret.mp4')
     expect(text).not.toContain('storageKey')
-    const option = root.querySelector('input[value="a"]') as HTMLInputElement
-    option.checked = true
-    option.dispatchEvent(new Event('change', { bubbles: true }))
+    const progress = root.querySelector('[data-testid="elearning-exam-answer-progress"]') as HTMLElement
+    expect(progress.getAttribute('aria-live')).toBe('polite')
+    expect(progress.textContent).toBe('已答 0 / 1')
+    expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(true)
+    selectOption(root, 'a')
+    await flushUi()
+    expect(progress.textContent).toBe('已答 1 / 1')
     ;(root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).click()
     await flushUi()
     expect(h.submitExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['a'] })
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-answer-progress"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent).toContain('得分 10 / 10')
     expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent).toContain('通过')
+  })
+
+  it('tracks answered progress, blocks incomplete submit, and never double-counts radio changes', async () => {
+    expect(elearningExamAnswerProgress(0, 2, false)).toBe('Answered 0 of 2')
+    expect(elearningExamAnswerProgress(1, 2, true)).toBe('已答 1 / 2')
+
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockResolvedValue({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      duplicate: false,
+      paper: {
+        domain: 'elearning.exam.paper.v1',
+        version: 1,
+        questions: [
+          {
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 5,
+          },
+          {
+            position: 2,
+            questionRevisionId: Q2,
+            questionType: 'multiple_choice',
+            prompt: 'Pick any',
+            options: [
+              { id: 'c', text: 'gamma' },
+              { id: 'd', text: 'delta' },
+            ],
+            points: 5,
+          },
+        ],
+      },
+      answers: { [Q1]: [], [Q2]: [] },
+    })
+
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const progress = root.querySelector('[data-testid="elearning-exam-answer-progress"]') as HTMLElement
+    const submit = root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement
+    const form = root.querySelector('[data-testid="elearning-exam-form"]') as HTMLFormElement
+    expect(progress.getAttribute('aria-live')).toBe('polite')
+    expect(progress.textContent).toBe('Answered 0 of 2')
+    expect(submit.disabled).toBe(true)
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(h.submitExam).not.toHaveBeenCalled()
+
+    selectOption(root, 'a')
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 1 of 2')
+    expect(submit.disabled).toBe(true)
+    selectOption(root, 'b')
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 1 of 2')
+
+    selectOption(root, 'c')
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 2 of 2')
+    expect(submit.disabled).toBe(false)
+    selectOption(root, 'd')
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 2 of 2')
+    selectOption(root, 'c', false)
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 2 of 2')
+    selectOption(root, 'd', false)
+    await flushUi()
+    expect(progress.textContent).toBe('Answered 1 of 2')
+    expect(submit.disabled).toBe(true)
+
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flushUi()
+    expect(h.submitExam).not.toHaveBeenCalled()
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(progress.textContent).toBe('已答 1 / 2')
+
+    selectOption(root, 'c')
+    await flushUi()
+    expect(progress.textContent).toBe('已答 2 / 2')
+    submit.click()
+    await flushUi()
+    expect(h.submitExam).toHaveBeenCalledTimes(1)
+    expect(h.submitExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['b'], [Q2]: ['c'] })
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-answer-progress"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent).toContain('得分 10 / 10')
   })
 
   it('cleans heartbeat timers on unmount', async () => {
@@ -728,5 +907,631 @@ describe('ElearningLearnerView', () => {
     expect(h.heartbeat.mock.calls[1]?.[0]).toBe(SESSION_B)
     expect(h.heartbeat.mock.calls[1]?.[1]).toEqual({ sequence: 8, positionMs: 0, playing: true })
     expect(h.heartbeat).toHaveBeenCalledTimes(2)
+  })
+
+  it('renders server-grounded 0..99 progress and keeps explicit not_started/completed labels', async () => {
+    expect(elearningWatchProgressPercent(0, 5000)).toBe(0)
+    expect(elearningWatchProgressPercent(1000, 5000)).toBe(20)
+    expect(elearningWatchProgressPercent(5000, 5000)).toBe(99)
+    expect(elearningLearnerVideoProgressLabel('not_started', 0, 5000, false)).toBe('Not started')
+    expect(elearningLearnerVideoProgressLabel('in_progress', 0, 5000, true)).toBe('学习中 0%')
+    expect(elearningLearnerVideoProgressLabel('in_progress', 5000, 5000, false)).toBe('In progress 99%')
+    expect(elearningLearnerVideoProgressLabel('completed', 4500, 5000, false)).toBe('Completed')
+
+    useLocale().setLocale('en')
+    h.list.mockResolvedValue({
+      courses: [
+        course(),
+        course({ courseId: COURSE_PROGRESS, video: vid({ status: 'in_progress', effectiveMs: 0 }) }),
+        course({
+          courseId: COURSE_DONE,
+          video: vid({ status: 'completed', effectiveMs: 4500, maxPositionMs: 5000, completedAt: '2026-01-03T04:05:06.000Z' }),
+        }),
+      ],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(progressText(root, COURSE)).toBe('Not started')
+    expect(progressText(root, COURSE_PROGRESS)).toBe('In progress 0%')
+    expect(progressText(root, COURSE_DONE)).toBe('Completed')
+    expect(courseQuery<HTMLButtonElement>(root, COURSE_PROGRESS, 'elearning-start-exam').disabled).toBe(true)
+    expect(courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').disabled).toBe(false)
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(progressText(root, COURSE_PROGRESS)).toBe('学习中 0%')
+  })
+
+  it('resumes from maxPositionMs without heartbeats, then updates only the active course from server state', async () => {
+    h.list.mockResolvedValue({
+      courses: [
+        course(),
+        course({ courseId: COURSE_PROGRESS, video: vid({ status: 'in_progress', effectiveMs: 1000, maxPositionMs: 1000 }) }),
+      ],
+    })
+    h.startWatch.mockResolvedValue(watchState({
+      lastClientPositionMs: 4000,
+      effectiveMs: 1500,
+      maxPositionMs: 1500,
+    }))
+    h.heartbeat.mockImplementation(async (_session: string, body: { sequence: number; positionMs: number; playing: boolean }) => watchState({
+      lastSequence: body.sequence,
+      lastClientPositionMs: body.positionMs,
+      status: 'in_progress',
+      effectiveMs: body.positionMs >= 5000 ? 5000 : 2000,
+      maxPositionMs: body.positionMs >= 5000 ? 5000 : 2500,
+    }))
+    const root = mountView()
+    await flushUi()
+    expect(progressText(root, COURSE)).toBe('未开始')
+    expect(progressText(root, COURSE_PROGRESS)).toBe('学习中 20%')
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-watch').click()
+    await flushUi()
+
+    const video = prepareVideo(courseQuery<HTMLVideoElement>(root, COURSE, 'elearning-learner-video'), Number.NaN, 0)
+    video.dispatchEvent(new Event('loadedmetadata'))
+    await flushUi()
+    expect(video.currentTime).toBe(0)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    video.duration = 5
+    dispatchSeekCycle(video, 'durationchange')
+    await flushUi()
+    expect(video.currentTime).toBe(1.5)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    expect(courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').disabled).toBe(true)
+
+    video.dispatchEvent(new Event('play'))
+    await flushUi()
+    expect(progressText(root, COURSE)).toBe('学习中 40%')
+    expect(progressText(root, COURSE_PROGRESS)).toBe('学习中 20%')
+    h.heartbeat.mockClear()
+    video.currentTime = 2
+    video.dispatchEvent(new Event('seeking'))
+    await flushUi()
+    expect(heartbeatBodies()).toEqual([{ sequence: 3, positionMs: 2000, playing: false }])
+
+    h.heartbeat.mockClear()
+    h.startWatch.mockResolvedValue(watchState({
+      sessionId: SESSION_B,
+      lastSequence: 7,
+      lastClientPositionMs: 12000,
+      effectiveMs: 2000,
+      maxPositionMs: 9000,
+    }))
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-watch').click()
+    await flushUi()
+    const clamped = prepareVideo(courseQuery<HTMLVideoElement>(root, COURSE, 'elearning-learner-video'), 5, 0)
+    dispatchSeekCycle(clamped, 'loadedmetadata')
+    await flushUi()
+    expect(clamped.currentTime).toBe(5)
+    expect(h.heartbeat).not.toHaveBeenCalled()
+    expect(courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').disabled).toBe(true)
+
+    clamped.currentTime = 5
+    clamped.dispatchEvent(new Event('ended'))
+    await flushUi()
+    expect(progressText(root, COURSE)).toBe('学习中 99%')
+    expect(progressText(root, COURSE_PROGRESS)).toBe('学习中 20%')
+    expect(progressText(root, COURSE)).not.toContain('已完成')
+    expect(courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').disabled).toBe(true)
+    expect(h.list).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows Continue exam for a latest started attempt, hydrates server answers, and restores controls', async () => {
+    expect(elearningLabel('learner.continueExam', false)).toBe('Continue exam')
+    expect(elearningLabel('learner.continueExam', true)).toBe('继续考试')
+    h.list.mockResolvedValue({
+      courses: [completedVideoCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: {
+            attemptId: ATTEMPT,
+            attemptNo: 1,
+            status: 'started',
+            autoScore: null,
+            totalScore: null,
+            passed: null,
+            startedAt: '2026-01-04T05:06:07.000Z',
+            submittedAt: null,
+            gradedAt: null,
+          },
+        },
+      })],
+    })
+    h.startExam.mockResolvedValue({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      duplicate: true,
+      paper: {
+        domain: 'elearning.exam.paper.v1',
+        version: 1,
+        questions: [
+          {
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 5,
+          },
+          {
+            position: 2,
+            questionRevisionId: Q2,
+            questionType: 'multiple_choice',
+            prompt: 'Pick any',
+            options: [
+              { id: 'c', text: 'gamma' },
+              { id: 'd', text: 'delta' },
+            ],
+            points: 5,
+          },
+        ],
+      },
+      answers: { [Q1]: ['a'], [Q2]: ['c'] },
+    })
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
+    expect(examBtn.textContent).toContain('Continue exam')
+    expect(examBtn.textContent).not.toContain('Start exam')
+    examBtn.click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledWith(EXAM_ITEM)
+    expect(root.querySelector('[data-testid="elearning-exam-answer-progress"]')?.textContent).toBe('Answered 2 of 2')
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    expect((root.querySelector('input[value="c"]') as HTMLInputElement).checked).toBe(true)
+    expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('serializes slow draft saves so an older request cannot overwrite a newer change', async () => {
+    const releases: Array<() => void> = []
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => {
+      await new Promise<void>((resolve) => {
+        releases.push(resolve)
+      })
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers,
+      }
+    })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    selectOption(root, 'b')
+    await flushUi()
+    expect(h.saveExam).toHaveBeenCalledTimes(1)
+    expect(h.saveExam.mock.calls[0]?.[1]).toEqual({ [Q1]: ['a'] })
+    releases[0]?.()
+    await flushUntil(() => h.saveExam.mock.calls.length === 2)
+    expect(h.saveExam.mock.calls[1]?.[1]).toEqual({ [Q1]: ['b'] })
+    releases[1]?.()
+    await flushUi()
+    expect(h.saveExam.mock.calls.map((call) => call[1])).toEqual([{ [Q1]: ['a'] }, { [Q1]: ['b'] }])
+  })
+
+  it('waits for queued draft saves before submit and still posts the current answer map', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => {
+      if (h.saveExam.mock.calls.length === 1) await gate
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers,
+      }
+    })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    ;(root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.submitExam).not.toHaveBeenCalled()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(true)
+    release()
+    await flushUntil(() => h.submitExam.mock.calls.length === 1)
+    expect(h.saveExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['a'] })
+    expect(h.submitExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['a'] })
+  })
+
+  it('keeps local selections after a save failure, shows a values-free error, and retries later', async () => {
+    h.saveExam
+      .mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+      .mockResolvedValue({
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: ['b'] },
+      })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('unavailable'))
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：unavailable（503）')
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    selectOption(root, 'b')
+    await flushUntil(() => h.saveExam.mock.calls.length === 2)
+    await flushUi()
+    expect(h.saveExam.mock.calls[1]?.[1]).toEqual({ [Q1]: ['b'] })
+    expect((root.querySelector('input[value="b"]') as HTMLInputElement).checked).toBe(true)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+  })
+
+  it('does not surface a delayed save failure from a previous attempt', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    h.saveExam.mockImplementation(async (attempt: string, answers: Record<string, string[]>) => {
+      if (h.saveExam.mock.calls.length === 1) await gate
+      return {
+        attemptId: attempt,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers,
+      }
+    })
+    h.startExam
+      .mockResolvedValueOnce({
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: [] },
+      })
+      .mockResolvedValueOnce({
+        attemptId: ATTEMPT_B,
+        attemptNo: 2,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: [] },
+      })
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    release()
+    await flushUntil(() => h.startExam.mock.calls.length === 2)
+    await flushUi()
+    expect(h.startExam.mock.calls[1]?.[0]).toBe(EXAM_ITEM)
+    expect(h.saveExam.mock.calls[0]?.[0]).toBe(ATTEMPT)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('clears a stale autosave error after a successful submit of the current local answers', async () => {
+    h.saveExam.mockRejectedValue(new ElearningApiError('unavailable', 503))
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('unavailable'))
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：unavailable（503）')
+    expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(false)
+    ;(root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).click()
+    await flushUntil(() => h.submitExam.mock.calls.length === 1)
+    await flushUi()
+    expect(h.saveExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['a'] })
+    expect(h.submitExam).toHaveBeenCalledWith(ATTEMPT, { [Q1]: ['a'] })
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent).toContain('得分 10 / 10')
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+  })
+
+  it('flushes a coalesced newer draft before starting another exam', async () => {
+    const EXAM_ITEM_B = '45454545-4545-4454-8454-454545454545'
+    const releases: Array<() => void> = []
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => {
+      await new Promise<void>((resolve) => {
+        releases.push(resolve)
+      })
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers,
+      }
+    })
+    h.startExam
+      .mockResolvedValueOnce({
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: [] },
+      })
+      .mockResolvedValueOnce({
+        attemptId: ATTEMPT_B,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers: { [Q1]: [] },
+      })
+    h.list.mockResolvedValue({
+      courses: [
+        completedVideoCourse(),
+        completedVideoCourse({
+          courseId: COURSE_DONE,
+          exam: { itemId: EXAM_ITEM_B, latestAttempt: null },
+        }),
+      ],
+    })
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    selectOption(root, 'b')
+    await flushUi()
+    expect(h.saveExam).toHaveBeenCalledTimes(1)
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').disabled).toBe(true)
+    expect(courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').disabled).toBe(true)
+    expect((root.querySelector('input[value="b"]') as HTMLInputElement).disabled).toBe(true)
+    expect((root.querySelector('input[value="b"]') as HTMLInputElement).checked).toBe(true)
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    releases[0]?.()
+    await flushUntil(() => h.saveExam.mock.calls.length === 2)
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(h.saveExam.mock.calls[1]?.[0]).toBe(ATTEMPT)
+    expect(h.saveExam.mock.calls[1]?.[1]).toEqual({ [Q1]: ['b'] })
+    releases[1]?.()
+    await flushUntil(() => h.startExam.mock.calls.length === 2)
+    await flushUi()
+    expect(h.saveExam.mock.calls.map((call) => [call[0], call[1]])).toEqual([
+      [ATTEMPT, { [Q1]: ['a'] }],
+      [ATTEMPT, { [Q1]: ['b'] }],
+    ])
+    expect(h.startExam.mock.calls[1]?.[0]).toBe(EXAM_ITEM_B)
+    expect(h.saveExam.mock.invocationCallOrder[1]).toBeLessThan(h.startExam.mock.invocationCallOrder[1])
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(courseEl(root, COURSE_DONE).querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(false)
+    expect((root.querySelector('input[value="b"]') as HTMLInputElement).checked).toBe(false)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+  })
+
+  it('aborts starting another exam when the queued draft save fails', async () => {
+    const EXAM_ITEM_B = '45454545-4545-4454-8454-454545454545'
+    let release!: (error: unknown) => void
+    const gate = new Promise<void>((_resolve, reject) => {
+      release = reject
+    })
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => {
+      await gate
+      return {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        duplicate: false,
+        paper: {
+          domain: 'elearning.exam.paper.v1',
+          version: 1,
+          questions: [{
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          }],
+        },
+        answers,
+      }
+    })
+    h.list.mockResolvedValue({
+      courses: [
+        completedVideoCourse(),
+        completedVideoCourse({
+          courseId: COURSE_DONE,
+          exam: { itemId: EXAM_ITEM_B, latestAttempt: null },
+        }),
+      ],
+    })
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').disabled).toBe(true)
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(true)
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    release(new ElearningApiError('unavailable', 503))
+    await flushUntil(() => (root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? '').includes('unavailable'))
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(h.startExam.mock.calls[0]?.[0]).toBe(EXAM_ITEM)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：unavailable（503）')
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    expect(courseEl(root, COURSE_DONE).querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(false)
+    courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toBe('失败：unavailable（503）')
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
   })
 })

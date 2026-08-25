@@ -512,6 +512,7 @@ paths:
         RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.
         itemId is the course version exam item. Returned paper is redacted
         (no answerKey, correct ids, explanation, examId, or passScore).
+        Result includes canonical own answers for every paper question.
         JSON limit 16 KiB.
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -528,7 +529,58 @@ paths:
               $ref: '#/components/schemas/ElearningEmptyObject'
       responses:
         '200':
-          description: Attempt plus public paper. duplicate true on replay of an open attempt.
+          description: Attempt plus public paper and canonical own answers. duplicate true on replay of an open attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamStartResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/attempts/{attemptId}/answers:
+    put:
+      operationId: saveElearningExamAnswers
+      summary: Save draft answers for a started exam attempt
+      description: |
+        RBAC `elearning:read`. Requires exam surface flags. Body key `answers`
+        only (map of questionRevisionId to selected option ids). Only started
+        attempts may save. Same canonical body is duplicate true. Result is the
+        closed started DTO with own answers. No answer keys. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningExamSubmitRequest'
+      responses:
+        '200':
+          description: Started attempt plus public paper and canonical own answers.
           content:
             application/json:
               schema:

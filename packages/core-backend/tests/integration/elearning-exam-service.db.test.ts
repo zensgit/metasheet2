@@ -18,6 +18,7 @@ import {
   ELEARNING_EXAM_GRADE_KIND,
   elearningExamLockKey,
   ElearningExamError,
+  saveElearningExamAnswers,
   startElearningExam,
   submitElearningExam,
   type ElearningExamDb,
@@ -1159,5 +1160,107 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     expect(nos.rows[0].status).toBe('started')
     expect(String(nos.rows[0].exam_id)).toBe(seed.examId)
     assertValuesFree(raced, org, seed.userId)
+  })
+
+  it('persists draft answers on a started attempt and replays them without grading', async () => {
+    const org = orgId('draft')
+    const other = orgId('draft-other')
+    seededOrgIds.push(org, other)
+    const seed = await seedPublishedExam({ org })
+    const outsider = await seedPublishedExam({ org: other })
+    const started = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    expect(Object.keys(started)).toEqual([
+      'attemptId',
+      'attemptNo',
+      'status',
+      'paper',
+      'answers',
+      'duplicate',
+    ])
+    expect(started.answers).toEqual({
+      [seed.singleId]: [],
+      [seed.multipleId]: [],
+      [seed.trueFalseId]: [],
+    })
+    expect(JSON.stringify(started)).not.toContain('answerKey')
+    expect(JSON.stringify(started)).not.toMatch(/"correct"/)
+
+    const first = await saveElearningExamAnswers(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: { [seed.singleId]: ['a'], [seed.multipleId]: ['c', 'a'] },
+    })
+    expect(first.duplicate).toBe(false)
+    expect(first.status).toBe('started')
+    expect(first.answers).toEqual({
+      [seed.singleId]: ['a'],
+      [seed.multipleId]: ['a', 'c'],
+      [seed.trueFalseId]: [],
+    })
+    expect(Object.keys(first)).toEqual(Object.keys(started))
+    assertValuesFree(first, org, seed.userId)
+
+    const same = await saveElearningExamAnswers(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: { [seed.singleId]: ['a'], [seed.multipleId]: ['a', 'c'], [seed.trueFalseId]: [] },
+    })
+    expect(same.duplicate).toBe(true)
+    expect(same.answers).toEqual(first.answers)
+
+    const replayed = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    expect(replayed.duplicate).toBe(true)
+    expect(replayed.attemptId).toBe(started.attemptId)
+    expect(replayed.answers).toEqual(first.answers)
+    expect(await countOrg('elearning_exam_attempts', org)).toBe(1)
+    expect(await countOrg('elearning_grading_records', org)).toBe(0)
+
+    await expect(saveElearningExamAnswers(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: { [seed.singleId]: ['z'] },
+    })).rejects.toMatchObject({ code: 'invalid_input' })
+    await expect(saveElearningExamAnswers(db, {
+      orgId: other,
+      userId: outsider.userId,
+      attemptId: started.attemptId,
+      answers: first.answers,
+    })).rejects.toMatchObject({ code: 'not_found' })
+    await expect(saveElearningExamAnswers(db, {
+      orgId: org,
+      userId: outsider.userId,
+      attemptId: started.attemptId,
+      answers: first.answers,
+    })).rejects.toMatchObject({ code: 'not_found' })
+    const stored = await pool.query(
+      `SELECT answers, status FROM elearning_exam_attempts WHERE org_id = $1 AND id = $2`,
+      [org, started.attemptId],
+    )
+    expect(stored.rows[0].status).toBe('started')
+    expect(stored.rows[0].answers).toEqual(first.answers)
+
+    await submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: perfectAnswers(seed),
+    })
+    await expect(saveElearningExamAnswers(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: perfectAnswers(seed),
+    })).rejects.toMatchObject({ code: 'conflict' })
   })
 })

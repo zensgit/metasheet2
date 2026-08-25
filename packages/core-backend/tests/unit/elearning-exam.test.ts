@@ -9,6 +9,7 @@ import {
   ElearningExamError,
   redactElearningPaperSnapshot,
   scoreElearningExam,
+  saveElearningExamAnswers,
   startElearningExam,
   stripElearningExamSecrets,
   submitElearningExam,
@@ -32,6 +33,15 @@ const QUESTION_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const QUESTION_C = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const VERSION = '44444444-4444-4444-8444-444444444444'
 const MEMBER = '55555555-5555-4555-8555-555555555555'
+
+const PUBLIC_START_KEYS = [
+  'attemptId',
+  'attemptNo',
+  'status',
+  'paper',
+  'answers',
+  'duplicate',
+] as const
 
 const PUBLIC_SUBMIT_KEYS = [
   'attemptId',
@@ -146,6 +156,24 @@ function createMemoryDb(): ElearningExamDb {
   }
 }
 
+function assertPublicStartJson(payload: unknown): Record<string, unknown> {
+  const raw = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>
+  expect(Object.keys(raw)).toEqual([...PUBLIC_START_KEYS])
+  expect(raw.status).toBe('started')
+  const blob = JSON.stringify(raw)
+  expect(blob).not.toContain('answer_key')
+  expect(blob).not.toContain('answerKey')
+  expect(blob).not.toContain('explanation')
+  expect(blob).not.toContain('secret rationale')
+  expect(blob).not.toContain('multi secret')
+  expect(blob).not.toContain('tf secret')
+  expect(blob).not.toMatch(/"correct"/)
+  expect(blob).not.toContain('paper_snapshot')
+  expect(blob).not.toContain('examId')
+  expect(blob).not.toContain('passScore')
+  return raw
+}
+
 function assertPublicSubmitJson(payload: unknown): Record<string, unknown> {
   const raw = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>
   expect(Object.keys(raw)).toEqual([...PUBLIC_SUBMIT_KEYS])
@@ -255,6 +283,13 @@ function createSubmitMemoryDb(seed: Partial<SubmitMemAttempt> = {}): {
         return { rows: [{ id: mem.memberId }], rowCount: 1 }
       }
       return { rows: [], rowCount: 0 }
+    }
+    if (tag === 'elearning-exam:save-answers') {
+      if (params[1] !== ORG || params[2] !== attempt.id || attempt.status !== 'started') {
+        return { rows: [], rowCount: 0 }
+      }
+      attempt.answers = JSON.parse(String(params[0])) as Record<string, string[]>
+      return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-exam:submit-attempt') {
       if (params[1] !== ORG || params[2] !== attempt.id || attempt.status !== 'started') {
@@ -577,6 +612,14 @@ describe('elearning exam service input closure', () => {
       () => submitElearningExam(db, { orgId: '', userId: USER, attemptId: ATTEMPT, answers: {} }),
       'invalid_input',
     )
+    await expectAsyncCode(
+      () => saveElearningExamAnswers(db, { orgId: ORG, userId: USER, attemptId: 'nope', answers: {} }),
+      'invalid_input',
+    )
+    await expectAsyncCode(
+      () => saveElearningExamAnswers(db, { orgId: '', userId: USER, attemptId: ATTEMPT, answers: {} }),
+      'invalid_input',
+    )
   })
 
   it('lowercases attempt/item UUIDs and still fails closed before a query on blank org', async () => {
@@ -712,5 +755,279 @@ describe('elearning exam public submit result', () => {
       attemptId: ATTEMPT,
       answers: perfectAnswers(),
     }), 'unavailable')
+  })
+})
+
+function emptyAnswers() {
+  return { [Q1]: [] as string[], [Q2]: [] as string[], [Q3]: [] as string[] }
+}
+
+interface StartMem {
+  attempts: SubmitMemAttempt[]
+  memberId: string | null
+  lockKeys: string[]
+  priorVideoIncomplete: boolean
+}
+
+function createStartMemoryDb(seed: Partial<SubmitMemAttempt> & { started?: boolean } = {}): {
+  db: ElearningExamDb
+  mem: StartMem
+} {
+  const snapshot = samplePaper()
+  const started = seed.started !== false
+  const mem: StartMem = {
+    attempts: started
+      ? [{
+          id: ATTEMPT,
+          examId: EXAM,
+          versionId: VERSION,
+          userId: USER,
+          attemptNo: 1,
+          status: 'started',
+          paperSnapshot: snapshot,
+          answers: seed.answers === undefined ? null : seed.answers,
+          autoScore: null,
+          totalScore: null,
+          passed: null,
+          ...seed,
+        }]
+      : [],
+    memberId: MEMBER,
+    lockKeys: [],
+    priorVideoIncomplete: false,
+  }
+  const query: ElearningExamQueryable['query'] = async (sql, params = []) => {
+    const tag = examQueryTag(sql)
+    if (tag === 'elearning-exam:peek-item') {
+      if (params[0] !== ORG || params[1] !== ITEM) return { rows: [], rowCount: 0 }
+      return { rows: [{ item_type: 'exam', exam_id: EXAM }], rowCount: 1 }
+    }
+    if (tag === 'elearning-exam:lock') {
+      mem.lockKeys.push(String(params[0]))
+      return { rows: [{}], rowCount: 1 }
+    }
+    if (tag === 'elearning-exam:load-item') {
+      if (params[0] !== ORG || params[1] !== ITEM) return { rows: [], rowCount: 0 }
+      return {
+        rows: [{
+          id: ITEM,
+          course_version_id: VERSION,
+          item_type: 'exam',
+          position: 2,
+          exam_id: EXAM,
+          version_status: 'published',
+          course_status: 'active',
+        }],
+        rowCount: 1,
+      }
+    }
+    if (tag === 'elearning-exam:lock-exam') {
+      if (params[0] !== ORG || params[1] !== EXAM) return { rows: [], rowCount: 0 }
+      return { rows: [{ status: 'published', pass_score: 20, max_attempts: 3 }], rowCount: 1 }
+    }
+    if (tag === 'elearning-exam:load-member') {
+      if (mem.memberId && params[0] === ORG && params[1] === USER && params[2] === VERSION) {
+        return { rows: [{ id: mem.memberId }], rowCount: 1 }
+      }
+      return { rows: [], rowCount: 0 }
+    }
+    if (tag === 'elearning-exam:load-prior-videos') {
+      if (mem.priorVideoIncomplete) return { rows: [{ id: ITEM }], rowCount: 1 }
+      return { rows: [], rowCount: 0 }
+    }
+    if (tag === 'elearning-exam:load-attempts') {
+      if (params[0] !== ORG || params[1] !== EXAM || params[2] !== USER) return { rows: [], rowCount: 0 }
+      return {
+        rows: mem.attempts.map((attempt) => ({
+          id: attempt.id,
+          attempt_no: attempt.attemptNo,
+          status: attempt.status,
+          paper_snapshot: attempt.paperSnapshot,
+          answers: attempt.answers,
+          auto_score: attempt.autoScore,
+          total_score: attempt.totalScore,
+          passed: attempt.passed,
+        })),
+        rowCount: mem.attempts.length,
+      }
+    }
+    if (tag === 'elearning-exam:load-questions') {
+      return {
+        rows: snapshot.questions.map((question) => ({
+          position: question.position,
+          points: question.points,
+          question_revision_id: question.questionRevisionId,
+          question_id: question.questionId,
+          question_type: question.questionType,
+          prompt: question.prompt,
+          options: question.options,
+          answer_key: question.answerKey,
+          explanation: question.explanation,
+        })),
+        rowCount: snapshot.questions.length,
+      }
+    }
+    if (tag === 'elearning-exam:insert-attempt') {
+      const attempt: SubmitMemAttempt = {
+        id: String(params[0]),
+        examId: String(params[2]),
+        versionId: String(params[3]),
+        userId: String(params[4]),
+        attemptNo: Number(params[5]),
+        status: 'started',
+        paperSnapshot: JSON.parse(String(params[6])) as ElearningPaperSnapshot,
+        answers: null,
+        autoScore: null,
+        totalScore: null,
+        passed: null,
+      }
+      mem.attempts.push(attempt)
+      return { rows: [], rowCount: 1 }
+    }
+    throw new Error(`unexpected exam query: ${tag ?? sql}`)
+  }
+  return {
+    db: {
+      query,
+      transaction: async (handler) => handler({ query }),
+    },
+    mem,
+  }
+}
+
+describe('elearning exam start own answers', () => {
+  it('returns a closed started DTO with empty own answers on a new attempt', async () => {
+    const { db, mem } = createStartMemoryDb({ started: false })
+    const started = await startElearningExam(db, { orgId: ORG, userId: USER, itemId: ITEM })
+    const raw = assertPublicStartJson(started)
+    expect(raw).toEqual({
+      attemptId: started.attemptId,
+      attemptNo: 1,
+      status: 'started',
+      paper: redactElearningPaperSnapshot(samplePaper()),
+      answers: emptyAnswers(),
+      duplicate: false,
+    })
+    expect(mem.attempts).toHaveLength(1)
+    expect(mem.attempts[0]?.answers).toBeNull()
+    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, EXAM)])
+  })
+
+  it('replays a started attempt with canonical saved answers and does not insert a second row', async () => {
+    const saved = { [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] as string[] }
+    const { db, mem } = createStartMemoryDb({ answers: saved })
+    const replayed = await startElearningExam(db, { orgId: ORG, userId: USER, itemId: ITEM })
+    expect(assertPublicStartJson(replayed)).toEqual({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: redactElearningPaperSnapshot(samplePaper()),
+      answers: saved,
+      duplicate: true,
+    })
+    expect(mem.attempts).toHaveLength(1)
+  })
+})
+
+describe('elearning exam draft answer save', () => {
+  it('canonicalizes, updates only the started attempt, and returns a closed started DTO', async () => {
+    const { db, mem } = createSubmitMemoryDb()
+    const saved = await saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: { [Q1]: ['a'], [Q2]: ['c', 'a'] },
+    })
+    expect(assertPublicStartJson(saved)).toEqual({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      paper: redactElearningPaperSnapshot(samplePaper()),
+      answers: { [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] },
+      duplicate: false,
+    })
+    expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, EXAM)])
+    expect(mem.attempt.status).toBe('started')
+    expect(mem.attempt.answers).toEqual({ [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] })
+    expect(mem.grades).toHaveLength(0)
+  })
+
+  it('treats the same canonical body as an idempotent duplicate without rewriting', async () => {
+    const { db, mem } = createSubmitMemoryDb()
+    const first = await saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: { [Q1]: ['b'] },
+    })
+    const stored = mem.attempt.answers
+    const replay = await saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: { [Q1]: ['b'], [Q2]: [], [Q3]: [] },
+    })
+    expect(assertPublicStartJson(replay)).toEqual({
+      ...assertPublicStartJson(first),
+      duplicate: true,
+    })
+    expect(mem.attempt.answers).toBe(stored)
+    expect(mem.attempt.status).toBe('started')
+  })
+
+  it('rejects unknown questions and options as invalid_input without leaking secrets', async () => {
+    const { db, mem } = createSubmitMemoryDb()
+    await expectAsyncCode(() => saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: { [Q1]: ['z'] },
+    }), 'invalid_input')
+    await expectAsyncCode(() => saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: { '99999999-9999-4999-8999-999999999999': ['a'] },
+    }), 'invalid_input')
+    expect(mem.attempt.answers).toBeNull()
+  })
+
+  it('denies other users and orgs as not_found without querying the save update', async () => {
+    const { db, mem } = createSubmitMemoryDb()
+    await expectAsyncCode(() => saveElearningExamAnswers(db, {
+      orgId: ORG,
+      userId: 'other-user',
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }), 'not_found')
+    await expectAsyncCode(() => saveElearningExamAnswers(db, {
+      orgId: 'other-org',
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }), 'not_found')
+    expect(mem.attempt.answers).toBeNull()
+    expect(mem.lockKeys).toEqual([])
+  })
+
+  it('conflicts on graded, submitted, and expired attempts', async () => {
+    const stored = canonicalizeElearningExamAnswers(samplePaper(), perfectAnswers())
+    for (const status of ['graded', 'submitted', 'expired'] as const) {
+      const { db, mem } = createSubmitMemoryDb({
+        status,
+        answers: stored,
+        autoScore: status === 'graded' ? 30 : null,
+        totalScore: status === 'graded' ? 30 : null,
+        passed: status === 'graded' ? true : null,
+      })
+      await expectAsyncCode(() => saveElearningExamAnswers(db, {
+        orgId: ORG,
+        userId: USER,
+        attemptId: ATTEMPT,
+        answers: perfectAnswers(),
+      }), 'conflict')
+      expect(mem.attempt.answers).toBe(stored)
+      expect(mem.grades).toHaveLength(0)
+    }
   })
 })

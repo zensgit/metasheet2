@@ -113,6 +113,7 @@ const EXAM_START_RESULT = {
       points: 10,
     }],
   },
+  answers: { [Q1]: [] },
   duplicate: false,
 }
 

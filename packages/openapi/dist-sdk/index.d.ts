@@ -8524,9 +8524,33 @@ export interface paths {
          * @description RBAC `elearning:read`. Requires exam surface flags. Empty JSON object.
          *     itemId is the course version exam item. Returned paper is redacted
          *     (no answerKey, correct ids, explanation, examId, or passScore).
+         *     Result includes canonical own answers for every paper question.
          *     JSON limit 16 KiB.
          */
         post: operations["startElearningExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/exams/attempts/{attemptId}/answers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save draft answers for a started exam attempt
+         * @description RBAC `elearning:read`. Requires exam surface flags. Body key `answers`
+         *     only (map of questionRevisionId to selected option ids). Only started
+         *     attempts may save. Same canonical body is duplicate true. Result is the
+         *     closed started DTO with own answers. No answer keys. JSON limit 16 KiB.
+         */
+        put: operations["saveElearningExamAnswers"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -17494,6 +17518,10 @@ export interface components {
             /** @enum {string} */
             status: "started";
             paper: components["schemas"]["ElearningPublicPaper"];
+            /** @description Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys. */
+            answers: {
+                [key: string]: string[];
+            };
             duplicate: boolean;
         };
         ElearningExamSubmitRequest: {
@@ -19081,7 +19109,47 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Attempt plus public paper. duplicate true on replay of an open attempt. */
+            /** @description Attempt plus public paper and canonical own answers. duplicate true on replay of an open attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamStartResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description assignment_unavailable, ORG_CONTEXT_REQUIRED, or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    saveElearningExamAnswers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningExamSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Started attempt plus public paper and canonical own answers. */
             200: {
                 headers: {
                     [name: string]: unknown;

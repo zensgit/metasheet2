@@ -5052,7 +5052,7 @@ components:
     ElearningExamStartResult:
       type: object
       additionalProperties: false
-      required: [attemptId, attemptNo, status, paper, duplicate]
+      required: [attemptId, attemptNo, status, paper, answers, duplicate]
       properties:
         attemptId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -5064,6 +5064,14 @@ components:
           enum: [started]
         paper:
           $ref: '#/components/schemas/ElearningPublicPaper'
+        answers:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+              minLength: 1
+          description: Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys.
         duplicate: { type: boolean }
     ElearningExamSubmitRequest:
       type: object

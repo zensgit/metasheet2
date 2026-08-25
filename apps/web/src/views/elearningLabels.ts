@@ -26,6 +26,7 @@ export type ElearningLabelKey =
   | 'learner.courseCompletion'
   | 'learner.startWatch'
   | 'learner.startExam'
+  | 'learner.continueExam'
   | 'learner.videoUnsupported'
   | 'learner.submitExam'
   // --- Admin chrome ---
@@ -53,6 +54,9 @@ export type ElearningLabelKey =
   | 'admin.deadline'
   | 'admin.publishing'
   | 'admin.publish'
+  | 'admin.uploading'
+  | 'admin.publishingCourse'
+  | 'admin.assigning'
   | 'admin.retrying'
   | 'admin.retry'
   | 'admin.assignSuccess'
@@ -93,6 +97,7 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'learner.courseCompletion': { en: 'Course completion', zh: '课程完成' },
   'learner.startWatch': { en: 'Start learning', zh: '开始学习' },
   'learner.startExam': { en: 'Start exam', zh: '开始考试' },
+  'learner.continueExam': { en: 'Continue exam', zh: '继续考试' },
   'learner.videoUnsupported': {
     en: 'Your browser does not support video playback.',
     zh: '您的浏览器不支持视频播放。',
@@ -126,6 +131,9 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'admin.deadline': { en: 'Deadline (optional)', zh: '截止日期（可选）' },
   'admin.publishing': { en: 'Publishing...', zh: '正在发布…' },
   'admin.publish': { en: 'Publish and assign', zh: '发布并指派' },
+  'admin.uploading': { en: 'Uploading video...', zh: '正在上传视频…' },
+  'admin.publishingCourse': { en: 'Publishing course...', zh: '正在发布课程…' },
+  'admin.assigning': { en: 'Assigning learner...', zh: '正在指派学员…' },
   'admin.retrying': { en: 'Retrying assignment...', zh: '正在重试指派…' },
   'admin.retry': { en: 'Retry assignment', zh: '重试指派' },
   'admin.assignSuccess': {
@@ -219,6 +227,25 @@ export function elearningVideoStatusLabel(
   }
 }
 
+// durationMs is already server-validated >= 1; in-progress stays 0..99 until status=completed.
+export function elearningWatchProgressPercent(effectiveMs: number, durationMs: number): number {
+  if (!Number.isFinite(effectiveMs) || !Number.isFinite(durationMs) || durationMs < 1) return 0
+  if (effectiveMs <= 0) return 0
+  return Math.min(99, Math.max(0, Math.floor((effectiveMs / durationMs) * 100)))
+}
+
+export function elearningLearnerVideoProgressLabel(
+  status: ElearningLearnerVideoStatus,
+  effectiveMs: number,
+  durationMs: number,
+  isZh: boolean,
+): string {
+  if (status === 'in_progress') {
+    return `${elearningLabel('video.inProgress', isZh)} ${elearningWatchProgressPercent(effectiveMs, durationMs)}%`
+  }
+  return elearningVideoStatusLabel(status, isZh)
+}
+
 export type ElearningTrueFalseOption = { id: 'true' | 'false'; text: string }
 
 export function elearningTrueFalseOptions(isZh: boolean): ElearningTrueFalseOption[] {
@@ -264,6 +291,14 @@ export function elearningExamScore(
     : `Score ${autoScore} / ${totalScore} · ${outcome}`
 }
 
+export function elearningExamAnswerProgress(
+  answered: number,
+  total: number,
+  isZh: boolean,
+): string {
+  return isZh ? `已答 ${answered} / ${total}` : `Answered ${answered} of ${total}`
+}
+
 export function elearningCorrectOptionAria(optionId: string, isZh: boolean): string {
   return isZh ? `正确答案 ${optionId}` : `Correct answer ${optionId}`
 }
@@ -276,4 +311,8 @@ export function elearningAssignIncomplete(errorText: string, isZh: boolean): str
   return isZh
     ? `课程已发布，指派未完成。${errorText} 可重试指派，无需重新发布。`
     : `The course was published, but assignment did not complete. ${errorText} You can retry assignment without publishing again.`
+}
+
+export function elearningSelectedFile(fileName: string, isZh: boolean): string {
+  return isZh ? `已选择：${fileName}` : `Selected: ${fileName}`
 }

@@ -122,6 +122,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/playback-ticket']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/media/playback']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/exams/items/{itemId}/start']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/exams/attempts/{attemptId}/answers']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/exams/attempts/{attemptId}/submit']['post']>().not.toBeNever()
   })
 
@@ -152,6 +153,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     >().toEqualTypeOf<Ticket>()
     expectTypeOf<
       paths['/api/elearning/exams/items/{itemId}/start']['post']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<ExamStart>()
+    expectTypeOf<
+      paths['/api/elearning/exams/attempts/{attemptId}/answers']['put']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<ExamStart>()
     expectTypeOf<
       paths['/api/elearning/exams/attempts/{attemptId}/submit']['post']['responses']['200']['content']['application/json']
@@ -204,6 +208,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
       attemptNo: number
       status: 'started'
       paper: PublicPaper
+      answers: { [key: string]: string[] }
       duplicate: boolean
     }>()
     expectTypeOf<ExamSubmit>().toEqualTypeOf<{
@@ -243,6 +248,10 @@ describe('elearning V0.1 OpenAPI paths', () => {
       {
         name: 'POST /api/elearning/exams/items/{itemId}/start 200',
         keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/exams/items/{itemId}/start', 'post', '200')),
+      },
+      {
+        name: 'PUT /api/elearning/exams/attempts/{attemptId}/answers 200',
+        keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/exams/attempts/{attemptId}/answers', 'put', '200')),
       },
       {
         name: 'POST /api/elearning/exams/attempts/{attemptId}/submit 200',
@@ -290,6 +299,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
         [key: string]: string[]
       }
     }>()
+    expectTypeOf<
+      NonNullable<paths['/api/elearning/exams/attempts/{attemptId}/answers']['put']['requestBody']>['content']['application/json']
+    >().toEqualTypeOf<ExamAnswers>()
     expectTypeOf<LearnerList>().toEqualTypeOf<{
       courses: components['schemas']['ElearningLearnerCourse'][]
     }>()

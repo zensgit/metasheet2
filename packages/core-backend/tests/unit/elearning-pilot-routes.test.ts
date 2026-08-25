@@ -27,6 +27,7 @@ import {
   type ElearningExamErrorCode,
   type ElearningExamStartResult,
   type ElearningExamSubmitResult,
+  type SaveElearningExamAnswersInput,
   type StartElearningExamInput,
   type SubmitElearningExamInput,
 } from '../../src/services/elearning-exam'
@@ -212,6 +213,7 @@ const EXAM_START_RESULT: ElearningExamStartResult = {
       points: 10,
     }],
   },
+  answers: { [Q1]: [] },
   duplicate: false,
 }
 
@@ -345,6 +347,7 @@ function makeApp(over: {
   heartbeatError?: unknown
   ticketError?: unknown
   examStartError?: unknown
+  examSaveError?: unknown
   examSubmitError?: unknown
   publishError?: unknown
   learnerError?: unknown
@@ -353,6 +356,7 @@ function makeApp(over: {
   heartbeatResult?: ElearningWatchState
   ticketResult?: ElearningMediaPlaybackTicket
   examStartResult?: ElearningExamStartResult
+  examSaveResult?: ElearningExamStartResult
   examSubmitResult?: ElearningExamSubmitResult
   publishResult?: ElearningCoursePublishResult
   learnerResult?: ElearningLearnerCourse[]
@@ -362,6 +366,7 @@ function makeApp(over: {
   const heartbeatCalls: RecordElearningHeartbeatInput[] = []
   const ticketCalls: IssueElearningMediaPlaybackInput[] = []
   const examStartCalls: StartElearningExamInput[] = []
+  const examSaveCalls: SaveElearningExamAnswersInput[] = []
   const examSubmitCalls: SubmitElearningExamInput[] = []
   const publishCalls: PublishElearningCourseInput[] = []
   const learnerCalls: ListElearningLearnerCoursesInput[] = []
@@ -429,6 +434,12 @@ function makeApp(over: {
       if (over.examStartError) throw over.examStartError
       return over.examStartResult ?? EXAM_START_RESULT
     },
+    saveElearningExamAnswers: async (_db, input) => {
+      examSaveCalls.push(input)
+      order.push('service')
+      if (over.examSaveError) throw over.examSaveError
+      return over.examSaveResult ?? { ...EXAM_START_RESULT, answers: ANSWERS }
+    },
     submitElearningExam: async (_db, input) => {
       examSubmitCalls.push(input)
       order.push('service')
@@ -458,6 +469,7 @@ function makeApp(over: {
     heartbeatCalls,
     ticketCalls,
     examStartCalls,
+    examSaveCalls,
     examSubmitCalls,
     publishCalls,
     learnerCalls,
@@ -586,6 +598,12 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(examStart.body).toEqual({ error: 'not_found' })
     expect(examApp.examStartCalls).toHaveLength(0)
     expect(examApp.readCalls).toBe(0)
+    const examSave = await serve(examApp.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(SUBMIT_BODY)
+    expect(examSave.status).toBe(404)
+    expect(examSave.body).toEqual({ error: 'not_found' })
+    expect(examApp.examSaveCalls).toHaveLength(0)
     const examSubmit = await serve(examApp.app)
       .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
       .send(SUBMIT_BODY)
@@ -679,6 +697,11 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(anonExamStart.status).toBe(401)
     expect(anonExam.examStartCalls).toHaveLength(0)
     expect(anonExam.readCalls).toBe(0)
+    const anonExamSave = await serve(anonExam.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(SUBMIT_BODY)
+    expect(anonExamSave.status).toBe(401)
+    expect(anonExam.examSaveCalls).toHaveLength(0)
     const anonExamSubmit = await serve(anonExam.app)
       .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
       .send(SUBMIT_BODY)
@@ -690,6 +713,11 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(orgExamStart.status).toBe(403)
     expect(noOrgExam.readCalls).toBe(0)
     expect(noOrgExam.examStartCalls).toHaveLength(0)
+    const orgExamSave = await serve(noOrgExam.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(SUBMIT_BODY)
+    expect(orgExamSave.status).toBe(403)
+    expect(noOrgExam.examSaveCalls).toHaveLength(0)
 
     const deniedExam = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
     const rbacExam = await serve(deniedExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
@@ -697,6 +725,16 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(deniedExam.readCalls).toBe(1)
     expect(deniedExam.examStartCalls).toHaveLength(0)
     expect(deniedExam.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac'))
+      .toEqual(['identity', 'org', 'rbac'])
+
+    const deniedExamSave = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
+    const rbacExamSave = await serve(deniedExamSave.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(SUBMIT_BODY)
+    expect(rbacExamSave.status).toBe(403)
+    expect(deniedExamSave.readCalls).toBe(1)
+    expect(deniedExamSave.examSaveCalls).toHaveLength(0)
+    expect(deniedExamSave.order.filter((step) => step === 'identity' || step === 'org' || step === 'rbac'))
       .toEqual(['identity', 'org', 'rbac'])
 
     const anonPublish = makeApp({ viewer: null, org: null, hasAdmin: false, env: FLAG_EXAM_ON })
@@ -841,6 +879,23 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(examStartApp.examStartCalls).toEqual([{ orgId: ORG, userId: ACTOR, itemId: ITEM }])
     expect(examStartApp.readCalls).toBe(1)
     expect(examStartApp.adminCalls).toBe(0)
+
+    const examSaveApp = makeApp({ env: FLAG_EXAM_ON })
+    const examSave = await serve(examSaveApp.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers?userId=evil-user&orgId=evil-org`)
+      .set('x-user-id', 'header-user')
+      .send(SUBMIT_BODY)
+    expect(examSave.status).toBe(200)
+    expect(examSave.body).toEqual({ ...EXAM_START_RESULT, answers: ANSWERS })
+    assertNoSecrets(examSave.body)
+    expect(examSaveApp.examSaveCalls).toEqual([{
+      orgId: ORG,
+      userId: ACTOR,
+      attemptId: ATTEMPT,
+      answers: ANSWERS,
+    }])
+    expect(examSaveApp.readCalls).toBe(1)
+    expect(examSaveApp.adminCalls).toBe(0)
 
     const examSubmitApp = makeApp({ env: FLAG_EXAM_ON })
     const examSubmit = await serve(examSubmitApp.app)
@@ -1005,7 +1060,15 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
       { selected: ANSWERS },
       {},
     ]) {
+      extraExam.examSaveCalls.length = 0
       extraExam.examSubmitCalls.length = 0
+      const saveRes = await serve(extraExam.app)
+        .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+        .send(body)
+      expect(saveRes.status).toBe(400)
+      expect(saveRes.body).toEqual({ error: 'invalid_input' })
+      assertValuesFree(saveRes.body)
+      expect(extraExam.examSaveCalls).toHaveLength(0)
       const res = await serve(extraExam.app)
         .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
         .send(body)
@@ -1014,6 +1077,12 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
       assertValuesFree(res.body)
       expect(extraExam.examSubmitCalls).toHaveLength(0)
     }
+    const badAttempt = await serve(extraExam.app)
+      .put('/api/elearning/exams/attempts/not-a-uuid/answers')
+      .send(SUBMIT_BODY)
+    expect(badAttempt.status).toBe(400)
+    expect(badAttempt.body).toEqual({ error: 'invalid_input' })
+    expect(extraExam.examSaveCalls).toHaveLength(0)
 
     const extraPublish = makeApp({ env: FLAG_EXAM_ON })
     for (const body of [
@@ -1092,6 +1161,15 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
       expect(startRes.body).toEqual({ error: code })
       assertValuesFree(startRes.body)
       expect(startApp.examStartCalls).toHaveLength(1)
+
+      const saveApp = makeApp({ env: FLAG_EXAM_ON, examSaveError: new ElearningExamError(code) })
+      const saveRes = await serve(saveApp.app)
+        .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+        .send(SUBMIT_BODY)
+      expect(saveRes.status).toBe(status)
+      expect(saveRes.body).toEqual({ error: code })
+      assertValuesFree(saveRes.body)
+      expect(saveApp.examSaveCalls).toHaveLength(1)
 
       const submitApp = makeApp({ env: FLAG_EXAM_ON, examSubmitError: new ElearningExamError(code) })
       const submitRes = await serve(submitApp.app)
@@ -1190,6 +1268,12 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(rbacExam.status).toBe(403)
     expect(deniedExam.readCalls).toBe(1)
     expect(deniedExam.examStartCalls).toHaveLength(0)
+    const rbacExamSave = await serve(deniedExam.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .set('content-type', 'application/json')
+      .send(hugeTicket)
+    expect(rbacExamSave.status).toBe(403)
+    expect(deniedExam.examSaveCalls).toHaveLength(0)
 
     const hugePublish = { ...PUBLISH_BODY, title: 'x'.repeat(20 * 1024) }
     const anonPublish = makeApp({ viewer: null, org: null, hasAdmin: false, env: FLAG_EXAM_ON })
@@ -1273,6 +1357,12 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     expect(examApp.examStartCalls).toHaveLength(0)
 
     const hugeAnswers = { answers: { [Q1]: ['x'.repeat(20 * 1024)] } }
+    const examSave = await serve(examApp.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(hugeAnswers)
+    expect(examSave.status).toBe(400)
+    expect(examSave.body).toEqual({ error: 'invalid_input' })
+    expect(examApp.examSaveCalls).toHaveLength(0)
     const examSubmit = await serve(examApp.app)
       .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
       .send(hugeAnswers)
@@ -1297,6 +1387,11 @@ describe('elearning pilot routes (flag-gated assignment + watch)', () => {
     const exam = await serve(ready.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
     expect(exam.status).toBe(404)
     expect(ready.examStartCalls).toHaveLength(0)
+    const examSaveOff = await serve(ready.app)
+      .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
+      .send(SUBMIT_BODY)
+    expect(examSaveOff.status).toBe(404)
+    expect(ready.examSaveCalls).toHaveLength(0)
     const publish = await serve(ready.app).post('/api/elearning/courses/publish').send(PUBLISH_BODY)
     expect(publish.status).toBe(404)
     expect(ready.publishCalls).toHaveLength(0)
