@@ -233,8 +233,8 @@ export const GENERIC_RETRY_MESSAGE = '操作未完成，请重试。'
  * F2 Designer 2.0 form canvas (delta §3.2/§3.3, FB-D1..D4, FB-D8) — the NEW
  * builder, SEPARATE from the extracted flag-OFF `ApprovalFormInlineEditor`
  * fallback. F4 mounts it in `TemplateAuthoringView.vue` behind the existing
- * `approvalCanvasV2` flag (default OFF) — the flag-OFF path still renders only
- * the legacy inline editor, byte-identical. Exercisable standalone (mounted
+ * `approvalCanvasV2` flag (default ON) — the explicit flag-OFF operator rollback renders only
+ * the legacy inline editor. Exercisable standalone (mounted
  * tests + the owned browser harness under `apps/web/verification/`) and, once
  * hydrated with the flag ON, as the production form surface.
  *

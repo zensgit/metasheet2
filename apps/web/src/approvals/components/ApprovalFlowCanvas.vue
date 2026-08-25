@@ -460,7 +460,7 @@ function canvasNodeAccName(nodeKey: string): string {
       </svg>
     </div>
     <p class="template-authoring__hint">
-      在连线上点「+」插入节点；选中节点后在右侧检查器配置与结构调整。Alt+↑/↓ 语义重排。辅助编辑模式保留完整结构列表。
+      在连线上点「+」插入节点；选中节点后在右侧检查器配置与结构调整。Alt+↑/↓ 语义重排。
     </p>
   </div>
 </template>

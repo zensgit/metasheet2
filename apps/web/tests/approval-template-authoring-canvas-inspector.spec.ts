@@ -471,9 +471,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-
     expect(container!.querySelector('[data-testid="approval-canvas-workspace"]')).not.toBeNull()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).toBeNull()
 
@@ -518,9 +515,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-
     const node = container!.querySelector(
       '[data-canvas-node="cond_1"] [data-testid="approval-canvas-node-select"]',
     ) as HTMLElement
@@ -540,9 +534,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_canvas_navigation' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildLinearReorderGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-canvas-toolbar"]')).not.toBeNull()
@@ -595,9 +586,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-
     clickCanvasNode('cond_1')
     await flushUi()
     let inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
@@ -633,9 +621,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('cc_1')
     await flushUi()
 
@@ -649,9 +634,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('fork_1')
     await flushUi()
 
@@ -664,15 +646,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     joinMode.dispatchEvent(new Event('change'))
     await flushUi()
 
-    // Switching to list keeps a still-valid selection; the list surface shows the same draft value.
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
-    await flushUi()
-    const listJoin = container!.querySelector('[data-testid="approval-parallel-join-mode"]') as HTMLSelectElement
-    expect(listJoin.value).toBe('any')
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-    // Selection preserved across list/canvas while the node still exists.
+    // The inspector remains the single editing surface and keeps the same draft value.
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
     expect(inspector?.getAttribute('data-inspector-node')).toBe('fork_1')
     expect(
@@ -725,9 +699,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_mid')
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).not.toBeNull()
@@ -746,9 +717,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
     canManageTemplates.value = false
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('fork_1')
     await flushUi()
@@ -773,9 +741,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('cond_1')
     await flushUi()
     expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')).not.toBeNull()
@@ -798,9 +763,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_inspector_footer' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('cond_1')
     await flushUi()
@@ -825,9 +787,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
 
@@ -845,9 +804,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_inspector_rename' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -888,8 +844,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_inspector_rename_history' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -943,8 +897,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
@@ -970,9 +922,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_inspector_rename_esc' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1006,9 +955,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
@@ -1035,9 +981,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('cc_1')
     await flushUi()
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
@@ -1063,9 +1006,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await flushUi()
     canManageTemplates.value = false
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
     const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
@@ -1090,9 +1030,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
       await flushUi()
-
-      ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-      await flushUi()
       clickCanvasNode('cond_1')
       await flushUi()
 
@@ -1113,7 +1050,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     }
   })
 
-  it('child-owned condition styles apply in list and canvas inspector (scoped CSS ownership)', async () => {
+  it('child-owned condition styles apply in the canvas inspector (scoped CSS ownership)', async () => {
     // Source contract: condition layout rules live on the extracted child, not only the parent.
     // (Parent scoped CSS cannot style the child's markup; this guards against regressing that.)
     expect(CHILD_EDITOR_SOURCE).toMatch(/\.template-authoring__condition-branch\s*\{[\s\S]*?border:\s*1px dashed/)
@@ -1131,40 +1068,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    // Canvas is the ordinary-user default; switch to the retained accessible list surface.
-    ;(container!.querySelector('[data-testid="approval-view-list"]') as HTMLButtonElement).click()
-    await flushUi()
-
-    // List surface: condition branch must receive child-owned dashed border + wrap head.
-    const listBranch = container!.querySelector(
-      '[data-testid="approval-graph-readonly-list"] .template-authoring__condition-branch',
-    ) as HTMLElement | null
-    expect(listBranch).not.toBeNull()
-    const listBranchStyle = getComputedStyle(listBranch!)
-    const listHead = listBranch!.querySelector('.template-authoring__condition-branch-head') as HTMLElement
-    const listHeadStyle = getComputedStyle(listHead)
-    const listRule = listBranch!.querySelector('.template-authoring__condition-rule') as HTMLElement | null
-    // Prefer computed-style proof when jsdom/Vite injects scoped CSS; fall back to class presence.
-    const listBorderApplied =
-      listBranchStyle.borderTopStyle === 'dashed'
-      || listBranchStyle.borderStyle === 'dashed'
-      || listBranchStyle.getPropertyValue('border-top-style') === 'dashed'
-    if (listBorderApplied) {
-      expect(listBorderApplied).toBe(true)
-      expect(listHeadStyle.flexWrap === 'wrap' || listHeadStyle.getPropertyValue('flex-wrap') === 'wrap').toBe(true)
-      if (listRule) {
-        const ruleStyle = getComputedStyle(listRule)
-        expect(ruleStyle.flexWrap === 'wrap' || ruleStyle.getPropertyValue('flex-wrap') === 'wrap').toBe(true)
-      }
-    } else {
-      // jsdom did not apply scoped CSS — source contract above is the ownership proof;
-      // still assert the markup + class contract that the styles target.
-      expect(listBranch!.classList.contains('template-authoring__condition-branch')).toBe(true)
-      expect(listHead.classList.contains('template-authoring__condition-branch-head')).toBe(true)
-    }
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('cond_1')
     await flushUi()
     const inspectorBranch = container!.querySelector(
@@ -1197,9 +1100,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_a1_a2' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1263,9 +1163,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_d1_echo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // approval_high: dept_head. D1 supersedes the incidental "部门主管" with "部门负责人".
@@ -1342,9 +1239,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
 
@@ -1366,8 +1260,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
       setRouteParams({ id: `tpl_a8_${withTabSwitch}` })
       getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
       await mountView()
-      await flushUi()
-      ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
       await flushUi()
       clickCanvasNode('approval_high')
       await flushUi()
@@ -1409,8 +1301,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
     expect((container!.querySelector('[data-testid="approval-canvas-undo"]') as HTMLButtonElement).disabled).toBe(true)
@@ -1433,8 +1323,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_p1_1_regression' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_b: static_role, roleIds:['legal'] — the exact gate Link A fixture.
@@ -1488,8 +1376,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
 
     // app_b: static_role, roleIds:['legal'] at card 0 (the same P1-1 fixture as above).
     clickCanvasNode('app_b')
@@ -1528,8 +1414,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_p1b_remove_clears_cache' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_b: static_role, roleIds:['legal'] at card 0.
@@ -1608,8 +1492,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
     ;(container!.querySelector('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]') as HTMLButtonElement).click()
@@ -1629,8 +1511,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_l7b_absent' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1665,8 +1545,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_d5_routing_hint' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     // app_a: switch its assignee source to form_field_user → reviewer (a real routing driver).
@@ -1712,8 +1590,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
     await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
 
@@ -1751,8 +1627,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_a12' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
     clickCanvasNode('approval_high')
     await flushUi()
@@ -1820,9 +1694,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     await mountView()
     await flushUi()
 
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
-    await flushUi()
-
     clickCanvasNode('app_a')
     await flushUi()
     const select = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
@@ -1843,9 +1714,6 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     setRouteParams({ id: 'tpl_setter_guard_timeout' })
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()
-    await flushUi()
-
-    ;(container!.querySelector('[data-testid="approval-view-canvas"]') as HTMLButtonElement).click()
     await flushUi()
 
     clickCanvasNode('app_b')

@@ -376,16 +376,10 @@
           </div>
         </template>
 
-        <!-- Complex graphs use a canvas for topology and a structured list for node configuration. -->
-        <!-- D-6 view toggle: structured list ⇄ visual canvas (complex graphs only) -->
-        <div v-if="graphReadOnly && canvasV2Enabled" class="template-authoring__view-toggle" data-testid="approval-graph-view-toggle">
-          <el-button size="small" :type="canvasViewMode === 'canvas' ? 'primary' : 'default'" data-testid="approval-view-canvas" @click="canvasViewMode = 'canvas'">画布视图</el-button>
-          <el-button size="small" :type="canvasViewMode === 'list' ? 'primary' : 'default'" data-testid="approval-view-list" @click="canvasViewMode = 'list'">辅助编辑模式</el-button>
-        </div>
-
-        <!-- D-1/D-5 visual canvas + inspector (PR4: extracted shell components; draft/history stay here). -->
+        <!-- Canvas is the ordinary authoring surface; the structured renderer remains only as the
+             explicit flag-off operational rollback for this release. -->
         <div
-          v-if="graphReadOnly && canvasV2Enabled && canvasViewMode === 'canvas'"
+          v-if="graphReadOnly && canvasV2Enabled"
           class="template-authoring__canvas-workspace"
           data-testid="approval-canvas-workspace"
         >
@@ -466,7 +460,7 @@
           </ApprovalCanvasNodeInspector>
         </div>
 
-        <div v-if="graphReadOnly && (!canvasV2Enabled || canvasViewMode === 'list')" data-testid="approval-graph-readonly-list">
+        <div v-if="graphReadOnly && !canvasV2Enabled" data-testid="approval-graph-readonly-list">
           <div
             v-for="node in graphPreviewNodes"
             :key="node.key"
@@ -1873,12 +1867,10 @@ function scrollAuthoringTarget(target: HTMLElement | null, focus = false) {
 async function selectAuthoringSection(section: AuthoringSectionId) {
   activeAuthoringSection.value = section
   // Canvas V2: ordinary-user flow authoring uses one preservedGraph rail. Promote linear steps
-  // when entering the flow step so linear + branch share the canvas surface; list remains the
-  // retained accessible alternative (辅助编辑模式).
+  // when entering the flow step so linear + branch share the canvas surface.
   if (section === 'flow' && canvasV2Enabled.value && !readOnly.value && !draft.value.preservedGraph) {
     draft.value = promoteLinearDraftToGraphAuthoring(draft.value)
     reseedCanvasHistoryFromDraft()
-    canvasViewMode.value = 'canvas'
   }
   await nextTick()
   scrollAuthoringTarget(authoringContentRef.value)
@@ -2788,11 +2780,9 @@ function onInsertHandlerAfter(nodeKey: string): void {
 }
 function onInsertConditionAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertConditionGateway(graph, nodeKey), { kind: 'node', nodeKey })
-  canvasViewMode.value = 'canvas'
 }
 function onInsertParallelAfter(nodeKey: string): void {
   runTopologyOp((graph) => insertParallelGateway(graph, nodeKey), { kind: 'node', nodeKey })
-  canvasViewMode.value = 'canvas'
 }
 function onRemoveNode(nodeKey: string): void {
   runTopologyOp((graph) => removeLinearNode(graph, nodeKey), { kind: 'none' })
@@ -2860,9 +2850,7 @@ function canRemoveNode(node: ApprovalNode): boolean {
 
 // ── D-1/D-5/D-6 visual canvas. Layout and semantic move targets are pure data; drag/drop and
 // Alt+Arrow both invoke the same typed canvas command, so visual position never diverges from the
-// saved graph. Canvas is the ordinary-user default when Canvas V2 is on; list is the retained
-// accessible alternative until S12 equivalence is proven. ──
-const canvasViewMode = ref<'list' | 'canvas'>('canvas')
+// saved graph. Canvas is the ordinary-user surface when Canvas V2 is on. ──
 const selectedCanvasNode = ref<string | null>(null)
 const approvalFlowCanvasRef = ref<{ getViewportEl: () => HTMLElement | null } | null>(null)
 const approvalCanvasInspectorRef = ref<{ scrollIntoView: (opts?: ScrollIntoViewOptions) => void } | null>(null)
@@ -2967,8 +2955,8 @@ watch(canvasEffectiveGraph, (graph) => {
   const movingKey = movingCanvasNode.value
   if (movingKey && linearNodeMoveTargets(graph, movingKey).length === 0) cancelCanvasNodeMove()
 })
-watch([canvasViewMode, canvasLayout], async ([mode]) => {
-  if (mode !== 'canvas') return
+watch(canvasLayout, async () => {
+  if (!canvasV2Enabled.value || !graphReadOnly.value) return
   await nextTick()
   syncCanvasViewportState()
 })

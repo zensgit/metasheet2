@@ -306,8 +306,8 @@ describe('G5-C S11 100-node operable layout', () => {
   })
 })
 
-describe('G5-C S12 accessible alternative retained on authoring surface', () => {
-  it('TemplateAuthoringView keeps list alternative, undo/redo, canvas-first, edge insert, palette; no node clusters', () => {
+describe('G5-C Canvas-only ordinary authoring surface', () => {
+  it('TemplateAuthoringView keeps rollback list flag-gated, with undo/redo, edge insert, palette; no node clusters', () => {
     const src = readFileSync(VIEW_PATH, 'utf8')
     const canvasShell = readFileSync(
       join(__dirname, '../src/approvals/components/ApprovalFlowCanvas.vue'),
@@ -323,12 +323,13 @@ describe('G5-C S12 accessible alternative retained on authoring surface', () => 
       join(__dirname, '../src/approvals/components/ApprovalFormInlineEditor.vue'),
       'utf8',
     )
-    expect(src).toMatch(/data-testid="approval-view-list"/)
-    expect(src).toMatch(/辅助编辑模式/)
+    expect(src).not.toMatch(/data-testid="approval-view-list"/)
+    expect(src).not.toMatch(/辅助编辑模式/)
+    expect(src).toMatch(/graphReadOnly && !canvasV2Enabled/)
     // Undo/redo + edge insert live on extracted ApprovalFlowCanvas (PR4).
     expect(canvasShell).toMatch(/data-testid="approval-canvas-undo"/)
     expect(canvasShell).toMatch(/data-testid="approval-canvas-redo"/)
-    expect(src).toMatch(/const canvasViewMode = ref<'list' \| 'canvas'>\('canvas'\)/)
+    expect(src).not.toMatch(/canvasViewMode/)
     expect(src).toMatch(/applyCanvasCommandToSession|undoAuthoringSession/)
     expect(src).toMatch(/promoteLinearDraftToGraphAuthoring/)
     expect(canvasShell).toMatch(/data-testid="approval-canvas-edge-insert"/)
