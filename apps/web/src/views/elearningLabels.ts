@@ -7,9 +7,12 @@
 // helpers below for strings with scores / ids / error codes.
 //
 // NOT translated (user/data values): course titles, question prompts,
-// option texts (including true/false option drafts that become publish
-// payload), deadlines, ids, URLs, and backend error codes. Error codes
-// and HTTP statuses are interpolated raw.
+// already-entered choice option texts, deadlines, ids, URLs, and backend
+// error codes. Error codes and HTTP statuses are interpolated raw.
+// True/false option drafts are UI-owned defaults (not user data) and are
+// localized when the question type is switched to true_false.
+
+import type { ElearningLearnerVideoStatus } from '../services/elearning'
 
 export type ElearningLabelKey =
   // --- Learner chrome ---
@@ -42,6 +45,8 @@ export type ElearningLabelKey =
   | 'admin.removeOption'
   | 'admin.addOption'
   | 'admin.addQuestion'
+  | 'admin.trueOption'
+  | 'admin.falseOption'
   | 'admin.passScore'
   | 'admin.maxAttempts'
   | 'admin.targetUser'
@@ -113,6 +118,8 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'admin.removeOption': { en: 'Remove option', zh: '删除选项' },
   'admin.addOption': { en: 'Add option', zh: '添加选项' },
   'admin.addQuestion': { en: 'Add question', zh: '添加题目' },
+  'admin.trueOption': { en: 'True', zh: '正确' },
+  'admin.falseOption': { en: 'False', zh: '错误' },
   'admin.passScore': { en: 'Passing score', zh: '及格分' },
   'admin.maxAttempts': { en: 'Maximum attempts', zh: '最大尝试次数' },
   'admin.targetUser': { en: 'Assignee (user ID)', zh: '指派对象（用户 ID）' },
@@ -198,10 +205,27 @@ export function elearningLabel(key: ElearningLabelKey, isZh: boolean): string {
 
 // --- Interpolation helpers (not keys) ---
 
-export function elearningVideoStatusLabel(status: string, isZh: boolean): string {
-  if (status === 'completed') return elearningLabel('status.completed', isZh)
-  if (status === 'in_progress') return elearningLabel('video.inProgress', isZh)
-  return elearningLabel('video.notStarted', isZh)
+export function elearningVideoStatusLabel(
+  status: ElearningLearnerVideoStatus,
+  isZh: boolean,
+): string {
+  switch (status) {
+    case 'completed':
+      return elearningLabel('status.completed', isZh)
+    case 'in_progress':
+      return elearningLabel('video.inProgress', isZh)
+    case 'not_started':
+      return elearningLabel('video.notStarted', isZh)
+  }
+}
+
+export type ElearningTrueFalseOption = { id: 'true' | 'false'; text: string }
+
+export function elearningTrueFalseOptions(isZh: boolean): ElearningTrueFalseOption[] {
+  return [
+    { id: 'true', text: elearningLabel('admin.trueOption', isZh) },
+    { id: 'false', text: elearningLabel('admin.falseOption', isZh) },
+  ]
 }
 
 export function elearningFailure(code: string, status: number, isZh: boolean): string {

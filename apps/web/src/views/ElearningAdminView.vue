@@ -241,6 +241,7 @@ import {
   elearningFailure,
   elearningLabel,
   elearningOptionAria,
+  elearningTrueFalseOptions,
 } from './elearningLabels'
 
 const { isZh } = useLocale()
@@ -258,11 +259,6 @@ interface QuestionDraft {
   correctOptionIds: string[]
   points: number
 }
-
-const TRUE_FALSE_OPTIONS: OptionDraft[] = [
-  { id: 'true', text: '正确' },
-  { id: 'false', text: '错误' },
-]
 
 const title = ref('')
 const file = ref<File | null>(null)
@@ -330,7 +326,7 @@ function onQuestionTypeChange(index: number, raw: string): void {
   if (raw !== 'single_choice' && raw !== 'multiple_choice' && raw !== 'true_false') return
   question.questionType = raw
   if (raw === 'true_false') {
-    question.options = TRUE_FALSE_OPTIONS.map((option) => ({ ...option }))
+    question.options = elearningTrueFalseOptions(isZh.value).map((option) => ({ ...option }))
     question.correctOptionIds = question.correctOptionIds.filter((id) => id === 'true' || id === 'false').slice(0, 1)
     return
   }

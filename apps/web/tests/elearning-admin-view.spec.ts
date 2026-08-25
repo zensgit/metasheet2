@@ -222,6 +222,85 @@ describe('ElearningAdminView', () => {
     expect(h.publish).not.toHaveBeenCalled()
   })
 
+  function questionOptionTexts(root: HTMLElement, qIndex: number): string[] {
+    return [...root.querySelectorAll(`[data-testid="elearning-admin-question-${qIndex}"] .elearning-option input[type="text"]`)]
+      .map((el) => (el as HTMLInputElement).value)
+  }
+
+  function switchQuestionType(root: HTMLElement, qIndex: number, value: string): void {
+    fillInput(root.querySelector(`[data-testid="elearning-admin-question-${qIndex}"] select`) as HTMLSelectElement, value)
+  }
+
+  it('uses English True/False defaults on true_false switch, publishes them, and preserves other option text', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await fillMinimum(root)
+    ;(root.querySelector('[data-testid="elearning-admin-add-question"]') as HTMLButtonElement).click()
+    await flushUi()
+    fillInput(root.querySelector('[data-testid="elearning-admin-prompt-1"]') as HTMLTextAreaElement, 'Second prompt')
+    const secondOptions = root.querySelectorAll('[data-testid="elearning-admin-question-1"] .elearning-option input[type="text"]')
+    fillInput(secondOptions[0] as HTMLInputElement, 'Alpha')
+    fillInput(secondOptions[1] as HTMLInputElement, 'Beta')
+    const secondCorrect = root.querySelector('[data-testid="elearning-admin-question-1"] input[type="radio"]') as HTMLInputElement
+    secondCorrect.checked = true
+    secondCorrect.dispatchEvent(new Event('change', { bubbles: true }))
+
+    switchQuestionType(root, 0, 'true_false')
+    await flushUi()
+    expect(questionOptionTexts(root, 0)).toEqual(['True', 'False'])
+    expect(questionOptionTexts(root, 1)).toEqual(['Alpha', 'Beta'])
+
+    const trueCorrect = root.querySelector('[data-testid="elearning-admin-question-0"] input[value="true"]') as HTMLInputElement
+    trueCorrect.checked = true
+    trueCorrect.dispatchEvent(new Event('change', { bubbles: true }))
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    const publishBody = h.publish.mock.calls[0]?.[0] as {
+      questions: Array<{ questionType: string; options: Array<{ id: string; text: string }> }>
+    }
+    expect(publishBody.questions[0]).toMatchObject({
+      questionType: 'true_false',
+      options: [
+        { id: 'true', text: 'True' },
+        { id: 'false', text: 'False' },
+      ],
+    })
+    expect(publishBody.questions[1]).toMatchObject({
+      options: [
+        { id: 'a', text: 'Alpha' },
+        { id: 'b', text: 'Beta' },
+      ],
+    })
+  })
+
+  it('uses Chinese 正确/错误 defaults on true_false switch and publishes them', async () => {
+    useLocale().setLocale('zh-CN')
+    const root = mountView()
+    await fillMinimum(root)
+    switchQuestionType(root, 0, 'true_false')
+    await flushUi()
+    expect(questionOptionTexts(root, 0)).toEqual(['正确', '错误'])
+    expect(questionOptionTexts(root, 0)).not.toEqual(['True', 'False'])
+
+    const trueCorrect = root.querySelector('[data-testid="elearning-admin-question-0"] input[value="true"]') as HTMLInputElement
+    trueCorrect.checked = true
+    trueCorrect.dispatchEvent(new Event('change', { bubbles: true }))
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    const publishBody = h.publish.mock.calls[0]?.[0] as {
+      questions: Array<{ questionType: string; options: Array<{ id: string; text: string }> }>
+    }
+    expect(publishBody.questions[0]).toMatchObject({
+      questionType: 'true_false',
+      options: [
+        { id: 'true', text: '正确' },
+        { id: 'false', text: '错误' },
+      ],
+    })
+  })
+
   it('publishes then direct-assigns with retained UUID request and source keys', async () => {
     const root = mountView()
     await fillMinimum(root)

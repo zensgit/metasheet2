@@ -29,10 +29,14 @@ vi.mock('../src/services/elearning', async () => {
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   elearningPlaybackSourceUrl,
+  type ElearningLearnerVideoStatus,
 } from '../src/services/elearning'
 import ElearningLearnerView from '../src/views/ElearningLearnerView.vue'
+import { elearningVideoStatusLabel } from '../src/views/elearningLabels'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
+const COURSE_PROGRESS = '12121212-1212-4121-8121-121212121212'
+const COURSE_DONE = '13131313-1313-4131-8131-131313131313'
 const VERSION = '22222222-2222-4222-8222-222222222222'
 const VIDEO = '33333333-3333-4333-8333-333333333333'
 const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
@@ -254,6 +258,69 @@ describe('ElearningLearnerView', () => {
     expect(root.textContent).not.toContain('Learning Center')
     expect(root.textContent).not.toContain('Start learning')
     expect(root.textContent).not.toContain('Not started')
+  })
+
+  it('renders each closed video status without a silent unknown fallback', async () => {
+    const statuses: ElearningLearnerVideoStatus[] = ['not_started', 'in_progress', 'completed']
+    expect(statuses.map((status) => elearningVideoStatusLabel(status, false))).toEqual([
+      'Not started',
+      'In progress',
+      'Completed',
+    ])
+    expect(statuses.map((status) => elearningVideoStatusLabel(status, true))).toEqual([
+      '未开始',
+      '学习中',
+      '已完成',
+    ])
+
+    h.list.mockResolvedValue({
+      courses: [
+        course({
+          video: {
+            itemId: VIDEO,
+            durationMs: 5000,
+            status: 'not_started',
+            effectiveMs: 0,
+            maxPositionMs: 0,
+            completedAt: null,
+          },
+        }),
+        course({
+          courseId: COURSE_PROGRESS,
+          video: {
+            itemId: VIDEO,
+            durationMs: 5000,
+            status: 'in_progress',
+            effectiveMs: 1000,
+            maxPositionMs: 1000,
+            completedAt: null,
+          },
+        }),
+        course({
+          courseId: COURSE_DONE,
+          video: {
+            itemId: VIDEO,
+            durationMs: 5000,
+            status: 'completed',
+            effectiveMs: 4500,
+            maxPositionMs: 5000,
+            completedAt: '2026-01-03T04:05:06.000Z',
+          },
+        }),
+      ],
+    })
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)?.textContent).toContain('Not started')
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE_PROGRESS}"]`)?.textContent).toContain('In progress')
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE_DONE}"]`)?.textContent).toContain('Completed')
+
+    useLocale().setLocale('zh-CN')
+    await nextTick()
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)?.textContent).toContain('未开始')
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE_PROGRESS}"]`)?.textContent).toContain('学习中')
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE_DONE}"]`)?.textContent).toContain('已完成')
   })
 
   it('starts authorized watch+ticket, sends monotonic playing heartbeats, and a final playing beat on ended', async () => {
