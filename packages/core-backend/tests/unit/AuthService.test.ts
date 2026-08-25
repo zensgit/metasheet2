@@ -55,7 +55,7 @@ vi.mock('../../src/security/SecretManager', () => ({
   secretManager: { get: secretManagerMocks.get }
 }))
 
-import { AuthService, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError } from '../../src/auth/AuthService'
+import { AuthService, DEFAULT_SESSION_ORG_ID, requestedTenantIdForLogin, USER_ROLE_ASSIGNMENT_RETRY_LIMIT, UserRoleAssignmentRecoveryBusyError } from '../../src/auth/AuthService'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
 import { censusFile } from './lib/recovery-census-recorder'
 
@@ -809,6 +809,56 @@ describe('AuthService.login', () => {
     expect(result).toBeNull()
     expect(sessionMocks.createUserSession).not.toHaveBeenCalled()
   })
+
+  it('does not treat a persisted default tenant hint as a chosen org (F1)', async () => {
+    const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+    poolMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'multi@example.com',
+          username: 'multi',
+          mobile: null,
+          name: 'Multi',
+          role: 'user',
+          permissions: ['attendance:read'],
+          password_hash: passwordHash,
+          activation_status: 'activated',
+          local_password_set: true,
+          is_active: true,
+          must_change_password: false,
+          created_at: new Date('2026-04-18T00:00:00.000Z'),
+          updated_at: new Date('2026-04-18T00:00:00.000Z'),
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ org_id: DEFAULT_SESSION_ORG_ID }, { org_id: 'tenant_42' }],
+      })
+      .mockResolvedValue({ rows: [] })
+    jwtMocks.verify.mockReturnValue({
+      userId: 'user-1',
+      email: 'multi@example.com',
+      role: 'user',
+      exp: Math.floor(new Date('2026-04-19T00:00:00.000Z').getTime() / 1000),
+      iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
+      sid: 'session-1',
+    })
+
+    const auth = new AuthService()
+    const result = await auth.login('multi@example.com', 'WelcomePass9A', {
+      tenantId: DEFAULT_SESSION_ORG_ID,
+    })
+
+    expect(result?.user.tenantId).toBeUndefined()
+    const membershipSql = String(poolMocks.query.mock.calls[1]?.[0] ?? '')
+    expect(membershipSql).toContain('LIMIT 2')
+    expect(membershipSql).not.toContain('uo.org_id = $2')
+    expect(jwtMocks.sign).toHaveBeenCalledWith(
+      expect.not.objectContaining({ tenantId: DEFAULT_SESSION_ORG_ID }),
+      expect.any(String),
+      expect.any(Object),
+    )
+  })
 })
 
 describe('AuthService.resolveSessionTenantId', () => {
@@ -842,6 +892,53 @@ describe('AuthService.resolveSessionTenantId', () => {
     const auth = new AuthService()
     await expect(auth.resolveSessionTenantId('user-1', 'tenant_42')).resolves.toBe('tenant_42')
     await expect(auth.resolveSessionTenantId('user-1', 'tenant_other')).resolves.toBeUndefined()
+  })
+
+  it('still accepts an explicit requested default membership (switcher / token claim, not login)', async () => {
+    poolMocks.query.mockResolvedValue({ rows: [{ org_id: DEFAULT_SESSION_ORG_ID }] })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1', DEFAULT_SESSION_ORG_ID)).resolves.toBe(DEFAULT_SESSION_ORG_ID)
+    expect(poolMocks.query).toHaveBeenCalledWith(expect.stringContaining('uo.org_id = $2'), ['user-1', DEFAULT_SESSION_ORG_ID])
+  })
+
+  it('does not invent a silent org when a multi-membership user supplies no usable claim', async () => {
+    poolMocks.query.mockResolvedValue({
+      rows: [{ org_id: DEFAULT_SESSION_ORG_ID }, { org_id: 'tenant_42' }],
+    })
+
+    const auth = new AuthService()
+    await expect(auth.resolveSessionTenantId('user-1')).resolves.toBeUndefined()
+    await expect(auth.resolveSessionTenantId('user-1', requestedTenantIdForLogin(DEFAULT_SESSION_ORG_ID))).resolves.toBeUndefined()
+  })
+
+  it('lists active memberships without inventing a current org', async () => {
+    poolMocks.query.mockResolvedValue({
+      rows: [{ org_id: DEFAULT_SESSION_ORG_ID }, { org_id: 'tenant_42' }],
+    })
+
+    const auth = new AuthService()
+    await expect(auth.listActiveMembershipOrgIds('user-1')).resolves.toEqual([DEFAULT_SESSION_ORG_ID, 'tenant_42'])
+  })
+})
+
+describe('requestedTenantIdForLogin (D6 R1 / F1)', () => {
+  it('treats a persisted default hint as unspecified, not a chosen org', () => {
+    expect(requestedTenantIdForLogin(DEFAULT_SESSION_ORG_ID)).toBeUndefined()
+    expect(requestedTenantIdForLogin(' default ')).toBeUndefined()
+    expect(requestedTenantIdForLogin('')).toBeUndefined()
+    expect(requestedTenantIdForLogin(null)).toBeUndefined()
+    expect(requestedTenantIdForLogin(undefined)).toBeUndefined()
+  })
+
+  it('keeps an explicit non-default request as a choice', () => {
+    expect(requestedTenantIdForLogin('tenant_42')).toBe('tenant_42')
+    expect(requestedTenantIdForLogin(' tenant_42 ')).toBe('tenant_42')
+  })
+
+  it('does not enable ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1', () => {
+    expect(process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1).not.toBe('shadow')
+    expect(process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1).not.toBe('enforce')
   })
 })
 

@@ -24,6 +24,9 @@ import type { AliasQueryClient } from './login-alias-service'
 import { assignUserRoles } from '../rbac/role-assignment'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
+import { requestedTenantIdForLogin } from './session-tenant-request'
+
+export { DEFAULT_SESSION_ORG_ID, requestedTenantIdForLogin } from './session-tenant-request'
 
 export interface User {
   id: string
@@ -356,7 +359,7 @@ export class AuthService {
       }
 
       const sessionId = crypto.randomUUID()
-      const tenantId = await this.resolveSessionTenantId(user.id, options.tenantId)
+      const tenantId = await this.resolveSessionTenantId(user.id, requestedTenantIdForLogin(options.tenantId))
       const token = this.createToken(tenantId ? { ...user, tenantId } : user, { sid: sessionId })
       const payload = this.readTokenPayload(token)
       if (payload?.exp) {
@@ -422,6 +425,28 @@ export class AuthService {
     } catch (error) {
       this.logger.warn('Session tenant resolution failed', error instanceof Error ? error : undefined)
       return undefined
+    }
+  }
+
+  async listActiveMembershipOrgIds(userId: string): Promise<string[]> {
+    try {
+      const pool = poolManager.get()
+      const result = await pool.query(
+        `SELECT uo.org_id
+         FROM user_orgs uo
+         JOIN users u ON u.id = uo.user_id
+         WHERE uo.user_id = $1
+           AND uo.is_active = true
+           AND u.is_active = true
+         ORDER BY uo.org_id ASC`,
+        [userId],
+      )
+      return result.rows
+        .map((row: { org_id?: unknown }) => row.org_id)
+        .filter((orgId: unknown): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+    } catch (error) {
+      this.logger.warn('Session org membership listing failed', error instanceof Error ? error : undefined)
+      return []
     }
   }
 

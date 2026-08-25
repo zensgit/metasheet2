@@ -1,4 +1,8 @@
 import { getApiBase } from '../utils/api'
+import {
+  isDefaultSessionOrgId,
+  isExplicitSessionOrgChoice,
+} from '../utils/sessionOrgChoice'
 
 const TOKEN_KEYS = ['auth_token', 'jwt', 'devToken'] as const
 const USER_SNAPSHOT_KEYS = ['user_permissions', 'user_roles'] as const
@@ -139,7 +143,18 @@ export function useAuth() {
   }
 
   function persistTenantHint(tenantId: string | null): void {
-    if (!tenantId || typeof localStorage === 'undefined') return
+    if (typeof localStorage === 'undefined') return
+    // F1: a minted/persisted `'default'` is not a user choice. Do not store it
+    // as the injected hint that login later sends as x-tenant-id.
+    if (!tenantId || isDefaultSessionOrgId(tenantId)) {
+      if (isDefaultSessionOrgId(tenantId)) {
+        clearStoredTenantHint()
+      }
+      return
+    }
+    // An explicit switcher choice is stored separately. Do not alias it onto
+    // the injected hint (that hint also seeds the attendance history Org ID box).
+    if (isExplicitSessionOrgChoice(tenantId)) return
     try {
       localStorage.setItem('tenantId', tenantId)
       localStorage.setItem('workspaceId', tenantId)
@@ -172,12 +187,15 @@ export function useAuth() {
     return readStoredToken()
   }
 
-  function setToken(token: string) {
+  function setToken(token: string, options: { persistInjectedTenantHint?: boolean } = {}) {
     resetSessionBootstrap()
     try {
       if (typeof localStorage === 'undefined') return
       localStorage.setItem('auth_token', token)
       localStorage.setItem('jwt', token)
+      if (options.persistInjectedTenantHint === false) {
+        return
+      }
       clearStoredTenantHint()
       persistTenantHint(extractTenantHint(parseJwtPayload(token)) || readLocationTenantHint())
     } catch (err) {

@@ -70,6 +70,30 @@ describe('apiFetch', () => {
     expect(requestHeaders.get('x-tenant-id')).toBe('tenant_42')
   })
 
+  it('does not send a persisted default hint on login (F1)', async () => {
+    store.tenantId = 'default'
+
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ identifier: 'admin@example.com', password: 'secret' }),
+      suppressUnauthorizedRedirect: true,
+    })
+
+    const loginHeaders = fetchMock.mock.calls[0]?.[1]?.headers as Headers
+    expect(loginHeaders.get('x-tenant-id')).toBeNull()
+
+    await apiFetch('/api/attendance/records', { suppressUnauthorizedRedirect: true })
+    const laterHeaders = fetchMock.mock.calls[1]?.[1]?.headers as Headers
+    expect(laterHeaders.get('x-tenant-id')).toBe('default')
+  })
+
   it('clears tenant hints together with auth state', () => {
     store.auth_token = 'jwt-token'
     store.tenantId = 'tenant_42'

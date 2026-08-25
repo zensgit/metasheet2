@@ -3,6 +3,7 @@
  */
 
 import { normalizePreLoginRedirect, shouldSkipPreLoginRedirectQuery } from './authRedirect'
+import { tenantHintForLoginRequest } from './sessionOrgChoice'
 
 // Vite environment type declaration
 declare global {
@@ -110,7 +111,7 @@ function extractTenantHintFromPayload(payload: Record<string, unknown> | null): 
   return typeof raw === 'string' ? raw.trim() : ''
 }
 
-function getStoredTenantHint(): string {
+export function getStoredTenantHint(): string {
   if (typeof localStorage === 'undefined') return ''
   for (const key of TENANT_HINT_KEYS) {
     const value = localStorage.getItem(key)
@@ -234,6 +235,11 @@ export async function apiFetch(
     ...(requestOptions.headers || {}),
   })
   for (const name of omitHeaders) headers.delete(name)
+  // F1: login (and other unauthenticated auth routes) must not treat a persisted
+  // `'default'` hint as a chosen org. Authenticated requests keep today's header.
+  if (isAuthRoute(path) && !tenantHintForLoginRequest(headers.get('x-tenant-id'))) {
+    headers.delete('x-tenant-id')
+  }
   const body = requestOptions.body
   const isFormData = typeof FormData !== 'undefined' && body instanceof FormData
   if (!isFormData && body != null && !headers.has('Content-Type')) {

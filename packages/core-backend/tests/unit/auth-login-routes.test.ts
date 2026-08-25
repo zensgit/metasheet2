@@ -9,6 +9,7 @@ const authServiceMocks = vi.hoisted(() => ({
   createToken: vi.fn(),
   readTokenPayload: vi.fn(),
   resolveSessionTenantId: vi.fn(),
+  listActiveMembershipOrgIds: vi.fn(),
 }))
 
 const inviteTokenMocks = vi.hoisted(() => ({
@@ -240,6 +241,8 @@ describe('auth login routes', () => {
     authServiceMocks.readTokenPayload.mockReset()
     authServiceMocks.resolveSessionTenantId.mockReset()
     authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+    authServiceMocks.listActiveMembershipOrgIds.mockReset()
+    authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue([])
     inviteTokenMocks.verifyInviteToken.mockReset()
     pgMocks.query.mockReset()
     bcryptMocks.hash.mockReset()
@@ -658,6 +661,86 @@ describe('auth login routes', () => {
     expect(sessionRegistryMocks.listUserSessions).toHaveBeenCalledWith('user-1')
     expect((response.body as Record<string, any>).data.currentSessionId).toBe('session-current')
     expect((response.body as Record<string, any>).data.items).toHaveLength(1)
+  })
+
+  it('lists session orgs without inventing a current org when the token has no claim', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+    })
+    authServiceMocks.listActiveMembershipOrgIds.mockResolvedValue(['default', 'tenant_42'])
+
+    const response = await invokeRoute('get', '/session-orgs', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.listActiveMembershipOrgIds).toHaveBeenCalledWith('user-1')
+    expect((response.body as Record<string, any>).data).toEqual({
+      orgs: ['default', 'tenant_42'],
+      currentOrgId: null,
+    })
+  })
+
+  it('remints the session for an explicit switcher choice, including default', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+    })
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue('default')
+    authServiceMocks.createToken.mockReturnValue('switched-token')
+    authServiceMocks.readTokenPayload.mockReturnValue({
+      sid: 'session-current',
+      exp: Math.floor(new Date('2026-03-14T08:00:00.000Z').getTime() / 1000),
+    })
+
+    const response = await invokeRoute('post', '/session-org', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: { orgId: 'default' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(authServiceMocks.resolveSessionTenantId).toHaveBeenCalledWith('user-1', 'default')
+    expect(authServiceMocks.createToken).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: 'default' }),
+      { sid: 'session-current' },
+    )
+    expect((response.body as Record<string, any>).data.token).toBe('switched-token')
+    expect((response.body as Record<string, any>).data.currentOrgId).toBe('default')
+    expect(process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1).not.toBe('shadow')
+    expect(process.env.ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1).not.toBe('enforce')
+  })
+
+  it('refuses an explicit switch to an org the user does not belong to', async () => {
+    authServiceMocks.verifyToken.mockResolvedValue({
+      id: 'user-1',
+      email: 'manager@example.com',
+      name: 'Manager',
+      role: 'user',
+      permissions: ['attendance:read'],
+    })
+    authServiceMocks.resolveSessionTenantId.mockResolvedValue(undefined)
+
+    const response = await invokeRoute('post', '/session-org', {
+      headers: {
+        authorization: 'Bearer live-token',
+      },
+      body: { orgId: 'tenant_other' },
+    })
+
+    expect(response.statusCode).toBe(403)
+    expect((response.body as Record<string, any>).code).toBe('SESSION_ORG_NOT_MEMBER')
+    expect(authServiceMocks.createToken).not.toHaveBeenCalled()
   })
 
   it('revokes one owned session from the self-service session center', async () => {

@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto'
 import * as bcrypt from 'bcryptjs'
 import jwt, { type SignOptions } from 'jsonwebtoken'
 import { authService, type User } from '../auth/AuthService'
+import { requestedTenantIdForLogin } from '../auth/session-tenant-request'
 import { buildOnboardingPacket, getAccessPreset } from '../auth/access-presets'
 import {
   bindDingTalkIdentityToUser,
@@ -624,7 +625,7 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
 
 async function issueAuthSessionToken(user: User, req: Request): Promise<string> {
   const sessionId = randomUUID()
-  const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
+  const tenantId = await authService.resolveSessionTenantId(user.id, requestedTenantIdForLogin(resolveRequestTenantId(req)))
   const tokenUser = tenantId ? { ...user, tenantId } : user
   const token = authService.createToken(tokenUser, { sid: sessionId })
   const payload = authService.readTokenPayload(token)
@@ -803,7 +804,7 @@ authRouter.post('/register', registerRateLimiter, async (req: Request, res: Resp
     }
 
     // 注册成功，自动生成token
-    const tenantId = await authService.resolveSessionTenantId(user.id, resolveRequestTenantId(req))
+    const tenantId = await authService.resolveSessionTenantId(user.id, requestedTenantIdForLogin(resolveRequestTenantId(req)))
     const token = authService.createToken(tenantId ? { ...user, tenantId } : user)
     logger.info(`Successful registration for ${cleanEmail} from ${ip}`)
 
@@ -1193,6 +1194,101 @@ authRouter.post('/logout', async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       error: 'Internal server error'
+    })
+  }
+})
+
+/**
+ * Canonical-Org session memberships for the current user (D6 R1).
+ * Attendance consumes this list; it does not own login or punch resolution.
+ */
+authRouter.get('/session-orgs', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { user } = authResult
+
+    const orgs = await authService.listActiveMembershipOrgIds(user.id)
+    const currentOrgId = typeof user.tenantId === 'string' && user.tenantId.trim().length > 0
+      ? user.tenantId.trim()
+      : null
+
+    return res.json({
+      success: true,
+      data: {
+        orgs,
+        currentOrgId,
+      },
+    })
+  } catch (error) {
+    logger.error('List session orgs error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+    })
+  }
+})
+
+/**
+ * Explicit session-org switch. Membership-checked, including `'default'`.
+ * Distinct from login's persisted-hint path (F1): this is a user choice.
+ */
+authRouter.post('/session-org', async (req: Request, res: Response) => {
+  try {
+    const authResult = await requireAuthenticatedUser(req, res)
+    if (!authResult) return
+    const { token, user } = authResult
+
+    const rawOrgId = req.body && typeof req.body === 'object'
+      ? (req.body as Record<string, unknown>).orgId
+      : undefined
+    const orgId = typeof rawOrgId === 'string' ? rawOrgId.trim() : ''
+    if (!orgId) {
+      return res.status(400).json({
+        success: false,
+        error: 'orgId is required',
+        code: 'SESSION_ORG_REQUIRED',
+      })
+    }
+
+    const chosen = await authService.resolveSessionTenantId(user.id, orgId)
+    if (!chosen) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not a member of the requested organization',
+        code: 'SESSION_ORG_NOT_MEMBER',
+      })
+    }
+
+    const payload = authService.readTokenPayload(token)
+    const sessionId = typeof payload?.sid === 'string' && payload.sid.trim().length > 0
+      ? payload.sid.trim()
+      : randomUUID()
+    const tokenUser = { ...user, tenantId: chosen }
+    const nextToken = authService.createToken(tokenUser, { sid: sessionId })
+    const nextPayload = authService.readTokenPayload(nextToken)
+    if (nextPayload?.exp) {
+      await createUserSession(user.id, {
+        sessionId,
+        expiresAt: new Date(nextPayload.exp * 1000).toISOString(),
+        ipAddress: getClientIP(req),
+        userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+      })
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        token: nextToken,
+        user: tokenUser,
+        currentOrgId: chosen,
+      },
+    })
+  } catch (error) {
+    logger.error('Switch session org error', error instanceof Error ? error : undefined)
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error',
     })
   }
 })

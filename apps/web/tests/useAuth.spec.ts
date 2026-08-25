@@ -173,6 +173,27 @@ describe('useAuth', () => {
     expect(store.user_roles).toBe(JSON.stringify(['admin']))
   })
 
+  it('does not persist a default tenant hint as a chosen org (F1)', () => {
+    const payload = { tenantId: 'default' }
+    const token = `header.${btoa(JSON.stringify(payload))}.sig`
+    const { setToken } = useAuth()
+    setToken(token)
+
+    expect(store.auth_token).toBe(token)
+    expect(store.tenantId).toBeUndefined()
+    expect(store.workspaceId).toBeUndefined()
+  })
+
+  it('persists a non-default token tenant as an injected hint', () => {
+    const payload = { tenantId: 'tenant_42' }
+    const token = `header.${btoa(JSON.stringify(payload))}.sig`
+    const { setToken } = useAuth()
+    setToken(token)
+
+    expect(store.tenantId).toBe('tenant_42')
+    expect(store.workspaceId).toBe('tenant_42')
+  })
+
   it('clears stale tokens when bootstrap session receives 401', async () => {
     store.auth_token = 'stale-token'
     store.user_roles = JSON.stringify(['admin'])
