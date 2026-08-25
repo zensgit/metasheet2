@@ -229,8 +229,8 @@ test('MODE + TARGET + POSTURE are validated against fixed choices BEFORE the ssh
   const preSsh = workflow.slice(0, sshIdx)
   assert.match(
     preSsh,
-    /case\s+"\$MODE"\s+in\s*\n\s*predeploy-flags\|postdeploy-full\)/,
-    'MODE must be validated against exactly {predeploy-flags,postdeploy-full} BEFORE it reaches the ssh command line',
+    /case\s+"\$MODE"\s+in\s*\n\s*predeploy-flags\|postdeploy-full\|l1-postgres-window\)/,
+    'MODE must be validated against exactly {predeploy-flags,postdeploy-full,l1-postgres-window} BEFORE it reaches the ssh command line',
   )
   assert.match(
     preSsh,
@@ -460,6 +460,9 @@ case "$cmd" in
     exit "\${STUB_COMPOSE_EXIT:-0}" ;;
   ps)
     printf '%s\\n' "$STUB_PS_NAMES"; exit 0 ;;
+  logs)
+    printf '%s\\n' "$STUB_PG_LOGS"
+    exit "\${STUB_PG_LOGS_EXIT:-0}" ;;
   exec)
     if [ "\${1:-}" = "-i" ]; then shift; fi
     container="\${1:-}"; shift || true
@@ -482,7 +485,9 @@ case "$cmd" in
     esac ;;
   inspect)
     fmt="$*"
-    if printf '%s' "$fmt" | grep -q 'config_files'; then printf '%s\\n' "$STUB_CONFIG_FILES"
+    if printf '%s' "$fmt" | grep -q 'State.StartedAt'; then printf '%s\\n' "$STUB_PG_STARTED_AT"
+    elif printf '%s' "$fmt" | grep -q 'LogConfig.Type'; then printf '%s\\n' "$STUB_PG_LOG_DRIVER"
+    elif printf '%s' "$fmt" | grep -q 'config_files'; then printf '%s\\n' "$STUB_CONFIG_FILES"
     elif printf '%s' "$fmt" | grep -q 'working_dir'; then printf '%s\\n' "$STUB_WORKING_DIR"
     else printf '\\n'; fi
     exit 0 ;;
@@ -517,6 +522,23 @@ const CLEAN_COMPOSE_CONFIG = JSON.stringify({
   },
 })
 
+const AUTHORITY_BUSY_MARKER = 'METASHEET_RECOVERY_AUTHORITY_BUSY'
+const batteryMarkers = (timestamp) =>
+  Array.from(
+    { length: 11 },
+    (_, index) => `${timestamp} ERROR: ${AUTHORITY_BUSY_MARKER} control=${index + 1}`,
+  )
+const BATTERY_MARKER_TIMESTAMPS = [
+  '2026-08-24T10:25:20.000000000Z',
+  '2026-08-25T10:27:00.000000000Z',
+  '2026-08-25T13:14:50.000000000Z',
+  '2026-08-25T14:54:40.000000000Z',
+]
+const CLEAN_L1_POSTGRES_LOGS = [
+  ...BATTERY_MARKER_TIMESTAMPS.flatMap(batteryMarkers),
+  '2026-08-25T12:00:00.000000000Z RAW_LOG_VALUE_MUST_NOT_ESCAPE',
+].join('\n')
+
 let containmentLogSeq = 0
 function runRemote({ target, mode, posture = 'inert', stub = {} }) {
   const logPath = join(containmentStubBase, `log-${containmentLogSeq++}.txt`)
@@ -528,7 +550,10 @@ function runRemote({ target, mode, posture = 'inert', stub = {} }) {
     TARGET: target,
     MODE: mode,
     POSTURE: posture,
-    STUB_PS_NAMES: 'metasheet-backend',
+    STUB_PS_NAMES:
+      mode === 'l1-postgres-window'
+        ? 'metasheet-staging-postgres'
+        : 'metasheet-backend',
     STUB_RUNNING_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
     STUB_COMPOSE_FLAG_SNAPSHOT: CLEAN_FLAG_SNAPSHOT,
     STUB_HELPER_SHA: schemaHelperSha[1],
@@ -540,6 +565,10 @@ function runRemote({ target, mode, posture = 'inert', stub = {} }) {
     STUB_COMPOSE_CONFIG_JSON: CLEAN_COMPOSE_CONFIG,
     STUB_COMPOSE_STDERR: '',
     STUB_COMPOSE_EXIT: '0',
+    STUB_PG_STARTED_AT: '2026-08-20T00:00:00.000000000Z',
+    STUB_PG_LOG_DRIVER: 'json-file',
+    STUB_PG_LOGS: CLEAN_L1_POSTGRES_LOGS,
+    STUB_PG_LOGS_EXIT: '0',
     ...stub,
   }
   const result = spawnSync('bash', [remoteScriptPath], { env, encoding: 'utf8' })
@@ -773,13 +802,46 @@ test('containment local pre-SSH validation FAILS CLOSED for illegal MODE/TARGET/
     false,
     'illegal POSTURE must NEVER reach ssh',
   )
+
+  const l1Witness = runLocal({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+  })
+  assert.equal(l1Witness.status, 0)
+  assert.ok(l1Witness.sshCalled, 'the exact staging L1 witness tuple must reach ssh')
+
+  const l1Production = runLocal({
+    target: 'production',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+  })
+  assert.notEqual(l1Production.status, 0)
+  assert.equal(
+    l1Production.sshCalled,
+    false,
+    'the L1 PostgreSQL witness must reject production before ssh',
+  )
+
+  const l1WrongPosture = runLocal({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'inert',
+  })
+  assert.notEqual(l1WrongPosture.status, 0)
+  assert.equal(
+    l1WrongPosture.sshCalled,
+    false,
+    'the L1 PostgreSQL witness must reject every posture except l1-armed before ssh',
+  )
 })
 
 // A containment PASS *verdict* is always mode-tagged: `PASS (predeploy-flags)`
 // or `PASS (postdeploy-full)`. The DB helper emits its own `VERDICT: PASS -`
 // line (echoed prefixed with `schema:` in full mode), so FAIL scenarios must
 // assert on the mode-tagged form, never on a bare /VERDICT: PASS/.
-const NO_CONTAINMENT_PASS = /VERDICT: PASS \((?:predeploy-flags|postdeploy-full)\)/
+const NO_CONTAINMENT_PASS =
+  /VERDICT: PASS \((?:predeploy-flags|postdeploy-full|l1-postgres-window)\)/
 
 test('containment behavior 1: predeploy-flags + all clean → PASS, helper NOT invoked, both flag legs run', () => {
   const { status, stdout, log } = runRemote({
@@ -960,6 +1022,173 @@ test('containment behavior 7: postdeploy-full still fails on a running-env flag=
   )
 })
 
+test('L1 PostgreSQL witness: four retained battery controls and no outside anomaly produce a values-free PASS', () => {
+  const result = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+  })
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /positive_controls=4\/4/)
+  assert.match(result.stdout, /battery_marker_counts=11,11,11,11/)
+  assert.match(result.stdout, /authority_busy_total=44/)
+  assert.match(result.stdout, /authority_busy_constructed=44/)
+  assert.match(result.stdout, /authority_busy_outside_constructed=0/)
+  assert.match(result.stdout, /deadlocks=0/)
+  assert.match(result.stdout, /parse_errors=0/)
+  assert.match(result.stdout, /VERDICT: PASS \(l1-postgres-window\)/)
+  assert.doesNotMatch(
+    `${result.stdout}\n${result.stderr}`,
+    /RAW_LOG_VALUE_MUST_NOT_ESCAPE/,
+    'raw PostgreSQL log content must never cross the values-free evidence boundary',
+  )
+  assert.match(
+    result.log,
+    /logs --timestamps --since 2026-08-24T10:25:17\.641000000Z --until 2026-08-25T14:55:51\.000000001Z metasheet-staging-postgres/,
+  )
+  assert.doesNotMatch(result.log, /compose|exec /)
+})
+
+test('L1 PostgreSQL witness: every one of the 11 markers in every battery window is load-bearing', () => {
+  for (const windowIndex of BATTERY_MARKER_TIMESTAMPS.keys()) {
+    const lines = CLEAN_L1_POSTGRES_LOGS.split('\n')
+    lines.splice(windowIndex * 11, 1)
+    const result = runRemote({
+      target: 'staging',
+      mode: 'l1-postgres-window',
+      posture: 'l1-armed',
+      stub: { STUB_PG_LOGS: lines.join('\n') },
+    })
+    const expectedCounts = [11, 11, 11, 11]
+    expectedCounts[windowIndex] = 10
+
+    assert.equal(result.status, 2)
+    assert.match(
+      result.stdout,
+      new RegExp(`battery_marker_counts=${expectedCounts.join(',')}`),
+    )
+    assert.match(result.stdout, /positive_controls=3\/4/)
+    assert.match(result.stdout, /VERDICT: FAIL/)
+    assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+  }
+})
+
+test('L1 PostgreSQL witness: an extra marker in any battery window cannot hide as constructed traffic', () => {
+  for (const [windowIndex, timestamp] of BATTERY_MARKER_TIMESTAMPS.entries()) {
+    const result = runRemote({
+      target: 'staging',
+      mode: 'l1-postgres-window',
+      posture: 'l1-armed',
+      stub: {
+        STUB_PG_LOGS: `${CLEAN_L1_POSTGRES_LOGS}\n${timestamp} ERROR: ${AUTHORITY_BUSY_MARKER}`,
+      },
+    })
+    const expectedCounts = [11, 11, 11, 11]
+    expectedCounts[windowIndex] = 12
+
+    assert.equal(result.status, 2)
+    assert.match(
+      result.stdout,
+      new RegExp(`battery_marker_counts=${expectedCounts.join(',')}`),
+    )
+    assert.match(result.stdout, /positive_controls=3\/4/)
+    assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+  }
+})
+
+test('L1 PostgreSQL witness: an authority marker outside constructed windows fails closed', () => {
+  const result = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+    stub: {
+      STUB_PG_LOGS: `${CLEAN_L1_POSTGRES_LOGS}\n2026-08-25T12:30:00.000000000Z ERROR: ${AUTHORITY_BUSY_MARKER}`,
+    },
+  })
+
+  assert.equal(result.status, 2)
+  assert.match(result.stdout, /authority_busy_outside_constructed=1/)
+  assert.match(result.stdout, /VERDICT: FAIL/)
+  assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+})
+
+test('L1 PostgreSQL witness: any deadlock in the observation window fails closed', () => {
+  const result = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+    stub: {
+      STUB_PG_LOGS: `${CLEAN_L1_POSTGRES_LOGS}\n2026-08-25T12:30:00.000000000Z ERROR: deadlock detected`,
+    },
+  })
+
+  assert.equal(result.status, 2)
+  assert.match(result.stdout, /deadlocks=1/)
+  assert.match(result.stdout, /VERDICT: FAIL/)
+  assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+})
+
+test('L1 PostgreSQL witness: late container start, malformed lines, and log-read failure are not evidence', () => {
+  for (const startedAt of [
+    '2026-08-24T10:25:17.100000000Z',
+    '2026-08-24T10:25:18.000000000Z',
+  ]) {
+    const lateStart = runRemote({
+      target: 'staging',
+      mode: 'l1-postgres-window',
+      posture: 'l1-armed',
+      stub: { STUB_PG_STARTED_AT: startedAt },
+    })
+    assert.equal(lateStart.status, 2)
+    assert.match(lateStart.stdout, /did not start strictly before the observation window opened/)
+    assert.doesNotMatch(lateStart.stdout, NO_CONTAINMENT_PASS)
+  }
+
+  const malformed = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+    stub: { STUB_PG_LOGS: `${CLEAN_L1_POSTGRES_LOGS}\nno-timestamp` },
+  })
+  assert.equal(malformed.status, 2)
+  assert.match(malformed.stdout, /parse_errors=1/)
+  assert.doesNotMatch(malformed.stdout, NO_CONTAINMENT_PASS)
+
+  const unreadable = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+    stub: { STUB_PG_LOGS_EXIT: '1' },
+  })
+  assert.equal(unreadable.status, 2)
+  assert.match(unreadable.stdout, /PostgreSQL log observation failed/)
+  assert.doesNotMatch(unreadable.stdout, NO_CONTAINMENT_PASS)
+
+  const unorderedDriver = runRemote({
+    target: 'staging',
+    mode: 'l1-postgres-window',
+    posture: 'l1-armed',
+    stub: { STUB_PG_LOG_DRIVER: 'journald' },
+  })
+  assert.equal(unorderedDriver.status, 2)
+  assert.match(unorderedDriver.stdout, /log driver does not provide the required ordered-retention contract/)
+  assert.doesNotMatch(unorderedDriver.stdout, NO_CONTAINMENT_PASS)
+})
+
+test('L1 PostgreSQL witness: production and a non-L1 posture fail before any observation', () => {
+  for (const [target, posture] of [
+    ['production', 'l1-armed'],
+    ['staging', 'inert'],
+  ]) {
+    const result = runRemote({ target, mode: 'l1-postgres-window', posture })
+    assert.equal(result.status, 2)
+    assert.match(result.stdout, /requires target=staging and posture=l1-armed/)
+    assert.equal(result.log.trim(), '', 'invalid witness scope must run no docker command')
+    assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+  }
+})
+
 const POSTURE_FLAGS = {
   inert: [],
   'l1-armed': [],
@@ -1112,23 +1341,24 @@ test('target=both observes both exact containers and runs the full helper twice'
   )
 })
 
-test('containment structure: the two mode PASS sentinels are DISTINCT (a predeploy PASS can never read as a full PASS)', () => {
+test('containment structure: all three mode PASS sentinels are distinct', () => {
   const passSentinels = [
     ...workflowText.matchAll(/echo "(VERDICT: PASS \([^)]*\)[^"]*)"/g),
   ].map((match) => match[1])
   assert.equal(
     passSentinels.length,
-    2,
-    'exactly two mode-tagged PASS sentinels (predeploy-flags + postdeploy-full)',
+    3,
+    'exactly three mode-tagged PASS sentinels',
   )
-  assert.notEqual(
-    passSentinels[0],
-    passSentinels[1],
-    'a predeploy PASS sentinel must never be identical to the full PASS sentinel',
+  assert.equal(
+    new Set(passSentinels).size,
+    3,
+    'each mode must emit a distinct PASS sentinel',
   )
   const joined = passSentinels.join('\n')
   assert.match(joined, /PASS \(predeploy-flags\)/)
   assert.match(joined, /PASS \(postdeploy-full\)/)
+  assert.match(joined, /PASS \(l1-postgres-window\)/)
   // The distinction must be substantive: full asserts the schema WAS verified,
   // predeploy explicitly states it was NOT.
   assert.ok(

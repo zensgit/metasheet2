@@ -9,12 +9,15 @@ name: Multitable Recovery-Flag Containment Check
 # READ-ONLY: ssh + `docker ps` + `docker exec <backend> node` flag classification + catalog-only database reads +
 # `docker inspect` + `docker compose config`. No writes, no restarts, no config edits.
 #
-# TWO MODES (`mode` fixed choice):
+# THREE MODES (`mode` fixed choice):
 #   • predeploy-flags — Leg 1 (running env) + Leg 3 (next-restart compose) FLAG checks only; Leg 2
 #     (live-DB schema) is skipped. Works on the CURRENTLY deployed image, BEFORE #4654's schema helper +
 #     trigger migrations exist. Distinct PASS sentinel explicitly states the schema was not verified.
 #   • postdeploy-full — the above PLUS Leg 2 (schema helper: exact disabled/armed state for all 9 triggers,
 #     6 function fingerprints, no meta_links.foreign_record_id FK). Requires the matching deployed image.
+#   • l1-postgres-window — a fixed, staging-only, values-free PostgreSQL server-log witness for the
+#     closed L1 observation window. It proves log retention with four constructed battery windows, then
+#     fails if any recovery-authority marker appears outside those windows or any deadlock is observed.
 #   The schema leg is gated by `if [ "$MODE" = "postdeploy-full" ]`: predeploy-flags skips it entirely, and
 #   postdeploy-full cannot bypass it (that guard is the only path to the schema check).
 #
@@ -67,10 +70,10 @@ on:
         options: [staging, production, both]
         default: both
       mode:
-        description: 'predeploy-flags = exact running/next-restart flag set only, DB schema explicitly not verified. postdeploy-full = also verifies the live-DB recovery schema against the posture-selected disabled/armed trigger state. Fixed choices only.'
+        description: 'predeploy-flags = exact running/next-restart flag set only. postdeploy-full = also verifies live-DB recovery schema. l1-postgres-window = fixed staging-only L1 PostgreSQL log witness. Fixed choices only.'
         required: true
         type: choice
-        options: [predeploy-flags, postdeploy-full]
+        options: [predeploy-flags, postdeploy-full, l1-postgres-window]
         default: postdeploy-full
       posture:
         description: 'Exact ladder posture to witness. inert is the default/rollback state; later choices are staging/production rung states. Fixed choices only.'
@@ -151,10 +154,10 @@ jobs:
           # Validate `mode` is EXACTLY one of the fixed choices before it reaches the ssh command line
           # (same injection-boundary discipline as target; the unmapped default fails closed).
           case "$MODE" in
-            predeploy-flags|postdeploy-full)
+            predeploy-flags|postdeploy-full|l1-postgres-window)
               ;;
             *)
-              echo "::error::unexpected mode '${MODE}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              echo "::error::unexpected mode '${MODE}' (expected predeploy-flags|postdeploy-full|l1-postgres-window) — refusing to proceed"
               exit 1
               ;;
           esac
@@ -171,6 +174,15 @@ jobs:
               exit 1
               ;;
           esac
+
+          # The historical L1 log witness is intentionally narrower than the general containment
+          # modes. Keep the production boundary and rung identity outside the remote command entirely.
+          if [ "$MODE" = "l1-postgres-window" ]; then
+            if [ "$TARGET" != "staging" ] || [ "$POSTURE" != "l1-armed" ]; then
+              echo "::error::l1-postgres-window requires target=staging and posture=l1-armed — refusing to proceed"
+              exit 1
+            fi
+          fi
 
           echo "posture='${POSTURE}'"
 
@@ -218,14 +230,126 @@ jobs:
           # Re-validate MODE on the remote side (defense in depth, mirrors the TARGET re-mapping above);
           # anything outside the fixed set fails closed rather than falling through to a mode-less run.
           case "${MODE:-}" in
-            predeploy-flags|postdeploy-full)
+            predeploy-flags|postdeploy-full|l1-postgres-window)
               ;;
             *)
-              echo "VERDICT: FAIL — unexpected mode '${MODE:-}' (expected predeploy-flags|postdeploy-full) — refusing to proceed"
+              echo "VERDICT: FAIL — unexpected mode '${MODE:-}' (expected predeploy-flags|postdeploy-full|l1-postgres-window) — refusing to proceed"
               exit 2
               ;;
           esac
           echo "mode='${MODE}'"
+
+          # One-time L1 observation witness. All bounds, positive-control windows, marker text, and
+          # container identity are reviewed constants; no caller value can widen the log read. Raw log
+          # lines never leave the host. PostgreSQL logs every authority-busy raise, while four known
+          # battery runs prove the retained log spans the full observation window.
+          if [ "$MODE" = "l1-postgres-window" ]; then
+            if [ "$TARGET" != "staging" ] || [ "$POSTURE" != "l1-armed" ]; then
+              echo "VERDICT: FAIL — l1-postgres-window requires target=staging and posture=l1-armed"
+              exit 2
+            fi
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "VERDICT: FAIL — docker not available on host (observation broken)"
+              exit 2
+            fi
+
+            PG_CONTAINER="metasheet-staging-postgres"
+            OBS_START="2026-08-24T10:25:17.641000000Z"
+            OBS_END="2026-08-25T14:55:51.000000000Z"
+            DOCKER_LOG_UNTIL="2026-08-25T14:55:51.000000001Z"
+            export LC_ALL=C
+            running_names=$(docker ps --format '{{.Names}}')
+            if ! printf '%s\n' "$running_names" | grep -qxF "$PG_CONTAINER"; then
+              echo "VERDICT: FAIL (positive control) — expected staging PostgreSQL container is not running"
+              exit 2
+            fi
+
+            started_at=$(docker inspect "$PG_CONTAINER" --format '{{.State.StartedAt}}' 2>/dev/null || true)
+            started_at_seconds=$(printf '%s\n' "$started_at" | sed -E 's/\.[0-9]+Z$/Z/')
+            if ! printf '%s\n' "$started_at_seconds" | grep -Eq '^20[0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$'; then
+              echo "VERDICT: FAIL — PostgreSQL container start time is unavailable or malformed"
+              exit 2
+            fi
+            if [[ "$started_at_seconds" > "2026-08-24T10:25:17Z" || "$started_at_seconds" = "2026-08-24T10:25:17Z" ]]; then
+              echo "VERDICT: FAIL — PostgreSQL container did not start strictly before the observation window opened"
+              exit 2
+            fi
+
+            log_driver=$(docker inspect "$PG_CONTAINER" --format '{{.HostConfig.LogConfig.Type}}' 2>/dev/null || true)
+            case "$log_driver" in
+              json-file|local)
+                ;;
+              *)
+                echo "VERDICT: FAIL — PostgreSQL container log driver does not provide the required ordered-retention contract"
+                exit 2
+                ;;
+            esac
+
+            pg_log=$(mktemp)
+            pg_summary=$(mktemp)
+            cleanup_l1_pg_witness() { rm -f "$pg_log" "$pg_summary"; }
+            trap cleanup_l1_pg_witness EXIT
+            if ! docker logs --timestamps --since "$OBS_START" --until "$DOCKER_LOG_UNTIL" "$PG_CONTAINER" >"$pg_log" 2>&1; then
+              echo "VERDICT: FAIL — PostgreSQL log observation failed"
+              exit 2
+            fi
+
+            if ! awk \
+              -v obs_start="$OBS_START" \
+              -v obs_end="$OBS_END" \
+              -v log_driver="$log_driver" \
+              -v marker="METASHEET_RECOVERY_AUTHORITY_BUSY" \
+              -v w1_start="2026-08-24T10:25:17.641000000Z" -v w1_end="2026-08-24T10:25:40.999999999Z" \
+              -v w2_start="2026-08-25T10:26:50.000000000Z" -v w2_end="2026-08-25T10:27:25.999999999Z" \
+              -v w3_start="2026-08-25T13:14:38.000000000Z" -v w3_end="2026-08-25T13:15:15.999999999Z" \
+              -v w4_start="2026-08-25T14:54:30.000000000Z" -v w4_end="2026-08-25T14:55:05.999999999Z" '
+              function normalize_timestamp(raw, base, fraction) {
+                if (raw !~ /^20[0-9][0-9]-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?Z$/) return ""
+                base = raw
+                sub(/(\.[0-9]+)?Z$/, "", base)
+                fraction = raw
+                if (fraction ~ /\./) {
+                  sub(/^.*\./, "", fraction)
+                  sub(/Z$/, "", fraction)
+                  if (length(fraction) > 9) return ""
+                } else {
+                  fraction = ""
+                }
+                while (length(fraction) < 9) fraction = fraction "0"
+                return base "." fraction "Z"
+              }
+              function in_window(value, start, finish) { return value >= start && value <= finish }
+              {
+                timestamp = normalize_timestamp($1)
+                if (timestamp == "") { parse_errors++; next }
+                if (timestamp < obs_start || timestamp > obs_end) next
+                lowered = tolower($0)
+                if (index($0, marker) > 0) {
+                  marker_total++
+                  constructed = 0
+                  if (in_window(timestamp, w1_start, w1_end)) { w1++; constructed = 1 }
+                  if (in_window(timestamp, w2_start, w2_end)) { w2++; constructed = 1 }
+                  if (in_window(timestamp, w3_start, w3_end)) { w3++; constructed = 1 }
+                  if (in_window(timestamp, w4_start, w4_end)) { w4++; constructed = 1 }
+                  if (constructed) marker_constructed++; else marker_outside++
+                }
+                if (index(lowered, "deadlock detected") > 0) deadlocks++
+              }
+              END {
+                controls = (w1 == 11) + (w2 == 11) + (w3 == 11) + (w4 == 11)
+                printf "window_start=%s\nwindow_end=%s\nlog_driver=%s\nbattery_marker_counts=%d,%d,%d,%d\npositive_controls=%d/4\nauthority_busy_total=%d\nauthority_busy_constructed=%d\nauthority_busy_outside_constructed=%d\ndeadlocks=%d\nparse_errors=%d\n", obs_start, obs_end, log_driver, w1, w2, w3, w4, controls, marker_total, marker_constructed, marker_outside, deadlocks, parse_errors
+                if (parse_errors > 0 || controls != 4 || marker_outside != 0 || deadlocks != 0) exit 2
+              }
+            ' "$pg_log" >"$pg_summary"; then
+              cat "$pg_summary"
+              echo "VERDICT: FAIL — L1 PostgreSQL observation window is incomplete or contains a non-constructed recovery anomaly"
+              exit 2
+            fi
+
+            cat "$pg_summary"
+            echo "VERDICT: PASS (l1-postgres-window) — ordered PostgreSQL logs contain exactly 11 markers in each constructed battery window; no authority-busy marker occurred outside them and no deadlock was observed"
+            exit 0
+          fi
 
           # Exact rung contract. No caller-supplied list reaches the comparison logic: each posture maps
           # to a hard-coded trigger state and exact active-flag set. l2-checkpoint is intentionally
