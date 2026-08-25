@@ -7,7 +7,7 @@
   This component owns LAYOUT, DISPLAY, and re-emitting real parent actions —
   it fetches nothing, holds no route/API state, and duplicates no write path.
   API calls, route sync, and the punch/request handlers stay in
-  AttendanceView.vue (charter §6.2 table, "暂留父层"). The heavy historical
+    AttendanceView.vue (charter §6.2 table, "暂留父层"). The heavy historical
   surfaces (summary, calendar, adjustment/request list, request report) are
   NOT re-authored here — they remain parent-owned markup, passed in through
   the `historyFilters` slot, so this first extraction does not touch their
@@ -17,41 +17,54 @@
   (lock §5, §4.3 item 6) — AttendanceView.vue keeps both as siblings right
   after this component so the reports-only sections between them (zero DOM
   nodes in overview mode) do not break that adjacency.
+
+  Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
+  DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
+
+  Owner lock (2026-08-24): first-viewport IA is frozen.
+  Desktop: punch|待办 + compact 申请 footer; 常用 full-width below.
+  Mobile: punch → 待办+申请 footer → 常用.
+  缺卡 row uses the makeup 面性 icon; never the character 缺.
+  No employee 自定义. Admin-only icon settings. Do not restyle further.
 -->
 <template>
   <div class="attendance-ew">
+    <div class="attendance-ew__greeting" data-attendance-overview-greeting>
+      <div class="attendance-ew__greeting-copy">
+        <h2 class="attendance-ew__hello">{{ greetingText }}</h2>
+        <p class="attendance-ew__hello-sub">{{ greetingSubline }}</p>
+      </div>
+    </div>
+
+    <!--
+      Owner lock 2026-08-24 + lock §7: desktop punch | 待办+申请 footer;
+      常用 is a full-width band below. Status banner stays in the today
+      column. History filters stay below this primary row.
+    -->
+    <div class="attendance-ew__primary" data-attendance-overview-primary>
     <div class="attendance-ew__today">
       <div class="attendance__hero-punch" data-testid="attendance-hero-punch">
-        <div class="attendance__hero-clock">
-          <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
-          <span class="attendance__hero-date">{{ heroClockDate }}</span>
-        </div>
-        <div class="attendance__actions attendance__hero-actions">
-          <button
-            class="attendance__btn attendance__btn--primary attendance__btn--hero"
-            :disabled="punching"
-            @click="$emit('punch', 'check_in')"
-          >
-            {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
-          </button>
-          <button
-            class="attendance__btn attendance__btn--hero-secondary"
-            :disabled="punching"
-            @click="$emit('punch', 'check_out')"
-          >
-            {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
-          </button>
-        </div>
-        <div v-if="heroTimeline" class="attendance__hero-timeline" data-testid="attendance-hero-timeline">
-          <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTimeline.checkIn }">
-            <span class="attendance__hero-timeline-dot" />
-            {{ tr('In', '上班') }} {{ heroTimeline.checkIn ?? '--:--' }}
-          </span>
-          <span class="attendance__hero-timeline-rail" />
-          <span class="attendance__hero-timeline-node" :class="{ 'attendance__hero-timeline-node--pending': !heroTimeline.checkOut }">
-            <span class="attendance__hero-timeline-dot" />
-            {{ tr('Out', '下班') }} {{ heroTimeline.checkOut ?? '--:--' }}
-          </span>
+        <div class="attendance-ew__hero-top">
+          <div class="attendance__hero-clock">
+            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
+            <p class="attendance-ew__clock-status">{{ clockStatusLine }}</p>
+          </div>
+          <div class="attendance__actions attendance__hero-actions">
+            <button
+              class="attendance__btn attendance__btn--primary attendance__btn--hero"
+              :disabled="punching"
+              @click="$emit('punch', 'check_in')"
+            >
+              {{ punching ? tr('Working...', '处理中...') : tr('Check In', '上班打卡') }}
+            </button>
+            <button
+              class="attendance__btn attendance__btn--hero-secondary"
+              :disabled="punching"
+              @click="$emit('punch', 'check_out')"
+            >
+              {{ punching ? tr('Working...', '处理中...') : tr('Check Out', '下班打卡') }}
+            </button>
+          </div>
         </div>
         <div v-if="punchOutdoorNoteRequired" class="attendance__punch-note" data-attendance-punch-note-form>
           <label class="attendance__field" for="attendance-punch-outdoor-note">
@@ -75,20 +88,47 @@
             {{ punching ? tr('Working...', '处理中...') : tr('Retry punch with note', '补充备注后重试打卡') }}
           </button>
         </div>
-      </div>
 
-      <div class="attendance__card attendance__card--selfservice attendance-ew__today-status" data-selfservice-card="status">
-        <div class="attendance__requests-header">
-          <div>
-            <h3>{{ tr('My status', '我的状态') }}</h3>
-            <small class="attendance__field-hint">
-              {{
-                workbenchFocusDateLabel
-                  ? tr(`Focus date: ${workbenchFocusDateLabel}`, `关注日期：${workbenchFocusDateLabel}`)
-                  : tr('Focus date: current range', '关注日期：当前区间')
-              }}
-            </small>
+        <div
+          class="attendance-ew__metrics"
+          data-selfservice-card="status"
+        >
+          <div
+            v-if="workbenchRecordStatus"
+            class="attendance__summary attendance__summary--workbench attendance__summary--stat"
+            :class="{ 'attendance__hero-timeline': Boolean(heroTimeline) }"
+            :data-testid="heroTimeline ? 'attendance-hero-timeline' : undefined"
+          >
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <span>{{ tr('In', '上班') }}</span>
+              <strong
+                class="attendance__summary-value attendance__hero-timeline-node"
+                :class="{
+                  'attendance__hero-timeline-node--pending': !metricInTime || metricInTime === '--:--',
+                  'attendance__summary-value--ok': Boolean(metricInTime && metricInTime !== '--:--'),
+                }"
+              >{{ metricInTime }}</strong>
+            </div>
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <span>{{ tr('Out', '下班') }}</span>
+              <strong
+                class="attendance__summary-value attendance__hero-timeline-node"
+                :class="{ 'attendance__hero-timeline-node--pending': !metricOutTime || metricOutTime === '--:--' }"
+              >{{ metricOutTime }}</strong>
+            </div>
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <span>{{ tr("Today's hours", '今日工时') }}</span>
+              <strong class="attendance__summary-value">{{ workDurationLabel }}</strong>
+            </div>
+            <div class="attendance__summary-item attendance__summary-item--stat">
+              <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
+              <strong
+                class="attendance__summary-value"
+                :class="{ 'attendance__summary-value--warning': workbenchHasLateEarly }"
+              >{{ lateEarlyDisplay }}</strong>
+            </div>
           </div>
+          <p class="attendance__selfservice-lead">{{ workbenchStatusDescription }}</p>
           <span
             v-if="workbenchRecordStatus"
             class="attendance__status-chip"
@@ -96,61 +136,43 @@
           >
             {{ formatStatus(workbenchRecordStatus) }}
           </span>
+          <small
+            v-if="refreshingAfterPunch"
+            class="attendance__field-hint"
+            data-testid="attendance-refreshing-indicator"
+          >
+            {{ tr('Updating...', '更新中...') }}
+          </small>
+          <p
+            v-if="selfServiceNeedsSetupHint"
+            class="attendance__field-hint attendance__field-hint--strong"
+            data-selfservice-setup-hint
+          >
+            {{ selfServiceSetupFollowupHint }}
+          </p>
         </div>
-        <p class="attendance__selfservice-lead">{{ workbenchStatusDescription }}</p>
-        <small
-          v-if="refreshingAfterPunch"
-          class="attendance__field-hint"
-          data-testid="attendance-refreshing-indicator"
-        >
-          {{ tr('Updating...', '更新中...') }}
-        </small>
-        <div class="attendance__summary attendance__summary--workbench attendance__summary--stat">
-          <div class="attendance__summary-item attendance__summary-item--stat">
-            <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>
-            <span>{{ tr('Latest punch', '最近一次打卡') }}</span>
-            <strong class="attendance__summary-value">{{ workbenchLatestPunchLabel }}</strong>
-          </div>
-          <div class="attendance__summary-item attendance__summary-item--stat">
-            <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 2h4M12 2v4" /><circle cx="12" cy="14" r="7" /><path d="M12 14l2.5-2.5" /></svg>
-            <span>{{ tr('Work minutes', '工时分钟') }}</span>
-            <strong class="attendance__summary-value">{{ workbenchWorkMinutes }}</strong>
-          </div>
-          <div class="attendance__summary-item attendance__summary-item--stat">
-            <svg class="attendance__summary-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l10 18H2z" /><path d="M12 10v5M12 18.5v.5" /></svg>
-            <span>{{ tr('Late / Early', '迟到 / 早退') }}</span>
-            <strong class="attendance__summary-value" :class="{ 'attendance__summary-value--warning': workbenchHasLateEarly }">{{ workbenchLateEarlyLabel }}</strong>
-          </div>
-        </div>
-        <p
-          v-if="selfServiceNeedsSetupHint"
-          class="attendance__field-hint attendance__field-hint--strong"
-          data-selfservice-setup-hint
-        >
-          {{ selfServiceSetupFollowupHint }}
-        </p>
       </div>
-    </div>
 
-    <div v-if="statusMessage" class="attendance__status-block">
-      <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
-        {{ statusMessage }}
-      </span>
-      <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
-        {{ tr('Code', '代码') }}: {{ statusCode }}
-      </span>
-      <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
-        {{ statusHint }}
-      </span>
-      <button
-        v-if="statusActionLabel"
-        class="attendance__btn attendance__btn--inline"
-        type="button"
-        :disabled="statusActionBusy"
-        @click="$emit('statusAction')"
-      >
-        {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
-      </button>
+      <div v-if="statusMessage" class="attendance__status-block">
+        <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
+          {{ statusMessage }}
+        </span>
+        <span v-if="statusCode" class="attendance__field-hint attendance__field-hint--error">
+          {{ tr('Code', '代码') }}: {{ statusCode }}
+        </span>
+        <span v-if="statusHint" class="attendance__field-hint" :class="{ 'attendance__field-hint--error': statusKind === 'error' }">
+          {{ statusHint }}
+        </span>
+        <button
+          v-if="statusActionLabel"
+          class="attendance__btn attendance__btn--inline"
+          type="button"
+          :disabled="statusActionBusy"
+          @click="$emit('statusAction')"
+        >
+          {{ statusActionBusy ? tr('Working...', '处理中...') : statusActionLabel }}
+        </button>
+      </div>
     </div>
 
     <div
@@ -158,147 +180,144 @@
       data-attendance-overview-attention
       :data-attendance-overview-attention-key="attentionItem.key"
     >
-      <strong>{{ attentionItem.title }}</strong>
-      <p>{{ attentionItem.detail }}</p>
-      <button
-        v-if="attentionItem.action && attentionItem.actionLabel"
-        class="attendance__btn attendance__btn--primary"
-        type="button"
-        data-attendance-overview-attention-action
-        @click="$emit('selfServiceAction', attentionItem.action)"
+      <div class="attendance-ew__todo-head">
+        <h3>{{ tr("Today's to-do", '今日待办') }}</h3>
+        <span
+          v-if="attentionItem.key !== 'all_clear'"
+          class="attendance-ew__todo-badge"
+        >1</span>
+      </div>
+      <div
+        v-if="attentionItem.key === 'all_clear'"
+        class="attendance-ew__todo-empty"
       >
-        {{ attentionItem.actionLabel }}
-      </button>
-    </div>
+        <strong>{{ attentionItem.title }}</strong>
+        <p>{{ attentionItem.detail }}</p>
+      </div>
+      <div v-else class="attendance-ew__todo-row">
+        <span
+          class="attendance-ew__todo-mark attendance-ew__todo-mark--makeup"
+          aria-hidden="true"
+        >
+          <AttendanceEmployeeCommonIcon name="clock-plus" />
+        </span>
+        <div class="attendance-ew__todo-copy">
+          <strong>{{ attentionItem.title }}</strong>
+          <p>{{ attentionItem.detail }}</p>
+        </div>
+        <button
+          v-if="attentionItem.action && attentionItem.actionLabel"
+          class="attendance-ew__todo-link"
+          type="button"
+          data-attendance-overview-attention-action
+          @click="$emit('selfServiceAction', attentionItem.action)"
+        >
+          {{ tr('Go handle', '去处理') }}
+        </button>
+      </div>
 
-    <div class="attendance-ew__tools">
-      <div class="attendance__card attendance__card--selfservice" data-selfservice-card="requests">
-        <div class="attendance__requests-header">
+      <div class="attendance-ew__request-footer" data-selfservice-card="requests">
+        <div class="attendance-ew__request-footer-row">
           <div>
-            <h3>{{ tr('My request status', '我的申请状态') }}</h3>
-            <small class="attendance__field-hint">
+            <h3>{{ tr('My applications', '我的申请') }}</h3>
+            <small v-if="hasRequestBody" class="attendance__field-hint">
               {{ tr('Summarizes the current request backlog from the visible date range.', '汇总当前可见日期区间内的申请处理状态。') }}
             </small>
           </div>
-          <strong>{{ requestsTotal }}</strong>
+          <strong v-if="hasRequestBody">{{ requestsTotal }}</strong>
+          <span v-else class="attendance-ew__request-empty">{{ tr('No pending approvals', '暂无待审批') }}</span>
         </div>
-        <div class="attendance__chip-list">
-          <span
-            v-for="item in selfServiceRequestStatusItems"
-            :key="item.key"
-            class="attendance__status-chip"
-            :class="`attendance__status-chip--${item.key}`"
-            :data-selfservice-request-stat="item.key"
-          >
-            {{ item.label }} · {{ item.count }}
-          </span>
-        </div>
-        <div class="attendance__selfservice-callout" data-selfservice-request-followup>
-          <div class="attendance__selfservice-callout-copy">
-            <div class="attendance__selfservice-callout-header">
-              <strong>{{ selfServiceRequestFollowup.title }}</strong>
-              <span
-                v-if="selfServiceRequestFollowup.status"
-                class="attendance__status-chip"
-                :class="`attendance__status-chip--${selfServiceRequestFollowup.status}`"
-              >
-                {{ formatStatus(selfServiceRequestFollowup.status) }}
-              </span>
-            </div>
-            <p>{{ selfServiceRequestFollowup.detail }}</p>
+        <template v-if="hasRequestBody">
+          <div class="attendance__chip-list">
+            <span
+              v-for="item in selfServiceRequestStatusItems"
+              :key="item.key"
+              class="attendance__status-chip"
+              :class="`attendance__status-chip--${item.key}`"
+              :data-selfservice-request-stat="item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </span>
           </div>
-          <button
-            class="attendance__btn attendance__btn--inline"
-            type="button"
-            data-selfservice-action="request-followup"
-            @click="$emit('selfServiceAction', selfServiceRequestFollowup.action)"
-          >
-            {{ selfServiceRequestFollowup.actionLabel }}
-          </button>
-        </div>
-        <ul v-if="selfServiceRecentRequests.length > 0" class="attendance__request-list attendance__request-list--compact">
-          <li v-for="item in selfServiceRecentRequests" :key="item.id" class="attendance__request-item">
-            <div>
-              <strong>{{ formatRequestType(item.request_type) }}</strong>
-              <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
-                {{ formatStatus(item.status) }}
-              </span>
+          <div class="attendance__selfservice-callout" data-selfservice-request-followup>
+            <div class="attendance__selfservice-callout-copy">
+              <div class="attendance__selfservice-callout-header">
+                <strong>{{ selfServiceRequestFollowup.title }}</strong>
+                <span
+                  v-if="selfServiceRequestFollowup.status"
+                  class="attendance__status-chip"
+                  :class="`attendance__status-chip--${selfServiceRequestFollowup.status}`"
+                >
+                  {{ formatStatus(selfServiceRequestFollowup.status) }}
+                </span>
+              </div>
+              <p>{{ selfServiceRequestFollowup.detail }}</p>
             </div>
-            <div class="attendance__request-meta">
-              <span>{{ formatDate(item.work_date) }}</span>
-              <span>{{ selfServiceRequestSubtitle(item) }}</span>
-            </div>
-            <div class="attendance__request-meta" v-if="requestReasonText(item)">
-              <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
-            </div>
-            <div class="attendance__request-meta" v-if="requestDecisionCommentText(item)">
-              <span>{{ requestDecisionCommentLabel(item) }}: {{ requestDecisionCommentText(item) }}</span>
-            </div>
-            <p class="attendance__request-note">
-              {{ describeRequestStatus(item.status, item) }}
-            </p>
-          </li>
-        </ul>
-        <div v-else class="attendance__empty">{{ tr('No recent requests in this range.', '当前区间内暂无申请。') }}</div>
+            <button
+              class="attendance__btn attendance__btn--inline"
+              type="button"
+              data-selfservice-action="request-followup"
+              @click="$emit('selfServiceAction', selfServiceRequestFollowup.action)"
+            >
+              {{ selfServiceRequestFollowup.actionLabel }}
+            </button>
+          </div>
+          <ul v-if="selfServiceRecentRequests.length > 0" class="attendance__request-list attendance__request-list--compact">
+            <li v-for="item in selfServiceRecentRequests" :key="item.id" class="attendance__request-item">
+              <div>
+                <strong>{{ formatRequestType(item.request_type) }}</strong>
+                <span class="attendance__status-chip" :class="`attendance__status-chip--${item.status}`">
+                  {{ formatStatus(item.status) }}
+                </span>
+              </div>
+              <div class="attendance__request-meta">
+                <span>{{ formatDate(item.work_date) }}</span>
+                <span>{{ selfServiceRequestSubtitle(item) }}</span>
+              </div>
+              <div class="attendance__request-meta" v-if="requestReasonText(item)">
+                <span>{{ tr('Reason', '原因') }}: {{ requestReasonText(item) }}</span>
+              </div>
+              <div class="attendance__request-meta" v-if="requestDecisionCommentText(item)">
+                <span>{{ requestDecisionCommentLabel(item) }}: {{ requestDecisionCommentText(item) }}</span>
+              </div>
+              <p class="attendance__request-note">
+                {{ describeRequestStatus(item.status, item) }}
+              </p>
+            </li>
+          </ul>
+        </template>
       </div>
+    </div>
+    </div>
 
-      <div class="attendance__card attendance__card--selfservice" data-selfservice-card="actions">
+    <div class="attendance__card attendance__card--selfservice attendance-ew__actions attendance-ew__common" data-selfservice-card="actions">
         <div class="attendance__requests-header">
           <div>
-            <h3>{{ tr('Quick actions', '快捷操作') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Jump straight into the most common employee actions without leaving overview.', '无需离开总览，直接进入最常用的员工操作。') }}
-            </small>
+            <h3>{{ tr('Common', '常用') }}</h3>
           </div>
         </div>
-        <div class="attendance__quick-actions">
+        <!-- First-screen 常用: four read-only tiles. Admin picks icons via settings. -->
+        <div class="attendance-ew__tiles">
           <button
-            class="attendance__btn attendance__btn--primary"
+            v-for="tile in commonTiles"
+            :key="tile.action"
+            class="attendance-ew__tile"
             type="button"
-            data-selfservice-action="missing-punch"
-            @click="$emit('selfServiceAction', 'missing-punch')"
+            :data-selfservice-action="tile.action"
+            :data-attendance-ew-icon="tile.icon"
+            @click="$emit('selfServiceAction', tile.emitAction)"
           >
-            {{ tr('Fix missing punch', '处理缺卡') }}
-          </button>
-          <button
-            class="attendance__btn"
-            type="button"
-            data-selfservice-action="leave"
-            @click="$emit('selfServiceAction', 'leave')"
-          >
-            {{ tr('Leave request', '请假申请') }}
-          </button>
-          <button
-            class="attendance__btn"
-            type="button"
-            data-selfservice-action="overtime"
-            @click="$emit('selfServiceAction', 'overtime')"
-          >
-            {{ tr('Overtime request', '加班申请') }}
-          </button>
-          <button
-            class="attendance__btn"
-            type="button"
-            data-selfservice-action="shift-swap"
-            @click="$emit('selfServiceAction', 'shift_swap')"
-          >
-            {{ tr('Shift swap', '换班申请') }}
-          </button>
-          <button
-            class="attendance__btn"
-            type="button"
-            data-selfservice-action="records"
-            @click="$emit('selfServiceAction', 'records')"
-          >
-            {{ tr('Review records', '查看记录') }}
+            <span class="attendance-ew__tile-icon" :class="`attendance-ew__tile-icon--${tile.tone}`" aria-hidden="true">
+              <AttendanceEmployeeCommonIcon :name="tile.icon" />
+            </span>
+            <span>{{ tile.label }}</span>
           </button>
         </div>
-        <p class="attendance__field-hint attendance__field-hint--strong">
-          {{ selfServiceQuickActionHint }}
-        </p>
+        <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
       </div>
 
-      <div class="attendance__card attendance__card--selfservice" data-selfservice-card="annual-balance">
+    <div class="attendance-ew__tools">
+      <div class="attendance__card attendance__card--selfservice attendance-ew__balance" data-selfservice-card="annual-balance">
         <div class="attendance__requests-header">
           <div>
             <h3 data-self-balance-title>
@@ -359,7 +378,7 @@
         </p>
       </div>
 
-      <div class="attendance__card attendance__card--selfservice attendance-ew__tools-deemphasized" data-selfservice-card="rules">
+      <div class="attendance__card attendance__card--selfservice attendance-ew__tools-deemphasized attendance-ew__rules" data-selfservice-card="rules">
         <div class="attendance__requests-header">
           <div>
             <h3>{{ tr('My attendance rules', '我的考勤规则') }}</h3>
@@ -428,7 +447,21 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import AttendanceEmployeeCommonIcon from './AttendanceEmployeeCommonIcon.vue'
 import type { AttendanceOverviewAttentionItem } from './attendanceOverviewPriority'
+import {
+  type EmployeeQuickActionIcons,
+  resolveEmployeeQuickActionIcons,
+} from './attendanceEmployeeWorkspaceCommonIcons'
+import {
+  formatLateEarlyPair,
+  formatWorkDurationMinutes,
+  greetingHeadline,
+  isClockedIn,
+  suggestOffDutyTime,
+  workWindowShortLabel,
+} from './attendanceEmployeeWorkspacePresentation'
 
 type TranslateFn = (en: string, zh: string) => string
 
@@ -475,7 +508,7 @@ interface AnnualBalanceSummary {
   expiredMinutes: number
 }
 
-defineProps<{
+const props = defineProps<{
   tr: TranslateFn
   // Today band
   heroClockTime: string
@@ -523,6 +556,7 @@ defineProps<{
   describeRequestStatus: (status: string | null | undefined, item?: WorkspaceRequestItem | null) => string
   // Tools band: quick actions
   selfServiceQuickActionHint: string
+  employeeQuickActionIcons?: Partial<EmployeeQuickActionIcons> | null
   // Tools band: annual balance
   annualSelfBalanceLoading: boolean
   annualSelfBalanceError: string | null
@@ -561,74 +595,394 @@ defineEmits<{
   changeBalanceLeaveType: [code: 'annual' | 'comp_time']
   openBalanceTrace: []
 }>()
+
+const resolvedQuickIcons = computed(() => resolveEmployeeQuickActionIcons(props.employeeQuickActionIcons))
+
+const commonTiles = computed(() => [
+  {
+    action: 'missing-punch' as const,
+    emitAction: 'missing-punch' as const,
+    tone: 'makeup',
+    icon: resolvedQuickIcons.value.makeup,
+    label: props.tr('Makeup punch', '补卡'),
+  },
+  {
+    action: 'leave' as const,
+    emitAction: 'leave' as const,
+    tone: 'leave',
+    icon: resolvedQuickIcons.value.leave,
+    label: props.tr('Leave', '请假'),
+  },
+  {
+    action: 'overtime' as const,
+    emitAction: 'overtime' as const,
+    tone: 'overtime',
+    icon: resolvedQuickIcons.value.overtime,
+    label: props.tr('Overtime', '加班'),
+  },
+  {
+    action: 'shift-swap' as const,
+    emitAction: 'shift_swap' as const,
+    tone: 'swap',
+    icon: resolvedQuickIcons.value.swap,
+    label: props.tr('Shift swap', '换班'),
+  },
+])
+
+const greetingText = computed(() => greetingHeadline(props.tr, props.heroClockTime))
+
+const windowShort = computed(() => workWindowShortLabel(props.selfRulesWorkWindowSummary))
+
+const greetingSubline = computed(() => {
+  const datePart = props.heroClockDate
+  const window = windowShort.value
+  if (window) {
+    return props.tr(`${datePart}, ${window}`, `${datePart}, ${window}`)
+  }
+  return datePart
+})
+
+const clockedIn = computed(() => isClockedIn(props.heroTimeline, props.workbenchLatestPunchLabel))
+
+const offDutySuggest = computed(() => suggestOffDutyTime(props.selfRulesWorkWindowSummary))
+
+const clockStatusLine = computed(() => {
+  if (!clockedIn.value) return props.tr('Not clocked in yet', '尚未上班')
+  const suggestAt = offDutySuggest.value
+  if (suggestAt) {
+    return props.tr(
+      `Clocked in · Suggest clocking out after ${suggestAt}`,
+      `已上班 · 建议 ${suggestAt} 后下班打卡`,
+    )
+  }
+  return props.tr('Clocked in', '已上班')
+})
+
+const workDurationLabel = computed(() => formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
+
+const lateEarlyDisplay = computed(() => formatLateEarlyPair(props.workbenchLateEarlyLabel, props.tr))
+
+const metricInTime = computed(() => props.heroTimeline?.checkIn ?? props.workbenchLatestPunchLabel ?? '--:--')
+
+const metricOutTime = computed(() => props.heroTimeline?.checkOut ?? '--:--')
+
+const hasRequestBody = computed(() =>
+  props.requestsTotal > 0 || props.selfServiceRecentRequests.length > 0,
+)
 </script>
 
 <style scoped>
-/* Layout shell — new band structure (lock §4, §7). All spacing/colors here
-   use --ms-* tokens; the relocated card styling below is copied verbatim
-   from AttendanceView.vue (byte-identical values) so the reorg introduces
-   no visual drift. */
+/* Employee-workspace chrome only. First viewport: desktop punch|待办+申请 footer,
+   常用 full-width below; mobile punch → 待办+申请 footer → 常用. */
 .attendance-ew {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-5, 20px);
+  gap: var(--ms-space-4, 16px);
+  min-width: 0;
+}
+
+.attendance-ew__greeting {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance-ew__greeting-copy {
+  min-width: 0;
+}
+
+.attendance-ew__hello {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: #1f2329;
+  letter-spacing: -0.02em;
+}
+
+.attendance-ew__hello-sub {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #8f959e;
+}
+
+.attendance-ew__primary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: var(--ms-space-4, 16px);
+  align-items: stretch;
+  min-width: 0;
 }
 
 .attendance-ew__today {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  gap: var(--ms-space-5, 20px);
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-3, 12px);
+  min-width: 0;
 }
 
-.attendance-ew__today-status {
-  margin: 0;
+.attendance-ew__hero-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-width: 0;
+}
+
+.attendance-ew__clock-status {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #646a73;
+}
+
+.attendance-ew__metrics {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 14px;
+  margin-top: 4px;
+  border-top: 1px solid rgba(31, 35, 41, 0.06);
+}
+
+.attendance-ew__metrics .attendance__selfservice-lead {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.attendance-ew__metrics .attendance__field-hint--strong {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .attendance-ew__attention {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-2, 8px);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-lg);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
-  padding: var(--ms-space-4, 16px) var(--ms-space-5, 20px);
+  gap: 12px;
+  min-width: 0;
+  min-height: 100%;
+  border: none;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
+  padding: 16px 18px;
 }
 
-.attendance-ew__attention p {
+.attendance-ew__todo-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance-ew__todo-head h3 {
   margin: 0;
-  color: var(--ms-text-2);
-  line-height: 1.5;
+  font-size: 15px;
+  font-weight: 650;
+  color: #1f2329;
+}
+
+.attendance-ew__todo-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #f54a45;
+  color: #fff;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.attendance-ew__todo-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance-ew__todo-mark {
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+}
+
+.attendance-ew__todo-mark--makeup {
+  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
+}
+
+.attendance-ew__todo-mark :deep(svg) {
+  width: 18px;
+  height: 18px;
+}
+
+.attendance-ew__todo-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.attendance-ew__todo-copy strong,
+.attendance-ew__todo-empty strong {
+  display: block;
+  font-size: 14px;
+  color: #1f2329;
+}
+
+.attendance-ew__todo-copy p,
+.attendance-ew__todo-empty p,
+.attendance-ew__attention p {
+  margin: 2px 0 0;
+  color: #8f959e;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.attendance-ew__todo-link {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0;
+  color: #3370ff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.attendance-ew__todo-empty {
+  min-width: 0;
+}
+
+.attendance-ew__request-footer {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid rgba(31, 35, 41, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.attendance-ew__request-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.attendance-ew__request-footer-row h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: #1f2329;
+}
+
+.attendance-ew__request-empty {
+  color: #8f959e;
+  font-size: 13px;
+}
+
+.attendance-ew__common {
+  min-width: 0;
+}
+
+.attendance-ew__common-hint {
+  margin: 0;
+  color: #8f959e;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .attendance-ew__tools {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--ms-space-4, 16px);
+  min-width: 0;
 }
 
 .attendance-ew__tools-deemphasized {
   opacity: 0.92;
 }
 
+.attendance-ew__tiles {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.attendance-ew__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  background: transparent;
+  color: #1f2329;
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.attendance-ew__tile-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  box-shadow: 0 6px 14px rgba(31, 45, 82, 0.14);
+}
+
+.attendance-ew__tile-icon :deep(svg) {
+  width: 26px;
+  height: 26px;
+}
+
+.attendance-ew__tile-icon--makeup {
+  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
+}
+
+.attendance-ew__tile-icon--leave {
+  background: linear-gradient(180deg, #34c759 0%, #00b42a 100%);
+}
+
+.attendance-ew__tile-icon--overtime {
+  background: linear-gradient(180deg, #ff9a2e 0%, #ff7d00 100%);
+}
+
+.attendance-ew__tile-icon--swap {
+  background: linear-gradient(180deg, #9b8af0 0%, #7b67ee 100%);
+}
+
 .attendance-ew__history-filters {
   grid-column: 1 / -1;
-  border: 1px dashed var(--ms-border);
-  border-radius: var(--ms-radius-md);
+  border: none;
+  border-radius: 16px;
   padding: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
-  background: var(--ms-bg-page);
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 4px 16px rgba(31, 45, 82, 0.04);
 }
 
 .attendance-ew__history-filters[open] {
-  background: var(--ms-bg-card);
+  background: #fff;
 }
 
-/* Relocated card/hero styling, copied verbatim from AttendanceView.vue's
-   scoped stylesheet (Vue scoped CSS does not cross component boundaries —
-   see attendance-employee-overview-task-first-design-lock-20260716.md
-   implementation notes). Do not retokenize values here independently of
-   the source; keep both copies in sync if either changes. */
 .attendance__filters {
   display: flex;
   align-items: center;
@@ -654,13 +1008,15 @@ defineEmits<{
 
 .attendance__field input {
   padding: 6px 10px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  min-width: 180px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
 }
 
 .attendance__field-hint {
-  color: #777;
+  color: #8f959e;
   font-size: 11px;
 }
 
@@ -670,19 +1026,18 @@ defineEmits<{
 
 .attendance__field-hint--strong {
   display: inline-flex;
-  margin-top: 12px;
+  margin-top: 8px;
   font-weight: 600;
 }
 
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid #d0d0d0;
+  border-radius: 999px;
+  border: 1px solid #e5e6eb;
   background: #fff;
   cursor: pointer;
 }
 
-/* W5-1: annual/comp_time balance toggle (compact segmented pair). */
 .attendance-ew__balance-toggle {
   display: inline-flex;
   gap: 4px;
@@ -694,8 +1049,8 @@ defineEmits<{
 }
 
 .attendance__btn--primary {
-  background: #1976d2;
-  border-color: #1976d2;
+  background: linear-gradient(180deg, #4c83ff 0%, #3370ff 100%);
+  border-color: transparent;
   color: #fff;
 }
 
@@ -727,16 +1082,17 @@ defineEmits<{
 
 .attendance__card {
   background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 12px;
-  padding: 16px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+  border: none;
+  border-radius: 18px;
+  padding: 16px 18px;
+  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
 }
 
 .attendance__card--selfservice {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
 }
 
 .attendance__summary--workbench {
@@ -745,14 +1101,15 @@ defineEmits<{
 
 .attendance__selfservice-lead {
   margin: 0;
-  color: #334155;
+  color: #646a73;
   line-height: 1.5;
+  font-size: 12px;
 }
 
 .attendance__selfservice-callout {
-  border: 1px solid #dbe4f0;
+  border: none;
   border-radius: 12px;
-  background: linear-gradient(135deg, #f8fbff, #eef6ff);
+  background: #f7f9fc;
   padding: 12px;
   display: flex;
   justify-content: space-between;
@@ -775,14 +1132,8 @@ defineEmits<{
 
 .attendance__selfservice-callout-copy p {
   margin: 0;
-  color: #475569;
+  color: #646a73;
   line-height: 1.5;
-}
-
-.attendance__quick-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
 }
 
 .attendance__request-list--compact {
@@ -790,9 +1141,10 @@ defineEmits<{
 }
 
 .attendance__request-item {
-  border: 1px solid #e0e0e0;
-  border-radius: 8px;
+  border: none;
+  border-radius: 10px;
   padding: 10px;
+  background: #f7f9fc;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -819,11 +1171,12 @@ defineEmits<{
 }
 
 .attendance__status-chip {
-  margin-left: 8px;
+  margin-left: 0;
   font-size: 12px;
   padding: 2px 8px;
   border-radius: 999px;
   background: #f0f0f0;
+  align-self: flex-start;
 }
 
 .attendance__status-chip--pending { background: #fff3e0; color: #ef6c00; }
@@ -841,23 +1194,24 @@ defineEmits<{
 
 .attendance__summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-  gap: 12px;
-  margin-top: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
 }
 
 .attendance__summary-item {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: #f7f9fb;
-  border-radius: 8px;
-  padding: 10px;
+  background: transparent;
+  border-radius: 0;
+  padding: 4px 0;
 }
 
 .attendance__summary-item span {
   font-size: 12px;
-  color: #666;
+  color: #8f959e;
 }
 
 .attendance__details-summary {
@@ -872,7 +1226,7 @@ defineEmits<{
 }
 
 .attendance__empty {
-  color: #777;
+  color: #8f959e;
   font-size: 13px;
 }
 
@@ -882,70 +1236,60 @@ defineEmits<{
   color: var(--ms-text-1);
 }
 
-/* UI-P0'/P1 hero + stat cards — already fully tokenized in the source
-   (see AttendanceView.vue's "UI-P0′ hero punch card" comment); copied
-   verbatim, no hardcoded hex introduced. */
 .attendance__hero-punch {
   display: flex;
-  align-items: center;
-  gap: var(--ms-space-5);
-  padding: var(--ms-space-4) var(--ms-space-5);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-lg);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 20px 22px 16px;
+  border: none;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
 }
 
 .attendance__hero-clock {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-1);
-  min-width: 132px;
+  gap: 0;
+  min-width: 0;
 }
 
 .attendance__hero-time {
-  font-size: 32px;
-  font-weight: var(--ms-font-weight-title);
-  line-height: 1.1;
-  color: var(--ms-text-1);
+  font-size: clamp(48px, 5vw, 64px);
+  font-weight: 650;
+  line-height: 1;
+  color: #1f2329;
   font-variant-numeric: tabular-nums;
-}
-
-.attendance__hero-date {
-  font-size: 12px;
-  color: var(--ms-text-3);
+  letter-spacing: -0.03em;
 }
 
 .attendance__hero-actions {
   display: flex;
-  align-items: center;
-  gap: var(--ms-space-3);
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  flex: 0 0 auto;
 }
 
 .attendance__btn--hero {
-  min-height: 56px;
-  min-width: 160px;
-  font-size: 16px;
-  font-weight: var(--ms-font-weight-title);
-  border-radius: var(--ms-radius-md);
+  min-height: 44px;
+  min-width: 132px;
+  font-size: 15px;
+  font-weight: 650;
+  border-radius: 999px;
+  box-shadow: 0 8px 18px rgba(51, 112, 255, 0.28);
 }
 
 .attendance__btn--hero-secondary {
-  min-height: 56px;
+  min-height: 40px;
   min-width: 132px;
-  font-size: 15px;
-  border-radius: var(--ms-radius-md);
-  border-color: var(--ms-color-primary);
-  color: var(--ms-color-primary);
-}
-
-.attendance__hero-timeline {
-  display: flex;
-  align-items: center;
-  gap: var(--ms-space-2);
-  font-size: 12px;
-  color: var(--ms-text-2);
-  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  border-radius: 999px;
+  border-color: transparent;
+  background: #e8f3ff;
+  color: #3370ff;
+  box-shadow: none;
 }
 
 .attendance__hero-timeline-node {
@@ -955,70 +1299,69 @@ defineEmits<{
 }
 
 .attendance__hero-timeline-node--pending {
-  color: var(--ms-text-3);
-}
-
-.attendance__hero-timeline-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--ms-color-success);
-}
-
-.attendance__hero-timeline-node--pending .attendance__hero-timeline-dot {
-  background: var(--ms-border);
-}
-
-.attendance__hero-timeline-rail {
-  flex: 0 0 32px;
-  height: 2px;
-  background: var(--ms-border-light);
-  border-radius: 1px;
+  color: var(--ms-text-3, #8f959e);
 }
 
 .attendance__summary--stat {
-  gap: var(--ms-space-3);
+  gap: 12px;
 }
 
 .attendance__summary-item--stat {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-1);
-  padding: var(--ms-space-3) var(--ms-space-4);
-  border: 1px solid var(--ms-border-light);
-  border-radius: var(--ms-radius-md);
-  background: var(--ms-bg-card);
-  box-shadow: var(--ms-shadow-card);
-}
-
-.attendance__summary-icon {
-  width: 18px;
-  height: 18px;
-  color: var(--ms-color-primary);
+  gap: 4px;
+  min-width: 0;
+  padding: 4px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .attendance__summary-value {
-  font-size: 22px;
+  font-size: 16px;
   line-height: 1.2;
-  font-weight: var(--ms-font-weight-title);
-  color: var(--ms-text-1);
+  font-weight: 650;
+  color: #1f2329;
   font-variant-numeric: tabular-nums;
 }
 
+.attendance__summary-value--ok {
+  color: #00b42a;
+}
+
 .attendance__summary-value--warning {
-  color: var(--ms-color-warning);
+  color: #ff7d00;
+}
+
+@media (max-width: 1099px) {
+  .attendance-ew__primary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .attendance-ew__tools {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .attendance-ew__balance { order: 1; }
+  .attendance-ew__rules { order: 2; }
+  .attendance-ew__history-filters { order: 3; }
 }
 
 @media (max-width: 768px) {
-  .attendance-ew__today {
-    grid-template-columns: 1fr;
+  .attendance-ew__hello {
+    font-size: 26px;
   }
 
-  .attendance__hero-punch {
+  .attendance__hero-time {
+    font-size: 54px;
+  }
+
+  .attendance-ew__hero-top {
     flex-direction: column;
     align-items: stretch;
-    gap: var(--ms-space-3);
   }
 
   .attendance__hero-actions {
@@ -1026,12 +1369,15 @@ defineEmits<{
     align-items: stretch;
   }
 
-  .attendance__hero-timeline {
-    flex-wrap: wrap;
+  .attendance__btn--hero,
+  .attendance__btn--hero-secondary {
+    min-width: 0;
+    width: 100%;
   }
 
+  .attendance__summary,
   .attendance__summary--stat {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .attendance__selfservice-callout {
@@ -1039,8 +1385,8 @@ defineEmits<{
     align-items: flex-start;
   }
 
-  .attendance__btn {
-    width: 100%;
+  .attendance-ew__todo-row {
+    flex-wrap: wrap;
   }
 
   .attendance__request-meta {
@@ -1051,5 +1397,17 @@ defineEmits<{
   .attendance__filters .attendance__field {
     width: 100%;
   }
+
+  .attendance-ew__balance-toggle .attendance__btn {
+    width: auto;
+  }
+}
+</style>
+
+<style>
+/* Overview page wash only — scoped by the employee overview class, not the app shell. */
+.attendance--overview {
+  background-color: #f4f6fa;
+  background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
 }
 </style>
