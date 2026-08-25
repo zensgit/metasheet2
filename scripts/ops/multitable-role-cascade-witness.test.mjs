@@ -6,12 +6,12 @@ import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
-import { ROLE_CASCADE_WITNESS_QUERY } from './multitable-l1-battery.mjs'
+import { CANONICAL_ROLES_SCHEMA, FK_DELETE_ACTION_LETTERS, ROLE_DELETE_CHILD_WRITE_ACTIONS, buildRoleCascadeWitnessQuery } from './multitable-l1-battery.mjs'
 import {
   HEADLINES,
   INDETERMINATE_REASONS,
   PROTOCOL,
-  RELATION_PRESENCE_QUERY,
+  buildRelationPresenceQuery,
   buildProbeSource,
   classifyObservation,
   parseWitnessObservation,
@@ -41,12 +41,26 @@ const workflowPath = path.join(workflowsDir, 'multitable-role-cascade-witness.ym
 const workflowRaw = readFileSync(workflowPath, 'utf8')
 const runnerRaw = readFileSync(path.join(here, 'multitable-role-cascade-witness.mjs'), 'utf8')
 
+// The canonical-schema renderings the production dispatch uses. The static-shape tests below assert
+// against THESE, so a change that only holds for a random golden schema cannot pass them.
+const WITNESS_SQL = buildRoleCascadeWitnessQuery(CANONICAL_ROLES_SCHEMA)
+const PRESENCE_SQL = buildRelationPresenceQuery(CANONICAL_ROLES_SCHEMA)
+
 /** A witness ROWS entry. Every field is required by the protocol, so the helper supplies them all. */
 function row({ schema = 'public', table = 'role_permissions', conname = 'role_permissions_role_id_fkey', confdeltype = 'c' } = {}) {
   return { child_schema: schema, child_table: table, conname, confdeltype }
 }
 
-const PRESENT_RELATIONS = { roles: 1, recovery_authority_relations: 8, roles_referencing_fks: 1 }
+const PRESENT_RELATIONS = Object.freeze({
+  canonical_schema: 'public',
+  canonical_roles_present: true,
+  session_binds_canonical: true,
+  session_roles_schema: 'public',
+  visible_roles_relations: 1,
+  canonical_exact_carriers: 8,
+  recovery_authority_relations: 8,
+  roles_referencing_fks: 1,
+})
 
 function observation({ presence = PRESENT_RELATIONS, rows = [] } = {}) {
   return [
@@ -243,25 +257,144 @@ const INDETERMINATE_CASES = [
   },
   {
     label: 'positive control: no relation carries a canonical recovery-authority trigger',
-    text: observation({ presence: { ...PRESENT_RELATIONS, recovery_authority_relations: 0 }, rows: [] }),
+    text: observation({ presence: { ...PRESENT_RELATIONS, canonical_exact_carriers: 0 }, rows: [] }),
     reason: INDETERMINATE_REASONS.relationsAbsent,
   },
   {
-    label: 'positive control: the observed database has no session-resolvable roles relation',
-    text: observation({ presence: { ...PRESENT_RELATIONS, roles: 0 }, rows: [] }),
-    reason: INDETERMINATE_REASONS.relationsAbsent,
+    label: 'door 1: the canonical `roles` relation does not exist on the observed database',
+    text: observation({ presence: { ...PRESENT_RELATIONS, canonical_roles_present: false }, rows: [] }),
+    reason: INDETERMINATE_REASONS.canonicalRelationAbsent,
+  },
+  {
+    label: 'door 2: the session resolves `roles` to a NON-canonical schema (the shadow vector)',
+    text: observation({ presence: { ...PRESENT_RELATIONS, session_binds_canonical: false, session_roles_schema: 'metasheet' }, rows: [] }),
+    reason: INDETERMINATE_REASONS.bindingMismatch,
+  },
+  {
+    label: 'door 3: a second `roles` table is visible on the search_path',
+    text: observation({ presence: { ...PRESENT_RELATIONS, visible_roles_relations: 2 }, rows: [] }),
+    reason: INDETERMINATE_REASONS.relationAmbiguous,
+  },
+  {
+    label: 'door 3: NO `roles` table is visible on the search_path',
+    text: observation({ presence: { ...PRESENT_RELATIONS, visible_roles_relations: 0 }, rows: [] }),
+    reason: INDETERMINATE_REASONS.relationAmbiguous,
   },
   {
     label: 'PRESENCE counts are not numbers',
-    text: observation({ presence: { roles: 'yes', recovery_authority_relations: 'yes', roles_referencing_fks: 'yes' }, rows: [] }),
+    text: observation({ presence: { ...PRESENT_RELATIONS, visible_roles_relations: 'yes', canonical_exact_carriers: 'yes', recovery_authority_relations: 'yes', roles_referencing_fks: 'yes' }, rows: [] }),
     reason: INDETERMINATE_REASONS.unparseable,
   },
   {
-    label: 'PRESENCE is missing the audit-only FK count (a /1-shaped capture from an older probe)',
-    text: observation({ presence: { roles: 1, role_permissions: 1 }, rows: [] }),
+    label: 'PRESENCE is a pre-canonical-binding capture from an older probe',
+    text: observation({ presence: { roles: 1, recovery_authority_relations: 1, roles_referencing_fks: 1 }, rows: [] }),
     reason: INDETERMINATE_REASONS.unparseable,
   },
 ]
+
+test('the protocol is VALIDATED, not coerced — malformed payloads are unreadable, never absence', () => {
+  // `String()` and `Number()` manufacture a well-formed-looking observation out of junk:
+  // `Number(true)` is 1, `Number(null)` is 0, `String(7)` is a non-empty string. Against head
+  // cd0977e3c0, sending `true` for all four counts, and sending `{child_schema: 1, child_table:
+  // true, conname: 2, confdeltype: 7}` as a row, BOTH returned CASCADE ABSENT / exit 0. The parse
+  // has to reject the RAW JSON before anything is converted.
+  const counts = { visible_roles_relations: 1, canonical_exact_carriers: 9, recovery_authority_relations: 9, roles_referencing_fks: 1 }
+  const bound = { canonical_schema: 'public', canonical_roles_present: true, session_binds_canonical: true, session_roles_schema: 'public' }
+
+  // Counts: booleans, nulls, empty strings, floats, negatives, leading-zero and exponent strings.
+  for (const field of Object.keys(counts)) {
+    for (const junk of [true, false, null, '', ' 1', '01', '1e3', 1.5, -1, [], {}, '1 ']) {
+      const verdict = verdictFor(observation({ presence: { ...bound, ...counts, [field]: junk } }))
+      assert.equal(verdict.verdict, 'INDETERMINATE', `${field}=${JSON.stringify(junk)} was accepted`)
+      assert.equal(verdict.exitCode, 2, `${field}=${JSON.stringify(junk)} did not fail closed`)
+      assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `${field}=${JSON.stringify(junk)}`)
+      assert.match(verdict.detail, new RegExp(field), 'the detail must name the offending field')
+    }
+    // …and the strict decimal STRING form is still accepted, because node-postgres returns
+    // `count(*)` as a string and the shared classifier is fed straight from a pg row.
+    const ok = verdictFor(observation({ presence: { ...bound, ...counts, [field]: '3' }, rows: [] }))
+    assert.notEqual(ok.reason, INDETERMINATE_REASONS.unparseable, `${field} rejected the decimal string form pg actually returns`)
+  }
+
+  // Row fields: every non-string type, on every field.
+  for (const field of ['child_schema', 'child_table', 'conname', 'confdeltype']) {
+    for (const junk of [1, true, null, undefined, [], {}, 7.5]) {
+      const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'c', [field]: junk }
+      const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+      assert.equal(verdict.verdict, 'INDETERMINATE', `${field}=${JSON.stringify(junk)} was accepted`)
+      assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `${field}=${JSON.stringify(junk)}`)
+    }
+  }
+
+  // confdeltype must be a letter the CATALOG can produce. Anything else is unreadable — NOT
+  // "some action that happens not to write the child", which is how it used to read.
+  for (const junk of ['z', '7', '', 'C', 'cc', ' c']) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: junk }
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `confdeltype ${JSON.stringify(junk)} was accepted`)
+    assert.match(verdict.detail, /not a legal foreign-key delete action/)
+  }
+  // POSITIVE CONTROL for all of the above: the legal letters still classify, both ways.
+  for (const [letter, expected] of [['c', 'PRESENT'], ['n', 'PRESENT'], ['d', 'PRESENT'], ['a', 'ABSENT'], ['r', 'ABSENT']]) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: letter }
+    assert.equal(verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] })).verdict, expected, `confdeltype '${letter}'`)
+  }
+
+  // session_roles_schema is reported, so it must be a string or null — not coerced into one.
+  for (const junk of [1, true, [], {}]) {
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: junk } }))
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `session_roles_schema=${JSON.stringify(junk)}`)
+  }
+
+  // The three IDENTIFIER fields must be non-empty, not merely strings. This invariant predates the
+  // type check above and was swallowed when the coercion block was replaced: `''` is a string, so a
+  // row naming no schema / no table / no constraint parsed cleanly and, with a legal non-writing
+  // `confdeltype`, reported CASCADE ABSENT / exit 0. Verified against head 826352dc72.
+  for (const field of ['child_schema', 'child_table', 'conname']) {
+    const row = { child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'a', [field]: '' }
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts }, rows: [row] }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `an empty ${field} was accepted`)
+    assert.equal(verdict.exitCode, 2, `an empty ${field} did not fail closed`)
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.unparseable, `empty ${field}`)
+    assert.match(verdict.detail, new RegExp(`empty ${field}`), 'the detail must name the offending field')
+  }
+  // …and the same row WITHOUT the emptying still classifies, so the case above is discriminating.
+  assert.equal(
+    verdictFor(observation({ presence: { ...bound, ...counts }, rows: [{ child_schema: 'public', child_table: 'user_roles', conname: 'fk', confdeltype: 'a' }] })).verdict,
+    'ABSENT',
+  )
+})
+
+test('the binding fields must AGREE with each other, not merely have the right types', () => {
+  // `session_binds_canonical` and `session_roles_schema` are two views of ONE fact, and nothing
+  // forced them to agree. A payload asserting `true` while naming `null`, `''`, or another schema
+  // was accepted and certified ABSENT / exit 0 — verified against head 826352dc72. The flag is a
+  // claim; the schema name is the evidence for it, and a self-contradicting observation is
+  // unreadable whichever half is lying.
+  const counts = { visible_roles_relations: 1, canonical_exact_carriers: 9, recovery_authority_relations: 9, roles_referencing_fks: 1 }
+  const bound = { canonical_schema: 'public', canonical_roles_present: true, session_binds_canonical: true }
+  for (const claimed of [null, '', 'evil', 'PUBLIC', ' public', 'public ']) {
+    const verdict = verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: claimed } }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', `session_roles_schema=${JSON.stringify(claimed)} was accepted`)
+    assert.equal(verdict.exitCode, 2, `session_roles_schema=${JSON.stringify(claimed)} did not fail closed`)
+    assert.equal(verdict.reason, INDETERMINATE_REASONS.bindingMismatch, `session_roles_schema=${JSON.stringify(claimed)}`)
+    assert.match(verdict.detail, /contradicts itself/)
+  }
+  // POSITIVE CONTROL: the agreeing pair still passes, or the assertions above prove nothing.
+  assert.equal(verdictFor(observation({ presence: { ...bound, ...counts, session_roles_schema: 'public' } })).verdict, 'ABSENT')
+})
+
+
+
+test('the legal delete-action letters are a SUPERSET of the child-write letters', () => {
+  // Two sets with one job each: "is this an action at all" and "does it write the child". If the
+  // write set ever grew a letter the legal set does not have, every observation carrying it would
+  // be rejected as unreadable instead of classified — and the widening would look like it worked.
+  for (const letter of ROLE_DELETE_CHILD_WRITE_ACTIONS) {
+    assert.ok(FK_DELETE_ACTION_LETTERS.includes(letter), `write action '${letter}' is not in the legal letter set`)
+  }
+  assert.deepEqual([...FK_DELETE_ACTION_LETTERS].sort(), ['a', 'c', 'd', 'n', 'r'], 'the legal set no longer matches pg_constraint.confdeltype')
+})
 
 test('every failed observation is INDETERMINATE — never ABSENT, never exit 0', () => {
   for (const testCase of INDETERMINATE_CASES) {
@@ -311,7 +444,8 @@ test('runVerdict reads a real file end to end and renders an auditable summary',
     assert.match(summary, /\| `public` \| `role_permissions` \| `role_permissions_role_id_fkey` \| `c` \| CASCADE \|/)
     assert.match(summary, /not_driven_reason_expired/)
     assert.match(summary, /target: `production`/)
-    assert.match(summary, /relation presence \(positive control\): roles=1, recovery_authority_relations=8/)
+    assert.match(summary, /bound to: `public\.roles` \(session resolves `roles` to `public`; 1 `roles` table\(s\) visible on the search_path\)/)
+    assert.match(summary, /relation presence \(positive control\): recovery-authority-triggered relations in `public`=8/)
     // The narrowing is visible as a number, not invisible: FKs excluded for carrying no trigger.
     assert.match(summary, /foreign keys referencing `roles` \(audit only, decides nothing\): 1 in total, 1 on a table carrying a recovery-authority trigger/)
   } finally {
@@ -349,7 +483,7 @@ class Client {
   async connect() { if (plan.connectError) throw new Error(plan.connectError) }
   async query(sql) {
     if (plan.queryError) throw new Error(plan.queryError)
-    if (String(sql).includes('relkind')) return { rows: [plan.presence || { roles_relations: '1', recovery_authority_relations: '8', roles_referencing_fks: '1' }] }
+    if (String(sql).includes('relkind')) return { rows: [plan.presence || { canonical_roles_present: true, session_binds_canonical: true, session_roles_schema: 'public', visible_roles_relations: '1', canonical_exact_carriers: '8', recovery_authority_relations: '8', roles_referencing_fks: '1' }] }
     return { rows: plan.witnessRows || [] }
   }
   async end() {}
@@ -387,7 +521,7 @@ test('the probe issues the witness SQL verbatim and a presence probe, and nothin
   // The stub discriminates on the SQL text, so a probe that stopped sending the real query would
   // fail the round trips above. Here, pin the statements themselves.
   const source = buildProbeSource()
-  assert.ok(source.includes(JSON.stringify(ROLE_CASCADE_WITNESS_QUERY)), 'the probe no longer embeds ROLE_CASCADE_WITNESS_QUERY verbatim')
+  assert.ok(source.includes(JSON.stringify(WITNESS_SQL)), 'the probe no longer embeds the canonical-bound witness query verbatim')
   // Catalog-only by construction: the only SQL verbs in the probe are SELECTs over pg_catalog.
   const statements = [...source.matchAll(/"(\\n[^"]*SELECT[^"]*)"/g)].map((match) => match[1])
   assert.equal(statements.length, 2, `expected exactly 2 SQL literals in the probe, found ${statements.length}`)
@@ -441,8 +575,10 @@ test('a probe whose catalog query fails reports query_failed — never zero rows
  * the predicate is represented.
  */
 const WITNESS_SQL_SIGNATURES = [
-  // conjunct 1 — the FK targets the session-resolved `roles` relation
-  "AND con.confrelid = to_regclass('roles')",
+  // conjunct 1 — the FK targets the CANONICALLY-bound `roles` relation. The signature is the
+  // template as it appears in source, not the rendered SQL: rendering it would make the signature
+  // schema-specific and the census would silently stop finding the definition it censuses.
+  'AND con.confrelid = ${canonicalRolesOidSql}',
   // conjunct 2 — the child table carries a canonical recovery-authority trigger
   'WHERE tg.tgrelid = con.conrelid',
   // the auditable projection the output protocol depends on
@@ -470,48 +606,86 @@ test('the witness SQL has EXACTLY ONE definition across workflows and non-test o
     )
     // Non-vacuity: the signature must actually be findable in the query it censuses, or the set
     // equality above is satisfied by a fragment that no longer exists anywhere.
-    assert.ok(ROLE_CASCADE_WITNESS_QUERY.includes(signature), `the signature no longer matches the query it censuses: ${signature}`)
+    assert.ok(
+      readFileSync(path.join(repoRoot, 'scripts/ops/multitable-l1-battery.mjs'), 'utf8').includes(signature),
+      `the signature no longer matches the query it censuses: ${signature}`,
+    )
   }
   // Non-vacuity: the scanner must actually be reading files.
   assert.ok(nonTestSources().length > 20, 'the source scan found implausibly few files')
 })
 
-test('the relation-presence control resolves the SAME relation the witness query resolves', () => {
-  // The module's own docblock warns that these two are COUPLED: narrowing the query without
-  // narrowing the control manufactures a FALSE ABSENT (the control passes on a shadow `roles` the
-  // query cannot see, and its zero rows then read as "no cascade"). Pin the coupling mechanically.
-  assert.match(RELATION_PRESENCE_QUERY, /to_regclass\('roles'\)/, 'the presence control stopped session-resolving `roles`')
-  assert.match(ROLE_CASCADE_WITNESS_QUERY, /to_regclass\('roles'\)/, 'the witness query stopped session-resolving `roles`')
-  for (const query of [RELATION_PRESENCE_QUERY, ROLE_CASCADE_WITNESS_QUERY]) {
-    assert.ok(!/to_regclass\('public\./.test(query), 'a hard-coded `public.` literal blinds every per-random-schema real-DB golden')
-    assert.ok(!/relname = 'roles'/.test(query), 'name matching resolves relations in schemas the session cannot see; use to_regclass')
+test('the witness query and its presence control bind `roles` CANONICALLY, not through the session', () => {
+  // THIS TEST'S INVARIANT WAS INVERTED, NOT WIDENED — deliberately, because the invariant it used
+  // to pin was the defect. It previously asserted that BOTH queries session-resolve `roles`
+  // (`to_regclass('roles')`) and that neither hard-codes a schema, and it called that coupling a
+  // safety property. It is the opposite: because the control resolved the relation the SAME way the
+  // query did, it failed for the SAME reason, and a decoy `roles` reached first on the search_path
+  // satisfied the control while the query looked at the decoy and returned nothing — reported as
+  // `CASCADE ABSENT (premise CONFIRMED)`, exit 0, on a database whose cascade was live. Widening
+  // the old test would have left the old assertions standing and both shapes would read as green.
+  assert.match(PRESENCE_SQL, /to_regclass\('public\.roles'\)/, 'the presence control stopped binding `roles` canonically')
+  assert.match(WITNESS_SQL, /confrelid = to_regclass\('public\.roles'\)/, 'the witness query stopped binding `roles` canonically')
+  // The bare-name resolution survives in exactly ONE role: as the thing compared AGAINST the
+  // canonical binding, so a mismatch can be reported. It must never be what the query binds to.
+  assert.ok(
+    !/confrelid = to_regclass\('roles'\)/.test(WITNESS_SQL),
+    'the witness query is binding the bare session-resolved name again — this is the shadow-schema false ABSENT',
+  )
+  assert.match(PRESENCE_SQL, /to_regclass\('roles'\) = to_regclass\('public\.roles'\)/, 'the presence control stopped comparing the session resolution against the canonical binding')
+  // NOT hard-coded: production binds the canonical schema DERIVED from the containment census, and
+  // the real-DB goldens bind the per-run random schema they just created. Both must render.
+  const goldenSql = buildRoleCascadeWitnessQuery('rcw_random_schema')
+  assert.match(goldenSql, /to_regclass\('rcw_random_schema\.roles'\)/, 'the query factory cannot bind a per-run golden schema')
+  assert.equal(CANONICAL_ROLES_SCHEMA, 'public', 'the canonical schema is derived from EXPECTED_AUTHORITY_TRIGGERS; all nine are `public`')
+  // Values-free by construction: a schema name that is not a plain identifier is refused at build
+  // time rather than escaped and embedded.
+  for (const junk of ["pu'blic", 'public; DROP TABLE roles', 'Public', '']) {
+    assert.throws(() => buildRoleCascadeWitnessQuery(junk), /refusing to bind a non-identifier schema name/, `accepted ${JSON.stringify(junk)}`)
   }
+  assert.ok(!/relname = 'roles'/.test(WITNESS_SQL), 'name matching resolves relations in schemas the session cannot see; use to_regclass')
   // `con.confrelid` can only ever be an ordinary or partitioned table, so the presence control must
   // not count a view named `roles` as presence for a query that would return nothing.
-  assert.match(RELATION_PRESENCE_QUERY, /relkind IN \('r', 'p'\)/)
-  // Both halves of the relation set the query consults are counted, including the trigger carriers
-  // the EXISTS conjunct can match — derived from the same census, never hand-typed.
-  assert.match(RELATION_PRESENCE_QUERY, /pg_catalog\.pg_trigger/)
-  const presencePronames = [...RELATION_PRESENCE_QUERY.matchAll(/'(metasheet_[a-z_]+)'/g)].map((match) => match[1]).sort()
-  const queryPronames = [...ROLE_CASCADE_WITNESS_QUERY.matchAll(/'(metasheet_[a-z_]+)'/g)].map((match) => match[1]).sort()
+  assert.match(PRESENCE_SQL, /relkind IN \('r', 'p'\)/)
+  // The trigger-carrier control is SCOPED to the canonical schema. Counting carriers globally is
+  // what let the old control stay satisfied by a real child while the resolved `roles` sat
+  // elsewhere: two counters, two different relations, both green.
+  assert.match(PRESENCE_SQL, /rel_ns\.nspname = 'public'/, 'the exact-carrier control is no longer scoped to the canonical schema')
+  assert.match(PRESENCE_SQL, /fn_ns\.nspname = 'public'/, 'the exact-carrier control stopped checking the FUNCTION schema — a same-named function elsewhere can feed it again')
+  assert.match(PRESENCE_SQL, /pg_catalog\.pg_trigger/)
+  // SET equality, not list equality: the presence control now ALSO carries the exact-identity
+  // tuples, so the same function name legitimately appears more than once there. What must not
+  // drift is WHICH functions each side considers canonical.
+  const presencePronames = [...new Set([...PRESENCE_SQL.matchAll(/'(metasheet_[a-z_]+)'/g)].map((m) => m[1]))].sort()
+  const queryPronames = [...new Set([...WITNESS_SQL.matchAll(/'(metasheet_[a-z_]+)'/g)].map((m) => m[1]))].sort()
   assert.ok(presencePronames.length >= 3, `parsed only ${presencePronames.length} trigger function(s) out of the presence control`)
   assert.deepEqual(
     presencePronames,
     queryPronames,
     'the presence control and the witness query disagree about which triggers are canonical — one of them is narrower than the other',
   )
+  // The WITNESS QUERY STAYS WIDE. Narrowing it to the census's table list would be the enumeration
+  // trap: it would go stale the first time the migration covers one more table, silently.
+  assert.ok(!/want\(table_name/.test(WITNESS_SQL), 'the witness query was narrowed to the exact-identity table list — that is the enumeration trap')
 })
 
-test('the presence control names WHICH half was missing, so one dispatch is enough to diagnose it', () => {
-  const noRoles = verdictFor(observation({ presence: { ...PRESENT_RELATIONS, roles: 0 } }))
-  assert.equal(noRoles.reason, INDETERMINATE_REASONS.relationsAbsent)
-  assert.match(noRoles.detail, /no session-resolvable `roles` table/)
-  assert.ok(!/canonical recovery-authority trigger/.test(noRoles.detail), 'the detail blamed the half that was present')
-
-  const noTriggers = verdictFor(observation({ presence: { ...PRESENT_RELATIONS, recovery_authority_relations: 0 } }))
-  assert.equal(noTriggers.reason, INDETERMINATE_REASONS.relationsAbsent)
-  assert.match(noTriggers.detail, /no relation carries a canonical recovery-authority trigger/)
-  assert.ok(!/no session-resolvable/.test(noTriggers.detail), 'the detail blamed the half that was present')
+test('each door names ITSELF, so one dispatch is enough to diagnose which one closed', () => {
+  // Four distinct ways for zero rows to mean something other than "no cascade". An undifferentiated
+  // reason would make a shadow-schema dispatch indistinguishable from a wrong-database one.
+  const cases = [
+    { presence: { canonical_roles_present: false }, reason: INDETERMINATE_REASONS.canonicalRelationAbsent, says: /no ordinary table `public\.roles`/, notSays: /resolves to schema/ },
+    { presence: { session_binds_canonical: false, session_roles_schema: 'metasheet' }, reason: INDETERMINATE_REASONS.bindingMismatch, says: /resolves to schema "metasheet", not the canonical `public`/, notSays: /no ordinary table/ },
+    { presence: { visible_roles_relations: 3 }, reason: INDETERMINATE_REASONS.relationAmbiguous, says: /3 `roles` tables are visible/, notSays: /resolves to schema/ },
+    { presence: { canonical_exact_carriers: 0 }, reason: INDETERMINATE_REASONS.relationsAbsent, says: /at its EXPECTED identity/, notSays: /visible on this session/ },
+  ]
+  for (const testCase of cases) {
+    const verdict = verdictFor(observation({ presence: { ...PRESENT_RELATIONS, ...testCase.presence } }))
+    assert.equal(verdict.verdict, 'INDETERMINATE', JSON.stringify(testCase.presence))
+    assert.equal(verdict.exitCode, 2, JSON.stringify(testCase.presence))
+    assert.equal(verdict.reason, testCase.reason, JSON.stringify(testCase.presence))
+    assert.match(verdict.detail, testCase.says)
+    assert.ok(!testCase.notSays.test(verdict.detail), `the detail blamed a door that was open: ${verdict.detail}`)
+  }
 })
 
 test('the workflow carries no SQL of its own and defers to the runner for both ends', () => {
@@ -530,7 +704,7 @@ test('the runner re-implements neither half of the witness', () => {
   // import line is pinned so a locally-defined shadow cannot quietly take over.
   assert.match(
     runnerRaw,
-    /import \{ ROLES_RELATION_PRESENT_SQL, ROLE_CASCADE_WITNESS_QUERY, describeRoleCascadeRow, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
+    /import \{ CANONICAL_ROLES_SCHEMA, FK_DELETE_ACTION_LETTERS, ROLE_CASCADE_BINDING_DOORS, buildRoleCascadeBindingSql, buildRoleCascadeWitnessQuery, classifyRoleCascadeBinding, describeRoleCascadeRow, readCatalogCount, roleDeleteCascadeExists, roleDeleteChildWrites \} from '\.\/multitable-l1-battery\.mjs'/,
   )
   // The battery's predicate must be the thing that DECIDES; a hand-rolled test anywhere in this
   // module (or in the probe source it generates) is a second, narrower definition.
@@ -870,7 +1044,7 @@ esac
 class Client {
   async connect() {}
   async query(sql) {
-    if (String(sql).includes('relkind')) return { rows: [{ roles_relations: '1', recovery_authority_relations: '8', roles_referencing_fks: '1' }] }
+    if (String(sql).includes('relkind')) return { rows: [{ canonical_roles_present: true, session_binds_canonical: true, session_roles_schema: 'public', visible_roles_relations: '1', canonical_exact_carriers: '8', recovery_authority_relations: '8', roles_referencing_fks: '1' }] }
     return { rows: ${JSON.stringify(witnessRows)} }
   }
   async end() {}
@@ -1216,8 +1390,8 @@ const GOLDEN_TRIGGER_FUNCTIONS = {
  * DDL for one schema: a `roles` table plus the requested children.
  * @param {{schema: string, children: {table: string, action?: string, trigger?: string|null}[]}} spec
  */
-function schemaDdl({ schema, children }) {
-  const parts = [`CREATE SCHEMA ${schema};`, `SET search_path TO ${schema};`]
+function schemaDdl({ schema, children, existingSchema = false }) {
+  const parts = existingSchema ? [`SET search_path TO ${schema};`] : [`CREATE SCHEMA ${schema};`, `SET search_path TO ${schema};`]
   for (const fn of new Set(Object.values(GOLDEN_TRIGGER_FUNCTIONS))) {
     parts.push(`CREATE FUNCTION ${schema}.${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;`)
   }
@@ -1242,7 +1416,10 @@ function schemaDdl({ schema, children }) {
  * return the capture in the probe's own wire format so the REAL parser and the REAL classifier
  * decide — not a shortcut that calls the predicate directly.
  */
-function observeRealDatabase({ ddl, searchPath }) {
+function observeRealDatabase({ ddl, searchPath, canonicalSchema, sessionPrelude = '' }) {
+  // The canonical schema is EXPLICIT at every call site, never defaulted: a golden that silently
+  // inherited production's `public` binding would be testing a relation its fixture never created.
+  if (!canonicalSchema) throw new Error('observeRealDatabase requires an explicit canonicalSchema')
   const dbName = `rcw_golden_${process.pid}_${Math.random().toString(36).slice(2, 10)}`
   psql(DB_GOLDEN_ADMIN_URL, `CREATE DATABASE ${dbName};`)
   const dbUrl = new URL(DB_GOLDEN_ADMIN_URL)
@@ -1254,9 +1431,12 @@ function observeRealDatabase({ ddl, searchPath }) {
     const raw = psql(
       dbUrl.toString(),
       [
+        // Runs in the OBSERVATION session, not the fixture session — the only way to put a pg_temp
+        // relation in front of the binding, which is where `current_schemas(true)` looks first.
+        ...(sessionPrelude ? [sessionPrelude] : []),
         `SET search_path TO ${searchPath};`,
-        `SELECT row_to_json(p) FROM (${RELATION_PRESENCE_QUERY}) p;`,
-        `SELECT coalesce(json_agg(row_to_json(w)), '[]'::json) FROM (${ROLE_CASCADE_WITNESS_QUERY}) w;`,
+        `SELECT row_to_json(p) FROM (${buildRelationPresenceQuery(canonicalSchema)}) p;`,
+        `SELECT coalesce(json_agg(row_to_json(w)), '[]'::json) FROM (${buildRoleCascadeWitnessQuery(canonicalSchema)}) w;`,
       ].join('\n'),
     )
     const [presenceLine, rowsLine] = raw.split('\n').map((line) => line.trim()).filter((line) => line !== '')
@@ -1266,7 +1446,12 @@ function observeRealDatabase({ ddl, searchPath }) {
     const capture = [
       `${PROTOCOL} BEGIN`,
       `${PROTOCOL} PRESENCE ${JSON.stringify({
-        roles: Number(presenceRow.roles_relations),
+        canonical_schema: canonicalSchema,
+        canonical_roles_present: presenceRow.canonical_roles_present === true || presenceRow.canonical_roles_present === 't',
+        session_binds_canonical: presenceRow.session_binds_canonical === true || presenceRow.session_binds_canonical === 't',
+        session_roles_schema: presenceRow.session_roles_schema == null ? null : String(presenceRow.session_roles_schema),
+        visible_roles_relations: Number(presenceRow.visible_roles_relations),
+        canonical_exact_carriers: Number(presenceRow.canonical_exact_carriers),
         recovery_authority_relations: Number(presenceRow.recovery_authority_relations),
         roles_referencing_fks: Number(presenceRow.roles_referencing_fks),
       })}`,
@@ -1350,6 +1535,7 @@ for (const golden of DB_GOLDENS) {
     const { verdict, capture } = observeRealDatabase({
       ddl: schemaDdl({ schema, children: golden.children }),
       searchPath: `${schema}, public`,
+      canonicalSchema: schema,
     })
     assert.equal(verdict.verdict, golden.expect.verdict, capture)
     assert.equal(verdict.exitCode, golden.expect.exitCode, capture)
@@ -1380,6 +1566,7 @@ test('real-DB golden: a shadow schema OFF search_path cannot flip the verdict', 
       schemaDdl({ schema: shadow, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
     ].join('\n'),
     searchPath: `${live}, public`,
+    canonicalSchema: live,
   })
   assert.equal(verdict.verdict, 'ABSENT', capture)
   assert.equal(verdict.exitCode, 0, capture)
@@ -1389,8 +1576,203 @@ test('real-DB golden: a shadow schema OFF search_path cannot flip the verdict', 
   const armed = observeRealDatabase({
     ddl: schemaDdl({ schema: shadow, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
     searchPath: `${shadow}, public`,
+    canonicalSchema: shadow,
   })
   assert.equal(armed.verdict.verdict, 'PRESENT', armed.capture)
+})
+
+/**
+ * THE SHADOW-RESOLUTION GOLDENS.
+ *
+ * Every case below returned `CASCADE ABSENT (premise CONFIRMED)`, exit 0, against the shipped
+ * pre-fix queries — on a database whose `roles:delete` cascade into a recovery-authority-triggered
+ * child was LIVE. Reproduced end to end on PG 15 with the shipped probe, parser, classifier and
+ * summary renderer; see `docs/development/role-cascade-witness-shadow-resolution-repro-20260824.md`.
+ *
+ * They are separate tests, not a matrix, because each one is caught by a DIFFERENT door and the
+ * mutation proofs pair case to door. Collapsing them would let one mutation red everything and
+ * prove nothing about which door is load-bearing.
+ */
+test('real-DB golden: a `$user`-shaped decoy in FRONT of the canonical schema cannot read as ABSENT', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // The production accident, at production's own binding: the canonical fixture lives in `public`,
+  // and the connecting role owns a schema of its own containing a bare `roles`. No `SET
+  // search_path`, no DSN `options=`, no `ALTER ROLE` is needed for this on a real deployment — the
+  // stock default `"$user", public` puts the decoy first all by itself.
+  const decoy = `rcw_user_${Math.random().toString(36).slice(2, 8)}`
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      schemaDdl({ schema: 'public', existingSchema: true, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
+      `CREATE SCHEMA ${decoy};`,
+      `CREATE TABLE ${decoy}.roles (id text PRIMARY KEY);`,
+    ].join('\n'),
+    searchPath: `${decoy}, public`,
+    canonicalSchema: 'public',
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.exitCode, 2, capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.bindingMismatch, capture)
+  assert.equal(verdict.presence, null, capture)
+})
+
+test('real-DB golden: a session looking at ONE wrong schema cannot read as ABSENT — the ambiguity count alone would miss it', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // The narrow case that refutes "count the visible `roles` tables and flag >1". Here exactly ONE
+  // `roles` is visible and it is the WRONG one, so an ambiguity gate sees nothing wrong. Only the
+  // canonical OID equality catches it. This golden exists to keep that asymmetry testable: if
+  // someone ever trades door 2 away for door 3, THIS is the test that reds.
+  const live = `rcw_live_${Math.random().toString(36).slice(2, 8)}`
+  const wrong = `rcw_wrong_${Math.random().toString(36).slice(2, 8)}`
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      schemaDdl({ schema: live, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
+      `CREATE SCHEMA ${wrong};`,
+      `CREATE TABLE ${wrong}.roles (id text PRIMARY KEY);`,
+    ].join('\n'),
+    searchPath: wrong,
+    canonicalSchema: live,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.bindingMismatch, capture)
+  // The point of the case, asserted rather than asserted-by-absence: the ambiguity door was OPEN.
+  assert.match(capture, /"visible_roles_relations":1/, 'the fixture stopped being the narrow one-visible-relation case this golden exists for')
+})
+
+test('real-DB golden: canonical bound FIRST but a second `roles` visible behind it is INDETERMINATE', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // Door 2 passes here — the session really does resolve the canonical relation — and door 3 is the
+  // only thing standing between this and a verdict drawn on an environment we cannot fully explain.
+  const live = `rcw_live_${Math.random().toString(36).slice(2, 8)}`
+  const second = `rcw_second_${Math.random().toString(36).slice(2, 8)}`
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      schemaDdl({ schema: live, children: [{ table: 'user_roles', action: 'RESTRICT', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
+      `CREATE SCHEMA ${second};`,
+      `CREATE TABLE ${second}.roles (id text PRIMARY KEY);`,
+    ].join('\n'),
+    searchPath: `${live}, ${second}, public`,
+    canonicalSchema: live,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationAmbiguous, capture)
+  assert.match(capture, /"session_binds_canonical":true/, 'this golden must exercise door 3, with door 2 satisfied')
+})
+
+test('real-DB golden: a pg_temp `roles` cannot read as ABSENT', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // `current_schemas(true)` searches pg_temp FIRST, so a temp relation shadows the canonical one
+  // without touching search_path at all. Nobody enumerated this vector; it falls out of the OID
+  // equality without being named, which is the argument for binding rather than enumerating.
+  const live = `rcw_live_${Math.random().toString(36).slice(2, 8)}`
+  const { verdict, capture } = observeRealDatabase({
+    ddl: schemaDdl({ schema: live, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
+    sessionPrelude: 'CREATE TEMP TABLE roles (id text PRIMARY KEY);',
+    searchPath: `${live}, public`,
+    canonicalSchema: live,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.bindingMismatch, capture)
+  assert.match(capture, /"session_roles_schema":"pg_temp/, capture)
+})
+
+test('real-DB golden: a same-named trigger function from ANOTHER schema cannot satisfy the positive control', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // The impostor-carrier hole. Everything the loose control looked at is right here: the carrier
+  // table IS in the canonical schema, and the function name IS one of the census's. Only the
+  // function's SCHEMA is wrong. Against head b3bdb23d8b all four doors opened and this reported
+  // ABSENT / exit 0 on a catalog whose recovery-authority surface is not the canonical one.
+  const canon = `rcw_canon_${Math.random().toString(36).slice(2, 8)}`
+  const evil = `rcw_evil_${Math.random().toString(36).slice(2, 8)}`
+  const fn = GOLDEN_TRIGGER_FUNCTIONS.user_roles
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      `CREATE SCHEMA ${canon};`,
+      `CREATE SCHEMA ${evil};`,
+      `CREATE FUNCTION ${evil}.${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;`,
+      `CREATE TABLE ${canon}.roles (id text PRIMARY KEY);`,
+      `CREATE TABLE ${canon}.user_roles (owner_id text, role_id text REFERENCES ${canon}.roles(id) ON DELETE CASCADE);`,
+      `CREATE TRIGGER trg_user_roles_recovery_authority_lock BEFORE INSERT OR UPDATE OR DELETE`
+        + ` ON ${canon}.user_roles FOR EACH ROW EXECUTE FUNCTION ${evil}.${fn}();`,
+    ].join('\n'),
+    searchPath: canon,
+    canonicalSchema: canon,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.exitCode, 2, capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
+  // The point of the case: the LOOSE carrier count was satisfied — only the exact identity was not.
+  assert.match(capture, /"recovery_authority_relations":1/, 'the fixture stopped exercising the loose-count-satisfied case')
+  assert.match(capture, /"canonical_exact_carriers":0/, capture)
+})
+
+test('real-DB golden: a RENAMED trigger on the right table cannot satisfy the positive control', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // The third axis of "exact identity". Right schema, right carrier table, right function, right
+  // function schema — only the trigger NAME differs from the census's. Added because a mutation
+  // that deleted the `trg.tgname = want.trigger_name` conjunct left the golden suite green at
+  // 66/66: the conjunct was asserted in source but nothing exercised it. An unexercised conjunct is
+  // a claim, not a check.
+  const canon = `rcw_canon_${Math.random().toString(36).slice(2, 8)}`
+  const fn = GOLDEN_TRIGGER_FUNCTIONS.user_roles
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      `CREATE SCHEMA ${canon};`,
+      `CREATE FUNCTION ${canon}.${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;`,
+      `CREATE TABLE ${canon}.roles (id text PRIMARY KEY);`,
+      `CREATE TABLE ${canon}.user_roles (owner_id text, role_id text REFERENCES ${canon}.roles(id) ON DELETE CASCADE);`,
+      `CREATE TRIGGER trg_user_roles_recovery_authority_lock_RENAMED BEFORE INSERT OR UPDATE OR DELETE`
+        + ` ON ${canon}.user_roles FOR EACH ROW EXECUTE FUNCTION ${canon}.${fn}();`,
+    ].join('\n'),
+    searchPath: canon,
+    canonicalSchema: canon,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
+  assert.match(capture, /"recovery_authority_relations":1/, 'the fixture stopped exercising the loose-count-satisfied case')
+  assert.match(capture, /"canonical_exact_carriers":0/, capture)
+})
+
+test('real-DB golden: a canonical-schema trigger on an UNEXPECTED carrier table cannot satisfy the positive control', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // Same hole, the other axis: right schema, right function, right function schema — wrong table,
+  // so it is not one of the census's carrier identities.
+  const canon = `rcw_canon_${Math.random().toString(36).slice(2, 8)}`
+  const fn = GOLDEN_TRIGGER_FUNCTIONS.user_roles
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      `CREATE SCHEMA ${canon};`,
+      `CREATE FUNCTION ${canon}.${fn}() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;`,
+      `CREATE TABLE ${canon}.roles (id text PRIMARY KEY);`,
+      `CREATE TABLE ${canon}.user_roles (owner_id text, role_id text REFERENCES ${canon}.roles(id) ON DELETE CASCADE);`,
+      `CREATE TABLE ${canon}.not_a_census_carrier (id text);`,
+      `CREATE TRIGGER trg_user_roles_recovery_authority_lock BEFORE INSERT OR UPDATE OR DELETE`
+        + ` ON ${canon}.not_a_census_carrier FOR EACH ROW EXECUTE FUNCTION ${canon}.${fn}();`,
+    ].join('\n'),
+    searchPath: canon,
+    canonicalSchema: canon,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
+  assert.match(capture, /"recovery_authority_relations":1/, 'the fixture stopped exercising the loose-count-satisfied case')
+  assert.match(capture, /"canonical_exact_carriers":0/, capture)
+})
+
+test('real-DB golden: a trigger carrier in ANOTHER schema cannot satisfy the canonical positive control', { skip: DB_GOLDEN_SKIP ?? false }, () => {
+  // Door 4, scoped. This is the shape that made the ORIGINAL control unfalsifiable: its two counts
+  // were satisfied by two different relations in two different schemas — the decoy answered "a
+  // `roles` exists" and the real child answered "a trigger carrier exists" — and neither noticed
+  // they were describing different databases-within-a-database. Here the session binds the canonical
+  // `roles` honestly, but the canonical schema carries no recovery-authority trigger at all, so the
+  // witness query is structurally incapable of returning a row. A globally-counted carrier control
+  // would be fed by the OTHER schema and let this proceed to ABSENT.
+  const live = `rcw_live_${Math.random().toString(36).slice(2, 8)}`
+  const elsewhere = `rcw_elsewhere_${Math.random().toString(36).slice(2, 8)}`
+  const { verdict, capture } = observeRealDatabase({
+    ddl: [
+      `CREATE SCHEMA ${live};`,
+      `CREATE TABLE ${live}.roles (id text PRIMARY KEY);`,
+      `CREATE TABLE ${live}.user_roles (owner_id text, role_id text REFERENCES ${live}.roles(id) ON DELETE CASCADE);`,
+      schemaDdl({ schema: elsewhere, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] }),
+    ].join('\n'),
+    searchPath: `${live}, public`,
+    canonicalSchema: live,
+  })
+  assert.equal(verdict.verdict, 'INDETERMINATE', capture)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
+  assert.match(capture, /"session_binds_canonical":true/, 'this golden must exercise door 4, with doors 1-3 satisfied')
 })
 
 test('real-DB golden: a database with no canonical trigger at all is INDETERMINATE, never ABSENT', { skip: DB_GOLDEN_SKIP ?? false }, () => {
@@ -1403,11 +1785,11 @@ test('real-DB golden: a database with no canonical trigger at all is INDETERMINA
     `CREATE TABLE ${schema}.roles (id text PRIMARY KEY);`,
     `CREATE TABLE ${schema}.user_roles (owner_id text, role_id text REFERENCES ${schema}.roles(id) ON DELETE CASCADE);`,
   ].join('\n')
-  const { verdict, capture } = observeRealDatabase({ ddl, searchPath: `${schema}, public` })
+  const { verdict, capture } = observeRealDatabase({ ddl, searchPath: `${schema}, public`, canonicalSchema: schema })
   assert.equal(verdict.verdict, 'INDETERMINATE', capture)
   assert.equal(verdict.exitCode, 2, capture)
   assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
-  assert.match(verdict.detail, /no relation carries a canonical recovery-authority trigger/)
+  assert.match(verdict.detail, /at its EXPECTED identity/)
 })
 
 test('real-DB golden: no session-resolvable `roles` is INDETERMINATE, never ABSENT', { skip: DB_GOLDEN_SKIP ?? false }, () => {
@@ -1420,9 +1802,10 @@ test('real-DB golden: no session-resolvable `roles` is INDETERMINATE, never ABSE
     ddl: schemaDdl({ schema: hidden, children: [{ table: 'user_roles', action: 'CASCADE', trigger: GOLDEN_TRIGGER_FUNCTIONS.user_roles }] })
       + `\nCREATE SCHEMA ${schema};`,
     searchPath: `${schema}, public`,
+    canonicalSchema: schema,
   })
   assert.equal(verdict.verdict, 'INDETERMINATE', capture)
   assert.equal(verdict.exitCode, 2, capture)
-  assert.equal(verdict.reason, INDETERMINATE_REASONS.relationsAbsent, capture)
-  assert.match(verdict.detail, /no session-resolvable `roles` table/)
+  assert.equal(verdict.reason, INDETERMINATE_REASONS.canonicalRelationAbsent, capture)
+  assert.match(verdict.detail, /has no ordinary table `.+\.roles`/)
 })

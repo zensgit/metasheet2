@@ -2191,6 +2191,22 @@ components:
               type: integer
         minPunchIntervalMinutes:
           type: integer
+        employeeQuickActionIcons:
+          type: object
+          additionalProperties: false
+          properties:
+            makeup:
+              type: string
+              enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+            leave:
+              type: string
+              enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+            overtime:
+              type: string
+              enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
+            swap:
+              type: string
+              enum: [clock-plus, calendar, moon, swap, plus, user, briefcase, pin]
     Spreadsheet:
       type: object
       properties:

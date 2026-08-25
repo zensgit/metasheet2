@@ -186,7 +186,7 @@ jobs:
           ssh $ssh_opts "$DEPLOY_USER@$DEPLOY_HOST" TARGET="$TARGET" MODE="$MODE" POSTURE="$POSTURE" 'bash -s' <<'REMOTE' | tee containment-report.txt
           set -uo pipefail
           FLAGS="MULTITABLE_ENABLE_SHEET_REVERT MULTITABLE_ENABLE_PIT_RESET MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION"
-          SCHEMA_HELPER_SHA256="673ce2000bb367d7758acc88a7fe3b3994aa88d36139fb85036732ce8be90059"
+          SCHEMA_HELPER_SHA256="f1c17af1b9091c82dce8ec899f0e7480ecfa810087e4a34d506c118775a44d82"
           SCHEMA_PASS_LINE_DISABLED="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           SCHEMA_PASS_LINE_ARMED="VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links"
           FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const normalized=present?String(source[key]??"").trim().toLowerCase():"";const state=!present?"unset":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
