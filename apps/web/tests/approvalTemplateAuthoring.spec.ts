@@ -1561,6 +1561,78 @@ describe('TemplateAuthoringView', () => {
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('E-round5 P2 (Canvas V2 ON): switching /tpl_a/edit -> /tpl_b/edit re-seeds the form builder — B fields display, edit, and SAVE as B', async () => {
+    // Reproduced by the external review: ApprovalFormBuilder reads the draft ONCE per epoch by
+    // design; the route reload replaced the parent draft but never bumped formBuilderSessionEpoch,
+    // so basic info showed B while the form designer still showed A's fields. Becomes an ordinary
+    // path once #5141 defaults the canvas ON.
+    approvalCanvasV2.value = true
+    getTemplateSpy.mockImplementation((id: string) => Promise.resolve(buildTemplate({
+      id, key: `k_${id}`, name: `模板 ${id}`,
+      // `reviewer` retained: the default approvalGraph's form_user assignee references it, and
+      // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
+      // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
+      formSchema: { fields: [
+        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
+      ] },
+    })))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+    expect(container!.textContent).toContain('字段 tpl_a')
+
+    setRouteParams({ id: 'tpl_b' })
+    await flushUi()
+    await flushUi()
+    await flushUi()
+
+    // The builder shows B's fields — and A's are GONE (the reviewer's exact symptom).
+    const builder = container!.querySelector('[data-testid="approval-form-builder"]') as HTMLElement
+    expect(builder).not.toBeNull()
+    expect(builder.textContent).toContain('字段 tpl_b')
+    expect(builder.textContent).not.toContain('字段 tpl_a')
+
+    // …and what SAVES is B: field list from B's schema, update targeted at tpl_b.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(updateTemplateSpy.mock.calls[0]?.[0]).toBe('tpl_b')
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.formSchema.fields.map((f: any) => f.id)).toEqual(['reviewer', 'field_tpl_b'])
+  })
+
+  it('E-round5 P2 (Canvas V2 ON): switching /tpl_a/edit -> /new re-seeds the builder to the empty starter', async () => {
+    approvalCanvasV2.value = true
+    getTemplateSpy.mockImplementation((id: string) => Promise.resolve(buildTemplate({
+      id, key: `k_${id}`, name: `模板 ${id}`,
+      // `reviewer` retained: the default approvalGraph's form_user assignee references it, and
+      // that shape check is save-BLOCKING in B0's minimal set (dropping it red the save with
+      // 审批人 1 的表单用户字段无效 — the minimal gate doing its job, caught during authoring).
+      formSchema: { fields: [
+        { id: 'reviewer', type: 'user', label: '审批人', required: false },
+        { id: `field_${id}`, type: 'text', label: `字段 ${id}`, required: false },
+      ] },
+    })))
+    setRouteParams({ id: 'tpl_a' })
+    await mountView()
+    await flushUi()
+    expect(container!.textContent).toContain('字段 tpl_a')
+
+    setRouteParams({})
+    await flushUi()
+    await flushUi()
+
+    const builder = container!.querySelector('[data-testid="approval-form-builder"]') as HTMLElement
+    expect(builder).not.toBeNull()
+    expect(builder.textContent).not.toContain('字段 tpl_a')
+    // New-route positive control through the V2 surface: the empty starter saves via CREATE.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+  })
+
   it('E-round4 P2 (stale response): a SLOW previous route\'s fetch resolving LAST cannot overwrite the current route\'s draft', async () => {
     // The sequence-ticket guard: tpl_a's fetch is slow, the user switches to tpl_b, tpl_b
     // resolves first — then tpl_a's response finally arrives and must be DROPPED.

@@ -1649,7 +1649,11 @@ function onFormBuilderDraftChange(nextDraft: TemplateAuthoringDraft, focusLocalI
   refreshFormBuilderHistoryFlags()
 }
 
-/** Deliberate resync after a genuine server round-trip (save/create/preset) — NOT a routine reseed. */
+/** Deliberate resync after a genuine draft REPLACEMENT — server round-trips (save/create/preset)
+ *  and route transitions on a reused instance (round-5 P2: A->B switch left the builder showing
+ *  A's fields — ApprovalFormBuilder reads the draft ONCE per epoch by design, and only this epoch
+ *  bump remounts it). First mount is untouched: showFormBuilderV2 is still false there (the
+ *  hydration gate runs after this would-be call), so the guard makes it a natural no-op. */
 function reseedFormBuilderSessionIfActive(): void {
   if (!showFormBuilderV2.value) return
   formBuilderSessionEpoch.value += 1
@@ -3868,6 +3872,9 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2: an edit->new transition on a reused instance replaced the draft above — the
+    // builder must re-read it (no-ops on first mount via the showFormBuilderV2 guard).
+    reseedFormBuilderSessionIfActive()
     // F4 hydration gate: a NEW template's starter draft is available synchronously (no fetch) —
     // seed the v2 session in the SAME tick, before first paint, so there is no builder-mounts-empty
     // flash even for a brand-new template.
@@ -3890,6 +3897,12 @@ async function loadTemplateForEdit() {
     reseedCanvasHistoryFromDraft()
     reseedFormHistoryFromDraft()
     snapshotDraft()
+    // Round-5 P2 (external review, reproduced mounted with Canvas V2 ON): a route reload on a
+    // reused instance replaced the draft above, but ApprovalFormBuilder reads the draft ONCE per
+    // epoch — basic info showed B while the form designer still showed A's fields. Reseed here;
+    // the showFormBuilderV2 guard makes this a no-op on the first (mount-time) load, where the
+    // hydration gate below does the seeding.
+    reseedFormBuilderSessionIfActive()
   } catch (error: unknown) {
     if (seq !== templateLoadSeq) return // a superseded load's failure is not THIS route's failure
     loadError.value = describeTemplateAuthoringError(error, '加载审批模板失败')
