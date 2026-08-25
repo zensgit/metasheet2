@@ -1,6 +1,13 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v7(2026-08-26 六次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v8(2026-08-26 七次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+
+> **v8 修订说明**(第七轮执行链对账):①B 旗改为 admission gate,已持久化 detail 动作不得因关旗
+> 被记作 skipped/done;混合版本必须在启用前由全 worker capability barrier 拦住,回滚必须在新镜像上
+> 禁止新规则、排空并以部署 preflight 证明无 detail 动作后才允许旧镜像;②detail executor 明确复用
+> `recheckFwbPermissionGates` 与 `resolveFwbRuntimeMappings`,select 有效闭集为「确认值 ∩ 当前值」;
+> ③批准终态冻结改为结构守卫,handler UPDATE 增加 pending 谓词并要求受影响行恰为 1;
+> ④旧 create/update 哈希 golden 上移到 raw route/service 入口;⑤flag registry 对未知跨域依赖 fail loud。
 
 > **v7 修订说明**(第六轮兼容性对账):①新增 detail 专用确认哈希域,
 > 旧 create/update 的 `deriveFwbConfirmationHash` 主体、规范化映射形状与已存哈希字节
@@ -60,7 +67,9 @@
 协作状态。两条公理:
 
 - **A1(终态冻结边界)**:提交建立初始证据,办理节点可在 pending 期受控修订;批准终态后快照冻结。
-  明细 `row_index` 与逐行事件身份均以该终态快照的最终行序为准。不存在审批单↔表的实时双向同步。
+  该冻结必须由 `form_snapshot` UPDATE 自身的 `status='pending'` 谓词和受影响行数检查保证,不能只依赖
+  远处调用者先检查 status。明细 `row_index` 与逐行事件身份均以该终态快照的最终行序为准。
+  不存在审批单↔表的实时双向同步。
 - **A2(三缝原则)**:关联记录(引用进)、FWB(批准后快照出)、automation 桥(表事件触发审批)。
   新能力必须落在三缝上,不开第四条。
 
@@ -105,7 +114,8 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
 **行数边界合同(v6 固定数值与传输,审阅 P2-2/P2-5)**:
 - 现状:`maxRows` 可不填,服务端仅校验非负整数,**无系统硬上限**;`minRows≥1` 时发起页初始
   仍播种空数组(不自动出首行)。因此部署前须只读 census:全部**服务端持久化**
-  模板草稿/已发布版本中 `minRows/maxRows > 200` 的字段,以及全部非终态实例中
+  模板草稿/已发布版本中 `minRows/maxRows > 200` 或虽为 `Number.isInteger` 但不是安全整数的字段,
+  以及全部非终态实例中
   明细行数 `>200` 的 `form_snapshot`。发起页草稿只存于浏览器 `localStorage`,
   **不存在服务端草稿表供 SQL census**;不得将未盘点写成 0。旧本地草稿恢复后,
   客户端 capability 显示超限原因,服务端提交终检对 201 行必须拒绝;不做静默截断或自动分批。
@@ -117,7 +127,9 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
   `/api/approvals/capabilities` 路由,避免被既有 `/api/approvals/:id` 参数路由遮蔽,也避免页面再发一条
   可独立失败的请求。现有 `ProductFeatures`、`RouteFeatureGuard.requiredFeature`、`hasFeature` 和开发态
   localStorage override 都是**布尔合同**,不得加入数字 cap。审批域新增纯解析器/只读状态
-  `ApprovalDetailCapability`;它从同一个嵌套节点原子取得布尔开关与正安全整数上限,任一缺失/畸形就
+  `ApprovalDetailCapability`,由 `useAuth` 已缓存的原始 session payload 构造专用只读 accessor;
+  不得复用会丢弃未知嵌套键的 `extractFeaturesFromPayload`,也不得二次请求 `/api/auth/me`。该 accessor
+  从同一个嵌套节点原子取得布尔开关与正安全整数上限,任一缺失/畸形就
   返回 disabled,不得把一半有效的 payload 拼成能力。Web 不定义第二个数字或另读一份旗。该 payload
   只承载静态能力,不扩大模板/实例 ACL;提交与办理写入终检始终直接使用后端常量,不信客户端回传。
 - **模板合同:**作者显式写 `maxRows > 200` 时保存/发布均拒绝,不静默 clamp;省略 `maxRows` 时
@@ -132,7 +144,9 @@ Lock-7 已授权且运行时已实现 `pending` 办理节点在同一锁事务�
 - **写入面完整性:**上述七条是**可携带已发布明细 schema 的模板型审批路径**,
   不是对全仓 `form_snapshot` 写入器数量的猜测。A 必须增加 source-derived census,
   机械枚举 core backend 与生产 plugins 中的所有 `approval_instances.form_snapshot`
-  INSERT/UPDATE/UPSERT 路径,并将每条精确分类为「模板型且可携带明细」或「固定形状且不可携带明细」。
+  INSERT/UPDATE/UPSERT 路径,并在两个独立轴上分类:「模板型且可携带明细 / 固定形状且不可携带明细」
+  与「写入 SQL 自身有终态 status guard / 无 guard」。模板型办理 UPDATE 必须带
+  `status='pending'` 且受影响行恰为 1;只靠调用点预检不算结构守卫。
   当前 `plugins/plugin-attendance/index.cjs` 的考勤直写器属后者:它不绑定已发布模板版本/
   明细 schema,所以 v1 不强行套用明细行上限。该排除必须有正控;新增未分类写入器或使固定形状
   路径开始携带模板明细时,required guard 必须变红,先纳入上限合同才能放行。
@@ -190,14 +204,16 @@ safe);date 只收**文本单元格**中的严格 `YYYY-MM-DD`;datetime 只收带
 5. mounted spec 同时进入 approval web guard 与 `run-required-web-tests.sh`;在 1440/1024/390 真浏览器
    验证表格横向滚动、行操作和键盘等价路径。旗 OFF 截图与当前 main 一致。
 6. 从 `localStorage` 恢复 201 行旧草稿时不清空用户数据,但提交必须在任何实例/
-   outbox 写入前拒绝。`form_snapshot` writer census 对当前精确类别集有正控;新增一个
+   outbox 写入前拒绝。`form_snapshot` writer census 对当前精确类别集和 status-guard 轴有正控;新增一个
    未分类写入器、或让考勤固定形状开始绑定明细 schema,均须使 required guard 变红。
 
 ## 4. FWB v2:明细行展开投递(审批→表)
 
 一单中**一个指定明细字段**的 N 行 → 目标表 N 行。既有动作新增
 `mode: 'create_detail_rows'` 与 `detailSourceFieldId`;不允许两个明细字段按位置 zip,也不允许笛卡尔积。
-该 mode 只有 `APPROVAL_FWB_DETAIL_EXPANSION_ENABLED=true` 才能保存/启用/执行;旗 OFF 时 fail closed。
+该 mode 只有 `APPROVAL_FWB_DETAIL_EXPANSION_ENABLED=true` 才能新建、保存或启用。该旗是
+**admission gate,不是 executor kill switch**:一旦规则已持久化并产生终态事件,执行端必须完成、重试或
+明确停车,不能因后续关旗返回 `skipped` 并把 event-fire 标为 done。
 当前 main 的 `parseFwbWriteMode` 对未知 mode 已是拒绝语义,因此回滚到功能前镜像也只会拒绝该动作,
 不得把它降级为旧 `create` 并误写一行。N=0 仍获取一次动作级主 claim,但写 0 个业务行、revision、
 逐行溯源和 outbox;完整重放返回 `already_applied`。该语义只适用于终态
@@ -236,14 +252,16 @@ type FwbMappingSource =
   mode + detailSourceFieldId + 完整 source 联合映射`。不得把 detail `source` 形状反向
   写回旧 mode 的 hash subject。现有 confirm 路由必须在 `parseFwbWriteMode`
   后改为三个显式 case:create/update 仍调旧函数,detail 调新函数,未知 mode 在哈希前拒绝;
-  禁止在路由末尾无条件继续调用旧函数。
+  禁止在路由末尾无条件继续调用旧函数。旧载荷可在 mapping-read 层被解释为 `form_field`,但
+  `normalizeFwbMappings` 交给旧哈希函数的数组不得因此增加 `source` 键;否则历史 confirmation hash 会漂移。
 - 逐行映射保留既有 `mapApprovalFormValues` 的**全有或全无**合同:对任一显式映射,
   源格缺失、`null` 或空白字符串均在父 claim 前以 `missing_required_value` 拒绝整个
   动作。不得因为 `minRows` 播种了空行就静默丢行、压缩 `row_index` 或只写部分列;
   「可选映射」若未来需要,须独立设计,不由 v2 推断。
 - 源叶子 8 类(text/textarea/number/date/datetime/select/multi-select/user),目标闭集为
   text/date/select(number 待 D0-D4)。v1 矩阵:text/textarea→text;date→date;select→select,且
-  选项使用 execute-time 目标闭集;datetime、multi-select、user、number 及其他所有格子明确拒绝。
+  select 的 execute-time 有效闭集必须是**确认哈希中的选项 ∩ 当前目标字段仍存在的选项**;
+  新增但未确认的目标选项不能绕过确认。datetime、multi-select、user、number 及其他所有格子明确拒绝。
   datetime 不截断,避免制造带时区语义的日期。
 
 ### 4.2 主 claim 不变,逐行溯源用 additive 子表
@@ -286,8 +304,13 @@ CREATE TABLE meta_fwb_detail_row_applied (
 ### 4.3 一次父 claim、整批事务和严格重放
 
 所有来源/类型/权限/目标字段、固定模板版本、终态行序、逐格映射和 `N <= 200` 在第一笔写前完成。
-规则保存、启用和执行均要求 A 旗、既有 FWB 旗、durable-delivery 旗和 B 旗同时有效;任一缺失都
-fail closed,不得只记录 skipped 后把外部效果视为成功。随后在**同一个数据库事务**调用原
+detail executor 必须在自己的新路径上调用既有 `recheckFwbPermissionGates` 和
+`resolveFwbRuntimeMappings`;后者继续负责目标字段存在/类型、select 确认交集与 number precision
+替换。不得因不复用旧 executor 而复制或省略这两道 execute-time 门。规则保存/启用要求 A 旗、
+既有 FWB 旗、durable-delivery 旗和 B admission 旗同时有效；已持久化 detail 动作执行时不得再读
+B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专用、values-free 的
+`fwb_retryable:*` 命名空间，不得记录 skipped/done；真正未知的 mode 仍保留既有确定性拒绝，不能
+因本包变成无限重试。随后在**同一个数据库事务**调用原
 `claimActionApplied` 一次:
 
 - `claimed`:按终态冻结顺序写 N 个 record、N 个 revision、N 个逐行溯源和 N 个 outbox。任一位置失败,
@@ -300,7 +323,8 @@ fail closed,不得只记录 skipped 后把外部效果视为成功。随后在**
   不是两行成功)、
   每行 `event_id` 等于本次纯函数推导值、`target_record_id` 非空。完全相等才返回
   `already_applied`;缺行、多行、错 event 或父行无子证据均以 values-free
-  `fwb_detail_provenance_mismatch` 终止并走 required alert,绝不补写或重发。
+  `fwb_detail_provenance_mismatch` 终止并走 required alert,不自动补写或重发,且该 delivery 保持
+  parked/reclaimable,不能被 `markEventFiresDone` 吸收;只有 owner 处置证据不一致后才能恢复或终结。
 - N=0:首次事务只留下父 claim;重放要求该父 claim 的子行集恰为空。这样 no-op 也有稳定审计身份,
   而不是每次都重新「成功」。
 
@@ -333,24 +357,37 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    不能被 `IF NOT EXISTS` 吞掉。
 2. **Mode/activation:**parser、类型联合、保存验证和 executor 三 case 穷尽一致;把 detail case 删掉或
    恢复「非 update 即 create」时,flag-ON 测试必须红且业务行保持 0。B 在 A/FWB/durable 任一 OFF 时
-   save/enable/execute 均 fail closed;不得将 skipped 记作成功。旧 create/update 确认哈希用固定
-   golden 证明字节不变;detail 哈希对 mode、明细字段、嵌套 source 的任一变化都必须改变。
+   save/enable 均 fail closed;已持久化 detail 动作不再读取 B admission 旗；底层 capability 暂不可用
+   时必须保持 event-fire 非 done 并 values-free 告警，不得将 skipped/确定性拒绝记作成功。新代码中的
+   `hasRetryableFwbFailure`/调用链只把明确的 `fwb_retryable:*` 视为可重试并回抛到 durable delivery；
+   既有 `unknown_mode` 仍是确定性配置拒绝。实际旧 worker 既不认识 detail mode，也没有这条新命名空间，
+   所以 capability barrier 必须证明它在启用后无权 claim。
+   旧
+   create/update 确认哈希 golden 从**原始 route/service 请求或持久 config**进入生产规范化与哈希路径,
+   证明字节不变;只测 `deriveFwbConfirmationHash` 纯函数不算。旧 mode 的 mapping-read 可规范化兼容载荷,
+   但交给旧哈希函数的数组不得物化新 `source` 联合。detail 哈希对 mode、明细字段、嵌套 source 的
+   任一变化都必须改变。
 3. **Parent claim/replay:**N=0/1/200 首次与重放均构造;两个 worker 同抢同一 N 行只能得到一个
    完整赢家。空数组的 N=0 有正控;字段缺失/`null`/非数组的负例必须在 claim 前拒绝。
    把 detail 路径退回旧 duplicate 短路,或删除任一严格 replay 核对(行集/event/record id)时,
    指定 corruption golden 必须红。
-4. **Nested mapping:**两个明细字段复用同一 child id,只读取指定组;不存在/跨组/类型漂移在
+4. **Nested mapping/execute recheck:**两个明细字段复用同一 child id,只读取指定组;不存在/跨组/类型漂移在
    rule-save/rule-enable/execute 三时点 fail closed。顶层字段重复到每行有正控。一个显式映射格为
    缺失/`null`/空白字符串时,父 claim 与所有业务写均为 0;删掉缺值门或改成跳行时指定测试必须变红。
+   detail 路径必须行使 `recheckFwbPermissionGates` 与 `resolveFwbRuntimeMappings`;确认后给目标 select
+   新增一个选项,detail execute 仍拒绝该未确认值,而原 create 路径作为同形正控。中和任一道重检只让
+   自己的权限/新增选项/字段删除或改型负例变红。
 5. **Atomicity:**第 k 行 record/revision/provenance/outbox 四类故障逐一注入后,父 claim、N 类业务行、
    revision、子证据和 outbox 全部为 0;不存在「补剩余行」路径。
 6. **Event identity:**两行→两个不同 outbox event id→真实 durable adapter→两个下游效果;
    同一 action 全量 replay→零新增效果。把 seed 退回裸 completion event 或所有行共用 action id
-   时对应测试必须红。
+   时对应测试必须红。合同同时钉住「同一 instance 只能有一次 approved 终态事件」;若未来允许第二次
+   approved transition,必须先扩父业务键/event identity 与恢复语义,不能让 event mismatch 变成无恢复吸收态。
 7. **Cap/terminal snapshot:**办理节点写 200/201 与批准终态读取均有真库测试;先提交行 A、再由办理
    节点改成行 B、最后批准的正控必须让 FWB 只写 B;若改为读取提交时捕获值,对应测试必须红。execute
    对 201 行在 claim 前拒绝。B 激活 census 覆盖可能命中规则的历史批准快照。旗 OFF 与功能前 main 对
-   `create_detail_rows` 都 fail closed,不得 fallback 到 create。
+   `create_detail_rows` 都 fail closed,不得 fallback 到 create。批准后再次调用办理写入必须因 UPDATE
+   自身的 pending 谓词影响 0 行而整事务拒绝;中和该谓词或忽略 row-count 时对应测试必须红。
 8. **Legacy:**FWB-1/2/3 现有真库套件数量不减;主表 migration/helper/index 无 diff,旧调用载荷与
    flag-OFF 行为逐字节不变。
 9. **CI:**后端真库 spec 进入 `test (20.x)` 明确 run-list;新 mounted FE spec 同时进入
@@ -365,15 +402,20 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    **consumer 行总数**计,不得只记 200 条 producer event。
 11. **Rolling deploy/rollback:**先 additive migration,再全 worker 新代码且四旗 OFF;flag-ON boot 对
     子表、约束、索引做精确 schema assertion,缺失/漂移即中止。激活前证明所有 dispatcher 都报告
-    `create_detail_rows` capability,再按 A→durable/FWB→B 开启。回滚先禁止新规则并关 B,排空/停车相关
-    事件且登记混合窗口 reconciliation,确认无 detail action 后才允许旧 worker 回来;最后才可关 A。
-    旧镜像会拒 unknown mode 只证明不误写,**不证明待写效果不会丢失**。
+    `create_detail_rows` capability,且 capability registry/部署 barrier 为本包明确前置基础设施,再按
+    A→durable/FWB→B 开启。回滚先关 B admission、禁止/停用新 detail 规则,但新 worker 的 execution
+    支持保持有效;排空并证明不存在 pending/in_progress/reclaimable detail delivery 和仍启用规则后,
+    部署 preflight 才允许旧 worker 回来,最后才可关 A。若无法排空,必须停车相关 delivery 并阻止旧镜像
+    启动,不得让旧 `unknown_mode` 消费事件。旧镜像会拒 unknown mode 只证明不误写,
+    **不证明待写效果不会丢失**。混合版本/关旗演练必须证明没有 detail event-fire 进入 done。
 
 **定位:**FWB v2 是**批准后的分析/联动路径**,不是导出替代——它不覆盖草稿/驳回实例、不产出
 Excel 文件、无回导。文件级导出(含主+子一并导出、编辑后回导)为独立缺口,是否立项见 §7-A。
 新旗 `APPROVAL_FWB_DETAIL_EXPANSION_ENABLED` 默认 OFF、exact-literal `'true'`,登记全域 manifest;
 登记项明确依赖 `APPROVAL_DETAIL_V11_ENABLED`、`APPROVAL_FWB_WRITEBACK_ENABLED` 与
-`AUTOMATION_DURABLE_DELIVERY_ENABLED`;非法组合让 boot/strict status 失败。启用前要求 A 与既有
+`AUTOMATION_DURABLE_DELIVERY_ENABLED`;registry 构建时任何 `dependsOn` key 不在跨域总索引中都必须
+fail loud,不能被 `depSpec && ...` 当成已满足。source-derived completeness 覆盖被声明依赖的跨前缀 key;
+非法组合让 boot/strict status 失败。启用前要求 A 与既有
 durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capability 完整、B 历史快照 census
 已清零/逐项处置且 §4.5 merged-main 全绿。
 
@@ -470,7 +512,7 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 - (b) 行级引用+伴生列:填单中可刷新;提交时切断与表的联动并成为审批内副本,批准终态再冻结。量级:中-大。
 - 安全底线:服务端以发起人身份过表 ACL;发布时目录校验;跨 org 不通。
 
-## 7. 待 owner 裁决(v7:五个独立裁决包)
+## 7. 待 owner 裁决(v8:五个独立裁决包)
 
 **A. v1.1 录入效率包 — 建议 RATIFY v7。**裁决面收窄为:①系统硬上限固定 **200**、
 嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
@@ -479,13 +521,13 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
 
-**B. FWB v2 delta lock 包 — 建议 RATIFY v7。**裁决面为:①单一 detailSourceFieldId +
+**B. FWB v2 delta lock 包 — 建议 RATIFY v8。**裁决面为:①单一 detailSourceFieldId +
 判别式来源;②既有六元父 claim/helper/index 零改动 + additive 逐行溯源表;③一次父 claim、N 行同事务、
 严格 replay(含 N=0 与缺字段区分,不复用旧 duplicate 短路);④旧 create/update 哈希字节不变 +
 detail 专用确认哈希域;⑤以 action-scoped FWB event 为父种子的逐行稳定 event id;⑥逐格类型矩阵;
 ⑦新实例只追加;⑧按 §1.1 精确修订 FWB-0 数据源条款、终态冻结语义、缺值全有或全无、
-A/FWB/durable 依赖、穷尽 dispatcher、历史批准快照 census、
-滚动部署/回滚;⑨§4.5 十一道验证门。
+A/FWB/durable 依赖、穷尽 dispatcher、执行期权限/目标确认交集重检、admission/execution 分离、
+历史批准快照 census、终态 UPDATE 结构守卫、滚动部署/回滚;⑨§4.5 十一道验证门。
 任何一项写成「实现时再定」都视为未裁。owner 未逐项接受前仍为 PROPOSED,不得开实现旗。
 
 **C. v1.2 引用桥包 — 建议 ACCEPT AS DEFERRED。**保留 `>50` 行或多人协作预填/导入的真实
