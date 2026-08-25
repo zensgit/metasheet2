@@ -781,7 +781,7 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
   })
 
   // ── B1: fixed bottom action bar (取消/确定) ────────────────────────────────────────────────────
-  it('B1: footer action bar renders 取消/确定 alongside 关闭, and either button closes the panel the same way 关闭 does', async () => {
+  it('B1 (E-P2-3): the footer renders exactly ONE 关闭 — the 取消/确定 pair was a lying control over live-committing fields and ratified A-8 forbids it', async () => {
     routeParams = { id: 'tpl_inspector_footer' }
     getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
     await mountView()

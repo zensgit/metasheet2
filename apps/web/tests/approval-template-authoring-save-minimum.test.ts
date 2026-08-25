@@ -280,8 +280,13 @@ describe('E-P3: the view composes the save minimum through the ONE helper', () =
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
       .join('\n')
     expect(executable).toMatch(/^\s*const minimum = collectTemplateSaveMinimum\(draft\.value, unsupportedReason\.value\)/m)
-    expect(executable).not.toMatch(/^\s*const \w+ = validateTemplateFormFields\(/m)
-    expect(executable).not.toMatch(/^\s*const \w+ = validateTemplateApprovalFlow\(/m)
+    // UNANCHORED negatives (gate NIT-6 on 5dc82a3124, its A2/A3 attacks measured green against
+    // the const-anchored form): a `let` + inline-spread recomposition and an out-of-body wrapper
+    // both evaded line-start anchors. Any direct validator call inside validate() is forbidden,
+    // whatever the binding shape — and the gate's OUTPUT must be what the view renders.
+    expect(executable).not.toMatch(/validateTemplateFormFields\(/)
+    expect(executable).not.toMatch(/validateTemplateApprovalFlow\(/)
+    expect(executable).toMatch(/validationErrors\.value = minimum\.all/)
   })
 })
 
