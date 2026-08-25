@@ -252,6 +252,15 @@ describeIfDatabase('W0-1 L5-wire — trust-checkpoint activation route (real DB)
     expect(revoked.status).toBe(403)
     expect(revoked.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
     expect(await checkpointRows()).toEqual(rowsAfterGrant) // byte-identical row set: full rollback
+
+    // Leg C (oracle closure): the SAME revoked-but-unexpired claims-admin token, aimed at a sheet that is
+    // NOT in the allowlist, must get the SAME uniform 403 — not the 409 allowlist refusal. Without the
+    // pool-level DB-fresh pre-check a revoked actor could tell 409 (designated canary missing) from
+    // 404 (no such sheet) and enumerate which sheets the owner designated. Stale claims must observe
+    // NO differentiated response at all.
+    const probedOffList = await activateReq(`${SHEET}-not-allowlisted`)
+    expect(probedOffList.status).toBe(403)
+    expect(probedOffList.body).toEqual({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
   })
 
   test('REVOKE-DURING-QUEUE (constructed race, two connections): a revoke that commits while the activation parks on the fence is observed ⇒ 403, zero rows', async () => {

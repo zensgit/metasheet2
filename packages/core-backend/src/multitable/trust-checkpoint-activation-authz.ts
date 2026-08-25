@@ -43,6 +43,11 @@
  * operator must designate the canary explicitly before any checkpoint can be minted anywhere. This
  * module names no sheet; designation is entirely the owner's.
  */
+// REVOCATION SURFACE NOTE: the DB-fresh resolver reads users.role / users.is_active / user_roles /
+// user_permissions / role_permissions AND the legacy users.permissions JSON column (see
+// recovery-authorization-stability.ts loadDatabaseFreshRecoveryAccess). A revocation that only
+// deletes user_permissions rows while leaving a grant in the legacy JSON column is INCOMPLETE and
+// this gate will still admit it — shared semantics inherited from the resolver, not widened here.
 import type { Request } from 'express'
 
 import { resolveRecoverySheetAuthority } from './recovery-authorization-stability'

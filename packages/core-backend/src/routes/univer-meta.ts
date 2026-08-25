@@ -10187,12 +10187,26 @@ export function univerMetaRouter(): Router {
       // D2 floor: provisioning the trust anchor for destructive recovery is a sheet-admin capability, the
       // same floor as revert/reset themselves — a plain writer must not move the sheet's trust floor.
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
+      // DB-FRESH pre-check, BEFORE any differentiated response. The capability floor above can be
+      // satisfied by JWT claims alone, so without this a REVOKED-but-unexpired claims-admin token could
+      // still tell 409 (not allowlisted) from 404 (no such sheet) and enumerate which sheets are
+      // designated canaries. This pool-level check closes that oracle: a revoked actor gets the uniform
+      // 403 before the allowlist or existence reads run. It is NOT the authoritative gate — the
+      // authoritative, race-observing re-check runs again INSIDE the fenced transaction below; this one
+      // exists only so no differentiated response is reachable on stale claims.
+      try {
+        await assertTrustCheckpointActivationAuthority(req, pool.query.bind(pool) as unknown as TrustCheckpointQueryFn, sheetId)
+      } catch (err) {
+        if (err instanceof TrustCheckpointActivationForbiddenError) return sendForbidden(res)
+        throw err
+      }
       // Canary allowlist (fail-closed): the O-2 ladder's L2-C rung provisions a checkpoint for a NAMED
       // synthetic sheet only and forbids bulk-provisioning customer sheets — that was convention, and this
       // route accepted any sheet id. UNSET or EMPTY allowlist ⇒ refuse for EVERY sheet, so owner designation
-      // is a precondition by construction and this code names no sheet. Placed AFTER the capability floor so
-      // an unauthorized caller cannot probe which sheets are designated (they get the uniform 403 first), and
-      // BEFORE the existence read so a designation-less deployment leaks no sheet-existence oracle either.
+      // is a precondition by construction and this code names no sheet. Ordered AFTER the capability floor
+      // AND the DB-fresh pre-check above, so only an actor with CURRENT sheet-admin authority can observe
+      // the 409/404 distinction; ordered BEFORE the existence read so a designation-less deployment leaks
+      // no sheet-existence oracle to anyone.
       if (!isTrustCheckpointSheetAllowlisted(sheetId)) {
         return res.status(409).json({ ok: false, error: { code: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_CODE, message: TRUST_CHECKPOINT_SHEET_NOT_ALLOWLISTED_MESSAGE } })
       }
