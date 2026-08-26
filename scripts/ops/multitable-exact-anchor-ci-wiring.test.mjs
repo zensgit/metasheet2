@@ -298,6 +298,7 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260821120000_recovery_authority_functions_fix_search_path',
   'zzzz20260826120000_create_meta_recovery_archive_catalog',
   'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
+  'zzzz20260826122000_add_section_causality_substrate',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
@@ -377,10 +378,15 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 14 Time Machine migrations in causal order',
+    'verifier must exercise the exact 15 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
+  assert.match(
+    verifier,
+    /zzzz20260826122000_add_section_causality_substrate[\s\S]*assertPreD2cEndpointFunctionsUnconfigured/,
+    'verifier must assert pre-D2c endpoint function proconfig after D2c down',
+  )
   assert.match(verifier, /database_url_required/)
   assert.match(verifier, /await assertOwnedSurfaceAbsent\(db\)/)
   assert.match(verifier, /changedKeys\.length === 0/)
@@ -450,7 +456,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 14 Time Machine migrations/,
+    /exact 15 Time Machine migrations/,
   )
 
   const missingArchiveCleanup = verifier.replace(
@@ -460,7 +466,17 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveCleanup),
-    /exact 14 Time Machine migrations/,
+    /exact 15 Time Machine migrations/,
+  )
+
+  const missingSectionCausality = verifier.replace(
+    "  {\n    name: 'zzzz20260826122000_add_section_causality_substrate',\n    module: sectionCausality,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingSectionCausality),
+    /exact 15 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(

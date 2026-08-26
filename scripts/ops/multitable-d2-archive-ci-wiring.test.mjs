@@ -19,6 +19,7 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const FILES = [
   'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
 ]
 const CONFIG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')

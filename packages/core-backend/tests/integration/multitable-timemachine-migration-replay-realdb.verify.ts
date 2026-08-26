@@ -17,6 +17,7 @@ import * as authorityCorrection from '../../src/db/migrations/zzzz20260728120000
 import * as authoritySearchPath from '../../src/db/migrations/zzzz20260821120000_recovery_authority_functions_fix_search_path'
 import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
+import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -115,6 +116,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
     module: recoveryArchiveStagingCleanup,
   },
+  {
+    name: 'zzzz20260826122000_add_section_causality_substrate',
+    module: sectionCausality,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -140,6 +145,9 @@ const TOUCHED_RELATIONS = [
   'meta_recovery_archive_coverage_items',
   'meta_recovery_archive_attachment_refs',
   'meta_recovery_archive_staging_objects',
+  'meta_sheet_section_revisions',
+  'meta_record_history_snapshot_members',
+  'meta_record_history_operation_members',
 ]
 
 const OWNED_RELATIONS = [
@@ -155,6 +163,9 @@ const OWNED_RELATIONS = [
   'meta_recovery_archive_coverage_items',
   'meta_recovery_archive_attachment_refs',
   'meta_recovery_archive_staging_objects',
+  'meta_sheet_section_revisions',
+  'meta_record_history_snapshot_members',
+  'meta_record_history_operation_members',
 ]
 
 const OWNED_COLUMNS = [
@@ -167,6 +178,9 @@ const OWNED_COLUMNS = [
   ['meta_recovery_archive_attachment_refs', 'cleanup_owner_kind'],
   ['meta_recovery_archive_attachment_refs', 'cleanup_owner_id'],
   ['meta_recovery_archive_attachment_refs', 'cleanup_owner_fence'],
+  ['meta_record_history_operations', 'operation_kind'],
+  ['meta_record_history_operations', 'event_contract_version'],
+  ['meta_record_history_operations', 'component_count'],
 ] as const
 
 // These indexes are created on relations that predate at least one migration in this replay set.
@@ -185,6 +199,10 @@ const OWNED_CONSTRAINTS = [
   ['meta_record_version_markers', 'uq_meta_record_version_markers_sheet_record_version'],
   ['meta_record_revisions', 'fk_mrr_operation'],
   ['meta_record_version_markers', 'fk_mrvm_operation'],
+  ['meta_record_history_operations', 'chk_mrho_event_contract'],
+  ['meta_sheet_section_revisions', 'fk_mssr_operation'],
+  ['meta_record_history_snapshot_members', 'fk_mrhsm_parent'],
+  ['meta_record_history_operation_members', 'fk_mrhom_parent'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
@@ -218,10 +236,16 @@ const RECOVERY_ARCHIVE_FUNCTIONS = [
   'meta_recovery_archive_release_abandoned_source_pin',
 ]
 
+const SECTION_CAUSALITY_FUNCTIONS = [
+  'meta_sheet_section_revisions_guard_row',
+  'meta_record_history_membership_guard_row',
+]
+
 const OWNED_FUNCTIONS = [
   ...OPERATION_FUNCTIONS,
   ...AUTHORITY_FUNCTIONS,
   ...RECOVERY_ARCHIVE_FUNCTIONS,
+  ...SECTION_CAUSALITY_FUNCTIONS,
 ]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
@@ -241,10 +265,17 @@ const RECOVERY_ARCHIVE_TRIGGERS = [
   'trg_meta_recovery_archive_staging_object_finalize_guard_row',
   'trg_meta_recovery_archive_attachment_cleanup_finalize_guard_row',
 ]
+const SECTION_CAUSALITY_TRIGGERS = [
+  'trg_mssr_reject_append_sealed',
+  'trg_mssr_guard_row',
+  'trg_mrhsm_guard_row',
+  'trg_mrhom_guard_row',
+]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
   ...RECOVERY_ARCHIVE_TRIGGERS,
+  ...SECTION_CAUSALITY_TRIGGERS,
 ]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'
@@ -352,6 +383,34 @@ async function catalogSnapshot(db: Kysely<unknown>): Promise<CatalogRow[]> {
     ...functions.rows,
     ...sequences.rows,
   ])
+}
+
+async function assertPreD2cEndpointFunctionsUnconfigured(db: Kysely<unknown>): Promise<void> {
+  const functions = await sql<{
+    proname: string
+    proconfig: string | null
+  }>`
+    SELECT procedure_row.proname::text AS proname,
+           array_to_string(procedure_row.proconfig, ',') AS proconfig
+      FROM pg_proc procedure_row
+      JOIN pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+     WHERE namespace.nspname = 'public'
+       AND procedure_row.proname IN (
+         'meta_record_history_operations_validate_endpoint',
+         'meta_record_history_operations_prune'
+       )
+     ORDER BY procedure_row.proname
+  `.execute(db)
+  requireCondition(
+    functions.rows.length === 2,
+    new ReplayFailure('down', 'pre_d2c_endpoint_function_missing', 'function', functions.rows.length),
+  )
+  for (const row of functions.rows) {
+    requireCondition(
+      row.proconfig === null || row.proconfig === '',
+      new ReplayFailure('down', 'pre_d2c_endpoint_function_configured', 'function', 1),
+    )
+  }
 }
 
 async function assertOwnedSurfaceAbsent(db: Kysely<unknown>): Promise<void> {
@@ -515,6 +574,9 @@ async function main(): Promise<void> {
     for (const migration of [...MIGRATIONS].reverse()) {
       downed.add(migration.name)
       await migration.module.down(db)
+      if (migration.name === 'zzzz20260826122000_add_section_causality_substrate') {
+        await assertPreD2cEndpointFunctionsUnconfigured(db)
+      }
       if (failureInjectionMigration === migration.name) {
         throw new ReplayFailure('down', 'injected_down_failure', 'migration', 1)
       }
