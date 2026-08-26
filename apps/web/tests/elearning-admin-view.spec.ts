@@ -991,6 +991,68 @@ describe('ElearningAdminView', () => {
     })
   })
 
+  it('clears hidden question selections when the selected bank changes', async () => {
+    h.listBanks.mockImplementation(async (page: number, pageSize: number) => ({
+      items: [{
+        bankId: page === 1 ? BANK : SECOND_BANK,
+        title: page === 1 ? '安全题库' : '质量题库',
+        questionCount: 1,
+        createdAt: '2026-08-26T00:00:00.000Z',
+        updatedAt: '2026-08-26T00:00:00.000Z',
+      }],
+      page,
+      pageSize,
+      total: 51,
+    }))
+    h.listQuestions.mockImplementation(async (bankId: string, page: number, pageSize: number) => ({
+      bank: { bankId, title: bankId === BANK ? '安全题库' : '质量题库' },
+      items: [{
+        questionId: bankId === BANK ? COURSE : VERSION,
+        questionRevisionId: bankId === BANK ? QUESTION_REVISION : SECOND_QUESTION_REVISION,
+        revision: 1,
+        questionType: 'single_choice',
+        prompt: bankId === BANK ? '安全题目' : '质量题目',
+        options: [
+          { id: 'a', text: '正确项' },
+          { id: 'b', text: '错误项' },
+        ],
+        correctOptionIds: ['a'],
+        points: 1,
+        explanation: null,
+        createdAt: '2026-08-26T00:00:00.000Z',
+      }],
+      page,
+      pageSize,
+      total: 1,
+    }))
+
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    ;(root.querySelector(
+      `[data-testid="elearning-assessment-question-${QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement).click()
+    await flushUi()
+    expect((root.querySelector(
+      '[data-testid="elearning-assessment-publish-paper"]',
+    ) as HTMLButtonElement).disabled).toBe(false)
+
+    ;(root.querySelector('[data-testid="elearning-assessment-bank-next"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listQuestions).toHaveBeenLastCalledWith(SECOND_BANK, 1, 100)
+    expect(root.textContent).toContain('质量题目')
+    expect((root.querySelector(
+      '[data-testid="elearning-assessment-publish-paper"]',
+    ) as HTMLButtonElement).disabled).toBe(true)
+
+    ;(root.querySelector('[data-testid="elearning-assessment-bank-previous"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect((root.querySelector(
+      `[data-testid="elearning-assessment-question-${QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement).checked).toBe(false)
+  })
+
   it('falls back from an empty trailing catalog page after totals shrink', async () => {
     h.listBanks
       .mockResolvedValueOnce({

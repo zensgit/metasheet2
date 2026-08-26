@@ -367,6 +367,7 @@ const xlsxFile = ref<File | null>(null)
 const questions = ref<ElearningAdminQuestionRevision[]>([])
 const questionPage = ref(1)
 const questionTotal = ref(0)
+const loadedQuestionBankId = ref('')
 const selectedQuestions = ref<ElearningAdminQuestionRevision[]>([])
 const paperTitle = ref('')
 const publishedPaper = ref<ElearningFixedPaperResult | null>(null)
@@ -416,12 +417,17 @@ async function runAction(action: BusyAction, operation: () => Promise<void>): Pr
 
 async function loadQuestions(page = questionPage.value): Promise<void> {
   questions.value = []
-  if (!selectedBankId.value) {
+  const bankId = selectedBankId.value
+  if (loadedQuestionBankId.value !== bankId) {
+    loadedQuestionBankId.value = bankId
+    selectedQuestions.value = []
+  }
+  if (!bankId) {
     questionPage.value = 1
     questionTotal.value = 0
     return
   }
-  const result = await listElearningBankQuestions(selectedBankId.value, page, QUESTION_PAGE_SIZE)
+  const result = await listElearningBankQuestions(bankId, page, QUESTION_PAGE_SIZE)
   if (result.items.length === 0 && result.total > 0 && result.page > 1) {
     await loadQuestions(result.page - 1)
     return
