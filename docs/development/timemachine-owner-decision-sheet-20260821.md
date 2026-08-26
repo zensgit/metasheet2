@@ -1,11 +1,11 @@
 # Time Machine — owner 决策清单(2026-08-21)
 
-> **当前权威状态（2026-08-24 20:30+08）**：F3 双主机 postdeploy-full 已 PASS（run
-> `32714983998`）；L1 电池已 PASS（run `32716676483`）；A1 已由 owner-directed Codex 在 #5042
-> 以 `RATIFY-A1 7067b49516b26ed4d8d5a64ebea624f0fed53ba9` ratify（comment `5395076709`）。
-> L1 观察窗从工件可证明时间 `2026-08-24T10:25:17.641Z` 起算，最早出窗点
-> `2026-08-25T10:25:17.641Z`；**尚未出窗**。旧证据只核了 4 个 flag；出窗前还须一次只读
-> `predeploy-flags + target=staging + posture=l1-armed` 补齐第五 flag 的 running/next-restart 见证。
+> **当前权威状态（2026-08-26）**：staging L1 **CLOSED**。A1 已由 owner-directed Codex 在 #5042
+> 以 `RATIFY-A1 7067b49516b26ed4d8d5a64ebea624f0fed53ba9` ratify（comment `5395076709`）；
+> post-#5147 电池 run `32862460377`、五旗标/schema 姿态见证 run `32862572066` 与 PostgreSQL
+> 观察轴 run `32871925465` 均 PASS。workflow 源码 SHA、被测 `build_commit`、脚本 SHA、已接受的
+> 时延证据边界与一次被 provenance 拒绝的旧镜像假关闭，统一记录在
+> `multitable-timemachine-l1-closure-20260826.md`；旧的“观察中/第五 flag 待补证”段落只保留为历史轨迹。
 > L2+ 继续 HOLD，直至 E1（fence 先行、短暂 checkpoint
 > activation、strict 后置、五 flag rung witness）通过审阅并 ratify。下方带日期的旧状态段是发现过程，
 > 不得覆盖本块当前状态或被当作下一步清单。
@@ -355,13 +355,16 @@ L1-armed 路由的已发布响应体的契约变更,且已有两处测试逐字�
 
 ## B. 前置满足、随时可拍(压缩真正落袋的动作)
 
-**B1 · ratify 阶梯修正案 A1 —— ✅ 已完成；L1 观察窗进行中**
+**B1 · ratify 阶梯修正案 A1 —— ✅ 已完成；staging L1 CLOSED**
 - 批准：#5042 comment `5395076709`，exact content SHA = `7067b49516b26ed4d8d5a64ebea624f0fed53ba9`。
   未使用本清单旧版建议的 `5b2376bb49`，因为 #5125 后来实质收窄 production 范围并补 A1.3 provenance。
-- 承重证据：F3 双主机 PASS run `32714983998`；电池 PASS run `32716676483`（11/11 blocked、
-  11/11 cleared、2/2 controls、6/9 triggers、43 not-driven、failures `[]`、residue 0）。
+- 最终关闭证据：post-#5147 电池 PASS run `32862460377`（11/11 blocked、11/11 cleared、
+  2/2 controls、6/9 triggers、43 not-driven、failures `[]`、residue 0）；五旗标/schema 姿态见证
+  run `32862572066`；PostgreSQL 观察轴 run `32871925465`（五个构造窗各 11、窗外 40001=0、
+  40P01=0、解析错误=0）。完整 provenance 与边界见
+  `multitable-timemachine-l1-closure-20260826.md`。
 - 生效合同：仅 staging L1 = `≥1 日历日 + 电池 PASS`；production 仍 ≥2 日；L6 ≥7 日不变。
-  最早出窗点 `2026-08-25T10:25:17.641Z`，到时仍须核无相关异常及其余 L1 退出判据。
+  staging L1 已按该合同关闭；这不授权 production、任何 flag 或 L2+。
 - 历史前置记录：代码侧 P1/P2、F1/F2/F3、role-cascade witness、pending=0、建号与电池均已闭合；
   下列“原写/更正”段保留为审阅轨迹，不再代表当前待办。
   **原写「……staging pending≠0(据 #5094 / `staging-migration-backlog-disposition-20260822.md`,本轮未取得更新证据)……三者齐备才可 ratify」,已更正(见文首「五次更新」)**:staging 迁移窗口已于
@@ -522,8 +525,8 @@ revert/reset 的 preview 与 execute 会在两个独立位置都拒绝——L4/L
 > **A1 是阶梯的修正案、不是 L0 的勾选项**——它决定 L1 窗口按 `≥2 天` 还是 `≥1 天 + 电池 PASS` 计,
 > 与 L0 是否满足是两件事;原速记 `差 A1` 把两者并列,易致误读。本条只记录状态,不代 owner 拍板。
 
-L0 ✅ → **L1 staging ARMED / 旧四 flag 已证 OFF / 第五 flag 待只读补证 / 观察中**（A1 已 ratify，最早
-`2026-08-25T10:25:17.641Z` 出窗；补证命令见文首）→ **⚠️ L2 及其之后 HOLD**。解除 HOLD 的唯一当前载体是 ladder
+L0 ✅ → **L1 staging ARMED / 五旗标与 schema 姿态已证 / CLOSED**（A1 已 ratify；关闭证据见
+`multitable-timemachine-l1-closure-20260826.md`）→ **⚠️ L2 及其之后 HOLD**。解除 HOLD 的唯一当前载体是 ladder
 修正案 E1：L2 writer fence → L2-C 短暂 checkpoint activation + 具名 canary checkpoint → activation OFF →
 L3 strict → L4/L5 canary；五 flag 与每个 rung 用固定 `posture` 正向 PASS。E1 未 ratify 前不得续接 L2。
 L6 soak ≥7 日历日与 production 独立授权均不变。
