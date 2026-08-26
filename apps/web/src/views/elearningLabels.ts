@@ -70,6 +70,8 @@ export type ElearningLabelKey =
   | 'assessment.subtitle'
   | 'assessment.loading'
   | 'assessment.refresh'
+  | 'assessment.previousPage'
+  | 'assessment.nextPage'
   | 'assessment.bankTitle'
   | 'assessment.createBank'
   | 'assessment.bankSelect'
@@ -193,6 +195,8 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   },
   'assessment.loading': { en: 'Loading assessment resources...', zh: '正在加载题库与考试资源…' },
   'assessment.refresh': { en: 'Refresh', zh: '刷新' },
+  'assessment.previousPage': { en: 'Previous', zh: '上一页' },
+  'assessment.nextPage': { en: 'Next', zh: '下一页' },
   'assessment.bankTitle': { en: 'New bank title', zh: '新题库名称' },
   'assessment.createBank': { en: 'Create bank', zh: '创建题库' },
   'assessment.bankSelect': { en: 'Question bank', zh: '题库' },
@@ -430,6 +434,16 @@ export function elearningAssessmentRevision(revision: number, isZh: boolean): st
 
 export function elearningAssessmentImported(count: number, isZh: boolean): string {
   return isZh ? `已导入 ${count} 道题。` : `Imported ${count} questions.`
+}
+
+export function elearningAssessmentPage(
+  page: number,
+  total: number,
+  pageSize: number,
+  isZh: boolean,
+): string {
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  return isZh ? `第 ${page} / ${pageCount} 页` : `Page ${page} of ${pageCount}`
 }
 
 export function elearningAssessmentPaperPublished(

@@ -63,6 +63,27 @@
           </select>
         </label>
         <p v-else class="assessment-muted">{{ elearningLabel('assessment.noBanks', isZh) }}</p>
+        <div v-if="bankTotal > BANK_PAGE_SIZE" class="assessment-pagination">
+          <button
+            type="button"
+            class="assessment-btn assessment-btn--secondary"
+            :disabled="busy || pipelineFrozen || bankPage <= 1"
+            data-testid="elearning-assessment-bank-previous"
+            @click="void changeBankPage(-1)"
+          >
+            {{ elearningLabel('assessment.previousPage', isZh) }}
+          </button>
+          <span>{{ elearningAssessmentPage(bankPage, bankTotal, BANK_PAGE_SIZE, isZh) }}</span>
+          <button
+            type="button"
+            class="assessment-btn assessment-btn--secondary"
+            :disabled="busy || pipelineFrozen || bankPage * BANK_PAGE_SIZE >= bankTotal"
+            data-testid="elearning-assessment-bank-next"
+            @click="void changeBankPage(1)"
+          >
+            {{ elearningLabel('assessment.nextPage', isZh) }}
+          </button>
+        </div>
 
         <form class="assessment-row" @submit.prevent="void importQuestions()">
           <label class="assessment-field assessment-field--grow">
@@ -113,11 +134,41 @@
               {{ elearningLabel('assessment.correctAnswers', isZh) }}:
               {{ question.correctOptionIds.join(', ') }}
             </span>
+            <span class="assessment-question__options">
+              <span
+                v-for="option in question.options"
+                :key="option.id"
+                :class="{ 'assessment-question__option--correct': question.correctOptionIds.includes(option.id) }"
+              >
+                {{ option.id }}. {{ option.text }}
+              </span>
+            </span>
             <span v-if="question.explanation">
               {{ elearningLabel('assessment.explanation', isZh) }}: {{ question.explanation }}
             </span>
           </span>
         </label>
+        <div v-if="questionTotal > QUESTION_PAGE_SIZE" class="assessment-pagination">
+          <button
+            type="button"
+            class="assessment-btn assessment-btn--secondary"
+            :disabled="busy || pipelineFrozen || questionPage <= 1"
+            data-testid="elearning-assessment-question-previous"
+            @click="void changeQuestionPage(-1)"
+          >
+            {{ elearningLabel('assessment.previousPage', isZh) }}
+          </button>
+          <span>{{ elearningAssessmentPage(questionPage, questionTotal, QUESTION_PAGE_SIZE, isZh) }}</span>
+          <button
+            type="button"
+            class="assessment-btn assessment-btn--secondary"
+            :disabled="busy || pipelineFrozen || questionPage * QUESTION_PAGE_SIZE >= questionTotal"
+            data-testid="elearning-assessment-question-next"
+            @click="void changeQuestionPage(1)"
+          >
+            {{ elearningLabel('assessment.nextPage', isZh) }}
+          </button>
+        </div>
       </fieldset>
 
       <form class="assessment-card assessment-form" @submit.prevent="void publishPaper()">
@@ -288,6 +339,7 @@ import {
 import {
   elearningAssessmentExamPublished,
   elearningAssessmentImported,
+  elearningAssessmentPage,
   elearningAssessmentPaperPublished,
   elearningAssessmentRevision,
   elearningFailure,
@@ -297,16 +349,23 @@ import {
 
 type BusyAction = 'loading' | 'create_bank' | 'load_questions' | 'import' | 'paper' | 'exam'
 
+const BANK_PAGE_SIZE = 50
+const QUESTION_PAGE_SIZE = 100
+
 const { isZh } = useLocale()
 const ready = ref(false)
 const busyAction = ref<BusyAction | null>('loading')
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const banks = ref<ElearningQuestionBankListItem[]>([])
+const bankPage = ref(1)
+const bankTotal = ref(0)
 const selectedBankId = ref('')
 const newBankTitle = ref('')
 const xlsxFile = ref<File | null>(null)
 const questions = ref<ElearningAdminQuestionRevision[]>([])
+const questionPage = ref(1)
+const questionTotal = ref(0)
 const selectedQuestionRevisionIds = ref<string[]>([])
 const paperTitle = ref('')
 const publishedPaper = ref<ElearningFixedPaperResult | null>(null)
@@ -351,22 +410,30 @@ async function runAction(action: BusyAction, operation: () => Promise<void>): Pr
   }
 }
 
-async function loadQuestions(): Promise<void> {
+async function loadQuestions(page = questionPage.value): Promise<void> {
   selectedQuestionRevisionIds.value = []
   questions.value = []
-  if (!selectedBankId.value) return
-  const result = await listElearningBankQuestions(selectedBankId.value, 1, 100)
+  if (!selectedBankId.value) {
+    questionPage.value = 1
+    questionTotal.value = 0
+    return
+  }
+  const result = await listElearningBankQuestions(selectedBankId.value, page, QUESTION_PAGE_SIZE)
   questions.value = result.items
+  questionPage.value = result.page
+  questionTotal.value = result.total
 }
 
-async function loadBanks(preferredBankId?: string): Promise<void> {
-  const result = await listElearningQuestionBanks(1, 100)
+async function loadBanks(preferredBankId?: string, page = bankPage.value): Promise<void> {
+  const result = await listElearningQuestionBanks(page, BANK_PAGE_SIZE)
   banks.value = result.items
+  bankPage.value = result.page
+  bankTotal.value = result.total
   const preferred = preferredBankId ?? selectedBankId.value
   selectedBankId.value = preferred && result.items.some((bank) => bank.bankId === preferred)
     ? preferred
     : (result.items[0]?.bankId ?? '')
-  await loadQuestions()
+  await loadQuestions(1)
 }
 
 async function refreshBanks(): Promise<void> {
@@ -376,7 +443,21 @@ async function refreshBanks(): Promise<void> {
 
 async function selectBank(): Promise<void> {
   if (!ready.value || pipelineFrozen.value) return
-  await runAction('load_questions', loadQuestions)
+  await runAction('load_questions', () => loadQuestions(1))
+}
+
+async function changeBankPage(delta: -1 | 1): Promise<void> {
+  if (!ready.value || pipelineFrozen.value) return
+  const target = bankPage.value + delta
+  if (target < 1 || (delta > 0 && bankPage.value * BANK_PAGE_SIZE >= bankTotal.value)) return
+  await runAction('load_questions', () => loadBanks(undefined, target))
+}
+
+async function changeQuestionPage(delta: -1 | 1): Promise<void> {
+  if (!ready.value || pipelineFrozen.value || !selectedBankId.value) return
+  const target = questionPage.value + delta
+  if (target < 1 || (delta > 0 && questionPage.value * QUESTION_PAGE_SIZE >= questionTotal.value)) return
+  await runAction('load_questions', () => loadQuestions(target))
 }
 
 async function createBank(): Promise<void> {
@@ -389,7 +470,7 @@ async function createBank(): Promise<void> {
   await runAction('create_bank', async () => {
     const result = await createElearningQuestionBank(title)
     newBankTitle.value = ''
-    await loadBanks(result.bankId)
+    await loadBanks(result.bankId, 1)
   })
 }
 
@@ -411,7 +492,7 @@ async function importQuestions(): Promise<void> {
   }
   await runAction('import', async () => {
     const result = await importElearningQuestionBankXlsx(selectedBankId.value, file)
-    await loadQuestions()
+    await loadQuestions(1)
     statusTone.value = 'info'
     status.value = elearningAssessmentImported(result.importedCount, isZh.value)
   })
@@ -557,6 +638,29 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 10px;
   align-items: end;
+}
+
+.assessment-question__options,
+.assessment-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.assessment-question__options span {
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: #f3f6fa;
+}
+
+.assessment-question__option--correct {
+  color: #14532d;
+  font-weight: 600;
+}
+
+.assessment-pagination {
+  justify-content: flex-end;
 }
 
 .assessment-admin__header {

@@ -226,6 +226,7 @@ function parseQuestion(value: unknown, status: number): ElearningAdminQuestionRe
     failShape(status)
   }
   const options = value.options.map((option) => parseOption(option, status))
+  if (new Set(options.map((option) => option.id)).size !== options.length) failShape(status)
   if (!Array.isArray(value.correctOptionIds) || value.correctOptionIds.length < 1) {
     failShape(status)
   }

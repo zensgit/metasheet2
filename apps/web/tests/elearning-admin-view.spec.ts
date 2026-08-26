@@ -168,7 +168,7 @@ describe('ElearningAdminView', () => {
         updatedAt: '2026-08-26T00:00:00.000Z',
       }],
       page: 1,
-      pageSize: 100,
+      pageSize: 50,
       total: 1,
     })
     h.listQuestions.mockResolvedValue({
@@ -751,11 +751,13 @@ describe('ElearningAdminView', () => {
     await flushUi(12)
 
     expect(h.capabilities).toHaveBeenCalledTimes(2)
-    expect(h.listBanks).toHaveBeenCalledWith(1, 100)
+    expect(h.listBanks).toHaveBeenCalledWith(1, 50)
     expect(h.listQuestions).toHaveBeenCalledWith(BANK, 1, 100)
     expect(root.textContent).toContain('题库与考试资源')
     expect(root.textContent).toContain('请选择安全做法')
     expect(root.textContent).toContain('正确答案: a')
+    expect(root.textContent).toContain('a. 佩戴护具')
+    expect(root.textContent).toContain('b. 忽略警示')
     expect(root.textContent).toContain('按作业规范佩戴护具。')
 
     fillInput(
@@ -823,10 +825,6 @@ describe('ElearningAdminView', () => {
       '2',
     )
     fillInput(
-      root.querySelector('[data-testid="elearning-assessment-duration"]') as HTMLInputElement,
-      '15',
-    )
-    fillInput(
       root.querySelector('[data-testid="elearning-assessment-disclosure"]') as HTMLSelectElement,
       'wrong_items_after_submit',
     )
@@ -845,7 +843,7 @@ describe('ElearningAdminView', () => {
       maxAttempts: 2,
       windowStartsAt: null,
       windowEndsAt: null,
-      durationSeconds: 900,
+      durationSeconds: null,
       shuffleQuestions: true,
       shuffleOptions: true,
       disclosurePolicy: 'wrong_items_after_submit',
@@ -879,5 +877,40 @@ describe('ElearningAdminView', () => {
     expect(h.importQuestions).not.toHaveBeenCalled()
     expect(h.publishPaper).not.toHaveBeenCalled()
     expect(h.publishExam).not.toHaveBeenCalled()
+  })
+
+  it('requests later bank and question pages instead of silently truncating catalogs', async () => {
+    h.listBanks.mockImplementation(async (page: number, pageSize: number) => ({
+      items: [{
+        bankId: BANK,
+        title: `安全题库 ${page}`,
+        questionCount: 101,
+        createdAt: '2026-08-26T00:00:00.000Z',
+        updatedAt: '2026-08-26T00:00:00.000Z',
+      }],
+      page,
+      pageSize,
+      total: 51,
+    }))
+    h.listQuestions.mockImplementation(async (_bankId: string, page: number, pageSize: number) => ({
+      bank: { bankId: BANK, title: '安全题库' },
+      items: [],
+      page,
+      pageSize,
+      total: 101,
+    }))
+
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    ;(root.querySelector('[data-testid="elearning-assessment-question-next"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listQuestions).toHaveBeenLastCalledWith(BANK, 2, 100)
+
+    ;(root.querySelector('[data-testid="elearning-assessment-bank-next"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listBanks).toHaveBeenLastCalledWith(2, 50)
   })
 })

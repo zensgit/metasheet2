@@ -537,6 +537,32 @@ describe('elearning client fail-closed validation', () => {
       status: 200,
     })
 
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      bank: { bankId: BANK, title: 'Safety bank' },
+      items: [{
+        questionId: COURSE,
+        questionRevisionId: Q1,
+        revision: 1,
+        questionType: 'single_choice',
+        prompt: 'Pick one',
+        options: [
+          { id: 'a', text: 'Alpha' },
+          { id: 'a', text: 'Duplicate' },
+        ],
+        correctOptionIds: ['a'],
+        points: 5,
+        explanation: null,
+        createdAt: CREATED_AT,
+      }],
+      page: 1,
+      pageSize: 100,
+      total: 1,
+    }))
+    await expect(listElearningBankQuestions(BANK)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
     apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
     await expect(listElearningQuestionBanks()).rejects.toMatchObject({
       code: 'ORG_CONTEXT_REQUIRED',
