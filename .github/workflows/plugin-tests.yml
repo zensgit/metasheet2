@@ -880,10 +880,12 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/elearning-assignment-lifecycle-routes.test.ts \
             tests/unit/elearning-assignment-lifecycle.test.ts \
+            tests/unit/elearning-assignment-reminder.test.ts \
             tests/unit/elearning-admin-access-routes.test.ts \
             tests/unit/elearning-admin-access.test.ts \
             tests/unit/elearning-admin-operations.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-reminder-port-scoping.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \
             tests/unit/elearning-batch-assignment-runtime.test.ts \
             tests/unit/elearning-batch-assignment.test.ts \
