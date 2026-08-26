@@ -1338,6 +1338,10 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // T8-1 Revert-to-T real-DB goldens, including the retention compatibility/no-oracle contract.
+      // Whole-file wired into `Run multitable real-DB integration`; exclude here so DATABASE_URL
+      // gating cannot report skip-shaped green in the default no-DB lane.
+      'tests/integration/multitable-revert-pit-realdb.test.ts',
       // T8-2 Reset-to-T goldens (flag-off/on, PIT-2 all-or-nothing, delete-set divergence including the
       // docket #46 capture-complete deleteScopeHash-mismatch golden, single-txn atomicity, D2 gate): real
       // Postgres only. Was ALREADY whole-file wired into `Run multitable real-DB integration` in

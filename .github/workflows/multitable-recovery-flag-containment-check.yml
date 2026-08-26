@@ -53,7 +53,7 @@ name: Multitable Recovery-Flag Containment Check
 #      files — and all SIX observed vars (the five ladder rung flags + the retention conflict var,
 #      see the `FLAGS` comment inside the heredoc) are classified. The five rung flags are verdicted
 #      closed-world against the posture's exact active set; the retention var is verdicted only at the
-#      postures that presuppose PIT reset (today: `l5-reset` alone) and is observed-but-unconstrained
+#      postures that presuppose destructive recovery (`l4-revert` and `l5-reset`) and is observed-but-unconstrained
 #      at the rest, because the ladder registers retention-era recovery as a decoupled owner line.
 #
 # Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: expected-active flags must be
@@ -207,34 +207,37 @@ jobs:
           # FLAGS = everything the witness OBSERVES: the five rung flags plus one non-rung conflict
           # var, MULTITABLE_META_REVISION_RETENTION_ENABLED. Observing ≠ asserting. The retention var
           # is NOT a rung flag and the closed-world rule above does NOT reach it; it is asserted only
-          # at the postures that list it in EXPECTED_INACTIVE_NON_RUNG_VARS (today: l5-reset alone).
-          #   • WHY IT IS ASSERTED AT l5-reset: that rung's objective is a PIT-reset canary drill
+          # at the postures that list it in EXPECTED_INACTIVE_NON_RUNG_VARS (today: l4-revert and l5-reset).
+          #   • WHY IT IS ASSERTED AT l4-revert/l5-reset: those rungs are destructive recovery canary drills.
           #     (ladder §E1.1 step 5 "L5 — PIT Reset canary … retention 冲突仍硬拒"; §2 L89 "同 L4 纪律
           #     做 reset 演练"), and packages/core-backend/src/routes/univer-meta.ts
-          #     #PIT_RESET_RETENTION_BLOCKED refuses BOTH reset-preview (~L10608) and reset-execute
-          #     (~L10710) with 409 RESET_RETENTION_CONFLICT whenever this var is exactly '1' — before
-          #     any anchor, trust or authority check. So at retention='1' the drill is structurally
-          #     impossible and a `posture=l5-reset` PASS would be a vacuous green on the exact rung
-          #     the posture exists to witness. The rung objective plus that code fact are the whole
+          #     #isMetaRevisionRetentionEnabled refuses BOTH preview and execute for either mode with a
+          #     named 409 whenever this var is exactly '1' — after auth/full-read, before trust,
+          #     anchor lookup, or reconstruction work.
+          #     So at retention='1' either destructive drill is structurally impossible and a
+          #     `posture=l4-revert` or `posture=l5-reset` PASS would be a vacuous green. The rung objective
+          #     plus that code fact are the whole
           #     justification; §E1.2's matrix does not name retention in any row.
           #   • WHY IT IS *NOT* ASSERTED ELSEWHERE: ladder §4 registers retention-era recovery as
           #     DECOUPLED from this ladder ("retention 后恢复 … 与本阶梯无耦合，另立设计锁") — a separate
-          #     owner line with its own design lock. A rung that does not presuppose reset has no
+          #     owner line with its own design lock. A rung that does not presuppose destructive recovery has no
           #     ladder-sourced opinion about it, so requiring it OFF at inert/l1…l4 would make an
           #     independent, legitimate retention deployment fail a posture it does not violate: a
           #     witness reporting a breach that is not one. At those rungs the var is observed and
           #     its state printed, never verdicted. The flag manifest models the coupling the same
-          #     reset-scoped way: `conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED']` sits
-          #     on the MULTITABLE_ENABLE_PIT_RESET key, rule id `pit-reset-intent-with-retention-on`
+          #     destructive-recovery way: `conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED']`
+          #     sits on both MULTITABLE_ENABLE_SHEET_REVERT and MULTITABLE_ENABLE_PIT_RESET
           #     (scripts/ops/global-history-flag-manifest.mjs).
           # VALUE SEMANTICS (scripts/ops/global-history-flag-manifest.mjs, key
           # MULTITABLE_META_REVISION_RETENTION_ENABLED): activationValue is the EXACT string '1'
           # (classifier state `one`), NOT 'true' — 'true' is a documented silent no-op there ("the
-          # single biggest operator footgun in this manifest"). Where the var IS asserted, the shared
-          # required-inactive branch in check_flag_snapshot reds on BOTH `one` and `true`, deliberately
-          # and for different reasons: `one` is the reset-blocking value itself, while `true` is an
-          # operator INTENT to enable retention on a rung that requires it off — fail-closed on that
-          # intent is the choice here, not an accident of reusing the branch.
+          # single biggest operator footgun in this manifest"). Retention is classified from the RAW
+          # value: only raw '1' becomes `one`, raw 'true' becomes the separate operator-intent state
+          # `true`, and whitespace/case variants are inactive. The other five flags retain their
+          # existing trim+lower classifier semantics. Where retention IS asserted, the shared
+          # required-inactive branch reds on BOTH `one` and `true`, deliberately and for different
+          # reasons: `one` is runtime-active, while exact raw `true` is operator intent to enable
+          # retention on a rung that requires it off.
           # Spelled out literally (not "$RUNG_FLAGS …") so the required contract test can pin BOTH
           # sets by name from the YAML and assert their exact relationship: FLAGS ⊃ RUNG_FLAGS and
           # FLAGS \ RUNG_FLAGS = {MULTITABLE_META_REVISION_RETENTION_ENABLED}. Silently dropping a
@@ -244,7 +247,7 @@ jobs:
           SCHEMA_HELPER_SHA256="f1c17af1b9091c82dce8ec899f0e7480ecfa810087e4a34d506c118775a44d82"
           SCHEMA_PASS_LINE_DISABLED="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           SCHEMA_PASS_LINE_ARMED="VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links"
-          FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const normalized=present?String(source[key]??"").trim().toLowerCase():"";const state=!present?"unset":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
+          FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);const retentionKey="MULTITABLE_META_REVISION_RETENTION_ENABLED";let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const raw=present?String(source[key]??""):"";const normalized=raw.trim().toLowerCase();const state=!present?"unset":key===retentionKey?raw==="1"?"one":raw==="true"?"true":"inactive":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
           fail=0
           checked=0
 
@@ -312,11 +315,10 @@ jobs:
           # rung flag NOT listed there is required inactive at that posture (§E1.2's closed world).
           #
           # EXPECTED_INACTIVE_NON_RUNG_VARS is the posture-SCOPED expectation for observed vars the
-          # ladder does not put on the rung matrix. It is non-empty at l5-reset ONLY, and holds exactly
-          # MULTITABLE_META_REVISION_RETENTION_ENABLED there — because l5-reset is the only posture that
-          # presupposes PIT reset actually working (it is the only row of §E1.2 with
-          # MULTITABLE_ENABLE_PIT_RESET ON, and §E1.1 step 5 defines the rung as a reset canary drill),
-          # and PIT_RESET_RETENTION_BLOCKED() makes that drill impossible at retention='1'. At the other
+          # ladder does not put on the rung matrix. It is non-empty at l4-revert and l5-reset, and holds
+          # exactly MULTITABLE_META_REVISION_RETENTION_ENABLED there — because those postures presuppose
+          # destructive recovery actually working, and isMetaRevisionRetentionEnabled() makes either drill
+          # impossible at retention='1'. At the other
           # six postures the var stays UNCONSTRAINED — observed and printed, never verdicted — because
           # ladder §4 registers retention-era recovery as decoupled from this ladder (separate design
           # lock / owner line). Requiring it OFF there would fail an independent, legitimate retention
@@ -350,7 +352,7 @@ jobs:
             l4-revert)
               EXPECTED_TRIGGER_STATE="armed"
               EXPECTED_ACTIVE_FLAGS="MULTITABLE_ENABLE_WRITER_FENCE MULTITABLE_HISTORY_CONTIGUITY_STRICT MULTITABLE_ENABLE_SHEET_REVERT"
-              EXPECTED_INACTIVE_NON_RUNG_VARS=""
+              EXPECTED_INACTIVE_NON_RUNG_VARS="MULTITABLE_META_REVISION_RETENTION_ENABLED"
               ;;
             l5-reset)
               EXPECTED_TRIGGER_STATE="armed"
@@ -417,10 +419,10 @@ jobs:
                 fi
               elif flag_expected_inactive "$f"; then
                 # Required inactive at this posture ⇒ it must be observably OFF. BOTH `true` and `one`
-                # (the classifier's name for exactly '1') red here: `true` is the activation literal of
-                # the five rung flags, `one` is the activation literal of
-                # MULTITABLE_META_REVISION_RETENTION_ENABLED — the value PIT_RESET_RETENTION_BLOCKED()
-                # refuses reset on. See the FLAGS comment above for why both are fail-closed.
+                # (the classifier's name for exact raw '1') red here: `true` is the activation literal of
+                # the five rung flags (or exact raw operator intent for retention), while `one` is the
+                # runtime activation literal of MULTITABLE_META_REVISION_RETENTION_ENABLED — the value isMetaRevisionRetentionEnabled()
+                # refuses destructive recovery on. See the FLAGS comment above for why both are fail-closed.
                 if [ "$state" = "true" ] || [ "$state" = "one" ]; then
                   echo "   [${context}] $f=$state — UNEXPECTED ACTIVE ⇒ POSTURE MISMATCH"
                   fail=1
