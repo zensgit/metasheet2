@@ -1125,9 +1125,60 @@ describe("Phase D2h adapter result validation and throw normalization", () => {
     ).toBe(true);
   });
 
+  test("a typed-looking Proxy reflection failure is replaced with the result-invalid code", async () => {
+    const issuedDek = randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES);
+    const hostile = new RecoveryArchiveCryptoError(
+      "RECOVERY_ARCHIVE_CRYPTO_INVALID_DEK_FINGERPRINT",
+    );
+    hostile.message = "provider-secret-host.example";
+    const result = new Proxy(
+      {
+        dek: issuedDek,
+        wrappedDekId: WRAPPED_DEK_ID,
+        wrappedDek: Buffer.alloc(48, 7),
+      },
+      {
+        getOwnPropertyDescriptor(value, property) {
+          if (property === "wrappedDekId") throw hostile;
+          return Reflect.getOwnPropertyDescriptor(value, property);
+        },
+      },
+    );
+    const guarded = createTransactionGuardedKeyCustody(
+      createTestCustody({
+        overrides: {
+          async produceGenerationDek() {
+            return result;
+          },
+        },
+      }),
+      depthProbe(0),
+    );
+
+    const error = await capture(() =>
+      guarded.produceGenerationDek({
+        keyId: KEY_ID,
+        generationId: randomUUID(),
+      }),
+    );
+    expect(error).not.toBe(hostile);
+    expect(error.code).toBe(
+      "RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_RESULT_INVALID",
+    );
+    expect(error.message).toBe(error.code);
+    expect(error.message).not.toContain("provider-secret-host.example");
+    expect(
+      Buffer.from(issuedDek).equals(
+        Buffer.alloc(RECOVERY_ARCHIVE_AEAD_KEY_BYTES),
+      ),
+    ).toBe(true);
+  });
+
   test("adapter results are snapshotted once instead of being re-read after validation", async () => {
     const issuedDek = randomBytes(RECOVERY_ARCHIVE_AEAD_KEY_BYTES);
     const wrappedDek = Buffer.alloc(48, 7);
+    const expectedDek = Buffer.from(issuedDek);
+    const expectedWrappedDek = Buffer.from(wrappedDek);
     const result = { dek: issuedDek, wrappedDekId: WRAPPED_DEK_ID, wrappedDek };
     const guarded = createTransactionGuardedKeyCustody(
       createTestCustody({
@@ -1145,12 +1196,14 @@ describe("Phase D2h adapter result validation and throw normalization", () => {
       generationId: randomUUID(),
     });
     result.wrappedDekId = "mutated-after-return";
+    issuedDek.fill(9);
+    wrappedDek.fill(8);
     result.wrappedDek = Buffer.alloc(0);
-    expect(snapshot).toEqual({
-      dek: issuedDek,
-      wrappedDekId: WRAPPED_DEK_ID,
-      wrappedDek,
-    });
+    expect(snapshot.dek).not.toBe(issuedDek);
+    expect(snapshot.wrappedDek).not.toBe(wrappedDek);
+    expect(Buffer.from(snapshot.dek)).toEqual(expectedDek);
+    expect(snapshot.wrappedDekId).toBe(WRAPPED_DEK_ID);
+    expect(Buffer.from(snapshot.wrappedDek)).toEqual(expectedWrappedDek);
   });
 
   test("a non-boolean MAC verdict and an empty MAC refuse", async () => {
@@ -1264,24 +1317,27 @@ describe("Phase D2h adapter result validation and throw normalization", () => {
     }
   });
 
-  test("an existing typed error survives normalization unchanged", async () => {
+  test("an externally thrown typed error is replaced instead of being trusted", async () => {
     const typed = new RecoveryArchiveCryptoError(
       "RECOVERY_ARCHIVE_CRYPTO_INVALID_DEK_FINGERPRINT",
     );
-    expect(
-      await asyncCodeOf(() =>
-        reserveThenSealRecoveryArchiveSections({
-          binding: generationBinding(),
-          keyCustody: createTestCustody(),
-          transactionDepth: depthProbe(0),
-          dekSource: { kind: "produce" },
-          sections: fullSnapshotSections(),
-          reserveNonces: async () => {
-            throw typed;
-          },
-        }),
-      ),
-    ).toBe("RECOVERY_ARCHIVE_CRYPTO_INVALID_DEK_FINGERPRINT");
+    typed.message = "kms.internal.example leaked provider text";
+    const error = await capture(() =>
+      reserveThenSealRecoveryArchiveSections({
+        binding: generationBinding(),
+        keyCustody: createTestCustody(),
+        transactionDepth: depthProbe(0),
+        dekSource: { kind: "produce" },
+        sections: fullSnapshotSections(),
+        reserveNonces: async () => {
+          throw typed;
+        },
+      }),
+    );
+    expect(error).not.toBe(typed);
+    expect(error.code).toBe("RECOVERY_ARCHIVE_CRYPTO_RESERVATION_FAILED");
+    expect(error.message).toBe(error.code);
+    expect(error.message).not.toContain("kms.internal.example");
   });
 
   test("no failure carries a cause, a host, a provider message, or any bound value", async () => {
@@ -1724,6 +1780,55 @@ describe("Phase D2h reservation before encryption and upload", () => {
       plan.map((section) => toRecoveryArchiveNonceHex(section.nonce)),
     );
     expect(result.dekFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  test("fingerprinting cannot mutate the DEK later used for reservation and sealing", async () => {
+    const originalDek = Buffer.alloc(RECOVERY_ARCHIVE_AEAD_KEY_BYTES, 0x11);
+    let adapterOwnedDek: Uint8Array | undefined;
+    let fingerprintView: Uint8Array | undefined;
+    const custody = createTestCustody({
+      dek: originalDek,
+      dekResult: (issued) => {
+        adapterOwnedDek = issued.dek;
+        return issued;
+      },
+      overrides: {
+        async deriveDekFingerprint(request) {
+          fingerprintView = request.dek;
+          const fingerprint = fingerprintOfDek(request.dek);
+          adapterOwnedDek?.fill(0x22);
+          request.dek.fill(0x33);
+          return fingerprint;
+        },
+      },
+    });
+    const sealDeks: Buffer[] = [];
+    let reservedFingerprint = "";
+
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(),
+      keyCustody: custody,
+      transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" },
+      sections: fullSnapshotSections(),
+      reserveNonces: async (reservations) => {
+        reservedFingerprint = reservations[0]?.dekFingerprint ?? "";
+      },
+      sealSection: (input) => {
+        sealDeks.push(Buffer.from(input.dek));
+        return sealRecoveryArchiveSection(input);
+      },
+    });
+
+    const expectedFingerprint = fingerprintOfDek(originalDek);
+    expect(result.dekFingerprint).toBe(expectedFingerprint);
+    expect(reservedFingerprint).toBe(expectedFingerprint);
+    expect(sealDeks).toHaveLength(RECOVERY_ARCHIVE_V1_SECTION_NAMES.length);
+    for (const sealedDek of sealDeks) expect(sealedDek).toEqual(originalDek);
+    expect(fingerprintView).toBeDefined();
+    expect(Buffer.from(fingerprintView ?? [])).toEqual(
+      Buffer.alloc(RECOVERY_ARCHIVE_AEAD_KEY_BYTES),
+    );
   });
 
   test("a refused (duplicate) reservation leaves zero seal calls, zero uploads, zero ciphertext", async () => {

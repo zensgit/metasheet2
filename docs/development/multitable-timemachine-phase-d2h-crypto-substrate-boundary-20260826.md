@@ -4,7 +4,7 @@
   authorization, or a key-custody ratification.
 - **Parent contract:** `multitable-timemachine-phase-d1-durable-archive-design-lock-20260826.md`
   at SHA-256 `19f10cd8d7259861c75ee6d82af4f421f29b875101a5a2a583c0a73c67009caf` (verified against the
-  file at this head). That file's own closing line still reads *"Status remains PROPOSED"*, while
+  file at this head). That file's own closing line still reads _"Status remains PROPOSED"_, while
   the D2a boundary doc cites the same SHA as "ratified". This slice does not resolve that tension
   and does not ratify anything; it cites the exact bytes it was built against.
 - **Default posture:** `MULTITABLE_RECOVERY_ARCHIVE_ENABLED` remains exact-literal OFF. No flag is
@@ -34,20 +34,23 @@ three things per verb: re-check transaction depth, **validate the adapter's resu
 **normalize any arbitrary throw** into a closed code. Result validation refuses a DEK that is not an
 exact 32-byte `Uint8Array`, a blank wrapped id, an empty wrapped blob, an unwrap whose returned
 wrapped id differs from the requested one, an empty MAC, and a non-boolean verify verdict — each of
-which is silent corruption otherwise. Invalid key bytes are scrubbed *before* the refusal.
+which is silent corruption otherwise. Invalid key bytes are scrubbed _before_ the refusal.
 
 Generation-DEK results are treated as hostile objects after the adapter promise resolves. The
 wrapper reads each required own **data descriptor** once, rejects accessors without invoking them,
-normalizes Proxy reflection failures, and returns a plain snapshot rather than the original object.
-If reflection exposes a valid DEK and a later field then fails, those bytes are scrubbed before the
-closed refusal. This prevents a getter from exporting provider text and prevents a result object
-from changing after validation but before fingerprinting or sealing.
+normalizes Proxy reflection failures, and returns a plain snapshot with fresh copies of both the DEK
+and wrapped-DEK bytes rather than any adapter-owned view. The adapter-owned DEK is scrubbed after the
+copies are complete. Fingerprint derivation receives a separate temporary DEK copy, which is also
+scrubbed on every exit, so the adapter cannot mutate the bytes later used for reservation and
+sealing. If reflection or copying exposes a valid DEK and a later field then fails, all reachable key
+copies are scrubbed before the closed refusal.
 
 `RecoveryArchiveCryptoError.message` is the closed code itself, and the class carries **no `cause`**:
 attaching the original throwable would re-export exactly the provider text and host detail it exists
 to strip. Adapter, reservation, sealer, and provider failures map to
-`KEY_CUSTODY_FAILED` / `RESERVATION_FAILED` / `SEAL_FAILED` / `PROVIDER_FAILED`; an error this module
-already produced passes through unchanged.
+`KEY_CUSTODY_FAILED` / `RESERVATION_FAILED` / `SEAL_FAILED` / `PROVIDER_FAILED`. Every exception
+crossing one of those external callback boundaries is replaced with a fresh error even when it is
+an instance of the exported error class, because external code can construct or mutate that class.
 
 ### 2. Transaction-depth guard (D-F: "No KMS call may run inside a database transaction")
 
@@ -75,13 +78,13 @@ firmly as it forbids KMS calls there.
 **AAD field set (14 fields, exact order).** This is the union of two lists and the union is
 load-bearing, not gold-plating:
 
-| Source | Fields |
-|---|---|
-| D1 §2.1 step 2 (tenant/anchor identity) | `format_version`, `archive_generation_id`, `workspace_id`, `base_id`, `sheet_id`, `anchor_operation_id`, `anchor_seq`, `checkpoint_id`, `section_name` |
-| D2h task list (crypto-bearing descriptor, §2.1 step 3) | `aead_algorithm`, `key_id`, `wrapped_dek_id`, `dek_fingerprint`, `plaintext_sha256` |
+| Source                                                 | Fields                                                                                                                                                 |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| D1 §2.1 step 2 (tenant/anchor identity)                | `format_version`, `archive_generation_id`, `workspace_id`, `base_id`, `sheet_id`, `anchor_operation_id`, `anchor_seq`, `checkpoint_id`, `section_name` |
+| D2h task list (crypto-bearing descriptor, §2.1 step 3) | `aead_algorithm`, `key_id`, `wrapped_dek_id`, `dek_fingerprint`, `plaintext_sha256`                                                                    |
 
 The seven-field key-metadata list **alone** binds no tenant identity, which is exactly fork C2 that
-D-C rejects ("C2 cannot prove tenant isolation") and exactly the *cross-binding mixup* row of the
+D-C rejects ("C2 cannot prove tenant isolation") and exactly the _cross-binding mixup_ row of the
 §2.1 threat table. A mutation dropping the tenant/anchor fields reds three unit tests. All fields
 are mandatory: a blank or missing field refuses rather than encoding as empty, because an empty
 field silently produces a different security binding.
@@ -100,7 +103,7 @@ neither a string nor null and is refused, so a forgotten field can never be read
 
 **Canonical timestamps.** `createdAt` and a non-null `expiresAt` must be canonical UTC with exactly
 millisecond precision (`YYYY-MM-DDTHH:mm:ss.sssZ`). Three independent guards enforce this and all
-three are mutation-proven load-bearing: the fixed-shape regex is the *only* thing that rejects an
+three are mutation-proven load-bearing: the fixed-shape regex is the _only_ thing that rejects an
 expanded-year instant such as `+010000-01-01T00:00:00.000Z` (which round-trips through `Date`
 exactly); the finiteness check is the only thing that rejects `2026-13-26T00:00:00.000Z`; and the
 `Date` round-trip is the only thing that rejects `2026-02-30T…` and `2026-08-26T24:00:00.000Z`.
@@ -112,7 +115,7 @@ collapse into one. A verifier must not branch on telling them apart.
 
 Fail-closed refusals, each with its own closed code and a discriminating test: wrong key, tampered
 tag, tampered ciphertext, tampered nonce, truncated ciphertext, any single AAD field changed,
-unknown algorithm (checked *before* node crypto is touched, so Node's own length-bearing errors are
+unknown algorithm (checked _before_ node crypto is touched, so Node's own length-bearing errors are
 never surfaced), malformed key/nonce/tag length, and a `plaintext_sha256` that does not describe
 the bytes handed in.
 
@@ -135,12 +138,12 @@ and `section_name`.
 - **Same nonce, different fingerprint is admitted**, as D-F explicitly permits, proven with two
   fingerprints derived from two different DEKs by the same domain-separated PRF.
 - **No JS number for counters.** There is no sequence or counter column; `format_version` is a
-  closed version literal, and `anchor_seq` is a decimal *string* everywhere it appears in the
+  closed version literal, and `anchor_seq` is a decimal _string_ everywhere it appears in the
   crypto binding (a JS-number spelling refuses; `Number('9007199254741993')` rounds).
 
 - **One generation reserves each section exactly once.** A second UNIQUE constraint on
   `(generation_id, section_name)` closes the retry hole the primary key alone cannot: a retry that
-  minted a *fresh* nonce for an already-reserved section has a genuinely new `(fingerprint, nonce)`
+  minted a _fresh_ nonce for an already-reserved section has a genuinely new `(fingerprint, nonce)`
   pair, so only this arbiter refuses two live ciphertexts both claiming to be one section.
 - **A complete format-v1 `archive_snapshot` is exactly ten reservations under one generation** —
   the ten contract sections, in the exact D-D order, one nonce each.
