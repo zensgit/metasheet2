@@ -620,7 +620,7 @@ function parseFlagSnapshot(output) {
   )
 }
 
-test('embedded flag classifier uses application-equivalent trim semantics for running and Compose values', () => {
+test('embedded flag classifier preserves rung normalization but uses raw exact retention semantics', () => {
   const activeFlag = 'MULTITABLE_ENABLE_PIT_RESET'
   const running = spawnSync(
     process.execPath,
@@ -636,11 +636,8 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
         ...process.env,
         [activeFlag]: '\nTrUe\t',
         MULTITABLE_ENABLE_WRITER_FENCE: ' 1 ',
-        // The retention var's activation literal is EXACTLY '1' (global-history-flag-manifest.mjs:
-        // activationValue '1', not 'true'), and '1' is precisely what isMetaRevisionRetentionEnabled()
-        // refuses destructive recovery on. The classifier must therefore surface it as its own `one` state — never
-        // fold it into `true` (which would make the retention breach unnameable) and never into
-        // `inactive` (which would make it invisible).
+        // Retention must not inherit the rung flags' trim/lower normalization. Runtime compares raw
+        // bytes with === '1', so this whitespace spelling is inactive.
         [RETENTION_CONFLICT_VAR]: ' 1 ',
       },
       encoding: 'utf8',
@@ -653,7 +650,7 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
     MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'unset',
     MULTITABLE_ENABLE_WRITER_FENCE: 'one',
     MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: 'unset',
-    [RETENTION_CONFLICT_VAR]: 'one',
+    [RETENTION_CONFLICT_VAR]: 'inactive',
   })
 
   const compose = spawnSync(
@@ -673,6 +670,7 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
             environment: {
               [activeFlag]: '\nTrUe\t',
               MULTITABLE_ENABLE_WRITER_FENCE: false,
+              [RETENTION_CONFLICT_VAR]: '1',
             },
           },
         },
@@ -684,6 +682,42 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
   assert.equal(parseFlagSnapshot(compose.stdout)[activeFlag], 'true')
   assert.equal(
     parseFlagSnapshot(compose.stdout).MULTITABLE_ENABLE_WRITER_FENCE,
+    'inactive',
+  )
+  assert.equal(parseFlagSnapshot(compose.stdout)[RETENTION_CONFLICT_VAR], 'one')
+
+  const composeWhitespace = spawnSync(
+    process.execPath,
+    ['-e', flagClassifierScript[1], 'compose', 'metasheet-backend', RETENTION_CONFLICT_VAR],
+    {
+      input: JSON.stringify({
+        services: {
+          backend: {
+            container_name: 'metasheet-backend',
+            environment: { [RETENTION_CONFLICT_VAR]: '1 ' },
+          },
+        },
+      }),
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(composeWhitespace.status, 0, composeWhitespace.stderr)
+  assert.equal(
+    parseFlagSnapshot(composeWhitespace.stdout)[RETENTION_CONFLICT_VAR],
+    'inactive',
+  )
+
+  const runningUppercase = spawnSync(
+    process.execPath,
+    ['-e', flagClassifierScript[1], 'running', '_', RETENTION_CONFLICT_VAR],
+    {
+      env: { ...process.env, [RETENTION_CONFLICT_VAR]: 'TRUE' },
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(runningUppercase.status, 0, runningUppercase.stderr)
+  assert.equal(
+    parseFlagSnapshot(runningUppercase.stdout)[RETENTION_CONFLICT_VAR],
     'inactive',
   )
 

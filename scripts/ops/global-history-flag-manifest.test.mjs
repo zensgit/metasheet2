@@ -233,11 +233,14 @@ test("R4 retention requires exact '1'; '1' activates, 'true'/'yes'/'on' do not",
   assert.equal(isActivated(spec, '1 '), false)
 })
 
-test('R3 reciprocal manifest metadata keeps Revert and retention conflictsWith symmetric', () => {
+test('R3 reciprocal manifest metadata keeps Revert/Reset and retention conflictsWith symmetric', () => {
   const revert = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_SHEET_REVERT
+  const reset = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_PIT_RESET
   const retention = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_META_REVISION_RETENTION_ENABLED
   assert.ok(revert.conflictsWith.includes(retention.key), 'Revert must declare retention as a conflict')
   assert.ok(retention.conflictsWith.includes(revert.key), 'retention must declare Revert as a conflict')
+  assert.ok(reset.conflictsWith.includes(retention.key), 'PIT Reset must declare retention as a conflict')
+  assert.ok(retention.conflictsWith.includes(reset.key), 'retention must declare PIT Reset as a conflict')
 })
 
 test('R4 isMisconfiguredTruthy flags retention=true (should be 1) and PIT_RESET=1 (should be true)', () => {

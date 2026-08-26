@@ -231,11 +231,13 @@ jobs:
           # VALUE SEMANTICS (scripts/ops/global-history-flag-manifest.mjs, key
           # MULTITABLE_META_REVISION_RETENTION_ENABLED): activationValue is the EXACT string '1'
           # (classifier state `one`), NOT 'true' — 'true' is a documented silent no-op there ("the
-          # single biggest operator footgun in this manifest"). Where the var IS asserted, the shared
-          # required-inactive branch in check_flag_snapshot reds on BOTH `one` and `true`, deliberately
-          # and for different reasons: `one` is the reset-blocking value itself, while `true` is an
-          # operator INTENT to enable retention on a rung that requires it off — fail-closed on that
-          # intent is the choice here, not an accident of reusing the branch.
+          # single biggest operator footgun in this manifest"). Retention is classified from the RAW
+          # value: only raw '1' becomes `one`, raw 'true' becomes the separate operator-intent state
+          # `true`, and whitespace/case variants are inactive. The other five flags retain their
+          # existing trim+lower classifier semantics. Where retention IS asserted, the shared
+          # required-inactive branch reds on BOTH `one` and `true`, deliberately and for different
+          # reasons: `one` is runtime-active, while exact raw `true` is operator intent to enable
+          # retention on a rung that requires it off.
           # Spelled out literally (not "$RUNG_FLAGS …") so the required contract test can pin BOTH
           # sets by name from the YAML and assert their exact relationship: FLAGS ⊃ RUNG_FLAGS and
           # FLAGS \ RUNG_FLAGS = {MULTITABLE_META_REVISION_RETENTION_ENABLED}. Silently dropping a
@@ -245,7 +247,7 @@ jobs:
           SCHEMA_HELPER_SHA256="f1c17af1b9091c82dce8ec899f0e7480ecfa810087e4a34d506c118775a44d82"
           SCHEMA_PASS_LINE_DISABLED="VERDICT: PASS - recovery authority triggers/functions match the expected default-inert schema posture and no foreign_record_id FK exists on meta_links"
           SCHEMA_PASS_LINE_ARMED="VERDICT: PASS - recovery authority triggers/functions match the expected armed schema posture and no foreign_record_id FK exists on meta_links"
-          FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const normalized=present?String(source[key]??"").trim().toLowerCase():"";const state=!present?"unset":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
+          FLAG_CLASSIFIER_JS='const fs=require("node:fs");const [mode,container,...keys]=process.argv.slice(1);const retentionKey="MULTITABLE_META_REVISION_RETENTION_ENABLED";let source;if(mode==="running"){source=process.env}else if(mode==="compose"){const config=JSON.parse(fs.readFileSync(0,"utf8"));const matches=Object.values(config.services??{}).filter((service)=>service&&service.container_name===container);if(matches.length!==1)process.exit(3);source=matches[0].environment??{};if(!source||Array.isArray(source)||typeof source!=="object")process.exit(4)}else{process.exit(2)}for(const key of keys){const present=Object.prototype.hasOwnProperty.call(source,key);const raw=present?String(source[key]??""):"";const normalized=raw.trim().toLowerCase();const state=!present?"unset":key===retentionKey?raw==="1"?"one":raw==="true"?"true":"inactive":normalized==="true"?"true":normalized==="1"?"one":"inactive";process.stdout.write(`${key}\t${state}\n`)}'
           fail=0
           checked=0
 
@@ -417,9 +419,9 @@ jobs:
                 fi
               elif flag_expected_inactive "$f"; then
                 # Required inactive at this posture ⇒ it must be observably OFF. BOTH `true` and `one`
-                # (the classifier's name for exactly '1') red here: `true` is the activation literal of
-                # the five rung flags, `one` is the activation literal of
-                # MULTITABLE_META_REVISION_RETENTION_ENABLED — the value isMetaRevisionRetentionEnabled()
+                # (the classifier's name for exact raw '1') red here: `true` is the activation literal of
+                # the five rung flags (or exact raw operator intent for retention), while `one` is the
+                # runtime activation literal of MULTITABLE_META_REVISION_RETENTION_ENABLED — the value isMetaRevisionRetentionEnabled()
                 # refuses destructive recovery on. See the FLAGS comment above for why both are fail-closed.
                 if [ "$state" = "true" ] || [ "$state" = "one" ]; then
                   echo "   [${context}] $f=$state — UNEXPECTED ACTIVE ⇒ POSTURE MISMATCH"
