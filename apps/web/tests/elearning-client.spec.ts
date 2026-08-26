@@ -280,6 +280,7 @@ describe('elearning client transport', () => {
         status: 'started',
         paper: paper(),
         answers: { [Q1]: [] },
+        deadlineAt: '2026-08-26T09:30:00.000Z',
         duplicate: false,
       }))
       .mockResolvedValueOnce(jsonResponse(200, {
@@ -296,7 +297,16 @@ describe('elearning client transport', () => {
     expect(lastJson()).toEqual({})
     expect(started.paper.questions[0]).not.toHaveProperty('answerKey')
     expect(started.answers).toEqual({ [Q1]: [] })
-    expect(Object.keys(started)).toEqual(['attemptId', 'attemptNo', 'status', 'paper', 'answers', 'duplicate'])
+    expect(started.deadlineAt).toBe('2026-08-26T09:30:00.000Z')
+    expect(Object.keys(started)).toEqual([
+      'attemptId',
+      'attemptNo',
+      'status',
+      'paper',
+      'answers',
+      'deadlineAt',
+      'duplicate',
+    ])
     await submitElearningExam(ATTEMPT, { [Q1]: ['a'] })
     expect(lastCall().path).toBe(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
     expect(lastJson()).toEqual({ answers: { [Q1]: ['a'] } })
@@ -310,6 +320,7 @@ describe('elearning client transport', () => {
       status: 'started',
       paper: paper(),
       answers: { [Q1]: ['a'] },
+      deadlineAt: null,
       duplicate: false,
     }))
     const saved = await saveElearningExamAnswers(ATTEMPT, { [Q1]: ['a'] })
@@ -323,6 +334,7 @@ describe('elearning client transport', () => {
       status: 'started',
       paper: paper(),
       answers: { [Q1]: ['a'] },
+      deadlineAt: null,
       duplicate: false,
     })
     expect(JSON.stringify(saved)).not.toMatch(/answerKey|explanation|storageKey|storage_key|"correct"/)
@@ -418,6 +430,7 @@ describe('elearning client fail-closed validation', () => {
         }],
       },
       answers: { [Q1]: [] },
+      deadlineAt: null,
       duplicate: false,
     }))
     await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
@@ -432,6 +445,7 @@ describe('elearning client fail-closed validation', () => {
       attemptNo: 1,
       status: 'started',
       paper: paper(),
+      deadlineAt: null,
       duplicate: false,
     }))
     await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
@@ -445,6 +459,7 @@ describe('elearning client fail-closed validation', () => {
       status: 'started',
       paper: paper(),
       answers: { [Q1]: ['a'] },
+      deadlineAt: null,
       duplicate: false,
       explanation: 'secret',
     }))
@@ -459,12 +474,32 @@ describe('elearning client fail-closed validation', () => {
       status: 'started',
       paper: paper(),
       answers: { [Q1]: ['a'], extra: ['b'] },
+      deadlineAt: null,
       duplicate: false,
     }))
     await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
       code: 'invalid_response',
       status: 200,
     })
+  })
+
+  it('rejects a missing or non-string exam deadline snapshot', async () => {
+    for (const deadline of [undefined, 42]) {
+      const payload: Record<string, unknown> = {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        paper: paper(),
+        answers: { [Q1]: [] },
+        duplicate: false,
+      }
+      if (deadline !== undefined) payload.deadlineAt = deadline
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, payload))
+      await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 200,
+      })
+    }
   })
 
   it('converts HTTP 201 rejected media metadata to a stable ElearningApiError', async () => {

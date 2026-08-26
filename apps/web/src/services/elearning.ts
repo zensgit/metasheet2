@@ -220,6 +220,7 @@ export interface ElearningExamStartResult {
   status: 'started'
   paper: ElearningPublicPaper
   answers: Record<string, string[]>
+  deadlineAt: string | null
   duplicate: boolean
 }
 
@@ -431,6 +432,7 @@ function parseExamStartResult(value: unknown, status: number): ElearningExamStar
     'status',
     'paper',
     'answers',
+    'deadlineAt',
     'duplicate',
   ])) {
     failShape(status)
@@ -443,6 +445,7 @@ function parseExamStartResult(value: unknown, status: number): ElearningExamStar
     status: 'started',
     paper,
     answers: parseOwnAnswers(value.answers, paper, status),
+    deadlineAt: requireNullableString(value.deadlineAt, status),
     duplicate: requireBoolean(value.duplicate, status),
   }
 }
