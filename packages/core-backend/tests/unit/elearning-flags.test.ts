@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   ELEARNING_FLAG_NAMES,
   ELEARNING_PRODUCT_FEATURE,
+  isElearningAssessmentSurfaceEnabled,
   isElearningEnabled,
+  isElearningExamSurfaceEnabled,
   isElearningFlagEnabled,
   resolveElearningCatalogFeature,
   type ElearningFlagName,
@@ -65,6 +67,22 @@ describe('elearning V0.1 flags', () => {
         ELEARNING_ASSESSMENT_ENABLED: 'true',
       } as NodeJS.ProcessEnv),
     ).toBe(false)
+  })
+
+  it('keeps assessment authoring independent from media while learner exams require it', () => {
+    const assessmentOnly = {
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_ASSESSMENT_ENABLED: 'true',
+    } as NodeJS.ProcessEnv
+    expect(isElearningAssessmentSurfaceEnabled(assessmentOnly)).toBe(true)
+    expect(isElearningExamSurfaceEnabled(assessmentOnly)).toBe(false)
+    expect(
+      isElearningExamSurfaceEnabled({
+        ...assessmentOnly,
+        ELEARNING_MEDIA_ENABLED: 'true',
+      } as NodeJS.ProcessEnv),
+    ).toBe(true)
   })
 
   it('FEATURE_FLAGS registers the seven names, default OFF, exact true only', async () => {

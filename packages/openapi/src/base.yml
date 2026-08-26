@@ -4609,7 +4609,7 @@ components:
             evaluatedAt:
               type: string
               format: date-time
-    # E-learning V0.1 named-pilot public HTTP DTOs. Closed objects: no storage keys,
+    # E-learning named-pilot and L3 public HTTP DTOs. Closed objects: no storage keys,
     # signing material, answer keys, explanations, or paper snapshots on learner reads.
     ElearningUuid:
       type: string
@@ -4787,6 +4787,154 @@ components:
           maxLength: 2000
           nullable: true
           description: Optional admin write field. Never returned on learner exam surfaces.
+    ElearningQuestionBankCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+    ElearningQuestionBankResult:
+      type: object
+      additionalProperties: false
+      required: [bankId]
+      properties:
+        bankId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningQuestionWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [question]
+      properties:
+        question:
+          $ref: '#/components/schemas/ElearningPublishQuestion'
+    ElearningQuestionRevisionResult:
+      type: object
+      additionalProperties: false
+      required: [questionId, questionRevisionId, revision]
+      properties:
+        questionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revision:
+          type: integer
+          minimum: 1
+    ElearningFixedPaperItem:
+      type: object
+      additionalProperties: false
+      required: [questionRevisionId, points]
+      properties:
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        points:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+    ElearningFixedPaperPublishRequest:
+      type: object
+      additionalProperties: false
+      required: [title, items]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/ElearningFixedPaperItem'
+    ElearningFixedPaperResult:
+      type: object
+      additionalProperties: false
+      required: [paperId, status, itemCount, totalPoints]
+      properties:
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [published]
+        itemCount:
+          type: integer
+          minimum: 1
+          maximum: 200
+        totalPoints:
+          type: integer
+          minimum: 1
+    ElearningExamDisclosurePolicy:
+      type: string
+      enum:
+        - no_review
+        - correctness_after_submit
+        - wrong_items_after_submit
+        - correctness_after_window
+    ElearningPaperExamPublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - paperId
+        - title
+        - passScore
+        - maxAttempts
+        - windowStartsAt
+        - windowEndsAt
+        - durationSeconds
+        - shuffleQuestions
+        - shuffleOptions
+        - disclosurePolicy
+      properties:
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        passScore:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        windowStartsAt:
+          type: string
+          format: date-time
+          nullable: true
+        windowEndsAt:
+          type: string
+          format: date-time
+          nullable: true
+        durationSeconds:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          nullable: true
+        shuffleQuestions:
+          type: boolean
+        shuffleOptions:
+          type: boolean
+        disclosurePolicy:
+          $ref: '#/components/schemas/ElearningExamDisclosurePolicy'
+    ElearningPaperExamResult:
+      type: object
+      additionalProperties: false
+      required: [examId, paperId, status, totalPoints]
+      properties:
+        examId:
+          $ref: '#/components/schemas/ElearningUuid'
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum: [published]
+        totalPoints:
+          type: integer
+          minimum: 1
     ElearningCoursePublishRequest:
       type: object
       additionalProperties: false

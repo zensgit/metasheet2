@@ -76,9 +76,22 @@ export function isElearningWatchSurfaceEnabled(env: NodeJS.ProcessEnv = process.
 }
 
 /**
- * Exam HTTP surface is live only when the watch gate AND ASSESSMENT are
- * exact literal 'true'.
+ * Assessment authoring is independent from media/watch and requires only the
+ * master, CONTENT, and ASSESSMENT capabilities.
  */
+export function isElearningAssessmentSurfaceEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    isElearningContentSurfaceEnabled(env)
+    && isElearningFlagEnabled(ELEARNING_ASSESSMENT_ENABLED, env)
+  )
+}
+
+/** Learner exam runtime additionally needs the media/watch capability. */
 export function isElearningExamSurfaceEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return isElearningWatchSurfaceEnabled(env) && isElearningFlagEnabled(ELEARNING_ASSESSMENT_ENABLED, env)
+  return (
+    isElearningWatchSurfaceEnabled(env)
+    && isElearningAssessmentSurfaceEnabled(env)
+  )
 }

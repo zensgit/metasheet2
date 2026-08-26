@@ -8421,6 +8421,113 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assessment/question-banks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create an assessment question bank
+         * @description Admin-only L3 assessment write. Requires master, content, and
+         *     assessment flags plus `elearning:admin`. Actor and organization are
+         *     injected from the authenticated request. JSON limit 1 MiB.
+         */
+        post: operations["createElearningQuestionBank"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/question-banks/{bankId}/questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a stable objective question with revision one
+         * @description Admin-only L3 assessment write. The request may contain the answer key
+         *     and explanation; the closed response returns identifiers only.
+         */
+        post: operations["createElearningBankQuestion"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/questions/{questionId}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append one immutable objective-question revision
+         * @description Admin-only L3 assessment write. Existing revisions are never mutated.
+         *     The closed response returns identifiers and the new revision number.
+         */
+        post: operations["appendElearningQuestionRevision"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/papers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish an immutable fixed-revision paper
+         * @description Admin-only L3 assessment write. Each item pins one immutable question
+         *     revision. V1 accepts 1 through 200 items and rejects 201 before DB I/O.
+         */
+        post: operations["publishElearningFixedPaper"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/exams": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Publish exam rules bound to an immutable paper
+         * @description Admin-only L3 assessment write. Window, duration, shuffle, attempt,
+         *     pass-score, and review-disclosure rules are frozen at publication.
+         *     The response never contains paper snapshots, answer keys, or explanations.
+         */
+        post: operations["publishElearningPaperExam"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/assignments/direct": {
         parameters: {
             query?: never;
@@ -17787,6 +17894,58 @@ export interface components {
             /** @description Optional admin write field. Never returned on learner exam surfaces. */
             explanation?: string | null;
         };
+        ElearningQuestionBankCreateRequest: {
+            title: string;
+        };
+        ElearningQuestionBankResult: {
+            bankId: components["schemas"]["ElearningUuid"];
+        };
+        ElearningQuestionWriteRequest: {
+            question: components["schemas"]["ElearningPublishQuestion"];
+        };
+        ElearningQuestionRevisionResult: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+        };
+        ElearningFixedPaperItem: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            points: number;
+        };
+        ElearningFixedPaperPublishRequest: {
+            title: string;
+            items: components["schemas"]["ElearningFixedPaperItem"][];
+        };
+        ElearningFixedPaperResult: {
+            paperId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            itemCount: number;
+            totalPoints: number;
+        };
+        /** @enum {string} */
+        ElearningExamDisclosurePolicy: "no_review" | "correctness_after_submit" | "wrong_items_after_submit" | "correctness_after_window";
+        ElearningPaperExamPublishRequest: {
+            paperId: components["schemas"]["ElearningUuid"];
+            title: string;
+            passScore: number;
+            maxAttempts: number;
+            /** Format: date-time */
+            windowStartsAt: string | null;
+            /** Format: date-time */
+            windowEndsAt: string | null;
+            durationSeconds: number | null;
+            shuffleQuestions: boolean;
+            shuffleOptions: boolean;
+            disclosurePolicy: components["schemas"]["ElearningExamDisclosurePolicy"];
+        };
+        ElearningPaperExamResult: {
+            examId: components["schemas"]["ElearningUuid"];
+            paperId: components["schemas"]["ElearningUuid"];
+            /** @enum {string} */
+            status: "published";
+            totalPoints: number;
+        };
         ElearningCoursePublishRequest: {
             requestId: components["schemas"]["ElearningUuid"];
             title: string;
@@ -19448,6 +19607,200 @@ export interface operations {
                     };
                 };
             };
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningQuestionBank: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionBankCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Created question-bank identifier. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    createElearningBankQuestion: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Stable question and immutable revision identifiers. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionRevisionResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    appendElearningQuestionRevision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                questionId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningQuestionWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Appended immutable revision. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionRevisionResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningFixedPaper: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningFixedPaperPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published paper metadata without answer material. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningFixedPaperResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningPaperExam: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningPaperExamPublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published exam metadata without answer material. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningPaperExamResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

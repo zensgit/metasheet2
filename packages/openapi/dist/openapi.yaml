@@ -5717,6 +5717,174 @@ components:
           maxLength: 2000
           nullable: true
           description: Optional admin write field. Never returned on learner exam surfaces.
+    ElearningQuestionBankCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - title
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+    ElearningQuestionBankResult:
+      type: object
+      additionalProperties: false
+      required:
+        - bankId
+      properties:
+        bankId:
+          $ref: '#/components/schemas/ElearningUuid'
+    ElearningQuestionWriteRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - question
+      properties:
+        question:
+          $ref: '#/components/schemas/ElearningPublishQuestion'
+    ElearningQuestionRevisionResult:
+      type: object
+      additionalProperties: false
+      required:
+        - questionId
+        - questionRevisionId
+        - revision
+      properties:
+        questionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        revision:
+          type: integer
+          minimum: 1
+    ElearningFixedPaperItem:
+      type: object
+      additionalProperties: false
+      required:
+        - questionRevisionId
+        - points
+      properties:
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        points:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+    ElearningFixedPaperPublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - title
+        - items
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        items:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/ElearningFixedPaperItem'
+    ElearningFixedPaperResult:
+      type: object
+      additionalProperties: false
+      required:
+        - paperId
+        - status
+        - itemCount
+        - totalPoints
+      properties:
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum:
+            - published
+        itemCount:
+          type: integer
+          minimum: 1
+          maximum: 200
+        totalPoints:
+          type: integer
+          minimum: 1
+    ElearningExamDisclosurePolicy:
+      type: string
+      enum:
+        - no_review
+        - correctness_after_submit
+        - wrong_items_after_submit
+        - correctness_after_window
+    ElearningPaperExamPublishRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - paperId
+        - title
+        - passScore
+        - maxAttempts
+        - windowStartsAt
+        - windowEndsAt
+        - durationSeconds
+        - shuffleQuestions
+        - shuffleOptions
+        - disclosurePolicy
+      properties:
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        passScore:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        maxAttempts:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        windowStartsAt:
+          type: string
+          format: date-time
+          nullable: true
+        windowEndsAt:
+          type: string
+          format: date-time
+          nullable: true
+        durationSeconds:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          nullable: true
+        shuffleQuestions:
+          type: boolean
+        shuffleOptions:
+          type: boolean
+        disclosurePolicy:
+          $ref: '#/components/schemas/ElearningExamDisclosurePolicy'
+    ElearningPaperExamResult:
+      type: object
+      additionalProperties: false
+      required:
+        - examId
+        - paperId
+        - status
+        - totalPoints
+      properties:
+        examId:
+          $ref: '#/components/schemas/ElearningUuid'
+        paperId:
+          $ref: '#/components/schemas/ElearningUuid'
+        status:
+          type: string
+          enum:
+            - published
+        totalPoints:
+          type: integer
+          minimum: 1
     ElearningCoursePublishRequest:
       type: object
       additionalProperties: false
@@ -16342,6 +16510,238 @@ paths:
                         type: string
                         enum:
                           - payload_too_large
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/question-banks:
+    post:
+      operationId: createElearningQuestionBank
+      summary: Create an assessment question bank
+      description: |
+        Admin-only L3 assessment write. Requires master, content, and
+        assessment flags plus `elearning:admin`. Actor and organization are
+        injected from the authenticated request. JSON limit 1 MiB.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionBankCreateRequest'
+      responses:
+        '201':
+          description: Created question-bank identifier.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assessment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/question-banks/{bankId}/questions:
+    post:
+      operationId: createElearningBankQuestion
+      summary: Create a stable objective question with revision one
+      description: |
+        Admin-only L3 assessment write. The request may contain the answer key
+        and explanation; the closed response returns identifiers only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionWriteRequest'
+      responses:
+        '201':
+          description: Stable question and immutable revision identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionRevisionResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/questions/{questionId}/revisions:
+    post:
+      operationId: appendElearningQuestionRevision
+      summary: Append one immutable objective-question revision
+      description: |
+        Admin-only L3 assessment write. Existing revisions are never mutated.
+        The closed response returns identifiers and the new revision number.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: questionId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningQuestionWriteRequest'
+      responses:
+        '201':
+          description: Appended immutable revision.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionRevisionResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/papers:
+    post:
+      operationId: publishElearningFixedPaper
+      summary: Publish an immutable fixed-revision paper
+      description: |
+        Admin-only L3 assessment write. Each item pins one immutable question
+        revision. V1 accepts 1 through 200 items and rejects 201 before DB I/O.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningFixedPaperPublishRequest'
+      responses:
+        '201':
+          description: Published paper metadata without answer material.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningFixedPaperResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/exams:
+    post:
+      operationId: publishElearningPaperExam
+      summary: Publish exam rules bound to an immutable paper
+      description: >
+        Admin-only L3 assessment write. Window, duration, shuffle, attempt,
+
+        pass-score, and review-disclosure rules are frozen at publication.
+
+        The response never contains paper snapshots, answer keys, or
+        explanations.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningPaperExamPublishRequest'
+      responses:
+        '201':
+          description: Published exam metadata without answer material.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningPaperExamResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error
           $ref: '#/components/responses/ElearningError'

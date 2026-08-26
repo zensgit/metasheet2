@@ -12,6 +12,7 @@ export const ELEARNING_ASSESSMENT_OPTION_ID_MAX = 64
 export const ELEARNING_ASSESSMENT_OPTION_TEXT_MAX = 500
 export const ELEARNING_ASSESSMENT_EXPLANATION_MAX = 2000
 export const ELEARNING_ASSESSMENT_OPTION_MAX = 20
+export const ELEARNING_FIXED_PAPER_ITEM_MAX = 200
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -427,7 +428,13 @@ export async function publishElearningFixedPaper(
   const orgId = requireText(input.orgId, ELEARNING_ASSESSMENT_ACTOR_MAX)
   const actorId = requireText(input.actorId, ELEARNING_ASSESSMENT_ACTOR_MAX)
   const title = requireText(input.title, ELEARNING_ASSESSMENT_TITLE_MAX)
-  if (!Array.isArray(input.items) || input.items.length < 1) fail('invalid_input')
+  if (
+    !Array.isArray(input.items)
+    || input.items.length < 1
+    || input.items.length > ELEARNING_FIXED_PAPER_ITEM_MAX
+  ) {
+    fail('invalid_input')
+  }
   const revisionIds = new Set<string>()
   const items: CanonicalPaperItem[] = input.items.map((raw) => {
     if (!isPlainObject(raw)) fail('invalid_input')

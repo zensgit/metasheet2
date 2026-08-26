@@ -16,6 +16,7 @@ import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
+import type { ElearningAssessmentCatalogDb } from './elearning-assessment-catalog'
 import type {
   ElearningBatchAssignmentDb,
   ElearningBatchAssignmentResult,
@@ -57,6 +58,7 @@ import {
   type ElearningPlaybackDb,
   type IssueElearningMediaPlaybackInput,
 } from './elearning-media-playback'
+import type { ElearningPaperExamDb } from './elearning-paper-exam'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -113,7 +115,9 @@ export interface ElearningPilotRuntimeOptions {
     ElearningTrainingPlanAssignmentDb &
     ElearningTrainingPlanRevocationDb &
     ElearningAdminAccessDb &
-    ElearningAdminOperationDb
+    ElearningAdminOperationDb &
+    ElearningAssessmentCatalogDb &
+    ElearningPaperExamDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler

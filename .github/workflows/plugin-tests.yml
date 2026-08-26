@@ -871,10 +871,10 @@ jobs:
             tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
-      - name: Run elearning V0.1 unit canaries
+      - name: Run elearning V0.1-L3 unit canaries
         id: elearning-v01-unit-canaries
-        # V0.1 units: flags/plugin runtime, content/watch/assignment/exam/publish,
-        # media ingest/playback, pilot routes/runtime, migration contract.
+        # V0.1-L3 units: flags/plugin runtime, content/watch/assignment/exam/publish,
+        # assessment authoring, media ingest/playback, pilot routes/runtime, migration contract.
         # Whole-file args so a name filter matching zero tests cannot skip-green.
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
@@ -884,6 +884,7 @@ jobs:
             tests/unit/elearning-admin-access-routes.test.ts \
             tests/unit/elearning-admin-access.test.ts \
             tests/unit/elearning-admin-operations.test.ts \
+            tests/unit/elearning-assessment-admin-routes.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \

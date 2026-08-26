@@ -11,6 +11,14 @@ type Flags = components['schemas']['ElearningCapabilityFlags']
 type MediaUpload = components['schemas']['ElearningMediaUploadResult']
 type PublishRequest = components['schemas']['ElearningCoursePublishRequest']
 type PublishResult = components['schemas']['ElearningCoursePublishResult']
+type QuestionBankCreateRequest = components['schemas']['ElearningQuestionBankCreateRequest']
+type QuestionBankResult = components['schemas']['ElearningQuestionBankResult']
+type QuestionWriteRequest = components['schemas']['ElearningQuestionWriteRequest']
+type QuestionRevisionResult = components['schemas']['ElearningQuestionRevisionResult']
+type FixedPaperPublishRequest = components['schemas']['ElearningFixedPaperPublishRequest']
+type FixedPaperResult = components['schemas']['ElearningFixedPaperResult']
+type PaperExamPublishRequest = components['schemas']['ElearningPaperExamPublishRequest']
+type PaperExamResult = components['schemas']['ElearningPaperExamResult']
 type AssignRequest = components['schemas']['ElearningDirectAssignmentRequest']
 type AssignResult = components['schemas']['ElearningDirectAssignmentResult']
 type AssignmentProgress = components['schemas']['ElearningAssignmentProgressResult']
@@ -77,6 +85,7 @@ type JsonSchema = {
   $ref?: string
   properties?: Record<string, JsonSchema>
   items?: JsonSchema | JsonSchema[]
+  maxItems?: number
   additionalProperties?: JsonSchema | boolean
   allOf?: JsonSchema[]
   oneOf?: JsonSchema[]
@@ -135,6 +144,11 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/capabilities']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/media']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/courses/publish']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/question-banks']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/questions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/papers']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/exams']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assignments/direct']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assignments/{assignmentId}']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assignments/{assignmentId}/members/{memberId}/revocation']['put']>().not.toBeNever()
@@ -166,6 +180,21 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/courses/publish']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<PublishResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/question-banks']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<QuestionBankResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/question-banks/{bankId}/questions']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<QuestionRevisionResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<QuestionRevisionResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/papers']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<FixedPaperResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/exams']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<PaperExamResult>()
     expectTypeOf<
       paths['/api/elearning/assignments/direct']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<AssignResult>()
@@ -247,6 +276,59 @@ describe('elearning V0.1 OpenAPI paths', () => {
       enabled: boolean
       capabilities: Flags
     }>()
+  })
+
+  it('keeps L3 assessment admin requests and responses closed', () => {
+    expectTypeOf<QuestionBankCreateRequest>().toEqualTypeOf<{ title: string }>()
+    expectTypeOf<QuestionBankResult>().toEqualTypeOf<{ bankId: string }>()
+    expectTypeOf<QuestionWriteRequest>().toEqualTypeOf<{
+      question: components['schemas']['ElearningPublishQuestion']
+    }>()
+    expectTypeOf<QuestionRevisionResult>().toEqualTypeOf<{
+      questionId: string
+      questionRevisionId: string
+      revision: number
+    }>()
+    expectTypeOf<FixedPaperPublishRequest>().toEqualTypeOf<{
+      title: string
+      items: Array<{ questionRevisionId: string; points: number }>
+    }>()
+    expectTypeOf<FixedPaperResult>().toEqualTypeOf<{
+      paperId: string
+      status: 'published'
+      itemCount: number
+      totalPoints: number
+    }>()
+    expectTypeOf<PaperExamPublishRequest>().toEqualTypeOf<{
+      paperId: string
+      title: string
+      passScore: number
+      maxAttempts: number
+      windowStartsAt: string | null
+      windowEndsAt: string | null
+      durationSeconds: number | null
+      shuffleQuestions: boolean
+      shuffleOptions: boolean
+      disclosurePolicy:
+        | 'no_review'
+        | 'correctness_after_submit'
+        | 'wrong_items_after_submit'
+        | 'correctness_after_window'
+    }>()
+    expectTypeOf<PaperExamResult>().toEqualTypeOf<{
+      examId: string
+      paperId: string
+      status: 'published'
+      totalPoints: number
+    }>()
+
+    const doc = JSON.parse(readFileSync(join(here, '..', '..', 'dist', 'openapi.json'), 'utf8')) as {
+      components?: { schemas?: Record<string, JsonSchema> }
+    }
+    expect(
+      doc.components?.schemas?.ElearningFixedPaperPublishRequest
+        ?.properties?.items?.maxItems,
+    ).toBe(200)
   })
 
   it('keeps delegated administration and collaboration DTOs closed', () => {
@@ -416,6 +498,44 @@ describe('elearning V0.1 OpenAPI paths', () => {
       {
         name: 'POST /api/elearning/exams/items/{itemId}/start 200',
         keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/exams/items/{itemId}/start', 'post', '200')),
+      },
+      {
+        name: 'POST /api/elearning/assessment/question-banks/{bankId}/questions 201',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(
+            doc,
+            '/api/elearning/assessment/question-banks/{bankId}/questions',
+            'post',
+            '201',
+          ),
+        ),
+      },
+      {
+        name: 'POST /api/elearning/assessment/questions/{questionId}/revisions 201',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(
+            doc,
+            '/api/elearning/assessment/questions/{questionId}/revisions',
+            'post',
+            '201',
+          ),
+        ),
+      },
+      {
+        name: 'POST /api/elearning/assessment/papers 201',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(doc, '/api/elearning/assessment/papers', 'post', '201'),
+        ),
+      },
+      {
+        name: 'POST /api/elearning/assessment/exams 201',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(doc, '/api/elearning/assessment/exams', 'post', '201'),
+        ),
       },
       {
         name: 'PUT /api/elearning/exams/attempts/{attemptId}/answers 200',

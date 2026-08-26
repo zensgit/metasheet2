@@ -23,7 +23,9 @@ import {
   createElearningAdminAccessRouter,
   isElearningGlobalAdminRequest,
 } from './elearning-admin-access'
+import { createElearningAssessmentAdminRouter } from './elearning-assessment-admin'
 import type { ElearningAdminAccessDb } from '../services/elearning-admin-access'
+import type { ElearningAssessmentCatalogDb } from '../services/elearning-assessment-catalog'
 import {
   ElearningCoursePublishError,
   publishElearningCourse,
@@ -73,6 +75,7 @@ import {
   type ElearningExamErrorCode,
 } from '../services/elearning-exam'
 import { getElearningExamReview } from '../services/elearning-exam-review'
+import type { ElearningPaperExamDb } from '../services/elearning-paper-exam'
 import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
@@ -294,7 +297,9 @@ export interface ElearningPilotRouteDeps {
     ElearningTrainingPlanAssignmentDb &
     ElearningTrainingPlanRevocationDb &
     ElearningAdminAccessDb &
-    ElearningAdminOperationDb
+    ElearningAdminOperationDb &
+    ElearningAssessmentCatalogDb &
+    ElearningPaperExamDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -324,6 +329,21 @@ export interface ElearningPilotRouteDeps {
   publishElearningCourse?: typeof publishElearningCourse
   listElearningLearnerCourses?: typeof listElearningLearnerCourses
   setElearningCourseScope?: typeof setElearningCourseScopeAuthorized
+  createElearningQuestionBank?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['createElearningQuestionBank']
+  createElearningBankQuestion?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['createElearningBankQuestion']
+  appendElearningQuestionRevision?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['appendElearningQuestionRevision']
+  publishElearningFixedPaper?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['publishElearningFixedPaper']
+  publishElearningPaperExam?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['publishElearningPaperExam']
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -450,6 +470,19 @@ export function createElearningPilotRouter(
     isGlobalAdmin,
   })
   if (adminAccessRouter) router.use(adminAccessRouter)
+  const assessmentAdminRouter = createElearningAssessmentAdminRouter({
+    db: deps.db,
+    env: deps.env,
+    adminGuard: deps.adminGuard,
+    viewerId: deps.viewerId,
+    orgId: deps.orgId,
+    createElearningQuestionBank: deps.createElearningQuestionBank,
+    createElearningBankQuestion: deps.createElearningBankQuestion,
+    appendElearningQuestionRevision: deps.appendElearningQuestionRevision,
+    publishElearningFixedPaper: deps.publishElearningFixedPaper,
+    publishElearningPaperExam: deps.publishElearningPaperExam,
+  })
+  if (assessmentAdminRouter) router.use(assessmentAdminRouter)
 
   const asyncHandler =
     (fn: (req: Request, res: Response) => Promise<unknown>) =>
