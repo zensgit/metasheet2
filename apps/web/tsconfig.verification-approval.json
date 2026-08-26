@@ -4,10 +4,9 @@
   // `type-check` gate) is blind to a broken ApprovalNodeConfigEditorApi implementation there — the
   // exact mechanism FAIL-1 exploited (8 missing members + a 2-vs-3-arg signature drift produced
   // ZERO compile-time signal). This standalone, non-composite project type-checks the approval
-  // inspector-keyboard harness against the SAME src/ tree (so its `ApprovalNodeConfigEditorApi`
-  // object literal is checked against the real, current interface) without folding verification/
-  // into the composite `tsconfig.app.json` build graph — the other verification/*.ts harnesses are
-  // out of this slice's scope and are not added here.
+  // approval browser harnesses against the SAME src/ tree without folding verification/ into the
+  // composite `tsconfig.app.json` build graph. Each included harness is exercised by the dedicated
+  // Approval Browser Verify lane; unrelated verification/*.ts files remain out of scope.
   "extends": "@vue/tsconfig/tsconfig.dom.json",
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.verification-approval.tsbuildinfo",
@@ -24,6 +23,7 @@
     "src/**/*.tsx",
     "src/**/*.vue",
     "src/**/*.d.ts",
-    "verification/approval-inspector-keyboard-harness.ts"
+    "verification/approval-inspector-keyboard-harness.ts",
+    "verification/approval-member-action-dialog-harness.ts"
   ]
 }

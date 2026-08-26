@@ -20,6 +20,9 @@ name: Approval Browser Verify
 # surface matrix (approval-form-builder-mounted-matrix.spec.ts, its owned
 # harness, and the two production-mount source files it exercises) to this
 # SAME lane/job — same server discipline, same "not required yet" posture.
+#
+# P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
+# at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
 
 on:
   workflow_dispatch:
@@ -33,6 +36,13 @@ on:
       - 'apps/web/src/approvals/approvalFormIdentity.ts'
       - 'apps/web/src/approvals/approvalFormCommands.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
+      - 'apps/web/src/approvals/memberActionDialogGrammar.ts'
+      - 'apps/web/src/approvals/store.ts'
+      - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
+      - 'apps/web/src/composables/useAuth.ts'
+      - 'apps/web/src/composables/useMobileViewport.ts'
+      - 'apps/web/src/stores/featureFlags.ts'
+      - 'apps/web/src/views/approval/ApprovalDetailView.vue'
       - 'apps/web/src/views/approval/TemplateAuthoringView.vue'
       - 'apps/web/verification/approval-form-builder-harness.html'
       - 'apps/web/verification/approval-form-builder-harness.ts'
@@ -40,7 +50,11 @@ on:
       - 'apps/web/verification/approval-form-builder-mounted-harness.html'
       - 'apps/web/verification/approval-form-builder-mounted-harness.ts'
       - 'apps/web/verification/approval-form-builder-mounted-matrix.spec.ts'
+      - 'apps/web/verification/approval-member-action-dialog-harness.html'
+      - 'apps/web/verification/approval-member-action-dialog-harness.ts'
+      - 'apps/web/verification/approval-member-action-dialog.spec.ts'
       - 'apps/web/playwright.approval-verification.config.ts'
+      - 'apps/web/tsconfig.verification-approval.json'
       - '.github/workflows/approval-browser-verify.yml'
 
 jobs:
@@ -87,6 +101,9 @@ jobs:
       - name: Install Playwright chromium (+ system deps)
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Type-check approval verification harnesses
+        run: pnpm --filter @metasheet/web run type-check:verification-approval
+
       - name: Run approval browser verification (boots Vite, renders real components)
         run: pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts
 
@@ -95,5 +112,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: approval-browser-verify-screenshots
-          path: apps/web/verification-output/afb-*.png
+          path: |
+            apps/web/verification-output/afb-*.png
+            apps/web/verification-output/p5c-*.png
           if-no-files-found: warn
