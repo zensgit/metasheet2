@@ -20,6 +20,11 @@ import {
   isElearningWatchSurfaceEnabled,
 } from '../elearning/feature-flags'
 import {
+  createElearningAdminAccessRouter,
+  isElearningGlobalAdminRequest,
+} from './elearning-admin-access'
+import type { ElearningAdminAccessDb } from '../services/elearning-admin-access'
+import {
   ElearningCoursePublishError,
   publishElearningCourse,
   type ElearningCoursePublishDb,
@@ -266,13 +271,17 @@ export interface ElearningPilotRouteDeps {
     ElearningAssignmentLifecycleDb &
     ElearningTrainingPlanDb &
     ElearningTrainingPlanAssignmentDb &
-    ElearningTrainingPlanRevocationDb
+    ElearningTrainingPlanRevocationDb &
+    ElearningAdminAccessDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
   adminGuard: RequestHandler
   /** Production wiring: rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']). Injected in tests. */
   readGuard: RequestHandler
+  /** Production wiring: rbacGuardAny(['elearning:write', 'elearning:admin']). */
+  writeGuard?: RequestHandler
+  isGlobalAdmin?(req: Request): boolean
   env?: NodeJS.ProcessEnv
   assignElearningDirect?: typeof assignElearningDirect
   assignElearningBatch?: typeof assignElearningBatch
@@ -395,6 +404,16 @@ export function createElearningPilotRouter(
     deps.listElearningLearnerCourses ?? listElearningLearnerCourses
   const setCourseScope = deps.setElearningCourseScope ?? setElearningCourseScope
   const router = Router()
+  const adminAccessRouter = createElearningAdminAccessRouter({
+    db: deps.db,
+    env: deps.env,
+    adminGuard: deps.adminGuard,
+    writeGuard: deps.writeGuard ?? deps.adminGuard,
+    viewerId: deps.viewerId,
+    orgId: deps.orgId,
+    isGlobalAdmin: deps.isGlobalAdmin ?? isElearningGlobalAdminRequest,
+  })
+  if (adminAccessRouter) router.use(adminAccessRouter)
 
   const asyncHandler =
     (fn: (req: Request, res: Response) => Promise<unknown>) =>

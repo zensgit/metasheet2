@@ -1570,6 +1570,11 @@ export default defineConfig({
       // same-org composite FKs, deferred completeness, concurrency, and
       // transaction rollback. Wired as a whole-file post-migrate gate.
       'tests/integration/elearning-training-plan-assignment.db.test.ts',
+      // E-learning L2 delegated administration + object collaboration ACL.
+      // Requires real PostgreSQL for same-org FK chains, recursive directory
+      // scope evaluation, closed actions, and one-way historical revocation.
+      // Wired as a whole-file post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-admin-access.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.

@@ -5133,6 +5133,83 @@ components:
           enum: [active, archived]
         activeVersion:
           $ref: '#/components/schemas/ElearningTrainingPlanActiveVersion'
+    ElearningAdminScopeInput:
+      type: object
+      additionalProperties: false
+      required: [departmentId, includeChildren]
+      properties:
+        departmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        includeChildren:
+          type: boolean
+    ElearningAdminScopeReplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, scopes]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        scopes:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          description: Empty array revokes every active delegated management scope.
+          items:
+            $ref: '#/components/schemas/ElearningAdminScopeInput'
+    ElearningAdminScopeReplaceResult:
+      type: object
+      additionalProperties: false
+      required: [targetUserId, scopeCount, duplicate]
+      properties:
+        targetUserId:
+          type: string
+          minLength: 1
+        scopeCount:
+          type: integer
+          minimum: 0
+          maximum: 100
+        duplicate: { type: boolean }
+    ElearningObjectAction:
+      type: string
+      enum: [assign, scope, track]
+    ElearningObjectAclReplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, actions]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        actions:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          description: Empty array revokes every active action for this collaborator.
+          items:
+            $ref: '#/components/schemas/ElearningObjectAction'
+    ElearningObjectAclReplaceResult:
+      type: object
+      additionalProperties: false
+      required: [objectType, objectId, granteeUserId, actions, duplicate]
+      properties:
+        objectType:
+          type: string
+          enum: [course, training_plan]
+        objectId:
+          $ref: '#/components/schemas/ElearningUuid'
+        granteeUserId:
+          type: string
+          minLength: 1
+        actions:
+          type: array
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ElearningObjectAction'
+        duplicate: { type: boolean }
     ElearningScopeRule:
       description: |
         L1 visibility rule. Subjects are resolved from fresh, active, same-org

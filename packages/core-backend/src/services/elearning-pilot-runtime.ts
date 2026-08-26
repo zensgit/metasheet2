@@ -14,6 +14,8 @@ import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
+import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
+import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type {
   AssignElearningBatchInput,
   ElearningBatchAssignmentDb,
@@ -101,13 +103,16 @@ export interface ElearningPilotRuntimeOptions {
     ElearningScopeDb &
     ElearningTrainingPlanDb &
     ElearningTrainingPlanAssignmentDb &
-    ElearningTrainingPlanRevocationDb
+    ElearningTrainingPlanRevocationDb &
+    ElearningAdminAccessDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
   readGuard?: RequestHandler
+  writeGuard?: RequestHandler
   viewerId?: (req: Request) => string | null
   orgId?: (req: Request) => string | null
+  isGlobalAdmin?: (req: Request) => boolean
   assignElearningDirect?: (
     db: ElearningDirectAssignmentDb,
     input: AssignElearningDirectInput,
@@ -204,6 +209,8 @@ export function createElearningPilotRuntime(
     orgId: opts.orgId ?? orgId,
     adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
     readGuard: opts.readGuard ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    writeGuard: opts.writeGuard ?? rbacGuardAny(['elearning:write', 'elearning:admin']),
+    isGlobalAdmin: opts.isGlobalAdmin ?? isElearningGlobalAdminRequest,
     env,
     assignElearningDirect: opts.assignElearningDirect,
     assignElearningBatch: opts.assignElearningBatch,

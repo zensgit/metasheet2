@@ -8592,6 +8592,53 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin-scopes/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one administrator's delegated department scope
+         * @description Global e-learning-admin L2 operation. RBAC `elearning:admin`; JSON limit
+         *     16 KiB. Actor and authoritative org come from JWT. The requested active
+         *     set replaces the previous set atomically; removed or changed rows are
+         *     one-way revoked and retained as history. Department ownership and the
+         *     target user's active same-org membership are checked by the server.
+         */
+        put: operations["replaceElearningAdminScopes"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/training-plans/{planId}/collaborators/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one training-plan collaborator's closed action set
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; the service additionally requires the plan owner or
+         *     an org-global e-learning admin. Actions are exactly `assign`, `scope`,
+         *     and `track`; they never imply edit, publish, grading, or export rights.
+         */
+        put: operations["replaceElearningTrainingPlanCollaborator"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/training-plan-assignments/{planAssignmentId}/revocation": {
         parameters: {
             query?: never;
@@ -8610,6 +8657,29 @@ export interface paths {
          *     revocation is rejected so one plan cohort cannot split across courses.
          */
         put: operations["revokeElearningTrainingPlanAssignment"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/courses/{courseId}/collaborators/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Replace one course collaborator's closed action set
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; the service additionally requires the course owner
+         *     or an org-global e-learning admin. Actions are exactly `assign`,
+         *     `scope`, and `track`; they never imply edit, publish, grading, or export.
+         */
+        put: operations["replaceElearningCourseCollaborator"];
         post?: never;
         delete?: never;
         options?: never;
@@ -17817,6 +17887,35 @@ export interface components {
             status: "active" | "archived";
             activeVersion: components["schemas"]["ElearningTrainingPlanActiveVersion"];
         };
+        ElearningAdminScopeInput: {
+            departmentId: components["schemas"]["ElearningUuid"];
+            includeChildren: boolean;
+        };
+        ElearningAdminScopeReplaceRequest: {
+            reason: string;
+            /** @description Empty array revokes every active delegated management scope. */
+            scopes: components["schemas"]["ElearningAdminScopeInput"][];
+        };
+        ElearningAdminScopeReplaceResult: {
+            targetUserId: string;
+            scopeCount: number;
+            duplicate: boolean;
+        };
+        /** @enum {string} */
+        ElearningObjectAction: "assign" | "scope" | "track";
+        ElearningObjectAclReplaceRequest: {
+            reason: string;
+            /** @description Empty array revokes every active action for this collaborator. */
+            actions: components["schemas"]["ElearningObjectAction"][];
+        };
+        ElearningObjectAclReplaceResult: {
+            /** @enum {string} */
+            objectType: "course" | "training_plan";
+            objectId: components["schemas"]["ElearningUuid"];
+            granteeUserId: string;
+            actions: components["schemas"]["ElearningObjectAction"][];
+            duplicate: boolean;
+        };
         /**
          * @description L1 visibility rule. Subjects are resolved from fresh, active, same-org
          *     database state. `department.subjectRef` is the directory department UUID;
@@ -19552,6 +19651,83 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    replaceElearningAdminScopes: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningAdminScopeReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active scope count; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAdminScopeReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, user missing, or department missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    replaceElearningTrainingPlanCollaborator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                planId: components["schemas"]["ElearningUuid"];
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningObjectAclReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active action set; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningObjectAclReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, plan missing, or collaborator missing in this org */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     revokeElearningTrainingPlanAssignment: {
         parameters: {
             query?: never;
@@ -19586,6 +19762,45 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description Already revoked with a different reason */
             409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    replaceElearningCourseCollaborator: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                courseId: components["schemas"]["ElearningUuid"];
+                userId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningObjectAclReplaceRequest"];
+            };
+        };
+        responses: {
+            /** @description Current active action set; duplicate true for an exact replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningObjectAclReplaceResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Assignment flags off, course missing, or collaborator missing in this org */
+            404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

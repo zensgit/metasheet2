@@ -23,6 +23,10 @@ type TrainingPlanAssignmentRequest = components['schemas']['ElearningTrainingPla
 type TrainingPlanAssignmentResult = components['schemas']['ElearningTrainingPlanAssignmentResult']
 type TrainingPlanRevocationResult = components['schemas']['ElearningTrainingPlanRevocationResult']
 type TrainingPlan = components['schemas']['ElearningTrainingPlan']
+type AdminScopeReplaceRequest = components['schemas']['ElearningAdminScopeReplaceRequest']
+type AdminScopeReplaceResult = components['schemas']['ElearningAdminScopeReplaceResult']
+type ObjectAclReplaceRequest = components['schemas']['ElearningObjectAclReplaceRequest']
+type ObjectAclReplaceResult = components['schemas']['ElearningObjectAclReplaceResult']
 type LearnerList = components['schemas']['ElearningLearnerCourseList']
 type WatchState = components['schemas']['ElearningWatchState']
 type Heartbeat = components['schemas']['ElearningHeartbeatRequest']
@@ -135,6 +139,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/training-plans/{planId}']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plans/{planId}/assign']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/training-plan-assignments/{planAssignmentId}/revocation']['put']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/admin-scopes/{userId}']['put']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/courses/{courseId}/collaborators/{userId}']['put']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/training-plans/{planId}/collaborators/{userId}']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/me/courses']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/watch/sessions/{sessionId}/heartbeat']['post']>().not.toBeNever()
@@ -176,6 +183,15 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/training-plan-assignments/{planAssignmentId}/revocation']['put']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<TrainingPlanRevocationResult>()
+    expectTypeOf<
+      paths['/api/elearning/admin-scopes/{userId}']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<AdminScopeReplaceResult>()
+    expectTypeOf<
+      paths['/api/elearning/courses/{courseId}/collaborators/{userId}']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<ObjectAclReplaceResult>()
+    expectTypeOf<
+      paths['/api/elearning/training-plans/{planId}/collaborators/{userId}']['put']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<ObjectAclReplaceResult>()
     expectTypeOf<
       paths['/api/elearning/me/courses']['get']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<LearnerList>()
@@ -223,6 +239,29 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<Capabilities>().toEqualTypeOf<{
       enabled: boolean
       capabilities: Flags
+    }>()
+  })
+
+  it('keeps delegated administration and collaboration DTOs closed', () => {
+    expectTypeOf<AdminScopeReplaceRequest>().toEqualTypeOf<{
+      reason: string
+      scopes: Array<{ departmentId: string; includeChildren: boolean }>
+    }>()
+    expectTypeOf<AdminScopeReplaceResult>().toEqualTypeOf<{
+      targetUserId: string
+      scopeCount: number
+      duplicate: boolean
+    }>()
+    expectTypeOf<ObjectAclReplaceRequest>().toEqualTypeOf<{
+      reason: string
+      actions: Array<'assign' | 'scope' | 'track'>
+    }>()
+    expectTypeOf<ObjectAclReplaceResult>().toEqualTypeOf<{
+      objectType: 'course' | 'training_plan'
+      objectId: string
+      granteeUserId: string
+      actions: Array<'assign' | 'scope' | 'track'>
+      duplicate: boolean
     }>()
   })
 

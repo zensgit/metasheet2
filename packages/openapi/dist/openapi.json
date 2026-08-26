@@ -8287,6 +8287,139 @@
           }
         }
       },
+      "ElearningAdminScopeInput": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "departmentId",
+          "includeChildren"
+        ],
+        "properties": {
+          "departmentId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "includeChildren": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningAdminScopeReplaceRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "scopes"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "scopes": {
+            "type": "array",
+            "maxItems": 100,
+            "uniqueItems": true,
+            "description": "Empty array revokes every active delegated management scope.",
+            "items": {
+              "$ref": "#/components/schemas/ElearningAdminScopeInput"
+            }
+          }
+        }
+      },
+      "ElearningAdminScopeReplaceResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "targetUserId",
+          "scopeCount",
+          "duplicate"
+        ],
+        "properties": {
+          "targetUserId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scopeCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningObjectAction": {
+        "type": "string",
+        "enum": [
+          "assign",
+          "scope",
+          "track"
+        ]
+      },
+      "ElearningObjectAclReplaceRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason",
+          "actions"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "actions": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "description": "Empty array revokes every active action for this collaborator.",
+            "items": {
+              "$ref": "#/components/schemas/ElearningObjectAction"
+            }
+          }
+        }
+      },
+      "ElearningObjectAclReplaceResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "objectType",
+          "objectId",
+          "granteeUserId",
+          "actions",
+          "duplicate"
+        ],
+        "properties": {
+          "objectType": {
+            "type": "string",
+            "enum": [
+              "course",
+              "training_plan"
+            ]
+          },
+          "objectId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "granteeUserId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actions": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/ElearningObjectAction"
+            }
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
       "ElearningScopeRule": {
         "description": "L1 visibility rule. Subjects are resolved from fresh, active, same-org\ndatabase state. `department.subjectRef` is the directory department UUID;\nonly department rules may set includeChildren true. Position matches the\ntrimmed, case-sensitive title on an active same-org directory account.\nPlatform roles are not accepted until an org-scoped role-membership store\nexists. `all` requires subjectRef absent/null.\n",
         "oneOf": [
@@ -24126,6 +24259,152 @@
         }
       }
     },
+    "/api/elearning/admin-scopes/{userId}": {
+      "put": {
+        "operationId": "replaceElearningAdminScopes",
+        "summary": "Replace one administrator's delegated department scope",
+        "description": "Global e-learning-admin L2 operation. RBAC `elearning:admin`; JSON limit\n16 KiB. Actor and authoritative org come from JWT. The requested active\nset replaces the previous set atomically; removed or changed rows are\none-way revoked and retained as history. Department ownership and the\ntarget user's active same-org membership are checked by the server.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningAdminScopeReplaceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current active scope count; duplicate true for an exact replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningAdminScopeReplaceResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient `elearning:admin`",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment flags off, user missing, or department missing in this org",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/training-plans/{planId}/collaborators/{userId}": {
+      "put": {
+        "operationId": "replaceElearningTrainingPlanCollaborator",
+        "summary": "Replace one training-plan collaborator's closed action set",
+        "description": "L2 assignment operation. RBAC requires `elearning:write` or\n`elearning:admin`; the service additionally requires the plan owner or\nan org-global e-learning admin. Actions are exactly `assign`, `scope`,\nand `track`; they never imply edit, publish, grading, or export rights.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "planId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningObjectAclReplaceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current active action set; duplicate true for an exact replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningObjectAclReplaceResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment flags off, plan missing, or collaborator missing in this org",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
     "/api/elearning/training-plan-assignments/{planAssignmentId}/revocation": {
       "put": {
         "operationId": "revokeElearningTrainingPlanAssignment",
@@ -24185,6 +24464,83 @@
           },
           "409": {
             "description": "Already revoked with a different reason",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/courses/{courseId}/collaborators/{userId}": {
+      "put": {
+        "operationId": "replaceElearningCourseCollaborator",
+        "summary": "Replace one course collaborator's closed action set",
+        "description": "L2 assignment operation. RBAC requires `elearning:write` or\n`elearning:admin`; the service additionally requires the course owner\nor an org-global e-learning admin. Actions are exactly `assign`,\n`scope`, and `track`; they never imply edit, publish, grading, or export.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "courseId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "path",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningObjectAclReplaceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current active action set; duplicate true for an exact replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningObjectAclReplaceResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, insufficient write RBAC, or not owner/global admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assignment flags off, course missing, or collaborator missing in this org",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

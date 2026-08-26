@@ -18,6 +18,9 @@ import {
   SCOPE_REVISIONS_DENY_MUTATION_TRIGGER,
   SCOPE_RULES_DENY_MUTATION_TRIGGER,
 } from '../../src/db/migrations/zzzz20260826150000_add_elearning_scope_access'
+import {
+  ELEARNING_OBJECT_ACL_STATE_TRIGGER,
+} from '../../src/db/migrations/zzzz20260826200000_create_elearning_admin_scope_acl'
 import { authenticate } from '../../src/middleware/auth'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
@@ -253,6 +256,20 @@ async function scopeRevisionCount(): Promise<number> {
   return Number(result.rows[0]?.count ?? 0)
 }
 
+async function activeCourseAclActions(granteeUserId: string): Promise<string[]> {
+  const result = await pool.query(
+    `SELECT action
+       FROM elearning_object_acl
+      WHERE org_id = $1
+        AND course_id = $2
+        AND grantee_user_id = $3
+        AND revoked_at IS NULL
+      ORDER BY action ASC`,
+    [ORG_A, SCOPE_COURSE_ID, granteeUserId],
+  )
+  return result.rows.map((row) => String(row.action))
+}
+
 function signToken(claims: Record<string, unknown>): string {
   return jwt.sign(claims, JWT_SECRET, { expiresIn: '1h' })
 }
@@ -448,6 +465,22 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
   afterAll(async () => {
     try {
       await pool.query(
+        `ALTER TABLE elearning_object_acl
+         DISABLE TRIGGER ${ELEARNING_OBJECT_ACL_STATE_TRIGGER}`,
+      )
+      try {
+        await pool.query(
+          `DELETE FROM elearning_object_acl
+            WHERE org_id = $1 AND course_id = $2`,
+          [ORG_A, SCOPE_COURSE_ID],
+        )
+      } finally {
+        await pool.query(
+          `ALTER TABLE elearning_object_acl
+           ENABLE TRIGGER ${ELEARNING_OBJECT_ACL_STATE_TRIGGER}`,
+        )
+      }
+      await pool.query(
         `DELETE FROM elearning_courses WHERE org_id = $1 AND id = $2`,
         [ORG_A, SCOPE_COURSE_ID],
       )
@@ -524,7 +557,10 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       )
 
       const residue = await pool.query(
-        `SELECT 'user_namespace_admissions' AS rel FROM user_namespace_admissions WHERE user_id = ANY($1::text[])
+        `SELECT 'elearning_object_acl' AS rel FROM elearning_object_acl
+           WHERE org_id = $3 AND course_id = $4
+         UNION ALL
+         SELECT 'user_namespace_admissions' FROM user_namespace_admissions WHERE user_id = ANY($1::text[])
          UNION ALL
          SELECT 'user_permissions' FROM user_permissions WHERE user_id = ANY($1::text[])
          UNION ALL
@@ -537,7 +573,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
          SELECT 'role_permissions' FROM role_permissions WHERE role_id = ANY($2::text[])
          UNION ALL
          SELECT 'roles' FROM roles WHERE id = ANY($2::text[])`,
-        [createdUserIds, [ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID]],
+        [createdUserIds, [ROLE_ID, WRITE_ROLE_ID, ADMIN_ROLE_ID], ORG_A, SCOPE_COURSE_ID],
       )
       expect(residue.rows).toEqual([])
     } finally {
@@ -658,6 +694,47 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
     expect(res.body).toEqual({ error: 'Insufficient permissions' })
     expect(learnerCalls).toHaveLength(0)
     valuesFree(res.body)
+  })
+
+  it('hydrated admin may grant ACL while a write-only owner impostor stays non-global', async () => {
+    const adminToken = signToken({
+      userId: adminId,
+      email: `${adminId}@el-auth-gate.test`,
+      role: 'user',
+      tenantId: ORG_A,
+    })
+    const granted = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/collaborators/${readerId}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ reason: 'auth gate tracker', actions: ['track'] })
+    expect(granted.status).toBe(200)
+    expect(granted.body).toEqual({
+      objectType: 'course',
+      objectId: SCOPE_COURSE_ID,
+      granteeUserId: readerId,
+      actions: ['track'],
+      duplicate: false,
+    })
+    expect(await activeCourseAclActions(readerId)).toEqual(['track'])
+    valuesFree(granted.body)
+
+    const forgedAdminToken = signToken({
+      userId: writerId,
+      email: `${writerId}@el-auth-gate.test`,
+      role: 'admin',
+      roles: ['admin'],
+      perms: ['elearning:admin', '*:*'],
+      permissions: ['elearning:admin', '*:*'],
+      tenantId: ORG_A,
+    })
+    const denied = await request(pinned.url())
+      .put(`/api/elearning/courses/${SCOPE_COURSE_ID}/collaborators/${readerId}`)
+      .set('Authorization', `Bearer ${forgedAdminToken}`)
+      .send({ reason: 'must not replace ACL', actions: ['assign'] })
+    expect(denied.status).toBe(403)
+    expect(denied.body).toEqual({ error: 'forbidden' })
+    expect(await activeCourseAclActions(readerId)).toEqual(['track'])
+    valuesFree(denied.body)
   })
 
   it('tenant-bound elearning:admin appends one real scope revision', async () => {
