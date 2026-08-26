@@ -7,6 +7,7 @@ import {
   canonicalizeElearningExamAnswers,
   elearningExamLockKey,
   ElearningExamError,
+  materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   scoreElearningExam,
   saveElearningExamAnswers,
@@ -430,6 +431,36 @@ function perfectAnswers() {
 }
 
 describe('elearning exam lock and paper contract', () => {
+  it('materializes deterministic question and option order without changing stable ids', () => {
+    const source = samplePaper().questions
+    const materialized = materializeElearningExamQuestions(
+      source,
+      ATTEMPT,
+      true,
+      true,
+    )
+    expect(materialized.map((question) => question.questionRevisionId)).toEqual([
+      Q3,
+      Q2,
+      Q1,
+    ])
+    expect(materialized.map((question) => question.position)).toEqual([1, 2, 3])
+    expect(materialized[0]?.options.map((option) => option.id)).toEqual(['f', 't'])
+    expect(materialized[1]?.options.map((option) => option.id)).toEqual(['b', 'c', 'a'])
+    expect(materializeElearningExamQuestions(source, ATTEMPT, true, true)).toEqual(
+      materialized,
+    )
+    expect(source.map((question) => question.questionRevisionId)).toEqual([Q1, Q2, Q3])
+    const snapshot = validateElearningPaperSnapshot({
+      ...samplePaper(),
+      questions: materialized,
+    })
+    expect(scoreElearningExam(
+      snapshot,
+      canonicalizeElearningExamAnswers(snapshot, perfectAnswers()),
+    )).toMatchObject({ autoScore: 30, totalScore: 30, passed: true })
+  })
+
   it('names the advisory lock from org, user, and course item id', () => {
     expect(elearningExamLockKey(ORG, USER, ITEM)).toBe(`elearning-exam:${ORG}:${USER}:${ITEM}`)
     expect(elearningExamLockKey(ORG, USER, ITEM)).not.toBe(`elearning-exam:${ORG}:${USER}:${EXAM}`)
@@ -919,7 +950,20 @@ function createStartMemoryDb(
     }
     if (tag === 'elearning-exam:lock-exam') {
       if (params[0] !== ORG || params[1] !== EXAM) return { rows: [], rowCount: 0 }
-      return { rows: [{ status: 'published', pass_score: 20, max_attempts: 3 }], rowCount: 1 }
+      return {
+        rows: [{
+          status: 'published',
+          pass_score: 20,
+          max_attempts: 3,
+          paper_id: null,
+          window_starts_at: null,
+          window_ends_at: null,
+          duration_seconds: null,
+          shuffle_questions: false,
+          shuffle_options: false,
+        }],
+        rowCount: 1,
+      }
     }
     const accessResult = queryAccessMemory(tag, params, mem.access)
     if (accessResult) return accessResult

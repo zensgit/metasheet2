@@ -28,6 +28,13 @@ import {
   type ElearningAssessmentCatalogQueryable,
 } from '../../src/services/elearning-assessment-catalog'
 import {
+  ElearningExamError,
+  startElearningExam,
+  submitElearningExam,
+  type ElearningExamDb,
+  type ElearningExamQueryable,
+} from '../../src/services/elearning-exam'
+import {
   ElearningPaperExamError,
   publishElearningPaperExam,
   type ElearningPaperExamDb,
@@ -46,14 +53,24 @@ const pool = new Pool({ connectionString: DATABASE_URL, max: 4 })
 const NS = `el-paper-exam-${Date.now().toString(36)}`
 const MIGRATION_NAME = 'zzzz20260826230000_extend_elearning_exam_rules'
 
-class ClientDb implements ElearningAssessmentCatalogDb, ElearningPaperExamDb {
+class ClientDb implements ElearningAssessmentCatalogDb, ElearningPaperExamDb, ElearningExamDb {
   private savepoint = 0
 
   constructor(private readonly client: PoolClient) {}
 
+  async query(sql: string, params?: unknown[]) {
+    const result = await this.client.query(sql, params as never)
+    return {
+      rows: result.rows as Array<Record<string, unknown>>,
+      rowCount: result.rowCount,
+    }
+  }
+
   async transaction<T>(
     handler: (
-      tx: ElearningAssessmentCatalogQueryable & ElearningPaperExamQueryable,
+      tx: ElearningAssessmentCatalogQueryable
+        & ElearningPaperExamQueryable
+        & ElearningExamQueryable,
     ) => Promise<T>,
   ): Promise<T> {
     const name = `elearning_paper_exam_${++this.savepoint}`
@@ -174,6 +191,95 @@ function paperExamInput(
     disclosurePolicy: 'correctness_after_window',
     ...overrides,
   }
+}
+
+async function mountExamForLearner(
+  client: PoolClient,
+  orgId: string,
+  examId: string,
+  label: string,
+): Promise<{ itemId: string; userId: string }> {
+  const courseId = randomUUID()
+  const versionId = randomUUID()
+  const mediaId = randomUUID()
+  const videoItemId = randomUUID()
+  const itemId = randomUUID()
+  const assignmentId = randomUUID()
+  const memberId = randomUUID()
+  const userId = actor(`learner-${label}`)
+  await client.query(
+    `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
+     VALUES ($1, $2, 'Paper exam course', 'active', $3)`,
+    [courseId, orgId, actor(`course-${label}`)],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_versions
+       (id, org_id, course_id, version, status, title, created_by)
+     VALUES ($1, $2, $3, 1, 'draft', 'Version 1', $4)`,
+    [versionId, orgId, courseId, actor(`version-${label}`)],
+  )
+  await client.query(
+    `INSERT INTO elearning_media (
+       id, org_id, storage_key, mime_type, magic_mime_type,
+       size_bytes, sha256, duration_ms, status, created_by
+     ) VALUES ($1, $2, $3, 'video/mp4', 'video/mp4', 1024, $4, 10000, 'ready', $5)`,
+    [
+      mediaId,
+      orgId,
+      `${NS}/runtime-media/${mediaId}`,
+      'a'.repeat(64),
+      actor(`uploader-${label}`),
+    ],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_version_items (
+       id, org_id, course_version_id, item_type, position, media_id, exam_id,
+       completion_policy_version, completion_threshold_bps
+     ) VALUES ($1, $2, $3, 'video', 1, $4, NULL, 'video-v1-90pct', 9000)`,
+    [videoItemId, orgId, versionId, mediaId],
+  )
+  await client.query(
+    `INSERT INTO elearning_course_version_items (
+       id, org_id, course_version_id, item_type, position, media_id, exam_id,
+       completion_policy_version, completion_threshold_bps
+     ) VALUES ($1, $2, $3, 'exam', 2, NULL, $4, NULL, NULL)`,
+    [itemId, orgId, versionId, examId],
+  )
+  await client.query(
+    `UPDATE elearning_course_versions
+        SET status = 'published', updated_at = now()
+      WHERE org_id = $1 AND id = $2`,
+    [orgId, versionId],
+  )
+  await client.query(
+    `INSERT INTO elearning_assignments (
+       id, org_id, course_version_id, source_key, request_hash,
+       request_hash_version, deadline, assigned_by
+     ) VALUES ($1, $2, $3, $4, $5, 1, NULL, $6)`,
+    [
+      assignmentId,
+      orgId,
+      versionId,
+      `${orgId}-source-${assignmentId}`,
+      `hash-${assignmentId}`,
+      actor(`assigner-${label}`),
+    ],
+  )
+  await client.query(
+    `INSERT INTO elearning_assignment_members (
+       id, org_id, assignment_id, course_version_id, user_id, source
+     ) VALUES ($1, $2, $3, $4, $5, 'manual')`,
+    [memberId, orgId, assignmentId, versionId, userId],
+  )
+  await client.query(
+    `INSERT INTO elearning_progress (
+       org_id, assignment_member_id, course_version_id, course_version_item_id,
+       user_id, status, effective_ms, max_position_ms, completed_at,
+       required_at_completion
+     ) VALUES ($1, $2, $3, $4, $5, 'completed', 9000, 10000, now(), TRUE)`,
+    [orgId, memberId, versionId, videoItemId, userId],
+  )
+  return { itemId, userId }
 }
 
 afterAll(async () => {
@@ -672,6 +778,137 @@ describe('e-learning L3 paper-bound exam rules', () => {
           [randomUUID(), orgId, actor('sql-after-window'), paper.paperId],
         ),
       )
+    })
+  })
+
+  it('starts and grades a retired fixed paper from its pinned attempt snapshot', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: null,
+          shuffleQuestions: true,
+          shuffleOptions: true,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime',
+      )
+      await client.query(
+        `UPDATE elearning_papers
+            SET status = 'retired', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, paper.paperId],
+      )
+
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(started).toMatchObject({
+        status: 'started',
+        attemptNo: 1,
+        duplicate: false,
+        paper: {
+          questions: [{
+            questionRevisionId: paper.questionRevisionId,
+            points: 10,
+          }],
+        },
+      })
+      expect(JSON.stringify(started)).not.toContain('answerKey')
+      expect(JSON.stringify(started)).not.toContain('explanation')
+
+      const replayed = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(replayed).toEqual({
+        ...started,
+        duplicate: true,
+      })
+
+      const stored = await client.query(
+        `SELECT paper_snapshot
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(stored.rows[0]?.paper_snapshot).toMatchObject({
+        examId: exam.examId,
+        questions: [{
+          questionRevisionId: paper.questionRevisionId,
+          answerKey: { correct: ['a'] },
+          explanation: 'Internal explanation',
+        }],
+      })
+      expect(stored.rows).toHaveLength(1)
+
+      const submitted = await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })
+      expect(submitted).toEqual({
+        attemptId: started.attemptId,
+        attemptNo: 1,
+        status: 'graded',
+        autoScore: 10,
+        totalScore: 10,
+        passed: true,
+        duplicate: false,
+      })
+    })
+  })
+
+  it('refuses temporal paper exams until atomic expiry settlement is available', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-temporal')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-temporal')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-temporal',
+      )
+
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })).rejects.toBeInstanceOf(ElearningExamError)
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })).rejects.toMatchObject({
+        code: 'unsupported_item',
+        message: 'unsupported_item',
+      })
+      const attempts = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND exam_id = $2`,
+        [orgId, exam.examId],
+      )
+      expect(attempts.rows).toEqual([{ count: 0 }])
     })
   })
 })

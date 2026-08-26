@@ -23,6 +23,7 @@ import {
   ElearningExamError,
   failElearningExam,
   freezeElearningPaperSnapshot,
+  materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   requireActor,
   requireUuid,
@@ -45,6 +46,7 @@ export {
   elearningExamLockKey,
   ElearningExamError,
   failElearningExam,
+  materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   scoreElearningExam,
   stripElearningExamSecrets,
@@ -124,6 +126,18 @@ function requireRowNumber(value: unknown): number {
   const parsed = asFiniteNumber(value)
   if (parsed === null) fail('unavailable')
   return parsed
+}
+
+function requireRowBoolean(value: unknown): boolean {
+  if (typeof value !== 'boolean') fail('unavailable')
+  return value
+}
+
+function hasStoredTimestamp(value: unknown): boolean {
+  if (value === null) return false
+  if (value instanceof Date && Number.isFinite(value.getTime())) return true
+  if (typeof value === 'string' && Number.isFinite(Date.parse(value))) return true
+  fail('unavailable')
 }
 
 function requireStoredUuid(value: unknown): string {
@@ -214,6 +228,10 @@ interface ExamItem {
   position: number
   passScore: number
   maxAttempts: number
+  paperId: string | null
+  hasTemporalRules: boolean
+  shuffleQuestions: boolean
+  shuffleOptions: boolean
 }
 
 async function peekExamIdFromItem(
@@ -270,7 +288,9 @@ async function lockExamItem(
   const examId = requireStoredUuid(row.exam_id)
   const exam = await tx.query(
     `/* elearning-exam:lock-exam */
-     SELECT status, pass_score, max_attempts
+     SELECT status, pass_score, max_attempts, paper_id,
+            window_starts_at, window_ends_at, duration_seconds,
+            shuffle_questions, shuffle_options
        FROM elearning_exams
       WHERE org_id = $1 AND id = $2
       FOR SHARE`,
@@ -280,6 +300,18 @@ async function lockExamItem(
   if (!examRow) fail('unavailable')
   const examStatus = asText(examRow.status)
   if (examStatus !== 'published' && examStatus !== 'retired') fail('unsupported_item')
+  const paperId = examRow.paper_id == null
+    ? null
+    : requireStoredUuid(examRow.paper_id)
+  const hasWindowStart = hasStoredTimestamp(examRow.window_starts_at)
+  const hasWindowEnd = hasStoredTimestamp(examRow.window_ends_at)
+  const durationSeconds = examRow.duration_seconds == null
+    ? null
+    : requireRowInt(examRow.duration_seconds)
+  if (durationSeconds !== null && durationSeconds < 1) fail('unavailable')
+  if ((hasWindowStart && !hasWindowEnd) || (!hasWindowStart && hasWindowEnd)) {
+    fail('unavailable')
+  }
   return {
     itemId: loadedId,
     versionId,
@@ -287,6 +319,10 @@ async function lockExamItem(
     position: requireRowInt(row.position),
     passScore: requireRowNumber(examRow.pass_score),
     maxAttempts: requireRowInt(examRow.max_attempts),
+    paperId,
+    hasTemporalRules: hasWindowStart || durationSeconds !== null,
+    shuffleQuestions: requireRowBoolean(examRow.shuffle_questions),
+    shuffleOptions: requireRowBoolean(examRow.shuffle_options),
   }
 }
 
@@ -391,9 +427,11 @@ async function loadExamQuestions(
   tx: ElearningExamQueryable,
   orgId: string,
   examId: string,
+  paperId: string | null,
 ): Promise<ElearningObjectiveQuestion[]> {
-  const result = await tx.query(
-    `/* elearning-exam:load-questions */
+  const result = paperId === null
+    ? await tx.query(
+      `/* elearning-exam:load-questions */
      SELECT
        eq.position,
        eq.points,
@@ -410,8 +448,30 @@ async function loadExamQuestions(
     WHERE eq.org_id = $1 AND eq.exam_id = $2
     ORDER BY eq.position ASC
     FOR SHARE OF eq, qr`,
-    [orgId, examId],
-  )
+      [orgId, examId],
+    )
+    : await tx.query(
+      `/* elearning-exam:load-paper-questions */
+       SELECT
+         pq.position,
+         pq.points,
+         pq.question_revision_id,
+         qr.question_id,
+         qr.question_type,
+         qr.prompt,
+         qr.options,
+         qr.answer_key,
+         qr.explanation
+       FROM elearning_paper_questions pq
+       JOIN elearning_question_revisions qr
+         ON qr.org_id = pq.org_id
+        AND qr.question_id = pq.question_id
+        AND qr.id = pq.question_revision_id
+      WHERE pq.org_id = $1 AND pq.paper_id = $2
+      ORDER BY pq.position ASC
+      FOR SHARE OF pq, qr`,
+      [orgId, paperId],
+    )
   if (result.rows.length < 1) fail('unavailable')
   const questions: ElearningObjectiveQuestion[] = []
   const positions = new Set<number>()
@@ -458,6 +518,10 @@ export async function startElearningExam(
       if (item.examId !== examId || item.itemId !== itemId) fail('unavailable')
       await requireCourseAccess(tx, orgId, userId, item.versionId)
       await requireCompletedPriorVideos(tx, orgId, userId, item.versionId, item.position)
+      // Deadline enforcement requires atomic expiry + grading. Until that
+      // dedicated slice lands, refuse configured windows/durations instead of
+      // silently running an untimed attempt.
+      if (item.hasTemporalRules) fail('unsupported_item')
 
       const attempts = await lockUserAttempts(tx, orgId, item.examId, userId, item.itemId)
       const started = attempts.find((row) => row.status === 'started')
@@ -468,10 +532,25 @@ export async function startElearningExam(
       }
       if (attempts.length >= item.maxAttempts) fail('max_attempts')
 
-      const questions = await loadExamQuestions(tx, orgId, item.examId)
-      const snapshot = freezeElearningPaperSnapshot(item.examId, item.passScore, questions)
       const attemptNo = attempts.reduce((max, row) => Math.max(max, row.attemptNo), 0) + 1
       const attemptId = randomUUID()
+      const questions = await loadExamQuestions(
+        tx,
+        orgId,
+        item.examId,
+        item.paperId,
+      )
+      const materialized = materializeElearningExamQuestions(
+        questions,
+        attemptId,
+        item.shuffleQuestions,
+        item.shuffleOptions,
+      )
+      const snapshot = freezeElearningPaperSnapshot(
+        item.examId,
+        item.passScore,
+        materialized,
+      )
       await tx.query(
         `/* elearning-exam:insert-attempt */
          INSERT INTO elearning_exam_attempts (

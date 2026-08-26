@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 /**
  * Pure V0.1 exam paper helpers: canonicalization, snapshot validation, grading.
  * No I/O. Public types never include answer_key, correct ids, or explanation.
@@ -307,6 +309,67 @@ export function freezeElearningPaperSnapshot(
     passScore,
     questions,
   }, 'unavailable')
+}
+
+function seededRank(seed: string, scope: string, id: string): string {
+  return createHash('sha256')
+    .update(`${ELEARNING_EXAM_PAPER_DOMAIN}:${seed}:${scope}:${id}`)
+    .digest('hex')
+}
+
+function compareStableText(left: string, right: string): number {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
+/**
+ * Materializes one attempt's visible order without changing stable ids.
+ * The attempt id is the deterministic seed and the realized order is persisted
+ * in paper_snapshot, so retries never reshuffle and grading remains id-based.
+ */
+export function materializeElearningExamQuestions(
+  questions: ElearningObjectiveQuestion[],
+  attemptId: string,
+  shuffleQuestions: boolean,
+  shuffleOptions: boolean,
+): ElearningObjectiveQuestion[] {
+  const seed = requireUuid(attemptId)
+  const materialized = questions.map((question) => ({
+    ...question,
+    options: question.options.map((option) => ({ ...option })),
+    answerKey: { correct: [...question.answerKey.correct] },
+  }))
+
+  if (shuffleQuestions) {
+    materialized.sort((left, right) => {
+      const leftRank = seededRank(seed, 'question', left.questionRevisionId)
+      const rightRank = seededRank(seed, 'question', right.questionRevisionId)
+      return compareStableText(leftRank, rightRank)
+        || compareStableText(left.questionRevisionId, right.questionRevisionId)
+    })
+    for (let index = 0; index < materialized.length; index += 1) {
+      materialized[index] = { ...materialized[index], position: index + 1 }
+    }
+  }
+
+  if (shuffleOptions) {
+    for (let index = 0; index < materialized.length; index += 1) {
+      const question = materialized[index]
+      const options = [...question.options].sort((left, right) => {
+        const scope = `option:${question.questionRevisionId}`
+        const leftRank = seededRank(seed, scope, left.id)
+        const rightRank = seededRank(seed, scope, right.id)
+        return compareStableText(leftRank, rightRank)
+          || compareStableText(left.id, right.id)
+      })
+      materialized[index] = { ...question, options }
+    }
+  }
+
+  return materialized.map((question) =>
+    validateElearningObjectiveQuestion(question, 'unavailable'),
+  )
 }
 
 export function redactElearningPaperSnapshot(snapshot: ElearningPaperSnapshot): ElearningPublicPaper {
