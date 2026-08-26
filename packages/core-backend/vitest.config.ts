@@ -1575,6 +1575,10 @@ export default defineConfig({
       // scope evaluation, closed actions, and one-way historical revocation.
       // Wired as a whole-file post-migrate gate in plugin-tests.yml.
       'tests/integration/elearning-admin-access.db.test.ts',
+      // E-learning L2 durable notification intent. Requires real PostgreSQL
+      // for same-org FK isolation, concurrent source-key idempotency, and the
+      // identity guard. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-notification-delivery.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
