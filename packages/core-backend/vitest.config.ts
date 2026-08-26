@@ -1594,6 +1594,11 @@ export default defineConfig({
       // same-org paper binding, source XOR, rule checks, and publish/retire
       // immutability. Wired as a whole-file post-migrate gate.
       'tests/integration/elearning-paper-exam.db.test.ts',
+      // E-learning L3 manual-grading schema preparation. Requires real
+      // PostgreSQL for state checks, same-org FKs, partial unique indexes,
+      // append-only records, and guarded rollback. Wired as a whole-file
+      // post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-manual-grading-schema.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.

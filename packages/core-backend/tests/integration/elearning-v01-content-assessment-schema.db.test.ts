@@ -18,8 +18,12 @@ import {
   ELEARNING_MEDIA_STALE_CLAIM_INDEX,
   ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ELEARNING_V01_TABLES,
-  GRADING_RECORD_ATTEMPT_KIND_UNIQ,
 } from '../../src/db/migrations/zzzz20260824120000_create_elearning_v01_content_assessment'
+import {
+  ELEARNING_ATTEMPT_EARNED_SCORE_CAP_CHECK,
+  ELEARNING_GRADING_RECORD_AUTO_UNIQUE,
+  ELEARNING_GRADING_RECORD_SEQUENCE_UNIQUE,
+} from '../../src/db/migrations/zzzz20260826235930_prepare_elearning_manual_grading'
 import {
   ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
   ELEARNING_V01_LEDGER_TRIGGERS,
@@ -603,12 +607,13 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [...ELEARNING_V01_IMMUTABILITY_TRIGGERS.map((row) => row.name)].sort(),
     )
 
-    const uniq = await pool.query<{ conname: string }>(
-      `SELECT conname
-         FROM pg_constraint
-        WHERE conrelid = 'elearning_grading_records'::regclass
-          AND conname = $1`,
-      [GRADING_RECORD_ATTEMPT_KIND_UNIQ],
+    const uniq = await pool.query<{ indexname: string }>(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = current_schema()
+          AND tablename = 'elearning_grading_records'
+          AND indexname = $1`,
+      [ELEARNING_GRADING_RECORD_AUTO_UNIQUE],
     )
     expect(uniq.rows).toHaveLength(1)
   })
@@ -896,7 +901,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     await submitAttempt(orderErrId)
     const orderErr = await reject(() => gradeAttempt(orderErrId, 11, 10, true))
     expect(orderErr?.code).toBe('23514')
-    expect(orderErr?.constraint).toBe('elearning_exam_attempts_score_order_chk')
+    expect(orderErr?.constraint).toBe(ELEARNING_ATTEMPT_EARNED_SCORE_CAP_CHECK)
 
     const negPoints = await reject(() =>
       pool.query(
@@ -1443,7 +1448,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     const gradedUpdate = await reject(() =>
       pool.query(`UPDATE elearning_exam_attempts SET total_score = 1 WHERE id = $1`, [startedId]),
     )
-    expect(String(gradedUpdate?.message)).toMatch(/graded rows cannot be updated/)
+    expect(String(gradedUpdate?.message)).toMatch(/graded evidence is immutable/)
 
     const gradedDelete = await reject(() =>
       pool.query(`DELETE FROM elearning_exam_attempts WHERE id = $1`, [startedId]),
@@ -1465,7 +1470,10 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       ),
     )
     expect(dupAuto?.code).toBe('23505')
-    expect(dupAuto?.constraint).toBe(GRADING_RECORD_ATTEMPT_KIND_UNIQ)
+    expect([
+      ELEARNING_GRADING_RECORD_AUTO_UNIQUE,
+      ELEARNING_GRADING_RECORD_SEQUENCE_UNIQUE,
+    ]).toContain(dupAuto?.constraint)
 
     const kept = await pool.query<{ score: string; n: number }>(
       `SELECT score::text, count(*)::int AS n

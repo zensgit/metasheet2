@@ -874,7 +874,8 @@ jobs:
       - name: Run elearning V0.1 unit canaries
         id: elearning-v01-unit-canaries
         # V0.1-L3 units: flags/plugin runtime, content/watch/assignment/exam/publish,
-        # assessment authoring, media ingest/playback, pilot routes/runtime, migration contract.
+        # assessment authoring/manual-grading schema, media ingest/playback,
+        # pilot routes/runtime, migration contracts.
         # Whole-file args so a name filter matching zero tests cannot skip-green.
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
@@ -897,6 +898,7 @@ jobs:
             tests/unit/elearning-exam.test.ts \
             tests/unit/elearning-flags.test.ts \
             tests/unit/elearning-learner-courses.test.ts \
+            tests/unit/elearning-manual-grading-migration-contract.test.ts \
             tests/unit/elearning-media-ingest.test.ts \
             tests/unit/elearning-media-playback-routes.test.ts \
             tests/unit/elearning-media-playback-runtime.test.ts \
@@ -1013,6 +1015,7 @@ jobs:
             tests/integration/elearning-notification-worker.db.test.ts \
             tests/integration/elearning-assessment-catalog.db.test.ts \
             tests/integration/elearning-paper-exam.db.test.ts \
+            tests/integration/elearning-manual-grading-schema.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

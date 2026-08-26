@@ -75,6 +75,7 @@ const SCHEMA_DB_FILES = [
   'tests/integration/elearning-media-playback.db.test.ts',
   'tests/integration/elearning-assessment-catalog.db.test.ts',
   'tests/integration/elearning-paper-exam.db.test.ts',
+  'tests/integration/elearning-manual-grading-schema.db.test.ts',
 ]
 
 const SCHEMA_DB_STEP_ID = 'elearning-v01-content-assessment-schema-gate'
