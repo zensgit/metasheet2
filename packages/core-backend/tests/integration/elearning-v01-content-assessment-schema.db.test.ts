@@ -1575,7 +1575,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     const emptyExamId = randomUUID()
     await insertExam(org, emptyExamId)
     const emptyExam = await reject(() => publishExam(org, emptyExamId))
-    expect(String(emptyExam?.message)).toMatch(/at least one exam question is required/)
+    expect(String(emptyExam?.message)).toMatch(/exactly one content source is required/)
 
     const courseId = randomUUID()
     const missingVideoId = randomUUID()
