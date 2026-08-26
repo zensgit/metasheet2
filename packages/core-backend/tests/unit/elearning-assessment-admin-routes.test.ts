@@ -18,6 +18,10 @@ import {
 import {
   ELEARNING_ASSESSMENT_XLSX_MIME,
 } from '../../src/services/elearning-assessment-import'
+import type {
+  ListElearningBankQuestionsInput,
+  ListElearningQuestionBanksInput,
+} from '../../src/services/elearning-assessment-catalog-read'
 import type { ElearningPilotRouteDeps } from '../../src/routes/elearning-pilot'
 import { createElearningPilotRouter } from '../../src/routes/elearning-pilot'
 import {
@@ -33,6 +37,7 @@ const QUESTION_ID = '22222222-2222-4222-8222-222222222222'
 const REVISION_ID = '33333333-3333-4333-8333-333333333333'
 const PAPER_ID = '44444444-4444-4444-8444-444444444444'
 const EXAM_ID = '55555555-5555-4555-8555-555555555555'
+const CREATED_AT = '2026-08-26T00:00:00.000Z'
 
 const FLAG_ON = {
   ELEARNING_ENABLED: 'true',
@@ -91,6 +96,8 @@ function makeApp(
   } = {},
 ) {
   const bankCalls: CreateElearningQuestionBankInput[] = []
+  const bankListCalls: ListElearningQuestionBanksInput[] = []
+  const questionListCalls: ListElearningBankQuestionsInput[] = []
   const questionCalls: CreateElearningBankQuestionInput[] = []
   const revisionCalls: AppendElearningQuestionRevisionInput[] = []
   const importCalls: ImportElearningBankQuestionsInput[] = []
@@ -113,6 +120,46 @@ function makeApp(
       next()
     },
     readGuard: (_req, _res, next) => next(),
+    listElearningQuestionBanks: async (_db, input) => {
+      bankListCalls.push(input)
+      if (over.catalogError) throw over.catalogError
+      return Object.assign({
+        items: [{
+          bankId: BANK_ID,
+          title: 'Safety bank',
+          questionCount: 1,
+          createdAt: CREATED_AT,
+          updatedAt: CREATED_AT,
+          internalOwner: ACTOR,
+        }],
+        page: input.page,
+        pageSize: input.pageSize,
+        total: 1,
+      }, { answerKey: ['a'] })
+    },
+    listElearningBankQuestions: async (_db, input) => {
+      questionListCalls.push(input)
+      if (over.catalogError) throw over.catalogError
+      return Object.assign({
+        bank: { bankId: BANK_ID, title: 'Safety bank', internalOwner: ACTOR },
+        items: [{
+          questionId: QUESTION_ID,
+          questionRevisionId: REVISION_ID,
+          revision: 2,
+          questionType: 'single_choice' as const,
+          prompt: QUESTION.prompt,
+          options: QUESTION.options,
+          correctOptionIds: QUESTION.correctOptionIds,
+          points: QUESTION.points,
+          explanation: QUESTION.explanation,
+          createdAt: CREATED_AT,
+          internalAudit: ACTOR,
+        }],
+        page: input.page,
+        pageSize: input.pageSize,
+        total: 1,
+      }, { paperSnapshot: { answerKey: ['a'] } })
+    },
     createElearningQuestionBank: async (_db, input) => {
       bankCalls.push(input)
       if (over.catalogError) throw over.catalogError
@@ -169,6 +216,8 @@ function makeApp(
   return {
     app,
     bankCalls,
+    bankListCalls,
+    questionListCalls,
     questionCalls,
     revisionCalls,
     importCalls,
@@ -237,6 +286,82 @@ describe('e-learning assessment admin routes', () => {
     expect(forbiddenResponse.body).toEqual({ error: 'Insufficient permissions' })
     expect(forbidden.adminCalls).toBe(1)
     expect(forbidden.bankCalls).toEqual([])
+  })
+
+  test('lists bounded banks and latest question revisions with closed admin DTOs', async () => {
+    const testApp = makeApp()
+    const banks = await serve(testApp.app)
+      .get('/api/elearning/assessment/question-banks')
+    expect(banks.status).toBe(200)
+    expect(banks.body).toEqual({
+      items: [{
+        bankId: BANK_ID,
+        title: 'Safety bank',
+        questionCount: 1,
+        createdAt: CREATED_AT,
+        updatedAt: CREATED_AT,
+      }],
+      page: 1,
+      pageSize: 50,
+      total: 1,
+    })
+    expect(testApp.bankListCalls).toEqual([{ orgId: ORG, page: 1, pageSize: 50 }])
+
+    const questions = await serve(testApp.app)
+      .get(`/api/elearning/assessment/question-banks/${BANK_ID}/questions?page=2&pageSize=10`)
+    expect(questions.status).toBe(200)
+    expect(questions.body).toEqual({
+      bank: { bankId: BANK_ID, title: 'Safety bank' },
+      items: [{
+        questionId: QUESTION_ID,
+        questionRevisionId: REVISION_ID,
+        revision: 2,
+        questionType: 'single_choice',
+        prompt: QUESTION.prompt,
+        options: QUESTION.options,
+        correctOptionIds: ['a'],
+        points: 5,
+        explanation: QUESTION.explanation,
+        createdAt: CREATED_AT,
+      }],
+      page: 2,
+      pageSize: 10,
+      total: 1,
+    })
+    expect(testApp.questionListCalls).toEqual([{
+      orgId: ORG,
+      bankId: BANK_ID,
+      page: 2,
+      pageSize: 10,
+    }])
+    expect(JSON.stringify([banks.body, questions.body])).not.toMatch(
+      /internalOwner|internalAudit|paperSnapshot|answerKey/,
+    )
+  })
+
+  test('authenticates reads before query parsing and rejects non-canonical pagination', async () => {
+    const unauthenticated = makeApp({ viewer: null })
+    const unauthenticatedResponse = await serve(unauthenticated.app)
+      .get('/api/elearning/assessment/question-banks?page=0&unknown=value')
+    expect(unauthenticatedResponse.status).toBe(401)
+    expect(unauthenticatedResponse.body).toEqual({ error: 'unauthenticated' })
+    expect(unauthenticated.bankListCalls).toEqual([])
+
+    const testApp = makeApp()
+    for (const path of [
+      '/api/elearning/assessment/question-banks?page=0',
+      '/api/elearning/assessment/question-banks?page=01',
+      '/api/elearning/assessment/question-banks?pageSize=101',
+      '/api/elearning/assessment/question-banks?page=1&page=2',
+      '/api/elearning/assessment/question-banks?unknown=value',
+      '/api/elearning/assessment/question-banks/not-a-uuid/questions',
+    ]) {
+      const response = await serve(testApp.app).get(path)
+      expect(response.status).toBe(400)
+      expect(response.body).toEqual({ error: 'invalid_input' })
+    }
+    expect(testApp.bankListCalls).toEqual([])
+    expect(testApp.questionListCalls).toEqual([])
   })
 
   test('mounts all five closed admin writes and injects org/actor', async () => {

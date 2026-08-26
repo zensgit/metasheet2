@@ -8428,7 +8428,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List assessment question banks
+         * @description Admin-only L3 assessment read. Returns organization-scoped bank
+         *     metadata and question counts; it never returns question content.
+         */
+        get: operations["listElearningQuestionBanks"];
         put?: never;
         /**
          * Create an assessment question bank
@@ -8450,7 +8455,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List the latest revision of each question in a bank
+         * @description Admin-only L3 assessment read. Returns one latest immutable revision
+         *     per stable question, including its answer key and explanation. These
+         *     fields are never exposed by learner exam APIs.
+         */
+        get: operations["listElearningBankQuestions"];
         put?: never;
         /**
          * Create a stable objective question with revision one
@@ -17924,6 +17935,47 @@ export interface components {
         ElearningQuestionBankResult: {
             bankId: components["schemas"]["ElearningUuid"];
         };
+        ElearningQuestionBankListItem: {
+            bankId: components["schemas"]["ElearningUuid"];
+            title: string;
+            questionCount: number;
+            /** Format: date-time */
+            createdAt: string;
+            /** Format: date-time */
+            updatedAt: string;
+        };
+        ElearningQuestionBankListResult: {
+            items: components["schemas"]["ElearningQuestionBankListItem"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
+        ElearningQuestionBankSummary: {
+            bankId: components["schemas"]["ElearningUuid"];
+            title: string;
+        };
+        ElearningAdminQuestionRevision: {
+            questionId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            revision: number;
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Admin-only answer key. Never returned by learner exam APIs. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Admin-only explanation. Never returned by learner exam APIs. */
+            explanation: string | null;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningQuestionBankQuestionsResult: {
+            bank: components["schemas"]["ElearningQuestionBankSummary"];
+            items: components["schemas"]["ElearningAdminQuestionRevision"][];
+            page: number;
+            pageSize: number;
+            total: number;
+        };
         ElearningQuestionWriteRequest: {
             question: components["schemas"]["ElearningPublishQuestion"];
         };
@@ -19640,6 +19692,41 @@ export interface operations {
             503: components["responses"]["ElearningError"];
         };
     };
+    listElearningQuestionBanks: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Organization-scoped question-bank page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankListResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description Assessment surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
     createElearningQuestionBank: {
         parameters: {
             query?: never;
@@ -19672,6 +19759,43 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description JSON body exceeds 1 MiB */
             413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningBankQuestions: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Organization-scoped latest-question page. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionBankQuestionsResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

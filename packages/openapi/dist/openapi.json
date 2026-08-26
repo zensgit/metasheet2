@@ -7722,6 +7722,197 @@
           }
         }
       },
+      "ElearningQuestionBankListItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bankId",
+          "title",
+          "questionCount",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "bankId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "questionCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningQuestionBankListResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "page",
+          "pageSize",
+          "total"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningQuestionBankListItem"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ElearningQuestionBankSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bankId",
+          "title"
+        ],
+        "properties": {
+          "bankId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "ElearningAdminQuestionRevision": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "questionId",
+          "questionRevisionId",
+          "revision",
+          "questionType",
+          "prompt",
+          "options",
+          "correctOptionIds",
+          "points",
+          "explanation",
+          "createdAt"
+        ],
+        "properties": {
+          "questionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "questionRevisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "questionType": {
+            "$ref": "#/components/schemas/ElearningQuestionType"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "options": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublishOption"
+            }
+          },
+          "correctOptionIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "description": "Admin-only answer key. Never returned by learner exam APIs."
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "nullable": true,
+            "description": "Admin-only explanation. Never returned by learner exam APIs."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningQuestionBankQuestionsResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bank",
+          "items",
+          "page",
+          "pageSize",
+          "total"
+        ],
+        "properties": {
+          "bank": {
+            "$ref": "#/components/schemas/ElearningQuestionBankSummary"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningAdminQuestionRevision"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "ElearningQuestionWriteRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -24136,6 +24327,74 @@
       }
     },
     "/api/elearning/assessment/question-banks": {
+      "get": {
+        "operationId": "listElearningQuestionBanks",
+        "summary": "List assessment question banks",
+        "description": "Admin-only L3 assessment read. Returns organization-scoped bank\nmetadata and question counts; it never returns question content.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization-scoped question-bank page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningQuestionBankListResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Assessment surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      },
       "post": {
         "operationId": "createElearningQuestionBank",
         "summary": "Create an assessment question bank",
@@ -24198,6 +24457,82 @@
       }
     },
     "/api/elearning/assessment/question-banks/{bankId}/questions": {
+      "get": {
+        "operationId": "listElearningBankQuestions",
+        "summary": "List the latest revision of each question in a bank",
+        "description": "Admin-only L3 assessment read. Returns one latest immutable revision\nper stable question, including its answer key and explanation. These\nfields are never exposed by learner exam APIs.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "bankId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 1
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageSize",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Organization-scoped latest-question page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningQuestionBankQuestionsResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or Insufficient permissions",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or assessment flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      },
       "post": {
         "operationId": "createElearningBankQuestion",
         "summary": "Create a stable objective question with revision one",

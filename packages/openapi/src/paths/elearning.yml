@@ -166,6 +166,53 @@ paths:
           $ref: '#/components/responses/ElearningError'
 
   /api/elearning/assessment/question-banks:
+    get:
+      operationId: listElearningQuestionBanks
+      summary: List assessment question banks
+      description: |
+        Admin-only L3 assessment read. Returns organization-scoped bank
+        metadata and question counts; it never returns question content.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization-scoped question-bank page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankListResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Assessment surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
     post:
       operationId: createElearningQuestionBank
       summary: Create an assessment question bank
@@ -210,6 +257,59 @@ paths:
           $ref: '#/components/responses/ElearningError'
 
   /api/elearning/assessment/question-banks/{bankId}/questions:
+    get:
+      operationId: listElearningBankQuestions
+      summary: List the latest revision of each question in a bank
+      description: |
+        Admin-only L3 assessment read. Returns one latest immutable revision
+        per stable question, including its answer key and explanation. These
+        fields are never exposed by learner exam APIs.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000000
+            default: 1
+        - in: query
+          name: pageSize
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        '200':
+          description: Organization-scoped latest-question page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionBankQuestionsResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
     post:
       operationId: createElearningBankQuestion
       summary: Create a stable objective question with revision one

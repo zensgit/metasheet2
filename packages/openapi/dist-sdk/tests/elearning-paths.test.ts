@@ -13,6 +13,8 @@ type PublishRequest = components['schemas']['ElearningCoursePublishRequest']
 type PublishResult = components['schemas']['ElearningCoursePublishResult']
 type QuestionBankCreateRequest = components['schemas']['ElearningQuestionBankCreateRequest']
 type QuestionBankResult = components['schemas']['ElearningQuestionBankResult']
+type QuestionBankListResult = components['schemas']['ElearningQuestionBankListResult']
+type QuestionBankQuestionsResult = components['schemas']['ElearningQuestionBankQuestionsResult']
 type QuestionWriteRequest = components['schemas']['ElearningQuestionWriteRequest']
 type QuestionRevisionResult = components['schemas']['ElearningQuestionRevisionResult']
 type QuestionImportResult = components['schemas']['ElearningQuestionImportResult']
@@ -146,7 +148,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/media']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/courses/publish']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/question-banks']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/questions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/questions']['get']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/import']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/papers']['post']>().not.toBeNever()
@@ -186,8 +190,14 @@ describe('elearning V0.1 OpenAPI paths', () => {
       paths['/api/elearning/assessment/question-banks']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<QuestionBankResult>()
     expectTypeOf<
+      paths['/api/elearning/assessment/question-banks']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<QuestionBankListResult>()
+    expectTypeOf<
       paths['/api/elearning/assessment/question-banks/{bankId}/questions']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<QuestionRevisionResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/question-banks/{bankId}/questions']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<QuestionBankQuestionsResult>()
     expectTypeOf<
       paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<QuestionRevisionResult>()
@@ -286,6 +296,36 @@ describe('elearning V0.1 OpenAPI paths', () => {
   it('keeps L3 assessment admin requests and responses closed', () => {
     expectTypeOf<QuestionBankCreateRequest>().toEqualTypeOf<{ title: string }>()
     expectTypeOf<QuestionBankResult>().toEqualTypeOf<{ bankId: string }>()
+    expectTypeOf<QuestionBankListResult>().toEqualTypeOf<{
+      items: Array<{
+        bankId: string
+        title: string
+        questionCount: number
+        createdAt: string
+        updatedAt: string
+      }>
+      page: number
+      pageSize: number
+      total: number
+    }>()
+    expectTypeOf<QuestionBankQuestionsResult>().toEqualTypeOf<{
+      bank: { bankId: string; title: string }
+      items: Array<{
+        questionId: string
+        questionRevisionId: string
+        revision: number
+        questionType: components['schemas']['ElearningQuestionType']
+        prompt: string
+        options: components['schemas']['ElearningPublishOption'][]
+        correctOptionIds: string[]
+        points: number
+        explanation: string | null
+        createdAt: string
+      }>
+      page: number
+      pageSize: number
+      total: number
+    }>()
     expectTypeOf<QuestionWriteRequest>().toEqualTypeOf<{
       question: components['schemas']['ElearningPublishQuestion']
     }>()

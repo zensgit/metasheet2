@@ -332,6 +332,12 @@ export interface ElearningPilotRouteDeps {
   createElearningQuestionBank?: Parameters<
     typeof createElearningAssessmentAdminRouter
   >[0]['createElearningQuestionBank']
+  listElearningQuestionBanks?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['listElearningQuestionBanks']
+  listElearningBankQuestions?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['listElearningBankQuestions']
   createElearningBankQuestion?: Parameters<
     typeof createElearningAssessmentAdminRouter
   >[0]['createElearningBankQuestion']
@@ -482,6 +488,8 @@ export function createElearningPilotRouter(
     adminGuard: deps.adminGuard,
     viewerId: deps.viewerId,
     orgId: deps.orgId,
+    listElearningQuestionBanks: deps.listElearningQuestionBanks,
+    listElearningBankQuestions: deps.listElearningBankQuestions,
     createElearningQuestionBank: deps.createElearningQuestionBank,
     createElearningBankQuestion: deps.createElearningBankQuestion,
     importElearningBankQuestions: deps.importElearningBankQuestions,

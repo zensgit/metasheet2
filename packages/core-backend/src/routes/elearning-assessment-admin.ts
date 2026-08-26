@@ -24,6 +24,13 @@ import {
   type ElearningExamDisclosurePolicy,
   type ElearningPaperExamDb,
 } from '../services/elearning-paper-exam'
+import {
+  ELEARNING_ASSESSMENT_PAGE_DEFAULT,
+  ELEARNING_ASSESSMENT_PAGE_SIZE_DEFAULT,
+  ELEARNING_ASSESSMENT_PAGE_SIZE_MAX,
+  listElearningBankQuestions,
+  listElearningQuestionBanks,
+} from '../services/elearning-assessment-catalog-read'
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -42,6 +49,7 @@ const PUBLISH_EXAM_KEYS = new Set([
   'shuffleOptions',
   'disclosurePolicy',
 ])
+const PAGE_QUERY_KEYS = new Set(['page', 'pageSize'])
 const jsonParser = json({ limit: 1024 * 1024 })
 const xlsxParser = raw({
   limit: ELEARNING_ASSESSMENT_XLSX_MAX_BYTES,
@@ -69,6 +77,8 @@ export interface ElearningAssessmentAdminRouteDeps {
   adminGuard: RequestHandler
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
+  listElearningQuestionBanks?: typeof listElearningQuestionBanks
+  listElearningBankQuestions?: typeof listElearningBankQuestions
   createElearningQuestionBank?: typeof createElearningQuestionBank
   createElearningBankQuestion?: typeof createElearningBankQuestion
   importElearningBankQuestions?: typeof importElearningBankQuestions
@@ -132,6 +142,34 @@ function uuidParam(req: Request, name: string): string | null {
     : null
 }
 
+function positiveQueryInt(
+  value: unknown,
+  fallback: number,
+  max: number,
+): number | null {
+  if (value === undefined) return fallback
+  if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed <= max ? parsed : null
+}
+
+function paginationParams(req: Request): { page: number; pageSize: number } | null {
+  const query = req.query as Record<string, unknown>
+  const keys = Object.keys(query)
+  if (keys.some((key) => !PAGE_QUERY_KEYS.has(key))) return null
+  const page = positiveQueryInt(
+    query.page,
+    ELEARNING_ASSESSMENT_PAGE_DEFAULT,
+    1_000_000,
+  )
+  const pageSize = positiveQueryInt(
+    query.pageSize,
+    ELEARNING_ASSESSMENT_PAGE_SIZE_DEFAULT,
+    ELEARNING_ASSESSMENT_PAGE_SIZE_MAX,
+  )
+  return page === null || pageSize === null ? null : { page, pageSize }
+}
+
 function sendError(res: Response, error: unknown): void {
   if (error instanceof ElearningAssessmentCatalogError) {
     res.status(CATALOG_ERROR_STATUS[error.code]).json({ error: error.code })
@@ -151,6 +189,10 @@ export function createElearningAssessmentAdminRouter(
 
   const createBank =
     deps.createElearningQuestionBank ?? createElearningQuestionBank
+  const listBanks =
+    deps.listElearningQuestionBanks ?? listElearningQuestionBanks
+  const listQuestions =
+    deps.listElearningBankQuestions ?? listElearningBankQuestions
   const createQuestion =
     deps.createElearningBankQuestion ?? createElearningBankQuestion
   const importQuestions =
@@ -246,6 +288,85 @@ export function createElearningAssessmentAdminRouter(
     requireXlsx,
     parseXlsx,
   ] as const
+
+  router.get(
+    '/api/elearning/assessment/question-banks',
+    ...authGate,
+    run(async (req, res) => {
+      const ctx = context(req, res)
+      if (!ctx) return
+      const paging = paginationParams(req)
+      if (!paging) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const value = await listBanks(deps.db, {
+          orgId: ctx.orgId,
+          ...paging,
+        })
+        res.status(200).json({
+          items: value.items.map((item) => ({
+            bankId: item.bankId,
+            title: item.title,
+            questionCount: item.questionCount,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+          })),
+          page: value.page,
+          pageSize: value.pageSize,
+          total: value.total,
+        })
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/assessment/question-banks/:bankId/questions',
+    ...authGate,
+    run(async (req, res) => {
+      const ctx = context(req, res)
+      if (!ctx) return
+      const bankId = uuidParam(req, 'bankId')
+      const paging = paginationParams(req)
+      if (!bankId || !paging) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const value = await listQuestions(deps.db, {
+          orgId: ctx.orgId,
+          bankId,
+          ...paging,
+        })
+        res.status(200).json({
+          bank: {
+            bankId: value.bank.bankId,
+            title: value.bank.title,
+          },
+          items: value.items.map((item) => ({
+            questionId: item.questionId,
+            questionRevisionId: item.questionRevisionId,
+            revision: item.revision,
+            questionType: item.questionType,
+            prompt: item.prompt,
+            options: item.options.map((option) => ({ ...option })),
+            correctOptionIds: [...item.correctOptionIds],
+            points: item.points,
+            explanation: item.explanation,
+            createdAt: item.createdAt,
+          })),
+          page: value.page,
+          pageSize: value.pageSize,
+          total: value.total,
+        })
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
 
   router.post(
     '/api/elearning/assessment/question-banks',

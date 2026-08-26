@@ -24,6 +24,10 @@ import {
   type ElearningAssessmentCatalogQueryable,
   type ElearningAssessmentQuestionInput,
 } from '../../src/services/elearning-assessment-catalog'
+import {
+  listElearningBankQuestions,
+  listElearningQuestionBanks,
+} from '../../src/services/elearning-assessment-catalog-read'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -267,6 +271,163 @@ describe('e-learning L3 assessment catalog', () => {
         [orgId],
       )
       expect(count.rows).toEqual([{ count: 2 }])
+    })
+  })
+
+  it('paginates org-scoped banks with exact question counts', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('read-banks')
+      const otherOrg = org('read-banks-other')
+      const first = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: actor('read-banks'),
+        title: 'First bank',
+      })
+      const second = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: actor('read-banks'),
+        title: 'Second bank',
+      })
+      const third = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: actor('read-banks'),
+        title: 'Third bank',
+      })
+      await createElearningQuestionBank(db, {
+        orgId: otherOrg,
+        actorId: actor('read-banks-other'),
+        title: 'Other org bank',
+      })
+      await createElearningBankQuestion(db, {
+        orgId,
+        actorId: actor('read-banks-question'),
+        bankId: third.bankId,
+        question: question('Third bank first question'),
+      })
+      await createElearningBankQuestion(db, {
+        orgId,
+        actorId: actor('read-banks-question'),
+        bankId: third.bankId,
+        question: question('Third bank second question'),
+      })
+      await client.query(
+        `UPDATE elearning_question_banks
+            SET created_at = CASE id
+              WHEN $1::uuid THEN '2026-08-24T00:00:00Z'::timestamptz
+              WHEN $2::uuid THEN '2026-08-25T00:00:00Z'::timestamptz
+              WHEN $3::uuid THEN '2026-08-26T00:00:00Z'::timestamptz
+            END
+          WHERE org_id = $4 AND id = ANY($5::uuid[])`,
+        [first.bankId, second.bankId, third.bankId, orgId, [
+          first.bankId,
+          second.bankId,
+          third.bankId,
+        ]],
+      )
+
+      const pageOne = await listElearningQuestionBanks(db, {
+        orgId,
+        page: 1,
+        pageSize: 2,
+      })
+      expect(pageOne).toMatchObject({ page: 1, pageSize: 2, total: 3 })
+      expect(pageOne.items.map((item) => [item.title, item.questionCount])).toEqual([
+        ['Third bank', 2],
+        ['Second bank', 0],
+      ])
+      expect(pageOne.items.every((item) => (
+        Number.isFinite(Date.parse(item.createdAt))
+        && Number.isFinite(Date.parse(item.updatedAt))
+      ))).toBe(true)
+
+      const pageTwo = await listElearningQuestionBanks(db, {
+        orgId,
+        page: 2,
+        pageSize: 2,
+      })
+      expect(pageTwo.items.map((item) => item.title)).toEqual(['First bank'])
+      expect(JSON.stringify([pageOne, pageTwo])).not.toContain('Other org bank')
+    })
+  })
+
+  it('returns only the latest revision for each banked question and hides cross-org banks', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('read-questions')
+      const bank = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: actor('read-questions'),
+        title: 'Revision bank',
+      })
+      const first = await createElearningBankQuestion(db, {
+        orgId,
+        actorId: actor('read-questions'),
+        bankId: bank.bankId,
+        question: question('First revision'),
+      })
+      const secondRevision = await appendElearningQuestionRevision(db, {
+        orgId,
+        actorId: actor('read-questions-r2'),
+        questionId: first.questionId,
+        question: question('Latest revision', ['b']),
+      })
+      const second = await createElearningBankQuestion(db, {
+        orgId,
+        actorId: actor('read-questions'),
+        bankId: bank.bankId,
+        question: question('Second stable question'),
+      })
+      await client.query(
+        `UPDATE elearning_questions
+            SET created_at = CASE id
+              WHEN $1::uuid THEN '2026-08-24T00:00:00Z'::timestamptz
+              WHEN $2::uuid THEN '2026-08-25T00:00:00Z'::timestamptz
+            END
+          WHERE org_id = $3 AND id = ANY($4::uuid[])`,
+        [first.questionId, second.questionId, orgId, [first.questionId, second.questionId]],
+      )
+
+      const pageOne = await listElearningBankQuestions(db, {
+        orgId,
+        bankId: bank.bankId,
+        page: 1,
+        pageSize: 1,
+      })
+      expect(pageOne).toEqual({
+        bank: { bankId: bank.bankId, title: 'Revision bank' },
+        items: [{
+          questionId: first.questionId,
+          questionRevisionId: secondRevision.questionRevisionId,
+          revision: 2,
+          questionType: 'single_choice',
+          prompt: 'Latest revision',
+          options: question('unused').options,
+          correctOptionIds: ['b'],
+          points: 5,
+          explanation: 'Internal answer explanation',
+          createdAt: expect.any(String),
+        }],
+        page: 1,
+        pageSize: 1,
+        total: 2,
+      })
+      const pageTwo = await listElearningBankQuestions(db, {
+        orgId,
+        bankId: bank.bankId,
+        page: 2,
+        pageSize: 1,
+      })
+      expect(pageTwo.items).toHaveLength(1)
+      expect(pageTwo.items[0]).toMatchObject({
+        questionId: second.questionId,
+        revision: 1,
+        prompt: 'Second stable question',
+      })
+      await expect(listElearningBankQuestions(db, {
+        orgId: org('read-questions-other'),
+        bankId: bank.bankId,
+        page: 1,
+        pageSize: 50,
+      })).rejects.toMatchObject({ code: 'not_found', message: 'not_found' })
     })
   })
 
