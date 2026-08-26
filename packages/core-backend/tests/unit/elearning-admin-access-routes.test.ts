@@ -11,6 +11,7 @@ import {
   type ReplaceElearningAdminScopesInput,
   type ReplaceElearningObjectAclInput,
 } from '../../src/services/elearning-admin-access'
+import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-admin-route'
 const ACTOR = 'actor-admin-route'
@@ -23,6 +24,8 @@ const FLAGS = {
   ELEARNING_CONTENT_ENABLED: 'true',
   ELEARNING_ASSIGNMENT_ENABLED: 'true',
 } as unknown as NodeJS.ProcessEnv
+
+const pinned = usePinnedServer()
 
 function makeApp(options: {
   env?: NodeJS.ProcessEnv
@@ -93,6 +96,11 @@ function makeApp(options: {
   return { app, router, scopeCalls, aclCalls, order }
 }
 
+function requestFixture(fixture: ReturnType<typeof makeApp>) {
+  pinned.setApp(fixture.app)
+  return request(pinned.url())
+}
+
 describe('e-learning admin-access routes', () => {
   it('mounts only with exact assignment capability flags', () => {
     expect(makeApp().router).not.toBeNull()
@@ -108,7 +116,7 @@ describe('e-learning admin-access routes', () => {
 
   it('injects authoritative org/actor into admin-scope replacement after RBAC', async () => {
     const fixture = makeApp()
-    const response = await request(fixture.app)
+    const response = await requestFixture(fixture)
       .put(`/api/elearning/admin-scopes/${USER}?orgId=evil`)
       .set('x-tenant-id', 'evil')
       .send({
@@ -141,7 +149,7 @@ describe('e-learning admin-access routes', () => {
 
   it('uses write RBAC for collaborators and passes only hydrated global-admin state', async () => {
     const fixture = makeApp({ globalAdmin: true })
-    const response = await request(fixture.app)
+    const response = await requestFixture(fixture)
       .put(`/api/elearning/courses/${COURSE}/collaborators/${USER}`)
       .send({ reason: 'course tracker', actions: ['track'] })
     expect(response.status).toBe(200)
@@ -158,7 +166,7 @@ describe('e-learning admin-access routes', () => {
     }])
 
     const plan = makeApp()
-    const planResponse = await request(plan.app)
+    const planResponse = await requestFixture(plan)
       .put(`/api/elearning/training-plans/${PLAN}/collaborators/${USER}`)
       .send({ reason: 'plan assigner', actions: ['assign'] })
     expect(planResponse.status).toBe(200)
@@ -167,20 +175,20 @@ describe('e-learning admin-access routes', () => {
 
   it('checks identity, org, and RBAC before parsing or service execution', async () => {
     const unauthenticated = makeApp({ actor: null })
-    expect((await request(unauthenticated.app)
+    expect((await requestFixture(unauthenticated)
       .put(`/api/elearning/admin-scopes/${USER}`)
       .send('{bad')).status).toBe(401)
     expect(unauthenticated.scopeCalls).toEqual([])
 
     const noOrg = makeApp({ org: null })
-    expect((await request(noOrg.app)
+    expect((await requestFixture(noOrg)
       .put(`/api/elearning/admin-scopes/${USER}`)
       .send({ reason: 'x', scopes: [] })).body).toEqual({
       error: 'ORG_CONTEXT_REQUIRED',
     })
 
     const denied = makeApp({ allowWrite: false })
-    const deniedResponse = await request(denied.app)
+    const deniedResponse = await requestFixture(denied)
       .put(`/api/elearning/courses/${COURSE}/collaborators/${USER}`)
       .send({ reason: 'x', actions: ['track'] })
     expect(deniedResponse.status).toBe(403)
@@ -189,17 +197,22 @@ describe('e-learning admin-access routes', () => {
 
   it('rejects unknown/missing keys and malformed path identifiers', async () => {
     for (const requestCase of [
-      request(makeApp().app)
-        .put(`/api/elearning/admin-scopes/${USER}`)
-        .send({ reason: 'x', scopes: [], extra: true }),
-      request(makeApp().app)
-        .put(`/api/elearning/courses/not-a-uuid/collaborators/${USER}`)
-        .send({ reason: 'x', actions: [] }),
-      request(makeApp().app)
-        .put(`/api/elearning/training-plans/${PLAN}/collaborators/${USER}`)
-        .send({ reason: 'x' }),
+      {
+        path: `/api/elearning/admin-scopes/${USER}`,
+        body: { reason: 'x', scopes: [], extra: true },
+      },
+      {
+        path: `/api/elearning/courses/not-a-uuid/collaborators/${USER}`,
+        body: { reason: 'x', actions: [] },
+      },
+      {
+        path: `/api/elearning/training-plans/${PLAN}/collaborators/${USER}`,
+        body: { reason: 'x' },
+      },
     ]) {
-      const response = await requestCase
+      const response = await requestFixture(makeApp())
+        .put(requestCase.path)
+        .send(requestCase.body)
       expect(response.status).toBe(400)
       expect(response.body).toEqual({ error: 'invalid_input' })
     }
@@ -209,7 +222,7 @@ describe('e-learning admin-access routes', () => {
     const env = { ...FLAGS } as NodeJS.ProcessEnv
     const fixture = makeApp({ env })
     env.ELEARNING_ASSIGNMENT_ENABLED = 'false'
-    const disabled = await request(fixture.app)
+    const disabled = await requestFixture(fixture)
       .put(`/api/elearning/admin-scopes/${USER}`)
       .send({ reason: 'x', scopes: [] })
     expect(disabled.status).toBe(404)
@@ -229,7 +242,7 @@ describe('e-learning admin-access routes', () => {
           code as keyof typeof statuses,
         ),
       })
-      const response = await request(errorFixture.app)
+      const response = await requestFixture(errorFixture)
         .put(`/api/elearning/admin-scopes/${USER}`)
         .send({ reason: 'x', scopes: [] })
       expect(response.status).toBe(status)
