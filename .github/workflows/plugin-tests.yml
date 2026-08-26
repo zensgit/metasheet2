@@ -869,6 +869,7 @@ jobs:
             tests/unit/elearning-assignment-lifecycle.test.ts \
             tests/unit/elearning-admin-access-routes.test.ts \
             tests/unit/elearning-admin-access.test.ts \
+            tests/unit/elearning-admin-operations.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \
             tests/unit/elearning-batch-assignment-runtime.test.ts \
             tests/unit/elearning-batch-assignment.test.ts \

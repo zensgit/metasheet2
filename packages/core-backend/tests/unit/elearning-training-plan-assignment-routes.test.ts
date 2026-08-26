@@ -166,7 +166,7 @@ function makeRevocationApp(options: {
 }
 
 describe('e-learning training-plan assignment route', () => {
-  it('uses the assignment capability and global admin guard in route and runtime', () => {
+  it('uses the assignment capability and delegated-write guard in route and runtime', () => {
     const route = readFileSync(
       join(__dirname, '../../src/routes/elearning-pilot.ts'),
       'utf8',
@@ -180,20 +180,20 @@ describe('e-learning training-plan assignment route', () => {
     )
     expect(routeAt).toBeGreaterThan(-1)
     expect(route.slice(routeAt, routeAt + 400)).toMatch(
-      /gate\(\s*deps\.adminGuard,\s*'assignment'\s*\)/,
+      /gate\(writeGuard, 'assignment'\)/,
     )
     expect(runtime).toMatch(
-      /opts\.assignElearningTrainingPlan\s*\?\?\s*assignElearningTrainingPlan/,
+      /opts\.assignElearningTrainingPlan\s*\?\?\s*assignElearningTrainingPlanAuthorized/,
     )
     const revokeAt = route.indexOf(
       "router.put(\n    '/api/elearning/training-plan-assignments/:planAssignmentId/revocation'",
     )
     expect(revokeAt).toBeGreaterThan(-1)
     expect(route.slice(revokeAt, revokeAt + 400)).toMatch(
-      /gate\(\s*deps\.adminGuard,\s*'assignment'\s*\)/,
+      /gate\(writeGuard, 'assignment'\)/,
     )
     expect(runtime).toMatch(
-      /opts\.revokeElearningTrainingPlanAssignment\s*\?\?\s*revokeElearningTrainingPlanAssignment/,
+      /opts\.revokeElearningTrainingPlanAssignment[\s\S]*\?\?\s*revokeElearningTrainingPlanAssignmentAuthorized/,
     )
     expect(runtime).toMatch(/rbacGuard\('elearning',\s*'admin'\)/)
   })
@@ -217,6 +217,7 @@ describe('e-learning training-plan assignment route', () => {
     expect(fixture.calls).toEqual([{
       orgId: ORG,
       actorId: ACTOR,
+      isGlobalAdmin: false,
       planId: PLAN_ID,
       ...BODY,
     }])
@@ -331,6 +332,7 @@ describe('e-learning training-plan assignment revocation route', () => {
     expect(fixture.calls).toEqual([{
       orgId: ORG,
       actorId: ACTOR,
+      isGlobalAdmin: false,
       planAssignmentId: PLAN_ASSIGNMENT_ID,
       reason: '  assigned in error  ',
     }])

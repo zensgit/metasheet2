@@ -343,6 +343,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       env: FLAG_EXAM_ON,
       authenticate: authenticateMw,
       adminGuard,
+      writeGuard: adminGuard,
       readGuard: (_req, res, next) => {
         order.push('rbac')
         if (_req.headers['x-test-deny-read'] === '1') {
@@ -433,6 +434,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       {
         orgId: ORG,
         actorId: ACTOR,
+        isGlobalAdmin: false,
         targetUserId: TARGET,
         courseVersionId: VERSION,
         sourceKey: SOURCE,
@@ -598,6 +600,10 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       env: FLAG_EXAM_ON,
       authenticate: authenticateMw,
       adminGuard: (_req, _res, next) => {
+        order.push('rbac')
+        next()
+      },
+      writeGuard: (_req, _res, next) => {
         order.push('rbac')
         next()
       },

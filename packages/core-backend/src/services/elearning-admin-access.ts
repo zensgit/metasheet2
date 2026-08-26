@@ -85,6 +85,12 @@ export interface AuthorizeElearningObjectActionInput {
   action: ElearningObjectAction
 }
 
+export interface LockElearningAdminAuthorizationInput {
+  orgId: string
+  actorId: string
+  object: ElearningObjectRef
+}
+
 function fail(code: ElearningAdminAccessErrorCode): never {
   throw new ElearningAdminAccessError(code)
 }
@@ -237,11 +243,14 @@ function sameActions(
   return rows.every((row, index) => storedText(row.action) === actions[index])
 }
 
-function scopeLockKey(orgId: string, targetUserId: string): string {
+export function elearningAdminScopeLockKey(
+  orgId: string,
+  targetUserId: string,
+): string {
   return `elearning-admin-scopes:${orgId}:${targetUserId}`
 }
 
-function aclLockKey(
+export function elearningObjectAclLockKey(
   orgId: string,
   objectType: 'course' | 'training_plan',
   objectId: string,
@@ -306,7 +315,7 @@ export async function replaceElearningAdminScopes(
       await tx.query(
         `/* elearning-admin-scopes:lock */
          SELECT pg_advisory_xact_lock(hashtext($1))`,
-        [scopeLockKey(orgId, targetUserId)],
+        [elearningAdminScopeLockKey(orgId, targetUserId)],
       )
       await requireActiveMembership(tx, orgId, actorId)
       await requireActiveMembership(tx, orgId, targetUserId)
@@ -428,7 +437,12 @@ export async function replaceElearningObjectAcl(
       await tx.query(
         `/* elearning-object-acl:lock */
          SELECT pg_advisory_xact_lock(hashtext($1))`,
-        [aclLockKey(orgId, ref.objectType, ref.objectId, granteeUserId)],
+        [elearningObjectAclLockKey(
+          orgId,
+          ref.objectType,
+          ref.objectId,
+          granteeUserId,
+        )],
       )
       await requireActiveMembership(tx, orgId, actorId)
       const ownerId = await loadObjectOwner(tx, orgId, ref)
@@ -551,21 +565,42 @@ export async function authorizeElearningObjectAction(
   if (result.rows.length !== 1) fail('forbidden')
 }
 
-export async function assertElearningUsersWithinAdminScope(
+/**
+ * Serializes one business operation with concurrent changes to the actor's
+ * management scope and object ACL. Call inside the same transaction that
+ * performs the protected operation, before evaluating either permission.
+ */
+export async function lockElearningAdminAuthorization(
   db: ElearningAdminAccessQueryable,
-  input: {
-    orgId: string
-    actorId: string
-    isGlobalAdmin: boolean
-    userIds: readonly string[]
-  },
+  input: LockElearningAdminAuthorizationInput,
 ): Promise<void> {
   const orgId = requireText(input.orgId)
   const actorId = requireText(input.actorId)
-  if (typeof input.isGlobalAdmin !== 'boolean') fail('invalid_input')
-  const userIds = normalizeUserIds(input.userIds)
-  if (input.isGlobalAdmin) return
+  const ref = objectRef(input.object)
+  const keys = [
+    elearningAdminScopeLockKey(orgId, actorId),
+    elearningObjectAclLockKey(
+      orgId,
+      ref.objectType,
+      ref.objectId,
+      actorId,
+    ),
+  ].sort()
+  for (const key of keys) {
+    await db.query(
+      `/* elearning-admin-access:operation-lock */
+       SELECT pg_advisory_xact_lock(hashtext($1))`,
+      [key],
+    )
+  }
+}
 
+async function loadElearningAdminScopeCoverage(
+  db: ElearningAdminAccessQueryable,
+  orgId: string,
+  actorId: string,
+  userIds: readonly string[],
+): Promise<{ scopeCount: number; targetCount: number; coveredCount: number }> {
   const result = await db.query(
     `/* elearning-admin-access:user-scope */
      WITH RECURSIVE active_scopes AS (
@@ -644,10 +679,61 @@ export async function assertElearningUsersWithinAdminScope(
   )
   const row = result.rows[0]
   if (!row) fail('unavailable')
-  if (asSafeCount(row.scope_count) === 0) fail('scope_required')
-  if (asSafeCount(row.target_count) !== asSafeCount(row.covered_count)) {
+  return {
+    scopeCount: asSafeCount(row.scope_count),
+    targetCount: asSafeCount(row.target_count),
+    coveredCount: asSafeCount(row.covered_count),
+  }
+}
+
+export async function assertElearningUsersWithinAdminScope(
+  db: ElearningAdminAccessQueryable,
+  input: {
+    orgId: string
+    actorId: string
+    isGlobalAdmin: boolean
+    userIds: readonly string[]
+  },
+): Promise<void> {
+  const orgId = requireText(input.orgId)
+  const actorId = requireText(input.actorId)
+  if (typeof input.isGlobalAdmin !== 'boolean') fail('invalid_input')
+  const userIds = normalizeUserIds(input.userIds)
+  if (input.isGlobalAdmin) return
+  const coverage = await loadElearningAdminScopeCoverage(
+    db,
+    orgId,
+    actorId,
+    userIds,
+  )
+  if (coverage.scopeCount === 0) fail('scope_required')
+  if (coverage.targetCount !== coverage.coveredCount) {
     fail('target_out_of_scope')
   }
+}
+
+export async function assertAnyElearningUserWithinAdminScope(
+  db: ElearningAdminAccessQueryable,
+  input: {
+    orgId: string
+    actorId: string
+    isGlobalAdmin: boolean
+    userIds: readonly string[]
+  },
+): Promise<void> {
+  const orgId = requireText(input.orgId)
+  const actorId = requireText(input.actorId)
+  if (typeof input.isGlobalAdmin !== 'boolean') fail('invalid_input')
+  const userIds = normalizeUserIds(input.userIds)
+  if (input.isGlobalAdmin) return
+  const coverage = await loadElearningAdminScopeCoverage(
+    db,
+    orgId,
+    actorId,
+    userIds,
+  )
+  if (coverage.scopeCount === 0) fail('scope_required')
+  if (coverage.coveredCount === 0) fail('target_out_of_scope')
 }
 
 export async function assertElearningRulesWithinAdminScope(

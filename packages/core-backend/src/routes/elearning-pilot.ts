@@ -40,32 +40,26 @@ import {
   type PublishElearningTrainingPlanInput,
 } from '../services/elearning-training-plan'
 import {
-  assignElearningTrainingPlan,
   ElearningTrainingPlanAssignmentError,
   type ElearningTrainingPlanAssignmentDb,
   type ElearningTrainingPlanAssignmentErrorCode,
 } from '../services/elearning-training-plan-assignment'
 import {
-  revokeElearningTrainingPlanAssignment,
   ElearningTrainingPlanRevocationError,
   type ElearningTrainingPlanRevocationDb,
   type ElearningTrainingPlanRevocationErrorCode,
 } from '../services/elearning-training-plan-revocation'
 import {
-  assignElearningBatch,
   ElearningBatchAssignmentError,
   type ElearningBatchAssignmentDb,
   type ElearningBatchAssignmentErrorCode,
 } from '../services/elearning-batch-assignment'
 import {
-  listElearningAssignmentProgress,
-  revokeElearningAssignmentMember,
   ElearningAssignmentLifecycleError,
   type ElearningAssignmentLifecycleDb,
   type ElearningAssignmentLifecycleErrorCode,
 } from '../services/elearning-assignment-lifecycle'
 import {
-  assignElearningDirect,
   ElearningDirectAssignmentError,
   type ElearningDirectAssignmentDb,
   type ElearningDirectAssignmentErrorCode,
@@ -93,10 +87,23 @@ import {
 } from '../services/elearning-media-playback'
 import {
   ElearningScopeError,
-  setElearningCourseScope,
   type ElearningScopeDb,
   type ElearningScopeErrorCode,
 } from '../services/elearning-scope'
+import {
+  assignElearningBatchAuthorized,
+  assignElearningDirectAuthorized,
+  assignElearningTrainingPlanAuthorized,
+  listElearningAssignmentProgressAuthorized,
+  revokeElearningAssignmentMemberAuthorized,
+  revokeElearningTrainingPlanAssignmentAuthorized,
+  setElearningCourseScopeAuthorized,
+  type ElearningAdminOperationDb,
+} from '../services/elearning-admin-operations'
+import {
+  ElearningAdminAccessError,
+  type ElearningAdminAccessErrorCode,
+} from '../services/elearning-admin-access'
 import {
   ElearningWatchError,
   recordElearningHeartbeat,
@@ -256,6 +263,15 @@ const TRAINING_PLAN_REVOCATION_STATUS: Record<
   unavailable: 503,
 }
 
+const ADMIN_ACCESS_STATUS: Record<ElearningAdminAccessErrorCode, number> = {
+  invalid_input: 400,
+  not_found: 404,
+  forbidden: 403,
+  scope_required: 403,
+  target_out_of_scope: 403,
+  unavailable: 503,
+}
+
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
 
@@ -272,7 +288,8 @@ export interface ElearningPilotRouteDeps {
     ElearningTrainingPlanDb &
     ElearningTrainingPlanAssignmentDb &
     ElearningTrainingPlanRevocationDb &
-    ElearningAdminAccessDb
+    ElearningAdminAccessDb &
+    ElearningAdminOperationDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -283,14 +300,15 @@ export interface ElearningPilotRouteDeps {
   writeGuard?: RequestHandler
   isGlobalAdmin?(req: Request): boolean
   env?: NodeJS.ProcessEnv
-  assignElearningDirect?: typeof assignElearningDirect
-  assignElearningBatch?: typeof assignElearningBatch
-  listElearningAssignmentProgress?: typeof listElearningAssignmentProgress
-  revokeElearningAssignmentMember?: typeof revokeElearningAssignmentMember
+  assignElearningDirect?: typeof assignElearningDirectAuthorized
+  assignElearningBatch?: typeof assignElearningBatchAuthorized
+  listElearningAssignmentProgress?: typeof listElearningAssignmentProgressAuthorized
+  revokeElearningAssignmentMember?: typeof revokeElearningAssignmentMemberAuthorized
   publishElearningTrainingPlan?: typeof publishElearningTrainingPlan
   getElearningTrainingPlan?: typeof getElearningTrainingPlan
-  assignElearningTrainingPlan?: typeof assignElearningTrainingPlan
-  revokeElearningTrainingPlanAssignment?: typeof revokeElearningTrainingPlanAssignment
+  assignElearningTrainingPlan?: typeof assignElearningTrainingPlanAuthorized
+  revokeElearningTrainingPlanAssignment?:
+    typeof revokeElearningTrainingPlanAssignmentAuthorized
   startElearningWatch?: typeof startElearningWatch
   recordElearningHeartbeat?: typeof recordElearningHeartbeat
   issueElearningMediaPlaybackTicket?: typeof issueElearningMediaPlaybackTicket
@@ -299,7 +317,7 @@ export interface ElearningPilotRouteDeps {
   submitElearningExam?: typeof submitElearningExam
   publishElearningCourse?: typeof publishElearningCourse
   listElearningLearnerCourses?: typeof listElearningLearnerCourses
-  setElearningCourseScope?: typeof setElearningCourseScope
+  setElearningCourseScope?: typeof setElearningCourseScopeAuthorized
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -373,26 +391,34 @@ function invalid(res: Response): void {
   res.status(400).json({ error: 'invalid_input' })
 }
 
+function sendAdminAccessError(res: Response, error: unknown): boolean {
+  if (!(error instanceof ElearningAdminAccessError)) return false
+  res.status(ADMIN_ACCESS_STATUS[error.code]).json({ error: error.code })
+  return true
+}
+
 export function createElearningPilotRouter(
   deps: ElearningPilotRouteDeps,
 ): Router | null {
   if (!isElearningContentSurfaceEnabled(envOf(deps))) return null
 
-  const assignDirect = deps.assignElearningDirect ?? assignElearningDirect
-  const assignBatch = deps.assignElearningBatch ?? assignElearningBatch
+  const assignDirect = deps.assignElearningDirect ?? assignElearningDirectAuthorized
+  const assignBatch = deps.assignElearningBatch ?? assignElearningBatchAuthorized
   const listProgress =
-    deps.listElearningAssignmentProgress ?? listElearningAssignmentProgress
+    deps.listElearningAssignmentProgress
+    ?? listElearningAssignmentProgressAuthorized
   const revokeMember =
-    deps.revokeElearningAssignmentMember ?? revokeElearningAssignmentMember
+    deps.revokeElearningAssignmentMember
+    ?? revokeElearningAssignmentMemberAuthorized
   const publishTrainingPlan =
     deps.publishElearningTrainingPlan ?? publishElearningTrainingPlan
   const getTrainingPlan =
     deps.getElearningTrainingPlan ?? getElearningTrainingPlan
   const assignTrainingPlan =
-    deps.assignElearningTrainingPlan ?? assignElearningTrainingPlan
+    deps.assignElearningTrainingPlan ?? assignElearningTrainingPlanAuthorized
   const revokeTrainingPlanAssignment =
     deps.revokeElearningTrainingPlanAssignment
-    ?? revokeElearningTrainingPlanAssignment
+    ?? revokeElearningTrainingPlanAssignmentAuthorized
   const startWatch = deps.startElearningWatch ?? startElearningWatch
   const heartbeat = deps.recordElearningHeartbeat ?? recordElearningHeartbeat
   const issuePlayback = deps.issueElearningMediaPlaybackTicket ?? issueElearningMediaPlaybackTicket
@@ -402,16 +428,19 @@ export function createElearningPilotRouter(
   const publishCourse = deps.publishElearningCourse ?? publishElearningCourse
   const listLearnerCourses =
     deps.listElearningLearnerCourses ?? listElearningLearnerCourses
-  const setCourseScope = deps.setElearningCourseScope ?? setElearningCourseScope
+  const setCourseScope =
+    deps.setElearningCourseScope ?? setElearningCourseScopeAuthorized
+  const writeGuard = deps.writeGuard ?? deps.adminGuard
+  const isGlobalAdmin = deps.isGlobalAdmin ?? isElearningGlobalAdminRequest
   const router = Router()
   const adminAccessRouter = createElearningAdminAccessRouter({
     db: deps.db,
     env: deps.env,
     adminGuard: deps.adminGuard,
-    writeGuard: deps.writeGuard ?? deps.adminGuard,
+    writeGuard,
     viewerId: deps.viewerId,
     orgId: deps.orgId,
-    isGlobalAdmin: deps.isGlobalAdmin ?? isElearningGlobalAdminRequest,
+    isGlobalAdmin,
   })
   if (adminAccessRouter) router.use(adminAccessRouter)
 
@@ -545,7 +574,7 @@ export function createElearningPilotRouter(
 
   router.post(
     '/api/elearning/assignments/direct',
-    ...gate(deps.adminGuard, 'assignment'),
+    ...gate(writeGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -581,9 +610,11 @@ export function createElearningPilotRouter(
           courseVersionId,
           sourceKey,
           deadline,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(201).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningDirectAssignmentError) {
           res.status(ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
           return
@@ -595,7 +626,7 @@ export function createElearningPilotRouter(
 
   router.post(
     '/api/elearning/assignments/batch',
-    ...gate(deps.adminGuard, 'assignment'),
+    ...gate(writeGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -634,9 +665,11 @@ export function createElearningPilotRouter(
           sourceKey,
           deadline,
           rules: body.rules,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(201).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningBatchAssignmentError) {
           res.status(BATCH_ASSIGNMENT_STATUS[error.code]).json({ error: error.code })
           return
@@ -648,7 +681,7 @@ export function createElearningPilotRouter(
 
   router.get(
     '/api/elearning/assignments/:assignmentId',
-    ...gate(deps.adminGuard, 'assignment', null),
+    ...gate(writeGuard, 'assignment', null),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -695,9 +728,12 @@ export function createElearningPilotRouter(
           assignmentId,
           cursor,
           limit,
+          actorId: ctx.actorId,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(200).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningAssignmentLifecycleError) {
           res.status(LIFECYCLE_STATUS[error.code]).json({ error: error.code })
           return
@@ -709,7 +745,7 @@ export function createElearningPilotRouter(
 
   router.put(
     '/api/elearning/assignments/:assignmentId/members/:memberId/revocation',
-    ...gate(deps.adminGuard, 'assignment'),
+    ...gate(writeGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -737,9 +773,11 @@ export function createElearningPilotRouter(
           assignmentId,
           memberId,
           reason: body.reason,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(200).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningAssignmentLifecycleError) {
           res.status(LIFECYCLE_STATUS[error.code]).json({ error: error.code })
           return
@@ -781,7 +819,7 @@ export function createElearningPilotRouter(
 
   router.post(
     '/api/elearning/training-plans/:planId/assign',
-    ...gate(deps.adminGuard, 'assignment'),
+    ...gate(writeGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -820,9 +858,11 @@ export function createElearningPilotRouter(
           sourceKey,
           deadline,
           rules: body.rules,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(201).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningTrainingPlanAssignmentError) {
           res.status(TRAINING_PLAN_ASSIGNMENT_STATUS[error.code]).json({
             error: error.code,
@@ -836,7 +876,7 @@ export function createElearningPilotRouter(
 
   router.put(
     '/api/elearning/training-plan-assignments/:planAssignmentId/revocation',
-    ...gate(deps.adminGuard, 'assignment'),
+    ...gate(writeGuard, 'assignment'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'assignment')
       if (!ctx) return
@@ -858,9 +898,11 @@ export function createElearningPilotRouter(
           actorId: ctx.actorId,
           planAssignmentId,
           reason: body.reason,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(200).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningTrainingPlanRevocationError) {
           res.status(TRAINING_PLAN_REVOCATION_STATUS[error.code]).json({
             error: error.code,
@@ -901,7 +943,7 @@ export function createElearningPilotRouter(
 
   router.put(
     '/api/elearning/courses/:courseId/scope',
-    ...gate(deps.adminGuard, 'content'),
+    ...gate(writeGuard, 'content'),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'content')
       if (!ctx) return
@@ -924,9 +966,11 @@ export function createElearningPilotRouter(
           courseId,
           reason: body.reason as string,
           rules: body.rules as never,
+          isGlobalAdmin: isGlobalAdmin(req),
         })
         res.status(200).json(result)
       } catch (error) {
+        if (sendAdminAccessError(res, error)) return
         if (error instanceof ElearningScopeError) {
           res.status(SCOPE_STATUS[error.code]).json({ error: error.code })
           return

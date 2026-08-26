@@ -8432,9 +8432,10 @@ export interface paths {
         put?: never;
         /**
          * Direct-assign a published course version to one user
-         * @description Admin named-pilot assignment. RBAC `elearning:admin`. JSON limit 16 KiB.
-         *     Allowed keys: targetUserId, courseVersionId, sourceKey, optional deadline.
-         *     Actor/org injected from JWT.
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `assign` ACL and management-scope coverage of the target user.
+         *     JSON limit 16 KiB. Actor/org are injected from JWT.
          */
         post: operations["assignElearningDirect"];
         delete?: never;
@@ -8454,8 +8455,10 @@ export interface paths {
         put?: never;
         /**
          * Materialize an audience into one published-version assignment
-         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
-         *     Actor and authoritative org come from JWT. Rules are normalized and
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `assign` ACL, and every audience rule must stay within their
+         *     management scope. JSON limit 16 KiB. Rules are normalized and
          *     resolved once from current same-org active directory state, then the
          *     resulting members are stored as assignment facts. Idempotent replay does
          *     not resolve the audience again. At most 10,000 members may be materialized.
@@ -8476,9 +8479,12 @@ export interface paths {
         };
         /**
          * Look up assignment progress for every member
-         * @description Admin L2 assignment operation. RBAC `elearning:admin`. No JSON body.
-         *     Actor and authoritative org come from JWT. Cursor is a member UUID
-         *     keyset; page size is at most 100. Closed DTO only: assignment metadata
+         * @description L2 tracking operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the owning course/plan
+         *     owner role or exact `track` ACL. Their current management scope is
+         *     applied in SQL before cursor/limit, so out-of-scope member rows never
+         *     enter the page; no intersecting member is a 403. Cursor is a member UUID
+         *     keyset and page size is at most 100. Closed DTO only: assignment metadata
          *     plus member progress statuses. Scores, answers, answer keys, raw
          *     events, revocation reason, storage data, and hidden audit values are
          *     never returned. Deadline expiry is overdue, not revoke; a revoked
@@ -8503,8 +8509,10 @@ export interface paths {
         get?: never;
         /**
          * Explicitly revoke one assignment member
-         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
-         *     Body key `reason` only, trimmed length 1..500. Actor and authoritative
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the owning course/plan
+         *     owner role or exact `assign` ACL and management-scope coverage of the
+         *     member. Body key `reason` only, trimmed length 1..500. Actor and authoritative
          *     org come from JWT. First call sets revoked_at to server time. Same
          *     normalized reason is duplicate true. A different reason is conflict.
          *     Cross-org or missing member is 404. Progress, evidence, attempts, and
@@ -8577,8 +8585,10 @@ export interface paths {
         put?: never;
         /**
          * Atomically assign every course in a pinned training plan
-         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
-         *     Actor and authoritative org come from JWT. The active published plan
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the plan owner role or
+         *     exact `assign` ACL, and every audience rule must stay within their
+         *     management scope. JSON limit 16 KiB. The active published plan
          *     version is pinned, the audience is resolved once, and one ordinary
          *     assignment with the identical materialized member set is created per
          *     plan item in a single transaction. Same-key replay returns the original
@@ -8649,8 +8659,10 @@ export interface paths {
         get?: never;
         /**
          * Atomically revoke every child obligation in one plan assignment
-         * @description Admin L2 assignment operation. RBAC `elearning:admin`; JSON limit 16 KiB.
-         *     Actor and authoritative org come from JWT. The operation writes one
+         * @description L2 assignment operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the plan owner role or
+         *     exact `assign` ACL and management-scope coverage of the entire frozen
+         *     cohort. JSON limit 16 KiB. The operation writes one
          *     plan-level revocation triplet and revokes every materialized child
          *     assignment member in the same transaction. Same normalized reason is
          *     duplicate true; a different reason conflicts. Individual child-member
@@ -8697,8 +8709,10 @@ export interface paths {
         get?: never;
         /**
          * Append and activate a course visibility-scope revision
-         * @description Admin L1 content operation. RBAC `elearning:admin`; JSON limit 16 KiB.
-         *     Actor and authoritative org come from JWT. This changes only who may
+         * @description L2 content operation. RBAC requires `elearning:write` or
+         *     `elearning:admin`; non-global actors also need the course owner role or
+         *     exact `scope` ACL, and every requested rule must stay within their
+         *     management scope. JSON limit 16 KiB. This changes only who may
          *     discover and self-study an active published course. It never creates,
          *     revokes, or reclassifies an assignment. Current live rules are `all`,
          *     same-org active `department`, same-org directory `position`, and same-org
@@ -19406,7 +19420,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description not_found (flags off or course/user missing as mapped by service) */
             404: components["responses"]["ElearningError"];
@@ -19444,7 +19458,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden ACL action, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description not_found (flags off or course version missing) */
             404: components["responses"]["ElearningError"];
@@ -19486,7 +19500,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden track ACL, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description not_found (flags off or assignment missing in this org) */
             404: components["responses"]["ElearningError"];
@@ -19525,7 +19539,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description not_found (flags off, or member not on this org assignment) */
             404: components["responses"]["ElearningError"];
@@ -19637,7 +19651,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description Assignment flags off or plan missing in this org */
             404: components["responses"]["ElearningError"];
@@ -19756,7 +19770,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or insufficient `elearning:admin` */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden assign ACL, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description Assignment flags off or plan assignment missing in this org */
             404: components["responses"]["ElearningError"];
@@ -19835,7 +19849,7 @@ export interface operations {
             400: components["responses"]["ElearningError"];
             /** @description unauthenticated or missing JWT */
             401: components["responses"]["ElearningAuthError"];
-            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions (`elearning:admin`) */
+            /** @description ORG_CONTEXT_REQUIRED, insufficient write RBAC, forbidden scope ACL, scope_required, or target_out_of_scope */
             403: components["responses"]["ElearningError"];
             /** @description Content surface flags off, course not found, or audience subject not found */
             404: components["responses"]["ElearningError"];

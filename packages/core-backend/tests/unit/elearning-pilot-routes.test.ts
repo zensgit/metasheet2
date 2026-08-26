@@ -701,7 +701,7 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(examApp.learnerCalls).toHaveLength(0)
   })
 
-  test('scope revision is content-only, strict, admin-gated, and rechecks flags', async () => {
+  test('scope revision is content-only, strict, delegated-write gated, and rechecks flags', async () => {
     const contentEnv = {
       ...FLAG_ON,
       ELEARNING_ASSIGNMENT_ENABLED: 'false',
@@ -720,6 +720,7 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       {
         orgId: ORG,
         actorId: ACTOR,
+        isGlobalAdmin: false,
         courseId: REQUEST_ID,
         reason: SCOPE_BODY.reason,
         rules: SCOPE_BODY.rules,
@@ -1014,6 +1015,7 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       {
         orgId: ORG,
         actorId: ACTOR,
+        isGlobalAdmin: false,
         targetUserId: TARGET,
         courseVersionId: VERSION,
         sourceKey: SOURCE,

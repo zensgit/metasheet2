@@ -14,6 +14,7 @@ import {
   type ListElearningAssignmentProgressInput,
   type RevokeElearningAssignmentMemberInput,
 } from '../../src/services/elearning-assignment-lifecycle'
+import { ElearningAdminAccessError } from '../../src/services/elearning-admin-access'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-lifecycle-route'
@@ -70,6 +71,8 @@ function makeApp(options: {
   viewer?: string | null
   org?: string | null
   allowAdmin?: boolean
+  allowWrite?: boolean
+  globalAdmin?: boolean
   allowRead?: boolean
   listError?: unknown
   revokeError?: unknown
@@ -103,6 +106,15 @@ function makeApp(options: {
       }
       next()
     },
+    writeGuard: (_req, res, next) => {
+      order.push('rbac')
+      if ((options.allowWrite ?? options.allowAdmin) === false) {
+        res.status(403).json({ error: 'Insufficient permissions' })
+        return
+      }
+      next()
+    },
+    isGlobalAdmin: () => options.globalAdmin === true,
     readGuard: (_req, res, next) => {
       order.push('read')
       if (options.allowRead === false) {
@@ -131,7 +143,7 @@ function makeApp(options: {
 }
 
 describe('GET /api/elearning/assignments/:assignmentId', () => {
-  it('registers after static assignment writes and uses admin assignment gates', () => {
+  it('registers after static assignment writes and uses delegated-write gates', () => {
     const src = readFileSync(join(__dirname, '../../src/routes/elearning-pilot.ts'), 'utf8')
     const directAt = src.indexOf("router.post(\n    '/api/elearning/assignments/direct'")
     const batchAt = src.indexOf("router.post(\n    '/api/elearning/assignments/batch'")
@@ -143,8 +155,8 @@ describe('GET /api/elearning/assignments/:assignmentId', () => {
     expect(batchAt).toBeGreaterThan(directAt)
     expect(getAt).toBeGreaterThan(batchAt)
     expect(revokeAt).toBeGreaterThan(getAt)
-    expect(src.slice(getAt, getAt + 400)).toMatch(/gate\(\s*deps\.adminGuard,\s*'assignment',\s*null\s*\)/)
-    expect(src.slice(revokeAt, revokeAt + 400)).toMatch(/gate\(\s*deps\.adminGuard,\s*'assignment'\s*\)/)
+    expect(src.slice(getAt, getAt + 400)).toMatch(/gate\(writeGuard, 'assignment', null\)/)
+    expect(src.slice(revokeAt, revokeAt + 400)).toMatch(/gate\(writeGuard, 'assignment'\)/)
   })
 
   it('is assignment-admin gated, org-scoped, and returns the closed progress DTO', async () => {
@@ -178,6 +190,8 @@ describe('GET /api/elearning/assignments/:assignmentId', () => {
     )
     expect(fixture.listCalls).toEqual([{
       orgId: ORG,
+      actorId: ACTOR,
+      isGlobalAdmin: false,
       assignmentId: ASSIGNMENT,
       cursor: CURSOR,
       limit: 50,
@@ -191,6 +205,27 @@ describe('GET /api/elearning/assignments/:assignmentId', () => {
       'service',
     ])
     expect(fixture.revokeCalls).toHaveLength(0)
+  })
+
+  it('admits write RBAC collaborators and maps values-free ACL/scope denials', async () => {
+    const allowed = makeApp({ allowAdmin: false, allowWrite: true, globalAdmin: true })
+    const response = await request(pinned.url())
+      .get(`/api/elearning/assignments/${ASSIGNMENT}`)
+    expect(response.status).toBe(200)
+    expect(allowed.listCalls[0]).toMatchObject({ isGlobalAdmin: true })
+
+    for (const code of ['forbidden', 'scope_required', 'target_out_of_scope'] as const) {
+      const denied = makeApp({
+        allowAdmin: false,
+        allowWrite: true,
+        listError: new ElearningAdminAccessError(code),
+      })
+      const failure = await request(pinned.url())
+        .get(`/api/elearning/assignments/${ASSIGNMENT}`)
+      expect(failure.status).toBe(403)
+      expect(failure.body).toEqual({ error: code })
+      expect(JSON.stringify(failure.body)).not.toContain(ORG)
+    }
   })
 
   it('fails closed before service when flags, identity, org, or admin RBAC deny', async () => {
@@ -295,6 +330,7 @@ describe('PUT /api/elearning/assignments/:assignmentId/members/:memberId/revocat
     expect(fixture.revokeCalls).toEqual([{
       orgId: ORG,
       actorId: ACTOR,
+      isGlobalAdmin: false,
       assignmentId: ASSIGNMENT,
       memberId: MEMBER,
       reason: 'left the team',

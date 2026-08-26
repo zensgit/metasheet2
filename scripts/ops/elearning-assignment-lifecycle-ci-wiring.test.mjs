@@ -20,6 +20,7 @@ const wiringFile = 'scripts/ops/elearning-assignment-lifecycle-ci-wiring.test.mj
 const unitFiles = [
   'tests/unit/elearning-assignment-lifecycle-routes.test.ts',
   'tests/unit/elearning-assignment-lifecycle.test.ts',
+  'tests/unit/elearning-admin-operations.test.ts',
 ]
 const dbFiles = [
   'tests/integration/elearning-assignment-lifecycle.db.test.ts',
@@ -71,6 +72,7 @@ test('real-DB suite refuses skip-shaped green and implementation files exist', (
   }
   for (const file of [
     'packages/core-backend/src/services/elearning-assignment-lifecycle.ts',
+    'packages/core-backend/src/services/elearning-admin-operations.ts',
     'packages/core-backend/src/routes/elearning-pilot.ts',
     'packages/openapi/src/paths/elearning.yml',
   ]) {

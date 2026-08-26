@@ -51,6 +51,8 @@ export interface ListElearningAssignmentProgressInput {
   assignmentId: string
   cursor?: string | null
   limit?: number
+  /** Internal SQL-level row filter. Public routes set this for delegated admins. */
+  scopeActorId?: string | null
 }
 
 export interface ElearningAssignmentProgressMember {
@@ -166,6 +168,66 @@ SELECT
  WHERE a.org_id = $1
    AND a.id = $2
    AND ($3::uuid IS NULL OR m.id > $3::uuid)
+   AND (
+     $5::text IS NULL
+     OR EXISTS (
+       WITH RECURSIVE allowed_departments AS (
+         SELECT
+           scope.directory_integration_id AS integration_id,
+           scope.directory_department_id AS department_id,
+           scope.include_children,
+           ARRAY[scope.directory_department_id]::uuid[] AS path
+         FROM elearning_admin_scopes scope
+         JOIN directory_integrations integration
+           ON integration.id = scope.directory_integration_id
+          AND integration.org_id = scope.org_id
+          AND integration.status = 'active'
+         JOIN directory_departments department
+           ON department.id = scope.directory_department_id
+          AND department.integration_id = scope.directory_integration_id
+          AND department.is_active = TRUE
+         WHERE scope.org_id = m.org_id
+           AND scope.user_id = $5
+           AND scope.revoked_at IS NULL
+         UNION ALL
+         SELECT
+           parent.integration_id,
+           child.id,
+           parent.include_children,
+           parent.path || child.id
+         FROM allowed_departments parent
+         JOIN directory_departments parent_department
+           ON parent_department.id = parent.department_id
+          AND parent_department.integration_id = parent.integration_id
+         JOIN directory_departments child
+           ON child.integration_id = parent.integration_id
+          AND child.external_parent_department_id =
+            parent_department.external_department_id
+          AND child.is_active = TRUE
+         WHERE parent.include_children = TRUE
+           AND NOT child.id = ANY(parent.path)
+       )
+       SELECT 1
+       FROM users platform_user
+       JOIN user_orgs membership
+         ON membership.user_id = platform_user.id
+        AND membership.org_id = m.org_id
+        AND membership.is_active = TRUE
+       JOIN directory_account_links link
+         ON link.local_user_id = platform_user.id
+        AND link.link_status = 'linked'
+       JOIN directory_accounts account
+         ON account.id = link.directory_account_id
+        AND account.is_active = TRUE
+       JOIN directory_account_departments account_department
+         ON account_department.directory_account_id = account.id
+       JOIN allowed_departments allowed
+         ON allowed.integration_id = account.integration_id
+        AND allowed.department_id = account_department.directory_department_id
+       WHERE platform_user.id = m.user_id
+         AND platform_user.is_active = TRUE
+     )
+   )
  ORDER BY m.id ASC
  LIMIT $4`
 
@@ -353,6 +415,9 @@ export async function listElearningAssignmentProgress(
   const assignmentId = requireUuid(input.assignmentId)
   const cursor = optionalCursor(input.cursor)
   const limit = requireLimit(input.limit)
+  const scopeActorId = input.scopeActorId == null
+    ? null
+    : requireActor(input.scopeActorId)
 
   try {
     return await db.transaction(async (tx) => {
@@ -364,7 +429,13 @@ export async function listElearningAssignmentProgress(
       if (loadedId !== assignmentId) fail('unavailable')
       const deadline = optionalIsoTimestamp(assignmentRow.deadline)
 
-      const page = await tx.query(MEMBERS_SQL, [orgId, assignmentId, cursor, limit + 1])
+      const page = await tx.query(MEMBERS_SQL, [
+        orgId,
+        assignmentId,
+        cursor,
+        limit + 1,
+        scopeActorId,
+      ])
       if (!Array.isArray(page.rows)) fail('unavailable')
       if (page.rows.length > limit + 1) fail('unavailable')
       const hasMore = page.rows.length > limit

@@ -16,6 +16,12 @@ import { ELEARNING_V01_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzz
 import { ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
 import { ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
 import {
+  ELEARNING_ADMIN_SCOPE_STATE_TRIGGER,
+  ELEARNING_ADMIN_SCOPES_TABLE,
+  ELEARNING_OBJECT_ACL_STATE_TRIGGER,
+  ELEARNING_OBJECT_ACL_TABLE,
+} from '../../src/db/migrations/zzzz20260826200000_create_elearning_admin_scope_acl'
+import {
   elearningAssignmentRevokeLockKey,
   ElearningAssignmentLifecycleError,
   listElearningAssignmentProgress,
@@ -23,6 +29,15 @@ import {
   type ElearningAssignmentLifecycleDb,
   type ElearningAssignmentLifecycleQueryable,
 } from '../../src/services/elearning-assignment-lifecycle'
+import {
+  assignElearningDirectAuthorized,
+  listElearningAssignmentProgressAuthorized,
+  setElearningCourseScopeAuthorized,
+} from '../../src/services/elearning-admin-operations'
+import {
+  replaceElearningAdminScopes,
+  replaceElearningObjectAcl,
+} from '../../src/services/elearning-admin-access'
 import {
   listElearningLearnerCourses,
   type ElearningLearnerCoursesDb,
@@ -42,6 +57,8 @@ const ALL_TRIGGERS = [
   ...ELEARNING_V01_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_WATCH_IMMUTABILITY_TRIGGERS,
   ...ELEARNING_V01_LEDGER_CLEANUP_TRIGGERS,
+  { table: ELEARNING_ADMIN_SCOPES_TABLE, name: ELEARNING_ADMIN_SCOPE_STATE_TRIGGER },
+  { table: ELEARNING_OBJECT_ACL_TABLE, name: ELEARNING_OBJECT_ACL_STATE_TRIGGER },
 ]
 
 function sortedMemberIds(): [string, string, string] {
@@ -115,6 +132,8 @@ async function setTriggers(enabled: boolean): Promise<void> {
 async function cleanupOrg(org: string): Promise<void> {
   await setTriggers(false)
   try {
+    await pool.query('DELETE FROM elearning_object_acl WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM elearning_admin_scopes WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_grading_records WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_exam_attempts WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_completion_evidence WHERE org_id = $1', [org])
@@ -151,6 +170,45 @@ async function cleanupOrg(org: string): Promise<void> {
     )
     await pool.query('DELETE FROM elearning_course_versions WHERE org_id = $1', [org])
     await pool.query('DELETE FROM elearning_courses WHERE org_id = $1', [org])
+    await pool.query(
+      `DELETE FROM directory_account_links
+       WHERE directory_account_id IN (
+         SELECT account.id
+         FROM directory_accounts account
+         JOIN directory_integrations integration
+           ON integration.id = account.integration_id
+         WHERE integration.org_id = $1
+       )`,
+      [org],
+    )
+    await pool.query(
+      `DELETE FROM directory_account_departments
+       WHERE directory_account_id IN (
+         SELECT account.id
+         FROM directory_accounts account
+         JOIN directory_integrations integration
+           ON integration.id = account.integration_id
+         WHERE integration.org_id = $1
+       )`,
+      [org],
+    )
+    await pool.query(
+      `DELETE FROM directory_accounts
+       WHERE integration_id IN (
+         SELECT id FROM directory_integrations WHERE org_id = $1
+       )`,
+      [org],
+    )
+    await pool.query(
+      `DELETE FROM directory_departments
+       WHERE integration_id IN (
+         SELECT id FROM directory_integrations WHERE org_id = $1
+       )`,
+      [org],
+    )
+    await pool.query('DELETE FROM directory_integrations WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM user_orgs WHERE org_id = $1', [org])
+    await pool.query('DELETE FROM users WHERE id LIKE $1', [`${org}-%`])
   } finally {
     await setTriggers(true)
   }
@@ -166,6 +224,7 @@ async function countOrg(table: string, org: string): Promise<number> {
 
 interface Seed {
   org: string
+  courseId: string
   assignmentId: string
   versionId: string
   videoItemId: string
@@ -176,6 +235,7 @@ interface Seed {
 }
 
 async function seedPublishedCourse(org: string): Promise<{
+  courseId: string
   versionId: string
   videoItemId: string
   examItemId: string
@@ -252,11 +312,12 @@ async function seedPublishedCourse(org: string): Promise<{
     `UPDATE elearning_course_versions SET status = 'published', updated_at = now() WHERE org_id = $1 AND id = $2`,
     [org, versionId],
   )
-  return { versionId, videoItemId, examItemId, examId }
+  return { courseId, versionId, videoItemId, examItemId, examId }
 }
 
 async function seedAssignment(org: string): Promise<Seed> {
-  const { versionId, videoItemId, examItemId, examId } = await seedPublishedCourse(org)
+  const { courseId, versionId, videoItemId, examItemId, examId } =
+    await seedPublishedCourse(org)
   const assignmentId = randomUUID()
   const [memberA, memberB, memberC] = sortedMemberIds()
   const users = {
@@ -300,6 +361,7 @@ async function seedAssignment(org: string): Promise<Seed> {
   )
   return {
     org,
+    courseId,
     assignmentId,
     versionId,
     videoItemId,
@@ -308,6 +370,53 @@ async function seedAssignment(org: string): Promise<Seed> {
     members: { a: memberA, b: memberB, c: memberC },
     users,
   }
+}
+
+async function seedActiveUser(userId: string, org: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO users (
+       id, email, name, password_hash, role, permissions,
+       is_active, is_admin, activation_status, local_password_set,
+       must_change_password, created_at, updated_at
+     ) VALUES (
+       $1, $2, $1, 'x', 'user', '[]'::jsonb,
+       TRUE, FALSE, 'activated', TRUE, FALSE, now(), now()
+     )`,
+    [userId, `${randomUUID()}@elearning-lifecycle.test`],
+  )
+  await pool.query(
+    `INSERT INTO user_orgs (user_id, org_id, is_active)
+     VALUES ($1, $2, TRUE)`,
+    [userId, org],
+  )
+}
+
+async function seedDirectoryAccount(input: {
+  integrationId: string
+  departmentId: string
+  userId: string
+}): Promise<void> {
+  const accountId = randomUUID()
+  const externalId = randomUUID()
+  await pool.query(
+    `INSERT INTO directory_accounts (
+       id, integration_id, provider, external_user_id, external_key,
+       name, is_active
+     ) VALUES ($1, $2, 'dingtalk', $3, $3, $4, TRUE)`,
+    [accountId, input.integrationId, externalId, input.userId],
+  )
+  await pool.query(
+    `INSERT INTO directory_account_departments (
+       directory_account_id, directory_department_id, is_primary
+     ) VALUES ($1, $2, TRUE)`,
+    [accountId, input.departmentId],
+  )
+  await pool.query(
+    `INSERT INTO directory_account_links (
+       id, directory_account_id, local_user_id, link_status
+     ) VALUES ($1, $2, $3, 'linked')`,
+    [randomUUID(), accountId, input.userId],
+  )
 }
 
 async function insertProgress(input: {
@@ -505,6 +614,137 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
       userId: seed.users.a,
     })
     expect(overdueLearner.some((course) => course.courseVersionId === seed.versionId)).toBe(true)
+  })
+
+  it('enforces exact collaborator actions and filters progress by management scope', async () => {
+    const org = orgId('delegated-access')
+    committedOrgIds.push(org)
+    const seed = await seedAssignment(org)
+    const admin = `${org}-admin`
+    const manager = `${org}-manager`
+    for (const userId of [admin, manager, ...Object.values(seed.users)]) {
+      await seedActiveUser(userId, org)
+    }
+
+    const integrationId = randomUUID()
+    const rootDepartmentId = randomUUID()
+    const outsideDepartmentId = randomUUID()
+    await pool.query(
+      `INSERT INTO directory_integrations (
+         id, org_id, provider, name, status, corp_id
+       ) VALUES ($1, $2, 'dingtalk', $3, 'active', $4)`,
+      [integrationId, org, `${org}-directory`, randomUUID()],
+    )
+    await pool.query(
+      `INSERT INTO directory_departments (
+         id, integration_id, provider, external_department_id,
+         external_parent_department_id, name, is_active
+       ) VALUES
+         ($1, $3, 'dingtalk', 'root', NULL, 'Root', TRUE),
+         ($2, $3, 'dingtalk', 'outside', NULL, 'Outside', TRUE)`,
+      [rootDepartmentId, outsideDepartmentId, integrationId],
+    )
+    await seedDirectoryAccount({
+      integrationId,
+      departmentId: rootDepartmentId,
+      userId: seed.users.a,
+    })
+    await seedDirectoryAccount({
+      integrationId,
+      departmentId: rootDepartmentId,
+      userId: seed.users.b,
+    })
+    await seedDirectoryAccount({
+      integrationId,
+      departmentId: outsideDepartmentId,
+      userId: seed.users.c,
+    })
+
+    await replaceElearningAdminScopes(db, {
+      orgId: org,
+      actorId: admin,
+      targetUserId: manager,
+      reason: 'root management scope',
+      scopes: [{ departmentId: rootDepartmentId, includeChildren: false }],
+    })
+    await replaceElearningObjectAcl(db, {
+      orgId: org,
+      actorId: admin,
+      isGlobalAdmin: true,
+      object: { courseId: seed.courseId },
+      granteeUserId: manager,
+      reason: 'track only',
+      actions: ['track'],
+    })
+
+    const visible = await listElearningAssignmentProgressAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      assignmentId: seed.assignmentId,
+    })
+    expect(visible.members.map((member) => member.userId)).toEqual([
+      seed.users.a,
+      seed.users.b,
+    ])
+    expect(visible.members.some((member) => member.userId === seed.users.c))
+      .toBe(false)
+
+    await replaceElearningAdminScopes(db, {
+      orgId: org,
+      actorId: admin,
+      targetUserId: manager,
+      reason: 'temporarily remove scope',
+      scopes: [],
+    })
+    await expect(listElearningAssignmentProgressAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      assignmentId: seed.assignmentId,
+    })).rejects.toMatchObject({ code: 'scope_required' })
+    await replaceElearningAdminScopes(db, {
+      orgId: org,
+      actorId: admin,
+      targetUserId: manager,
+      reason: 'restore root scope',
+      scopes: [{ departmentId: rootDepartmentId, includeChildren: false }],
+    })
+
+    await expect(assignElearningDirectAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      targetUserId: seed.users.a,
+      courseVersionId: seed.versionId,
+      sourceKey: `${org}-track-cannot-assign`,
+    })).rejects.toMatchObject({ code: 'forbidden' })
+
+    await replaceElearningObjectAcl(db, {
+      orgId: org,
+      actorId: admin,
+      isGlobalAdmin: true,
+      object: { courseId: seed.courseId },
+      granteeUserId: manager,
+      reason: 'assign only',
+      actions: ['assign'],
+    })
+    await expect(setElearningCourseScopeAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      courseId: seed.courseId,
+      reason: 'assign cannot change scope',
+      rules: [{ subjectType: 'user', subjectRef: seed.users.a }],
+    })).rejects.toMatchObject({ code: 'forbidden' })
+    await expect(assignElearningDirectAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      targetUserId: seed.users.c,
+      courseVersionId: seed.versionId,
+      sourceKey: `${org}-outside-target`,
+    })).rejects.toMatchObject({ code: 'target_out_of_scope' })
   })
 
   it('isolates lookup and revocation to the authoritative org', async () => {

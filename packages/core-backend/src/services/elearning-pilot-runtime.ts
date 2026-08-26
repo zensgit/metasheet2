@@ -17,7 +17,6 @@ import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
 import type {
-  AssignElearningBatchInput,
   ElearningBatchAssignmentDb,
   ElearningBatchAssignmentResult,
 } from './elearning-batch-assignment'
@@ -28,7 +27,6 @@ import {
   type PublishElearningCourseInput,
 } from './elearning-course-publish'
 import type {
-  AssignElearningDirectInput,
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
 } from './elearning-direct-assignment'
@@ -61,9 +59,7 @@ import type {
   StartElearningWatchInput,
 } from './elearning-watch-progress'
 import {
-  setElearningCourseScope,
   type ElearningScopeDb,
-  type SetElearningCourseScopeInput,
   type SetElearningCourseScopeResult,
 } from './elearning-scope'
 import {
@@ -76,17 +72,24 @@ import {
   type PublishElearningTrainingPlanInput,
 } from './elearning-training-plan'
 import {
-  assignElearningTrainingPlan,
-  type AssignElearningTrainingPlanInput,
   type ElearningTrainingPlanAssignmentDb,
   type ElearningTrainingPlanAssignmentResult,
 } from './elearning-training-plan-assignment'
 import {
-  revokeElearningTrainingPlanAssignment,
   type ElearningTrainingPlanRevocationDb,
   type ElearningTrainingPlanRevocationResult,
-  type RevokeElearningTrainingPlanAssignmentInput,
 } from './elearning-training-plan-revocation'
+import {
+  assignElearningTrainingPlanAuthorized,
+  revokeElearningTrainingPlanAssignmentAuthorized,
+  setElearningCourseScopeAuthorized,
+  type AssignElearningBatchAuthorizedInput,
+  type AssignElearningDirectAuthorizedInput,
+  type AssignElearningTrainingPlanAuthorizedInput,
+  type ElearningAdminOperationDb,
+  type RevokeElearningTrainingPlanAssignmentAuthorizedInput,
+  type SetElearningCourseScopeAuthorizedInput,
+} from './elearning-admin-operations'
 
 export interface ElearningPilotRuntime {
   router: ExpressRouter
@@ -104,7 +107,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningTrainingPlanDb &
     ElearningTrainingPlanAssignmentDb &
     ElearningTrainingPlanRevocationDb &
-    ElearningAdminAccessDb
+    ElearningAdminAccessDb &
+    ElearningAdminOperationDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -115,11 +119,11 @@ export interface ElearningPilotRuntimeOptions {
   isGlobalAdmin?: (req: Request) => boolean
   assignElearningDirect?: (
     db: ElearningDirectAssignmentDb,
-    input: AssignElearningDirectInput,
+    input: AssignElearningDirectAuthorizedInput,
   ) => Promise<ElearningDirectAssignmentResult>
   assignElearningBatch?: (
     db: ElearningBatchAssignmentDb,
-    input: AssignElearningBatchInput,
+    input: AssignElearningBatchAuthorizedInput,
   ) => Promise<ElearningBatchAssignmentResult>
   startElearningWatch?: (
     db: ElearningWatchDb,
@@ -151,7 +155,7 @@ export interface ElearningPilotRuntimeOptions {
   ) => Promise<ElearningLearnerCourse[]>
   setElearningCourseScope?: (
     db: ElearningScopeDb,
-    input: SetElearningCourseScopeInput,
+    input: SetElearningCourseScopeAuthorizedInput,
   ) => Promise<SetElearningCourseScopeResult>
   publishElearningTrainingPlan?: (
     db: ElearningTrainingPlanDb,
@@ -163,11 +167,11 @@ export interface ElearningPilotRuntimeOptions {
   ) => Promise<ElearningTrainingPlan>
   assignElearningTrainingPlan?: (
     db: ElearningTrainingPlanAssignmentDb,
-    input: AssignElearningTrainingPlanInput,
+    input: AssignElearningTrainingPlanAuthorizedInput,
   ) => Promise<ElearningTrainingPlanAssignmentResult>
   revokeElearningTrainingPlanAssignment?: (
     db: ElearningTrainingPlanRevocationDb,
-    input: RevokeElearningTrainingPlanAssignmentInput,
+    input: RevokeElearningTrainingPlanAssignmentAuthorizedInput,
   ) => Promise<ElearningTrainingPlanRevocationResult>
 }
 
@@ -224,16 +228,16 @@ export function createElearningPilotRuntime(
     listElearningLearnerCourses:
       opts.listElearningLearnerCourses ?? listElearningLearnerCourses,
     setElearningCourseScope:
-      opts.setElearningCourseScope ?? setElearningCourseScope,
+      opts.setElearningCourseScope ?? setElearningCourseScopeAuthorized,
     publishElearningTrainingPlan:
       opts.publishElearningTrainingPlan ?? publishElearningTrainingPlan,
     getElearningTrainingPlan:
       opts.getElearningTrainingPlan ?? getElearningTrainingPlan,
     assignElearningTrainingPlan:
-      opts.assignElearningTrainingPlan ?? assignElearningTrainingPlan,
+      opts.assignElearningTrainingPlan ?? assignElearningTrainingPlanAuthorized,
     revokeElearningTrainingPlanAssignment:
       opts.revokeElearningTrainingPlanAssignment
-      ?? revokeElearningTrainingPlanAssignment,
+      ?? revokeElearningTrainingPlanAssignmentAuthorized,
   })
   if (!inner) return null
 

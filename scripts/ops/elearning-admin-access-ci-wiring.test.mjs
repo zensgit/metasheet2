@@ -20,6 +20,7 @@ const wiringFile = 'scripts/ops/elearning-admin-access-ci-wiring.test.mjs'
 const unitFiles = [
   'tests/unit/elearning-admin-access-routes.test.ts',
   'tests/unit/elearning-admin-access.test.ts',
+  'tests/unit/elearning-admin-operations.test.ts',
 ]
 const dbFile = 'tests/integration/elearning-admin-access.db.test.ts'
 
@@ -58,6 +59,7 @@ test('migration, service, isolated routes, runtime, and OpenAPI are present', ()
   for (const file of [
     'packages/core-backend/src/db/migrations/zzzz20260826200000_create_elearning_admin_scope_acl.ts',
     'packages/core-backend/src/services/elearning-admin-access.ts',
+    'packages/core-backend/src/services/elearning-admin-operations.ts',
     'packages/core-backend/src/routes/elearning-admin-access.ts',
     'packages/core-backend/src/routes/elearning-pilot.ts',
     'packages/core-backend/src/services/elearning-pilot-runtime.ts',
@@ -71,6 +73,8 @@ test('migration, service, isolated routes, runtime, and OpenAPI are present', ()
     'utf8',
   )
   assert.match(runtime, /rbacGuardAny\(\['elearning:write', 'elearning:admin'\]\)/)
+  assert.match(runtime, /setElearningCourseScopeAuthorized/)
+  assert.match(runtime, /assignElearningTrainingPlanAuthorized/)
   const route = readFileSync(
     join(repoRoot, 'packages/core-backend/src/routes/elearning-admin-access.ts'),
     'utf8',

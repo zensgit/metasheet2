@@ -105,6 +105,7 @@ describe('POST /api/elearning/assignments/batch', () => {
     expect(fixture.calls).toEqual([{
       orgId: ORG,
       actorId: ACTOR,
+      isGlobalAdmin: false,
       courseVersionId: VERSION,
       sourceKey: BODY.sourceKey,
       deadline: '2026-12-31T00:00:00.000Z',

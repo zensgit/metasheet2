@@ -3,7 +3,7 @@ import request from 'supertest'
 import { describe, expect, it } from 'vitest'
 
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
-import type { AssignElearningBatchInput } from '../../src/services/elearning-batch-assignment'
+import type { AssignElearningBatchAuthorizedInput } from '../../src/services/elearning-admin-operations'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-batch-runtime'
@@ -21,7 +21,7 @@ const pinned = usePinnedServer()
 
 describe('batch assignment production runtime wiring', () => {
   it('mounts JWT before the inner route and forwards the injected batch service', async () => {
-    const calls: AssignElearningBatchInput[] = []
+    const calls: AssignElearningBatchAuthorizedInput[] = []
     const db = {
       query: async () => ({ rows: [], rowCount: 0 }),
       transaction: async <T>(handler: (tx: { query: typeof db.query }) => Promise<T>) =>
@@ -36,6 +36,7 @@ describe('batch assignment production runtime wiring', () => {
         next()
       },
       adminGuard: (_req, _res, next) => next(),
+      writeGuard: (_req, _res, next) => next(),
       readGuard: (_req, _res, next) => next(),
       assignElearningBatch: async (_db, input) => {
         calls.push(input)
@@ -64,6 +65,7 @@ describe('batch assignment production runtime wiring', () => {
     expect(calls).toEqual([{
       orgId: ORG,
       actorId: ACTOR,
+      isGlobalAdmin: false,
       courseVersionId: VERSION,
       sourceKey: 'batch-runtime-source',
       deadline: undefined,

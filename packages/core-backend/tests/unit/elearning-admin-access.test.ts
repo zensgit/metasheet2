@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  assertAnyElearningUserWithinAdminScope,
   assertElearningRulesWithinAdminScope,
   assertElearningUsersWithinAdminScope,
   authorizeElearningObjectAction,
@@ -271,6 +272,12 @@ describe('e-learning delegated action and management-scope checks', () => {
       isGlobalAdmin: false,
       userIds: ['user-a', 'user-b'],
     })).rejects.toMatchObject({ code: 'target_out_of_scope' })
+    await expect(assertAnyElearningUserWithinAdminScope(uncovered, {
+      orgId: ORG,
+      actorId: ACTOR,
+      isGlobalAdmin: false,
+      userIds: ['user-a', 'user-b'],
+    })).resolves.toBeUndefined()
     expect(uncovered.calls[0]?.sql).toMatch(/NOT child\.id = ANY\(parent\.path\)/)
 
     const noScope = new ScriptDb(() => result([{
@@ -284,6 +291,18 @@ describe('e-learning delegated action and management-scope checks', () => {
       isGlobalAdmin: false,
       userIds: ['user-a'],
     })).rejects.toMatchObject({ code: 'scope_required' })
+
+    const noneCovered = new ScriptDb(() => result([{
+      scope_count: 1n,
+      target_count: 1n,
+      covered_count: 0n,
+    }]))
+    await expect(assertAnyElearningUserWithinAdminScope(noneCovered, {
+      orgId: ORG,
+      actorId: ACTOR,
+      isGlobalAdmin: false,
+      userIds: ['user-a'],
+    })).rejects.toMatchObject({ code: 'target_out_of_scope' })
   })
 
   it('denies dynamic rules and proves department expansion structurally', async () => {
