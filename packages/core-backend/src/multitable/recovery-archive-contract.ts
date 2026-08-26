@@ -1,5 +1,5 @@
 /**
- * Time Machine Phase D2a only: pure recovery-archive contract and flag shape.
+ * Time Machine Phase D2a/D2b only: pure recovery-archive contract and flag shape.
  *
  * This module has no production caller. It does not implement archive creation,
  * canonical serialization, MAC/AEAD, storage, database, or prune behavior.
@@ -49,6 +49,17 @@ export const RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY = [
   'mutable',
   'drifted',
 ] as const
+export const RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES = [
+  'section',
+  'attachment',
+  'manifest',
+] as const
+export const RECOVERY_ARCHIVE_STAGING_OBJECT_STATES = [
+  'pending',
+  'sealed',
+  'deleted',
+  'absent',
+] as const
 
 export type RecoveryArchiveSectionName = (typeof RECOVERY_ARCHIVE_V1_SECTION_NAMES)[number]
 export type RecoveryArchivePayloadState = (typeof RECOVERY_ARCHIVE_PAYLOAD_STATES)[number]
@@ -58,6 +69,8 @@ export type RecoveryArchiveCoverageSourceKind = (typeof RECOVERY_ARCHIVE_COVERAG
 export type RecoveryArchiveAttachmentReferenceClass = (typeof RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_CLASSES)[number]
 export type RecoveryArchiveAttachmentReferenceState = (typeof RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_STATES)[number]
 export type RecoveryArchiveAttachmentAvailability = (typeof RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY)[number]
+export type RecoveryArchiveStagingObjectClass = (typeof RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES)[number]
+export type RecoveryArchiveStagingObjectState = (typeof RECOVERY_ARCHIVE_STAGING_OBJECT_STATES)[number]
 
 /**
  * D2a-only integrity projection of a v1 section descriptor. Additional
@@ -82,6 +95,8 @@ export type RecoveryArchiveContractErrorCode =
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_REFERENCE_CLASS'
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_REFERENCE_STATE'
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_AVAILABILITY'
+  | 'RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_CLASS'
+  | 'RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_STATE'
   | 'RECOVERY_ARCHIVE_INVALID_SECTION_DESCRIPTORS'
 
 /** Values-free failure surface for Phase D2a contract validation. */
@@ -197,6 +212,30 @@ export function assertRecoveryArchiveAttachmentAvailability(
 ): asserts value is RecoveryArchiveAttachmentAvailability {
   if (!isRecoveryArchiveAttachmentAvailability(value)) {
     throwContractError('RECOVERY_ARCHIVE_INVALID_ATTACHMENT_AVAILABILITY')
+  }
+}
+
+export function isRecoveryArchiveStagingObjectClass(value: unknown): value is RecoveryArchiveStagingObjectClass {
+  return isClosedValue(RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES, value)
+}
+
+export function assertRecoveryArchiveStagingObjectClass(
+  value: unknown,
+): asserts value is RecoveryArchiveStagingObjectClass {
+  if (!isRecoveryArchiveStagingObjectClass(value)) {
+    throwContractError('RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_CLASS')
+  }
+}
+
+export function isRecoveryArchiveStagingObjectState(value: unknown): value is RecoveryArchiveStagingObjectState {
+  return isClosedValue(RECOVERY_ARCHIVE_STAGING_OBJECT_STATES, value)
+}
+
+export function assertRecoveryArchiveStagingObjectState(
+  value: unknown,
+): asserts value is RecoveryArchiveStagingObjectState {
+  if (!isRecoveryArchiveStagingObjectState(value)) {
+    throwContractError('RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_STATE')
   }
 }
 

@@ -11,16 +11,19 @@ import {
   wholeFileVitestArgs,
 } from './ci-realdb-step-contract.mjs'
 
-// Time Machine D2a is a DATABASE_URL-gated real-DB proof. Its two load-bearing CI placements
-// must stay in sync: direct `test.exclude` keeps the no-DB job from skip-greening it, and the
-// exact-id real-DB step names the whole file. Parse both structures so comments, heredocs, title
-// decoys, wrong steps, and similarly named files cannot satisfy the contract.
+// Time Machine D2 is DATABASE_URL-gated real-DB proof. Each load-bearing spec must stay in both
+// placements: direct `test.exclude` keeps the no-DB job from skip-greening it, and the exact-id
+// real-DB step names the whole file. Parse both structures so comments, heredocs, title decoys,
+// wrong steps, and similarly named files cannot satisfy the contract.
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const FILE = 'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts'
+const FILES = [
+  'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
+]
 const CONFIG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const INSTALL_STEP_MARKER = '      - name: Install dependencies (with log)\n'
-const BEHAVIOR_STEP_MARKER = '      - name: Time Machine D2a archive-catalog fail-not-skip behavior\n'
+const BEHAVIOR_STEP_MARKER = '      - name: Time Machine D2 archive real-DB fail-not-skip behavior\n'
 
 function jobBody(workflow, jobName) {
   const marker = `  ${jobName}:\n`
@@ -35,16 +38,18 @@ function jobBody(workflow, jobName) {
   return nextJob ? remainder.slice(0, nextJob.index) : remainder
 }
 
-test('Time Machine D2a archive-catalog proof is exactly two-point wired', () => {
+test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
   const config = readFileSync(CONFIG, 'utf8')
   const excludeBody = extractTestExcludeArrayBody(config)
   assert.notEqual(excludeBody, null, 'vitest.config.ts must have a direct test.exclude array')
-  const exclusions = quotedExcludeEntries(excludeBody).filter((entry) => entry === FILE)
-  assert.equal(
-    exclusions.length,
-    1,
-    `test.exclude must contain exactly one quoted ${FILE} entry`,
-  )
+  const exclusions = quotedExcludeEntries(excludeBody)
+  for (const file of FILES) {
+    assert.equal(
+      exclusions.filter((entry) => entry === file).length,
+      1,
+      `test.exclude must contain exactly one quoted ${file} entry`,
+    )
+  }
 
   const workflow = readFileSync(WORKFLOW, 'utf8')
   const testJob = jobBody(workflow, 'test')
@@ -56,23 +61,25 @@ test('Time Machine D2a archive-catalog proof is exactly two-point wired', () => 
   assert.equal(
     testJob.split(BEHAVIOR_STEP_MARKER).length - 1,
     1,
-    'the required test job must contain exactly one D2a fail-not-skip behavior step',
+    'the required test job must contain exactly one D2 fail-not-skip behavior step',
   )
   assert.ok(
     testJob.indexOf(BEHAVIOR_STEP_MARKER) > testJob.indexOf(INSTALL_STEP_MARKER),
-    'the D2a behavioral fail-not-skip proof must run after dependencies are installed',
+    'the D2 behavioral fail-not-skip proof must run after dependencies are installed',
   )
   const step = requireExecutableRealDbStep(workflow, REAL_DB_STEP_IDS.multitable)
   assert.ok(step.env && typeof step.env === 'object' && !Array.isArray(step.env))
   assert.equal(
     step.env.METASHEET_REAL_DB_TEST_STEP,
     '1',
-    `${REAL_DB_STEP_IDS.multitable} must arm the D2a fail-not-skip marker with exact string '1'`,
+    `${REAL_DB_STEP_IDS.multitable} must arm the D2 fail-not-skip marker with exact string '1'`,
   )
-  const fileArgs = wholeFileVitestArgs(step).filter((arg) => arg === FILE)
-  assert.equal(
-    fileArgs.length,
-    1,
-    `the parsed ${REAL_DB_STEP_IDS.multitable} step must contain exactly one whole-file Vitest argument ${FILE}`,
-  )
+  const fileArgs = wholeFileVitestArgs(step)
+  for (const file of FILES) {
+    assert.equal(
+      fileArgs.filter((arg) => arg === file).length,
+      1,
+      `the parsed ${REAL_DB_STEP_IDS.multitable} step must contain exactly one whole-file Vitest argument ${file}`,
+    )
+  }
 })

@@ -16,6 +16,7 @@ import * as authorityLocks from '../../src/db/migrations/zzzz20260721121000_add_
 import * as authorityCorrection from '../../src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks'
 import * as authoritySearchPath from '../../src/db/migrations/zzzz20260821120000_recovery_authority_functions_fix_search_path'
 import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
+import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -110,6 +111,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260826120000_create_meta_recovery_archive_catalog',
     module: recoveryArchiveCatalog,
   },
+  {
+    name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
+    module: recoveryArchiveStagingCleanup,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -134,6 +139,7 @@ const TOUCHED_RELATIONS = [
   'meta_recovery_archives',
   'meta_recovery_archive_coverage_items',
   'meta_recovery_archive_attachment_refs',
+  'meta_recovery_archive_staging_objects',
 ]
 
 const OWNED_RELATIONS = [
@@ -148,6 +154,7 @@ const OWNED_RELATIONS = [
   'meta_recovery_archives',
   'meta_recovery_archive_coverage_items',
   'meta_recovery_archive_attachment_refs',
+  'meta_recovery_archive_staging_objects',
 ]
 
 const OWNED_COLUMNS = [
@@ -157,6 +164,9 @@ const OWNED_COLUMNS = [
   ['meta_record_revisions', 'operation_id'],
   ['meta_sheets', 'recovery_writer_state'],
   ['meta_sheets', 'system_kind'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_kind'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_id'],
+  ['meta_recovery_archive_attachment_refs', 'cleanup_owner_fence'],
 ] as const
 
 // These indexes are created on relations that predate at least one migration in this replay set.
@@ -199,6 +209,13 @@ const RECOVERY_ARCHIVE_FUNCTIONS = [
   'meta_recovery_archive_coverage_guard_row',
   'meta_recovery_archive_attachment_ref_guard_row',
   'meta_recovery_archive_attachment_finalize_guard_row',
+  'meta_recovery_archive_abandoned_cleanup_claim_guard_row',
+  'meta_recovery_archive_claim_abandoned_cleanup',
+  'meta_recovery_archive_staging_object_guard_row',
+  'meta_recovery_archive_staging_object_finalize_guard_row',
+  'meta_recovery_archive_attachment_ref_cleanup_guard_row',
+  'meta_recovery_archive_attachment_cleanup_finalize_guard_row',
+  'meta_recovery_archive_release_abandoned_source_pin',
 ]
 
 const OWNED_FUNCTIONS = [
@@ -219,6 +236,10 @@ const RECOVERY_ARCHIVE_TRIGGERS = [
   'trg_meta_recovery_archive_coverage_guard_row',
   'trg_meta_recovery_archive_attachment_ref_guard_row',
   'trg_meta_recovery_archive_attachment_finalize_guard_row',
+  'trg_meta_recovery_archive_abandoned_cleanup_claim_guard_row',
+  'trg_meta_recovery_archive_staging_object_guard_row',
+  'trg_meta_recovery_archive_staging_object_finalize_guard_row',
+  'trg_meta_recovery_archive_attachment_cleanup_finalize_guard_row',
 ]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,

@@ -5,6 +5,7 @@ import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
+import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
@@ -57,6 +58,7 @@ const TABLES = [
   'meta_recovery_archives',
   'meta_recovery_archive_coverage_items',
   'meta_recovery_archive_attachment_refs',
+  'meta_recovery_archive_staging_objects',
 ] as const
 
 const FUNCTIONS = [
@@ -64,6 +66,13 @@ const FUNCTIONS = [
   'meta_recovery_archive_coverage_guard_row',
   'meta_recovery_archive_attachment_ref_guard_row',
   'meta_recovery_archive_attachment_finalize_guard_row',
+  'meta_recovery_archive_abandoned_cleanup_claim_guard_row',
+  'meta_recovery_archive_claim_abandoned_cleanup',
+  'meta_recovery_archive_staging_object_guard_row',
+  'meta_recovery_archive_staging_object_finalize_guard_row',
+  'meta_recovery_archive_attachment_ref_cleanup_guard_row',
+  'meta_recovery_archive_attachment_cleanup_finalize_guard_row',
+  'meta_recovery_archive_release_abandoned_source_pin',
 ] as const
 
 const INDEXES = [
@@ -71,6 +80,7 @@ const INDEXES = [
   'idx_meta_recovery_archive_coverage_source',
   'idx_meta_recovery_archives_anchor',
   'idx_meta_recovery_archives_sheet_state',
+  'idx_meta_recovery_archive_staging_generation_state',
 ] as const
 
 const SOURCE_KINDS = RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS
@@ -274,6 +284,7 @@ async function truncateCatalog(): Promise<void> {
   if (!schemaIsUp) return
   await q(
     `TRUNCATE TABLE
+       meta_recovery_archive_staging_objects,
        meta_recovery_archive_attachment_refs,
        meta_recovery_archive_coverage_items,
        meta_recovery_archives`,
@@ -419,12 +430,27 @@ async function installCatalogIfAbsent(): Promise<void> {
     `SELECT name,
             pg_catalog.to_regclass('public.' || name) IS NOT NULL AS present
        FROM unnest($1::text[]) AS owned_tables(name)`,
-    [TABLES],
+    [TABLES.slice(0, 3)],
   )
   const presentCount = result.rows.filter((row) => row.present).length
   if (presentCount === 0) await archiveCatalogMigration.up(db)
-  else if (presentCount !== TABLES.length) throw new Error('recovery_archive_catalog_partial_schema')
+  else if (presentCount !== 3) throw new Error('recovery_archive_catalog_partial_schema')
+
+  const cleanupPresent = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_staging_objects') IS NOT NULL AS present`,
+  )
+  if (!cleanupPresent.rows[0]?.present) await stagingCleanupMigration.up(db)
   schemaIsUp = true
+}
+
+async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
+  await stagingCleanupMigration.down(target)
+  await archiveCatalogMigration.down(target)
+}
+
+async function upCatalogStack(target: Kysely<unknown>): Promise<void> {
+  await archiveCatalogMigration.up(target)
+  await stagingCleanupMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -558,7 +584,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   afterAll(async () => {
     try {
       if (!schemaIsUp) {
-        await archiveCatalogMigration.up(db)
+        await upCatalogStack(db)
         schemaIsUp = true
       }
       await truncateCatalog()
@@ -1468,7 +1494,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     expect(posture.rows).toEqual([{ state: 'building', source_refs: 1, archive_refs: 0 }])
   })
 
-  test('abandoned source pins remain fail-closed until owner-fence cleanup lands', async () => {
+  test('abandoned source pins remain fail-closed without owner-fence cleanup authorization', async () => {
     const archive = await insertArchive()
     const attachmentId = await insertAttachmentRef(archive.generationId)
     await q(
@@ -1682,7 +1708,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     await insertCoverage(archive.generationId)
     await insertAttachmentRef(archive.generationId)
 
-    const refusal = await errorOf(archiveCatalogMigration.down(db))
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => downCatalogStack(trx)),
+    )
     expect(refusal.message).toBe('recovery_archive_catalog_nonempty')
     expectValuesFree(refusal, [WORKSPACE, BASE, SHEET, OWNER])
     expect(await catalogSurface()).toEqual({
@@ -1693,16 +1721,16 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     expect(await catalogFingerprint()).toBe(initialFingerprint)
 
     await truncateCatalog()
-    await archiveCatalogMigration.down(db)
+    await downCatalogStack(db)
     schemaIsUp = false
     try {
       expect(await catalogSurface()).toEqual({ tables: [], functions: [], indexes: [] })
-      await archiveCatalogMigration.up(db)
+      await upCatalogStack(db)
       schemaIsUp = true
       expect(await catalogFingerprint()).toBe(initialFingerprint)
     } finally {
       if (!schemaIsUp) {
-        await archiveCatalogMigration.up(db)
+        await upCatalogStack(db)
         schemaIsUp = true
       }
     }
@@ -1711,12 +1739,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        await archiveCatalogMigration.down(trx)
+        await downCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_sheets
           RENAME COLUMN system_kind TO system_kind_d2a_drift
         `.execute(trx)
-        await archiveCatalogMigration.up(trx)
+        await upCatalogStack(trx)
         throw new Error('recovery_archive_source_schema_guard_missing')
       }),
     )
@@ -1728,9 +1756,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on an owned-name collision and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        await archiveCatalogMigration.down(trx)
+        await downCatalogStack(trx)
         await sql`CREATE TABLE public.meta_recovery_archives (drifted text)`.execute(trx)
-        await archiveCatalogMigration.up(trx)
+        await upCatalogStack(trx)
         throw new Error('recovery_archive_owned_object_guard_missing')
       }),
     )

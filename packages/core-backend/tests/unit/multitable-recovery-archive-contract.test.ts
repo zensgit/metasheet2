@@ -11,6 +11,8 @@ import {
   assertRecoveryArchiveCoverageSourceKind,
   assertRecoveryArchiveCoverageStatus,
   assertRecoveryArchivePayloadState,
+  assertRecoveryArchiveStagingObjectClass,
+  assertRecoveryArchiveStagingObjectState,
   assertRecoveryArchiveV1SectionIntegrityProjection,
   isMultitableRecoveryArchiveEnabled,
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
@@ -21,6 +23,8 @@ import {
   RECOVERY_ARCHIVE_COVERAGE_STATUSES,
   RECOVERY_ARCHIVE_FORMAT_VERSION,
   RECOVERY_ARCHIVE_PAYLOAD_STATES,
+  RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES,
+  RECOVERY_ARCHIVE_STAGING_OBJECT_STATES,
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
   RecoveryArchiveContractError,
   type RecoveryArchiveSectionIntegrityProjection,
@@ -160,6 +164,30 @@ describe('Time Machine D2a closed contract values', () => {
     expectContractError(
       () => assertRecoveryArchiveAttachmentAvailability('hash_mismatch'),
       'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_AVAILABILITY',
+    )
+  })
+
+  test('pins exact staging object class and lifecycle tokens', () => {
+    expect(RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES).toEqual([
+      'section',
+      'attachment',
+      'manifest',
+    ])
+    expect(RECOVERY_ARCHIVE_STAGING_OBJECT_STATES).toEqual([
+      'pending',
+      'sealed',
+      'deleted',
+      'absent',
+    ])
+    assertClosedEnum(
+      RECOVERY_ARCHIVE_STAGING_OBJECT_CLASSES,
+      assertRecoveryArchiveStagingObjectClass,
+      'RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_CLASS',
+    )
+    assertClosedEnum(
+      RECOVERY_ARCHIVE_STAGING_OBJECT_STATES,
+      assertRecoveryArchiveStagingObjectState,
+      'RECOVERY_ARCHIVE_INVALID_STAGING_OBJECT_STATE',
     )
   })
 })

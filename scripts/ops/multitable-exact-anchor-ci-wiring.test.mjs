@@ -297,6 +297,7 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260728120000_correct_recovery_authority_locks',
   'zzzz20260821120000_recovery_authority_functions_fix_search_path',
   'zzzz20260826120000_create_meta_recovery_archive_catalog',
+  'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
@@ -376,7 +377,7 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 13 Time Machine migrations in causal order',
+    'verifier must exercise the exact 14 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
@@ -449,17 +450,17 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 13 Time Machine migrations/,
+    /exact 14 Time Machine migrations/,
   )
 
-  const missingArchiveCatalog = verifier.replace(
-    "  {\n    name: 'zzzz20260826120000_create_meta_recovery_archive_catalog',\n    module: recoveryArchiveCatalog,\n  },\n",
+  const missingArchiveCleanup = verifier.replace(
+    "  {\n    name: 'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',\n    module: recoveryArchiveStagingCleanup,\n  },\n",
     '',
   )
-  assert.notEqual(missingArchiveCatalog, verifier, 'archive-catalog removal mutation must apply')
+  assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
   assert.throws(
-    () => migrationReplayContract(workflow, missingArchiveCatalog),
-    /exact 13 Time Machine migrations/,
+    () => migrationReplayContract(workflow, missingArchiveCleanup),
+    /exact 14 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(

@@ -593,7 +593,7 @@ jobs:
           name: install-log-${{ matrix.node-version }}
           path: install.log
 
-      - name: Time Machine D2a archive-catalog fail-not-skip behavior
+      - name: Time Machine D2 archive real-DB fail-not-skip behavior
         run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
 
       - name: Run attendance calculation-group W1 contract
@@ -1070,6 +1070,7 @@ jobs:
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
             tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
