@@ -728,3 +728,107 @@ describe('Time Machine D2g owner fourth-pass: accessors are not JSON data', () =
     expect(canonicalizeRecoveryArchiveJson([1])).toBe('[1]')
   })
 })
+
+describe('Time Machine D2g owner fifth-pass: Proxy values are snapshotted once', () => {
+  function withHostileGet<T extends object>(target: T, replacement: unknown) {
+    let reads = 0
+    const proxy = new Proxy(target, {
+      get(_target, _key, _receiver) {
+        reads += 1
+        return replacement
+      },
+    })
+    return { proxy, reads: () => reads }
+  }
+
+  test('build snapshots binding descriptors and never consumes a later Proxy get value', () => {
+    const hostile = withHostileGet({ ...BINDING }, '')
+    const built = buildRecoveryArchiveManifest(
+      hostile.proxy as RecoveryArchiveManifestBinding,
+      goldenSections(),
+    )
+    expect(hostile.reads()).toBe(0)
+    expect(built.manifest.sheet_id).toBe(BINDING.sheet_id)
+  })
+
+  test('validate snapshots the stored manifest and section descriptors before use', () => {
+    const built = buildRecoveryArchiveManifest(BINDING, goldenSections())
+    const stored = JSON.parse(built.manifestJson)
+    const sectionHostile = withHostileGet(stored.sections[0], '')
+    stored.sections[0] = sectionHostile.proxy
+    const manifestHostile = withHostileGet(stored, '')
+
+    const validated = validateRecoveryArchiveManifest(manifestHostile.proxy)
+    expect(manifestHostile.reads()).toBe(0)
+    expect(sectionHostile.reads()).toBe(0)
+    expect(validated.root_hash).toBe(built.manifest.root_hash)
+  })
+
+  test('build snapshots section input and row envelope descriptors before use', () => {
+    const sections = goldenSections()
+    const rowHostile = withHostileGet(RECORD_ROW_NESTED, '')
+    const sectionHostile = withHostileGet(
+      { ...sections[1], rows: [rowHostile.proxy] },
+      '',
+    )
+    sections[1] = sectionHostile.proxy as RecoveryArchiveSectionBuildInput
+
+    const built = buildRecoveryArchiveManifest(BINDING, sections)
+    expect(sectionHostile.reads()).toBe(0)
+    expect(rowHostile.reads()).toBe(0)
+    expect(built.manifest.sections[1].row_count).toBe('1')
+  })
+
+  test('canonical JSON snapshots object and array descriptors instead of invoking Proxy get traps', () => {
+    const objectHostile = withHostileGet({ stable: 'descriptor-value' }, 'get-trap-value')
+    const arrayHostile = withHostileGet(['descriptor-value'], 'get-trap-value')
+    expect(canonicalizeRecoveryArchiveJson({ object: objectHostile.proxy, array: arrayHostile.proxy })).toBe(
+      '{"array":["descriptor-value"],"object":{"stable":"descriptor-value"}}',
+    )
+    expect(objectHostile.reads()).toBe(0)
+    expect(arrayHostile.reads()).toBe(0)
+  })
+
+  test('each schema-bound descriptor is captured once even when its Proxy trap changes later', () => {
+    const descriptorReads = new Map<PropertyKey, number>()
+    const binding = new Proxy({ ...BINDING }, {
+      getOwnPropertyDescriptor(target, key) {
+        descriptorReads.set(key, (descriptorReads.get(key) ?? 0) + 1)
+        const descriptor = Reflect.getOwnPropertyDescriptor(target, key)
+        if (key === 'sheet_id' && descriptor && 'value' in descriptor) {
+          return { ...descriptor, value: descriptorReads.get(key) === 1 ? BINDING.sheet_id : '' }
+        }
+        return descriptor
+      },
+      get() {
+        throw new Error('schema values must not be read through Proxy get')
+      },
+    })
+
+    expect(buildRecoveryArchiveManifest(binding, goldenSections()).manifest.sheet_id).toBe(BINDING.sheet_id)
+    for (const key of Object.keys(BINDING)) expect(descriptorReads.get(key)).toBe(1)
+  })
+
+  test('reflection trap failures become values-free typed manifest errors', () => {
+    const binding = new Proxy({ ...BINDING }, {
+      ownKeys() {
+        throw new Error(`secret-${BINDING.sheet_id}`)
+      },
+    })
+    expectManifestError(
+      () => buildRecoveryArchiveManifest(binding, goldenSections()),
+      'RECOVERY_ARCHIVE_MANIFEST_INVALID_BINDING',
+    )
+
+    const revoked = Proxy.revocable({ ...BINDING }, {})
+    revoked.revoke()
+    expectManifestError(
+      () => buildRecoveryArchiveManifest(revoked.proxy, goldenSections()),
+      'RECOVERY_ARCHIVE_MANIFEST_INVALID_BINDING',
+    )
+    expectManifestError(
+      () => canonicalizeRecoveryArchiveJson(revoked.proxy),
+      'RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON',
+    )
+  })
+})

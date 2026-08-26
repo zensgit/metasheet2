@@ -203,13 +203,14 @@ export function canonicalizeRecoveryArchiveSectionRows(
   sectionName: RecoveryArchiveSectionName,
   rows: readonly RecoveryArchiveRowEnvelope[],
 ): RecoveryArchiveSectionCanonicalization {
-  if (!Array.isArray(rows)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE')
-  }
+  const rowSnapshot = snapshotDenseArrayValues(
+    rows,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE',
+  )
 
   const seenEntityKeys = new Set<string>()
   const canonicalRows: RecoveryArchiveRowEnvelope[] = []
-  for (const row of rows) {
+  for (const row of rowSnapshot) {
     const envelope = validateRowEnvelope(row)
     validateEntityKeyForSection(sectionName, envelope.entity_key)
     if (seenEntityKeys.has(envelope.entity_key)) {
@@ -249,24 +250,31 @@ export function buildRecoveryArchiveManifest(
 ): RecoveryArchiveManifestBuildResult {
   // D-A: the build input itself must be a plain record with the exact v1
   // BINDING_KEYS set; additive fields require a format version bump. Validate
-  // the ORIGINAL object before any projection so foreign keys, class
-  // prototypes, and enumerable symbol keys cannot be spread away.
-  if (!isPlainRecordWithExactKeys(binding, BINDING_KEYS)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_BINDING')
-  }
-  validateBinding(binding)
+  // the original object's ordinary data descriptors before any validation so
+  // foreign keys, class prototypes, symbols, and Proxy reads cannot be spread
+  // away or substituted after admission.
+  const bindingSnapshot = snapshotPlainRecordWithExactKeys(
+    binding,
+    BINDING_KEYS,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_BINDING',
+  )
+  validateBinding(bindingSnapshot)
   validateManifestMac(manifestMac)
 
-  if (!Array.isArray(sections) || sections.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length) {
+  const sectionSnapshot = snapshotDenseArrayValues(
+    sections,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS',
+  )
+  if (sectionSnapshot.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS')
   }
-  const descriptors = sections.map((section, index) =>
+  const descriptors = sectionSnapshot.map((section, index) =>
     buildSectionDescriptor(section, expectedSectionNameAt(index)),
   )
 
   const body: RecoveryArchiveManifestBody = {
     format_version: RECOVERY_ARCHIVE_FORMAT_VERSION,
-    ...pickBinding(binding),
+    ...pickBinding(bindingSnapshot),
     sections: descriptors,
   }
   const bodyJson = serializeManifestBody(body)
@@ -290,20 +298,25 @@ export function buildRecoveryArchiveManifest(
  * verification is owned by the later crypto slice and is not performed here.
  */
 export function validateRecoveryArchiveManifest(value: unknown): RecoveryArchiveManifest {
-  if (!isPlainRecordWithExactKeys(value, MANIFEST_KEYS)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SHAPE')
-  }
-  if (value.format_version !== RECOVERY_ARCHIVE_FORMAT_VERSION) {
+  const manifestSnapshot = snapshotPlainRecordWithExactKeys(
+    value,
+    MANIFEST_KEYS,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_SHAPE',
+  )
+  if (manifestSnapshot.format_version !== RECOVERY_ARCHIVE_FORMAT_VERSION) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_FORMAT_VERSION')
   }
-  validateBinding(value)
-  validateManifestMac(value.manifest_mac)
-  if (!isLowercaseSha256Hex(value.root_hash)) {
+  validateBinding(manifestSnapshot)
+  validateManifestMac(manifestSnapshot.manifest_mac)
+  if (!isLowercaseSha256Hex(manifestSnapshot.root_hash)) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_ROOT_HASH')
   }
 
-  const sections = value.sections
-  if (!Array.isArray(sections) || sections.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length) {
+  const sections = snapshotDenseArrayValues(
+    manifestSnapshot.sections,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS',
+  )
+  if (sections.length !== RECOVERY_ARCHIVE_V1_SECTION_NAMES.length) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS')
   }
   const descriptors = sections.map((section, index) =>
@@ -312,33 +325,35 @@ export function validateRecoveryArchiveManifest(value: unknown): RecoveryArchive
 
   const body: RecoveryArchiveManifestBody = {
     format_version: RECOVERY_ARCHIVE_FORMAT_VERSION,
-    ...pickBinding(value),
+    ...pickBinding(manifestSnapshot),
     sections: descriptors,
   }
-  if (computeRecoveryArchiveManifestRootHash(body) !== value.root_hash) {
+  if (computeRecoveryArchiveManifestRootHash(body) !== manifestSnapshot.root_hash) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_ROOT_HASH_MISMATCH')
   }
   return {
     ...body,
-    root_hash: value.root_hash,
-    manifest_mac: value.manifest_mac as string | null,
+    root_hash: manifestSnapshot.root_hash,
+    manifest_mac: manifestSnapshot.manifest_mac as string | null,
   }
 }
 
 function buildSectionDescriptor(
-  section: RecoveryArchiveSectionBuildInput,
+  section: unknown,
   expectedName: RecoveryArchiveSectionName,
 ): RecoveryArchiveSectionDescriptor {
-  if (!isPlainRecordWithExactKeys(section, SECTION_BUILD_INPUT_KEYS)) {
+  const sectionSnapshot = snapshotPlainRecordWithExactKeys(
+    section,
+    SECTION_BUILD_INPUT_KEYS,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS',
+  )
+  if (sectionSnapshot.name !== expectedName || !isArray(sectionSnapshot.rows)) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS')
   }
-  if (section.name !== expectedName || !Array.isArray(section.rows)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTIONS')
-  }
-  const crypto = requireCryptoDescriptor(section)
+  const crypto = requireCryptoDescriptor(sectionSnapshot)
   const { rowCount, plaintextSha256 } = canonicalizeRecoveryArchiveSectionRows(
     expectedName,
-    section.rows,
+    sectionSnapshot.rows as readonly RecoveryArchiveRowEnvelope[],
   )
   return {
     name: expectedName,
@@ -352,21 +367,23 @@ function validateSectionDescriptor(
   value: unknown,
   expectedName: RecoveryArchiveSectionName,
 ): RecoveryArchiveSectionDescriptor {
-  if (!isPlainRecordWithExactKeys(value, SECTION_DESCRIPTOR_KEYS)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTION_DESCRIPTOR')
-  }
+  const sectionSnapshot = snapshotPlainRecordWithExactKeys(
+    value,
+    SECTION_DESCRIPTOR_KEYS,
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTION_DESCRIPTOR',
+  )
   if (
-    value.name !== expectedName ||
-    !isCanonicalNonnegativeDecimalString(value.row_count) ||
-    !isLowercaseSha256Hex(value.plaintext_sha256)
+    sectionSnapshot.name !== expectedName ||
+    !isCanonicalNonnegativeDecimalString(sectionSnapshot.row_count) ||
+    !isLowercaseSha256Hex(sectionSnapshot.plaintext_sha256)
   ) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SECTION_DESCRIPTOR')
   }
   return {
     name: expectedName,
-    row_count: value.row_count,
-    plaintext_sha256: value.plaintext_sha256,
-    ...requireCryptoDescriptor(value),
+    row_count: sectionSnapshot.row_count,
+    plaintext_sha256: sectionSnapshot.plaintext_sha256,
+    ...requireCryptoDescriptor(sectionSnapshot),
   }
 }
 
@@ -453,16 +470,18 @@ function pickBinding(value: Record<string, unknown>): RecoveryArchiveManifestBin
 }
 
 function validateRowEnvelope(row: unknown): RecoveryArchiveRowEnvelope {
-  if (!isPlainRecordWithExactKeys(row, ['entity_key', 'payload'])) {
+  const envelope = snapshotPlainRecordWithExactKeys(
+    row,
+    ['entity_key', 'payload'],
+    'RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE',
+  )
+  if (typeof envelope.entity_key !== 'string' || envelope.entity_key.length === 0) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE')
   }
-  if (typeof row.entity_key !== 'string' || row.entity_key.length === 0) {
+  if (!isRecord(envelope.payload)) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE')
   }
-  if (!isRecord(row.payload)) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_ROW_ENVELOPE')
-  }
-  return row as unknown as RecoveryArchiveRowEnvelope
+  return envelope as unknown as RecoveryArchiveRowEnvelope
 }
 
 function validateEntityKeyForSection(
@@ -487,9 +506,13 @@ function validateEntityKeyForSection(
 }
 
 function serializeManifestBody(body: RecoveryArchiveManifestBody): string {
-  const preimage: Record<string, unknown> = {}
-  for (const key of BODY_KEYS) preimage[key] = body[key]
-  return canonicalizeRecoveryArchiveJson(preimage)
+  return canonicalizeRecoveryArchiveJson(
+    snapshotPlainRecordWithExactKeys(
+      body,
+      BODY_KEYS,
+      'RECOVERY_ARCHIVE_MANIFEST_INVALID_SHAPE',
+    ),
+  )
 }
 
 function expectedSectionNameAt(index: number): RecoveryArchiveSectionName {
@@ -517,17 +540,20 @@ function serializeJsonValue(value: unknown, path: Set<object>): string {
     }
     return JSON.stringify(value)
   }
-  if (Array.isArray(value)) {
+  if (isArray(value)) {
     if (path.has(value)) {
       throwManifestError('RECOVERY_ARCHIVE_MANIFEST_CYCLIC_JSON')
     }
     // Exact dense-index ownership: every 0..length-1 must be an own property and
     // the enumerable own string keys must be exactly those canonical indices, so a
     // hole plus an extra key (or an enumerable symbol key) cannot balance the count.
-    validateDenseArrayIndices(value)
+    const elements = snapshotDenseArrayValues(
+      value,
+      'RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON',
+    )
     path.add(value)
     try {
-      return `[${value.map((element) => serializeJsonValue(element, path)).join(',')}]`
+      return `[${elements.map((element) => serializeJsonValue(element, path)).join(',')}]`
     } finally {
       path.delete(value)
     }
@@ -535,23 +561,16 @@ function serializeJsonValue(value: unknown, path: Set<object>): string {
   if (typeof value === 'object') {
     // Only plain objects are in the supported JSON domain; Date, Map, and class
     // instances refuse rather than serialize as empty/enumerable projections.
-    const prototype: unknown = Object.getPrototypeOf(value)
-    if (prototype !== Object.prototype && prototype !== null) {
-      throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-    }
     if (path.has(value)) {
       throwManifestError('RECOVERY_ARCHIVE_MANIFEST_CYCLIC_JSON')
     }
+    const record = snapshotEnumerableDataRecord(
+      value,
+      'RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON',
+    )
     path.add(value)
     try {
-      const record = value as Record<string, unknown>
-      if (Object.getOwnPropertySymbols(record).some((symbol) => isEnumerable(record, symbol))) {
-        throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-      }
       const keys = Object.keys(record).sort()
-      if (keys.some((key) => !hasEnumerableDataProperty(record, key))) {
-        throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-      }
       const entries = keys.map(
         (key) => `${serializeJsonString(key)}:${serializeJsonValue(record[key], path)}`,
       )
@@ -561,10 +580,6 @@ function serializeJsonValue(value: unknown, path: Set<object>): string {
     }
   }
   throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-}
-
-function isEnumerable(record: object, symbol: symbol): boolean {
-  return Object.prototype.propertyIsEnumerable.call(record, symbol)
 }
 
 function serializeJsonString(value: string): string {
@@ -605,66 +620,118 @@ function compareUtf8Bytes(left: string, right: string): number {
   return leftBytes.length - rightBytes.length
 }
 
-function hasOwn(value: object, key: PropertyKey): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key)
-}
-
-function validateDenseArrayIndices(value: readonly unknown[]): void {
-  if (Object.getOwnPropertySymbols(value).some((symbol) => isEnumerable(value, symbol))) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-  }
-  const keys = Object.keys(value)
-  if (keys.length !== value.length) {
-    throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-  }
-  for (let index = 0; index < value.length; index += 1) {
-    if (!hasOwn(value, index)) {
-      throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
-    }
-  }
-  for (const key of keys) {
-    const index = Number(key)
+/**
+ * Snapshot a dense array from own data descriptors exactly once. The returned
+ * plain array is the only value source used after admission, so a Proxy `get`
+ * trap cannot substitute a later value after validation.
+ */
+function snapshotDenseArrayValues(
+  value: unknown,
+  errorCode: RecoveryArchiveManifestErrorCode,
+): unknown[] {
+  try {
+    if (!Array.isArray(value)) throwManifestError(errorCode)
+    const keys = Reflect.ownKeys(value)
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
     if (
-      !Number.isInteger(index) ||
-      String(index) !== key ||
-      index < 0 ||
-      index >= value.length ||
-      !hasEnumerableDataProperty(value, key)
+      lengthDescriptor === undefined ||
+      !('value' in lengthDescriptor) ||
+      typeof lengthDescriptor.value !== 'number' ||
+      !Number.isInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0
     ) {
-      throwManifestError('RECOVERY_ARCHIVE_MANIFEST_UNSUPPORTED_JSON')
+      throwManifestError(errorCode)
     }
+    const length = lengthDescriptor.value
+    const elements = new Array<unknown>(length)
+    const seenIndices = new Set<number>()
+    for (const key of keys) {
+      if (key === 'length') continue
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (descriptor === undefined) throwManifestError(errorCode)
+      if (typeof key === 'symbol') {
+        if (descriptor.enumerable) throwManifestError(errorCode)
+        continue
+      }
+      if (!descriptor.enumerable) continue
+      const index = Number(key)
+      if (
+        !Number.isInteger(index) ||
+        String(index) !== key ||
+        index < 0 ||
+        index >= length ||
+        !('value' in descriptor) ||
+        seenIndices.has(index)
+      ) {
+        throwManifestError(errorCode)
+      }
+      seenIndices.add(index)
+      elements[index] = descriptor.value
+    }
+    if (seenIndices.size !== length) throwManifestError(errorCode)
+    return elements
+  } catch (error) {
+    if (error instanceof RecoveryArchiveManifestError) throw error
+    throwManifestError(errorCode)
   }
-}
-
-function hasEnumerableDataProperty(value: object, key: PropertyKey): boolean {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key)
-  return descriptor !== undefined && descriptor.enumerable && 'value' in descriptor
 }
 
 /**
- * One schema-boundary predicate: a plain object (Object.prototype or null
- * prototype, both intentional) whose enumerable own string keys are exactly the
- * expected set, with no enumerable own symbol keys. Class instances, arrays,
- * and symbol-keyed extras are refused rather than projected.
+ * Snapshot all enumerable own string data properties of a plain object exactly
+ * once. Non-enumerable metadata remains outside the supported JSON projection,
+ * matching JSON object semantics; enumerable symbols and accessors refuse.
  */
-function isPlainRecordWithExactKeys(
+function snapshotEnumerableDataRecord(
+  value: object,
+  errorCode: RecoveryArchiveManifestErrorCode,
+): Record<string, unknown> {
+  try {
+    const prototype: unknown = Object.getPrototypeOf(value)
+    if (prototype !== Object.prototype && prototype !== null) throwManifestError(errorCode)
+    const snapshot: Record<string, unknown> = Object.create(null)
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (descriptor === undefined) throwManifestError(errorCode)
+      if (!descriptor.enumerable) continue
+      if (typeof key === 'symbol' || !('value' in descriptor)) throwManifestError(errorCode)
+      snapshot[key] = descriptor.value
+    }
+    return snapshot
+  } catch (error) {
+    if (error instanceof RecoveryArchiveManifestError) throw error
+    throwManifestError(errorCode)
+  }
+}
+
+/**
+ * Schema-boundary snapshot: exact enumerable own key set and ordinary data
+ * descriptors only. All values are copied once from those descriptors before
+ * validation, projection, or serialization.
+ */
+function snapshotPlainRecordWithExactKeys(
   value: unknown,
   expected: readonly string[],
-): value is Record<string, unknown> {
-  if (!isRecord(value)) return false
-  const prototype: unknown = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) return false
-  if (Object.getOwnPropertySymbols(value).some((symbol) => isEnumerable(value, symbol))) {
-    return false
-  }
-  const keys = Object.keys(value)
-  if (keys.length !== expected.length) return false
+  errorCode: RecoveryArchiveManifestErrorCode,
+): Record<string, unknown> {
+  if (!isRecord(value)) throwManifestError(errorCode)
+  const snapshot = snapshotEnumerableDataRecord(value, errorCode)
+  const keys = Object.keys(snapshot)
+  if (keys.length !== expected.length) throwManifestError(errorCode)
   const expectedSet = new Set<string>(expected)
-  return keys.every((key) => expectedSet.has(key) && hasEnumerableDataProperty(value, key))
+  if (!keys.every((key) => expectedSet.has(key))) throwManifestError(errorCode)
+  return snapshot
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+  return typeof value === 'object' && value !== null && !isArray(value)
+}
+
+function isArray(value: unknown): value is unknown[] {
+  try {
+    return Array.isArray(value)
+  } catch {
+    return false
+  }
 }
 
 function sha256Hex(canonicalJson: string): string {
