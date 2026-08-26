@@ -30,7 +30,12 @@ import type {
 // ---------------------------------------------------------------------------
 // Mock-mode flag
 // ---------------------------------------------------------------------------
-const USE_MOCK = import.meta.env.DEV || (globalThis as any).__APPROVAL_MOCK__ === true
+const APPROVAL_MOCK_OVERRIDE = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+// DEV keeps its existing mock-by-default behavior. A mounted browser harness may explicitly set
+// the override to false before dynamically importing the approval surface so Playwright can drive
+// the real fetch path; production has no override and remains network-backed as before.
+const USE_MOCK = APPROVAL_MOCK_OVERRIDE === true
+  || (import.meta.env.DEV && APPROVAL_MOCK_OVERRIDE !== false)
 
 // ---------------------------------------------------------------------------
 // Mock data factories

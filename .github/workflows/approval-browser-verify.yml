@@ -25,6 +25,10 @@ name: Approval Browser Verify
 #
 # P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
 # at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
+#
+# P7-B0 extends the lane with Canvas sole-surface acceptance against the mounted production
+# TemplateAuthoringView at desktop/tablet/mobile widths. The collection preflight below prevents a
+# testMatch removal from turning this browser contract into a vacuous green.
 
 on:
   workflow_dispatch:
@@ -150,6 +154,14 @@ jobs:
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web run type-check:verification-approval
 
+      - name: Assert Canvas acceptance is collected
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_list="$(pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts --list)"
+          printf '%s\n' "$test_list"
+          grep -F 'approval-canvas-sole-surface.spec.ts' <<<"$test_list"
+
       - name: Run approval browser verification (boots Vite, renders real components)
         if: steps.changes.outputs.relevant == 'true'
         run: pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts
@@ -162,4 +174,5 @@ jobs:
           path: |
             apps/web/verification-output/afb-*.png
             apps/web/verification-output/p5c-*.png
+            apps/web/verification-output/p7-canvas-*.png
           if-no-files-found: warn

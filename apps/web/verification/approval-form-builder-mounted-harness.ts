@@ -14,14 +14,13 @@
 // - `useApprovalPermissions()` reads `localStorage.user_roles` synchronously (no network) via
 //   `useAuth().getAccessSnapshot()`.
 // A `/approval-templates/new` route needs no fetch at all (`loadTemplateForEdit` takes the
-// synchronous empty-draft branch). The matrix spec's edit-mode/legacy-compatibility rows use
-// Playwright's `page.route()` to intercept `getTemplate`/`createTemplate` at the network layer
-// instead — real requests, real responses, no vi.mock.
+// synchronous empty-draft branch). Edit rows that need a deterministic server fixture pass
+// `networkTemplate=on`: the harness disables the DEV API mock before dynamically importing the
+// production view, then Playwright's `page.route()` intercepts the real request/response cycle.
 import { createApp, defineComponent, h } from 'vue'
 import { createMemoryHistory, createRouter, RouterView } from 'vue-router'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'
-import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.vue'
 import { useFeatureFlags } from '../src/stores/featureFlags'
 
 declare global {
@@ -33,6 +32,14 @@ declare global {
 async function main(): Promise<void> {
   // Dev-override path (§ module doc above) — set BEFORE loadProductFeatures reads it.
   const params = new URLSearchParams(window.location.search)
+  if (params.get('networkTemplate') === 'on') {
+    // The approval API reads this once at module initialization. Dynamic import below guarantees
+    // the explicit browser-fixture override is installed first; ordinary harness rows omit the
+    // query and preserve the existing DEV mock behavior byte-for-byte.
+    const globalScope = globalThis as { __APPROVAL_MOCK__?: boolean }
+    globalScope.__APPROVAL_MOCK__ = false
+  }
+  const { default: TemplateAuthoringView } = await import('../src/views/approval/TemplateAuthoringView.vue')
   const canvasV2 = params.get('canvasV2') !== 'off'
   localStorage.setItem('metasheet_features', JSON.stringify({ approvalCanvasV2: canvasV2 }))
   localStorage.setItem('user_roles', JSON.stringify(['admin']))

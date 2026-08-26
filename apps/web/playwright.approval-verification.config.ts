@@ -18,6 +18,10 @@ import { defineConfig, devices } from '@playwright/test'
 // production Element Plus dialog/focus trap at 1440/1024/390, including mobile action narrowing,
 // accessible names, disabled confirms, focus containment/restoration, and overflow.
 //
+// P7-B0 adds Canvas sole-surface acceptance through the mounted TemplateAuthoringView harness:
+// Canvas ON is the only ordinary flow surface at 1440/1024/390, selection opens the real inspector
+// by pointer and keyboard, and flag OFF keeps the explicit structured-list rollback.
+//
 // Run: `pnpm --filter @metasheet/web exec playwright test
 //       --config playwright.approval-verification.config.ts` (cwd = apps/web).
 // Port 5175 keeps this lane's server disjoint from the multitable lane (5174).
