@@ -18,6 +18,8 @@ export const ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK =
   'elearning_exam_attempts_expiry_state_chk'
 export const ELEARNING_ATTEMPT_DUE_INDEX =
   'idx_elearning_exam_attempts_started_deadline'
+export const ELEARNING_ATTEMPT_DOWN_NONEMPTY =
+  'cannot roll back timed attempts while deadline snapshots exist'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
@@ -128,7 +130,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
          WHERE deadline_at IS NOT NULL
             OR expired_at IS NOT NULL
       ) THEN
-        RAISE EXCEPTION 'cannot roll back timed attempts while deadline snapshots exist';
+        RAISE EXCEPTION ${sql.raw(`'${ELEARNING_ATTEMPT_DOWN_NONEMPTY}'`)};
       END IF;
     END;
     $fn$

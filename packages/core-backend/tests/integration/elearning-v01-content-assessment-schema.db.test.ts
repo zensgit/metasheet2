@@ -12,7 +12,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
-import { Kysely, PostgresDialect } from 'kysely'
+import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import {
   ELEARNING_MEDIA_STALE_CLAIM_INDEX,
@@ -25,6 +25,11 @@ import {
   ELEARNING_V01_LEDGER_TRIGGERS,
   MEDIA_DURATION_STATUS_CHK,
 } from '../../src/db/migrations/zzzz20260826120000_harden_elearning_v01_ledger'
+import {
+  ELEARNING_ATTEMPT_DOWN_NONEMPTY,
+  down as downAttemptDeadlines,
+  up as upAttemptDeadlines,
+} from '../../src/db/migrations/zzzz20260826235900_add_elearning_exam_attempt_deadlines'
 import {
   ATTEMPT_ITEM_BACKFILL_ABORT,
   ATTEMPT_ITEM_BACKFILL_PREFLIGHT_SQL,
@@ -2499,5 +2504,64 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       [ATTEMPTS_ITEM_COLUMN],
     )
     expect(column.rows[0].n).toBe(1)
+  })
+
+  it('refuses deadline rollback with snapshots and transactionally replays a clean down/up', async () => {
+    const org = orgId('deadline-down')
+    seededOrgIds.push(org)
+    const graph = await seedGraph(org)
+    const startedAt = new Date(Date.now() - 1_000)
+    await insertAttempt({
+      org,
+      examId: graph.examId,
+      versionId: graph.versionId,
+      itemId: graph.examItemId,
+      userId: actor('deadline-down'),
+      attemptNo: 1,
+      startedAt: startedAt.toISOString(),
+      deadlineAt: new Date(startedAt.getTime() + 60_000).toISOString(),
+    })
+
+    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await expect(
+      db.transaction().execute((trx) => downAttemptDeadlines(trx)),
+    ).rejects.toThrow(ELEARNING_ATTEMPT_DOWN_NONEMPTY)
+    expect((await pool.query<{ n: number }>(
+      `SELECT count(*)::int AS n
+         FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name IN ('deadline_at', 'expired_at')`,
+    )).rows[0].n).toBe(2)
+
+    await cleanupOrg(org)
+    await db.transaction().execute(async (trx) => {
+      await downAttemptDeadlines(trx)
+      const removed = await sql<{ n: number }>`
+        SELECT count(*)::int AS n
+          FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'elearning_exam_attempts'
+           AND column_name IN ('deadline_at', 'expired_at')
+      `.execute(trx)
+      expect(removed.rows[0].n).toBe(0)
+
+      const restoredGuard = await sql<{ definition: string }>`
+        SELECT pg_get_functiondef('elearning_exam_attempts_state_guard()'::regprocedure) AS definition
+      `.execute(trx)
+      expect(restoredGuard.rows[0].definition).toContain('course_version_item_id')
+      expect(restoredGuard.rows[0].definition).not.toContain('deadline_at')
+      expect(restoredGuard.rows[0].definition).not.toContain('expired_at')
+
+      await upAttemptDeadlines(trx)
+      const restored = await sql<{ n: number }>`
+        SELECT count(*)::int AS n
+          FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'elearning_exam_attempts'
+           AND column_name IN ('deadline_at', 'expired_at')
+      `.execute(trx)
+      expect(restored.rows[0].n).toBe(2)
+    })
   })
 })
