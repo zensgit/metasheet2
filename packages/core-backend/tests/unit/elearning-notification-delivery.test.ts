@@ -70,6 +70,13 @@ describe('e-learning notification delivery intent', () => {
       payload: { nested: { a: false, b: true }, z: 1 },
     })
     expect(left).toBe(right)
+    const unicodeKeys = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { 'é': 4, z: 2, 'ä': 3, A: 1 },
+    })
+    expect(unicodeKeys).toContain('"payload":{"A":1,"z":2,"ä":3,"é":4}')
     const baselineHash = hashElearningNotificationRequest({
       assignmentMemberId: MEMBER,
       recipientUserId: USER,
@@ -104,7 +111,12 @@ describe('e-learning notification delivery intent', () => {
   it('locks, validates the same-org active member, and inserts one pending intent', async () => {
     const db = new ScriptDb((sql) => {
       if (marker(sql) === 'elearning-notification-delivery:load-member') {
-        return result([{ user_id: USER, revoked_at: null, deadline: DUE_AT }])
+        return result([{
+          user_id: USER,
+          revoked_at: null,
+          deadline: DUE_AT,
+          course_status: 'active',
+        }])
       }
       return result()
     })
@@ -204,23 +216,50 @@ describe('e-learning notification delivery intent', () => {
     expect(blob).not.toContain('0'.repeat(64))
   })
 
-  it('fails closed for a revoked, mismatched, or deadline-free member without leaking values', async () => {
-    const db = new ScriptDb((sql) => {
-      if (marker(sql) === 'elearning-notification-delivery:load-member') {
-        return result([{ user_id: USER, revoked_at: DUE_AT, deadline: null }])
-      }
-      return result()
-    })
+  it('fails closed for ineligible assignments without leaking values', async () => {
+    for (const member of [
+      {
+        user_id: `${USER}-other`,
+        revoked_at: null,
+        deadline: DUE_AT,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: DUE_AT,
+        deadline: DUE_AT,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: null,
+        deadline: null,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: null,
+        deadline: DUE_AT,
+        course_status: 'withdrawn',
+      },
+    ]) {
+      const db = new ScriptDb((sql) => {
+        if (marker(sql) === 'elearning-notification-delivery:load-member') {
+          return result([member])
+        }
+        return result()
+      })
 
-    let caught: unknown
-    try {
-      await enqueueElearningNotificationDelivery(db, input())
-    } catch (error) {
-      caught = error
+      let caught: unknown
+      try {
+        await enqueueElearningNotificationDelivery(db, input())
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toMatchObject({ code: 'not_eligible' })
+      expect(`${(caught as Error).message}\n${(caught as Error).stack ?? ''}`)
+        .not.toContain(ORG)
     }
-    expect(caught).toMatchObject({ code: 'not_eligible' })
-    expect(`${(caught as Error).message}\n${(caught as Error).stack ?? ''}`)
-      .not.toContain(ORG)
   })
 
   it('maps transaction-boundary failures to a values-free unavailable error', async () => {

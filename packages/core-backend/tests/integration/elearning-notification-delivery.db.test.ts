@@ -468,6 +468,17 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       duplicate: true,
     })
 
+    await pool.query(
+      `UPDATE elearning_courses
+          SET status = 'withdrawn', updated_at = clock_timestamp()
+        WHERE org_id = $1`,
+      [orgA],
+    )
+    await expect(enqueueElearningNotificationDelivery(db, {
+      ...requestA,
+      sourceKey: `${sourceKey}:withdrawn`,
+    })).rejects.toMatchObject({ code: 'not_eligible' })
+
     await expectPgError(
       () => pool.query(
         `UPDATE elearning_notification_deliveries

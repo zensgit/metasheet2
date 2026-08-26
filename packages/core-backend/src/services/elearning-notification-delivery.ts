@@ -115,7 +115,7 @@ function normalizeJson(value: unknown, depth = 0): unknown {
   if (entries.length > 256) fail('invalid_input')
   return Object.fromEntries(
     entries
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
       .map(([key, candidate]) => [key, normalizeJson(candidate, depth + 1)]),
   )
 }
@@ -253,21 +253,32 @@ export async function enqueueElearningNotificationDelivery(
 
       const member = await tx.query(
         `/* elearning-notification-delivery:load-member */
-         SELECT member.user_id, member.revoked_at, assignment.deadline
+         SELECT member.user_id,
+                member.revoked_at,
+                assignment.deadline,
+                course.status AS course_status
            FROM elearning_assignment_members member
            JOIN elearning_assignments assignment
              ON assignment.org_id = member.org_id
             AND assignment.id = member.assignment_id
+           JOIN elearning_course_versions course_version
+             ON course_version.org_id = assignment.org_id
+            AND course_version.id = assignment.course_version_id
+           JOIN elearning_courses course
+             ON course.org_id = course_version.org_id
+            AND course.id = course_version.course_id
           WHERE member.org_id = $1 AND member.id = $2
-          FOR SHARE OF member, assignment`,
+          FOR SHARE OF member, assignment, course_version, course`,
         [orgId, assignmentMemberId],
       )
       const memberRow = member.rows[0]
       if (!memberRow) fail('not_found')
+      const courseStatus = storedText(memberRow.course_status)
       if (
         storedText(memberRow.user_id) !== recipientUserId
         || memberRow.revoked_at != null
         || memberRow.deadline == null
+        || (courseStatus !== 'active' && courseStatus !== 'archived')
       ) {
         fail('not_eligible')
       }
