@@ -22,6 +22,16 @@ import {
   submitElearningExam,
   uploadElearningMedia,
 } from '../src/services/elearning'
+import {
+  createElearningQuestionBank,
+  ELEARNING_ASSESSMENT_XLSX_MIME,
+  importElearningQuestionBankXlsx,
+  isElearningAssessmentAdminReady,
+  listElearningBankQuestions,
+  listElearningQuestionBanks,
+  publishElearningFixedPaper,
+  publishElearningPaperExam,
+} from '../src/services/elearningAssessmentAdmin'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
 const VERSION = '22222222-2222-4222-8222-222222222222'
@@ -35,7 +45,10 @@ const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const BANK = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+const PAPER_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
 const SHA256 = 'ab'.repeat(32)
+const CREATED_AT = '2026-08-26T00:00:00.000Z'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -345,9 +358,192 @@ describe('elearning client transport', () => {
       '/api/elearning/media/playback?token=tok%2Ben%2F1',
     )
   })
+
+  it('lists assessment banks and accepts closed admin-only answer material', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        items: [{
+          bankId: BANK,
+          title: 'Safety bank',
+          questionCount: 1,
+          createdAt: CREATED_AT,
+          updatedAt: CREATED_AT,
+        }],
+        page: 1,
+        pageSize: 50,
+        total: 1,
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        bank: { bankId: BANK, title: 'Safety bank' },
+        items: [{
+          questionId: COURSE,
+          questionRevisionId: Q1,
+          revision: 2,
+          questionType: 'single_choice',
+          prompt: 'Pick one',
+          options: [
+            { id: 'a', text: 'Alpha' },
+            { id: 'b', text: 'Beta' },
+          ],
+          correctOptionIds: ['a'],
+          points: 5,
+          explanation: 'Admin answer explanation',
+          createdAt: CREATED_AT,
+        }],
+        page: 1,
+        pageSize: 100,
+        total: 1,
+      }))
+
+    const banks = await listElearningQuestionBanks()
+    expect(lastCall()).toMatchObject({
+      path: '/api/elearning/assessment/question-banks?page=1&pageSize=50',
+      options: { method: 'GET' },
+    })
+    expect(banks.items[0]).toEqual({
+      bankId: BANK,
+      title: 'Safety bank',
+      questionCount: 1,
+      createdAt: CREATED_AT,
+      updatedAt: CREATED_AT,
+    })
+
+    const questions = await listElearningBankQuestions(BANK)
+    expect(lastCall()).toMatchObject({
+      path: `/api/elearning/assessment/question-banks/${BANK}/questions?page=1&pageSize=100`,
+      options: { method: 'GET' },
+    })
+    expect(questions.items[0]).toMatchObject({
+      questionRevisionId: Q1,
+      correctOptionIds: ['a'],
+      explanation: 'Admin answer explanation',
+    })
+  })
+
+  it('creates a bank and imports the raw XLSX body with the exact media type', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(201, { bankId: BANK }))
+      .mockResolvedValueOnce(jsonResponse(201, { importedCount: 2 }))
+
+    await createElearningQuestionBank('Safety bank')
+    expect(lastCall().path).toBe('/api/elearning/assessment/question-banks')
+    expect(lastCall().options.method).toBe('POST')
+    expect(lastJson()).toEqual({ title: 'Safety bank' })
+    assertNoIdentityOverrides(lastJson())
+
+    const file = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'questions.xlsx', {
+      type: ELEARNING_ASSESSMENT_XLSX_MIME,
+    })
+    const imported = await importElearningQuestionBankXlsx(BANK, file)
+    expect(lastCall().path).toBe(`/api/elearning/assessment/question-banks/${BANK}/import`)
+    expect(lastCall().options.method).toBe('POST')
+    expect(lastCall().options.body).toBe(file)
+    expect(new Headers(lastCall().options.headers).get('Content-Type')).toBe(
+      ELEARNING_ASSESSMENT_XLSX_MIME,
+    )
+    expect(imported).toEqual({ importedCount: 2 })
+  })
+
+  it('publishes a fixed paper and a paper exam with explicit nullable fields', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(201, {
+        paperId: PAPER_ID,
+        status: 'published',
+        itemCount: 1,
+        totalPoints: 5,
+      }))
+      .mockResolvedValueOnce(jsonResponse(201, {
+        examId: EXAM,
+        paperId: PAPER_ID,
+        status: 'published',
+        totalPoints: 5,
+      }))
+
+    await publishElearningFixedPaper({
+      title: 'Safety paper',
+      items: [{ questionRevisionId: Q1, points: 5 }],
+    })
+    expect(lastCall().path).toBe('/api/elearning/assessment/papers')
+    expect(lastJson()).toEqual({
+      title: 'Safety paper',
+      items: [{ questionRevisionId: Q1, points: 5 }],
+    })
+    assertNoIdentityOverrides(lastJson())
+
+    await publishElearningPaperExam({
+      paperId: PAPER_ID,
+      title: 'Safety exam',
+      passScore: 3,
+      maxAttempts: 2,
+      windowStartsAt: null,
+      windowEndsAt: null,
+      durationSeconds: null,
+      shuffleQuestions: true,
+      shuffleOptions: false,
+      disclosurePolicy: 'correctness_after_submit',
+    })
+    expect(lastCall().path).toBe('/api/elearning/assessment/exams')
+    expect(lastJson()).toEqual({
+      paperId: PAPER_ID,
+      title: 'Safety exam',
+      passScore: 3,
+      maxAttempts: 2,
+      windowStartsAt: null,
+      windowEndsAt: null,
+      durationSeconds: null,
+      shuffleQuestions: true,
+      shuffleOptions: false,
+      disclosurePolicy: 'correctness_after_submit',
+    })
+    assertNoIdentityOverrides(lastJson())
+  })
+
+  it('derives assessment-admin readiness without requiring media or assignment', () => {
+    expect(isElearningAssessmentAdminReady(capabilitiesDto({}, {
+      assignment: false,
+      media: false,
+    }))).toBe(true)
+    expect(isElearningAssessmentAdminReady(capabilitiesDto({}, {
+      assessment: false,
+    }))).toBe(false)
+  })
 })
 
 describe('elearning client fail-closed validation', () => {
+  it('rejects extra nested admin-question keys but preserves the authoritative org error', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      bank: { bankId: BANK, title: 'Safety bank' },
+      items: [{
+        questionId: COURSE,
+        questionRevisionId: Q1,
+        revision: 1,
+        questionType: 'single_choice',
+        prompt: 'Pick one',
+        options: [
+          { id: 'a', text: 'Alpha', storageKey: 'secret' },
+          { id: 'b', text: 'Beta' },
+        ],
+        correctOptionIds: ['a'],
+        points: 5,
+        explanation: null,
+        createdAt: CREATED_AT,
+      }],
+      page: 1,
+      pageSize: 100,
+      total: 1,
+    }))
+    await expect(listElearningBankQuestions(BANK)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(listElearningQuestionBanks()).rejects.toMatchObject({
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+  })
+
   it('rejects extra keys, missing keys, and secret fields on the learner DTO', async () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
       courses: [learnerCourse()],

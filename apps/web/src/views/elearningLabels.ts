@@ -63,6 +63,36 @@ export type ElearningLabelKey =
   | 'admin.retrying'
   | 'admin.retry'
   | 'admin.assignSuccess'
+  | 'admin.assessmentOpen'
+  | 'admin.assessmentClose'
+  // --- Assessment resource admin chrome ---
+  | 'assessment.title'
+  | 'assessment.subtitle'
+  | 'assessment.loading'
+  | 'assessment.refresh'
+  | 'assessment.bankTitle'
+  | 'assessment.createBank'
+  | 'assessment.bankSelect'
+  | 'assessment.noBanks'
+  | 'assessment.importFile'
+  | 'assessment.import'
+  | 'assessment.questions'
+  | 'assessment.noQuestions'
+  | 'assessment.correctAnswers'
+  | 'assessment.explanation'
+  | 'assessment.paperTitle'
+  | 'assessment.publishPaper'
+  | 'assessment.examTitle'
+  | 'assessment.duration'
+  | 'assessment.shuffleQuestions'
+  | 'assessment.shuffleOptions'
+  | 'assessment.disclosure'
+  | 'assessment.disclosureNoReview'
+  | 'assessment.disclosureCorrectness'
+  | 'assessment.disclosureWrongItems'
+  | 'assessment.publishExam'
+  | 'assessment.unbound'
+  | 'assessment.startAnother'
   // --- Shared statuses ---
   | 'status.completed'
   | 'status.incomplete'
@@ -85,6 +115,13 @@ export type ElearningLabelKey =
   | 'validation.correctRequired'
   | 'validation.singleCorrect'
   | 'validation.passScoreTooHigh'
+  | 'validation.bankTitleRequired'
+  | 'validation.bankRequired'
+  | 'validation.xlsxRequired'
+  | 'validation.questionSelectionRequired'
+  | 'validation.paperTitleRequired'
+  | 'validation.examTitleRequired'
+  | 'validation.durationInteger'
 
 const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = {
   'learner.title': { en: 'Learning Center', zh: '学习中心' },
@@ -146,6 +183,42 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     en: 'The course was published and assigned.',
     zh: '课程已发布并完成指派。',
   },
+  'admin.assessmentOpen': { en: 'Manage assessment resources', zh: '管理题库与考试' },
+  'admin.assessmentClose': { en: 'Close assessment resources', zh: '收起题库与考试' },
+
+  'assessment.title': { en: 'Assessment resources', zh: '题库与考试资源' },
+  'assessment.subtitle': {
+    en: 'Create a bank, import an XLSX question set, select immutable revisions, then publish a fixed paper and an independent exam template.',
+    zh: '创建题库、导入 XLSX 题目、选择不可变题目版本，再发布固定试卷和独立考试模板。',
+  },
+  'assessment.loading': { en: 'Loading assessment resources...', zh: '正在加载题库与考试资源…' },
+  'assessment.refresh': { en: 'Refresh', zh: '刷新' },
+  'assessment.bankTitle': { en: 'New bank title', zh: '新题库名称' },
+  'assessment.createBank': { en: 'Create bank', zh: '创建题库' },
+  'assessment.bankSelect': { en: 'Question bank', zh: '题库' },
+  'assessment.noBanks': { en: 'No question banks yet.', zh: '暂无题库。' },
+  'assessment.importFile': { en: 'Question workbook (.xlsx)', zh: '题目工作簿（.xlsx）' },
+  'assessment.import': { en: 'Import questions', zh: '导入题目' },
+  'assessment.questions': { en: 'Latest question revisions', zh: '最新题目版本' },
+  'assessment.noQuestions': { en: 'No questions in this bank.', zh: '该题库暂无题目。' },
+  'assessment.correctAnswers': { en: 'Correct answers', zh: '正确答案' },
+  'assessment.explanation': { en: 'Explanation', zh: '解析' },
+  'assessment.paperTitle': { en: 'Paper title', zh: '试卷名称' },
+  'assessment.publishPaper': { en: 'Publish fixed paper', zh: '发布固定试卷' },
+  'assessment.examTitle': { en: 'Exam title', zh: '考试名称' },
+  'assessment.duration': { en: 'Duration in minutes (optional)', zh: '限时分钟数（可选）' },
+  'assessment.shuffleQuestions': { en: 'Shuffle questions', zh: '题目乱序' },
+  'assessment.shuffleOptions': { en: 'Shuffle options', zh: '选项乱序' },
+  'assessment.disclosure': { en: 'Answer disclosure', zh: '答案披露策略' },
+  'assessment.disclosureNoReview': { en: 'No review', zh: '不开放复盘' },
+  'assessment.disclosureCorrectness': { en: 'Correctness after submission', zh: '交卷后显示正误' },
+  'assessment.disclosureWrongItems': { en: 'Wrong items after submission', zh: '交卷后显示错题' },
+  'assessment.publishExam': { en: 'Publish independent exam', zh: '发布独立考试' },
+  'assessment.unbound': {
+    en: 'This exam template is published but is not assigned to learners or bound to a course yet.',
+    zh: '该考试模板已发布，但尚未指派给学员，也尚未绑定课程。',
+  },
+  'assessment.startAnother': { en: 'Create another paper', zh: '继续创建新试卷' },
 
   'status.completed': { en: 'Completed', zh: '已完成' },
   'status.incomplete': { en: 'Incomplete', zh: '未完成' },
@@ -209,6 +282,34 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'validation.passScoreTooHigh': {
     en: 'Passing score cannot exceed the total score.',
     zh: '及格分不能大于总分。',
+  },
+  'validation.bankTitleRequired': {
+    en: 'Please enter a question-bank title.',
+    zh: '请填写题库名称。',
+  },
+  'validation.bankRequired': {
+    en: 'Please select a question bank.',
+    zh: '请选择题库。',
+  },
+  'validation.xlsxRequired': {
+    en: 'Please select an XLSX workbook.',
+    zh: '请选择一个 XLSX 工作簿。',
+  },
+  'validation.questionSelectionRequired': {
+    en: 'Select at least one question revision.',
+    zh: '请至少选择一个题目版本。',
+  },
+  'validation.paperTitleRequired': {
+    en: 'Please enter a paper title.',
+    zh: '请填写试卷名称。',
+  },
+  'validation.examTitleRequired': {
+    en: 'Please enter an exam title.',
+    zh: '请填写考试名称。',
+  },
+  'validation.durationInteger': {
+    en: 'Duration must be empty or a positive integer.',
+    zh: '限时须留空或填写正整数。',
   },
 }
 
@@ -321,4 +422,28 @@ export function elearningAssignIncomplete(errorText: string, isZh: boolean): str
 
 export function elearningSelectedFile(fileName: string, isZh: boolean): string {
   return isZh ? `已选择：${fileName}` : `Selected: ${fileName}`
+}
+
+export function elearningAssessmentRevision(revision: number, isZh: boolean): string {
+  return isZh ? `版本 ${revision}` : `Revision ${revision}`
+}
+
+export function elearningAssessmentImported(count: number, isZh: boolean): string {
+  return isZh ? `已导入 ${count} 道题。` : `Imported ${count} questions.`
+}
+
+export function elearningAssessmentPaperPublished(
+  itemCount: number,
+  totalPoints: number,
+  isZh: boolean,
+): string {
+  return isZh
+    ? `固定试卷已发布：${itemCount} 道题，共 ${totalPoints} 分。`
+    : `Fixed paper published: ${itemCount} questions, ${totalPoints} points.`
+}
+
+export function elearningAssessmentExamPublished(totalPoints: number, isZh: boolean): string {
+  return isZh
+    ? `独立考试模板已发布，共 ${totalPoints} 分。`
+    : `Independent exam template published with ${totalPoints} total points.`
 }

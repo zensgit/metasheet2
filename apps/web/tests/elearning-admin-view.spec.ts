@@ -7,6 +7,12 @@ const h = vi.hoisted(() => ({
   upload: vi.fn(),
   publish: vi.fn(),
   assign: vi.fn(),
+  createBank: vi.fn(),
+  listBanks: vi.fn(),
+  listQuestions: vi.fn(),
+  importQuestions: vi.fn(),
+  publishPaper: vi.fn(),
+  publishExam: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -17,6 +23,21 @@ vi.mock('../src/services/elearning', async () => {
     uploadElearningMedia: h.upload,
     publishElearningCourse: h.publish,
     assignElearningDirect: h.assign,
+  }
+})
+
+vi.mock('../src/services/elearningAssessmentAdmin', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningAssessmentAdmin')>(
+    '../src/services/elearningAssessmentAdmin',
+  )
+  return {
+    ...actual,
+    createElearningQuestionBank: h.createBank,
+    listElearningQuestionBanks: h.listBanks,
+    listElearningBankQuestions: h.listQuestions,
+    importElearningQuestionBankXlsx: h.importQuestions,
+    publishElearningFixedPaper: h.publishPaper,
+    publishElearningPaperExam: h.publishExam,
   }
 })
 
@@ -36,6 +57,10 @@ const COURSE = '11111111-1111-4111-8111-111111111111'
 const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const SHA256 = 'ab'.repeat(32)
+const BANK = '71717171-7171-4171-8171-717171717171'
+const SECOND_BANK = '72727272-7272-4272-8272-727272727272'
+const QUESTION_REVISION = '81818181-8181-4181-8181-818181818181'
+const PAPER = '91919191-9191-4191-8191-919191919191'
 
 async function flushUi(cycles = 8): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
@@ -91,6 +116,12 @@ describe('ElearningAdminView', () => {
     h.upload.mockReset()
     h.publish.mockReset()
     h.assign.mockReset()
+    h.createBank.mockReset()
+    h.listBanks.mockReset()
+    h.listQuestions.mockReset()
+    h.importQuestions.mockReset()
+    h.publishPaper.mockReset()
+    h.publishExam.mockReset()
     h.capabilities.mockResolvedValue({
       enabled: true,
       capabilities: {
@@ -126,6 +157,53 @@ describe('ElearningAdminView', () => {
       assignmentId: ASSIGNMENT,
       memberId: MEMBER,
       duplicate: false,
+    })
+    h.createBank.mockResolvedValue({ bankId: SECOND_BANK })
+    h.listBanks.mockResolvedValue({
+      items: [{
+        bankId: BANK,
+        title: '安全题库',
+        questionCount: 1,
+        createdAt: '2026-08-26T00:00:00.000Z',
+        updatedAt: '2026-08-26T00:00:00.000Z',
+      }],
+      page: 1,
+      pageSize: 100,
+      total: 1,
+    })
+    h.listQuestions.mockResolvedValue({
+      bank: { bankId: BANK, title: '安全题库' },
+      items: [{
+        questionId: COURSE,
+        questionRevisionId: QUESTION_REVISION,
+        revision: 2,
+        questionType: 'single_choice',
+        prompt: '请选择安全做法',
+        options: [
+          { id: 'a', text: '佩戴护具' },
+          { id: 'b', text: '忽略警示' },
+        ],
+        correctOptionIds: ['a'],
+        points: 5,
+        explanation: '按作业规范佩戴护具。',
+        createdAt: '2026-08-26T00:00:00.000Z',
+      }],
+      page: 1,
+      pageSize: 100,
+      total: 1,
+    })
+    h.importQuestions.mockResolvedValue({ importedCount: 1 })
+    h.publishPaper.mockResolvedValue({
+      paperId: PAPER,
+      status: 'published',
+      itemCount: 1,
+      totalPoints: 5,
+    })
+    h.publishExam.mockResolvedValue({
+      examId: EXAM,
+      paperId: PAPER,
+      status: 'published',
+      totalPoints: 5,
     })
   })
 
@@ -661,5 +739,145 @@ describe('ElearningAdminView', () => {
     const publishedIds = publishBody.questions[0]?.options.map((option) => option.id) ?? []
     expect(publishedIds).toEqual(['a', 'b', 'o4', 'o5'])
     expect(new Set(publishedIds).size).toBe(4)
+  })
+
+  it('lazily opens the assessment resource section and creates a bank', async () => {
+    const root = mountView()
+    await flushUi()
+    expect(h.listBanks).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-assessment-bank-title"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(h.capabilities).toHaveBeenCalledTimes(2)
+    expect(h.listBanks).toHaveBeenCalledWith(1, 100)
+    expect(h.listQuestions).toHaveBeenCalledWith(BANK, 1, 100)
+    expect(root.textContent).toContain('题库与考试资源')
+    expect(root.textContent).toContain('请选择安全做法')
+    expect(root.textContent).toContain('正确答案: a')
+    expect(root.textContent).toContain('按作业规范佩戴护具。')
+
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-bank-title"]') as HTMLInputElement,
+      '新员工题库',
+    )
+    ;(root.querySelector('[data-testid="elearning-assessment-create-bank"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.createBank).toHaveBeenCalledWith('新员工题库')
+    expect(h.listBanks).toHaveBeenCalledTimes(2)
+  })
+
+  it('imports XLSX, publishes a fixed paper, then publishes an explicitly unbound exam', async () => {
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    const input = root.querySelector('[data-testid="elearning-assessment-xlsx"]') as HTMLInputElement
+    const workbook = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'questions.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    Object.defineProperty(input, 'files', { configurable: true, value: [workbook] })
+    input.dispatchEvent(new Event('change'))
+    ;(root.querySelector('[data-testid="elearning-assessment-import"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(h.importQuestions).toHaveBeenCalledWith(BANK, workbook)
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent).toContain('已导入 1 道题')
+
+    const selected = root.querySelector(
+      `[data-testid="elearning-assessment-question-${QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement
+    selected.checked = true
+    selected.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect(selected.checked).toBe(true)
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-paper-title"]') as HTMLInputElement,
+      '安全固定卷',
+    )
+    const publishPaperButton = root.querySelector(
+      '[data-testid="elearning-assessment-publish-paper"]',
+    ) as HTMLButtonElement
+    expect(publishPaperButton.disabled).toBe(false)
+    publishPaperButton.click()
+    await flushUi(12)
+
+    expect(h.publishPaper).toHaveBeenCalledWith({
+      title: '安全固定卷',
+      items: [{ questionRevisionId: QUESTION_REVISION, points: 5 }],
+    })
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent).toContain('固定试卷已发布')
+
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-exam-title"]') as HTMLInputElement,
+      '安全独立考试',
+    )
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-pass-score"]') as HTMLInputElement,
+      '4',
+    )
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-max-attempts"]') as HTMLInputElement,
+      '2',
+    )
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-duration"]') as HTMLInputElement,
+      '15',
+    )
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-disclosure"]') as HTMLSelectElement,
+      'wrong_items_after_submit',
+    )
+    const toggles = root.querySelectorAll('.assessment-check input[type="checkbox"]')
+    for (const toggle of toggles) {
+      ;(toggle as HTMLInputElement).checked = true
+      toggle.dispatchEvent(new Event('change', { bubbles: true }))
+    }
+    ;(root.querySelector('[data-testid="elearning-assessment-publish-exam"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(h.publishExam).toHaveBeenCalledWith({
+      paperId: PAPER,
+      title: '安全独立考试',
+      passScore: 4,
+      maxAttempts: 2,
+      windowStartsAt: null,
+      windowEndsAt: null,
+      durationSeconds: 900,
+      shuffleQuestions: true,
+      shuffleOptions: true,
+      disclosurePolicy: 'wrong_items_after_submit',
+    })
+    expect(root.querySelector('[data-testid="elearning-assessment-unbound"]')?.textContent).toContain(
+      '尚未指派给学员，也尚未绑定课程',
+    )
+  })
+
+  it('fails the lazy assessment section closed before any catalog request', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: true,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: true,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent).toContain('feature_disabled')
+    expect(h.listBanks).not.toHaveBeenCalled()
+    expect(h.listQuestions).not.toHaveBeenCalled()
+    expect(h.createBank).not.toHaveBeenCalled()
+    expect(h.importQuestions).not.toHaveBeenCalled()
+    expect(h.publishPaper).not.toHaveBeenCalled()
+    expect(h.publishExam).not.toHaveBeenCalled()
   })
 })

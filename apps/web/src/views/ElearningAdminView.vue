@@ -235,6 +235,19 @@
     >
       {{ status }}
     </p>
+
+    <div class="elearning-admin__assessment-toggle">
+      <button
+        type="button"
+        class="elearning-btn elearning-btn--secondary"
+        data-testid="elearning-assessment-toggle"
+        @click="showAssessmentAdmin = !showAssessmentAdmin"
+      >
+        {{ elearningLabel(showAssessmentAdmin ? 'admin.assessmentClose' : 'admin.assessmentOpen', isZh) }}
+      </button>
+    </div>
+
+    <ElearningAssessmentAdminSection v-if="showAssessmentAdmin" />
   </section>
 </template>
 
@@ -252,6 +265,7 @@ import {
   type ElearningDirectAssignmentRequest,
   type ElearningQuestionType,
 } from '../services/elearning'
+import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.vue'
 import {
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
@@ -297,6 +311,7 @@ const ready = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
+const showAssessmentAdmin = ref(false)
 
 const operationStageLabel = computed(() => {
   const stage = operationStage.value
@@ -653,7 +668,8 @@ onMounted(() => {
 
 .elearning-question__row,
 .elearning-option,
-.elearning-admin__actions {
+.elearning-admin__actions,
+.elearning-admin__assessment-toggle {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
