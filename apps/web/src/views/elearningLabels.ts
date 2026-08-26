@@ -31,6 +31,8 @@ export type ElearningLabelKey =
   | 'learner.startExam'
   | 'learner.continueExam'
   | 'learner.videoUnsupported'
+  | 'learner.examTimeRemaining'
+  | 'learner.examExpired'
   | 'learner.submitExam'
   // --- Admin chrome ---
   | 'admin.title'
@@ -107,6 +109,11 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'learner.videoUnsupported': {
     en: 'Your browser does not support video playback.',
     zh: '您的浏览器不支持视频播放。',
+  },
+  'learner.examTimeRemaining': { en: 'Time remaining', zh: '剩余时间' },
+  'learner.examExpired': {
+    en: 'The server has closed this timed attempt. Your answers are locked.',
+    zh: '服务端已结束本次限时考试，答卷已锁定。',
   },
   'learner.submitExam': { en: 'Submit answers', zh: '提交答卷' },
 
@@ -303,6 +310,19 @@ export function elearningExamAnswerProgress(
   isZh: boolean,
 ): string {
   return isZh ? `已答 ${answered} / ${total}` : `Answered ${answered} of ${total}`
+}
+
+export function elearningExamCountdown(remainingMs: number, isZh: boolean): string {
+  const totalSeconds = Number.isFinite(remainingMs)
+    ? Math.max(0, Math.ceil(remainingMs / 1000))
+    : 0
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  const clock = [hours, minutes, seconds]
+    .map((part) => String(part).padStart(2, '0'))
+    .join(':')
+  return `${elearningLabel('learner.examTimeRemaining', isZh)} ${clock}`
 }
 
 export function elearningCorrectOptionAria(optionId: string, isZh: boolean): string {

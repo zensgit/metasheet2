@@ -112,6 +112,17 @@
         >
           {{ elearningExamAnswerProgress(answeredCount, paper.questions.length, isZh) }}
         </p>
+        <p
+          v-if="examDeadlineAt !== null"
+          class="elearning-muted"
+          data-testid="elearning-exam-countdown"
+          role="timer"
+          aria-live="polite"
+          aria-atomic="true"
+          :aria-label="examCountdownLabel"
+        >
+          {{ examCountdownLabel }}
+        </p>
         <fieldset
           v-for="question in paper.questions"
           :key="question.questionRevisionId"
@@ -139,7 +150,7 @@
           type="submit"
           class="elearning-btn elearning-btn--primary"
           data-testid="elearning-submit-exam"
-          :disabled="busy || !examFullyAnswered"
+          :disabled="busy || examLocked || !examFullyAnswered"
         >
           {{ elearningLabel('learner.submitExam', isZh) }}
         </button>
@@ -181,6 +192,7 @@ import {
 } from '../services/elearning'
 import {
   elearningExamAnswerProgress,
+  elearningExamCountdown,
   elearningExamScore,
   elearningFailure,
   elearningLabel,
@@ -205,6 +217,8 @@ const attemptId = ref<string | null>(null)
 const answers = ref<Record<string, string[]>>({})
 const examResult = ref<ElearningExamSubmitResult | null>(null)
 const examLocked = ref(false)
+const examDeadlineAt = ref<string | null>(null)
+const examRemainingMs = ref(0)
 
 const answeredCount = computed(() => {
   if (!paper.value) return 0
@@ -221,6 +235,10 @@ const examFullyAnswered = computed(() => {
     (question) => (answers.value[question.questionRevisionId] ?? []).length > 0,
   )
 })
+
+const examCountdownLabel = computed(() => (
+  elearningExamCountdown(examRemainingMs.value, isZh.value)
+))
 
 interface PendingBeat {
   playing: boolean
@@ -253,6 +271,7 @@ let pendingDraft: Record<string, string[]> | null = null
 let saveWork: Promise<void> = Promise.resolve()
 let examEpoch = 0
 let statusSource: 'draft' | null = null
+let examCountdownTimer: number | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -275,6 +294,45 @@ function clearStatus(): void {
   invalidateDraftStatusOwnership()
   statusTone.value = 'info'
   status.value = ''
+}
+
+function clearExamCountdownTimer(): void {
+  if (examCountdownTimer != null) {
+    window.clearInterval(examCountdownTimer)
+    examCountdownTimer = null
+  }
+}
+
+function clearExamDeadline(): void {
+  clearExamCountdownTimer()
+  examDeadlineAt.value = null
+  examRemainingMs.value = 0
+}
+
+function updateExamCountdown(): void {
+  if (examDeadlineAt.value === null) return
+  const deadlineMs = Date.parse(examDeadlineAt.value)
+  examRemainingMs.value = Number.isFinite(deadlineMs)
+    ? Math.max(0, deadlineMs - Date.now())
+    : 0
+  if (examRemainingMs.value === 0) clearExamCountdownTimer()
+}
+
+function applyExamDeadline(deadlineAt: string | null): void {
+  clearExamCountdownTimer()
+  if (
+    !viewMounted
+    || typeof deadlineAt !== 'string'
+    || !Number.isFinite(Date.parse(deadlineAt))
+  ) {
+    examDeadlineAt.value = null
+    examRemainingMs.value = 0
+    return
+  }
+  examDeadlineAt.value = deadlineAt
+  updateExamCountdown()
+  if (examRemainingMs.value === 0) return
+  examCountdownTimer = window.setInterval(updateExamCountdown, 1000)
 }
 
 function bindVideo(event: Event): HTMLVideoElement | null {
@@ -648,6 +706,46 @@ function ownsDraftSave(attempt: string, epoch: number): boolean {
   return epoch === examEpoch && attemptId.value === attempt
 }
 
+function isAttemptExpired(error: unknown): error is ElearningApiError {
+  return error instanceof ElearningApiError && error.code === 'attempt_expired'
+}
+
+async function handleAttemptExpired(
+  error: unknown,
+  options: {
+    expectedAttempt?: string
+    expectedEpoch?: number
+    lockActiveAttempt: boolean
+    refresh: boolean
+  },
+): Promise<boolean> {
+  if (!isAttemptExpired(error)) return false
+  if (
+    options.expectedAttempt !== undefined
+    && options.expectedEpoch !== undefined
+    && !ownsDraftSave(options.expectedAttempt, options.expectedEpoch)
+  ) {
+    return false
+  }
+  if (options.lockActiveAttempt) {
+    pendingDraft = null
+    examLocked.value = true
+    examEpoch += 1
+    clearExamDeadline()
+  }
+  statusSource = null
+  statusTone.value = 'error'
+  status.value = elearningLabel('learner.examExpired', isZh.value)
+  if (options.refresh && ready.value && viewMounted) {
+    try {
+      await refreshCourses()
+    } catch {
+      /* Preserve the authoritative expiry message if the follow-up refresh fails. */
+    }
+  }
+  return true
+}
+
 function applyDraftSaveFailure(error: unknown, attempt: string, epoch: number): void {
   if (examLocked.value || !ownsDraftSave(attempt, epoch)) return
   statusTone.value = 'error'
@@ -670,9 +768,16 @@ async function runPendingDraftSave(): Promise<void> {
     const currentAttempt = attemptId.value
     const epoch = examEpoch
     try {
-      await saveElearningExamAnswers(currentAttempt, payload)
+      const result = await saveElearningExamAnswers(currentAttempt, payload)
+      if (ownsDraftSave(currentAttempt, epoch)) applyExamDeadline(result.deadlineAt)
       clearOwnedDraftSaveError(currentAttempt, epoch)
     } catch (error) {
+      if (await handleAttemptExpired(error, {
+        expectedAttempt: currentAttempt,
+        expectedEpoch: epoch,
+        lockActiveAttempt: true,
+        refresh: true,
+      })) return
       applyDraftSaveFailure(error, currentAttempt, epoch)
       if (pendingDraft === null) return
     }
@@ -766,19 +871,22 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
 
 async function startExam(course: ElearningLearnerCourse): Promise<void> {
   if (busy.value || !ready.value || course.video.status !== 'completed') return
+  const epochBeforeDraftDrain = examEpoch
   busy.value = true
   try {
     await awaitExamDraftSaves()
-    if (statusSource === 'draft') return
+    if (examEpoch !== epochBeforeDraftDrain || statusSource === 'draft') return
     clearStatus()
-    examLocked.value = false
     pendingDraft = null
     examEpoch += 1
     const result = await startElearningExam(course.exam.itemId)
+    clearExamDeadline()
     examCourseVersionId.value = course.courseVersionId
     paper.value = result.paper
     attemptId.value = result.attemptId
     examResult.value = null
+    examLocked.value = false
+    applyExamDeadline(result.deadlineAt)
     answers.value = Object.fromEntries(
       result.paper.questions.map((question) => [
         question.questionRevisionId,
@@ -786,6 +894,16 @@ async function startExam(course: ElearningLearnerCourse): Promise<void> {
       ]),
     )
   } catch (error) {
+    const currentAttempt = attemptId.value
+    const locksCurrentAttempt = currentAttempt !== null
+      && examCourseVersionId.value === course.courseVersionId
+    if (await handleAttemptExpired(error, {
+      ...(locksCurrentAttempt
+        ? { expectedAttempt: currentAttempt, expectedEpoch: examEpoch }
+        : {}),
+      lockActiveAttempt: locksCurrentAttempt,
+      refresh: locksCurrentAttempt || course.exam.latestAttempt !== null,
+    })) return
     writeStatus(formatError(error), 'error')
   } finally {
     busy.value = false
@@ -795,17 +913,28 @@ async function startExam(course: ElearningLearnerCourse): Promise<void> {
 async function submitExam(): Promise<void> {
   if (busy.value || !ready.value || !attemptId.value || !paper.value) return
   if (!examFullyAnswered.value) return
+  const currentAttempt = attemptId.value
+  const currentEpoch = examEpoch
   examLocked.value = true
   busy.value = true
   try {
     await awaitExamDraftSaves()
+    if (attemptId.value !== currentAttempt || examEpoch !== currentEpoch) return
     const payload = canonicalDraft()
-    examResult.value = await submitElearningExam(attemptId.value, payload)
+    examResult.value = await submitElearningExam(currentAttempt, payload)
+    examEpoch += 1
+    clearExamDeadline()
     paper.value = null
     pendingDraft = null
     clearOwnedDraftSaveError()
     await refreshCourses()
   } catch (error) {
+    if (await handleAttemptExpired(error, {
+      expectedAttempt: currentAttempt,
+      expectedEpoch: currentEpoch,
+      lockActiveAttempt: true,
+      refresh: true,
+    })) return
     examLocked.value = false
     writeStatus(formatError(error), 'error')
   } finally {
@@ -828,6 +957,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   viewMounted = false
+  clearExamCountdownTimer()
   stopWatchSession()
 })
 </script>
