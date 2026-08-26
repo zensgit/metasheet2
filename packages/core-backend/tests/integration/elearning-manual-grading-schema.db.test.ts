@@ -340,7 +340,7 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
           `UPDATE elearning_exam_attempts SET total_score = total_score WHERE id = $1`,
           [fixture.attemptId],
         ),
-      ).rejects.toThrow('graded rows require a changed grade outcome')
+      ).rejects.toThrow('graded rows cannot be updated')
       await expect(
         harness.pool.query(
           `UPDATE elearning_grading_records SET score = score WHERE attempt_id = $1`,
@@ -360,10 +360,25 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
       const migrated = await harness.migrator.migrateToLatest()
       expect(migrated.error).toBeUndefined()
 
+      await expect(
+        harness.pool.query(
+          `UPDATE elearning_exam_attempts
+              SET status = 'awaiting_manual', answers = '{"answer":["text"]}'::jsonb,
+                  auto_score = 2, submitted_at = clock_timestamp()
+            WHERE org_id = $1 AND id = $2`,
+          [fixture.orgId, fixture.attemptId],
+        ),
+      ).rejects.toThrow('illegal status transition')
       await harness.pool.query(
         `UPDATE elearning_exam_attempts
-            SET status = 'awaiting_manual', answers = '{"answer":["text"]}'::jsonb,
-                auto_score = 2, submitted_at = clock_timestamp()
+            SET status = 'submitted', answers = '{"answer":["text"]}'::jsonb,
+                submitted_at = clock_timestamp()
+          WHERE org_id = $1 AND id = $2`,
+        [fixture.orgId, fixture.attemptId],
+      )
+      await harness.pool.query(
+        `UPDATE elearning_exam_attempts
+            SET status = 'awaiting_manual', auto_score = 2
           WHERE org_id = $1 AND id = $2`,
         [fixture.orgId, fixture.attemptId],
       )
@@ -492,6 +507,15 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
           WHERE org_id = $1 AND id = $2`,
         [fixture.orgId, fixture.attemptId],
       )
+      await expect(
+        harness.pool.query(
+          `UPDATE elearning_exam_attempts
+              SET status = 'graded', total_score = 10, passed = true,
+                  graded_at = clock_timestamp(), regraded_at = clock_timestamp()
+            WHERE org_id = $1 AND id = $2`,
+          [fixture.orgId, fixture.attemptId],
+        ),
+      ).rejects.toThrow('initial grade cannot set regraded_at')
       await harness.pool.query(
         `UPDATE elearning_exam_attempts
             SET status = 'graded', total_score = 10, passed = true,
@@ -504,7 +528,7 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
           `UPDATE elearning_exam_attempts SET manual_score = 4 WHERE id = $1`,
           [fixture.attemptId],
         ),
-      ).rejects.toThrow('regrade must advance regraded_at')
+      ).rejects.toThrow('graded rows cannot be updated')
       await harness.pool.query(
         `INSERT INTO elearning_grading_records (
            id, org_id, attempt_id, kind, question_revision_id, request_id, seq,
@@ -518,20 +542,23 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
           randomUUID(),
         ],
       )
-      await harness.pool.query(
-        `UPDATE elearning_exam_attempts
-            SET manual_score = 4, total_score = 10, regraded_at = clock_timestamp()
-          WHERE org_id = $1 AND id = $2`,
-        [fixture.orgId, fixture.attemptId],
-      )
+      await expect(
+        harness.pool.query(
+          `UPDATE elearning_exam_attempts
+              SET manual_score = 4, regraded_at = clock_timestamp()
+            WHERE org_id = $1 AND id = $2`,
+          [fixture.orgId, fixture.attemptId],
+        ),
+      ).rejects.toThrow('graded rows cannot be updated')
 
       const final = await harness.pool.query<{
         manual_score: string
         record_count: number
+        regraded_at: Date | null
         status: string
         total_score: string
       }>(
-        `SELECT a.manual_score, a.status, a.total_score,
+        `SELECT a.manual_score, a.regraded_at, a.status, a.total_score,
                 count(g.id)::int AS record_count
            FROM elearning_exam_attempts a
            JOIN elearning_grading_records g
@@ -542,8 +569,9 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
       )
       expect(final.rows).toEqual([
         {
-          manual_score: '4',
+          manual_score: '3',
           record_count: 3,
+          regraded_at: null,
           status: 'graded',
           total_score: '10',
         },
@@ -556,13 +584,13 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
             WHERE id = $1`,
           [fixture.attemptId],
         ),
-      ).rejects.toThrow('graded evidence is immutable')
+      ).rejects.toThrow('graded rows cannot be updated')
       await expect(
         harness.pool.query(
           `UPDATE elearning_exam_attempts SET answers = '{}'::jsonb WHERE id = $1`,
           [fixture.attemptId],
         ),
-      ).rejects.toThrow('graded evidence is immutable')
+      ).rejects.toThrow('graded rows cannot be updated')
       await expect(
         harness.pool.query(
           `DELETE FROM elearning_exam_attempts WHERE id = $1`,
@@ -613,6 +641,12 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
             AND conname = 'elearning_exam_attempts_status_chk'`,
       )
       expect(statusCheck.rows[0]?.definition).not.toContain('awaiting_manual')
+      await expect(
+        harness.pool.query(
+          `UPDATE elearning_exam_attempts SET total_score = total_score WHERE id = $1`,
+          [fixture.attemptId],
+        ),
+      ).rejects.toThrow('graded rows cannot be updated')
     } finally {
       await harness.close()
     }
@@ -626,8 +660,14 @@ describe('e-learning manual-grading migration (isolated real PostgreSQL schema)'
       expect((await harness.migrator.migrateToLatest()).error).toBeUndefined()
       await harness.pool.query(
         `UPDATE elearning_exam_attempts
-            SET status = 'awaiting_manual', answers = '{}'::jsonb,
-                auto_score = 0, submitted_at = clock_timestamp()
+            SET status = 'submitted', answers = '{}'::jsonb,
+                submitted_at = clock_timestamp()
+          WHERE id = $1`,
+        [fixture.attemptId],
+      )
+      await harness.pool.query(
+        `UPDATE elearning_exam_attempts
+            SET status = 'awaiting_manual', auto_score = 0
           WHERE id = $1`,
         [fixture.attemptId],
       )

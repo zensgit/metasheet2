@@ -13,6 +13,13 @@ import { sql } from 'kysely'
  * for reconstructing the effective question grade from the immutable ledger.
  * total_score keeps its existing meaning: maximum available points. Earned
  * points are auto_score + manual_score and may not exceed that maximum.
+ * request_id identifies one per-question grade command; a batch UI issues one
+ * command per question so replay and payload-conflict handling stay exact.
+ *
+ * This preparation slice intentionally keeps every graded attempt immutable.
+ * The grading-service slice must couple an appended regrade record to the
+ * aggregate update before it unlocks graded rows, including aggregate-neutral
+ * regrades that only advance regraded_at.
  */
 export const ELEARNING_ATTEMPT_MANUAL_STATUS_CHECK =
   'elearning_exam_attempts_status_chk'
@@ -50,6 +57,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       DROP CONSTRAINT elearning_exam_attempts_started_no_grade_chk,
       DROP CONSTRAINT elearning_exam_attempts_submitted_expired_frozen_chk,
       DROP CONSTRAINT elearning_exam_attempts_graded_complete_chk,
+      DROP CONSTRAINT elearning_exam_attempts_score_order_chk,
       ADD COLUMN manual_score numeric NOT NULL DEFAULT 0,
       ADD COLUMN regraded_at timestamptz
   `.execute(db)
@@ -231,25 +239,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       IF OLD.status = 'graded' THEN
-        IF NEW.status IS DISTINCT FROM OLD.status
-           OR NEW.answers IS DISTINCT FROM OLD.answers
-           OR NEW.auto_score IS DISTINCT FROM OLD.auto_score
-           OR NEW.total_score IS DISTINCT FROM OLD.total_score
-           OR NEW.submitted_at IS DISTINCT FROM OLD.submitted_at
-           OR NEW.graded_at IS DISTINCT FROM OLD.graded_at THEN
-          RAISE EXCEPTION 'elearning_exam_attempts graded evidence is immutable';
-        END IF;
-
-        IF NEW.manual_score IS NOT DISTINCT FROM OLD.manual_score
-           AND NEW.passed IS NOT DISTINCT FROM OLD.passed THEN
-          RAISE EXCEPTION 'elearning_exam_attempts graded rows require a changed grade outcome';
-        END IF;
-
-        IF NEW.regraded_at IS NULL
-           OR NEW.regraded_at <= COALESCE(OLD.regraded_at, OLD.graded_at) THEN
-          RAISE EXCEPTION 'elearning_exam_attempts regrade must advance regraded_at';
-        END IF;
-        RETURN NEW;
+        RAISE EXCEPTION 'elearning_exam_attempts graded rows cannot be updated';
       END IF;
 
       IF OLD.status IN ('submitted', 'awaiting_manual', 'expired') THEN
@@ -265,12 +255,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       IF OLD.status IS DISTINCT FROM NEW.status THEN
-        IF OLD.status = 'started'
-           AND NEW.status IN ('submitted', 'awaiting_manual', 'expired') THEN
+        IF OLD.status = 'started' AND NEW.status IN ('submitted', 'expired') THEN
           RETURN NEW;
         END IF;
-        IF OLD.status IN ('submitted', 'awaiting_manual', 'expired')
-           AND NEW.status = 'graded' THEN
+        IF OLD.status IN ('submitted', 'expired')
+           AND NEW.status IN ('awaiting_manual', 'graded') THEN
+          IF NEW.status = 'graded' AND NEW.regraded_at IS NOT NULL THEN
+            RAISE EXCEPTION 'elearning_exam_attempts initial grade cannot set regraded_at';
+          END IF;
+          RETURN NEW;
+        END IF;
+        IF OLD.status = 'awaiting_manual' AND NEW.status = 'graded' THEN
+          IF NEW.regraded_at IS NOT NULL THEN
+            RAISE EXCEPTION 'elearning_exam_attempts initial grade cannot set regraded_at';
+          END IF;
           RETURN NEW;
         END IF;
         RAISE EXCEPTION 'elearning_exam_attempts illegal status transition: % -> %', OLD.status, NEW.status;
@@ -283,6 +281,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`
+    LOCK TABLE elearning_exam_attempts, elearning_grading_records
+      IN ACCESS EXCLUSIVE MODE
+  `.execute(db)
+
   await sql`
     DO $fn$
     BEGIN
@@ -414,6 +417,12 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     ALTER TABLE elearning_exam_attempts
       ADD CONSTRAINT elearning_exam_attempts_status_chk
         CHECK (status IN ('started', 'submitted', 'graded', 'expired')),
+      ADD CONSTRAINT elearning_exam_attempts_score_order_chk
+        CHECK (
+          auto_score IS NULL
+          OR total_score IS NULL
+          OR auto_score <= total_score
+        ),
       ADD CONSTRAINT elearning_exam_attempts_started_no_grade_chk
         CHECK (
           status <> 'started'

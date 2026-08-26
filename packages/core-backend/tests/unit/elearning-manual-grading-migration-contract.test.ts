@@ -80,13 +80,15 @@ describe('e-learning manual-grading migration contract', () => {
     expect(upSource).toContain("WHERE kind = 'auto'")
     expect(upSource).toContain('WHERE request_id IS NOT NULL')
     expect(upSource).toContain('auto_score + manual_score <= total_score')
+    expect(upSource).toContain("OLD.status IN ('submitted', 'expired')")
+    expect(upSource).toContain("NEW.status IN ('awaiting_manual', 'graded')")
     expect(upSource).toContain(
+      'elearning_exam_attempts graded rows cannot be updated',
+    )
+    expect(upSource).toContain('including aggregate-neutral')
+    expect(upSource).not.toContain(
       "NEW.status IN ('submitted', 'awaiting_manual', 'expired')",
     )
-    expect(upSource).toContain(
-      "OLD.status IN ('submitted', 'awaiting_manual', 'expired')",
-    )
-    expect(upSource).toContain('regrade must advance regraded_at')
     expect(upSource).not.toContain("'short_answer'")
     expect(upSource).not.toMatch(/\bRouter\b|app\.(get|post|put|patch)/)
   })
@@ -103,9 +105,16 @@ describe('e-learning manual-grading migration contract', () => {
     expect(downSource).toContain("kind <> 'auto'")
     expect(downSource).toContain('request_id IS NOT NULL')
     expect(downSource).toContain('seq <> 1')
+    const lockAt = downSource.indexOf(
+      'LOCK TABLE elearning_exam_attempts, elearning_grading_records',
+    )
+    const residueCheckAt = downSource.indexOf('IF EXISTS (')
+    expect(lockAt).toBeGreaterThanOrEqual(0)
+    expect(residueCheckAt).toBeGreaterThan(lockAt)
     expect(downSource).toContain(
       "CHECK (status IN ('started', 'submitted', 'graded', 'expired'))",
     )
+    expect(downSource).toContain('auto_score <= total_score')
     expect(downSource).toContain("CHECK (kind IN ('auto'))")
     expect(downSource).toContain('UNIQUE (org_id, attempt_id, kind)')
     expect(downSource).not.toMatch(/\bCASCADE\b/)

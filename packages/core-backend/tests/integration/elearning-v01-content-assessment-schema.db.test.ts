@@ -1448,7 +1448,7 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     const gradedUpdate = await reject(() =>
       pool.query(`UPDATE elearning_exam_attempts SET total_score = 1 WHERE id = $1`, [startedId]),
     )
-    expect(String(gradedUpdate?.message)).toMatch(/graded evidence is immutable/)
+    expect(String(gradedUpdate?.message)).toMatch(/graded rows cannot be updated/)
 
     const gradedDelete = await reject(() =>
       pool.query(`DELETE FROM elearning_exam_attempts WHERE id = $1`, [startedId]),
