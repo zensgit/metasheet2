@@ -62,13 +62,18 @@
           type="button"
           class="elearning-btn elearning-btn--secondary"
           data-testid="elearning-start-exam"
-          :disabled="busy || course.video.status !== 'completed'"
-          :aria-disabled="course.video.status !== 'completed'"
+          :disabled="busy
+            || course.video.status !== 'completed'
+            || course.exam.latestAttempt?.status === 'awaiting_manual'"
+          :aria-disabled="course.video.status !== 'completed'
+            || course.exam.latestAttempt?.status === 'awaiting_manual'"
           @click="void startExam(course)"
         >
-          {{ course.exam.latestAttempt?.status === 'started'
-            ? elearningLabel('learner.continueExam', isZh)
-            : elearningLabel('learner.startExam', isZh) }}
+          {{ course.exam.latestAttempt?.status === 'awaiting_manual'
+            ? elearningLabel('learner.awaitingManual', isZh)
+            : course.exam.latestAttempt?.status === 'started'
+              ? elearningLabel('learner.continueExam', isZh)
+              : elearningLabel('learner.startExam', isZh) }}
         </button>
       </div>
 
@@ -91,11 +96,15 @@
       </video>
 
       <p
-        v-if="course.exam.latestAttempt && course.exam.latestAttempt.status === 'graded'"
+        v-if="course.exam.latestAttempt
+          && (course.exam.latestAttempt.status === 'graded'
+            || course.exam.latestAttempt.status === 'awaiting_manual')"
         class="elearning-result"
         data-testid="elearning-latest-attempt"
       >
-        {{ elearningLatestAttempt(course.exam.latestAttempt.autoScore, course.exam.latestAttempt.totalScore, course.exam.latestAttempt.passed, isZh) }}
+        {{ course.exam.latestAttempt.status === 'awaiting_manual'
+          ? elearningLabel('learner.awaitingManual', isZh)
+          : elearningLatestAttempt(course.exam.latestAttempt.autoScore, course.exam.latestAttempt.totalScore, course.exam.latestAttempt.passed, isZh) }}
       </p>
 
       <form
@@ -119,21 +128,32 @@
         >
           <legend>{{ question.position }}. {{ question.prompt }}</legend>
           <p class="elearning-muted">{{ elearningQuestionPoints(question.points, isZh) }}</p>
-          <label
-            v-for="option in question.options"
-            :key="option.id"
-            class="elearning-option"
-          >
-            <input
-              :type="question.questionType === 'multiple_choice' ? 'checkbox' : 'radio'"
-              :name="`elearning-answer-${question.questionRevisionId}`"
-              :value="option.id"
-              :checked="isSelected(question.questionRevisionId, option.id)"
-              :disabled="busy || examLocked"
-              @change="onAnswerChange($event, question.questionRevisionId, option.id, question.questionType)"
+          <textarea
+            v-if="question.questionType === 'short_answer'"
+            class="elearning-short-answer"
+            data-testid="elearning-short-answer"
+            :value="shortAnswerValue(question.questionRevisionId)"
+            :maxlength="ELEARNING_SHORT_ANSWER_MAX_CHARS"
+            :disabled="busy || examLocked"
+            @input="onShortAnswerInput($event, question.questionRevisionId)"
+          />
+          <template v-else>
+            <label
+              v-for="option in question.options"
+              :key="option.id"
+              class="elearning-option"
             >
-            <span>{{ option.text }}</span>
-          </label>
+              <input
+                :type="question.questionType === 'multiple_choice' ? 'checkbox' : 'radio'"
+                :name="`elearning-answer-${question.questionRevisionId}`"
+                :value="option.id"
+                :checked="isSelected(question.questionRevisionId, option.id)"
+                :disabled="busy || examLocked"
+                @change="onAnswerChange($event, question.questionRevisionId, option.id, question.questionType)"
+              >
+              <span>{{ option.text }}</span>
+            </label>
+          </template>
         </fieldset>
         <button
           type="submit"
@@ -150,7 +170,9 @@
         class="elearning-result"
         data-testid="elearning-exam-result"
       >
-        {{ elearningExamScore(examResult.autoScore, examResult.totalScore, examResult.passed, isZh) }}
+        {{ examResult.status === 'awaiting_manual'
+          ? elearningLabel('learner.awaitingManual', isZh)
+          : elearningExamScore(examResult.autoScore, examResult.totalScore, examResult.passed, isZh) }}
       </p>
     </article>
   </section>
@@ -161,6 +183,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
+  ELEARNING_SHORT_ANSWER_MAX_CHARS,
   ElearningApiError,
   elearningPlaybackSourceUrl,
   getElearningCapabilities,
@@ -173,10 +196,11 @@ import {
   startElearningWatch,
   submitElearningExam,
   type ElearningExamSubmitResult,
+  type ElearningExamAnswers,
   type ElearningLearnerCourse,
   type ElearningPlaybackTicket,
   type ElearningPublicPaper,
-  type ElearningQuestionType,
+  type ElearningExamQuestionType,
   type ElearningWatchState,
 } from '../services/elearning'
 import {
@@ -202,7 +226,7 @@ const playbackSrc = ref('')
 const examCourseVersionId = ref<string | null>(null)
 const paper = ref<ElearningPublicPaper | null>(null)
 const attemptId = ref<string | null>(null)
-const answers = ref<Record<string, string[]>>({})
+const answers = ref<ElearningExamAnswers>({})
 const examResult = ref<ElearningExamSubmitResult | null>(null)
 const examLocked = ref(false)
 
@@ -210,7 +234,7 @@ const answeredCount = computed(() => {
   if (!paper.value) return 0
   let count = 0
   for (const question of paper.value.questions) {
-    if ((answers.value[question.questionRevisionId] ?? []).length > 0) count += 1
+    if (answerHasValue(answers.value[question.questionRevisionId])) count += 1
   }
   return count
 })
@@ -218,7 +242,7 @@ const answeredCount = computed(() => {
 const examFullyAnswered = computed(() => {
   if (!paper.value || paper.value.questions.length === 0) return false
   return paper.value.questions.every(
-    (question) => (answers.value[question.questionRevisionId] ?? []).length > 0,
+    (question) => answerHasValue(answers.value[question.questionRevisionId]),
   )
 })
 
@@ -249,7 +273,7 @@ let ticketRenewalRestorePlaying = false
 let finishingTicketRenewal = false
 let viewMounted = false
 let watchStartPending = false
-let pendingDraft: Record<string, string[]> | null = null
+let pendingDraft: ElearningExamAnswers | null = null
 let saveWork: Promise<void> = Promise.resolve()
 let examEpoch = 0
 let statusSource: 'draft' | null = null
@@ -632,14 +656,27 @@ function onPlaybackError(event: Event): void {
 }
 
 function isSelected(questionRevisionId: string, optionId: string): boolean {
-  return (answers.value[questionRevisionId] ?? []).includes(optionId)
+  const answer = answers.value[questionRevisionId]
+  return Array.isArray(answer) && answer.includes(optionId)
 }
 
-function canonicalDraft(): Record<string, string[]> {
-  const payload: Record<string, string[]> = {}
+function answerHasValue(answer: string[] | string | undefined): boolean {
+  return typeof answer === 'string' ? answer.trim().length > 0 : (answer?.length ?? 0) > 0
+}
+
+function shortAnswerValue(questionRevisionId: string): string {
+  const answer = answers.value[questionRevisionId]
+  return typeof answer === 'string' ? answer : ''
+}
+
+function canonicalDraft(): ElearningExamAnswers {
+  const payload: ElearningExamAnswers = {}
   if (!paper.value) return payload
   for (const question of paper.value.questions) {
-    payload[question.questionRevisionId] = [...(answers.value[question.questionRevisionId] ?? [])]
+    const answer = answers.value[question.questionRevisionId]
+    payload[question.questionRevisionId] = question.questionType === 'short_answer'
+      ? typeof answer === 'string' ? answer : ''
+      : Array.isArray(answer) ? [...answer] : []
   }
   return payload
 }
@@ -698,11 +735,12 @@ function onAnswerChange(
   event: Event,
   questionRevisionId: string,
   optionId: string,
-  questionType: ElearningQuestionType,
+  questionType: ElearningExamQuestionType,
 ): void {
-  if (examLocked.value) return
+  if (examLocked.value || questionType === 'short_answer') return
   const checked = event.target instanceof HTMLInputElement ? event.target.checked : false
-  const current = answers.value[questionRevisionId] ?? []
+  const stored = answers.value[questionRevisionId]
+  const current = Array.isArray(stored) ? stored : []
   if (questionType === 'multiple_choice') {
     answers.value = {
       ...answers.value,
@@ -715,6 +753,16 @@ function onAnswerChange(
       ...answers.value,
       [questionRevisionId]: checked ? [optionId] : [],
     }
+  }
+  queueDraftSave()
+}
+
+function onShortAnswerInput(event: Event, questionRevisionId: string): void {
+  if (examLocked.value) return
+  const value = event.target instanceof HTMLTextAreaElement ? event.target.value : ''
+  answers.value = {
+    ...answers.value,
+    [questionRevisionId]: value.slice(0, ELEARNING_SHORT_ANSWER_MAX_CHARS),
   }
   queueDraftSave()
 }
@@ -765,7 +813,12 @@ async function startWatch(course: ElearningLearnerCourse): Promise<void> {
 }
 
 async function startExam(course: ElearningLearnerCourse): Promise<void> {
-  if (busy.value || !ready.value || course.video.status !== 'completed') return
+  if (
+    busy.value
+    || !ready.value
+    || course.video.status !== 'completed'
+    || course.exam.latestAttempt?.status === 'awaiting_manual'
+  ) return
   busy.value = true
   try {
     await awaitExamDraftSaves()
@@ -782,7 +835,9 @@ async function startExam(course: ElearningLearnerCourse): Promise<void> {
     answers.value = Object.fromEntries(
       result.paper.questions.map((question) => [
         question.questionRevisionId,
-        [...(result.answers[question.questionRevisionId] ?? [])],
+        typeof result.answers[question.questionRevisionId] === 'string'
+          ? result.answers[question.questionRevisionId]
+          : [...(result.answers[question.questionRevisionId] ?? [])],
       ]),
     )
   } catch (error) {
@@ -880,6 +935,13 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+}
+
+.elearning-short-answer {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  box-sizing: border-box;
 }
 
 .elearning-video {

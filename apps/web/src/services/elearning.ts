@@ -4,6 +4,8 @@ export const ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS = 1000
 export const ELEARNING_MEDIA_PLAYBACK_PATH = '/api/elearning/media/playback'
 export const ELEARNING_PAPER_DOMAIN = 'elearning.exam.paper.v1' as const
 export const ELEARNING_PAPER_VERSION = 1 as const
+export const ELEARNING_PAPER_VERSION_MIXED = 2 as const
+export const ELEARNING_SHORT_ANSWER_MAX_CHARS = 10_000 as const
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -17,6 +19,7 @@ const FORBIDDEN_KEYS = new Set([
   'storage_key',
 ])
 const QUESTION_TYPES = ['single_choice', 'multiple_choice', 'true_false'] as const
+const EXAM_QUESTION_TYPES = [...QUESTION_TYPES, 'short_answer'] as const
 const WATCH_STATUSES = ['in_progress', 'completed'] as const
 const VIDEO_LIST_STATUSES = ['not_started', 'in_progress', 'completed'] as const
 const ATTEMPT_STATUSES = [
@@ -30,6 +33,9 @@ const CAPABILITY_KEYS = ['content', 'assignment', 'assessment', 'incentive', 'an
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
 
 export type ElearningQuestionType = (typeof QUESTION_TYPES)[number]
+export type ElearningExamQuestionType = (typeof EXAM_QUESTION_TYPES)[number]
+export type ElearningExamAnswer = string[] | string
+export type ElearningExamAnswers = Record<string, ElearningExamAnswer>
 export type ElearningWatchStatus = (typeof WATCH_STATUSES)[number]
 export type ElearningLearnerVideoStatus = (typeof VIDEO_LIST_STATUSES)[number]
 export type ElearningLearnerAttemptStatus = (typeof ATTEMPT_STATUSES)[number]
@@ -208,7 +214,7 @@ export interface ElearningPublicOption {
 export interface ElearningPublicQuestion {
   position: number
   questionRevisionId: string
-  questionType: ElearningQuestionType
+  questionType: ElearningExamQuestionType
   prompt: string
   options: ElearningPublicOption[]
   points: number
@@ -216,7 +222,9 @@ export interface ElearningPublicQuestion {
 
 export interface ElearningPublicPaper {
   domain: typeof ELEARNING_PAPER_DOMAIN
-  version: typeof ELEARNING_PAPER_VERSION
+  version:
+    | typeof ELEARNING_PAPER_VERSION
+    | typeof ELEARNING_PAPER_VERSION_MIXED
   questions: ElearningPublicQuestion[]
 }
 
@@ -225,12 +233,12 @@ export interface ElearningExamStartResult {
   attemptNo: number
   status: 'started'
   paper: ElearningPublicPaper
-  answers: Record<string, string[]>
+  answers: ElearningExamAnswers
   deadlineAt: string | null
   duplicate: boolean
 }
 
-export interface ElearningExamSubmitResult {
+export interface ElearningExamGradedSubmitResult {
   attemptId: string
   attemptNo: number
   status: 'graded'
@@ -239,6 +247,20 @@ export interface ElearningExamSubmitResult {
   passed: boolean
   duplicate: boolean
 }
+
+export interface ElearningExamAwaitingManualSubmitResult {
+  attemptId: string
+  attemptNo: number
+  status: 'awaiting_manual'
+  autoScore: number
+  totalScore: number
+  passed: null
+  duplicate: boolean
+}
+
+export type ElearningExamSubmitResult =
+  | ElearningExamGradedSubmitResult
+  | ElearningExamAwaitingManualSubmitResult
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -310,6 +332,10 @@ function isQuestionType(value: unknown): value is ElearningQuestionType {
   return value === 'single_choice' || value === 'multiple_choice' || value === 'true_false'
 }
 
+function isExamQuestionType(value: unknown): value is ElearningExamQuestionType {
+  return isQuestionType(value) || value === 'short_answer'
+}
+
 function readErrorCode(payload: unknown): string {
   if (isPlainObject(payload) && typeof payload.error === 'string') {
     const code = payload.error.trim()
@@ -378,7 +404,14 @@ function parsePublicQuestion(value: unknown, status: number): ElearningPublicQue
   ])) {
     failShape(status)
   }
-  if (!isQuestionType(value.questionType) || !Array.isArray(value.options) || value.options.length < 1) {
+  if (!isExamQuestionType(value.questionType) || !Array.isArray(value.options)) {
+    failShape(status)
+  }
+  if (
+    value.questionType === 'short_answer'
+      ? value.options.length !== 0
+      : value.options.length < 1
+  ) {
     failShape(status)
   }
   return {
@@ -393,14 +426,30 @@ function parsePublicQuestion(value: unknown, status: number): ElearningPublicQue
 
 function parsePublicPaper(value: unknown, status: number): ElearningPublicPaper {
   if (!isPlainObject(value) || !exactKeys(value, ['domain', 'version', 'questions'])) failShape(status)
-  if (value.domain !== ELEARNING_PAPER_DOMAIN || value.version !== ELEARNING_PAPER_VERSION) {
+  if (
+    value.domain !== ELEARNING_PAPER_DOMAIN
+    || (
+      value.version !== ELEARNING_PAPER_VERSION
+      && value.version !== ELEARNING_PAPER_VERSION_MIXED
+    )
+  ) {
     failShape(status)
   }
   if (!Array.isArray(value.questions) || value.questions.length < 1) failShape(status)
+  const questions = value.questions.map((question) => parsePublicQuestion(question, status))
+  const hasShortAnswer = questions.some(
+    (question) => question.questionType === 'short_answer',
+  )
+  if (
+    (value.version === ELEARNING_PAPER_VERSION && hasShortAnswer)
+    || (value.version === ELEARNING_PAPER_VERSION_MIXED && !hasShortAnswer)
+  ) {
+    failShape(status)
+  }
   return {
     domain: ELEARNING_PAPER_DOMAIN,
-    version: ELEARNING_PAPER_VERSION,
-    questions: value.questions.map((question) => parsePublicQuestion(question, status)),
+    version: value.version,
+    questions,
   }
 }
 
@@ -408,13 +457,23 @@ function parseOwnAnswers(
   value: unknown,
   paper: ElearningPublicPaper,
   status: number,
-): Record<string, string[]> {
+): ElearningExamAnswers {
   if (!isPlainObject(value)) failShape(status)
   const expected = paper.questions.map((question) => question.questionRevisionId)
   if (!exactKeys(value, expected)) failShape(status)
-  const answers: Record<string, string[]> = {}
+  const answers: ElearningExamAnswers = {}
   for (const question of paper.questions) {
     const selected = value[question.questionRevisionId]
+    if (question.questionType === 'short_answer') {
+      if (
+        typeof selected !== 'string'
+        || selected.length > ELEARNING_SHORT_ANSWER_MAX_CHARS
+      ) {
+        failShape(status)
+      }
+      answers[question.questionRevisionId] = selected
+      continue
+    }
     if (!Array.isArray(selected)) failShape(status)
     const optionIds = new Set(question.options.map((option) => option.id))
     const seen = new Set<string>()
@@ -791,7 +850,7 @@ export async function startElearningExam(itemId: string): Promise<ElearningExamS
 
 export async function saveElearningExamAnswers(
   attemptId: string,
-  answers: Record<string, string[]>,
+  answers: ElearningExamAnswers,
 ): Promise<ElearningExamStartResult> {
   const payload = await putJson(
     `/api/elearning/exams/attempts/${encodeURIComponent(attemptId)}/answers`,
@@ -803,7 +862,7 @@ export async function saveElearningExamAnswers(
 
 export async function submitElearningExam(
   attemptId: string,
-  answers: Record<string, string[]>,
+  answers: ElearningExamAnswers,
 ): Promise<ElearningExamSubmitResult> {
   const payload = await postJson(
     `/api/elearning/exams/attempts/${encodeURIComponent(attemptId)}/submit`,
@@ -821,16 +880,28 @@ export async function submitElearningExam(
   ])) {
     failShape(200)
   }
-  if (payload.status !== 'graded') failShape(200)
-  return {
+  const common = {
     attemptId: requireUuid(payload.attemptId, 200),
     attemptNo: requireSafeInt(payload.attemptNo, 200, 1),
-    status: 'graded',
     autoScore: requireFiniteNumber(payload.autoScore, 200),
     totalScore: requireFiniteNumber(payload.totalScore, 200),
-    passed: requireBoolean(payload.passed, 200),
     duplicate: requireBoolean(payload.duplicate, 200),
   }
+  if (payload.status === 'graded') {
+    return {
+      ...common,
+      status: 'graded',
+      passed: requireBoolean(payload.passed, 200),
+    }
+  }
+  if (payload.status === 'awaiting_manual' && payload.passed === null) {
+    return {
+      ...common,
+      status: 'awaiting_manual',
+      passed: null,
+    }
+  }
+  failShape(200)
 }
 
 export const ELEARNING_QUESTION_TYPES = QUESTION_TYPES

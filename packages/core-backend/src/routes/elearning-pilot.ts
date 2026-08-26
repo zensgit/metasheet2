@@ -5,10 +5,10 @@
  * Unmounted factory. Registers nothing unless master+CONTENT are exact 'true'.
  * Every route rechecks its independent capability flags. Identity,
  * authoritative org, then RBAC run before JSON/service. Learner/actor/org are injected —
- * never taken from the client. Publish uses a dedicated 1 MiB JSON parser; a body just
- * over that limit is a values-free 413. Other JSON routes stay at 16 KiB. Learner GET
- * has no JSON parser. Errors are values-free. Ticket/exam JSON never includes storage
- * keys or paper secrets.
+ * never taken from the client. Publish uses a dedicated 1 MiB JSON parser and exam
+ * answer save/submit use a dedicated 8 MiB parser; bodies just over those limits get
+ * a values-free 413. Other JSON routes stay at 16 KiB. Learner GET has no JSON parser.
+ * Errors are values-free. Ticket/exam JSON never includes storage keys or paper secrets.
  */
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
 import { json, Router } from 'express'
@@ -282,6 +282,10 @@ const ADMIN_ACCESS_STATUS: Record<ElearningAdminAccessErrorCode, number> = {
 
 const jsonParser = json({ limit: 16 * 1024 })
 const publishJsonParser = json({ limit: 1024 * 1024 })
+export const ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES = 8 * 1024 * 1024
+const examAnswersJsonParser = json({
+  limit: ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES,
+})
 
 export interface ElearningPilotRouteDeps {
   db: ElearningDirectAssignmentDb &
@@ -375,6 +379,23 @@ function parsePublishJson(
   next: NextFunction,
 ): void {
   publishJsonParser(req, res, (error?: unknown) => {
+    if (!error) return next()
+    if (!req.readableEnded) req.resume()
+    const parseError = error as { status?: unknown; type?: unknown }
+    if (parseError.status === 413 || parseError.type === 'entity.too.large') {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    res.status(400).json({ error: 'invalid_input' })
+  })
+}
+
+function parseExamAnswersJson(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  examAnswersJsonParser(req, res, (error?: unknown) => {
     if (!error) return next()
     if (!req.readableEnded) req.resume()
     const parseError = error as { status?: unknown; type?: unknown }
@@ -1175,7 +1196,7 @@ export function createElearningPilotRouter(
 
   router.put(
     '/api/elearning/exams/attempts/:attemptId/answers',
-    ...gate(deps.readGuard, 'exam'),
+    ...gate(deps.readGuard, 'exam', parseExamAnswersJson),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'exam')
       if (!ctx) return
@@ -1209,7 +1230,7 @@ export function createElearningPilotRouter(
 
   router.post(
     '/api/elearning/exams/attempts/:attemptId/submit',
-    ...gate(deps.readGuard, 'exam'),
+    ...gate(deps.readGuard, 'exam', parseExamAnswersJson),
     asyncHandler(async (req: Request, res: Response) => {
       const ctx = recheck(req, res, 'exam')
       if (!ctx) return

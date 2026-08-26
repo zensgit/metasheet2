@@ -9214,11 +9214,13 @@
           },
           "autoScore": {
             "type": "number",
-            "nullable": true
+            "nullable": true,
+            "description": "Objective-question score once auto-grading has run; null before submission."
           },
           "totalScore": {
             "type": "number",
-            "nullable": true
+            "nullable": true,
+            "description": "Maximum score available on the frozen paper; null until final grading completes."
           },
           "passed": {
             "type": "boolean",
@@ -9559,6 +9561,7 @@
           },
           "answers": {
             "type": "object",
+            "maxProperties": 200,
             "additionalProperties": {
               "oneOf": [
                 {
@@ -9596,6 +9599,7 @@
         "properties": {
           "answers": {
             "type": "object",
+            "maxProperties": 200,
             "additionalProperties": {
               "oneOf": [
                 {
@@ -26439,7 +26443,7 @@
       "put": {
         "operationId": "saveElearningExamAnswers",
         "summary": "Save draft answers for a started exam attempt",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids or short-answer text). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers and the same immutable `deadlineAt`.\nNo answer keys. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids or short-answer text). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers and the same immutable `deadlineAt`.\nNo answer keys. JSON limit 8 MiB; oversized bodies fail before the service.\n",
         "security": [
           {
             "bearerAuth": []
@@ -26496,6 +26500,10 @@
             "description": "course_withdrawn, prerequisite_incomplete, max_attempts, or conflict",
             "$ref": "#/components/responses/ElearningError"
           },
+          "413": {
+            "description": "payload_too_large",
+            "$ref": "#/components/responses/ElearningError"
+          },
           "500": {
             "description": "internal_error",
             "$ref": "#/components/responses/ElearningError"
@@ -26511,7 +26519,7 @@
       "post": {
         "operationId": "submitElearningExam",
         "summary": "Submit an exam attempt and auto-grade its objective portion",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId\nto selected option ids or short-answer text). Objective-only papers return\ngraded. Mixed papers return awaiting_manual with passed=null after the\nobjective portion is recorded. The result has no per-question key,\nselected-answer echo, or paper snapshot. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId\nto selected option ids or short-answer text). Objective-only papers return\ngraded. Mixed papers return awaiting_manual with passed=null after the\nobjective portion is recorded. The result has no per-question key,\nselected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized\nbodies fail before the service.\n",
         "security": [
           {
             "bearerAuth": []
@@ -26566,6 +26574,10 @@
           },
           "409": {
             "description": "course_withdrawn, prerequisite_incomplete, max_attempts, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "413": {
+            "description": "payload_too_large",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

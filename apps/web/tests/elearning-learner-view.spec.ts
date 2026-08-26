@@ -637,6 +637,116 @@ describe('ElearningLearnerView', () => {
     expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent).toContain('通过')
   })
 
+  it('edits a mixed-paper short answer and shows awaiting-manual after submit', async () => {
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockResolvedValue({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'started',
+      duplicate: false,
+      paper: {
+        domain: 'elearning.exam.paper.v1',
+        version: 2,
+        questions: [
+          {
+            position: 1,
+            questionRevisionId: Q1,
+            questionType: 'single_choice',
+            prompt: 'Pick one',
+            options: [
+              { id: 'a', text: 'alpha' },
+              { id: 'b', text: 'beta' },
+            ],
+            points: 10,
+          },
+          {
+            position: 2,
+            questionRevisionId: Q2,
+            questionType: 'short_answer',
+            prompt: 'Explain briefly',
+            options: [],
+            points: 10,
+          },
+        ],
+      },
+      answers: { [Q1]: [], [Q2]: '' },
+    })
+    h.submitExam.mockResolvedValue({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'awaiting_manual',
+      autoScore: 10,
+      totalScore: 20,
+      passed: null,
+      duplicate: false,
+    })
+
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    selectOption(root, 'a')
+    const shortAnswer = root.querySelector(
+      '[data-testid="elearning-short-answer"]',
+    ) as HTMLTextAreaElement
+    shortAnswer.value = 'manual answer'
+    shortAnswer.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-exam-answer-progress"]')?.textContent)
+      .toBe('已答 2 / 2')
+    const submit = root.querySelector(
+      '[data-testid="elearning-submit-exam"]',
+    ) as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    submit.click()
+    await flushUi()
+
+    expect(h.submitExam).toHaveBeenCalledWith(ATTEMPT, {
+      [Q1]: ['a'],
+      [Q2]: 'manual answer',
+    })
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-result"]')?.textContent)
+      .toContain('等待人工阅卷')
+  })
+
+  it('keeps awaiting-manual visible and disables retakes after refresh', async () => {
+    h.list.mockResolvedValue({
+      courses: [completedVideoCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: {
+            attemptId: ATTEMPT,
+            attemptNo: 1,
+            status: 'awaiting_manual',
+            autoScore: 10,
+            totalScore: null,
+            passed: null,
+            startedAt: '2026-01-04T05:06:07.000Z',
+            submittedAt: '2026-01-04T05:10:00.000Z',
+            gradedAt: null,
+          },
+        },
+      })],
+    })
+
+    const root = mountView()
+    await flushUi()
+
+    const start = root.querySelector(
+      '[data-testid="elearning-start-exam"]',
+    ) as HTMLButtonElement
+    expect(start.disabled).toBe(true)
+    expect(start.textContent).toContain('等待人工阅卷')
+    expect(root.querySelector('[data-testid="elearning-latest-attempt"]')?.textContent)
+      .toContain('等待人工阅卷')
+    start.click()
+    await flushUi()
+    expect(h.startExam).not.toHaveBeenCalled()
+  })
+
   it('tracks answered progress, blocks incomplete submit, and never double-counts radio changes', async () => {
     expect(elearningExamAnswerProgress(0, 2, false)).toBe('Answered 0 of 2')
     expect(elearningExamAnswerProgress(1, 2, true)).toBe('已答 1 / 2')

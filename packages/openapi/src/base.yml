@@ -5701,9 +5701,11 @@ components:
         autoScore:
           type: number
           nullable: true
+          description: Objective-question score once auto-grading has run; null before submission.
         totalScore:
           type: number
           nullable: true
+          description: Maximum score available on the frozen paper; null until final grading completes.
         passed:
           type: boolean
           nullable: true
@@ -5904,6 +5906,7 @@ components:
           $ref: '#/components/schemas/ElearningPublicPaper'
         answers:
           type: object
+          maxProperties: 200
           additionalProperties:
             oneOf:
               - type: array
@@ -5926,6 +5929,7 @@ components:
       properties:
         answers:
           type: object
+          maxProperties: 200
           additionalProperties:
             oneOf:
               - type: array

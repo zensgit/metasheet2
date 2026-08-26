@@ -8,7 +8,10 @@ import {
   isElearningExamSurfaceEnabled,
   isElearningWatchSurfaceEnabled,
 } from '../../src/elearning/feature-flags'
-import { createElearningPilotRouter } from '../../src/routes/elearning-pilot'
+import {
+  createElearningPilotRouter,
+  ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES,
+} from '../../src/routes/elearning-pilot'
 import {
   ElearningDirectAssignmentError,
   type ElearningDirectAssignmentDb,
@@ -1777,19 +1780,43 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(examStart.body).toEqual({ error: 'invalid_input' })
     expect(examApp.examStartCalls).toHaveLength(0)
 
-    const hugeAnswers = { answers: { [Q1]: ['x'.repeat(20 * 1024)] } }
-    const examSave = await serve(examApp.app)
+  })
+
+  test('exam answer routes accept a 10k CJK short answer and reject bodies over 8 MiB before service', async () => {
+    const shortAnswer = '字'.repeat(10_000)
+    const body = { answers: { [Q1]: shortAnswer } }
+    expect(Buffer.byteLength(JSON.stringify(body))).toBeGreaterThan(16 * 1024)
+    expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(
+      ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES,
+    )
+
+    const under = makeApp({ env: FLAG_EXAM_ON })
+    under.app.use(express.json({ limit: '10mb' }))
+    const underRes = await serve(under.app)
       .put(`/api/elearning/exams/attempts/${ATTEMPT}/answers`)
-      .send(hugeAnswers)
-    expect(examSave.status).toBe(400)
-    expect(examSave.body).toEqual({ error: 'invalid_input' })
-    expect(examApp.examSaveCalls).toHaveLength(0)
-    const examSubmit = await serve(examApp.app)
+      .send(body)
+    expect(underRes.status).toBe(200)
+    expect(under.examSaveCalls).toEqual([{
+      orgId: ORG,
+      userId: ACTOR,
+      attemptId: ATTEMPT,
+      answers: body.answers,
+    }])
+
+    const over = makeApp({ env: FLAG_EXAM_ON })
+    over.app.use(express.json({ limit: '10mb' }))
+    const overJson = `{"answers":{}${' '.repeat(ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES)}}`
+    expect(Buffer.byteLength(overJson)).toBeGreaterThan(
+      ELEARNING_EXAM_ANSWERS_JSON_LIMIT_BYTES,
+    )
+    const overRes = await serve(over.app)
       .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
-      .send(hugeAnswers)
-    expect(examSubmit.status).toBe(400)
-    expect(examSubmit.body).toEqual({ error: 'invalid_input' })
-    expect(examApp.examSubmitCalls).toHaveLength(0)
+      .set('content-type', 'application/json')
+      .send(overJson)
+    expect(overRes.status).toBe(413)
+    expect(overRes.body).toEqual({ error: 'payload_too_large' })
+    assertValuesFree(overRes.body)
+    expect(over.examSubmitCalls).toHaveLength(0)
   })
 
   test('assessment OFF 404s exam routes before identity/RBAC/service while watch ticket still works', async () => {

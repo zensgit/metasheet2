@@ -6859,9 +6859,15 @@ components:
         autoScore:
           type: number
           nullable: true
+          description: >-
+            Objective-question score once auto-grading has run; null before
+            submission.
         totalScore:
           type: number
           nullable: true
+          description: >-
+            Maximum score available on the frozen paper; null until final
+            grading completes.
         passed:
           type: boolean
           nullable: true
@@ -7114,6 +7120,7 @@ components:
           $ref: '#/components/schemas/ElearningPublicPaper'
         answers:
           type: object
+          maxProperties: 200
           additionalProperties:
             oneOf:
               - type: array
@@ -7143,6 +7150,7 @@ components:
       properties:
         answers:
           type: object
+          maxProperties: 200
           additionalProperties:
             oneOf:
               - type: array
@@ -18365,7 +18373,8 @@ paths:
 
         closed started DTO with own answers and the same immutable `deadlineAt`.
 
-        No answer keys. JSON limit 16 KiB.
+        No answer keys. JSON limit 8 MiB; oversized bodies fail before the
+        service.
       security:
         - bearerAuth: []
       parameters:
@@ -18404,6 +18413,9 @@ paths:
         '409':
           description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
           $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error
           $ref: '#/components/responses/ElearningError'
@@ -18425,7 +18437,9 @@ paths:
 
         objective portion is recorded. The result has no per-question key,
 
-        selected-answer echo, or paper snapshot. JSON limit 16 KiB.
+        selected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized
+
+        bodies fail before the service.
       security:
         - bearerAuth: []
       parameters:
@@ -18463,6 +18477,9 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

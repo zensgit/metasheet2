@@ -1546,7 +1546,7 @@ paths:
         only (map of questionRevisionId to selected option ids or short-answer text). Only started
         attempts may save. Same canonical body is duplicate true. Result is the
         closed started DTO with own answers and the same immutable `deadlineAt`.
-        No answer keys. JSON limit 16 KiB.
+        No answer keys. JSON limit 8 MiB; oversized bodies fail before the service.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1582,6 +1582,9 @@ paths:
         '409':
           description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
           $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error
           $ref: '#/components/responses/ElearningError'
@@ -1598,7 +1601,8 @@ paths:
         to selected option ids or short-answer text). Objective-only papers return
         graded. Mixed papers return awaiting_manual with passed=null after the
         objective portion is recorded. The result has no per-question key,
-        selected-answer echo, or paper snapshot. JSON limit 16 KiB.
+        selected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized
+        bodies fail before the service.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1633,6 +1637,9 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: course_withdrawn, prerequisite_incomplete, max_attempts, or conflict
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

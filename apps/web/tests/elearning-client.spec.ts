@@ -42,6 +42,7 @@ const MEDIA = '66666666-6666-4666-8666-666666666666'
 const SESSION = '77777777-7777-4777-8777-777777777777'
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const Q2 = '99999999-9999-4999-8999-999999999999'
 const ASSIGNMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const MEMBER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
@@ -123,6 +124,24 @@ function paper() {
       ],
       points: 10,
     }],
+  }
+}
+
+function mixedPaper() {
+  return {
+    domain: 'elearning.exam.paper.v1',
+    version: 2,
+    questions: [
+      ...paper().questions,
+      {
+        position: 2,
+        questionRevisionId: Q2,
+        questionType: 'short_answer',
+        prompt: 'Explain briefly',
+        options: [],
+        points: 10,
+      },
+    ],
   }
 }
 
@@ -379,6 +398,88 @@ describe('elearning client transport', () => {
       duplicate: false,
     })
     expect(JSON.stringify(saved)).not.toMatch(/answerKey|explanation|storageKey|storage_key|"correct"/)
+  })
+
+  it('parses mixed-paper starts, string drafts, and awaiting-manual submits', async () => {
+    const answers = { [Q1]: ['a'], [Q2]: 'manual answer' }
+    apiFetchMock
+      .mockResolvedValueOnce(jsonResponse(200, {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        paper: mixedPaper(),
+        answers,
+        deadlineAt: null,
+        duplicate: false,
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        paper: mixedPaper(),
+        answers,
+        deadlineAt: null,
+        duplicate: true,
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'awaiting_manual',
+        autoScore: 10,
+        totalScore: 20,
+        passed: null,
+        duplicate: false,
+      }))
+
+    const started = await startElearningExam(EXAM_ITEM)
+    expect(started.paper.version).toBe(2)
+    expect(started.paper.questions[1]).toMatchObject({
+      questionType: 'short_answer',
+      options: [],
+    })
+    expect(started.answers).toEqual(answers)
+    await expect(saveElearningExamAnswers(ATTEMPT, answers)).resolves.toMatchObject({
+      answers,
+      duplicate: true,
+    })
+    await expect(submitElearningExam(ATTEMPT, answers)).resolves.toEqual({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'awaiting_manual',
+      autoScore: 10,
+      totalScore: 20,
+      passed: null,
+      duplicate: false,
+    })
+    expect(lastJson()).toEqual({ answers })
+  })
+
+  it('rejects cross-version papers and malformed short-answer response shapes', async () => {
+    for (const responsePaper of [
+      { ...mixedPaper(), version: 1 },
+      { ...paper(), version: 2 },
+      {
+        ...mixedPaper(),
+        questions: [
+          mixedPaper().questions[0],
+          { ...mixedPaper().questions[1], options: [{ id: 'x', text: 'invalid' }] },
+        ],
+      },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+        attemptId: ATTEMPT,
+        attemptNo: 1,
+        status: 'started',
+        paper: responsePaper,
+        answers: { [Q1]: [], [Q2]: '' },
+        deadlineAt: null,
+        duplicate: false,
+      }))
+      await expect(startElearningExam(EXAM_ITEM)).rejects.toMatchObject({
+        code: 'invalid_response',
+        status: 200,
+      })
+    }
   })
 
   it('builds a same-origin playback source from the ticket token', () => {

@@ -285,6 +285,7 @@ async function loadAssignmentReminderCandidate(
       && deadline !== null
       && courseHeadStatus !== 'withdrawn'
       && courseStatus !== 'completed'
+      && !(videoStatus === 'completed' && examStatus === 'awaiting_manual')
     ),
     memberId,
     userId,

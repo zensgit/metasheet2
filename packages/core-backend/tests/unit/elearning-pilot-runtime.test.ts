@@ -627,7 +627,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(order).toEqual(['jwt', 'rbac', 'service'])
   })
 
-  test('valid allowed-key body over 16 KiB is rejected before service even with a later 10 MB parser', async () => {
+  test('route-local JSON limits stay effective before the later 10 MB parser', async () => {
     const assignCalls: unknown[] = []
     const startCalls: unknown[] = []
     const heartbeatCalls: unknown[] = []
@@ -757,11 +757,11 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     order.length = 0
     const examSubmit = await serve(app)
       .post(`/api/elearning/exams/attempts/${ATTEMPT}/submit`)
-      .send({ answers: { [Q1]: ['x'.repeat(20 * 1024)] } })
-    expect(examSubmit.status).toBe(400)
-    expect(examSubmit.body).toEqual({ error: 'invalid_input' })
-    expect(examSubmitCalls).toHaveLength(0)
-    expect(order).toEqual(['jwt', 'rbac'])
+      .send({ answers: { [Q1]: '字'.repeat(10_000) } })
+    expect(examSubmit.status).toBe(200)
+    expect(examSubmit.body).toEqual(EXAM_SUBMIT_RESULT)
+    expect(examSubmitCalls).toHaveLength(1)
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
 
     order.length = 0
     const underPublish = await serve(app)

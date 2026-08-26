@@ -32,6 +32,7 @@ export type ElearningLabelKey =
   | 'learner.continueExam'
   | 'learner.videoUnsupported'
   | 'learner.submitExam'
+  | 'learner.awaitingManual'
   // --- Admin chrome ---
   | 'admin.title'
   | 'admin.subtitle'
@@ -148,6 +149,10 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     zh: '您的浏览器不支持视频播放。',
   },
   'learner.submitExam': { en: 'Submit answers', zh: '提交答卷' },
+  'learner.awaitingManual': {
+    en: 'Submitted. Waiting for manual grading.',
+    zh: '已提交，等待人工阅卷。',
+  },
 
   'admin.title': { en: 'Cloud Classroom Admin', zh: '云课堂管理' },
   'admin.subtitle': {

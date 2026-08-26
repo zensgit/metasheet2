@@ -9031,7 +9031,7 @@ export interface paths {
          *     only (map of questionRevisionId to selected option ids or short-answer text). Only started
          *     attempts may save. Same canonical body is duplicate true. Result is the
          *     closed started DTO with own answers and the same immutable `deadlineAt`.
-         *     No answer keys. JSON limit 16 KiB.
+         *     No answer keys. JSON limit 8 MiB; oversized bodies fail before the service.
          */
         put: operations["saveElearningExamAnswers"];
         post?: never;
@@ -9056,7 +9056,8 @@ export interface paths {
          *     to selected option ids or short-answer text). Objective-only papers return
          *     graded. Mixed papers return awaiting_manual with passed=null after the
          *     objective portion is recorded. The result has no per-question key,
-         *     selected-answer echo, or paper snapshot. JSON limit 16 KiB.
+         *     selected-answer echo, or paper snapshot. JSON limit 8 MiB; oversized
+         *     bodies fail before the service.
          */
         post: operations["submitElearningExam"];
         delete?: never;
@@ -18296,7 +18297,9 @@ export interface components {
             attemptNo: number;
             /** @enum {string} */
             status: "started" | "submitted" | "awaiting_manual" | "graded" | "expired";
+            /** @description Objective-question score once auto-grading has run; null before submission. */
             autoScore: number | null;
+            /** @description Maximum score available on the frozen paper; null until final grading completes. */
             totalScore: number | null;
             passed: boolean | null;
             /** Format: date-time */
@@ -20814,6 +20817,8 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
             409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */
@@ -20854,6 +20859,8 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
             409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
+            413: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */
