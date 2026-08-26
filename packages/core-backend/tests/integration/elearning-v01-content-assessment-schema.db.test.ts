@@ -2514,62 +2514,98 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
     expect(column.rows[0].n).toBe(1)
   })
 
-  it('refuses deadline rollback with snapshots and transactionally replays a clean down/up', async () => {
-    const org = orgId('deadline-down')
-    seededOrgIds.push(org)
-    const graph = await seedGraph(org)
-    const startedAt = new Date(Date.now() - 1_000)
-    await insertAttempt({
-      org,
-      examId: graph.examId,
-      versionId: graph.versionId,
-      itemId: graph.examItemId,
-      userId: actor('deadline-down'),
-      attemptNo: 1,
-      startedAt: startedAt.toISOString(),
-      deadlineAt: new Date(startedAt.getTime() + 60_000).toISOString(),
+  it('refuses deadline rollback with snapshots and replays a clean down/up in an isolated predecessor schema', async () => {
+    const schema = `el_deadline_${process.pid}_${randomUUID().replaceAll('-', '')}`
+    await pool.query(`CREATE SCHEMA ${schema}`)
+    const isolatedPool = new Pool({
+      connectionString: DATABASE_URL,
+      max: 1,
+      options: `-c search_path=${schema}`,
+    })
+    const db = new Kysely<unknown>({
+      dialect: new PostgresDialect({ pool: isolatedPool }),
     })
 
-    const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-    await expect(
-      db.transaction().execute((trx) => downAttemptDeadlines(trx)),
-    ).rejects.toThrow(ELEARNING_ATTEMPT_DOWN_NONEMPTY)
-    expect((await pool.query<{ n: number }>(
-      `SELECT count(*)::int AS n
-         FROM information_schema.columns
-        WHERE table_schema = current_schema()
-          AND table_name = 'elearning_exam_attempts'
-          AND column_name IN ('deadline_at', 'expired_at')`,
-    )).rows[0].n).toBe(2)
+    try {
+      await isolatedPool.query(`
+        CREATE TABLE elearning_exam_attempts (
+          id uuid PRIMARY KEY,
+          org_id text NOT NULL,
+          exam_id uuid NOT NULL,
+          course_version_id uuid NOT NULL,
+          course_version_item_id uuid NOT NULL,
+          user_id text NOT NULL,
+          attempt_no integer NOT NULL,
+          paper_snapshot jsonb NOT NULL,
+          answers jsonb,
+          status text NOT NULL,
+          started_at timestamptz NOT NULL,
+          submitted_at timestamptz
+        )
+      `)
+      await db.transaction().execute((trx) => upAttemptDeadlines(trx))
 
-    await cleanupOrg(org)
-    await db.transaction().execute(async (trx) => {
-      await downAttemptDeadlines(trx)
-      const removed = await sql<{ n: number }>`
-        SELECT count(*)::int AS n
-          FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'elearning_exam_attempts'
-           AND column_name IN ('deadline_at', 'expired_at')
-      `.execute(trx)
-      expect(removed.rows[0].n).toBe(0)
+      const startedAt = new Date(Date.now() - 1_000)
+      await isolatedPool.query(
+        `INSERT INTO elearning_exam_attempts
+          (id, org_id, exam_id, course_version_id, course_version_item_id,
+           user_id, attempt_no, paper_snapshot, status, started_at, deadline_at)
+         VALUES ($1, $2, $3, $4, $5, $6, 1, '{}'::jsonb, 'started', $7, $8)`,
+        [
+          randomUUID(),
+          orgId('deadline-down'),
+          randomUUID(),
+          randomUUID(),
+          randomUUID(),
+          actor('deadline-down'),
+          startedAt.toISOString(),
+          new Date(startedAt.getTime() + 60_000).toISOString(),
+        ],
+      )
 
-      const restoredGuard = await sql<{ definition: string }>`
-        SELECT pg_get_functiondef('elearning_exam_attempts_state_guard()'::regprocedure) AS definition
-      `.execute(trx)
-      expect(restoredGuard.rows[0].definition).toContain('course_version_item_id')
-      expect(restoredGuard.rows[0].definition).not.toContain('deadline_at')
-      expect(restoredGuard.rows[0].definition).not.toContain('expired_at')
+      await expect(
+        db.transaction().execute((trx) => downAttemptDeadlines(trx)),
+      ).rejects.toThrow(ELEARNING_ATTEMPT_DOWN_NONEMPTY)
+      expect((await isolatedPool.query<{ n: number }>(
+        `SELECT count(*)::int AS n
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'elearning_exam_attempts'
+            AND column_name IN ('deadline_at', 'expired_at')`,
+      )).rows[0].n).toBe(2)
 
-      await upAttemptDeadlines(trx)
-      const restored = await sql<{ n: number }>`
-        SELECT count(*)::int AS n
-          FROM information_schema.columns
-         WHERE table_schema = current_schema()
-           AND table_name = 'elearning_exam_attempts'
-           AND column_name IN ('deadline_at', 'expired_at')
-      `.execute(trx)
-      expect(restored.rows[0].n).toBe(2)
-    })
+      await isolatedPool.query('DELETE FROM elearning_exam_attempts')
+      await db.transaction().execute(async (trx) => {
+        await downAttemptDeadlines(trx)
+        const removed = await sql<{ n: number }>`
+          SELECT count(*)::int AS n
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'elearning_exam_attempts'
+             AND column_name IN ('deadline_at', 'expired_at')
+        `.execute(trx)
+        expect(removed.rows[0].n).toBe(0)
+
+        const restoredGuard = await sql<{ definition: string }>`
+          SELECT pg_get_functiondef('elearning_exam_attempts_state_guard()'::regprocedure) AS definition
+        `.execute(trx)
+        expect(restoredGuard.rows[0].definition).toContain('course_version_item_id')
+        expect(restoredGuard.rows[0].definition).not.toContain('deadline_at')
+        expect(restoredGuard.rows[0].definition).not.toContain('expired_at')
+
+        await upAttemptDeadlines(trx)
+        const restored = await sql<{ n: number }>`
+          SELECT count(*)::int AS n
+            FROM information_schema.columns
+           WHERE table_schema = current_schema()
+             AND table_name = 'elearning_exam_attempts'
+             AND column_name IN ('deadline_at', 'expired_at')
+        `.execute(trx)
+        expect(restored.rows[0].n).toBe(2)
+      })
+    } finally {
+      await db.destroy()
+      await pool.query(`DROP SCHEMA IF EXISTS ${schema} CASCADE`)
+    }
   })
 })
