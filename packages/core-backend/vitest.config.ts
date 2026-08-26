@@ -1590,6 +1590,10 @@ export default defineConfig({
       // validation, and published-paper immutability. Wired as a whole-file
       // post-migrate gate in plugin-tests.yml.
       'tests/integration/elearning-assessment-catalog.db.test.ts',
+      // E-learning L3 paper-bound exam rules. Requires real PostgreSQL for
+      // same-org paper binding, source XOR, rule checks, and publish/retire
+      // immutability. Wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-paper-exam.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
