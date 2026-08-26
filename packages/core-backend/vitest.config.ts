@@ -1105,6 +1105,10 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0 target-generation/floor strict comparator: DATABASE_URL-gated. Keep it out of the no-DB
+      // default lane and pin its existing whole-file multitable real-DB invocation in the shared
+      // exact-anchor wiring contract, so this suite cannot collect-and-skip-green.
+      'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
       // W0 L6-b exact-anchor authority goldens: DATABASE_URL-gated and meaningful only against real
       // Postgres. Exclude from the no-DB default lane so it cannot skip-green, and keep the whole file
       // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract

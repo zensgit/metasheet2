@@ -22,9 +22,10 @@
  * RESULT envelope (`{ ok, data }`), NOT a `meta_records` cell map — including it would couple this guard
  * to unrelated federation/approval code and make it noisy. The ident set is the precise, stable signal.
  *
- * ENUMERATION RESULT (one-time evidence, post-§2a.3, captured 2026-06-12): the 5 raw projections below are
- * the COMPLETE live `meta_records` raw-projection surface; each is SAFE (operand pre-masked, masked
- * before the response, or a write-path build — never a raw egress). ⇒ **no current raw-projection leak.**
+ * ENUMERATION RESULT (baseline captured 2026-06-12; classifications updated as new internal projections
+ * land): the allowlist below is the COMPLETE live `meta_records` raw-projection surface; each is SAFE
+ * (operand pre-masked, masked before the response, a write-path build, or internal-only — never a raw
+ * egress). ⇒ **no current raw-projection leak.**
  *
  * RESIDUAL (documented, NOT a flaky guard): two things this guard deliberately does NOT assert —
  *   1. It is a CHANGE GATE on the raw-projection SHAPE, not a by-value gating proof: it confirms each
@@ -161,6 +162,12 @@ const ALLOWLIST: Record<string, Record<string, { disposition: Disposition; reaso
     'data: r.data': {
       disposition: 'INTERNAL',
       reason: 'W0-1 v3.7 STRICT precheck (precheckSheetHistoryIntegrityStrict): liveById internal hydration map used ONLY for the content-projection layer\'s live-vs-latest-snapshot equality check; the function returns only {ok, reason} — never echoes record data to any response',
+    },
+    'data: row.data': {
+      disposition: 'INTERNAL',
+      reason:
+        'floor-aware strict target-window precheck: baseline, live, and trash cell maps remain inside ' +
+        'precheckTargetHistoryWindow for canonical equality checks; the function returns only {ok, reason}',
     },
   },
   'services/approval-record-link-options.ts': {

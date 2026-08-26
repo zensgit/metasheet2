@@ -1620,12 +1620,19 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await sealOp(REC_DEL, [
       { seq: String(seqBase - 50n), version: 1, action: 'create', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_pre_${TS}` },
     ])
-    await sealOp(REC_DEL, [
+    const { opId: deleteOp } = await sealOp(REC_DEL, [
       { seq: String(seqBase + 1400n), version: 1, action: 'delete', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_post_${TS}` },
     ])
+    const deleteRevisionId = String((await q(
+      `SELECT id::text AS id FROM meta_record_revisions
+       WHERE sheet_id = $1 AND record_id = $2 AND operation_id = $3::uuid`,
+      [SHEET, REC_DEL, deleteOp],
+    )).rows[0]?.id)
     await q(
-      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,1)',
-      [REC_DEL, SHEET, JSON.stringify({ [F_STR]: 'was-at-anchor' })],
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,1,$4)`,
+      [REC_DEL, SHEET, JSON.stringify({ [F_STR]: 'was-at-anchor' }), deleteRevisionId],
     )
     await q(
       `SELECT setval('meta_record_chain_seq', GREATEST((SELECT last_value FROM meta_record_chain_seq), $1::bigint), true)`,
@@ -1640,10 +1647,12 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(pv.body?.data?.previewIdentity).toBeNull()
   })
 
-  test('healed-gap trust failure preserves HISTORY_INCOMPLETE before minting a token', async () => {
+  test('a post-anchor healed gap does not contaminate the trusted target generation', async () => {
     enableRecoveryExecute()
     const { anchorOp, seqBase } = await seedWorld()
-    // Healed gap: live at version 3 with only v1+v3 revisions (delete v2) on REC_A
+    // Current live is version 3 with only v1+v3 revisions (delete v2) on REC_A. The selected anchor is v1,
+    // so target-generation A validates only the checkpoint-to-anchor window; current projection separately
+    // proves that live equals the latest captured v3 snapshot.
     await sealOp(REC_A, [
       { seq: String(seqBase + 1500n), version: 3, action: 'update', snap: { [F_STR]: 'healed-v3' }, batchId: `batch_healed_${TS}` },
     ])
@@ -1652,9 +1661,8 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     ])
     await q('DELETE FROM meta_record_revisions WHERE record_id = $1 AND version = 2 AND sheet_id = $2', [REC_A, SHEET])
     const pv = await revertPreview({ anchorOperationId: anchorOp })
-    expect(pv.status).toBe(409)
-    expect(pv.body?.error?.code).toBe('HISTORY_INCOMPLETE')
-    expect(pv.body?.data?.previewIdentity).toBeUndefined()
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.previewIdentity).toBeTruthy()
     expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now/) // values-free
   })
 

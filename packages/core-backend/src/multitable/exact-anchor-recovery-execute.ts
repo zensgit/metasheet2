@@ -909,11 +909,22 @@ async function applyExactAnchorRecoveryAttempt(
         throw new ApplyRefusalError('forbidden')
       }
 
-      // 4. Strict history under the fence, after authority is freshly established.
-      const trust = await precheckSheetHistoryIntegrity(query, input.sheetId)
+      // 4. Re-select the token-bound checkpoint before strict validation. This happens only after the
+      //    no-oracle full-read gate, and before burn/write, so the strict comparator receives the retained
+      //    DB-owned floor rather than scanning untrusted pre-checkpoint history.
+      const checkpoint = await selectCheckpointByAnchorSeq(query, input.sheetId, anchorSeq)
+      if (!checkpoint) throw new ApplyRefusalError('no-covering-checkpoint')
+      if (checkpoint.id !== checkpointId) throw new ApplyRefusalError('checkpoint-changed')
+
+      // 5. Strict target-window history under the fence, after authority is freshly established.
+      const trust = await precheckSheetHistoryIntegrity(query, input.sheetId, {
+        checkpointId: checkpoint.id,
+        trustedSinceSeq: checkpoint.trustedSinceSeq,
+        anchorSeq,
+      })
       if (!trust.ok) throw new ApplyRefusalError('history-incomplete')
 
-      // 5. Burn — at-most-once barrier (rolled back on any later refusal).
+      // 6. Burn — at-most-once barrier (rolled back on any later refusal).
       const tokenSha = createHash('sha256').update(input.token).digest('hex')
       try {
         await query(
@@ -925,13 +936,15 @@ async function applyExactAnchorRecoveryAttempt(
         throw e
       }
 
-      // 6. In-fence checkpoint re-resolution.
-      const checkpoint = await selectCheckpointByAnchorSeq(query, input.sheetId, anchorSeq)
-      if (!checkpoint) throw new ApplyRefusalError('no-covering-checkpoint')
-      if (checkpoint.id !== checkpointId) throw new ApplyRefusalError('checkpoint-changed')
-
-      // 6. Dual-hash drift + live rows for plan/projection.
-      const replayMap = await reconstructRecordsAtSeq(query, input.sheetId, anchorSeq)
+      // 7. Dual-hash drift + live rows for plan/projection.
+      const replayMap = await reconstructRecordsAtSeq(
+        query,
+        input.sheetId,
+        anchorSeq,
+        undefined,
+        checkpoint.trustedSinceSeq,
+        checkpoint.id,
+      )
       let composed: Map<string, RecordStateAtT>
       try {
         composed = await composeBaselineOverlay(query, { sheetId: input.sheetId, checkpointId: checkpoint.id, stateMap: replayMap })

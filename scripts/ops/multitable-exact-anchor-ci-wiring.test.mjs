@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = join(__dirname, '..', '..')
 const FILES = [
+  // Target-generation/floor comparator: DB-gated and required as one whole-file invocation too.
+  'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
   'tests/integration/multitable-exact-anchor-recovery-realdb.test.ts',
   'tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts',
   // W0 L8 destructive-apply suite joins the same two-point contract: removing/relocating either its
