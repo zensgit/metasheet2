@@ -319,32 +319,20 @@ export function addFormField(
     maxRowsText: '',
     recordLinkBaseId: '',
     recordLinkSheetId: '',
-    // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above — this
-    // command layer feeds the Designer 2.0 canvas track (ApprovalFormFieldInspector.vue). F4
-    // (approval-form-builder-parity-delta-design-20260811.md §5 F4) mounts that track in production
-    // behind `approvalCanvasV2` (default ON) — it is no longer categorically unmounted, but
-    // ApprovalFormFieldInspector.vue still has NO authoring affordance for these three keys (out of
-    // Lock-8's citation scope, §1.3 names ApprovalFormInlineEditor.vue only); a freshly-added
-    // `number` field simply carries no display props, same as today, on EITHER surface.
+    // L8-C: neutral defaults, same discipline as recordLinkBaseId/recordLinkSheetId above. Both the
+    // Canvas V2 inspector and the inline fallback author these display properties through the typed
+    // property-update command; precision/min/max/derived formulas remain outside this contract.
     numberCurrencySymbol: '',
     numberThousandsSeparator: false,
     numberUppercaseCny: false,
-    // L8-B: same neutral-defaults discipline as the L8-C keys above — no authoring affordance for
-    // date_range's four keys exists on ApprovalFormFieldInspector.vue either; a freshly-added
-    // date_range field simply carries an unset dateType (matching §1.2's no-absent-default: it
-    // stays publish-rejected until the OTHER surface — ApprovalFormInlineEditor — sets a
-    // granularity). With F4's mount, a date_range field added via the Designer 2.0 palette while
-    // `approvalCanvasV2` is ON has NO in-surface way to set that granularity (the legacy fallback
-    // is unreachable while the flag is ON) — a known, flag-gated residual; see this PR's
-    // description / the F4 execution ledger, not a defect this command layer introduces.
+    // L8-B: an unset granularity remains an explicit draft state and publish rejects it. Both live
+    // authoring surfaces can select a valid granularity and edit the three labels.
     dateRangeDateType: '',
     dateRangeStartLabel: '',
     dateRangeEndLabel: '',
     dateRangeDurationLabel: '',
-    // L8-A: same neutral-defaults discipline as the L8-B/L8-C keys above — no authoring affordance
-    // for `explanationText` exists here; a freshly-added explanation field simply carries an empty
-    // body (matching §1.1's no-absent-default: it stays publish-rejected until the OTHER, live
-    // authoring surface — ApprovalFormInlineEditor — writes one).
+    // L8-A: an empty explanation body is a draft-only state; both authoring surfaces expose the
+    // multiline body and publish keeps the non-empty boundary.
     explanationText: '',
   }
 

@@ -940,6 +940,11 @@ function onTypeChange(event: Event): void {
   const select = event.target as HTMLSelectElement
   const nextType = select.value as FormFieldType
   if (nextType === current.type) return
+  if (!settlePendingEdits()) {
+    // A retype must not hide an invalid buffer from the previous field type.
+    select.value = current.type
+    return
+  }
   const committed = runCommand({
     kind: 'retype',
     localId: current.localId,

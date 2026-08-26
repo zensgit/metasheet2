@@ -682,6 +682,56 @@ describe('ApprovalFormFieldInspector — type change is the typed retype command
     expect(inspector.session().history.undoStack).toHaveLength(1)
   })
 
+  it('settles a valid dirty type-specific buffer before retyping the field', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation', explanationText: '原说明' }),
+      field(2),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      '新说明',
+    )
+
+    await inspector.changeSelect('approval-form-field-inspector-type', 'date')
+
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { explanationText: '新说明' },
+      },
+      { kind: 'retype', localId: 'local_1', nextType: 'date' },
+    ])
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      type: 'date',
+      explanationText: '新说明',
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+    expect(inspector.vm.isDirty()).toBe(false)
+  })
+
+  it('blocks retype when the old type has an invalid dirty buffer', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation', explanationText: '原说明' }),
+      field(2),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      ' ',
+    )
+
+    await inspector.changeSelect('approval-form-field-inspector-type', 'date')
+
+    expect(inspector.commands).toHaveLength(0)
+    expect(inspector.session().draft.fields[0].type).toBe('explanation')
+    expect(inspector.session().history.undoStack).toHaveLength(0)
+    expect(inspector.select('approval-form-field-inspector-type').value).toBe(
+      'explanation',
+    )
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+    expect(inspector.vm.isDirty()).toBe(true)
+  })
+
   it('a NAMED refusal renders values-free business copy listing the dependency kinds and reverts the control', async () => {
     const inspector = await mountInspector([
       field(1),
