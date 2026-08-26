@@ -16,6 +16,7 @@ import {
   SECTION_CAUSALITY_D2C_SNAPSHOT_SOURCE_HEAD_KINDS,
   SECTION_CAUSALITY_DATA_SECTION_KINDS,
   SECTION_CAUSALITY_DIRECT_EVENT_KINDS,
+  SECTION_CAUSALITY_EVENT_CONTRACT_V2,
   SECTION_CAUSALITY_GENERIC_SEAL_KINDS,
   SECTION_CAUSALITY_INT4_MAX,
   SECTION_CAUSALITY_OPERATION_KINDS,
@@ -321,9 +322,19 @@ describe('Time Machine D2c generic helper cannot mint synthetic kinds or bootstr
     const members = snapshotMembers()
     const originalHash = members[0]!.sourceHash
     const insertedHashes: unknown[] = []
+    const insertedParents: unknown[][] = []
+    const input = {
+      sheetId: 'sheet',
+      operationId: BOOTSTRAP_ID,
+      endpointSeq: PARENT_SEQ,
+      members,
+    }
     const query: SealQuery = async (sql, params = []) => {
       if (sql.includes('FROM meta_record_history_operations')) {
         members[0]!.sourceHash = 'b'.repeat(64)
+        input.sheetId = 'mutated-sheet'
+        input.operationId = '22222222-2222-4222-8222-222222222222'
+        input.endpointSeq = '999'
         return {
           rows: members.map((member) => ({
             operation_id: member.sourceOperationId,
@@ -335,18 +346,19 @@ describe('Time Machine D2c generic helper cannot mint synthetic kinds or bootstr
       }
       if (sql.includes('INSERT INTO meta_record_history_snapshot_members')) {
         insertedHashes.push(params[8])
+        insertedParents.push(params)
+      }
+      if (sql.includes('INSERT INTO meta_record_history_operations')) {
+        insertedParents.push(params)
       }
       return { rows: [] }
     }
 
-    await sealArchiveSnapshotOperation(query, {
-      sheetId: 'sheet',
-      operationId: BOOTSTRAP_ID,
-      endpointSeq: PARENT_SEQ,
-      members,
-    })
+    await sealArchiveSnapshotOperation(query, input)
 
     expect(insertedHashes[0]).toBe(originalHash)
+    expect(insertedParents.every((params) => params[0] === 'sheet' && params[1] === BOOTSTRAP_ID)).toBe(true)
+    expect(insertedParents.at(-1)?.[2]).toBe(PARENT_SEQ)
     expect(members[0]!.sourceHash).not.toBe(originalHash)
   })
 
@@ -411,22 +423,35 @@ describe('Time Machine D2c generic helper cannot mint synthetic kinds or bootstr
       },
     ]
     const insertedCounts: unknown[] = []
-    const query: SealQuery = async (sql, params = []) => {
-      if (sql.includes('INSERT INTO meta_record_history_operation_members')) {
-        insertedCounts.push(params[5])
-        if (params[2] === 1) members[1]!.childEventCount = 99
-      }
-      return { rows: [] }
-    }
-
-    await sealRestoreAggregateOperation(query, {
+    const insertedParents: unknown[][] = []
+    const input = {
       sheetId: 'sheet',
       operationId: BOOTSTRAP_ID,
       endpointSeq: '3',
       members,
-    })
+    }
+    const query: SealQuery = async (sql, params = []) => {
+      if (sql.includes('INSERT INTO meta_record_history_operation_members')) {
+        insertedCounts.push(params[5])
+        insertedParents.push(params)
+        if (params[2] === 1) {
+          members[1]!.childEventCount = 99
+          input.sheetId = 'mutated-sheet'
+          input.operationId = '33333333-3333-4333-8333-333333333333'
+          input.endpointSeq = '999'
+        }
+      }
+      if (sql.includes('INSERT INTO meta_record_history_operations')) {
+        insertedParents.push(params)
+      }
+      return { rows: [] }
+    }
+
+    await sealRestoreAggregateOperation(query, input)
 
     expect(insertedCounts).toEqual([1, 2])
+    expect(insertedParents.every((params) => params[0] === 'sheet' && params[1] === BOOTSTRAP_ID)).toBe(true)
+    expect(insertedParents.at(-1)?.[2]).toBe('3')
     expect(members[1]!.childEventCount).toBe(99)
   })
 })
@@ -524,6 +549,38 @@ describe('Time Machine D2c bootstrap helper binds the captured event', () => {
     }
     await sealSectionBootstrapOperation(query, input)
     expect(calls).toEqual(['select', 'insert'])
+  })
+
+  test('bootstrap seal snapshots caller-owned scalar fields before awaited SQL', async () => {
+    const mutableInput = { ...input }
+    let insertedParams: unknown[] | undefined
+    const query: SealQuery = async (sql, params = []) => {
+      if (sql.includes('FROM meta_sheet_section_revisions')) {
+        mutableInput.sheetId = 'mutated-sheet'
+        mutableInput.operationId = '44444444-4444-4444-8444-444444444444'
+        mutableInput.endpointSeq = '999'
+        mutableInput.sectionKind = 'links'
+        mutableInput.rowCount = '1'
+        mutableInput.sourceHash = 'b'.repeat(64)
+        return {
+          rows: [
+            {
+              section_kind: 'schema',
+              action: 'bootstrap_snapshot',
+              seq: TWO_POW_53_PLUS_1,
+              row_count: '0',
+              source_hash: SHA256,
+            },
+          ],
+        }
+      }
+      insertedParams = params
+      return { rows: [] }
+    }
+
+    await sealSectionBootstrapOperation(query, mutableInput)
+
+    expect(insertedParams).toEqual(['sheet', BOOTSTRAP_ID, TWO_POW_53_PLUS_1, SECTION_CAUSALITY_EVENT_CONTRACT_V2])
   })
 })
 

@@ -260,28 +260,29 @@ export async function sealDirectEventOperation(query: SealQuery, input: DirectEv
 }
 
 export async function sealSectionBootstrapOperation(query: SealQuery, input: SectionBootstrapSealInput): Promise<void> {
-  assertNonEmptyId(input.sheetId)
-  assertNonEmptyId(input.operationId)
-  assertPositiveDecimalString(input.endpointSeq)
-  assertSectionCausalityDataSectionKind(input.sectionKind)
-  assertCanonicalNonnegativeDecimalString(input.rowCount)
-  assertLowercaseSha256Hex(input.sourceHash)
+  const { sheetId, operationId, endpointSeq, sectionKind, rowCount, sourceHash } = input
+  assertNonEmptyId(sheetId)
+  assertNonEmptyId(operationId)
+  assertPositiveDecimalString(endpointSeq)
+  assertSectionCausalityDataSectionKind(sectionKind)
+  assertCanonicalNonnegativeDecimalString(rowCount)
+  assertLowercaseSha256Hex(sourceHash)
   const captured = await query(
     `SELECT section_kind, action, seq::text AS seq,
             payload->>'row_count' AS row_count,
             payload->>'source_hash' AS source_hash
        FROM meta_sheet_section_revisions
       WHERE sheet_id = $1 AND operation_id = $2::uuid`,
-    [input.sheetId, input.operationId],
+    [sheetId, operationId],
   )
   const rows = captured.rows as BootstrapEventRow[]
   if (
     rows.length !== 1 ||
-    rows[0]?.section_kind !== input.sectionKind ||
+    rows[0]?.section_kind !== sectionKind ||
     rows[0]?.action !== 'bootstrap_snapshot' ||
-    rows[0]?.seq !== input.endpointSeq ||
-    rows[0]?.row_count !== input.rowCount ||
-    rows[0]?.source_hash !== input.sourceHash
+    rows[0]?.seq !== endpointSeq ||
+    rows[0]?.row_count !== rowCount ||
+    rows[0]?.source_hash !== sourceHash
   ) {
     throw new RecoveryArchiveSealError('SECTION_CAUSALITY_BOOTSTRAP_EVENT_MISMATCH')
   }
@@ -290,16 +291,17 @@ export async function sealSectionBootstrapOperation(query: SealQuery, input: Sec
        sheet_id, operation_id, endpoint_seq, event_count,
        operation_kind, event_contract_version, component_count
      ) VALUES ($1, $2::uuid, $3::bigint, 1, 'section_bootstrap', $4::int, NULL)`,
-    [input.sheetId, input.operationId, input.endpointSeq, SECTION_CAUSALITY_EVENT_CONTRACT_V2],
+    [sheetId, operationId, endpointSeq, SECTION_CAUSALITY_EVENT_CONTRACT_V2],
   )
 }
 
 export async function sealArchiveSnapshotOperation(query: SealQuery, input: ArchiveSnapshotSealInput): Promise<void> {
-  assertNonEmptyId(input.sheetId)
-  assertNonEmptyId(input.operationId)
-  assertPositiveDecimalString(input.endpointSeq)
-  const members = normalizeSnapshotMembers(input.members, input.endpointSeq)
-  await assertSnapshotMembersMatchBootstrapEndpoints(query, input.sheetId, members)
+  const { sheetId, operationId, endpointSeq } = input
+  assertNonEmptyId(sheetId)
+  assertNonEmptyId(operationId)
+  assertPositiveDecimalString(endpointSeq)
+  const members = normalizeSnapshotMembers(input.members, endpointSeq)
+  await assertSnapshotMembersMatchBootstrapEndpoints(query, sheetId, members)
   for (const member of members) {
     await query(
       `INSERT INTO meta_record_history_snapshot_members (
@@ -310,8 +312,8 @@ export async function sealArchiveSnapshotOperation(query: SealQuery, input: Arch
          $6::uuid, $7::bigint, $8::bigint, $9
        )`,
       [
-        input.sheetId,
-        input.operationId,
+        sheetId,
+        operationId,
         member.ordinal,
         member.sectionKind,
         member.sourceHeadKind,
@@ -327,15 +329,16 @@ export async function sealArchiveSnapshotOperation(query: SealQuery, input: Arch
        sheet_id, operation_id, endpoint_seq, event_count,
        operation_kind, event_contract_version, component_count
      ) VALUES ($1, $2::uuid, $3::bigint, 0, 'archive_snapshot', $4::int, $5::int)`,
-    [input.sheetId, input.operationId, input.endpointSeq, SECTION_CAUSALITY_EVENT_CONTRACT_V2, members.length],
+    [sheetId, operationId, endpointSeq, SECTION_CAUSALITY_EVENT_CONTRACT_V2, members.length],
   )
 }
 
 export async function sealRestoreAggregateOperation(query: SealQuery, input: RestoreAggregateSealInput): Promise<void> {
-  assertNonEmptyId(input.sheetId)
-  assertNonEmptyId(input.operationId)
-  assertPositiveDecimalString(input.endpointSeq)
-  const members = normalizeAggregateMembers(input.members, input.endpointSeq)
+  const { sheetId, operationId, endpointSeq } = input
+  assertNonEmptyId(sheetId)
+  assertNonEmptyId(operationId)
+  assertPositiveDecimalString(endpointSeq)
+  const members = normalizeAggregateMembers(input.members, endpointSeq)
   const eventCount = sumCheckedInt4EventCounts(members.map((member) => member.childEventCount))
   for (const member of members) {
     await query(
@@ -344,8 +347,8 @@ export async function sealRestoreAggregateOperation(query: SealQuery, input: Res
          child_endpoint_seq, child_event_count
        ) VALUES ($1, $2::uuid, $3::int, $4::uuid, $5::bigint, $6::int)`,
       [
-        input.sheetId,
-        input.operationId,
+        sheetId,
+        operationId,
         member.ordinal,
         member.childOperationId,
         member.childEndpointSeq,
@@ -359,9 +362,9 @@ export async function sealRestoreAggregateOperation(query: SealQuery, input: Res
        operation_kind, event_contract_version, component_count
      ) VALUES ($1, $2::uuid, $3::bigint, $4::int, 'restore_aggregate', $5::int, $6::int)`,
     [
-      input.sheetId,
-      input.operationId,
-      input.endpointSeq,
+      sheetId,
+      operationId,
+      endpointSeq,
       eventCount,
       SECTION_CAUSALITY_EVENT_CONTRACT_V2,
       members.length,

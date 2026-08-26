@@ -598,6 +598,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             ERRCODE = '23514',
             MESSAGE = 'section_causality_snapshot_direct_events_forbidden';
         END IF;
+        IF EXISTS (
+          SELECT 1
+            FROM public.meta_record_history_operation_members member_row
+           WHERE member_row.sheet_id = NEW.sheet_id
+             AND member_row.parent_operation_id = NEW.operation_id
+        ) THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'section_causality_snapshot_membership_invalid';
+        END IF;
         SELECT COUNT(*),
                COUNT(*) FILTER (
                  WHERE expected.section_kind IS NOT NULL
@@ -678,6 +688,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'section_causality_aggregate_direct_events_forbidden';
+        END IF;
+        IF EXISTS (
+          SELECT 1
+            FROM public.meta_record_history_snapshot_members member_row
+           WHERE member_row.sheet_id = NEW.sheet_id
+             AND member_row.parent_operation_id = NEW.operation_id
+        ) THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'section_causality_aggregate_membership_invalid';
         END IF;
         SELECT COUNT(*),
                COALESCE(SUM(child_event_count), 0),

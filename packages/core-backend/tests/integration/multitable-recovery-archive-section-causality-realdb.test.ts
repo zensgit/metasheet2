@@ -676,6 +676,98 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     expect(direct.rows).toEqual([{ revisions: 0, markers: 0, sections: 0 }])
   })
 
+  test('each synthetic parent refuses rows from the other membership table', async () => {
+    const snapshotId = randomUUID()
+    const snapshotError = await errorOf(
+      withTxn(async (client) => {
+        const heads = await bootstrapAllSections(client, SHEET)
+        const chunkId = randomUUID()
+        await insertRecordRevision(client, SHEET, chunkId, CHUNK_SEQ_1, `${SHEET}_mixed_snapshot`)
+        await sealDirectEventOperation(asQuery(client), {
+          sheetId: SHEET,
+          operationId: chunkId,
+          endpointSeq: CHUNK_SEQ_1,
+          eventCount: 1,
+          operationKind: 'restore_chunk',
+        })
+        for (const member of await snapshotMembersFor(SHEET, heads)) {
+          await client.query(
+            `INSERT INTO meta_record_history_snapshot_members (
+               sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+               source_operation_id, source_head_seq, row_count, source_hash
+             ) VALUES ($1, $2::uuid, $3::int, $4, $5, $6::uuid, $7::bigint, $8::bigint, $9)`,
+            [
+              SHEET,
+              snapshotId,
+              member.ordinal,
+              member.sectionKind,
+              member.sourceHeadKind,
+              member.sourceOperationId,
+              member.sourceHeadSeq,
+              member.rowCount,
+              member.sourceHash,
+            ],
+          )
+        }
+        await client.query(
+          `INSERT INTO meta_record_history_operation_members (
+             sheet_id, parent_operation_id, ordinal, child_operation_id,
+             child_endpoint_seq, child_event_count
+           ) VALUES ($1, $2::uuid, 1, $3::uuid, $4::bigint, 1)`,
+          [SHEET, snapshotId, chunkId, CHUNK_SEQ_1],
+        )
+        await client.query(
+          `INSERT INTO meta_record_history_operations (
+             sheet_id, operation_id, endpoint_seq, event_count,
+             operation_kind, event_contract_version, component_count
+           ) VALUES ($1, $2::uuid, $3::bigint, 0, 'archive_snapshot', 2, 9)`,
+          [SHEET, snapshotId, SNAPSHOT_SEQ],
+        )
+      }),
+    )
+    expect(snapshotError.message).toBe('section_causality_snapshot_membership_invalid')
+    expectValuesFree(snapshotError, [SHEET, WORKSPACE, BASE, snapshotId])
+
+    const aggregateId = randomUUID()
+    const aggregateError = await errorOf(
+      withTxn(async (client) => {
+        const bootstrapId = await sealBootstrapHead(client, SHEET, 'schema', BOOTSTRAP_SEQ0)
+        const chunkId = randomUUID()
+        await insertRecordRevision(client, SHEET, chunkId, CHUNK_SEQ_1, `${SHEET}_mixed_aggregate`)
+        await sealDirectEventOperation(asQuery(client), {
+          sheetId: SHEET,
+          operationId: chunkId,
+          endpointSeq: CHUNK_SEQ_1,
+          eventCount: 1,
+          operationKind: 'restore_chunk',
+        })
+        await client.query(
+          `INSERT INTO meta_record_history_operation_members (
+             sheet_id, parent_operation_id, ordinal, child_operation_id,
+             child_endpoint_seq, child_event_count
+           ) VALUES ($1, $2::uuid, 1, $3::uuid, $4::bigint, 1)`,
+          [SHEET, aggregateId, chunkId, CHUNK_SEQ_1],
+        )
+        await client.query(
+          `INSERT INTO meta_record_history_snapshot_members (
+             sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+             source_operation_id, source_head_seq, row_count, source_hash
+           ) VALUES ($1, $2::uuid, 1, 'schema', 'section_bootstrap', $3::uuid, $4::bigint, 0, $5)`,
+          [SHEET, aggregateId, bootstrapId, BOOTSTRAP_SEQ0, SHA256_A],
+        )
+        await client.query(
+          `INSERT INTO meta_record_history_operations (
+             sheet_id, operation_id, endpoint_seq, event_count,
+             operation_kind, event_contract_version, component_count
+           ) VALUES ($1, $2::uuid, $3::bigint, 1, 'restore_aggregate', 2, 1)`,
+          [SHEET, aggregateId, CHUNK_SEQ_1],
+        )
+      }),
+    )
+    expect(aggregateError.message).toBe('section_causality_aggregate_membership_invalid')
+    expectValuesFree(aggregateError, [SHEET, WORKSPACE, BASE, aggregateId])
+  })
+
   test('generic helper misuse cannot mint synthetic kinds', async () => {
     const client = await pool.connect()
     try {
