@@ -5,6 +5,7 @@ import {
   canonicalizeElearningExamAnswers,
   ElearningExamError,
   failElearningExam,
+  hasElearningManualQuestions,
   requireActor,
   requireUuid,
   scoreElearningExam,
@@ -229,9 +230,15 @@ export async function getElearningExamReview(
   }
 
   let snapshot: ReturnType<typeof validateElearningPaperSnapshot>
-  let answers: ReturnType<typeof canonicalizeElearningExamAnswers>
   try {
     snapshot = validateElearningPaperSnapshot(row.paper_snapshot, 'unavailable')
+  } catch (error) {
+    if (error instanceof ElearningExamError) fail('unavailable')
+    throw error
+  }
+  if (hasElearningManualQuestions(snapshot)) fail('review_unavailable')
+  let answers: ReturnType<typeof canonicalizeElearningExamAnswers>
+  try {
     answers = canonicalizeElearningExamAnswers(snapshot, row.answers)
   } catch (error) {
     if (error instanceof ElearningExamError) fail('unavailable')

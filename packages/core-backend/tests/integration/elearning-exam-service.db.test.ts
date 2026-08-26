@@ -135,6 +135,7 @@ interface Seed {
   singleId: string
   multipleId: string
   trueFalseId: string
+  shortAnswerId: string | null
 }
 
 async function seedPublishedExam(input: {
@@ -147,6 +148,7 @@ async function seedPublishedExam(input: {
   versionStatus?: 'published' | 'retired'
   examStatus?: 'published' | 'retired'
   aliasExamItem?: boolean
+  includeShortAnswer?: boolean
 }): Promise<Seed> {
   const userId = actor(`learner-${randomUUID().slice(0, 8)}`)
   const courseId = randomUUID()
@@ -163,6 +165,8 @@ async function seedPublishedExam(input: {
   const singleId = randomUUID()
   const multipleId = randomUUID()
   const trueFalseId = randomUUID()
+  const questionD = randomUUID()
+  const shortAnswerId = input.includeShortAnswer ? randomUUID() : null
 
   await pool.query(
     `INSERT INTO elearning_courses (id, org_id, title, status, created_by)
@@ -234,6 +238,29 @@ async function seedPublishedExam(input: {
      VALUES ($1, $2, $3, 1, 10), ($1, $2, $4, 2, 10), ($1, $2, $5, 3, 10)`,
     [input.org, examId, singleId, multipleId, trueFalseId],
   )
+  if (shortAnswerId) {
+    await pool.query(
+      `INSERT INTO elearning_questions (id, org_id, created_by)
+       VALUES ($1, $2, $3)`,
+      [questionD, input.org, actor('author')],
+    )
+    await pool.query(
+      `INSERT INTO elearning_question_revisions (
+         id, org_id, question_id, revision, question_type, prompt, options,
+         answer_key, explanation, points, created_by
+       ) VALUES (
+         $1, $2, $3, 1, 'short_answer', 'Explain briefly', '[]'::jsonb,
+         '{}'::jsonb, NULL, 10, $4
+       )`,
+      [shortAnswerId, input.org, questionD, actor('author')],
+    )
+    await pool.query(
+      `INSERT INTO elearning_exam_questions (
+         org_id, exam_id, question_revision_id, position, points
+       ) VALUES ($1, $2, $3, 4, 10)`,
+      [input.org, examId, shortAnswerId],
+    )
+  }
   await pool.query(
     `INSERT INTO elearning_course_version_items (
        id, org_id, course_version_id, item_type, position, media_id, exam_id,
@@ -326,6 +353,7 @@ async function seedPublishedExam(input: {
     singleId,
     multipleId,
     trueFalseId,
+    shortAnswerId,
   }
 }
 
@@ -805,6 +833,118 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
     expect(attempt.rows[0].passed).toBe(true)
     const storedAnswers = attempt.rows[0].answers as Record<string, string[]>
     expect(storedAnswers[passing.multipleId]).toEqual(['a', 'c'])
+  })
+
+  it('freezes a mixed v2 paper and parks an idempotent submission for manual grading', async () => {
+    const org = orgId('short-answer')
+    seededOrgIds.push(org)
+    const seed = await seedPublishedExam({ org, includeShortAnswer: true })
+    expect(seed.shortAnswerId).toBeTruthy()
+    const shortAnswerId = seed.shortAnswerId as string
+    const started = await startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })
+    expect(started.paper.version).toBe(2)
+    expect(started.paper.questions[3]).toEqual({
+      position: 4,
+      questionRevisionId: shortAnswerId,
+      questionType: 'short_answer',
+      prompt: 'Explain briefly',
+      options: [],
+      points: 10,
+    })
+
+    const submitted = await submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: {
+        ...perfectAnswers(seed),
+        [shortAnswerId]: '  first line\r\nsecond line  ',
+      },
+    })
+    const publicJson = JSON.parse(JSON.stringify(submitted)) as Record<string, unknown>
+    expect(Object.keys(publicJson)).toEqual([...PUBLIC_SUBMIT_KEYS])
+    expect(publicJson).toEqual({
+      attemptId: started.attemptId,
+      attemptNo: 1,
+      status: 'awaiting_manual',
+      autoScore: 30,
+      totalScore: 40,
+      passed: null,
+      duplicate: false,
+    })
+    expect(JSON.stringify(publicJson)).not.toContain('first line')
+
+    const attempt = await pool.query(
+      `SELECT status, answers, auto_score, manual_score, total_score, passed, graded_at
+         FROM elearning_exam_attempts
+        WHERE org_id = $1 AND id = $2`,
+      [org, started.attemptId],
+    )
+    expect(attempt.rows[0]).toEqual(expect.objectContaining({
+      status: 'awaiting_manual',
+      total_score: null,
+      passed: null,
+      graded_at: null,
+    }))
+    expect(Number(attempt.rows[0].auto_score)).toBe(30)
+    expect(Number(attempt.rows[0].manual_score)).toBe(0)
+    expect((attempt.rows[0].answers as Record<string, unknown>)[shortAnswerId]).toBe(
+      'first line\nsecond line',
+    )
+
+    const ledger = await pool.query(
+      `SELECT kind, score, max_score, details
+         FROM elearning_grading_records
+        WHERE org_id = $1 AND attempt_id = $2`,
+      [org, started.attemptId],
+    )
+    expect(ledger.rows).toHaveLength(1)
+    expect(Number(ledger.rows[0].score)).toBe(30)
+    expect(Number(ledger.rows[0].max_score)).toBe(30)
+    expect(JSON.stringify(ledger.rows[0].details)).not.toContain('first line')
+
+    const replay = await submitElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      attemptId: started.attemptId,
+      answers: {
+        ...perfectAnswers(seed),
+        [shortAnswerId]: 'first line\nsecond line',
+      },
+    })
+    expect(replay).toEqual({ ...submitted, duplicate: true })
+    expect(await countOrg('elearning_grading_records', org)).toBe(1)
+    await expect(
+      submitElearningExam(db, {
+        orgId: org,
+        userId: seed.userId,
+        attemptId: started.attemptId,
+        answers: {
+          ...perfectAnswers(seed),
+          [shortAnswerId]: 'changed',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' })
+    await expect(
+      saveElearningExamAnswers(db, {
+        orgId: org,
+        userId: seed.userId,
+        attemptId: started.attemptId,
+        answers: {
+          ...perfectAnswers(seed),
+          [shortAnswerId]: 'changed',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'conflict' })
+    await expect(startElearningExam(db, {
+      orgId: org,
+      userId: seed.userId,
+      itemId: seed.examItemId,
+    })).rejects.toMatchObject({ code: 'conflict' })
   })
 
   it('accepts mixed-case question UUID keys on submit and still autogrades', async () => {

@@ -221,6 +221,7 @@ function storedExamStatus(value: unknown): ElearningAssignmentExamStatus {
   if (
     value === 'started'
     || value === 'submitted'
+    || value === 'awaiting_manual'
     || value === 'graded'
     || value === 'expired'
   ) {

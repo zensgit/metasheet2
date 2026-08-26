@@ -34,6 +34,11 @@ import {
   ELEARNING_V01_WATCH_TABLES,
   LEARNING_SESSIONS_ONE_ACTIVE_INDEX,
 } from '../../src/db/migrations/zzzz20260825120000_create_elearning_v01_watch_progress'
+import {
+  ELEARNING_QUESTION_REVISION_TYPE_CHECK,
+  ELEARNING_SHORT_ANSWER_DOWN_NONEMPTY,
+  ELEARNING_SHORT_ANSWER_EXPIRY_STATE_CHECK,
+} from '../../src/db/migrations/zzzz20260826235940_add_elearning_short_answer'
 
 const MIGRATIONS_DIR = path.join(__dirname, '../../src/db/migrations')
 const CONTENT_MIGRATION = path.join(
@@ -47,6 +52,10 @@ const PERMISSION_MIGRATION = path.join(
 const WATCH_MIGRATION = path.join(
   MIGRATIONS_DIR,
   'zzzz20260825120000_create_elearning_v01_watch_progress.ts',
+)
+const SHORT_ANSWER_MIGRATION = path.join(
+  MIGRATIONS_DIR,
+  'zzzz20260826235940_add_elearning_short_answer.ts',
 )
 
 function plpgsqlBody(source: string, fnName: string): string {
@@ -360,5 +369,50 @@ describe('elearning V0.1 watch-progress migration source contract', () => {
         expect(indexes[index], marker).toBeGreaterThan(indexes[index - 1])
       }
     }
+  })
+})
+
+describe('elearning L3 short-answer migration source contract', () => {
+  it('expands the closed question type and exposes reversible up/down', async () => {
+    const migration = await import(
+      '../../src/db/migrations/zzzz20260826235940_add_elearning_short_answer'
+    )
+    const source = await fs.readFile(SHORT_ANSWER_MIGRATION, 'utf8')
+    const upSource = source.split('export async function up')[1]
+      ?.split('export async function down')[0] ?? ''
+    const downSource = source.split('export async function down')[1] ?? ''
+
+    expect(typeof migration.up).toBe('function')
+    expect(typeof migration.down).toBe('function')
+    expect(upSource).toContain(ELEARNING_QUESTION_REVISION_TYPE_CHECK)
+    expect(upSource).toContain("'short_answer'")
+    expect(upSource).toContain("'single_choice'")
+    expect(upSource).toContain("'multiple_choice'")
+    expect(upSource).toContain("'true_false'")
+    expect(upSource).toContain(ELEARNING_SHORT_ANSWER_EXPIRY_STATE_CHECK)
+    expect(upSource).toContain("status IN ('expired', 'awaiting_manual', 'graded')")
+
+    const lock = downSource.indexOf('LOCK TABLE elearning_question_revisions, elearning_exam_attempts')
+    const residue = downSource.indexOf("WHERE question_type = 'short_answer'")
+    const timedAwaiting = downSource.indexOf("WHERE status = 'awaiting_manual'")
+    const expiryRestore = downSource.indexOf(
+      `ADD CONSTRAINT ${ELEARNING_SHORT_ANSWER_EXPIRY_STATE_CHECK}`,
+    )
+    const restore = downSource.lastIndexOf(
+      `ADD CONSTRAINT ${ELEARNING_QUESTION_REVISION_TYPE_CHECK}`,
+    )
+    expect(lock).toBeGreaterThanOrEqual(0)
+    expect(residue).toBeGreaterThan(lock)
+    expect(timedAwaiting).toBeGreaterThan(residue)
+    expect(expiryRestore).toBeGreaterThan(timedAwaiting)
+    expect(restore).toBeGreaterThan(expiryRestore)
+    expect(source).toContain(`'${ELEARNING_SHORT_ANSWER_DOWN_NONEMPTY}'`)
+    expect(downSource).toContain('ELEARNING_SHORT_ANSWER_DOWN_NONEMPTY')
+    expect(downSource.slice(expiryRestore, restore)).toContain(
+      "status IN ('expired', 'graded')",
+    )
+    expect(downSource.slice(expiryRestore, restore)).not.toContain("'awaiting_manual'")
+    expect(downSource.slice(restore)).not.toContain("'short_answer'")
+    expect(downSource).not.toMatch(/\bCASCADE\b/)
   })
 })

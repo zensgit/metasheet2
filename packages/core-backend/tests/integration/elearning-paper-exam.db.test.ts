@@ -181,6 +181,61 @@ async function seedPublishedPaper(
   return { ...bank, ...revision, ...paper }
 }
 
+async function seedPublishedMixedPaper(
+  db: ClientDb,
+  orgId: string,
+  label: string,
+) {
+  const bank = await createElearningQuestionBank(db, {
+    orgId,
+    actorId: actor(`bank-${label}`),
+    title: `Bank ${label}`,
+  })
+  const objective = await createElearningBankQuestion(db, {
+    orgId,
+    actorId: actor(`objective-${label}`),
+    bankId: bank.bankId,
+    question: {
+      questionType: 'single_choice',
+      prompt: `Objective ${label}`,
+      options: [
+        { id: 'a', text: 'Alpha' },
+        { id: 'b', text: 'Beta' },
+      ],
+      correctOptionIds: ['a'],
+      points: 10,
+      explanation: null,
+    },
+  })
+  const manual = await createElearningBankQuestion(db, {
+    orgId,
+    actorId: actor(`manual-${label}`),
+    bankId: bank.bankId,
+    question: {
+      questionType: 'short_answer',
+      prompt: `Manual ${label}`,
+      options: [],
+      correctOptionIds: [],
+      points: 10,
+      explanation: null,
+    },
+  })
+  const paper = await publishElearningFixedPaper(db, {
+    orgId,
+    actorId: actor(`paper-${label}`),
+    title: `Paper ${label}`,
+    items: [
+      { questionRevisionId: objective.questionRevisionId, points: 10 },
+      { questionRevisionId: manual.questionRevisionId, points: 10 },
+    ],
+  })
+  return {
+    paperId: paper.paperId,
+    objectiveRevisionId: objective.questionRevisionId,
+    shortAnswerRevisionId: manual.questionRevisionId,
+  }
+}
+
 function paperExamInput(
   orgId: string,
   paperId: string,
@@ -439,7 +494,7 @@ describe('e-learning L3 paper-bound exam rules', () => {
       'deadline_at > started_at',
     )
     expect(attemptChecks.get(ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK)).toContain(
-      "status = ANY (ARRAY['expired'::text, 'graded'::text])",
+      "status = ANY (ARRAY['expired'::text, 'awaiting_manual'::text, 'graded'::text])",
     )
     const attemptIndex = await pool.query(
       `SELECT indexname
@@ -1368,6 +1423,88 @@ describe('e-learning L3 paper-bound exam rules', () => {
           WHERE org_id = $1 AND attempt_id = $2`,
         [orgId, started.attemptId],
       )).rows).toEqual([{ count: 1 }])
+    })
+  })
+
+  it('parks an expired mixed paper for manual grading without leaking its answer into the ledger', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-manual-expiry')
+      const paper = await seedPublishedMixedPaper(db, orgId, 'runtime-manual-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          passScore: 15,
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-manual-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      expect(started.paper.version).toBe(2)
+      await saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: {
+          [paper.objectiveRevisionId]: ['a'],
+          [paper.shortAnswerRevisionId]: 'manual answer must stay private',
+        },
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'settled' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+
+      const attempt = await client.query(
+        `SELECT status, answers, auto_score::text, manual_score::text,
+                total_score, passed, graded_at, submitted_at, deadline_at, expired_at
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(attempt.rows[0]).toMatchObject({
+        status: 'awaiting_manual',
+        answers: {
+          [paper.objectiveRevisionId]: ['a'],
+          [paper.shortAnswerRevisionId]: 'manual answer must stay private',
+        },
+        auto_score: '10',
+        manual_score: '0',
+        total_score: null,
+        passed: null,
+        graded_at: null,
+      })
+      expect(attempt.rows[0].submitted_at).toEqual(attempt.rows[0].deadline_at)
+      expect(attempt.rows[0].expired_at).toBeInstanceOf(Date)
+
+      const ledger = await client.query(
+        `SELECT score::text, max_score::text, details
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(ledger.rows).toHaveLength(1)
+      expect(ledger.rows[0]).toMatchObject({ score: '10', max_score: '10' })
+      expect(JSON.stringify(ledger.rows[0].details)).not.toContain(
+        'manual answer must stay private',
+      )
     })
   })
 

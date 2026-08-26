@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import {
   ElearningExamError,
-  validateElearningObjectiveQuestion,
+  validateElearningExamQuestion,
   type ElearningQuestionType,
 } from './elearning-exam-domain'
 
@@ -216,6 +216,7 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
     questionType !== 'single_choice'
     && questionType !== 'multiple_choice'
     && questionType !== 'true_false'
+    && questionType !== 'short_answer'
   ) {
     fail('invalid_input')
   }
@@ -224,7 +225,9 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
   if (!Array.isArray(value.options) || value.options.length > ELEARNING_ASSESSMENT_OPTION_MAX) {
     fail('invalid_input')
   }
-  if (questionType === 'true_false') {
+  if (questionType === 'short_answer') {
+    if (value.options.length !== 0) fail('invalid_input')
+  } else if (questionType === 'true_false') {
     if (value.options.length !== 2) fail('invalid_input')
   } else if (value.options.length < 2) {
     fail('invalid_input')
@@ -240,7 +243,14 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
     optionIds.add(id)
     options.push({ id, text })
   }
-  if (!Array.isArray(value.correctOptionIds) || value.correctOptionIds.length < 1) {
+  if (!Array.isArray(value.correctOptionIds)) {
+    fail('invalid_input')
+  }
+  if (
+    questionType === 'short_answer'
+      ? value.correctOptionIds.length !== 0
+      : value.correctOptionIds.length < 1
+  ) {
     fail('invalid_input')
   }
   const correctOptionIds: string[] = []
@@ -251,7 +261,11 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
     seenCorrect.add(id)
     correctOptionIds.push(id)
   }
-  if (questionType !== 'multiple_choice' && correctOptionIds.length !== 1) {
+  if (
+    questionType !== 'short_answer'
+    && questionType !== 'multiple_choice'
+    && correctOptionIds.length !== 1
+  ) {
     fail('invalid_input')
   }
   let explanation: string | null = null
@@ -268,7 +282,7 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
     explanation,
   }
   try {
-    validateElearningObjectiveQuestion({
+    validateElearningExamQuestion({
       position: 1,
       points: canonical.points,
       questionRevisionId: randomUUID(),
@@ -276,7 +290,10 @@ function canonicalizeQuestion(value: unknown): CanonicalQuestion {
       questionType: canonical.questionType,
       prompt: canonical.prompt,
       options: canonical.options,
-      answerKey: { correct: canonical.correctOptionIds },
+      answerKey:
+        canonical.questionType === 'short_answer'
+          ? {}
+          : { correct: canonical.correctOptionIds },
       explanation: canonical.explanation,
     })
   } catch (error) {
@@ -326,7 +343,11 @@ async function insertBankQuestionRevision(
       input.question.questionType,
       input.question.prompt,
       JSON.stringify(input.question.options),
-      JSON.stringify({ correct: input.question.correctOptionIds }),
+      JSON.stringify(
+        input.question.questionType === 'short_answer'
+          ? {}
+          : { correct: input.question.correctOptionIds },
+      ),
       input.question.explanation,
       input.question.points,
       input.actorId,
@@ -474,7 +495,11 @@ export async function appendElearningQuestionRevision(
         question.questionType,
         question.prompt,
         JSON.stringify(question.options),
-        JSON.stringify({ correct: question.correctOptionIds }),
+        JSON.stringify(
+          question.questionType === 'short_answer'
+            ? {}
+            : { correct: question.correctOptionIds },
+        ),
         question.explanation,
         question.points,
         actorId,

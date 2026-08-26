@@ -12,27 +12,29 @@ import {
 import {
   ELEARNING_EXAM_AUTO_GRADER,
   ELEARNING_EXAM_GRADE_KIND,
-  ELEARNING_EXAM_PAPER_VERSION,
   UUID_RE,
   asFiniteNumber,
   asSafeInt,
   asText,
   canonicalizeElearningExamAnswers,
+  elearningExamObjectiveMaxScore,
   elearningExamAnswersEqual,
   elearningExamLockKey,
   ElearningExamError,
   failElearningExam,
   freezeElearningPaperSnapshot,
+  hasElearningManualQuestions,
   materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   requireActor,
   requireUuid,
   scoreElearningExam,
-  validateElearningObjectiveQuestion,
+  validateElearningExamQuestion,
   validateElearningPaperSnapshot,
+  type ElearningExamAnswers,
   type ElearningExamErrorCode,
   type ElearningExamGrade,
-  type ElearningObjectiveQuestion,
+  type ElearningExamQuestion,
   type ElearningPaperSnapshot,
   type ElearningPublicPaper,
 } from './elearning-exam-domain'
@@ -51,15 +53,21 @@ export {
   ELEARNING_EXAM_GRADE_KIND,
   ELEARNING_EXAM_PAPER_DOMAIN,
   ELEARNING_EXAM_PAPER_VERSION,
+  ELEARNING_EXAM_PAPER_VERSION_MIXED,
+  ELEARNING_SHORT_ANSWER_MAX_CHARS,
   canonicalizeElearningExamAnswers,
+  elearningExamObjectiveMaxScore,
   elearningExamLockKey,
   ElearningExamError,
   failElearningExam,
+  freezeElearningPaperSnapshot,
+  hasElearningManualQuestions,
   materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   scoreElearningExam,
   stripElearningExamSecrets,
   validateElearningObjectiveQuestion,
+  validateElearningExamQuestion,
   validateElearningPaperSnapshot,
 } from './elearning-exam-domain'
 
@@ -74,8 +82,11 @@ export type {
   ElearningExamGrade,
   ElearningExamOption,
   ElearningExamQuestionScore,
+  ElearningExamAnswers,
+  ElearningExamQuestion,
   ElearningObjectiveAnswerKey,
   ElearningObjectiveQuestion,
+  ElearningShortAnswerQuestion,
   ElearningPaperSnapshot,
   ElearningPublicPaper,
   ElearningPublicQuestion,
@@ -118,12 +129,12 @@ export interface ElearningExamStartResult {
   attemptNo: number
   status: 'started'
   paper: ElearningPublicPaper
-  answers: Record<string, string[]>
+  answers: ElearningExamAnswers
   deadlineAt: string | null
   duplicate: boolean
 }
 
-export interface ElearningExamSubmitResult {
+export interface ElearningExamGradedSubmitResult {
   attemptId: string
   attemptNo: number
   status: 'graded'
@@ -132,6 +143,20 @@ export interface ElearningExamSubmitResult {
   passed: boolean
   duplicate: boolean
 }
+
+export interface ElearningExamAwaitingManualSubmitResult {
+  attemptId: string
+  attemptNo: number
+  status: 'awaiting_manual'
+  autoScore: number
+  totalScore: number
+  passed: null
+  duplicate: boolean
+}
+
+export type ElearningExamSubmitResult =
+  | ElearningExamGradedSubmitResult
+  | ElearningExamAwaitingManualSubmitResult
 
 function fail(code: ElearningExamErrorCode): never {
   failElearningExam(code)
@@ -186,9 +211,12 @@ function requireStoredUuid(value: unknown): string {
   return value.toLowerCase()
 }
 
-function ownAnswers(answers: Record<string, string[]>): Record<string, string[]> {
+function ownAnswers(answers: ElearningExamAnswers): ElearningExamAnswers {
   return Object.fromEntries(
-    Object.entries(answers).map(([key, value]) => [key, [...value]]),
+    Object.entries(answers).map(([key, value]) => [
+      key,
+      typeof value === 'string' ? value : [...value],
+    ]),
   )
 }
 
@@ -196,7 +224,7 @@ function publicStartResult(
   attemptId: string,
   attemptNo: number,
   snapshot: ElearningPaperSnapshot,
-  answers: Record<string, string[]>,
+  answers: ElearningExamAnswers,
   deadlineAt: Date | null,
   duplicate: boolean,
 ): ElearningExamStartResult {
@@ -217,6 +245,17 @@ function publicSubmitResult(
   grade: ElearningExamGrade,
   duplicate: boolean,
 ): ElearningExamSubmitResult {
+  if (grade.passed === null) {
+    return {
+      attemptId,
+      attemptNo,
+      status: 'awaiting_manual',
+      autoScore: grade.autoScore,
+      totalScore: grade.totalScore,
+      passed: null,
+      duplicate,
+    }
+  }
   return {
     attemptId,
     attemptNo,
@@ -228,9 +267,12 @@ function publicSubmitResult(
   }
 }
 
-function gradeDetails(grade: ElearningExamGrade): Record<string, unknown> {
+function gradeDetails(
+  snapshot: ElearningPaperSnapshot,
+  grade: ElearningExamGrade,
+): Record<string, unknown> {
   return {
-    version: ELEARNING_EXAM_PAPER_VERSION,
+    version: snapshot.version,
     questions: grade.questions,
   }
 }
@@ -242,7 +284,7 @@ function parseStoredSnapshot(value: unknown): ElearningPaperSnapshot {
 function parseStoredAnswers(
   snapshot: ElearningPaperSnapshot,
   value: unknown,
-): Record<string, string[]> {
+): ElearningExamAnswers {
   try {
     return canonicalizeElearningExamAnswers(snapshot, value)
   } catch (error) {
@@ -476,7 +518,7 @@ async function loadExamQuestions(
   orgId: string,
   examId: string,
   paperId: string | null,
-): Promise<ElearningObjectiveQuestion[]> {
+): Promise<ElearningExamQuestion[]> {
   const result = paperId === null
     ? await tx.query(
       `/* elearning-exam:load-questions */
@@ -521,13 +563,13 @@ async function loadExamQuestions(
       [orgId, paperId],
     )
   if (result.rows.length < 1) fail('unavailable')
-  const questions: ElearningObjectiveQuestion[] = []
+  const questions: ElearningExamQuestion[] = []
   const positions = new Set<number>()
   const revisionIds = new Set<string>()
   for (const row of result.rows) {
-    let question: ElearningObjectiveQuestion
+    let question: ElearningExamQuestion
     try {
-      question = validateElearningObjectiveQuestion({
+      question = validateElearningExamQuestion({
         position: row.position,
         points: row.points,
         questionRevisionId: row.question_revision_id,
@@ -591,6 +633,9 @@ export async function startElearningExam(
             true,
           ),
         }
+      }
+      if (attempts.some((row) => row.status === 'awaiting_manual')) {
+        fail('conflict')
       }
       if (attempts.length >= item.maxAttempts) fail('max_attempts')
 
@@ -832,6 +877,29 @@ export async function submitElearningExam(
           ),
         }
       }
+      if (attempt.status === 'awaiting_manual') {
+        const incoming = canonicalizeElearningExamAnswers(snapshot, input.answers)
+        const stored = parseStoredAnswers(snapshot, attempt.answers)
+        if (!elearningExamAnswersEqual(incoming, stored)) fail('conflict')
+        const grade = scoreElearningExam(snapshot, stored)
+        if (
+          grade.passed !== null
+          || attempt.autoScore !== grade.autoScore
+          || attempt.totalScore !== null
+          || attempt.passed !== null
+        ) {
+          fail('unavailable')
+        }
+        return {
+          kind: 'result' as const,
+          value: publicSubmitResult(
+            attempt.id,
+            attempt.attemptNo,
+            grade,
+            true,
+          ),
+        }
+      }
       if (attempt.status !== 'started') fail('conflict')
       const canonical = canonicalizeElearningExamAnswers(snapshot, input.answers)
       const grade = scoreElearningExam(snapshot, canonical)
@@ -874,23 +942,36 @@ export async function submitElearningExam(
           attempt.id,
           ELEARNING_EXAM_GRADE_KIND,
           grade.autoScore,
-          grade.totalScore,
-          JSON.stringify(gradeDetails(grade)),
+          elearningExamObjectiveMaxScore(snapshot),
+          JSON.stringify(gradeDetails(snapshot, grade)),
           ELEARNING_EXAM_AUTO_GRADER,
         ],
       )
-      const graded = await tx.query(
-        `/* elearning-exam:grade-attempt */
-         UPDATE elearning_exam_attempts
-            SET status = 'graded',
-                auto_score = $1,
-                total_score = $2,
-                passed = $3,
-                graded_at = clock_timestamp()
-          WHERE org_id = $4 AND id = $5 AND status = 'submitted'`,
-        [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
-      )
-      if (graded.rowCount !== 1) fail('unavailable')
+      if (hasElearningManualQuestions(snapshot)) {
+        const awaiting = await tx.query(
+          `/* elearning-exam:await-manual-grade */
+           UPDATE elearning_exam_attempts
+              SET status = 'awaiting_manual',
+                  auto_score = $1
+            WHERE org_id = $2 AND id = $3 AND status = 'submitted'`,
+          [grade.autoScore, orgId, attempt.id],
+        )
+        if (awaiting.rowCount !== 1) fail('unavailable')
+      } else {
+        if (grade.passed === null) fail('unavailable')
+        const graded = await tx.query(
+          `/* elearning-exam:grade-attempt */
+           UPDATE elearning_exam_attempts
+              SET status = 'graded',
+                  auto_score = $1,
+                  total_score = $2,
+                  passed = $3,
+                  graded_at = clock_timestamp()
+            WHERE org_id = $4 AND id = $5 AND status = 'submitted'`,
+          [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
+        )
+        if (graded.rowCount !== 1) fail('unavailable')
+      }
       return {
         kind: 'result' as const,
         value: publicSubmitResult(attempt.id, attempt.attemptNo, grade, false),

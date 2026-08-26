@@ -44,7 +44,7 @@ type MemberRow = {
   revocationReason: string | null
   overdue: boolean
   videoStatus: 'in_progress' | 'completed' | null
-  examStatus: 'started' | 'submitted' | 'graded' | 'expired' | null
+  examStatus: 'started' | 'submitted' | 'awaiting_manual' | 'graded' | 'expired' | null
   passed: boolean
 }
 
@@ -214,6 +214,20 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningAssignmentLifec
 }
 
 describe('listElearningAssignmentProgress', () => {
+  it('keeps an awaiting-manual exam in progress', async () => {
+    const { db, mem } = createMemoryDb()
+    mem.members[0].examStatus = 'awaiting_manual'
+    const result = await listElearningAssignmentProgress(db, {
+      orgId: ORG,
+      assignmentId: ASSIGNMENT,
+    })
+    expect(result.members[0]).toMatchObject({
+      examStatus: 'awaiting_manual',
+      courseStatus: 'in_progress',
+      passed: false,
+    })
+  })
+
   it('returns a closed assignment DTO plus member progress without hidden values', async () => {
     const { db, mem } = createMemoryDb({
       members: [

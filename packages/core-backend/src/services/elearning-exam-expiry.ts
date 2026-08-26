@@ -1,16 +1,18 @@
 import {
   ELEARNING_EXAM_AUTO_GRADER,
   ELEARNING_EXAM_GRADE_KIND,
-  ELEARNING_EXAM_PAPER_VERSION,
   UUID_RE,
   asText,
   canonicalizeElearningExamAnswers,
+  elearningExamObjectiveMaxScore,
   ElearningExamError,
   failElearningExam,
+  hasElearningManualQuestions,
   requireActor,
   requireUuid,
   scoreElearningExam,
   validateElearningPaperSnapshot,
+  type ElearningExamAnswers,
   type ElearningPaperSnapshot,
 } from './elearning-exam-domain'
 
@@ -97,7 +99,7 @@ function parseStoredSnapshot(value: unknown): ElearningPaperSnapshot {
 function parseStoredAnswers(
   snapshot: ElearningPaperSnapshot,
   value: unknown,
-): Record<string, string[]> {
+): ElearningExamAnswers {
   try {
     return canonicalizeElearningExamAnswers(snapshot, value)
   } catch (error) {
@@ -109,10 +111,11 @@ function parseStoredAnswers(
 }
 
 function gradeDetails(
+  snapshot: ElearningPaperSnapshot,
   grade: ReturnType<typeof scoreElearningExam>,
 ): Record<string, unknown> {
   return {
-    version: ELEARNING_EXAM_PAPER_VERSION,
+    version: snapshot.version,
     questions: grade.questions,
   }
 }
@@ -231,7 +234,9 @@ export async function settleExpiredElearningExamAttemptInTransaction(
   orgId: string,
   attempt: ExpirableElearningExamAttempt,
 ): Promise<'settled' | 'duplicate' | 'not_due'> {
-  if (attempt.status === 'graded') return 'duplicate'
+  if (attempt.status === 'graded' || attempt.status === 'awaiting_manual') {
+    return 'duplicate'
+  }
   if (attempt.status !== 'started' && attempt.status !== 'expired') {
     fail('unavailable')
   }
@@ -271,23 +276,36 @@ export async function settleExpiredElearningExamAttemptInTransaction(
       attempt.id,
       ELEARNING_EXAM_GRADE_KIND,
       grade.autoScore,
-      grade.totalScore,
-      JSON.stringify(gradeDetails(grade)),
+      elearningExamObjectiveMaxScore(snapshot),
+      JSON.stringify(gradeDetails(snapshot, grade)),
       ELEARNING_EXAM_AUTO_GRADER,
     ],
   )
-  const graded = await tx.query(
-    `/* elearning-exam:grade-expired-attempt */
-     UPDATE elearning_exam_attempts
-        SET status = 'graded',
-            auto_score = $1,
-            total_score = $2,
-            passed = $3,
-            graded_at = clock_timestamp()
-      WHERE org_id = $4 AND id = $5 AND status = 'expired'`,
-    [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
-  )
-  if (graded.rowCount !== 1) fail('unavailable')
+  if (hasElearningManualQuestions(snapshot)) {
+    const awaiting = await tx.query(
+      `/* elearning-exam:await-manual-after-expiry */
+       UPDATE elearning_exam_attempts
+          SET status = 'awaiting_manual',
+              auto_score = $1
+        WHERE org_id = $2 AND id = $3 AND status = 'expired'`,
+      [grade.autoScore, orgId, attempt.id],
+    )
+    if (awaiting.rowCount !== 1) fail('unavailable')
+  } else {
+    if (grade.passed === null) fail('unavailable')
+    const graded = await tx.query(
+      `/* elearning-exam:grade-expired-attempt */
+       UPDATE elearning_exam_attempts
+          SET status = 'graded',
+              auto_score = $1,
+              total_score = $2,
+              passed = $3,
+              graded_at = clock_timestamp()
+        WHERE org_id = $4 AND id = $5 AND status = 'expired'`,
+      [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
+    )
+    if (graded.rowCount !== 1) fail('unavailable')
+  }
   return 'settled'
 }
 

@@ -7,6 +7,7 @@ import {
 import {
   ELEARNING_EXAM_PAPER_DOMAIN,
   ELEARNING_EXAM_PAPER_VERSION,
+  ELEARNING_EXAM_PAPER_VERSION_MIXED,
   ElearningExamError,
   type ElearningPaperSnapshot,
 } from '../../src/services/elearning-exam'
@@ -18,8 +19,10 @@ const ATTEMPT = '11111111-1111-4111-8111-111111111111'
 const EXAM = '22222222-2222-4222-8222-222222222222'
 const Q1 = '33333333-3333-4333-8333-333333333333'
 const Q2 = '44444444-4444-4444-8444-444444444444'
+const Q3 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const QUESTION_1 = '55555555-5555-4555-8555-555555555555'
 const QUESTION_2 = '66666666-6666-4666-8666-666666666666'
+const QUESTION_3 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const COURSE = '77777777-7777-4777-8777-777777777777'
 const VERSION = '88888888-8888-4888-8888-888888888888'
 const MEMBER = '99999999-9999-4999-8999-999999999999'
@@ -59,6 +62,27 @@ function paper(): ElearningPaperSnapshot {
         points: 10,
         answerKey: { correct: ['a', 'c'] },
         explanation: 'secret two',
+      },
+    ],
+  }
+}
+
+function mixedPaper(): ElearningPaperSnapshot {
+  return {
+    ...paper(),
+    version: ELEARNING_EXAM_PAPER_VERSION_MIXED,
+    questions: [
+      ...paper().questions,
+      {
+        position: 3,
+        questionRevisionId: Q3,
+        questionId: QUESTION_3,
+        questionType: 'short_answer',
+        prompt: 'Explain briefly',
+        options: [],
+        points: 10,
+        answerKey: {},
+        explanation: null,
       },
     ],
   }
@@ -252,6 +276,19 @@ describe('getElearningExamReview', () => {
         attemptId: ATTEMPT,
       }), 'review_unavailable')
     }
+  })
+
+  it('keeps mixed-paper review closed until the manual-disclosure contract exists', async () => {
+    const { db } = dbWithRows([storedRow({
+      paper_snapshot: mixedPaper(),
+      answers: { [Q1]: ['b'], [Q2]: ['c', 'a'], [Q3]: 'manual answer' },
+      total_score: 30,
+    })])
+    await expectCode(() => getElearningExamReview(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+    }), 'review_unavailable')
   })
 
   it('hides cross-user and cross-org attempts behind not_found', async () => {

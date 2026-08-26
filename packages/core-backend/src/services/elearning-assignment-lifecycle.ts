@@ -12,7 +12,14 @@ const UUID_RE =
 
 const MEMBER_SOURCES = ['manual', 'rule', 'import'] as const
 const VIDEO_STATUSES = ['not_started', 'in_progress', 'completed'] as const
-const EXAM_STATUSES = ['not_started', 'started', 'submitted', 'graded', 'expired'] as const
+const EXAM_STATUSES = [
+  'not_started',
+  'started',
+  'submitted',
+  'awaiting_manual',
+  'graded',
+  'expired',
+] as const
 const COURSE_STATUSES = ['not_started', 'in_progress', 'completed'] as const
 
 export type ElearningAssignmentLifecycleErrorCode =

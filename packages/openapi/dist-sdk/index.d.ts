@@ -8464,9 +8464,10 @@ export interface paths {
         get: operations["listElearningBankQuestions"];
         put?: never;
         /**
-         * Create a stable objective question with revision one
-         * @description Admin-only L3 assessment write. The request may contain the answer key
-         *     and explanation; the closed response returns identifiers only.
+         * Create a stable assessment question with revision one
+         * @description Admin-only L3 assessment write. Objective questions carry a closed answer
+         *     key. A short_answer carries options=[] and correctOptionIds=[] and is
+         *     scored later by the manual-grading service. The response returns identifiers only.
          */
         post: operations["createElearningBankQuestion"];
         delete?: never;
@@ -8485,7 +8486,7 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Append one immutable objective-question revision
+         * Append one immutable assessment-question revision
          * @description Admin-only L3 assessment write. Existing revisions are never mutated.
          *     The closed response returns identifiers and the new revision number.
          */
@@ -9027,7 +9028,7 @@ export interface paths {
         /**
          * Save draft answers for a started exam attempt
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
-         *     only (map of questionRevisionId to selected option ids). Only started
+         *     only (map of questionRevisionId to selected option ids or short-answer text). Only started
          *     attempts may save. Same canonical body is duplicate true. Result is the
          *     closed started DTO with own answers and the same immutable `deadlineAt`.
          *     No answer keys. JSON limit 16 KiB.
@@ -9050,10 +9051,12 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Submit and auto-grade an exam attempt
+         * Submit an exam attempt and auto-grade its objective portion
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId
-         *     to selected option ids). Auto-grade result has no per-question key,
-         *     selected answers echo, or paper snapshot. JSON limit 16 KiB.
+         *     to selected option ids or short-answer text). Objective-only papers return
+         *     graded. Mixed papers return awaiting_manual with passed=null after the
+         *     objective portion is recorded. The result has no per-question key,
+         *     selected-answer echo, or paper snapshot. JSON limit 16 KiB.
          */
         post: operations["submitElearningExam"];
         delete?: never;
@@ -17855,7 +17858,9 @@ export interface components {
         };
         ElearningEmptyObject: Record<string, never>;
         /** @enum {string} */
-        ElearningQuestionType: "single_choice" | "multiple_choice" | "true_false";
+        ElearningObjectiveQuestionType: "single_choice" | "multiple_choice" | "true_false";
+        /** @enum {string} */
+        ElearningQuestionType: "single_choice" | "multiple_choice" | "true_false" | "short_answer";
         ElearningCapabilityFlags: {
             content: boolean;
             assignment: boolean;
@@ -17920,7 +17925,11 @@ export interface components {
             text: string;
         };
         ElearningPublishQuestion: {
-            questionType: components["schemas"]["ElearningQuestionType"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            questionType: "single_choice" | "multiple_choice" | "true_false";
             prompt: string;
             options: components["schemas"]["ElearningPublishOption"][];
             /** @description Admin-only write field. Never returned on learner exam start/submit. */
@@ -17929,6 +17938,22 @@ export interface components {
             /** @description Optional admin write field. Never returned on learner exam surfaces. */
             explanation?: string | null;
         };
+        ElearningShortAnswerQuestionWrite: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            questionType: "short_answer";
+            prompt: string;
+            /** @description Must be the empty array for a manually graded short answer. */
+            options: components["schemas"]["ElearningPublishOption"][];
+            /** @description Must be the empty array. No answer key is stored for short answers. */
+            correctOptionIds: string[];
+            points: number;
+            /** @description Optional admin-only guidance. Never returned on learner exam surfaces. */
+            explanation?: string | null;
+        };
+        ElearningAssessmentQuestionWrite: components["schemas"]["ElearningPublishQuestion"] | components["schemas"]["ElearningShortAnswerQuestionWrite"];
         ElearningQuestionBankCreateRequest: {
             title: string;
         };
@@ -17961,7 +17986,7 @@ export interface components {
             questionType: components["schemas"]["ElearningQuestionType"];
             prompt: string;
             options: components["schemas"]["ElearningPublishOption"][];
-            /** @description Admin-only answer key. Never returned by learner exam APIs. */
+            /** @description Admin-only answer key. Empty for short_answer; never returned by learner exam APIs. */
             correctOptionIds: string[];
             points: number;
             /** @description Admin-only explanation. Never returned by learner exam APIs. */
@@ -17977,7 +18002,7 @@ export interface components {
             total: number;
         };
         ElearningQuestionWriteRequest: {
-            question: components["schemas"]["ElearningPublishQuestion"];
+            question: components["schemas"]["ElearningAssessmentQuestionWrite"];
         };
         ElearningQuestionRevisionResult: {
             questionId: components["schemas"]["ElearningUuid"];
@@ -18086,7 +18111,7 @@ export interface components {
             /** @enum {string} */
             videoStatus: "not_started" | "in_progress" | "completed";
             /** @enum {string} */
-            examStatus: "not_started" | "started" | "submitted" | "graded" | "expired";
+            examStatus: "not_started" | "started" | "submitted" | "awaiting_manual" | "graded" | "expired";
             passed: boolean;
             /** @enum {string} */
             courseStatus: "not_started" | "in_progress" | "completed";
@@ -18270,7 +18295,7 @@ export interface components {
             attemptId: components["schemas"]["ElearningUuid"];
             attemptNo: number;
             /** @enum {string} */
-            status: "started" | "submitted" | "graded" | "expired";
+            status: "started" | "submitted" | "awaiting_manual" | "graded" | "expired";
             autoScore: number | null;
             totalScore: number | null;
             passed: boolean | null;
@@ -18334,15 +18359,16 @@ export interface components {
             questionRevisionId: components["schemas"]["ElearningUuid"];
             questionType: components["schemas"]["ElearningQuestionType"];
             prompt: string;
+            /** @description Empty for short_answer; otherwise contains the closed objective choices. */
             options: components["schemas"]["ElearningPublicOption"][];
             points: number;
         };
-        /** @description Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot secrets. */
+        /** @description Redacted paper. Version 1 is objective-only; version 2 contains at least one short answer. No snapshot secrets. */
         ElearningPublicPaper: {
             /** @enum {string} */
             domain: "elearning.exam.paper.v1";
             /** @enum {integer} */
-            version: 1;
+            version: 1 | 2;
             questions: components["schemas"]["ElearningPublicQuestion"][];
         };
         ElearningExamStartResult: {
@@ -18351,9 +18377,9 @@ export interface components {
             /** @enum {string} */
             status: "started";
             paper: components["schemas"]["ElearningPublicPaper"];
-            /** @description Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys. */
+            /** @description Canonical own answers for every paper question. Objective answers are option-id arrays; short answers are strings. Never includes answer keys. */
             answers: {
-                [key: string]: string[];
+                [key: string]: string[] | string;
             };
             /**
              * Format: date-time
@@ -18363,26 +18389,47 @@ export interface components {
             duplicate: boolean;
         };
         ElearningExamSubmitRequest: {
-            /** @description Map of questionRevisionId to selected option ids. Unknown keys are invalid_input. */
+            /** @description Map of questionRevisionId to objective option ids or short-answer text. Unknown keys and answer types that contradict the frozen paper are invalid_input. */
             answers: {
-                [key: string]: string[];
+                [key: string]: string[] | string;
             };
         };
-        ElearningExamSubmitResult: {
+        ElearningExamGradedSubmitResult: {
             attemptId: components["schemas"]["ElearningUuid"];
             attemptNo: number;
-            /** @enum {string} */
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
             status: "graded";
             autoScore: number;
+            /** @description Maximum score available on the frozen paper. */
             totalScore: number;
             passed: boolean;
             duplicate: boolean;
         };
+        ElearningExamAwaitingManualSubmitResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            status: "awaiting_manual";
+            /** @description Score already awarded to objective questions. */
+            autoScore: number;
+            /** @description Maximum score available on the complete frozen paper. */
+            totalScore: number;
+            /** @enum {boolean|null} */
+            passed: null;
+            duplicate: boolean;
+        };
+        ElearningExamSubmitResult: components["schemas"]["ElearningExamGradedSubmitResult"] | components["schemas"]["ElearningExamAwaitingManualSubmitResult"];
         /** @description Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations. */
         ElearningExamReviewQuestion: {
             position: number;
             questionRevisionId: components["schemas"]["ElearningUuid"];
-            questionType: components["schemas"]["ElearningQuestionType"];
+            questionType: components["schemas"]["ElearningObjectiveQuestionType"];
             prompt: string;
             options: components["schemas"]["ElearningPublicOption"][];
             points: number;
@@ -20788,7 +20835,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Graded attempt totals only. */
+            /** @description Objective-only graded result or mixed-paper awaiting-manual result. */
             200: {
                 headers: {
                     [name: string]: unknown;

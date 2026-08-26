@@ -128,6 +128,17 @@ function question(
   }
 }
 
+function shortQuestion(prompt: string): ElearningAssessmentQuestionInput {
+  return {
+    questionType: 'short_answer',
+    prompt,
+    options: [],
+    correctOptionIds: [],
+    points: 10,
+    explanation: null,
+  }
+}
+
 async function seedBankedQuestion(
   db: ClientDb,
   orgId: string,
@@ -428,6 +439,66 @@ describe('e-learning L3 assessment catalog', () => {
         page: 1,
         pageSize: 50,
       })).rejects.toMatchObject({ code: 'not_found', message: 'not_found' })
+    })
+  })
+
+  it('stores and reads the closed short-answer revision shape', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('short-answer')
+      const bank = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: actor('short-answer'),
+        title: 'Manual grading bank',
+      })
+      const created = await createElearningBankQuestion(db, {
+        orgId,
+        actorId: actor('short-answer'),
+        bankId: bank.bankId,
+        question: shortQuestion('Explain the safety check'),
+      })
+
+      const stored = await client.query(
+        `SELECT question_type, options, answer_key
+           FROM elearning_question_revisions
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, created.questionRevisionId],
+      )
+      expect(stored.rows).toEqual([{
+        question_type: 'short_answer',
+        options: [],
+        answer_key: {},
+      }])
+
+      const listed = await listElearningBankQuestions(db, {
+        orgId,
+        bankId: bank.bankId,
+        page: 1,
+        pageSize: 100,
+      })
+      expect(listed.items).toEqual([{
+        questionId: created.questionId,
+        questionRevisionId: created.questionRevisionId,
+        revision: 1,
+        questionType: 'short_answer',
+        prompt: 'Explain the safety check',
+        options: [],
+        correctOptionIds: [],
+        points: 10,
+        explanation: null,
+        createdAt: expect.any(String),
+      }])
+
+      for (const invalid of [
+        { ...shortQuestion('Has options'), options: [{ id: 'a', text: 'Alpha' }] },
+        { ...shortQuestion('Has answer key'), correctOptionIds: ['a'] },
+      ]) {
+        await expect(createElearningBankQuestion(db, {
+          orgId,
+          actorId: actor('short-answer-invalid'),
+          bankId: bank.bankId,
+          question: invalid,
+        })).rejects.toMatchObject({ code: 'invalid_input', message: 'invalid_input' })
+      }
     })
   })
 

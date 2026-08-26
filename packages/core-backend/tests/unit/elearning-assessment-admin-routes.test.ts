@@ -450,6 +450,35 @@ describe('e-learning assessment admin routes', () => {
     expect(responses).not.toMatch(/correctOptionIds|answerKey|explanation/)
   })
 
+  test('forwards the closed short-answer authoring shape without returning answer material', async () => {
+    const testApp = makeApp()
+    const shortAnswer = {
+      questionType: 'short_answer' as const,
+      prompt: 'Explain the safety check',
+      options: [],
+      correctOptionIds: [],
+      points: 10,
+      explanation: null,
+    }
+    const response = await serve(testApp.app)
+      .post(`/api/elearning/assessment/question-banks/${BANK_ID}/questions`)
+      .send({ question: shortAnswer })
+
+    expect(response.status).toBe(201)
+    expect(response.body).toEqual({
+      questionId: QUESTION_ID,
+      questionRevisionId: REVISION_ID,
+      revision: 1,
+    })
+    expect(testApp.questionCalls).toEqual([{
+      orgId: ORG,
+      actorId: ACTOR,
+      bankId: BANK_ID,
+      question: shortAnswer,
+    }])
+    expect(JSON.stringify(response.body)).not.toMatch(/correctOptionIds|answerKey|explanation/)
+  })
+
   test('imports one bounded XLSX after auth/org/RBAC and keeps the result closed', async () => {
     for (const blocked of [
       makeApp({ viewer: null }),

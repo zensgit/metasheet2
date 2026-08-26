@@ -561,6 +561,34 @@ describe('elearning learner courses public mapping', () => {
     expect(publicRow.completed).toBe(false)
   })
 
+  it('maps an awaiting-manual attempt without fabricating a final score', async () => {
+    const { db } = createMemoryDb([baseRow({
+      attempt_id: ATTEMPT,
+      attempt_no: 1,
+      attempt_status: 'awaiting_manual',
+      attempt_auto_score: 6,
+      attempt_total_score: null,
+      attempt_passed: null,
+      attempt_started_at: STARTED_AT,
+      attempt_submitted_at: SUBMITTED_AT,
+      attempt_graded_at: null,
+      any_passed: false,
+    })])
+    const [row] = await listElearningLearnerCourses(db, { orgId: ORG, userId: USER })
+    expect(row.exam.latestAttempt).toEqual({
+      attemptId: ATTEMPT,
+      attemptNo: 1,
+      status: 'awaiting_manual',
+      autoScore: 6,
+      totalScore: null,
+      passed: null,
+      startedAt: STARTED_AT,
+      submittedAt: SUBMITTED_AT,
+      gradedAt: null,
+    })
+    expect(row.completed).toBe(false)
+  })
+
   it('sets completed true when video is completed and any graded attempt passed', async () => {
     const passing = createMemoryDb([baseRow({
       video_status: 'completed',

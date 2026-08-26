@@ -4,9 +4,14 @@ import {
   ELEARNING_EXAM_GRADE_KIND,
   ELEARNING_EXAM_PAPER_DOMAIN,
   ELEARNING_EXAM_PAPER_VERSION,
+  ELEARNING_EXAM_PAPER_VERSION_MIXED,
+  ELEARNING_SHORT_ANSWER_MAX_CHARS,
   canonicalizeElearningExamAnswers,
+  elearningExamObjectiveMaxScore,
   elearningExamLockKey,
   ElearningExamError,
+  freezeElearningPaperSnapshot,
+  hasElearningManualQuestions,
   materializeElearningExamQuestions,
   redactElearningPaperSnapshot,
   scoreElearningExam,
@@ -14,9 +19,11 @@ import {
   startElearningExam,
   stripElearningExamSecrets,
   submitElearningExam,
+  validateElearningExamQuestion,
   validateElearningObjectiveQuestion,
   validateElearningPaperSnapshot,
   type ElearningExamDb,
+  type ElearningExamAnswers,
   type ElearningExamQueryable,
   type ElearningPaperSnapshot,
 } from '../../src/services/elearning-exam'
@@ -29,9 +36,11 @@ const EXAM = '33333333-3333-4333-8333-333333333333'
 const Q1 = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
 const Q2 = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const Q3 = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const Q4 = 'abababab-abab-4bab-8bab-abababababab'
 const QUESTION = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
 const QUESTION_B = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
 const QUESTION_C = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+const QUESTION_D = 'acacacac-acac-4cac-8cac-acacacacacac'
 const VERSION = '44444444-4444-4444-8444-444444444444'
 const MEMBER = '55555555-5555-4555-8555-555555555555'
 const COURSE = '66666666-6666-4666-8666-666666666666'
@@ -117,6 +126,23 @@ function samplePaper(over: Partial<ElearningPaperSnapshot> = {}): ElearningPaper
     ],
     ...over,
   })
+}
+
+function sampleMixedPaper(): ElearningPaperSnapshot {
+  return freezeElearningPaperSnapshot(EXAM, 12, [
+    validateElearningObjectiveQuestion(sampleQuestion()),
+    validateElearningExamQuestion({
+      position: 2,
+      questionRevisionId: Q4,
+      questionId: QUESTION_D,
+      questionType: 'short_answer',
+      prompt: 'Explain briefly',
+      options: [],
+      points: 10,
+      answerKey: {},
+      explanation: null,
+    }),
+  ])
 }
 
 function assertValuesFree(error: unknown): void {
@@ -303,7 +329,7 @@ interface SubmitMemAttempt {
   attemptNo: number
   status: string
   paperSnapshot: ElearningPaperSnapshot
-  answers: Record<string, string[]> | null
+  answers: ElearningExamAnswers | null
   autoScore: number | null
   totalScore: number | null
   passed: boolean | null
@@ -506,6 +532,51 @@ describe('elearning exam lock and paper contract', () => {
     expect(paper.domain).toBe(ELEARNING_EXAM_PAPER_DOMAIN)
   })
 
+  it('keeps objective snapshots on v1 and uses a closed v2 shape for short answers', () => {
+    expect(samplePaper().version).toBe(ELEARNING_EXAM_PAPER_VERSION)
+    const mixed = sampleMixedPaper()
+    expect(mixed.version).toBe(ELEARNING_EXAM_PAPER_VERSION_MIXED)
+    expect(hasElearningManualQuestions(mixed)).toBe(true)
+    expect(elearningExamObjectiveMaxScore(mixed)).toBe(10)
+    expect(mixed.questions[1]).toMatchObject({
+      questionType: 'short_answer',
+      options: [],
+      answerKey: {},
+    })
+    expectCode(
+      () =>
+        validateElearningPaperSnapshot({
+          ...mixed,
+          version: ELEARNING_EXAM_PAPER_VERSION,
+        }),
+      'invalid_input',
+    )
+    expectCode(
+      () =>
+        validateElearningPaperSnapshot({
+          ...samplePaper(),
+          version: ELEARNING_EXAM_PAPER_VERSION_MIXED,
+        }),
+      'invalid_input',
+    )
+    expectCode(
+      () =>
+        validateElearningExamQuestion({
+          ...mixed.questions[1],
+          options: [{ id: 'a', text: 'not allowed' }],
+        }),
+      'invalid_input',
+    )
+    expectCode(
+      () =>
+        validateElearningExamQuestion({
+          ...mixed.questions[1],
+          answerKey: { correct: ['a'] },
+        }),
+      'invalid_input',
+    )
+  })
+
   it('rejects blank, duplicate, and unknown option or answer-key ids without leaking secrets', () => {
     expectCode(() => validateElearningObjectiveQuestion(sampleQuestion({
       options: [{ id: ' ', text: 'alpha' }],
@@ -577,6 +648,59 @@ describe('elearning exam lock and paper contract', () => {
 })
 
 describe('elearning exam scoring and answer canonicalization', () => {
+  it('canonicalizes short text without auto-grading or exposing it in public paper JSON', () => {
+    const paper = sampleMixedPaper()
+    const answers = canonicalizeElearningExamAnswers(paper, {
+      [Q1]: ['a'],
+      [Q4]: '  first\r\nsecond  ',
+    })
+    expect(answers).toEqual({
+      [Q1]: ['a'],
+      [Q4]: 'first\nsecond',
+    })
+    const grade = scoreElearningExam(paper, answers)
+    expect(grade).toMatchObject({
+      autoScore: 10,
+      totalScore: 20,
+      passed: null,
+    })
+    expect(grade.questions).toEqual([
+      {
+        questionRevisionId: Q1,
+        selected: ['a'],
+        awarded: 10,
+        points: 10,
+      },
+      {
+        questionRevisionId: Q4,
+        selected: [],
+        awarded: 0,
+        points: 10,
+      },
+    ])
+    const publicJson = JSON.stringify(redactElearningPaperSnapshot(paper))
+    expect(publicJson).not.toContain('answerKey')
+    expect(publicJson).not.toContain('explanation')
+    expect(publicJson).not.toContain('first')
+    expect(canonicalizeElearningExamAnswers(paper, null)[Q4]).toBe('')
+    expectCode(
+      () => canonicalizeElearningExamAnswers(paper, { [Q1]: 'a', [Q4]: '' }),
+      'invalid_input',
+    )
+    expectCode(
+      () => canonicalizeElearningExamAnswers(paper, { [Q1]: [], [Q4]: [] }),
+      'invalid_input',
+    )
+    expectCode(
+      () =>
+        canonicalizeElearningExamAnswers(paper, {
+          [Q1]: [],
+          [Q4]: 'x'.repeat(ELEARNING_SHORT_ANSWER_MAX_CHARS + 1),
+        }),
+      'invalid_input',
+    )
+  })
+
   it('scores single choice, order-insensitive multiple choice, and true/false by exact set equality', () => {
     const paper = samplePaper()
     const perfect = canonicalizeElearningExamAnswers(paper, {
@@ -1096,6 +1220,24 @@ describe('elearning exam start own answers', () => {
       deadlineAt: null,
       duplicate: true,
     })
+    expect(mem.attempts).toHaveLength(1)
+  })
+
+  it('does not open a retake while an attempt awaits manual grading', async () => {
+    const mixed = sampleMixedPaper()
+    const { db, mem } = createStartMemoryDb({
+      status: 'awaiting_manual',
+      paperSnapshot: mixed,
+      answers: {
+        [Q1]: ['a'],
+        [Q4]: 'Manual answer',
+      },
+      autoScore: 10,
+    })
+    await expectAsyncCode(
+      () => startElearningExam(db, { orgId: ORG, userId: USER, itemId: ITEM }),
+      'conflict',
+    )
     expect(mem.attempts).toHaveLength(1)
   })
 })

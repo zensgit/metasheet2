@@ -312,10 +312,11 @@ paths:
           $ref: '#/components/responses/ElearningError'
     post:
       operationId: createElearningBankQuestion
-      summary: Create a stable objective question with revision one
+      summary: Create a stable assessment question with revision one
       description: |
-        Admin-only L3 assessment write. The request may contain the answer key
-        and explanation; the closed response returns identifiers only.
+        Admin-only L3 assessment write. Objective questions carry a closed answer
+        key. A short_answer carries options=[] and correctOptionIds=[] and is
+        scored later by the manual-grading service. The response returns identifiers only.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -361,7 +362,7 @@ paths:
   /api/elearning/assessment/questions/{questionId}/revisions:
     post:
       operationId: appendElearningQuestionRevision
-      summary: Append one immutable objective-question revision
+      summary: Append one immutable assessment-question revision
       description: |
         Admin-only L3 assessment write. Existing revisions are never mutated.
         The closed response returns identifiers and the new revision number.
@@ -1542,7 +1543,7 @@ paths:
       summary: Save draft answers for a started exam attempt
       description: |
         RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
-        only (map of questionRevisionId to selected option ids). Only started
+        only (map of questionRevisionId to selected option ids or short-answer text). Only started
         attempts may save. Same canonical body is duplicate true. Result is the
         closed started DTO with own answers and the same immutable `deadlineAt`.
         No answer keys. JSON limit 16 KiB.
@@ -1591,11 +1592,13 @@ paths:
   /api/elearning/exams/attempts/{attemptId}/submit:
     post:
       operationId: submitElearningExam
-      summary: Submit and auto-grade an exam attempt
+      summary: Submit an exam attempt and auto-grade its objective portion
       description: |
         RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId
-        to selected option ids). Auto-grade result has no per-question key,
-        selected answers echo, or paper snapshot. JSON limit 16 KiB.
+        to selected option ids or short-answer text). Objective-only papers return
+        graded. Mixed papers return awaiting_manual with passed=null after the
+        objective portion is recorded. The result has no per-question key,
+        selected-answer echo, or paper snapshot. JSON limit 16 KiB.
       security: [ { bearerAuth: [] } ]
       parameters:
         - in: path
@@ -1611,7 +1614,7 @@ paths:
               $ref: '#/components/schemas/ElearningExamSubmitRequest'
       responses:
         '200':
-          description: Graded attempt totals only.
+          description: Objective-only graded result or mixed-paper awaiting-manual result.
           content:
             application/json:
               schema:

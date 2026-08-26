@@ -4,7 +4,7 @@ import {
   type ElearningAssessmentOption,
 } from './elearning-assessment-catalog'
 import {
-  validateElearningObjectiveQuestion,
+  validateElearningExamQuestion,
   type ElearningQuestionType,
 } from './elearning-exam-domain'
 
@@ -185,7 +185,7 @@ function bankItem(row: Record<string, unknown>): ElearningQuestionBankListItem {
 function latestQuestion(row: Record<string, unknown>): ElearningQuestionLatestRevision {
   const questionId = asUuid(row.question_id)
   const questionRevisionId = asUuid(row.question_revision_id)
-  const validated = validateElearningObjectiveQuestion({
+  const validated = validateElearningExamQuestion({
     position: 1,
     questionId,
     questionRevisionId,
@@ -206,7 +206,10 @@ function latestQuestion(row: Record<string, unknown>): ElearningQuestionLatestRe
       id: option.id,
       text: option.text,
     })),
-    correctOptionIds: [...validated.answerKey.correct],
+    correctOptionIds:
+      validated.questionType === 'short_answer'
+        ? []
+        : [...validated.answerKey.correct],
     points: validated.points,
     explanation: validated.explanation,
     createdAt: asTimestamp(row.created_at),

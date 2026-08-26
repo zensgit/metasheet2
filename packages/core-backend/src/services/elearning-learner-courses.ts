@@ -18,7 +18,13 @@ export const ELEARNING_LEARNER_COURSES_LIMIT = 100 as const
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const ATTEMPT_STATUSES = ['started', 'submitted', 'graded', 'expired'] as const
+const ATTEMPT_STATUSES = [
+  'started',
+  'submitted',
+  'awaiting_manual',
+  'graded',
+  'expired',
+] as const
 const VIDEO_PROGRESS_STATUSES = ['in_progress', 'completed'] as const
 
 export type ElearningLearnerCoursesErrorCode = 'invalid_input' | 'unavailable'
@@ -450,6 +456,16 @@ function mapLatestAttempt(row: Record<string, unknown>): ElearningLearnerExamAtt
       || autoScore !== null
       || totalScore !== null
       || passed !== null
+      || gradedAt !== null
+    ) {
+      fail('unavailable')
+    }
+  } else if (statusText === 'awaiting_manual') {
+    if (
+      autoScore === null
+      || totalScore !== null
+      || passed !== null
+      || submittedAt === null
       || gradedAt !== null
     ) {
       fail('unavailable')

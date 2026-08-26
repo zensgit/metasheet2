@@ -187,6 +187,7 @@ describe('e-learning assignment reminder intent producer', () => {
     for (const row of [
       candidate({ video_status: 'in_progress', exam_status: 'graded', passed: true }),
       candidate({ video_status: 'completed', exam_status: 'graded', passed: false }),
+      candidate({ video_status: 'completed', exam_status: 'awaiting_manual', passed: false }),
     ]) {
       const db = eligibleDb(row)
       await expect(produceElearningAssignmentReminder(db, input()))

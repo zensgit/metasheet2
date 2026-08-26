@@ -258,6 +258,34 @@ describe('elearning client transport', () => {
     expect(result.courses[0]?.assignment).toBeNull()
   })
 
+  it('accepts an awaiting-manual latest attempt without fabricating a final score', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, {
+      courses: [learnerCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: {
+            attemptId: ATTEMPT,
+            attemptNo: 1,
+            status: 'awaiting_manual',
+            autoScore: 6,
+            totalScore: null,
+            passed: null,
+            startedAt: '2026-01-04T05:06:07.000Z',
+            submittedAt: '2026-01-04T05:16:07.000Z',
+            gradedAt: null,
+          },
+        },
+      })],
+    }))
+    const result = await listMyElearningCourses()
+    expect(result.courses[0]?.exam.latestAttempt).toMatchObject({
+      status: 'awaiting_manual',
+      autoScore: 6,
+      totalScore: null,
+      passed: null,
+    })
+  })
+
   it('starts watch and playback ticket with empty JSON bodies', async () => {
     apiFetchMock
       .mockResolvedValueOnce(jsonResponse(200, watchState()))

@@ -19,7 +19,13 @@ const FORBIDDEN_KEYS = new Set([
 const QUESTION_TYPES = ['single_choice', 'multiple_choice', 'true_false'] as const
 const WATCH_STATUSES = ['in_progress', 'completed'] as const
 const VIDEO_LIST_STATUSES = ['not_started', 'in_progress', 'completed'] as const
-const ATTEMPT_STATUSES = ['started', 'submitted', 'graded', 'expired'] as const
+const ATTEMPT_STATUSES = [
+  'started',
+  'submitted',
+  'awaiting_manual',
+  'graded',
+  'expired',
+] as const
 const CAPABILITY_KEYS = ['content', 'assignment', 'assessment', 'incentive', 'analytics', 'media'] as const
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
 
@@ -484,7 +490,11 @@ function isLearnerVideoStatus(value: unknown): value is ElearningLearnerVideoSta
 }
 
 function isLearnerAttemptStatus(value: unknown): value is ElearningLearnerAttemptStatus {
-  return value === 'started' || value === 'submitted' || value === 'graded' || value === 'expired'
+  return value === 'started'
+    || value === 'submitted'
+    || value === 'awaiting_manual'
+    || value === 'graded'
+    || value === 'expired'
 }
 
 function requireNullableString(value: unknown, status: number): string | null {

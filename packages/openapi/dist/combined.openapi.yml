@@ -5505,12 +5505,19 @@ components:
     ElearningEmptyObject:
       type: object
       additionalProperties: false
+    ElearningObjectiveQuestionType:
+      type: string
+      enum:
+        - single_choice
+        - multiple_choice
+        - true_false
     ElearningQuestionType:
       type: string
       enum:
         - single_choice
         - multiple_choice
         - true_false
+        - short_answer
     ElearningCapabilityFlags:
       type: object
       additionalProperties: false
@@ -5689,7 +5696,7 @@ components:
         - points
       properties:
         questionType:
-          $ref: '#/components/schemas/ElearningQuestionType'
+          $ref: '#/components/schemas/ElearningObjectiveQuestionType'
         prompt:
           type: string
           minLength: 1
@@ -5717,6 +5724,59 @@ components:
           maxLength: 2000
           nullable: true
           description: Optional admin write field. Never returned on learner exam surfaces.
+    ElearningShortAnswerQuestionWrite:
+      type: object
+      additionalProperties: false
+      required:
+        - questionType
+        - prompt
+        - options
+        - correctOptionIds
+        - points
+      properties:
+        questionType:
+          type: string
+          enum:
+            - short_answer
+        prompt:
+          type: string
+          minLength: 1
+          maxLength: 2000
+        options:
+          type: array
+          maxItems: 0
+          items:
+            $ref: '#/components/schemas/ElearningPublishOption'
+          description: Must be the empty array for a manually graded short answer.
+        correctOptionIds:
+          type: array
+          maxItems: 0
+          items:
+            type: string
+          description: Must be the empty array. No answer key is stored for short answers.
+        points:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+        explanation:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          nullable: true
+          description: >-
+            Optional admin-only guidance. Never returned on learner exam
+            surfaces.
+    ElearningAssessmentQuestionWrite:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningPublishQuestion'
+        - $ref: '#/components/schemas/ElearningShortAnswerQuestionWrite'
+      discriminator:
+        propertyName: questionType
+        mapping:
+          single_choice: '#/components/schemas/ElearningPublishQuestion'
+          multiple_choice: '#/components/schemas/ElearningPublishQuestion'
+          true_false: '#/components/schemas/ElearningPublishQuestion'
+          short_answer: '#/components/schemas/ElearningShortAnswerQuestionWrite'
     ElearningQuestionBankCreateRequest:
       type: object
       additionalProperties: false
@@ -5827,20 +5887,22 @@ components:
           maxLength: 2000
         options:
           type: array
-          minItems: 2
+          minItems: 0
           maxItems: 20
           items:
             $ref: '#/components/schemas/ElearningPublishOption'
         correctOptionIds:
           type: array
-          minItems: 1
+          minItems: 0
           maxItems: 20
           uniqueItems: true
           items:
             type: string
             minLength: 1
             maxLength: 64
-          description: Admin-only answer key. Never returned by learner exam APIs.
+          description: >-
+            Admin-only answer key. Empty for short_answer; never returned by
+            learner exam APIs.
         points:
           type: integer
           minimum: 1
@@ -5888,7 +5950,7 @@ components:
         - question
       properties:
         question:
-          $ref: '#/components/schemas/ElearningPublishQuestion'
+          $ref: '#/components/schemas/ElearningAssessmentQuestionWrite'
     ElearningQuestionRevisionResult:
       type: object
       additionalProperties: false
@@ -6229,6 +6291,7 @@ components:
             - not_started
             - started
             - submitted
+            - awaiting_manual
             - graded
             - expired
         passed:
@@ -6790,6 +6853,7 @@ components:
           enum:
             - started
             - submitted
+            - awaiting_manual
             - graded
             - expired
         autoScore:
@@ -6991,9 +7055,12 @@ components:
           minLength: 1
         options:
           type: array
-          minItems: 1
+          minItems: 0
           items:
             $ref: '#/components/schemas/ElearningPublicOption'
+          description: >-
+            Empty for short_answer; otherwise contains the closed objective
+            choices.
         points:
           type: integer
           minimum: 0
@@ -7005,8 +7072,8 @@ components:
         - version
         - questions
       description: >-
-        Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot
-        secrets.
+        Redacted paper. Version 1 is objective-only; version 2 contains at least
+        one short answer. No snapshot secrets.
       properties:
         domain:
           type: string
@@ -7016,6 +7083,7 @@ components:
           type: integer
           enum:
             - 1
+            - 2
         questions:
           type: array
           minItems: 1
@@ -7047,13 +7115,17 @@ components:
         answers:
           type: object
           additionalProperties:
-            type: array
-            items:
-              type: string
-              minLength: 1
+            oneOf:
+              - type: array
+                items:
+                  type: string
+                  minLength: 1
+              - type: string
+                maxLength: 10000
           description: >-
-            Canonical own selections for every paper question. Empty arrays when
-            unanswered. Never includes answer keys.
+            Canonical own answers for every paper question. Objective answers
+            are option-id arrays; short answers are strings. Never includes
+            answer keys.
         deadlineAt:
           type: string
           format: date-time
@@ -7072,14 +7144,18 @@ components:
         answers:
           type: object
           additionalProperties:
-            type: array
-            items:
-              type: string
-              minLength: 1
+            oneOf:
+              - type: array
+                items:
+                  type: string
+                  minLength: 1
+              - type: string
+                maxLength: 10000
           description: >-
-            Map of questionRevisionId to selected option ids. Unknown keys are
-            invalid_input.
-    ElearningExamSubmitResult:
+            Map of questionRevisionId to objective option ids or short-answer
+            text. Unknown keys and answer types that contradict the frozen paper
+            are invalid_input.
+    ElearningExamGradedSubmitResult:
       type: object
       additionalProperties: false
       required:
@@ -7104,10 +7180,54 @@ components:
           type: number
         totalScore:
           type: number
+          description: Maximum score available on the frozen paper.
         passed:
           type: boolean
         duplicate:
           type: boolean
+    ElearningExamAwaitingManualSubmitResult:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - attemptNo
+        - status
+        - autoScore
+        - totalScore
+        - passed
+        - duplicate
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        attemptNo:
+          type: integer
+          minimum: 1
+        status:
+          type: string
+          enum:
+            - awaiting_manual
+        autoScore:
+          type: number
+          description: Score already awarded to objective questions.
+        totalScore:
+          type: number
+          description: Maximum score available on the complete frozen paper.
+        passed:
+          type: boolean
+          nullable: true
+          enum:
+            - null
+        duplicate:
+          type: boolean
+    ElearningExamSubmitResult:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningExamGradedSubmitResult'
+        - $ref: '#/components/schemas/ElearningExamAwaitingManualSubmitResult'
+      discriminator:
+        propertyName: status
+        mapping:
+          graded: '#/components/schemas/ElearningExamGradedSubmitResult'
+          awaiting_manual: '#/components/schemas/ElearningExamAwaitingManualSubmitResult'
     ElearningExamReviewQuestion:
       type: object
       additionalProperties: false
@@ -7132,7 +7252,7 @@ components:
         questionRevisionId:
           $ref: '#/components/schemas/ElearningUuid'
         questionType:
-          $ref: '#/components/schemas/ElearningQuestionType'
+          $ref: '#/components/schemas/ElearningObjectiveQuestionType'
         prompt:
           type: string
           minLength: 1
@@ -16821,10 +16941,15 @@ paths:
           $ref: '#/components/responses/ElearningError'
     post:
       operationId: createElearningBankQuestion
-      summary: Create a stable objective question with revision one
-      description: |
-        Admin-only L3 assessment write. The request may contain the answer key
-        and explanation; the closed response returns identifiers only.
+      summary: Create a stable assessment question with revision one
+      description: >
+        Admin-only L3 assessment write. Objective questions carry a closed
+        answer
+
+        key. A short_answer carries options=[] and correctOptionIds=[] and is
+
+        scored later by the manual-grading service. The response returns
+        identifiers only.
       security:
         - bearerAuth: []
       parameters:
@@ -16870,7 +16995,7 @@ paths:
   /api/elearning/assessment/questions/{questionId}/revisions:
     post:
       operationId: appendElearningQuestionRevision
-      summary: Append one immutable objective-question revision
+      summary: Append one immutable assessment-question revision
       description: |
         Admin-only L3 assessment write. Existing revisions are never mutated.
         The closed response returns identifiers and the new revision number.
@@ -18233,7 +18358,8 @@ paths:
         RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
         Requires exam surface flags. Body key `answers`
 
-        only (map of questionRevisionId to selected option ids). Only started
+        only (map of questionRevisionId to selected option ids or short-answer
+        text). Only started
 
         attempts may save. Same canonical body is duplicate true. Result is the
 
@@ -18287,14 +18413,19 @@ paths:
   /api/elearning/exams/attempts/{attemptId}/submit:
     post:
       operationId: submitElearningExam
-      summary: Submit and auto-grade an exam attempt
+      summary: Submit an exam attempt and auto-grade its objective portion
       description: >
         RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body
         key `answers` only (map of questionRevisionId
 
-        to selected option ids). Auto-grade result has no per-question key,
+        to selected option ids or short-answer text). Objective-only papers
+        return
 
-        selected answers echo, or paper snapshot. JSON limit 16 KiB.
+        graded. Mixed papers return awaiting_manual with passed=null after the
+
+        objective portion is recorded. The result has no per-question key,
+
+        selected-answer echo, or paper snapshot. JSON limit 16 KiB.
       security:
         - bearerAuth: []
       parameters:
@@ -18311,7 +18442,7 @@ paths:
               $ref: '#/components/schemas/ElearningExamSubmitRequest'
       responses:
         '200':
-          description: Graded attempt totals only.
+          description: Objective-only graded result or mixed-paper awaiting-manual result.
           content:
             application/json:
               schema:

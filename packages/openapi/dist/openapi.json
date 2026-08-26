@@ -7426,12 +7426,21 @@
         "type": "object",
         "additionalProperties": false
       },
-      "ElearningQuestionType": {
+      "ElearningObjectiveQuestionType": {
         "type": "string",
         "enum": [
           "single_choice",
           "multiple_choice",
           "true_false"
+        ]
+      },
+      "ElearningQuestionType": {
+        "type": "string",
+        "enum": [
+          "single_choice",
+          "multiple_choice",
+          "true_false",
+          "short_answer"
         ]
       },
       "ElearningCapabilityFlags": {
@@ -7658,7 +7667,7 @@
         ],
         "properties": {
           "questionType": {
-            "$ref": "#/components/schemas/ElearningQuestionType"
+            "$ref": "#/components/schemas/ElearningObjectiveQuestionType"
           },
           "prompt": {
             "type": "string",
@@ -7693,6 +7702,77 @@
             "maxLength": 2000,
             "nullable": true,
             "description": "Optional admin write field. Never returned on learner exam surfaces."
+          }
+        }
+      },
+      "ElearningShortAnswerQuestionWrite": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "questionType",
+          "prompt",
+          "options",
+          "correctOptionIds",
+          "points"
+        ],
+        "properties": {
+          "questionType": {
+            "type": "string",
+            "enum": [
+              "short_answer"
+            ]
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "options": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublishOption"
+            },
+            "description": "Must be the empty array for a manually graded short answer."
+          },
+          "correctOptionIds": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "type": "string"
+            },
+            "description": "Must be the empty array. No answer key is stored for short answers."
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2147483647
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "nullable": true,
+            "description": "Optional admin-only guidance. Never returned on learner exam surfaces."
+          }
+        }
+      },
+      "ElearningAssessmentQuestionWrite": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningPublishQuestion"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningShortAnswerQuestionWrite"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "questionType",
+          "mapping": {
+            "single_choice": "#/components/schemas/ElearningPublishQuestion",
+            "multiple_choice": "#/components/schemas/ElearningPublishQuestion",
+            "true_false": "#/components/schemas/ElearningPublishQuestion",
+            "short_answer": "#/components/schemas/ElearningShortAnswerQuestionWrite"
           }
         }
       },
@@ -7841,7 +7921,7 @@
           },
           "options": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 0,
             "maxItems": 20,
             "items": {
               "$ref": "#/components/schemas/ElearningPublishOption"
@@ -7849,7 +7929,7 @@
           },
           "correctOptionIds": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "maxItems": 20,
             "uniqueItems": true,
             "items": {
@@ -7857,7 +7937,7 @@
               "minLength": 1,
               "maxLength": 64
             },
-            "description": "Admin-only answer key. Never returned by learner exam APIs."
+            "description": "Admin-only answer key. Empty for short_answer; never returned by learner exam APIs."
           },
           "points": {
             "type": "integer",
@@ -7921,7 +8001,7 @@
         ],
         "properties": {
           "question": {
-            "$ref": "#/components/schemas/ElearningPublishQuestion"
+            "$ref": "#/components/schemas/ElearningAssessmentQuestionWrite"
           }
         }
       },
@@ -8373,6 +8453,7 @@
               "not_started",
               "started",
               "submitted",
+              "awaiting_manual",
               "graded",
               "expired"
             ]
@@ -9126,6 +9207,7 @@
             "enum": [
               "started",
               "submitted",
+              "awaiting_manual",
               "graded",
               "expired"
             ]
@@ -9402,10 +9484,11 @@
           },
           "options": {
             "type": "array",
-            "minItems": 1,
+            "minItems": 0,
             "items": {
               "$ref": "#/components/schemas/ElearningPublicOption"
-            }
+            },
+            "description": "Empty for short_answer; otherwise contains the closed objective choices."
           },
           "points": {
             "type": "integer",
@@ -9421,7 +9504,7 @@
           "version",
           "questions"
         ],
-        "description": "Redacted paper. Domain elearning.exam.paper.v1 version 1. No snapshot secrets.",
+        "description": "Redacted paper. Version 1 is objective-only; version 2 contains at least one short answer. No snapshot secrets.",
         "properties": {
           "domain": {
             "type": "string",
@@ -9432,7 +9515,8 @@
           "version": {
             "type": "integer",
             "enum": [
-              1
+              1,
+              2
             ]
           },
           "questions": {
@@ -9476,13 +9560,21 @@
           "answers": {
             "type": "object",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                {
+                  "type": "string",
+                  "maxLength": 10000
+                }
+              ]
             },
-            "description": "Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys."
+            "description": "Canonical own answers for every paper question. Objective answers are option-id arrays; short answers are strings. Never includes answer keys."
           },
           "deadlineAt": {
             "type": "string",
@@ -9505,17 +9597,25 @@
           "answers": {
             "type": "object",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                {
+                  "type": "string",
+                  "maxLength": 10000
+                }
+              ]
             },
-            "description": "Map of questionRevisionId to selected option ids. Unknown keys are invalid_input."
+            "description": "Map of questionRevisionId to objective option ids or short-answer text. Unknown keys and answer types that contradict the frozen paper are invalid_input."
           }
         }
       },
-      "ElearningExamSubmitResult": {
+      "ElearningExamGradedSubmitResult": {
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -9545,13 +9645,77 @@
             "type": "number"
           },
           "totalScore": {
-            "type": "number"
+            "type": "number",
+            "description": "Maximum score available on the frozen paper."
           },
           "passed": {
             "type": "boolean"
           },
           "duplicate": {
             "type": "boolean"
+          }
+        }
+      },
+      "ElearningExamAwaitingManualSubmitResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "attemptNo",
+          "status",
+          "autoScore",
+          "totalScore",
+          "passed",
+          "duplicate"
+        ],
+        "properties": {
+          "attemptId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "attemptNo": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "awaiting_manual"
+            ]
+          },
+          "autoScore": {
+            "type": "number",
+            "description": "Score already awarded to objective questions."
+          },
+          "totalScore": {
+            "type": "number",
+            "description": "Maximum score available on the complete frozen paper."
+          },
+          "passed": {
+            "type": "boolean",
+            "nullable": true,
+            "enum": [
+              null
+            ]
+          },
+          "duplicate": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ElearningExamSubmitResult": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningExamGradedSubmitResult"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningExamAwaitingManualSubmitResult"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "status",
+          "mapping": {
+            "graded": "#/components/schemas/ElearningExamGradedSubmitResult",
+            "awaiting_manual": "#/components/schemas/ElearningExamAwaitingManualSubmitResult"
           }
         }
       },
@@ -9579,7 +9743,7 @@
             "$ref": "#/components/schemas/ElearningUuid"
           },
           "questionType": {
-            "$ref": "#/components/schemas/ElearningQuestionType"
+            "$ref": "#/components/schemas/ElearningObjectiveQuestionType"
           },
           "prompt": {
             "type": "string",
@@ -24535,8 +24699,8 @@
       },
       "post": {
         "operationId": "createElearningBankQuestion",
-        "summary": "Create a stable objective question with revision one",
-        "description": "Admin-only L3 assessment write. The request may contain the answer key\nand explanation; the closed response returns identifiers only.\n",
+        "summary": "Create a stable assessment question with revision one",
+        "description": "Admin-only L3 assessment write. Objective questions carry a closed answer\nkey. A short_answer carries options=[] and correctOptionIds=[] and is\nscored later by the manual-grading service. The response returns identifiers only.\n",
         "security": [
           {
             "bearerAuth": []
@@ -24607,7 +24771,7 @@
     "/api/elearning/assessment/questions/{questionId}/revisions": {
       "post": {
         "operationId": "appendElearningQuestionRevision",
-        "summary": "Append one immutable objective-question revision",
+        "summary": "Append one immutable assessment-question revision",
         "description": "Admin-only L3 assessment write. Existing revisions are never mutated.\nThe closed response returns identifiers and the new revision number.\n",
         "security": [
           {
@@ -26275,7 +26439,7 @@
       "put": {
         "operationId": "saveElearningExamAnswers",
         "summary": "Save draft answers for a started exam attempt",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers and the same immutable `deadlineAt`.\nNo answer keys. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids or short-answer text). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers and the same immutable `deadlineAt`.\nNo answer keys. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -26346,8 +26510,8 @@
     "/api/elearning/exams/attempts/{attemptId}/submit": {
       "post": {
         "operationId": "submitElearningExam",
-        "summary": "Submit and auto-grade an exam attempt",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId\nto selected option ids). Auto-grade result has no per-question key,\nselected answers echo, or paper snapshot. JSON limit 16 KiB.\n",
+        "summary": "Submit an exam attempt and auto-grade its objective portion",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Body key `answers` only (map of questionRevisionId\nto selected option ids or short-answer text). Objective-only papers return\ngraded. Mixed papers return awaiting_manual with passed=null after the\nobjective portion is recorded. The result has no per-question key,\nselected-answer echo, or paper snapshot. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -26375,7 +26539,7 @@
         },
         "responses": {
           "200": {
-            "description": "Graded attempt totals only.",
+            "description": "Objective-only graded result or mixed-paper awaiting-manual result.",
             "content": {
               "application/json": {
                 "schema": {

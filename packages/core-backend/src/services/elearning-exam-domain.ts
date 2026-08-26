@@ -7,16 +7,26 @@ import { createHash } from 'node:crypto'
 
 export const ELEARNING_EXAM_PAPER_DOMAIN = 'elearning.exam.paper.v1' as const
 export const ELEARNING_EXAM_PAPER_VERSION = 1 as const
+export const ELEARNING_EXAM_PAPER_VERSION_MIXED = 2 as const
 export const ELEARNING_EXAM_AUTO_GRADER = 'system:auto' as const
 export const ELEARNING_EXAM_GRADE_KIND = 'auto' as const
+export const ELEARNING_SHORT_ANSWER_MAX_CHARS = 10_000 as const
 
 export const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const QUESTION_TYPES = ['single_choice', 'multiple_choice', 'true_false'] as const
+const OBJECTIVE_QUESTION_TYPES = [
+  'single_choice',
+  'multiple_choice',
+  'true_false',
+] as const
 const SECRET_KEYS = new Set(['answer_key', 'answerKey', 'correct', 'explanation'])
 
-export type ElearningQuestionType = (typeof QUESTION_TYPES)[number]
+export type ElearningObjectiveQuestionType =
+  (typeof OBJECTIVE_QUESTION_TYPES)[number]
+export type ElearningQuestionType = ElearningObjectiveQuestionType | 'short_answer'
+export type ElearningExamAnswer = string[] | string
+export type ElearningExamAnswers = Record<string, ElearningExamAnswer>
 
 export type ElearningExamErrorCode =
   | 'invalid_input'
@@ -53,7 +63,7 @@ export interface ElearningObjectiveQuestion {
   position: number
   questionRevisionId: string
   questionId: string
-  questionType: ElearningQuestionType
+  questionType: ElearningObjectiveQuestionType
   prompt: string
   options: ElearningExamOption[]
   points: number
@@ -61,12 +71,30 @@ export interface ElearningObjectiveQuestion {
   explanation: string | null
 }
 
+export interface ElearningShortAnswerQuestion {
+  position: number
+  questionRevisionId: string
+  questionId: string
+  questionType: 'short_answer'
+  prompt: string
+  options: []
+  points: number
+  answerKey: Record<string, never>
+  explanation: string | null
+}
+
+export type ElearningExamQuestion =
+  | ElearningObjectiveQuestion
+  | ElearningShortAnswerQuestion
+
 export interface ElearningPaperSnapshot {
   domain: typeof ELEARNING_EXAM_PAPER_DOMAIN
-  version: typeof ELEARNING_EXAM_PAPER_VERSION
+  version:
+    | typeof ELEARNING_EXAM_PAPER_VERSION
+    | typeof ELEARNING_EXAM_PAPER_VERSION_MIXED
   examId: string
   passScore: number
-  questions: ElearningObjectiveQuestion[]
+  questions: ElearningExamQuestion[]
 }
 
 export interface ElearningPublicQuestion {
@@ -80,7 +108,9 @@ export interface ElearningPublicQuestion {
 
 export interface ElearningPublicPaper {
   domain: typeof ELEARNING_EXAM_PAPER_DOMAIN
-  version: typeof ELEARNING_EXAM_PAPER_VERSION
+  version:
+    | typeof ELEARNING_EXAM_PAPER_VERSION
+    | typeof ELEARNING_EXAM_PAPER_VERSION_MIXED
   questions: ElearningPublicQuestion[]
 }
 
@@ -94,8 +124,8 @@ export interface ElearningExamQuestionScore {
 export interface ElearningExamGrade {
   autoScore: number
   totalScore: number
-  passed: boolean
-  answers: Record<string, string[]>
+  passed: boolean | null
+  answers: ElearningExamAnswers
   questions: ElearningExamQuestionScore[]
 }
 
@@ -166,7 +196,9 @@ export function asFiniteNumber(value: unknown): number | null {
   return null
 }
 
-function isQuestionType(value: unknown): value is ElearningQuestionType {
+function isObjectiveQuestionType(
+  value: unknown,
+): value is ElearningObjectiveQuestionType {
   return value === 'single_choice' || value === 'multiple_choice' || value === 'true_false'
 }
 
@@ -201,7 +233,7 @@ export function validateElearningObjectiveQuestion(
     fail(storedFault)
   }
   const questionType = row.questionType ?? row.question_type
-  if (!isQuestionType(questionType)) fail(storedFault)
+  if (!isObjectiveQuestionType(questionType)) fail(storedFault)
   const prompt = asText(row.prompt)
   if (!prompt || prompt.trim() === '') fail(storedFault)
   const points = asSafeInt(row.points)
@@ -265,6 +297,64 @@ export function validateElearningObjectiveQuestion(
   }
 }
 
+export function validateElearningExamQuestion(
+  input: unknown,
+  storedFault: ElearningExamErrorCode = 'invalid_input',
+): ElearningExamQuestion {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    fail(storedFault)
+  }
+  const row = input as Record<string, unknown>
+  const questionType = row.questionType ?? row.question_type
+  if (questionType !== 'short_answer') {
+    return validateElearningObjectiveQuestion(input, storedFault)
+  }
+
+  const position = asSafeInt(row.position)
+  if (position === null || position < 1) fail(storedFault)
+  const questionRevisionId =
+    asText(row.questionRevisionId) ?? asText(row.question_revision_id)
+  const questionId = asText(row.questionId) ?? asText(row.question_id)
+  if (
+    !questionRevisionId
+    || !UUID_RE.test(questionRevisionId)
+    || !questionId
+    || !UUID_RE.test(questionId)
+  ) {
+    fail(storedFault)
+  }
+  const prompt = asText(row.prompt)
+  if (!prompt || prompt.trim() === '') fail(storedFault)
+  const points = asSafeInt(row.points)
+  if (points === null || points < 0) fail(storedFault)
+  if (!Array.isArray(row.options) || row.options.length !== 0) fail(storedFault)
+  const rawKey = row.answerKey ?? row.answer_key
+  if (
+    !rawKey
+    || typeof rawKey !== 'object'
+    || Array.isArray(rawKey)
+    || Object.keys(rawKey as Record<string, unknown>).length !== 0
+  ) {
+    fail(storedFault)
+  }
+  let explanation: string | null = null
+  if (row.explanation != null) {
+    if (typeof row.explanation !== 'string') fail(storedFault)
+    explanation = row.explanation
+  }
+  return {
+    position,
+    questionRevisionId: questionRevisionId.toLowerCase(),
+    questionId: questionId.toLowerCase(),
+    questionType,
+    prompt: prompt.trim(),
+    options: [],
+    points,
+    answerKey: {},
+    explanation,
+  }
+}
+
 export function validateElearningPaperSnapshot(
   input: unknown,
   storedFault: ElearningExamErrorCode = 'invalid_input',
@@ -272,29 +362,46 @@ export function validateElearningPaperSnapshot(
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail(storedFault)
   const row = input as Record<string, unknown>
   if (row.domain !== ELEARNING_EXAM_PAPER_DOMAIN) fail(storedFault)
-  if (asSafeInt(row.version) !== ELEARNING_EXAM_PAPER_VERSION) fail(storedFault)
+  const version = asSafeInt(row.version)
+  if (
+    version !== ELEARNING_EXAM_PAPER_VERSION
+    && version !== ELEARNING_EXAM_PAPER_VERSION_MIXED
+  ) {
+    fail(storedFault)
+  }
   const examId = asText(row.examId)
   if (!examId || !UUID_RE.test(examId)) fail(storedFault)
   const passScore = asFiniteNumber(row.passScore)
   if (passScore === null || passScore < 0) fail(storedFault)
   if (!Array.isArray(row.questions) || row.questions.length < 1) fail(storedFault)
 
-  const questions: ElearningObjectiveQuestion[] = []
+  const questions: ElearningExamQuestion[] = []
   const positions = new Set<number>()
   const revisionIds = new Set<string>()
+  let hasShortAnswer = false
   for (const raw of row.questions) {
-    const question = validateElearningObjectiveQuestion(raw, storedFault)
+    const question = validateElearningExamQuestion(raw, storedFault)
+    if (
+      version === ELEARNING_EXAM_PAPER_VERSION
+      && question.questionType === 'short_answer'
+    ) {
+      fail(storedFault)
+    }
+    if (question.questionType === 'short_answer') hasShortAnswer = true
     if (positions.has(question.position) || revisionIds.has(question.questionRevisionId)) fail(storedFault)
     positions.add(question.position)
     revisionIds.add(question.questionRevisionId)
     questions.push(question)
+  }
+  if (version === ELEARNING_EXAM_PAPER_VERSION_MIXED && !hasShortAnswer) {
+    fail(storedFault)
   }
   questions.sort((a, b) => a.position - b.position)
   const totalScore = questions.reduce((sum, question) => sum + question.points, 0)
   if (!(passScore <= totalScore)) fail(storedFault)
   return {
     domain: ELEARNING_EXAM_PAPER_DOMAIN,
-    version: ELEARNING_EXAM_PAPER_VERSION,
+    version,
     examId: examId.toLowerCase(),
     passScore,
     questions,
@@ -304,11 +411,16 @@ export function validateElearningPaperSnapshot(
 export function freezeElearningPaperSnapshot(
   examId: string,
   passScore: number,
-  questions: ElearningObjectiveQuestion[],
+  questions: ElearningExamQuestion[],
 ): ElearningPaperSnapshot {
+  const version = questions.some(
+    (question) => question.questionType === 'short_answer',
+  )
+    ? ELEARNING_EXAM_PAPER_VERSION_MIXED
+    : ELEARNING_EXAM_PAPER_VERSION
   return validateElearningPaperSnapshot({
     domain: ELEARNING_EXAM_PAPER_DOMAIN,
-    version: ELEARNING_EXAM_PAPER_VERSION,
+    version,
     examId,
     passScore,
     questions,
@@ -333,17 +445,25 @@ function compareStableText(left: string, right: string): number {
  * in paper_snapshot, so retries never reshuffle and grading remains id-based.
  */
 export function materializeElearningExamQuestions(
-  questions: ElearningObjectiveQuestion[],
+  questions: ElearningExamQuestion[],
   attemptId: string,
   shuffleQuestions: boolean,
   shuffleOptions: boolean,
-): ElearningObjectiveQuestion[] {
+): ElearningExamQuestion[] {
   const seed = requireUuid(attemptId)
-  const materialized = questions.map((question) => ({
-    ...question,
-    options: question.options.map((option) => ({ ...option })),
-    answerKey: { correct: [...question.answerKey.correct] },
-  }))
+  const materialized: ElearningExamQuestion[] = questions.map((question) =>
+    question.questionType === 'short_answer'
+      ? {
+        ...question,
+        options: [],
+        answerKey: {} as Record<string, never>,
+      }
+      : {
+        ...question,
+        options: question.options.map((option) => ({ ...option })),
+        answerKey: { correct: [...question.answerKey.correct] },
+      },
+  )
 
   if (shuffleQuestions) {
     materialized.sort((left, right) => {
@@ -360,6 +480,7 @@ export function materializeElearningExamQuestions(
   if (shuffleOptions) {
     for (let index = 0; index < materialized.length; index += 1) {
       const question = materialized[index]
+      if (question.questionType === 'short_answer') continue
       const options = [...question.options].sort((left, right) => {
         const scope = `option:${question.questionRevisionId}`
         const leftRank = seededRank(seed, scope, left.id)
@@ -372,7 +493,7 @@ export function materializeElearningExamQuestions(
   }
 
   return materialized.map((question) =>
-    validateElearningObjectiveQuestion(question, 'unavailable'),
+    validateElearningExamQuestion(question, 'unavailable'),
   )
 }
 
@@ -409,9 +530,14 @@ export function stripElearningExamSecrets<T>(value: T): T {
 export function canonicalizeElearningExamAnswers(
   snapshot: ElearningPaperSnapshot,
   raw: unknown,
-): Record<string, string[]> {
+): ElearningExamAnswers {
   if (raw == null) {
-    return Object.fromEntries(snapshot.questions.map((question) => [question.questionRevisionId, []]))
+    return Object.fromEntries(
+      snapshot.questions.map((question) => [
+        question.questionRevisionId,
+        question.questionType === 'short_answer' ? '' : [],
+      ]),
+    )
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) fail('invalid_input')
   const incoming = raw as Record<string, unknown>
@@ -426,11 +552,21 @@ export function canonicalizeElearningExamAnswers(
     remapped.set(normalized, incoming[key])
   }
 
-  const canonical: Record<string, string[]> = {}
+  const canonical: ElearningExamAnswers = {}
   for (const question of snapshot.questions) {
     const value = remapped.get(question.questionRevisionId)
     if (value === undefined) {
-      canonical[question.questionRevisionId] = []
+      canonical[question.questionRevisionId] =
+        question.questionType === 'short_answer' ? '' : []
+      continue
+    }
+    if (question.questionType === 'short_answer') {
+      if (typeof value !== 'string') fail('invalid_input')
+      const normalized = value.replace(/\r\n?/g, '\n').trim()
+      if (normalized.length > ELEARNING_SHORT_ANSWER_MAX_CHARS) {
+        fail('invalid_input')
+      }
+      canonical[question.questionRevisionId] = normalized
       continue
     }
     if (!Array.isArray(value)) fail('invalid_input')
@@ -452,7 +588,7 @@ export function canonicalizeElearningExamAnswers(
 
 export function scoreElearningExam(
   snapshot: ElearningPaperSnapshot,
-  answers: Record<string, string[]>,
+  answers: ElearningExamAnswers,
 ): ElearningExamGrade {
   const passScore = snapshot.passScore
   let autoScore = 0
@@ -460,7 +596,17 @@ export function scoreElearningExam(
   const questions: ElearningExamQuestionScore[] = []
   for (const question of snapshot.questions) {
     totalScore += question.points
-    const selected = answers[question.questionRevisionId] ?? []
+    if (question.questionType === 'short_answer') {
+      questions.push({
+        questionRevisionId: question.questionRevisionId,
+        selected: [],
+        awarded: 0,
+        points: question.points,
+      })
+      continue
+    }
+    const selected = answers[question.questionRevisionId]
+    if (!Array.isArray(selected)) fail('unavailable')
     const awarded = sameStringSet(selected, question.answerKey.correct) ? question.points : 0
     autoScore += awarded
     questions.push({
@@ -474,22 +620,52 @@ export function scoreElearningExam(
   return {
     autoScore,
     totalScore,
-    passed: autoScore >= passScore,
+    passed: snapshot.questions.some(
+      (question) => question.questionType === 'short_answer',
+    )
+      ? null
+      : autoScore >= passScore,
     answers,
     questions,
   }
 }
 
 export function elearningExamAnswersEqual(
-  left: Record<string, string[]>,
-  right: Record<string, string[]>,
+  left: ElearningExamAnswers,
+  right: ElearningExamAnswers,
 ): boolean {
   const leftKeys = Object.keys(left)
   const rightKeys = Object.keys(right)
   if (leftKeys.length !== rightKeys.length) return false
   for (const key of leftKeys) {
     const other = right[key]
-    if (!other || !sameStringSet(left[key], other)) return false
+    const value = left[key]
+    if (typeof value === 'string' || typeof other === 'string') {
+      if (typeof value !== 'string' || typeof other !== 'string' || value !== other) {
+        return false
+      }
+      continue
+    }
+    if (!Array.isArray(value) || !Array.isArray(other)) return false
+    if (!sameStringSet(value, other)) return false
   }
   return true
+}
+
+export function hasElearningManualQuestions(
+  snapshot: ElearningPaperSnapshot,
+): boolean {
+  return snapshot.questions.some(
+    (question) => question.questionType === 'short_answer',
+  )
+}
+
+export function elearningExamObjectiveMaxScore(
+  snapshot: ElearningPaperSnapshot,
+): number {
+  return snapshot.questions.reduce(
+    (total, question) =>
+      question.questionType === 'short_answer' ? total : total + question.points,
+    0,
+  )
 }
