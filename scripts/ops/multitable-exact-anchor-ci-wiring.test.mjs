@@ -17,6 +17,8 @@ const FILES = [
   'tests/integration/multitable-exact-anchor-apply-realdb.test.ts',
   // W2 route wiring is DB-gated too; keep its Express/auth/side-effect goldens impossible to skip-green.
   'tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts',
+  // T8-1 route behavior, including Revert-vs-retention no-oracle ordering, is real-DB-only.
+  'tests/integration/multitable-revert-pit-realdb.test.ts',
   // Closeout database guard: authority reader/writer leases.
   'tests/integration/multitable-recovery-authority-stability-realdb.test.ts',
   'tests/integration/multitable-recovery-lease-backoff-realdb.test.ts',

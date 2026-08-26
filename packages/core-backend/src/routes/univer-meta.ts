@@ -10348,7 +10348,7 @@ export function univerMetaRouter(): Router {
   // (RECOVERY_TRUST_REQUIRED otherwise). The apply is one transaction, all-or-nothing — the legacy
   // per-record best-effort loop and the multi-transaction durable-block claim/release dance are gone.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
-  const isMetaRevisionRetentionEnabled = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
+  const isMetaRevisionRetentionEnabled = () => process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'
   const sendRecoveryRetentionBlocked = (res: Response, mode: 'revert' | 'reset') => res.status(409).json({
     ok: false,
     error: {
@@ -10725,7 +10725,7 @@ export function univerMetaRouter(): Router {
   /**
    * Shared PREVIEW handler for both modes. No-oracle ordering: parse shape (no DB) → 401/403 admin floor →
    * existence-hidden 403 for non-admin unknown sheets → conservative full-read 403 → system-admin-only 404 →
-   * trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
+   * retention conflict 409 → trust 409 → live-count ceiling 413 → L6/L7 preview. The response is
    * VALUES-FREE (record/field ids + counts only; never targetData/live snapshots), and `previewIdentity`
    * is present ONLY when the plan is executable — resurrection-bearing, schema-drifted, and no-op plans
    * never receive a destructive token.
@@ -10734,7 +10734,6 @@ export function univerMetaRouter(): Router {
     if (mode === 'reset' && !PIT_RESET_ENABLED()) {
       return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
     }
-    if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     const parsed = parseRecoveryAnchorRequest(parseAnchorBody(req))
@@ -10760,6 +10759,9 @@ export function univerMetaRouter(): Router {
       if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
         return sendForbidden(res)
       }
+      // Retention posture is observable only after shape, authentication, existence hiding, and the
+      // conservative full-read gate. It remains anchor-neutral: no trust/history/anchor work runs first.
+      if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
       if (!requireRecoveryTrust(res)) return
       // Primary live-sheet ceiling (D3/PIT-6) AFTER full-read — no size oracle for denied actors.
       const ceiling = await enforceSheetRecoverySizeCeiling(pool.query.bind(pool) as QueryFn, sheetId, SHEET_REVERT_MAX_RECORDS)
@@ -10836,7 +10838,6 @@ export function univerMetaRouter(): Router {
     } else {
       if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
     }
-    if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const body = parseAnchorBody(req)
     const previewIdentity = typeof body.previewIdentity === 'string' ? body.previewIdentity : ''
@@ -10890,6 +10891,9 @@ export function univerMetaRouter(): Router {
       if (!(await hasFullTableReadAccess(req, pool.query.bind(pool), sheetId, access, capabilities))) {
         return sendForbidden(res)
       }
+      // Same no-oracle point as preview: authorized full-read callers may observe the compatibility
+      // conflict, while malformed/unauthenticated/nonexistent/unauthorized requests retain their order.
+      if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
 
       // TOKEN-ONLY authority (P1-1): verify + MODE-ISOLATE before any transaction or write.
       const verified = verifyExactAnchorRecoveryIdentity(previewIdentity, { sheetId, actorId: access.userId })

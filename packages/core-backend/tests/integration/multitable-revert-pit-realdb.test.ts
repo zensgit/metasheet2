@@ -5,7 +5,8 @@
  * the record UNCHANGED); reveal never composes (PIT-7, source-grep). Undelete-execute is deferred (codebase-wide
  * undelete slice); LOCK-3 row-deny is enforced via the SAME loadDeniedRecordIds seam the batch-execute test pins.
  * Destructive authority is server-resolved exact anchor (token-only execute). Retention active refuses preview and
- * execute before recovery DB work, with zero writes. Runs only with DATABASE_URL.
+ * execute after auth/full-read but before recovery DB work, with zero writes. Two-point CI wiring is
+ * pinned by scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs. Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -34,11 +35,14 @@ const T0 = '2026-01-01T00:00:00.000Z', T2 = '2026-01-03T00:00:00.000Z'
 
 const q = (sql: string, params: unknown[]) => poolManager.get().query(sql, params)
 let app: Express
+let curActorId: string | undefined = ACTOR
 let curRoles = ['member']
 let curPerms = ['multitable:read', 'multitable:write', 'multitable:share'] // share → canManageSheetAccess (D2 sheet-admin gate)
 let fixture: ExactAnchorHistoryFixture
 const revertPreview = () => request(app).post(`/api/multitable/sheets/${SHEET}/revert-preview`).send({ anchorOperationId: fixture.anchorOperationId() })
 const revertExecute = (previewIdentity: string) => request(app).post(`/api/multitable/sheets/${SHEET}/revert-execute`).send({ previewIdentity })
+const revertPreviewAt = (sheetId: string, body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${sheetId}/revert-preview`).send(body)
+const revertExecuteAt = (sheetId: string, body: Record<string, unknown>) => request(app).post(`/api/multitable/sheets/${sheetId}/revert-execute`).send(body)
 const recordRow = async (id: string) => (await q('SELECT data, version FROM meta_records WHERE id = $1', [id])).rows[0] as { data: Record<string, unknown>; version: number } | undefined
 // GATE golden helper: sheet-scoped row counts, to prove the flag-off 403 performs literally ZERO writes (no new
 // record row, no new revision row) — not just "the response the client sees looks unwritten".
@@ -79,7 +83,10 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     await enableRecoveryAuthorityTriggers(q)
     app = express()
     app.use(express.json())
-    app.use((req, _res, next) => { ;(req as any).user = { id: ACTOR, roles: curRoles, perms: curPerms }; next() })
+    app.use((req, _res, next) => {
+      if (curActorId) (req as any).user = { id: curActorId, roles: curRoles, perms: curPerms }
+      next()
+    })
     process.env.MULTITABLE_SHEET_REVERT_MAX_RECORDS = '10' // test ceiling: seed = 3 records; the ceiling golden adds 8 → 11 > 10
     // Interim revert-execute master gate (current-risk mitigation, owner-directed): default-OFF now — ON for
     // every pre-existing golden in this suite (unchanged behavior); the dedicated flag-off/on gate golden below
@@ -110,6 +117,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
   })
   beforeEach(async () => {
+    curActorId = ACTOR
     curRoles = ['member']
     curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
@@ -141,9 +149,15 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
   })
 
   test('[P1] retention guard: SHEET_REVERT + meta revision retention enabled → 409 REVERT_RETENTION_CONFLICT, ZERO writes', async () => {
-    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
+    // Mint a valid execute token before entering the incompatible retention posture. This proves the
+    // execute 409 is the retention contract, not a malformed-token shortcut.
+    const allowed = await revertPreview()
+    expect(allowed.status).toBe(200)
+    const previewIdentity = allowed.body?.data?.previewIdentity
+    expect(typeof previewIdentity).toBe('string')
     const beforeA = await recordRow(A)
     const beforeCounts = await sheetRowCounts()
+    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
 
     const pv = await revertPreview()
     expect(pv.status).toBe(409)
@@ -155,7 +169,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
       },
     })
 
-    const ex = await revertExecute('x')
+    const ex = await revertExecute(previewIdentity)
     expect(ex.status).toBe(409)
     expect(ex.body).toEqual({
       ok: false,
@@ -164,6 +178,72 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
         message: 'Revert-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using recovery.',
       },
     })
+    expect(await recordRow(A)).toEqual(beforeA)
+    expect(await sheetRowCounts()).toEqual(beforeCounts)
+  })
+
+  test('[P1] retention activation is exact: whitespace variants stay inactive', async () => {
+    for (const raw of [' 1 ', '1 ']) {
+      process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = raw
+      const pv = await revertPreview()
+      expect(pv.status).toBe(200)
+      expect(pv.body?.error?.code).not.toBe('REVERT_RETENTION_CONFLICT')
+    }
+  })
+
+  test('[P1] retention is no oracle: malformed, unauthenticated, nonexistent, and unauthorized calls retain prior refusals', async () => {
+    const allowed = await revertPreview()
+    expect(allowed.status).toBe(200)
+    const previewIdentity = allowed.body?.data?.previewIdentity as string
+    const beforeA = await recordRow(A)
+    const beforeCounts = await sheetRowCounts()
+    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
+
+    const malformedPreview = await revertPreviewAt(SHEET, { asOf: 123 })
+    expect(malformedPreview.status).toBe(400)
+    expect(malformedPreview.body?.error?.code).toBe('VALIDATION_ERROR')
+    const malformedExecute = await revertExecuteAt(SHEET, {})
+    expect(malformedExecute.status).toBe(400)
+    expect(malformedExecute.body?.error?.code).toBe('VALIDATION_ERROR')
+
+    curActorId = undefined
+    const unauthenticatedPreview = await revertPreview()
+    expect(unauthenticatedPreview.status).toBe(401)
+    expect(unauthenticatedPreview.body?.error?.code).toBe('UNAUTHENTICATED')
+    const unauthenticatedExecute = await revertExecute(previewIdentity)
+    expect(unauthenticatedExecute.status).toBe(401)
+    expect(unauthenticatedExecute.body?.error?.code).toBe('UNAUTHENTICATED')
+
+    curActorId = ACTOR
+    curPerms = ['multitable:read', 'multitable:write']
+    const unauthorizedPreview = await revertPreview()
+    expect(unauthorizedPreview.status).toBe(403)
+    expect(unauthorizedPreview.body?.error?.code).toBe('FORBIDDEN')
+    const unauthorizedExecute = await revertExecute(previewIdentity)
+    expect(unauthorizedExecute.status).toBe(403)
+    expect(unauthorizedExecute.body?.error?.code).toBe('FORBIDDEN')
+
+    curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
+    const missingSheetId = `sheet_rv_missing_${TS}`
+    const nonexistentPreview = await revertPreviewAt(missingSheetId, { anchorOperationId: fixture.anchorOperationId() })
+    expect(nonexistentPreview.status).toBe(403)
+    expect(nonexistentPreview.body?.error?.code).toBe('FORBIDDEN')
+    const nonexistentExecute = await revertExecuteAt(missingSheetId, { previewIdentity })
+    expect(nonexistentExecute.status).toBe(403)
+    expect(nonexistentExecute.body?.error?.code).toBe('FORBIDDEN')
+
+    for (const response of [
+      malformedPreview,
+      malformedExecute,
+      unauthenticatedPreview,
+      unauthenticatedExecute,
+      unauthorizedPreview,
+      unauthorizedExecute,
+      nonexistentPreview,
+      nonexistentExecute,
+    ]) {
+      expect(response.body?.error?.code).not.toBe('REVERT_RETENTION_CONFLICT')
+    }
     expect(await recordRow(A)).toEqual(beforeA)
     expect(await sheetRowCounts()).toEqual(beforeCounts)
   })

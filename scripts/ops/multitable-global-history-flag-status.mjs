@@ -13,7 +13,7 @@
  * checks (lossy-without-base, side-door-without-capture, sheet-revert-intent-with-retention-on,
  * pit-reset-intent-with-retention-on, undelete-without-revert-gate) are ALSO
  * evaluated and reported as STOPs in the default (non-strict) mode — this preserves the pre-existing
- * unconditional PIT_RESET-vs-retention stop (do not regress that to strict-only) and is the safer
+ * unconditional destructive-recovery-vs-retention stops (do not regress either to strict-only) and is the safer
  * default for an operator-facing safety helper: a plain run cannot miss a genuinely illegal config.
  */
 
@@ -70,7 +70,8 @@ Global History line's flags, their exact activation string, and illegal-combinat
 
 --strict additionally promotes advisory warnings (image-tag mismatch, a flag value that looks truthy
 but does not match its exact activation string) into hard stops. Illegal flag combinations
-(lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on,
+(lossy-without-base, side-door-without-capture, sheet-revert-intent-with-retention-on,
+pit-reset-intent-with-retention-on,
 undelete-without-revert-gate) are ALWAYS hard stops, in both modes.
 
 Examples:
@@ -184,7 +185,7 @@ function buildAssessment(input, { strict = false } = {}) {
   // sheet-revert-intent-with-retention-on, pit-reset-intent-with-retention-on, undelete-without-revert-gate). These are UNCONDITIONAL stops in
   // both modes — an illegal
   // combination is illegal regardless of whether the operator remembered --strict; this also preserves
-  // the pre-existing behavior where PIT_RESET-vs-retention already stopped without --strict.
+  // the pre-existing behavior where destructive-recovery-vs-retention stops without --strict.
   const violations = evaluateFlagRules(input.flags)
   for (const violation of violations) {
     stops.push(`[${violation.id}] ${violation.description}`)

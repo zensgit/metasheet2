@@ -209,7 +209,7 @@ test('workflow FLAGS pins exactly the six observed vars (five ladder rung flags 
       'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
       'MULTITABLE_META_REVISION_RETENTION_ENABLED',
     ],
-    'the witness must observe exactly the five ladder rung flags (including transient trust-checkpoint activation) plus MULTITABLE_META_REVISION_RETENTION_ENABLED, the PIT-reset conflict var',
+    'the witness must observe exactly the five ladder rung flags (including transient trust-checkpoint activation) plus MULTITABLE_META_REVISION_RETENTION_ENABLED, the destructive-recovery conflict var',
   )
   // RUNG_FLAGS is the closed-world set: a rung flag outside the posture's active set is required OFF.
   // Pin it by name too, and pin its relationship to FLAGS. Dropping a name from RUNG_FLAGS while
@@ -638,7 +638,7 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
         MULTITABLE_ENABLE_WRITER_FENCE: ' 1 ',
         // The retention var's activation literal is EXACTLY '1' (global-history-flag-manifest.mjs:
         // activationValue '1', not 'true'), and '1' is precisely what isMetaRevisionRetentionEnabled()
-        // refuses reset on. The classifier must therefore surface it as its own `one` state — never
+        // refuses destructive recovery on. The classifier must therefore surface it as its own `one` state — never
         // fold it into `true` (which would make the retention breach unnameable) and never into
         // `inactive` (which would make it invisible).
         [RETENTION_CONFLICT_VAR]: ' 1 ',
@@ -1295,7 +1295,7 @@ test("rung witness (anti-overreach): an active-retention host still PASSES postu
   assert.equal(
     result.status,
     0,
-    `l1-armed does not presuppose PIT reset, so an active retention deployment must not fail it:\n${result.stdout}`,
+    `l1-armed does not presuppose destructive recovery, so an active retention deployment must not fail it:\n${result.stdout}`,
   )
   // Positive assertion, not merely "did not fail": the exact PASS sentinel must be present…
   assert.match(
@@ -1356,7 +1356,7 @@ test("rung witness: at l5-reset retention='true' reds too — the documented ope
   )
   assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
 
-  // Symmetric anti-overreach: the same 'true' must NOT fail a posture that does not presuppose reset.
+  // Symmetric anti-overreach: the same 'true' must NOT fail a posture that does not presuppose destructive recovery.
   const unconstrained = runRemote({
     target: 'production',
     mode: 'postdeploy-full',
@@ -1409,7 +1409,7 @@ test('rung witness: retention is asserted-inactive ONLY at destructive-recovery 
         assert.equal(
           result.status,
           1,
-          `${posture}/${context}: retention='1' must fail a rung that presupposes reset:\n${result.stdout}`,
+          `${posture}/${context}: retention='1' must fail a rung that presupposes destructive recovery:\n${result.stdout}`,
         )
         assert.match(
           result.stdout,
@@ -1421,7 +1421,7 @@ test('rung witness: retention is asserted-inactive ONLY at destructive-recovery 
         assert.equal(
           result.status,
           0,
-          `${posture}/${context}: the ladder decouples retention (§4) and this rung does not presuppose reset, so retention='1' must NOT fail it:\n${result.stdout}`,
+          `${posture}/${context}: the ladder decouples retention (§4) and this rung does not presuppose destructive recovery, so retention='1' must NOT fail it:\n${result.stdout}`,
         )
         assert.match(
           result.stdout,

@@ -53,7 +53,7 @@ name: Multitable Recovery-Flag Containment Check
 #      files — and all SIX observed vars (the five ladder rung flags + the retention conflict var,
 #      see the `FLAGS` comment inside the heredoc) are classified. The five rung flags are verdicted
 #      closed-world against the posture's exact active set; the retention var is verdicted only at the
-#      postures that presuppose PIT reset (today: `l5-reset` alone) and is observed-but-unconstrained
+#      postures that presuppose destructive recovery (`l4-revert` and `l5-reset`) and is observed-but-unconstrained
 #      at the rest, because the ladder registers retention-era recovery as a decoupled owner line.
 #
 # Intentionally NOT scheduled; dispatch manually. FAIL-CLOSED throughout: expected-active flags must be
@@ -212,14 +212,15 @@ jobs:
           #     (ladder §E1.1 step 5 "L5 — PIT Reset canary … retention 冲突仍硬拒"; §2 L89 "同 L4 纪律
           #     做 reset 演练"), and packages/core-backend/src/routes/univer-meta.ts
           #     #isMetaRevisionRetentionEnabled refuses BOTH preview and execute for either mode with a
-          #     named 409 whenever this var is exactly '1' — before any anchor, trust or authority check.
+          #     named 409 whenever this var is exactly '1' — after auth/full-read, before trust,
+          #     anchor lookup, or reconstruction work.
           #     So at retention='1' either destructive drill is structurally impossible and a
           #     `posture=l4-revert` or `posture=l5-reset` PASS would be a vacuous green. The rung objective
           #     plus that code fact are the whole
           #     justification; §E1.2's matrix does not name retention in any row.
           #   • WHY IT IS *NOT* ASSERTED ELSEWHERE: ladder §4 registers retention-era recovery as
           #     DECOUPLED from this ladder ("retention 后恢复 … 与本阶梯无耦合，另立设计锁") — a separate
-          #     owner line with its own design lock. A rung that does not presuppose reset has no
+          #     owner line with its own design lock. A rung that does not presuppose destructive recovery has no
           #     ladder-sourced opinion about it, so requiring it OFF at inert/l1…l4 would make an
           #     independent, legitimate retention deployment fail a posture it does not violate: a
           #     witness reporting a breach that is not one. At those rungs the var is observed and
@@ -419,7 +420,7 @@ jobs:
                 # (the classifier's name for exactly '1') red here: `true` is the activation literal of
                 # the five rung flags, `one` is the activation literal of
                 # MULTITABLE_META_REVISION_RETENTION_ENABLED — the value isMetaRevisionRetentionEnabled()
-                # refuses reset on. See the FLAGS comment above for why both are fail-closed.
+                # refuses destructive recovery on. See the FLAGS comment above for why both are fail-closed.
                 if [ "$state" = "true" ] || [ "$state" = "one" ]; then
                   echo "   [${context}] $f=$state — UNEXPECTED ACTIVE ⇒ POSTURE MISMATCH"
                   fail=1

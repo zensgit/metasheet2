@@ -207,11 +207,10 @@ test('R3 positive control: SHEET_REVERT on + retention off/unset does NOT fire',
   assert.equal(violationIds({ MULTITABLE_ENABLE_SHEET_REVERT: 'true' }).includes('sheet-revert-intent-with-retention-on'), false)
 })
 
-test('R3 positive control: retention active alone (no PIT_RESET) does NOT fire', () => {
-  assert.equal(
-    violationIds({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' }).includes('pit-reset-intent-with-retention-on'),
-    false,
-  )
+test('R3 positive control: retention active alone (no Revert/Reset gate) does NOT fire', () => {
+  const ids = violationIds({ MULTITABLE_META_REVISION_RETENTION_ENABLED: '1' })
+  assert.equal(ids.includes('sheet-revert-intent-with-retention-on'), false)
+  assert.equal(ids.includes('pit-reset-intent-with-retention-on'), false)
 })
 
 test('R3 PIT_RESET activation is case-insensitive + trimmed (matches univer-meta.ts PIT_RESET_ENABLED)', () => {
@@ -230,6 +229,15 @@ test("R4 retention requires exact '1'; '1' activates, 'true'/'yes'/'on' do not",
   assert.equal(isActivated(spec, 'true'), false)
   assert.equal(isActivated(spec, 'yes'), false)
   assert.equal(isActivated(spec, 'on'), false)
+  assert.equal(isActivated(spec, ' 1 '), false)
+  assert.equal(isActivated(spec, '1 '), false)
+})
+
+test('R3 reciprocal manifest metadata keeps Revert and retention conflictsWith symmetric', () => {
+  const revert = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_ENABLE_SHEET_REVERT
+  const retention = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_META_REVISION_RETENTION_ENABLED
+  assert.ok(revert.conflictsWith.includes(retention.key), 'Revert must declare retention as a conflict')
+  assert.ok(retention.conflictsWith.includes(revert.key), 'retention must declare Revert as a conflict')
 })
 
 test('R4 isMisconfiguredTruthy flags retention=true (should be 1) and PIT_RESET=1 (should be true)', () => {
