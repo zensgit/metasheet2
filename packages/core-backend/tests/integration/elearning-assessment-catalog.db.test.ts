@@ -18,6 +18,7 @@ import {
   createElearningBankQuestion,
   createElearningQuestionBank,
   ElearningAssessmentCatalogError,
+  importElearningBankQuestions,
   publishElearningFixedPaper,
   type ElearningAssessmentCatalogDb,
   type ElearningAssessmentCatalogQueryable,
@@ -269,6 +270,51 @@ describe('e-learning L3 assessment catalog', () => {
     })
   })
 
+  it('imports duplicate rows atomically and leaves zero residue for one invalid row', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('import')
+      const createdBy = actor('import')
+      const bank = await createElearningQuestionBank(db, {
+        orgId,
+        actorId: createdBy,
+        title: 'Imported bank',
+      })
+
+      await expect(importElearningBankQuestions(db, {
+        orgId,
+        actorId: createdBy,
+        bankId: bank.bankId,
+        questions: [question('Duplicate'), question('Duplicate')],
+      })).resolves.toEqual({ importedCount: 2 })
+      const imported = await client.query(
+        `SELECT count(DISTINCT q.id)::integer AS question_count,
+                count(qr.id)::integer AS revision_count
+           FROM elearning_questions q
+           JOIN elearning_question_revisions qr
+             ON qr.org_id = q.org_id AND qr.question_id = q.id
+          WHERE q.org_id = $1
+            AND q.question_bank_id = $2
+            AND q.created_by = $3`,
+        [orgId, bank.bankId, createdBy],
+      )
+      expect(imported.rows).toEqual([{ question_count: 2, revision_count: 2 }])
+
+      await expect(importElearningBankQuestions(db, {
+        orgId,
+        actorId: createdBy,
+        bankId: bank.bankId,
+        questions: [question('Would roll back'), { ...question('Invalid'), points: 0 }],
+      })).rejects.toMatchObject({ code: 'invalid_input' })
+      const afterInvalid = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_questions
+          WHERE org_id = $1 AND question_bank_id = $2`,
+        [orgId, bank.bankId],
+      )
+      expect(afterInvalid.rows).toEqual([{ count: 2 }])
+    })
+  })
+
   it('enforces same-org bank ownership in both the FK and service path', async () => {
     await withRolledBackDb(async (client, db) => {
       const sourceOrg = org('bank-source')
@@ -290,6 +336,16 @@ describe('e-learning L3 assessment catalog', () => {
         actorId: actor('wrong-org-service'),
         bankId: bank.bankId,
         question: question('Cross-org question'),
+      })).rejects.toMatchObject({
+        name: 'ElearningAssessmentCatalogError',
+        code: 'not_found',
+        message: 'not_found',
+      })
+      await expect(importElearningBankQuestions(db, {
+        orgId: otherOrg,
+        actorId: actor('wrong-org-import'),
+        bankId: bank.bankId,
+        questions: [question('Cross-org import')],
       })).rejects.toMatchObject({
         name: 'ElearningAssessmentCatalogError',
         code: 'not_found',

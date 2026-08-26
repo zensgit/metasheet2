@@ -15,6 +15,7 @@ type QuestionBankCreateRequest = components['schemas']['ElearningQuestionBankCre
 type QuestionBankResult = components['schemas']['ElearningQuestionBankResult']
 type QuestionWriteRequest = components['schemas']['ElearningQuestionWriteRequest']
 type QuestionRevisionResult = components['schemas']['ElearningQuestionRevisionResult']
+type QuestionImportResult = components['schemas']['ElearningQuestionImportResult']
 type FixedPaperPublishRequest = components['schemas']['ElearningFixedPaperPublishRequest']
 type FixedPaperResult = components['schemas']['ElearningFixedPaperResult']
 type PaperExamPublishRequest = components['schemas']['ElearningPaperExamPublishRequest']
@@ -147,6 +148,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/assessment/question-banks']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/questions']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/assessment/question-banks/{bankId}/import']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/papers']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assessment/exams']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/assignments/direct']['post']>().not.toBeNever()
@@ -189,6 +191,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/assessment/questions/{questionId}/revisions']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<QuestionRevisionResult>()
+    expectTypeOf<
+      paths['/api/elearning/assessment/question-banks/{bankId}/import']['post']['responses']['201']['content']['application/json']
+    >().toEqualTypeOf<QuestionImportResult>()
     expectTypeOf<
       paths['/api/elearning/assessment/papers']['post']['responses']['201']['content']['application/json']
     >().toEqualTypeOf<FixedPaperResult>()
@@ -289,6 +294,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
       questionRevisionId: string
       revision: number
     }>()
+    expectTypeOf<QuestionImportResult>().toEqualTypeOf<{ importedCount: number }>()
     expectTypeOf<FixedPaperPublishRequest>().toEqualTypeOf<{
       title: string
       items: Array<{ questionRevisionId: string; points: number }>
@@ -518,6 +524,18 @@ describe('elearning V0.1 OpenAPI paths', () => {
           jsonSchemaAt(
             doc,
             '/api/elearning/assessment/questions/{questionId}/revisions',
+            'post',
+            '201',
+          ),
+        ),
+      },
+      {
+        name: 'POST /api/elearning/assessment/question-banks/{bankId}/import 201',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(
+            doc,
+            '/api/elearning/assessment/question-banks/{bankId}/import',
             'post',
             '201',
           ),

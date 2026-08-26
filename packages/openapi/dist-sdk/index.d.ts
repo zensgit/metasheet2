@@ -8485,6 +8485,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assessment/question-banks/{bankId}/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import objective questions from one XLSX worksheet
+         * @description Admin-only L3 assessment write. The workbook is limited to 1 MiB and
+         *     a 64 MiB expanded archive, uses a bounded standard single-disk ZIP,
+         *     and must contain exactly one formula-free worksheet with at most 500
+         *     data rows and 25 columns. The import is committed atomically. Duplicate
+         *     rows create separate questions.
+         */
+        post: operations["importElearningQuestionBankXlsx"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/assessment/papers": {
         parameters: {
             query?: never;
@@ -17908,6 +17932,9 @@ export interface components {
             questionRevisionId: components["schemas"]["ElearningUuid"];
             revision: number;
         };
+        ElearningQuestionImportResult: {
+            importedCount: number;
+        };
         ElearningFixedPaperItem: {
             questionRevisionId: components["schemas"]["ElearningUuid"];
             points: number;
@@ -19725,6 +19752,48 @@ export interface operations {
             404: components["responses"]["ElearningError"];
             /** @description JSON body exceeds 1 MiB */
             413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    importElearningQuestionBankXlsx: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bankId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": string;
+            };
+        };
+        responses: {
+            /** @description Number of imported stable questions. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningQuestionImportResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or Insufficient permissions */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description XLSX body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description unsupported_media_type */
+            415: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

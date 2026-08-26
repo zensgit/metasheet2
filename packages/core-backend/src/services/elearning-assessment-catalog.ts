@@ -12,6 +12,7 @@ export const ELEARNING_ASSESSMENT_OPTION_ID_MAX = 64
 export const ELEARNING_ASSESSMENT_OPTION_TEXT_MAX = 500
 export const ELEARNING_ASSESSMENT_EXPLANATION_MAX = 2000
 export const ELEARNING_ASSESSMENT_OPTION_MAX = 20
+export const ELEARNING_ASSESSMENT_IMPORT_MAX = 500
 export const ELEARNING_FIXED_PAPER_ITEM_MAX = 200
 
 const UUID_RE =
@@ -20,6 +21,7 @@ const PG_INT32_MAX = 2147483647
 
 const BANK_KEYS = ['orgId', 'actorId', 'title'] as const
 const CREATE_QUESTION_KEYS = ['orgId', 'actorId', 'bankId', 'question'] as const
+const IMPORT_QUESTIONS_KEYS = ['orgId', 'actorId', 'bankId', 'questions'] as const
 const APPEND_REVISION_KEYS = ['orgId', 'actorId', 'questionId', 'question'] as const
 const PAPER_KEYS = ['orgId', 'actorId', 'title', 'items'] as const
 const PAPER_ITEM_KEYS = ['questionRevisionId', 'points'] as const
@@ -85,6 +87,13 @@ export interface CreateElearningBankQuestionInput {
   question: ElearningAssessmentQuestionInput
 }
 
+export interface ImportElearningBankQuestionsInput {
+  orgId: string
+  actorId: string
+  bankId: string
+  questions: ElearningAssessmentQuestionInput[]
+}
+
 export interface AppendElearningQuestionRevisionInput {
   orgId: string
   actorId: string
@@ -112,6 +121,10 @@ export interface ElearningQuestionRevisionResult {
   questionId: string
   questionRevisionId: string
   revision: number
+}
+
+export interface ElearningQuestionImportResult {
+  importedCount: number
 }
 
 export interface ElearningFixedPaperResult {
@@ -282,6 +295,46 @@ async function runValuesFree<T>(handler: () => Promise<T>): Promise<T> {
   }
 }
 
+async function insertBankQuestionRevision(
+  tx: ElearningAssessmentCatalogQueryable,
+  input: {
+    orgId: string
+    actorId: string
+    bankId: string
+    question: CanonicalQuestion
+  },
+): Promise<ElearningQuestionRevisionResult> {
+  const questionId = randomUUID()
+  const questionRevisionId = randomUUID()
+  await tx.query(
+    `/* elearning-assessment-catalog:create-question */
+     INSERT INTO elearning_questions
+       (id, org_id, question_bank_id, created_by)
+     VALUES ($1, $2, $3, $4)`,
+    [questionId, input.orgId, input.bankId, input.actorId],
+  )
+  await tx.query(
+    `/* elearning-assessment-catalog:create-revision */
+     INSERT INTO elearning_question_revisions (
+       id, org_id, question_id, revision, question_type, prompt, options,
+       answer_key, explanation, points, created_by
+     ) VALUES ($1, $2, $3, 1, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
+    [
+      questionRevisionId,
+      input.orgId,
+      questionId,
+      input.question.questionType,
+      input.question.prompt,
+      JSON.stringify(input.question.options),
+      JSON.stringify({ correct: input.question.correctOptionIds }),
+      input.question.explanation,
+      input.question.points,
+      input.actorId,
+    ],
+  )
+  return { questionId, questionRevisionId, revision: 1 }
+}
+
 export async function createElearningQuestionBank(
   db: ElearningAssessmentCatalogDb,
   input: CreateElearningQuestionBankInput,
@@ -314,8 +367,6 @@ export async function createElearningBankQuestion(
   const actorId = requireText(input.actorId, ELEARNING_ASSESSMENT_ACTOR_MAX)
   const bankId = requireUuid(input.bankId)
   const question = canonicalizeQuestion(input.question)
-  const questionId = randomUUID()
-  const questionRevisionId = randomUUID()
 
   return runValuesFree(() => db.transaction(async (tx) => {
     const bank = await tx.query(
@@ -328,34 +379,48 @@ export async function createElearningBankQuestion(
       [orgId, bankId],
     )
     if (bank.rows.length !== 1) fail('not_found')
+    return insertBankQuestionRevision(tx, { orgId, actorId, bankId, question })
+  }))
+}
 
-    await tx.query(
-      `/* elearning-assessment-catalog:create-question */
-       INSERT INTO elearning_questions
-         (id, org_id, question_bank_id, created_by)
-       VALUES ($1, $2, $3, $4)`,
-      [questionId, orgId, bankId, actorId],
+export async function importElearningBankQuestions(
+  db: ElearningAssessmentCatalogDb,
+  input: ImportElearningBankQuestionsInput,
+): Promise<ElearningQuestionImportResult> {
+  if (!isPlainObject(input)) fail('invalid_input')
+  requireExactKeys(input, IMPORT_QUESTIONS_KEYS)
+  const orgId = requireText(input.orgId, ELEARNING_ASSESSMENT_ACTOR_MAX)
+  const actorId = requireText(input.actorId, ELEARNING_ASSESSMENT_ACTOR_MAX)
+  const bankId = requireUuid(input.bankId)
+  if (
+    !Array.isArray(input.questions)
+    || input.questions.length < 1
+    || input.questions.length > ELEARNING_ASSESSMENT_IMPORT_MAX
+  ) {
+    fail('invalid_input')
+  }
+  const questions = input.questions.map(canonicalizeQuestion)
+
+  return runValuesFree(() => db.transaction(async (tx) => {
+    const bank = await tx.query(
+      `/* elearning-assessment-catalog:load-import-bank */
+       SELECT id
+         FROM elearning_question_banks
+        WHERE org_id = $1
+          AND id = $2
+        FOR SHARE`,
+      [orgId, bankId],
     )
-    await tx.query(
-      `/* elearning-assessment-catalog:create-revision */
-       INSERT INTO elearning_question_revisions (
-         id, org_id, question_id, revision, question_type, prompt, options,
-         answer_key, explanation, points, created_by
-       ) VALUES ($1, $2, $3, 1, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10)`,
-      [
-        questionRevisionId,
+    if (bank.rows.length !== 1) fail('not_found')
+    for (const question of questions) {
+      await insertBankQuestionRevision(tx, {
         orgId,
-        questionId,
-        question.questionType,
-        question.prompt,
-        JSON.stringify(question.options),
-        JSON.stringify({ correct: question.correctOptionIds }),
-        question.explanation,
-        question.points,
         actorId,
-      ],
-    )
-    return { questionId, questionRevisionId, revision: 1 }
+        bankId,
+        question,
+      })
+    }
+    return { importedCount: questions.length }
   }))
 }
 

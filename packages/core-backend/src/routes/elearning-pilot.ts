@@ -335,6 +335,12 @@ export interface ElearningPilotRouteDeps {
   createElearningBankQuestion?: Parameters<
     typeof createElearningAssessmentAdminRouter
   >[0]['createElearningBankQuestion']
+  importElearningBankQuestions?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['importElearningBankQuestions']
+  parseElearningQuestionWorkbook?: Parameters<
+    typeof createElearningAssessmentAdminRouter
+  >[0]['parseElearningQuestionWorkbook']
   appendElearningQuestionRevision?: Parameters<
     typeof createElearningAssessmentAdminRouter
   >[0]['appendElearningQuestionRevision']
@@ -478,6 +484,8 @@ export function createElearningPilotRouter(
     orgId: deps.orgId,
     createElearningQuestionBank: deps.createElearningQuestionBank,
     createElearningBankQuestion: deps.createElearningBankQuestion,
+    importElearningBankQuestions: deps.importElearningBankQuestions,
+    parseElearningQuestionWorkbook: deps.parseElearningQuestionWorkbook,
     appendElearningQuestionRevision: deps.appendElearningQuestionRevision,
     publishElearningFixedPaper: deps.publishElearningFixedPaper,
     publishElearningPaperExam: deps.publishElearningPaperExam,

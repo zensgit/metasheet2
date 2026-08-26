@@ -5758,6 +5758,16 @@ components:
         revision:
           type: integer
           minimum: 1
+    ElearningQuestionImportResult:
+      type: object
+      additionalProperties: false
+      required:
+        - importedCount
+      properties:
+        importedCount:
+          type: integer
+          minimum: 1
+          maximum: 500
     ElearningFixedPaperItem:
       type: object
       additionalProperties: false
@@ -16651,6 +16661,62 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '413':
           description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/question-banks/{bankId}/import:
+    post:
+      operationId: importElearningQuestionBankXlsx
+      summary: Import objective questions from one XLSX worksheet
+      description: |
+        Admin-only L3 assessment write. The workbook is limited to 1 MiB and
+        a 64 MiB expanded archive, uses a bounded standard single-disk ZIP,
+        and must contain exactly one formula-free worksheet with at most 500
+        data rows and 25 columns. The import is committed atomically. Duplicate
+        rows create separate questions.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: bankId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: Number of imported stable questions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningQuestionImportResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or Insufficient permissions
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: XLSX body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '415':
+          description: unsupported_media_type
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

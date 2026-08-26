@@ -4822,6 +4822,15 @@ components:
         revision:
           type: integer
           minimum: 1
+    ElearningQuestionImportResult:
+      type: object
+      additionalProperties: false
+      required: [importedCount]
+      properties:
+        importedCount:
+          type: integer
+          minimum: 1
+          maximum: 500
     ElearningFixedPaperItem:
       type: object
       additionalProperties: false

@@ -12,8 +12,12 @@ import {
   type CreateElearningBankQuestionInput,
   type CreateElearningQuestionBankInput,
   type ElearningAssessmentCatalogDb,
+  type ImportElearningBankQuestionsInput,
   type PublishElearningFixedPaperInput,
 } from '../../src/services/elearning-assessment-catalog'
+import {
+  ELEARNING_ASSESSMENT_XLSX_MIME,
+} from '../../src/services/elearning-assessment-import'
 import type { ElearningPilotRouteDeps } from '../../src/routes/elearning-pilot'
 import { createElearningPilotRouter } from '../../src/routes/elearning-pilot'
 import {
@@ -60,6 +64,7 @@ const EXAM_BODY = {
   shuffleOptions: false,
   disclosurePolicy: 'correctness_after_submit' as const,
 }
+const XLSX_BYTES = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x01])
 
 const pinned = usePinnedServer()
 function serve(app: express.Express) {
@@ -88,6 +93,8 @@ function makeApp(
   const bankCalls: CreateElearningQuestionBankInput[] = []
   const questionCalls: CreateElearningBankQuestionInput[] = []
   const revisionCalls: AppendElearningQuestionRevisionInput[] = []
+  const importCalls: ImportElearningBankQuestionsInput[] = []
+  const parseCalls: Buffer[] = []
   const paperCalls: PublishElearningFixedPaperInput[] = []
   const examCalls: PublishElearningPaperExamInput[] = []
   let adminCalls = 0
@@ -117,6 +124,19 @@ function makeApp(
       return Object.assign(
         { questionId: QUESTION_ID, questionRevisionId: REVISION_ID, revision: 1 },
         { correctOptionIds: ['a'] },
+      )
+    },
+    parseElearningQuestionWorkbook: async (buffer) => {
+      parseCalls.push(buffer)
+      if (over.catalogError) throw over.catalogError
+      return [QUESTION]
+    },
+    importElearningBankQuestions: async (_db, input) => {
+      importCalls.push(input)
+      if (over.catalogError) throw over.catalogError
+      return Object.assign(
+        { importedCount: input.questions.length },
+        { answerKey: ['a'] },
       )
     },
     appendElearningQuestionRevision: async (_db, input) => {
@@ -151,6 +171,8 @@ function makeApp(
     bankCalls,
     questionCalls,
     revisionCalls,
+    importCalls,
+    parseCalls,
     paperCalls,
     examCalls,
     get adminCalls() {
@@ -284,6 +306,77 @@ describe('e-learning assessment admin routes', () => {
       exam.body,
     ])
     expect(responses).not.toMatch(/correctOptionIds|answerKey|explanation/)
+  })
+
+  test('imports one bounded XLSX after auth/org/RBAC and keeps the result closed', async () => {
+    for (const blocked of [
+      makeApp({ viewer: null }),
+      makeApp({ org: null }),
+      makeApp({ hasAdmin: false }),
+    ]) {
+      const response = await serve(blocked.app)
+        .post(`/api/elearning/assessment/question-banks/${BANK_ID}/import`)
+        .set('content-type', ELEARNING_ASSESSMENT_XLSX_MIME)
+        .send(XLSX_BYTES)
+      expect([401, 403]).toContain(response.status)
+      expect(blocked.parseCalls).toEqual([])
+      expect(blocked.importCalls).toEqual([])
+    }
+
+    const testApp = makeApp()
+    const response = await serve(testApp.app)
+      .post(`/api/elearning/assessment/question-banks/${BANK_ID}/import`)
+      .set('content-type', ELEARNING_ASSESSMENT_XLSX_MIME)
+      .send(XLSX_BYTES)
+    expect(response.status).toBe(201)
+    expect(response.body).toEqual({ importedCount: 1 })
+    expect(JSON.stringify(response.body)).not.toMatch(/answerKey|correctOptionIds/)
+    expect(testApp.parseCalls).toHaveLength(1)
+    expect(testApp.parseCalls[0]).toEqual(XLSX_BYTES)
+    expect(testApp.importCalls).toEqual([{
+      orgId: ORG,
+      actorId: ACTOR,
+      bankId: BANK_ID,
+      questions: [QUESTION],
+    }])
+
+    const wrongType = makeApp()
+    const wrongTypeResponse = await serve(wrongType.app)
+      .post(`/api/elearning/assessment/question-banks/${BANK_ID}/import`)
+      .set('content-type', 'application/octet-stream')
+      .send(XLSX_BYTES)
+    expect(wrongTypeResponse.status).toBe(415)
+    expect(wrongTypeResponse.body).toEqual({ error: 'unsupported_media_type' })
+    expect(wrongType.parseCalls).toEqual([])
+
+    const badId = makeApp()
+    const badIdResponse = await serve(badId.app)
+      .post('/api/elearning/assessment/question-banks/not-a-uuid/import')
+      .set('content-type', ELEARNING_ASSESSMENT_XLSX_MIME)
+      .send(XLSX_BYTES)
+    expect(badIdResponse.status).toBe(400)
+    expect(badIdResponse.body).toEqual({ error: 'invalid_input' })
+    expect(badId.parseCalls).toEqual([])
+
+    const oversized = makeApp()
+    const oversizedResponse = await serve(oversized.app)
+      .post(`/api/elearning/assessment/question-banks/${BANK_ID}/import`)
+      .set('content-type', ELEARNING_ASSESSMENT_XLSX_MIME)
+      .send(Buffer.alloc(1024 * 1024 + 1, 1))
+    expect(oversizedResponse.status).toBe(413)
+    expect(oversizedResponse.body).toEqual({ error: 'payload_too_large' })
+    expect(oversized.parseCalls).toEqual([])
+
+    const invalidWorkbook = makeApp({
+      catalogError: new ElearningAssessmentCatalogError('invalid_input'),
+    })
+    const invalidResponse = await serve(invalidWorkbook.app)
+      .post(`/api/elearning/assessment/question-banks/${BANK_ID}/import`)
+      .set('content-type', ELEARNING_ASSESSMENT_XLSX_MIME)
+      .send(XLSX_BYTES)
+    expect(invalidResponse.status).toBe(400)
+    expect(invalidResponse.body).toEqual({ error: 'invalid_input' })
+    expect(invalidWorkbook.importCalls).toEqual([])
   })
 
   test('rejects unknown top-level identity fields, bad ids, and oversized JSON before service', async () => {

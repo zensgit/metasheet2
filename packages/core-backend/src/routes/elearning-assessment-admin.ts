@@ -1,5 +1,5 @@
 import type { NextFunction, Request, RequestHandler, Response } from 'express'
-import { json, Router } from 'express'
+import { json, raw, Router } from 'express'
 
 import { isElearningAssessmentSurfaceEnabled } from '../elearning/feature-flags'
 import {
@@ -7,11 +7,17 @@ import {
   createElearningBankQuestion,
   createElearningQuestionBank,
   ElearningAssessmentCatalogError,
+  importElearningBankQuestions,
   publishElearningFixedPaper,
   type ElearningAssessmentCatalogDb,
   type ElearningAssessmentQuestionInput,
   type PublishElearningFixedPaperItem,
 } from '../services/elearning-assessment-catalog'
+import {
+  ELEARNING_ASSESSMENT_XLSX_MAX_BYTES,
+  ELEARNING_ASSESSMENT_XLSX_MIME,
+  parseElearningQuestionWorkbook,
+} from '../services/elearning-assessment-import'
 import {
   ElearningPaperExamError,
   publishElearningPaperExam,
@@ -37,6 +43,10 @@ const PUBLISH_EXAM_KEYS = new Set([
   'disclosurePolicy',
 ])
 const jsonParser = json({ limit: 1024 * 1024 })
+const xlsxParser = raw({
+  limit: ELEARNING_ASSESSMENT_XLSX_MAX_BYTES,
+  type: ELEARNING_ASSESSMENT_XLSX_MIME,
+})
 
 const CATALOG_ERROR_STATUS: Record<
   ElearningAssessmentCatalogError['code'],
@@ -61,6 +71,8 @@ export interface ElearningAssessmentAdminRouteDeps {
   orgId(req: Request): string | null
   createElearningQuestionBank?: typeof createElearningQuestionBank
   createElearningBankQuestion?: typeof createElearningBankQuestion
+  importElearningBankQuestions?: typeof importElearningBankQuestions
+  parseElearningQuestionWorkbook?: typeof parseElearningQuestionWorkbook
   appendElearningQuestionRevision?: typeof appendElearningQuestionRevision
   publishElearningFixedPaper?: typeof publishElearningFixedPaper
   publishElearningPaperExam?: typeof publishElearningPaperExam
@@ -68,6 +80,27 @@ export interface ElearningAssessmentAdminRouteDeps {
 
 function parseJson(req: Request, res: Response, next: NextFunction): void {
   jsonParser(req, res, (error?: unknown) => {
+    if (!error) return next()
+    if (!req.readableEnded) req.resume()
+    const parseError = error as { status?: unknown; type?: unknown }
+    if (parseError.status === 413 || parseError.type === 'entity.too.large') {
+      res.status(413).json({ error: 'payload_too_large' })
+      return
+    }
+    res.status(400).json({ error: 'invalid_input' })
+  })
+}
+
+function requireXlsx(req: Request, res: Response, next: NextFunction): void {
+  if (!req.is(ELEARNING_ASSESSMENT_XLSX_MIME)) {
+    res.status(415).json({ error: 'unsupported_media_type' })
+    return
+  }
+  next()
+}
+
+function parseXlsx(req: Request, res: Response, next: NextFunction): void {
+  xlsxParser(req, res, (error?: unknown) => {
     if (!error) return next()
     if (!req.readableEnded) req.resume()
     const parseError = error as { status?: unknown; type?: unknown }
@@ -120,6 +153,10 @@ export function createElearningAssessmentAdminRouter(
     deps.createElearningQuestionBank ?? createElearningQuestionBank
   const createQuestion =
     deps.createElearningBankQuestion ?? createElearningBankQuestion
+  const importQuestions =
+    deps.importElearningBankQuestions ?? importElearningBankQuestions
+  const parseQuestionWorkbook =
+    deps.parseElearningQuestionWorkbook ?? parseElearningQuestionWorkbook
   const appendRevision =
     deps.appendElearningQuestionRevision ?? appendElearningQuestionRevision
   const publishPaper =
@@ -192,12 +229,22 @@ export function createElearningAssessmentAdminRouter(
     })
   }
 
-  const gate = [
+  const authGate = [
     requireAssessment,
     requireIdentity,
     requireOrg,
     deps.adminGuard,
+  ] as const
+
+  const gate = [
+    ...authGate,
     parseJson,
+  ] as const
+
+  const xlsxGate = [
+    ...authGate,
+    requireXlsx,
+    parseXlsx,
   ] as const
 
   router.post(
@@ -248,6 +295,32 @@ export function createElearningAssessmentAdminRouter(
           questionRevisionId: value.questionRevisionId,
           revision: value.revision,
         })
+      } catch (error) {
+        sendError(res, error)
+      }
+    }),
+  )
+
+  router.post(
+    '/api/elearning/assessment/question-banks/:bankId/import',
+    ...xlsxGate,
+    run(async (req, res) => {
+      const ctx = context(req, res)
+      if (!ctx) return
+      const bankId = uuidParam(req, 'bankId')
+      if (!bankId || !Buffer.isBuffer(req.body)) {
+        res.status(400).json({ error: 'invalid_input' })
+        return
+      }
+      try {
+        const questions = await parseQuestionWorkbook(req.body)
+        const value = await importQuestions(deps.db, {
+          orgId: ctx.orgId,
+          actorId: ctx.actorId,
+          bankId,
+          questions,
+        })
+        res.status(201).json({ importedCount: value.importedCount })
       } catch (error) {
         sendError(res, error)
       }

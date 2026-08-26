@@ -885,6 +885,7 @@ jobs:
             tests/unit/elearning-admin-access.test.ts \
             tests/unit/elearning-admin-operations.test.ts \
             tests/unit/elearning-assessment-admin-routes.test.ts \
+            tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \
