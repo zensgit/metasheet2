@@ -6706,6 +6706,7 @@ components:
         - status
         - paper
         - answers
+        - deadlineAt
         - duplicate
       properties:
         attemptId:
@@ -6729,6 +6730,13 @@ components:
           description: >-
             Canonical own selections for every paper question. Empty arrays when
             unanswered. Never includes answer keys.
+        deadlineAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            Immutable server-issued attempt deadline, or null for an untimed
+            attempt.
         duplicate:
           type: boolean
     ElearningExamSubmitRequest:
@@ -17368,7 +17376,9 @@ paths:
 
         (no answerKey, correct ids, explanation, examId, or passScore).
 
-        Result includes canonical own answers for every paper question.
+        Result includes canonical own answers for every paper question and the
+
+        immutable server-issued `deadlineAt` (`null` for an untimed attempt).
 
         JSON limit 16 KiB.
       security:
@@ -17429,7 +17439,9 @@ paths:
 
         attempts may save. Same canonical body is duplicate true. Result is the
 
-        closed started DTO with own answers. No answer keys. JSON limit 16 KiB.
+        closed started DTO with own answers and the same immutable `deadlineAt`.
+
+        No answer keys. JSON limit 16 KiB.
       security:
         - bearerAuth: []
       parameters:

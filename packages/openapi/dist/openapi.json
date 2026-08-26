@@ -9020,6 +9020,7 @@
           "status",
           "paper",
           "answers",
+          "deadlineAt",
           "duplicate"
         ],
         "properties": {
@@ -9049,6 +9050,12 @@
               }
             },
             "description": "Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys."
+          },
+          "deadlineAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Immutable server-issued attempt deadline, or null for an untimed attempt."
           },
           "duplicate": {
             "type": "boolean"
@@ -25103,7 +25110,7 @@
       "post": {
         "operationId": "startElearningExam",
         "summary": "Start an objective exam attempt",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.\nitemId is the course version exam item. Returned paper is redacted\n(no answerKey, correct ids, explanation, examId, or passScore).\nResult includes canonical own answers for every paper question.\nJSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.\nitemId is the course version exam item. Returned paper is redacted\n(no answerKey, correct ids, explanation, examId, or passScore).\nResult includes canonical own answers for every paper question and the\nimmutable server-issued `deadlineAt` (`null` for an untimed attempt).\nJSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []
@@ -25175,7 +25182,7 @@
       "put": {
         "operationId": "saveElearningExamAnswers",
         "summary": "Save draft answers for a started exam attempt",
-        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers. No answer keys. JSON limit 16 KiB.\n",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`\nonly (map of questionRevisionId to selected option ids). Only started\nattempts may save. Same canonical body is duplicate true. Result is the\nclosed started DTO with own answers and the same immutable `deadlineAt`.\nNo answer keys. JSON limit 16 KiB.\n",
         "security": [
           {
             "bearerAuth": []

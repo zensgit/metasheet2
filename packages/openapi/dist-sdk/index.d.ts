@@ -8863,7 +8863,8 @@ export interface paths {
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Empty JSON object.
          *     itemId is the course version exam item. Returned paper is redacted
          *     (no answerKey, correct ids, explanation, examId, or passScore).
-         *     Result includes canonical own answers for every paper question.
+         *     Result includes canonical own answers for every paper question and the
+         *     immutable server-issued `deadlineAt` (`null` for an untimed attempt).
          *     JSON limit 16 KiB.
          */
         post: operations["startElearningExam"];
@@ -8886,7 +8887,8 @@ export interface paths {
          * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`. Requires exam surface flags. Body key `answers`
          *     only (map of questionRevisionId to selected option ids). Only started
          *     attempts may save. Same canonical body is duplicate true. Result is the
-         *     closed started DTO with own answers. No answer keys. JSON limit 16 KiB.
+         *     closed started DTO with own answers and the same immutable `deadlineAt`.
+         *     No answer keys. JSON limit 16 KiB.
          */
         put: operations["saveElearningExamAnswers"];
         post?: never;
@@ -18086,6 +18088,11 @@ export interface components {
             answers: {
                 [key: string]: string[];
             };
+            /**
+             * Format: date-time
+             * @description Immutable server-issued attempt deadline, or null for an untimed attempt.
+             */
+            deadlineAt: string | null;
             duplicate: boolean;
         };
         ElearningExamSubmitRequest: {

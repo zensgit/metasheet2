@@ -5554,7 +5554,7 @@ components:
     ElearningExamStartResult:
       type: object
       additionalProperties: false
-      required: [attemptId, attemptNo, status, paper, answers, duplicate]
+      required: [attemptId, attemptNo, status, paper, answers, deadlineAt, duplicate]
       properties:
         attemptId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -5574,6 +5574,11 @@ components:
               type: string
               minLength: 1
           description: Canonical own selections for every paper question. Empty arrays when unanswered. Never includes answer keys.
+        deadlineAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: Immutable server-issued attempt deadline, or null for an untimed attempt.
         duplicate: { type: boolean }
     ElearningExamSubmitRequest:
       type: object

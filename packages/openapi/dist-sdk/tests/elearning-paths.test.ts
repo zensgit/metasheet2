@@ -285,6 +285,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
       status: 'started'
       paper: PublicPaper
       answers: { [key: string]: string[] }
+      deadlineAt: string | null
       duplicate: boolean
     }>()
     expectTypeOf<ExamSubmit>().toEqualTypeOf<{
