@@ -67,7 +67,10 @@ async function createHarness(): Promise<Harness> {
   const pool = new Pool({
     connectionString: DATABASE_URL,
     max: 5,
-    options: `-c search_path=${schema},public`,
+    // The harness owns this schema exclusively. Keeping public in search_path
+    // lets an unqualified DROP INDEX fall through and mutate the migrated CI
+    // schema when a local negative fixture intentionally omits that index.
+    options: `-c search_path=${schema}`,
   })
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
   const migrator = new Migrator({
@@ -666,5 +669,23 @@ describe('e-learning exam-attempt item migration (isolated real PostgreSQL schem
       observer.release()
       await harness.close()
     }
+  })
+
+  it('leaves the migrated public-schema item index untouched', async () => {
+    const publicIndex = await adminPool.query<{ indexname: string }>(
+      `SELECT index_info.relname AS indexname
+         FROM pg_class index_info
+         JOIN pg_namespace namespace_info
+           ON namespace_info.oid = index_info.relnamespace
+         JOIN pg_index index_shape
+           ON index_shape.indexrelid = index_info.oid
+         JOIN pg_class table_info
+           ON table_info.oid = index_shape.indrelid
+        WHERE namespace_info.nspname = 'public'
+          AND index_info.relname = $1
+          AND table_info.relname = 'elearning_exam_attempts'`,
+      [ATTEMPTS_ITEM_USER_INDEX],
+    )
+    expect(publicIndex.rows).toEqual([{ indexname: ATTEMPTS_ITEM_USER_INDEX }])
   })
 })
