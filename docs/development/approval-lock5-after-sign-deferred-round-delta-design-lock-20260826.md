@@ -88,8 +88,10 @@ assignment 都与冻结 seat 一一对应。
 只有已经锁定一条具体 pending 轮后，
 一个原子 CTE 同时证明 `(round.status='pending', instance.status='pending',
 instance.current_node_key=round.node_key,
-instance.node_activation_seq=round.origin_entry_epoch)`，并证明当前 origin live assignments
-仍只属于该 epoch，才可 CAS 轮状态、bump epoch 和插入新席位。实例 `FOR UPDATE` 会串行普通请求，
+instance.node_activation_seq=round.origin_entry_epoch)`，并证明不存在同实例、同节点、仍为 active 且
+`entry_epoch <> round.origin_entry_epoch` 的 assignment，才可 CAS 轮状态、bump epoch 和插入新席位。
+origin 席位在完成动作中已全部停用时，该反集谓词应当成立；不得错误要求一个已经为空的 origin
+active exact-set 仍非空。实例 `FOR UPDATE` 会串行普通请求，
 但不能替代这些谓词：悬空 pending 行、已前进节点或已变更 seq 都必须零业务写入并 fail closed。
 已锁定具体 pending 轮后 CTE 返回 0 才复读**同一 round id**并验证为已激活的同一轮；其他形状
 fail closed。
@@ -112,7 +114,7 @@ add-sign 模式保持当前行为。已经提交的 `pending | active` 轮必须
 pending → active 前必须对同一目标集合重做 exact-set，并重新取得匹配 `users/user_orgs` 行的
 `FOR SHARE` 锁；只重读谓词而不持锁会在校验与 assignment INSERT 之间留下停用穿透窗。
 
-**AS-I12 — 新轮 timeout 不继承旧 deadline；after-sign 可达时所有 effect 使用同一扫描 fence。** 激活延迟轮必须在同一事务中锁定 metrics 行，
+**AS-I12 — 新轮 timeout 不继承旧 deadline；后加签可达的 effect 使用同一扫描 fence。** 激活延迟轮必须在同一事务中按 AS-I15 处理 metrics 行，
 并清除或重算 `approval_metrics.current_node_deadline_at/current_node_timeout_effect` 及四个
 calendar deadline 字段。现有 `emitNodeActivationMetric` 是 best-effort，而且同节点已有 open
 breakdown 时会 no-op，不能作为这条语义门；旧轮完成后的 post-commit
@@ -124,13 +126,27 @@ deadline，不得让同一实例在创建时可运行、后加签激活时却 50
 `{instanceId,nodeKey,deadlineUtc,effect,activationSeq}`。`deadlineUtc` 必须由扫描 SQL 从
 `timestamptz` 直接用
 `to_char(deadline AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` 格式化为固定六位微秒
-的规范文本，不能先经过只保留毫秒的 JS `Date`。每个执行路径在实例与 metrics
-行锁下只接受
-该 exact tuple；不得用回调时的 live deadline/seq 替换扫描快照。旧扫描即使延迟到新轮 deadline
-也只能 CAS 0，不能清新 deadline、通知新审批人、transfer 或 jump 新轮。只给 remind 加 fence、
-让 transfer/jump 继续接受 `(instanceId,effect)` 是错误实现。
+的规范文本，不能先经过只保留毫秒的 JS `Date`。`transfer | jump` 以及 OD-AS-5(b) 的
+remind 路径都必须在实例与 metrics 行锁下只接受该 exact tuple；不得用回调时的 live deadline/seq
+替换扫描快照。旧扫描即使延迟到新轮 deadline 也只能 CAS 0，不能清新 deadline、通知新审批人、
+transfer 或 jump 新轮。OD-AS-5(a) 明确保留的普通节点 legacy reminder 是唯一例外，且不得被当成
+后加签 fence 证据；只给 remind 加 fence、让 transfer/jump 继续接受 `(instanceId,effect)` 仍是错误实现。
 
-remind 不得用“先清 deadline，再直接通知”的 at-most-once 窗口。exact-tuple CAS 清除与一条
+exact-tuple fence 是后加签核心的必要条件，durable reminder 不是所有后加签形状的必要条件。
+OD-AS-5(a) 的最小核心版本在事务内发现 frozen node timeout effect 为 `remind` 时，于 pending round/
+actor/audit 任一写入前返回 409 `APPROVAL_AFTER_SIGN_REMINDER_UNSUPPORTED`；无 timeout 与
+`transfer | jump` 节点仍可使用后加签，后两者必须先完成上面的 exact-tuple 改造。该限制只约束新的
+`after` 请求，不改变普通节点现有 reminder 行为，也不阻断已经提交的 round 排空。
+
+以下 durable reminder 段落只在 owner 选择 OD-AS-5(b) 时属于 Lock-5B runtime 前置；选择 (a) 时
+移入独立 SLA reminder transport 锁并不得拖住无-remind 核心。此前提出的 OD-AS-5(c)
+“exact-tuple 预检 → notify → exact-tuple CAS”不可选择：现有 scanner/worker 可在 pending 轮激活前
+扫到 origin reminder，随后在新轮 deadline 写入后执行仅按 `instance_id` 的 legacy mark，清空新轮
+metrics；通知发生在事务外还留下并发重复与 crash 重复。它既没有 durable claim，也不能靠 terminal
+CAS 修复先前已经发生的发送或 deadline 破坏。本锁只允许 (a) 拒绝 remind 节点的 after-sign，或
+(b) 以同一事务的 exact-tuple CAS + durable intents 消费提醒。
+
+OD-AS-5(b) 下，remind 不得用“先清 deadline，再直接通知”的 at-most-once 窗口。exact-tuple CAS 清除与一条
 `approval.node_timeout_reminder.v1` durable outbox intent 必须在同一事务提交；事务崩溃时两者
 同回滚，提交后 dispatcher 至少一次重试。该事件属于新增的 routing manifest v2，consumer key
 固定为 `approval-node-timeout-reminder`。v2 保留 v1 全部既有 route，不重解释 v1 行；worker 必须先
@@ -147,6 +163,11 @@ due row、发 values-free readiness 告警并在后续 tick 重试。reminder pr
 `null` 的通用
 `produceAutomationEvent` facade；专用 seam 在确认完整 readiness 后直接调用事务强制的
 `enqueueOutboxEvent(..., ROUTING_MANIFEST_V2)`，任何 null/异常都使 CAS 事务回滚。
+
+新 durable channel message 只发往配置的通知 channel，不得写成“直接通知当前审批人”。payload 中的
+live assignee 只允许实例 org-scoped 显示名或 values-free 计数；解析失败回退计数/统一占位，绝不沿用
+当前 legacy `assigneeIds.join()` 的 raw ID 文本。内部 ID 只参与 targetFingerprint/deliveryKey，不能进入
+channel body、标题、错误或普通日志。
 
 CAS 事务从 boot/readiness 注入的**非空、固定闭集 `producerEnabledChannelKeys`** 构造一条 outbox
 event/consumer row 每个 channel。该集合必须是所有 worker 报告的
@@ -242,7 +263,7 @@ generic `completeConsumer/poisonConsumer`。retryable verdict 仍可走现有 fe
 claim CTE 原子处理。
 无法提供幂等的 adapter 必须诚实标记 at-least-once 可能重复。任何超过 attempt 上限而进入
 `dead_letter` 的行都必须产生 required、values-free 告警，并由指定 owner 修复后重放或逐行记录
-不可重放 disposition；本文只保证失败不会被静默记成 `done`，不声称外部效果绝不丢失。启用 after-sign 前 durable
+不可重放 disposition；本文只保证失败不会被静默记成 `done`，不声称外部效果绝不丢失。OD-AS-5(b) 下启用 after-sign 前 durable
 dispatcher/manifest-v2/consumer 与 reminder transport 必须已开启并通过真实 crash-injection；该
 runtime writer 同样受当前 E1/shared-writer HOLD。
 
@@ -278,7 +299,13 @@ channel 配置采用双集合生命周期。新增 channel 时先让全部 worke
 时，不得照常激活、静默删人或降低 `all | any` 集合。触发旧轮完成的动作整体回滚并返回统一
 409；管理员必须能取消该 pending 轮后让旧席位重试。取消能力是 break-glass，flag OFF 时仍可用。
 
-**AS-I14 — 混合版本不能误执行。** 上线使用 worker-first 的三段门：阶段 A1 先落迁移，并把“可
+**AS-I14a — 核心混合版本不能误执行。** OD-AS-5(a) 先把“可读取、激活、完成、取消既存 deferred
+round，但 writer flag OFF”的 after-sign-v1 处理器部署到所有 serving pod，以 exact-set 证明没有旧
+处理器后才开 writer。关闭 writer 后，开放轮仍须由同一协议排空；开放轮非零时不得回滚到协议之前。
+该路径不修改 routing manifest，也不声称 durable reminder 已完成；remind 节点的 after-sign 始终由
+route/service 双门拒绝，不能让旧 notify-then-mark 处理器接管 deferred round。
+
+**AS-I14b — durable transport 混合版本不能误执行（仅 OD-AS-5(b)）。** 上线使用 worker-first 的三段门：阶段 A1 先落迁移，并把“可
 读取/排空 deferred round、支持 manifest v1/v2 和 reminder adapter、但两个新 flag 均 OFF”的兼容
 处理器部署到所有 serving/dispatcher pod。boot completeness 必须对**全部 supported manifests 的
 route union**做双向 exact-set：每个 routed key 都有 adapter，每个 adapter 至少被一个 supported
@@ -309,6 +336,15 @@ global-durable transport，也只能
 阶段 B 与回滚证据都记录镜像 commit、serving/worker exact-set、开放轮计数、各 consumer status
 计数、活 lease 计数、dead-letter disposition 和 flag 状态，values-free。本文不授权实际部署或开关。
 
+**AS-I15 — best-effort metrics 不能毒化业务轮。** 当前 `approval_metrics` 在实例提交后由
+`safeMetricsCall(recordInstanceStart)` best-effort 创建，因此“实例存在”不蕴含“metrics 行存在”。
+after-sign create 必须在消费 actor 或允许 pending round 提交前读取 frozen node timeout：节点配置了
+任一 timeout effect 时，必须在规范锁序位置锁到恰好一条 metrics 行，否则以 values-free 409
+`APPROVAL_AFTER_SIGN_METRICS_UNAVAILABLE` 整体回滚；不能先提交 pending，等最后一个旧席位才发现
+缺行。节点没有 timeout 时，metrics 行为可选：存在则锁定并在激活时清六个 deadline 字段，不存在则
+激活不得因 telemetry 缺口失败。激活时发现“配置有 timeout 但 metrics 缺行”仍 fail closed，并保留
+管理员 pending-cancel 恢复路径；这是创建后数据库损坏/越权删除的恢复门，不得被当成合法常态。
+
 ## 2. 持久化合同
 
 ### 2.1 轮表
@@ -334,6 +370,11 @@ CREATE TABLE approval_deferred_add_sign_rounds (
     CHECK (origin_entry_epoch >= 1),
   CONSTRAINT approval_deferred_add_sign_rounds_activation_epoch_nonneg
     CHECK (activation_entry_epoch IS NULL OR activation_entry_epoch >= 1),
+  CONSTRAINT approval_deferred_add_sign_rounds_activation_after_origin
+    CHECK (
+      activation_entry_epoch IS NULL
+      OR activation_entry_epoch > origin_entry_epoch
+    ),
   CONSTRAINT approval_deferred_add_sign_rounds_status_valid
     CHECK (status IN ('pending', 'active', 'completed', 'cancelled')),
   CONSTRAINT approval_deferred_add_sign_rounds_aggregation_valid
@@ -374,6 +415,10 @@ CREATE INDEX approval_deferred_add_sign_rounds_origin_lookup
 CREATE UNIQUE INDEX approval_deferred_add_sign_rounds_one_open
   ON approval_deferred_add_sign_rounds(instance_id, node_key)
   WHERE status IN ('pending', 'active');
+
+CREATE UNIQUE INDEX approval_deferred_add_sign_rounds_activation_epoch_unique
+  ON approval_deferred_add_sign_rounds(instance_id, node_key, activation_entry_epoch)
+  WHERE activation_entry_epoch IS NOT NULL;
 ```
 
 `cancel_reason` 是固定闭集 `rejected | returned | admin_jump | timeout_jump |
@@ -400,6 +445,10 @@ CREATE TABLE approval_deferred_add_sign_round_seats (
 ```
 
 目标集合在请求事务中写入，后续激活只从该表读取，不从请求、目录或当前模板重新解析。
+服务端单一常量 `APPROVAL_AFTER_SIGN_MAX_TARGETS = 100` 同时约束 route、service、seat INSERT
+与 FE 选择器；合法基数为 `1..100`。route 必须在打开事务前拒绝超限，service 必须独立重复验证，
+不能把 FE 限制当合同，也不能用 `LIMIT 100` 静默截断。该上限是锁持有时间、authority exact-set
+和 task/outbox 扇出的安全边界；修改数值须走本锁 delta，不能由环境变量热改。
 仅在 `addSignMode:'after'` 已经判定后，route 与 service 才严格验证原始 `targetUserIds` 是非空
 数组，且**每个**元素都是去空白后非空的字符串；不得先 `filter(typeof === 'string')` 再计算人数，
 因为 `['u1', null, 'u2']` 会被错误收窄并改变 aggregation 合同。去空白后有重复、包含 actor、或
@@ -425,9 +474,10 @@ approve/after-sign 事务整体回滚，旧席位保持 active，返回 409
 已经 active 的延迟轮使用现有管理员 bulk reassign 做一换一修复；本文不把当前无生产调用方的
 `applyApprovalDepartureTransfer` 误报为自动闭环。
 
-### 2.3 live-target generation 与数据库准入屏障
+### 2.3 数据库准入屏障；live-target generation 仅属于 OD-AS-5(b)
 
-同一 approval runtime migration 为实例增加一个不参与客户端 optimistic version 的内部 ABA fence：
+只有 owner 选择 OD-AS-5(b) 时，approval runtime migration 才为实例增加一个不参与客户端
+optimistic version 的内部 ABA fence：
 
 ```sql
 ALTER TABLE approval_instances
@@ -436,7 +486,7 @@ ALTER TABLE approval_instances
     CHECK (current_node_target_generation >= 0);
 ```
 
-所有会改变 pending 实例当前节点 live assignment exact-set 的生产写入路径都必须在持有实例
+OD-AS-5(b) 下，所有会改变 pending 实例当前节点 live assignment exact-set 的生产写入路径都必须在持有实例
 `FOR UPDATE` 的同一事务中 `current_node_target_generation = current_node_target_generation + 1`：新节点
 激活/再进入、仍停留当前节点的审批席位消费、manual/timeout transfer、bulk reassign/handover、
 departure transfer、parallel/before add-sign、reduce-sign，以及本锁的 deferred round activation。它不替代 `node_activation_seq`：前者
@@ -470,11 +520,18 @@ VALUES ('after-sign-v1');
 ```
 
 环境 flag 是外层默认-OFF 门，DB 行是跨 pod 的事务门；两者必须同时为 ON，DB 行不能独立授权功能。
-每个 after-sign create 事务和 reminder CAS+enqueue 事务都必须把
+每个 after-sign create 事务，以及仅 OD-AS-5(b) 的 reminder CAS+enqueue 事务，都必须把
 `SELECT ... WHERE gate_name='after-sign-v1' FOR SHARE` 作为**第一个有状态 DB 锁**，在持锁期间重查
 对应 DB boolean、精确字面环境 flag 与 runtime readiness，并把该共享锁持有到业务事务 commit/
-rollback。规范锁序是 admission row → instance `FOR UPDATE` → round/assignment/metrics → authority
-rows；任何调用点不得先锁 instance 再倒序取得 admission row。
+rollback。所有新增路径共享一个不可倒序的后缀：instance `FOR UPDATE` → channel delivery row（仅
+卡片动作）→ deferred round → seat rows → metrics row（若该路径需要）→ `users` → `user_orgs` →
+live assignments/outbox/consumer。
+after-sign create 在该后缀前先取得 admission row `FOR SHARE`；已经提交的 round 排空路径不再读取
+writer admission，直接从 instance 开始，否则关闭 writer 会错误阻断存量排空。reminder producer
+的顺序为 admission → instance → metrics → live assignments → outbox；consumer terminal resolver
+为 instance → live assignments → consumer。省略某个不需要的域可以，跨过后再倒序锁回不可以；
+任何调用点都不得先锁 instance 再取得 admission。实现前的 writer/lock census 必须覆盖所有会同时
+触及上述两个以上域的生产调用方，并用两两交错测试证明不存在逆序。
 
 停止 producer 时，owner 先关闭 serving/scheduler 外层 admission，再以独立事务 `FOR UPDATE` 锁
 singleton，把对应 boolean 改为 false、`generation = generation + 1` 后提交。排他锁会等待所有已进入
@@ -482,7 +539,7 @@ singleton，把对应 boolean 改为 false、`generation = generation + 1` 后�
 只有该 barrier 提交后，开放轮/consumer/lease/dead-letter 的同快照计数才有证明力。consumer drain
 不得读取或依赖这两个 producer boolean。
 
-重新开启时顺序相反：先完成 serving/worker exact-set 和所有 readiness，再在 owner-bound 事务中更新
+重新开启时顺序相反：先完成该方案要求的 serving/worker exact-set 和所有 readiness，再在 owner-bound 事务中更新
 DB gate，最后开启对应外层 admission；`generation` 只用于证据关联，不能被当成 fencing token 绕过
 共享锁。本文不授权执行这些更新。
 
@@ -519,6 +576,11 @@ bridge 的宽 wire 扩大 route。
 等 assignment 激活后才显示姓名，否则 pending 阶段会出现“已后加签但没有对象”的不可解释状态。
 分页读取器必须先按内部 round alias 把审计对折成一个逻辑动作，再对逻辑动作执行
 `COUNT/LIMIT/OFFSET`；不得先分页再在单页内合成，否则跨页的同一动作会重复显示或改变总数。
+after 组必须恰好由同一 instance/actor/node/`deferredRoundId` 的一条 `approve` 与一条 `add_sign`
+组成；缺行、重复 action 或 actor/node 不一致均 values-free fail closed，不能猜配。合成动作以
+`add_sign.id` 作为稳定逻辑 id，以两行 `occurred_at` 的较晚者作为逻辑时间，并统一按
+`logical_occurred_at DESC, logical_id DESC` 排序；非 after 行以自身 id/time 进入同一序列。route 的
+total 是逻辑动作数，bridge 虽不分页也必须使用相同折叠与顺序，避免相同时间戳下翻页漂移。
 共享合成 helper 的 corpus 必须包含无 after 记录的历史页，并分别断言 route 的窄 aliases 与 bridge
 的完整 metadata 和当前 main byte-compatible；只测新 after 记录或要求两条 wire 变成相同 metadata
 形状都不能证明兼容。
@@ -533,7 +595,7 @@ bridge 的宽 wire 扩大 route。
 
 不新增 `approval_records.action` 枚举成员，因此不重开 CHECK widening 链。
 
-### 2.5 reminder dead-letter control
+### 2.5 reminder dead-letter control（仅 OD-AS-5(b)）
 
 required alert、replay 与 disposition 不能只依赖当前进程内 observer。阶段 A1 的 transport migration
 新增 approval-specific 控制表；它只接管本锁的新 consumer，不扩写其它 outbox consumer 的语义：
@@ -675,7 +737,7 @@ JS safe integer，且 base 不得大于 cap；全部在任何查询/告警前验
   `APPROVAL_ADD_SIGN_IN_PARALLEL_UNSUPPORTED`。
 
 `after` 的 `targetUserIds` 协议边界是严格数组：先拒绝未知 mode；mode 已确认为 `after` 后，key
-缺失、非数组、空数组、任一非字符串元素、任一 trim 后空字符串都返回 400
+缺失、非数组、空数组、超过 `APPROVAL_AFTER_SIGN_MAX_TARGETS`、任一非字符串元素、任一 trim 后空字符串都返回 400
 `APPROVAL_ADD_SIGN_TARGET_INVALID`。route 不得过滤坏元素后继续，service 必须重复验证。严格
 验证后才计算一人/多人 aggregation；重复、actor 自选和实例内任一活跃 user assignment 重叠也
 使用同码拒绝。before/parallel 保持当前 main 的 target 过滤/coerce 与错误形状，不共享该新门。
@@ -695,26 +757,30 @@ round/seat 原始 ID。取消表示放弃本次后加签并恢复 origin 轮继�
 
 ### 3.2 后加签请求的事务顺序
 
-在既有 `dispatchAction` 的实例 `FOR UPDATE` 事务中：
+route 与 service 先在事务外完成严格 mode/数组/元素/`1..100` 基数/aggregation 语法验证。只有
+`after` 进入以下事务；before/parallel 不读取 admission 行：
 
-1. 完成 actor seat、card binding 与 nodeOperationPolicy 等现有门。当前 comment gate 位于
+1. `BEGIN` 后先锁 admission singleton `FOR SHARE` 并重查 writer gate/readiness；这是第一个
+   有状态 DB 锁。随后才锁 instance `FOR UPDATE`；
+2. 完成 actor seat、card binding 与 nodeOperationPolicy 等现有门。当前 comment gate 位于
    `add_sign` 早返回之后，因此实现必须只为 `after` 显式执行与普通 approve 相同的
    `commentRequired:'always'` 检查；不得把这次收窄扩到现有 before/parallel；
-2. 校验 mode、目标闭集、aggregation、非 parallel region、无开放延迟轮，并执行 §2.2 的
-   活跃用户 + 实例同组织 exact-set 硬门；
-3. 读取当前唯一 epoch。若返回 NULL（迁移前旧 assignment 轮），409
+3. 校验非 parallel region、无开放延迟轮并读取当前唯一 epoch。若返回 NULL（迁移前旧 assignment 轮），409
    `APPROVAL_AFTER_SIGN_LEGACY_EPOCH_UNSUPPORTED`，actor/台账/audit/version 零变化；不得用
    `0` 哨兵或临时 backfill 绕过。非 NULL 时按原节点真实 `approvalMode`（含缺省规范化的
-   `single`）计算“actor 这一票之后旧轮是否完成”；
-4. 插入 `pending` 轮和 seat rows；
-5. 消费 actor assignment，写 `approve` + `add_sign` records；
-6. 若旧轮未完成，只 bump instance version 并提交；兄弟席位保持旧 epoch；
-7. 若旧轮完成，先按现有 `single`/`any`/`threshold` 规则停用或审计取消未决兄弟，再调用 §3.3
+   `single`）计算“actor 这一票之后旧轮是否完成”，并读取 frozen node timeout；
+4. 插入尚未提交的 `pending` 轮和 seat rows；随后按 AS-I15 锁定/验证 metrics 行。该顺序是为遵守
+   §2.3 的 round/seat → metrics 总序，任一后续验证失败都会回滚，不会暴露 provisional 行；
+5. 再按 §2.2 锁 `users`、`user_orgs` 并做活跃用户 + 实例同组织 exact-set，同时验证 actor/重复/
+   active-seat overlap。少一人、多一人或目录错误均回滚第 4 步；
+6. 消费 actor assignment，写 `approve` + `add_sign` records；
+7. 若旧轮未完成，只 bump instance version 并提交；兄弟席位保持旧 epoch；
+8. 若旧轮完成，先按现有 `single`/`any`/`threshold` 规则停用或审计取消未决兄弟，再调用 §3.3
    的共享激活 helper；`single` 必须保留 linear 路径当前的 blanket-deactivate first-wins 语义；
    helper 必须对刚写入或既有 pending seat 执行相同的第二次 exact-set。返回
    `deferredRoundActivated:true` 时不得调用 `resolveAfterApprove`，实例留在同一图节点；返回
    `false` 说明当前 origin epoch 没有 pending 轮，调用方必须继续既有 `resolveAfterApprove`；
-8. enqueue 新激活席位的 task-created durable events，提交后走既有 legacy emit；flag-OFF durable
+9. enqueue 新激活席位的 task-created durable events，提交后走既有 legacy emit；flag-OFF durable
    语义保持既有路径。
 
 旧轮聚合计算不能复制第二套 `single/all/any/threshold` 分支。实现必须提取一条共享的“消费一票并
@@ -729,33 +795,37 @@ round/seat 原始 ID。取消表示放弃本次后加签并恢复 origin 轮继�
 1. 查询并锁定同节点、同 origin epoch 的 pending round。0 行是普通无后加签审批的正常路径：
    立即以零写入返回 `deferredRoundActivated:false`，不得锁 metrics、bump seq 或检查历史
    completed/cancelled round；多行 500 fail closed；
-2. 若恰有一行，锁定全部 seat rows，按 §2.2 的用户活跃 + 实例同组织谓词重取匹配
-   `users/user_orgs` 的 `FOR SHARE` 锁并执行第二次 exact-set。失败抛
-   `APPROVAL_AFTER_SIGN_TARGET_STALE`，使触发旧轮完成的整个事务回滚；不能 subset-activate；
-3. 锁定该实例恰好一条 `approval_metrics` 行并计算新 timeout/calendar deadline。business
-   calendar 按既有 T3-2 语义 fail-open 到 wall-clock；只有 metrics 缺行、多行、六列 UPDATE
-   结果不是一行或其它事务写失败才回滚；
-4. 用一条数据修改 CTE 锁定 pending round 与实例，计算 `next_epoch =
+2. 若恰有一行，锁定全部 seat rows；
+3. 按 AS-I15 读取 frozen node timeout 并锁 metrics：配置 timeout 时必须恰好一行并计算新
+   timeout/calendar deadline；无 timeout 时允许 0 行，若有一行则锁定待清理。business calendar
+   按既有 T3-2 语义 fail-open 到 wall-clock；
+4. 按 §2.2 的用户活跃 + 实例同组织谓词重取匹配 `users/user_orgs` 的 `FOR SHARE` 锁并执行
+   第二次 exact-set。失败抛 `APPROVAL_AFTER_SIGN_TARGET_STALE`，使触发旧轮完成的整个事务回滚；
+   不能 subset-activate；
+5. 用一条数据修改 CTE 锁定 pending round 与实例，计算 `next_epoch =
    node_activation_seq + 1`，在同一 statement 内同时把轮改为 `active`、写入
    `activation_entry_epoch/activated_at`，并把实例 seq 更新到 `next_epoch`；最终
    `RETURNING round_id, aggregation, next_epoch`。CTE 的 candidate 必须同时包含并校验
    `round.status='pending'`、`instance.status='pending'`、当前 node 与 round node 相同、当前
-   `node_activation_seq=origin_entry_epoch`；任一谓词不满足都不得 bump seq；
-5. 已选定具体 round id 后 CTE candidate 为空时，轮与 seq 均不得变化；复读发现同一 round id
+   `node_activation_seq=origin_entry_epoch`，并以 `NOT EXISTS` 拒绝同实例/节点中任何
+   `is_active=TRUE AND entry_epoch <> origin_entry_epoch` 的 assignment；任一谓词不满足都不得
+   bump seq；origin active set 已为空是合法输入，不得改成要求存在 matching origin row；
+6. 已选定具体 round id 后 CTE candidate 为空时，轮与 seq 均不得变化；复读发现同一 round id
    已经 active/completed 时，只有
    seat exact-set、activation epoch 和 assignment exact-set 全部吻合才可视为幂等重放，否则
    500 fail closed；
-6. 非幂等候选的 CTE 最终未返回一行、seq CAS 未命中或返回多行时必须抛错并回滚整个事务；
-7. 从 seat 表创建新 assignment，全部使用新 epoch；
-8. 直接更新已锁定 metrics 行的六列：`current_node_deadline_at`、
+7. 非幂等候选的 CTE 最终未返回一行、seq CAS 未命中或返回多行时必须抛错并回滚整个事务；
+8. 从 seat 表创建新 assignment，全部使用新 epoch；
+9. metrics 行存在时直接更新已锁定行的六列：`current_node_deadline_at`、
    `current_node_timeout_effect`、`sla_due_at`、`sla_timezone`、`sla_calendar_org_id`、`sla_unit`。
-   节点无 timeout 时六列全部清空；wall-clock/business timeout 分别写完整新值；UPDATE 必须恰好
-   一行。保留既有 `node_breakdown` 的同节点 open entry，不伪造一次图节点重入；不得调用会因
+   节点无 timeout 时六列全部清空；wall-clock/business timeout 分别写完整新值；有 metrics 时
+   UPDATE 必须恰好一行，无 timeout 且 metrics 缺行时明确零写入继续。保留既有 `node_breakdown`
+   的同节点 open entry，不伪造一次图节点重入；不得调用会因
    open entry 而 no-op 的 `emitNodeActivationMetric` 充当此门；
-9. 保持 `approval_instances.current_node_key/current_step/status` 不变，只更新 version；事务结果
+10. 保持 `approval_instances.current_node_key/current_step/status` 不变，只更新 version；事务结果
    明确返回 `deferredRoundActivated:true`，post-commit 层据此跳过旧轮的
    `emitNodeDecisionMetric`；
-10. task-created events 在同事务 durable enqueue；旧轮卡片依赖 assignment+epoch 绑定自然失效，
+11. task-created events 在同事务 durable enqueue；旧轮卡片依赖 assignment+epoch 绑定自然失效，
    新轮卡片由新 task events 产生。
 
 为满足 AS-I7 和 `state_paired` CHECK，禁止先单独提交 `status='active'` 再补 epoch。CTE、
@@ -765,15 +835,23 @@ assignments。并发测试必须证明 candidate 为空时不会先空增一次 
 
 timeout 路径同时收窄：`scanNodeTimeouts` join 实例后返回 deadline/effect/node/activationSeq
 扫描快照。`transfer/jump` 把完整 tuple 传入现有 `applyNodeTimeoutEffect` 事务，锁实例和 metrics
-后逐字段相等才可消费/执行；传 `(instanceId,effect)` 的旧签名必须删除。`remind` 的 transport
-选择发生在任何 CAS 前：durable-reminder runtime ready 时调用
-`consumeAndEnqueueNodeReminder`，同样锁行并 exact-tuple CAS 清 deadline/effect，在同一事务通过
+后逐字段相等才可消费/执行；传 `(instanceId,effect)` 的旧签名必须删除。OD-AS-5(a) 的 after-sign
+create 已在事务写入前拒绝 frozen effect=`remind`，所以普通节点 reminder 保持当前 main 的
+notify-then-mark 兼容腿；该兼容腿不用于证明后加签安全。
+
+只有 OD-AS-5(b) 才在任何 reminder CAS 前选择 transport：runtime ready 时调用
+`consumeAndEnqueueNodeReminder`，锁行并 exact-tuple CAS 清 deadline/effect，在同一事务通过
 manifest v2 专用 seam 写 outbox；它不直接调用通知器。transport OFF 且实例无开放 deferred round
 时才走当前 notify-then-mark 兼容路径；存在开放轮或 readiness 不完整时保持 deadline 不变并重试。
 专用 enqueue 返回 null 或 consumer readiness 丢失都按事务失败处理，不能读成“无需提醒”。consumer
 按 AS-I12 复核 pending status、node/epoch 与非空 live assignee set，再用稳定 eventId 调 adapter。
-任一路径 CAS 0 都不得解析收件人或产生外部效果。旧扫描在同节点新轮激活后必须 0 行，不得通知、
-transfer、jump 新轮，也不得清空第 8 步的新值。
+
+不得实现“预检 → 直接 notify → terminal CAS”的第三条 reminder 腿。反例为：W1 扫到 origin
+reminder 快照但未锁实例；W2 以最后一票把 pending round 激活、bump activation seq 并写入新轮
+deadline；W1 随后执行现有只按 `instance_id` 清 metrics 的 mark，便会把 W2 的新 deadline 清空。
+terminal CAS 尚未发生，无法挽回已经发送的消息或已经被 legacy mark 清除的值。旧扫描在同节点新轮
+激活后必须 0 行且零 send；(a) 通过 create-time 拒绝使该形状不可达，(b) 通过“先 exact-tuple CAS、
+同事务写 durable intents”消费该形状。不得保留任何直接通知后再 mark 的 deferred-round 分支。
 
 ### 3.4 active 轮的聚合与完成
 
@@ -814,53 +892,66 @@ Lock-1 OD-L1-3 已 ratify `prior_node_approver` 只读取 latest epoch；延迟�
 
 ## 4. 兼容、迁移与启用
 
-1. 新增四表，并给 `approval_instances.current_node_target_generation` 加 `DEFAULT 0`；除该确定性列
-   回填外无业务状态 backfill。admission singleton 默认双 OFF，旧实例没有轮台账，所有读取返回 absent，
+1. 两个可 ratify 方案共同的核心迁移只新增 deferred round、seat 与 admission 三表；只有选择 OD-AS-5(b) 时才
+   增加 dead-letter control 表，并给 `approval_instances.current_node_target_generation` 加
+   `DEFAULT 0`。除该确定性列回填外无业务状态 backfill。admission singleton 默认双 OFF，旧实例
+   没有轮台账，所有读取返回 absent，
    行为与当前 main 相同。
    仍在 NULL `entry_epoch` 上运行的旧实例只对 `after` 返回 §3.2 的 values-free 409；普通
    approve 与现有 `before | parallel` 不变。
-2. migration 先于阶段 A1 兼容镜像；镜像回滚后表保留，不执行 destructive down。阶段 A1 的每个
+2. **仅 OD-AS-5(b)。** migration 先于阶段 A1 兼容镜像；镜像回滚后表保留，不执行 destructive down。阶段 A1 的每个
    serving/dispatcher pod 都能读取、激活、完成、取消既存 deferred round，dispatch v1/v2 rows，
    注册 `approval-node-timeout-reminder` adapter，并暴露 `approvalAfterSignProtocol='v1'`，但
    durable-reminder 与 after-sign writer flags 均为 OFF，current producer manifest 仍是 v1。boot
    completeness 使用 supported-manifest route union，claim SQL 实际过滤 supported version；只声明
    `SUPPORTED_MANIFEST_VERSIONS` 而不进入 claim 路径不算支持。
-3. 阶段 A2 先证明 worker exact-set 全部支持 `{1,2}` 与新 consumer，再把 producer/current manifest
+3. **仅 OD-AS-5(b)。** 阶段 A2 先证明 worker exact-set 全部支持 `{1,2}` 与新 consumer，再把 producer/current manifest
    切 v2；随后证明 `AUTOMATION_DURABLE_DELIVERY_ENABLED=true`、dispatcher/consumer readiness
    完整、旧 v1 行仍可排空，才允许打开 `APPROVAL_DURABLE_TIMEOUT_REMINDERS_ENABLED`。任何 pod
    只支持 v1、adapter 缺失、dispatcher OFF 或 enqueue facade 返回 null 都停止，且不得清 deadline。
    `producerEnabledChannelKeys` 必须是全 worker `workerDrainableChannelKeys` 交集的子集；channel 增删/
    改名必须执行 AS-I12 的 worker-first/producer-first drain 顺序，不能把配置热改当成无状态操作。
-4. 阶段 B 激活 after-sign 前还必须同时满足：serving pod 协议 exact-set 全为 v1、四表与 constraints
-   在位、migration pending=0、durable-reminder 已真运行、required + real-DB + rolling-version gate
-   全绿。少一个或无法枚举全部 serving/worker pod 都停止。
-5. 新 flags `APPROVAL_DURABLE_TIMEOUT_REMINDERS_ENABLED` 与 `APPROVAL_AFTER_SIGN_ENABLED` 都登记到
-   global-history flag manifest，默认 OFF，精确 `'true'` 才开启；前者必须先于后者。该 manifest、
+4. 阶段 B 激活 after-sign 前必须同时满足：serving pod 协议 exact-set 全为 v1、轮/seat/admission 表与
+   constraints 在位、migration pending=0、required + real-DB + rolling-version gate 全绿。选择
+   OD-AS-5(b) 时还必须证明 durable-reminder 已真运行；选择 (a) 时 publish/runtime 双门必须拒绝
+   `remind` 节点的 after-sign，且无需 manifest v2。少一个或无法枚举相关 serving/worker pod 都停止。
+5. `APPROVAL_AFTER_SIGN_ENABLED` 始终登记到 global-history flag manifest，默认 OFF，精确 `'true'`
+   才开启；只有 OD-AS-5(b) 另增加 `APPROVAL_DURABLE_TIMEOUT_REMINDERS_ENABLED`，且后者必须先于
+   after-sign。该 manifest、
    routing manifest v2、outbox writer 和 `users/user_orgs` authority reads 都属于当前
    Time Machine E1/shared-surface HOLD；即使本文 ratify，也必须等 ownership、writer/lease census
    与独立对抗测试另行放行后才能实现或合并相应 runtime delta。
 6. FE 只有在 capability/flag read 为 true 且服务端协议 v1 时显示“后加签”；服务端永远是新请求的权威门。
    flag 从 ON 改为 OFF 后，既有 pending/active 轮仍由常驻状态机继续排空；不得以 flag 跳过
    §3.3 或取消矩阵。
-7. 回滚必须先把 after-sign writer 与 reminder producer admission 在所有 pod 关闭，再按 §2.3
-   取得 singleton 排他锁、把对应 DB gates 置 OFF 并递增 generation；只有排他事务提交才证明此前
-   已准入 producer 全部终结。consumer 继续运行。随后同一数据库事务快照证明 `pending | active` 开放轮
-   为 0，相关 consumer `pending | in_progress` 为 0、无活 lease，且每个 `dead_letter` 已修复重放或
-   有 owner 逐行豁免。计数后仍能并发 enqueue、活 lease/backoff in-progress 或未处置 dead-letter
-   任一存在都禁止关闭 reminder/global durable transport，也禁止回到 v1/manifest-v2 兼容处理器
-   之前；不得以“关闭 flag”代替排空证明，也不得让旧 pod 在 writer 开启时重新加入 serving set。
+7. 所有方案回滚都先在全部 pod 关闭 after-sign writer，再按 §2.3 取得 singleton 排他锁、把
+   after-sign DB gate 置 OFF；只有排他事务提交才证明此前已准入 writer 全部终结。随后同一数据库
+   事务快照证明 `pending | active` 开放轮为 0，才能回到不理解 after-sign-v1 的镜像。只有选择
+   OD-AS-5(b) 时，回滚才还必须先关闭 reminder producer admission、递增其 generation，同时保持
+   consumer 运行，并在同快照证明相关 consumer `pending | in_progress` 为 0、无活 lease，且每个
+   `dead_letter` 已修复重放或有 owner 逐行豁免。计数后仍能并发 enqueue、活 lease/backoff
+   in-progress 或未处置 dead-letter 任一存在都禁止关闭 reminder/global durable transport，也禁止
+   回到 manifest-v2 兼容处理器之前；不得以“关闭 flag”代替排空证明，也不得让旧 pod 在 writer
+   开启时重新加入 serving set。
 8. UI 选择两个以上目标时显示“会签/或签”；单目标不显示无意义选项。
 9. disabled 模式不创建表外写入、不更改 before/parallel 的 assignment、版本、audit 或 copy。
-10. 实现不得压成一张跨域大 PR：先以独立 E1/shared-writer 切片交付 manifest v2、supported-version
-    claim、per-channel reminder consumer、dead-letter control/reconciler 与 transport gates；再以
-    approval runtime 切片交付轮表、seat、admission singleton、状态机
-    和 `users/user_orgs` 锁序；最后才是 FE exposure。每片分别提交 exact head/base、迁移、flags、
-    writer/lease/authority census 与对抗证据给 merge coordinator，前片未落 main 不开始后片激活。
+10. 实现不得压成一张跨域大 PR。OD-AS-5(a) 直接拆为 approval runtime（轮表、seat、admission、
+    状态机、metrics/authority 锁序、remind-node 拒绝）→ FE exposure；OD-AS-5(b) 才先以独立
+    E1/shared-writer 切片交付 manifest v2、supported-version claim、per-channel reminder consumer、
+    dead-letter control/reconciler 与 transport gates，再交 approval runtime，最后 FE。每片分别提交
+    exact head/base、迁移、flags、writer/lease/authority census 与对抗证据给 merge coordinator，前片
+    未落 main 不开始后片激活。直接提醒后再 mark 的第三条腿已由 AS-I12 反例排除，不得作为独立切片复活。
 
 ## 5. 判别性验证门
 
-所有 DB 门在 PostgreSQL 15 真库运行，`EXPECT_DB=1` 时不得 skip；新 FE spec 同时进入
-`approval-web-guard.yml` 与 `run-required-web-tests.sh`。
+所有 DB 门在生产同大版本的 `postgres:15-alpine` 真库运行，`EXPECT_DB=1` 时不得 skip；当前
+`.github/workflows/approval-realdb-node-operation-policy.yml` 仍使用 `postgres:16`，所以其现状绿灯不能
+充当本锁的 PG15 证据。实现切片必须把新增 after-sign DB suites 显式加入该 workflow 的 path filter、
+整文件执行清单与证据 summary，并让该 lane 至少包含一个 15-alpine arm；同时把这些真库文件加入
+默认无 DB `packages/core-backend/vitest.config.ts` 的 exclude，避免 Node 18/20 通用作业收集后整文件
+skip-shaped green。不能只在本地/通用 Vitest 配置中存在。新 FE spec 同时进入
+`.github/workflows/approval-web-guard.yml` 的 path filter、真实 `vitest run` 文件 token 清单与证据
+summary，并进入 `apps/web/scripts/run-required-web-tests.sh`；只加 path filter 仍是 skip-shaped green。
 
 **AS-G1 协议双门。** route 与 service 都接受 `after`；未知值 400。分别回退任一门，指定测试红。
 
@@ -894,7 +985,8 @@ outbox 不产生额外写入。把“0 pending”改回异常或在 no-op 前锁
 
 **AS-G8a 目标身份。** 对 `after`，inactive user、无同 org membership、inactive membership、
 跨 org user、非数组、数组中的 null/number/object、trim 后空字符串、重复 target、actor 自选、
-实例内已有活跃 user seat 各自 400 且响应同码同形；不得先过滤坏元素再用剩余人数决定
+实例内已有活跃 user seat、101 个合法不同 target 各自 400 且响应同码同形；100 人正控成功；
+不得先过滤坏元素再用剩余人数决定
 aggregation；同 org 活跃用户正控成功。相同脏数组送给 before/parallel 时保持当前 main 的过滤/
 coerce 行为，证明新严格门没有上移到共享 route。
 删除 users 门、org join、exact-set 比较或 overlap 门时，各自指定测试红。实例 org NULL 单独
@@ -907,10 +999,13 @@ approve 返回统一 stale 409，且该席位仍 active、轮仍 pending、audit
 成员调用 403、无 pending 轮 404、active round 409。flag OFF 时管理员仍可取消。删除共享激活
 helper 的第二次 exact-set、激活时共享锁、事务回滚或 admin guard 时各自指定测试红。
 
-**AS-G9 事务失败注入。** 在 admission 共享锁后、actor consume 后、CAS 后、epoch/target-generation
-bump 后、assignment insert 后、outbox enqueue 后分别注入失败；每处都必须回滚到无半轮、无孤儿 seat、无 version
-漂移，且共享准入锁随事务释放。删除任一 producer 调用点的 admission-first 获取或把它移到实例锁
-之后时，锁序/行为门必须变红。
+**AS-G9 事务失败注入。** 在 admission 共享锁后、provisional round/seat 后、actor consume 后、
+activation CAS/epoch bump 后、assignment insert 后、metrics reset 后、task-created outbox enqueue 后
+分别注入失败；每处都必须回滚到无半轮、无孤儿 seat、无 version/epoch/SLA/outbox 漂移，且共享
+准入锁随事务释放。OD-AS-5(b) 另在 target-generation bump 与 reminder outbox enqueue 后注入失败。
+删除任一 producer 调用点的 admission-first 获取或把它移到实例锁之后时，锁序/行为门必须变红。
+卡片来源另证明：target/metrics/authority 任一后置拒绝会同时回滚同事务的 delivery `acted` claim；
+把 card claim 提交到 after-sign 校验前或移出事务时指定测试红。
 
 **AS-G10 fence 与陈旧元组。** 两个完成旧轮的并发请求只能一方激活；seq 只 +1、assignment
 每人一行、task-created 每人一个 durable intent。该并发正控只能证明实例锁的串行化，不能单独
@@ -919,7 +1014,8 @@ set 全匹配、轮仍 pending 但实例已前进到另一节点、实例 seq �
 terminal、origin live assignment 混入另一 epoch；每个 fixture 只改变对应一个谓词字段，其余
 前提保持正控形状，并都必须零 round/seq/assignment/outbox 写入且 fail closed。分别删除
 `round.status='pending'`、`instance.status='pending'`、node equality、seq equality 或 origin epoch
-exact-set 任一谓词时，只有对应 fixture 变红；candidate 为空的重放不得空增 seq。只在实例
+anti-set（`NOT EXISTS` 不同 epoch live row）任一谓词时，只有对应 fixture 变红；candidate 为空的
+重放不得空增 seq。只在实例
 `FOR UPDATE` 下跑两个请求、却不直接击中每个 predicate，不算本门通过。
 
 **AS-G11 取消矩阵。** reject/return/admin jump/timeout jump 各有一条 pending 或 active 真库
@@ -930,7 +1026,7 @@ cancelled。离开节点后无 open 轮、无该轮 active assignment。从任�
 **AS-G12 同节点 mutation。** 初始 activation set 与 seat rows 保持冻结；transfer、timeout
 transfer、reassign、handover 保持 active 轮 epoch，不取消、不 bump。parallel/before add-sign
 进入 active 后加签轮仍保持 epoch并按 live assignment 数参与该轮聚合；不得据此改写 seat 表。
-上述每个 live-set mutation 与 reduce-sign、departure transfer 都必须在同一事务恰好 bump 一次
+OD-AS-5(b) 下，上述每个 live-set mutation 与 reduce-sign、departure transfer 都必须在同一事务恰好 bump 一次
 `current_node_target_generation`；源码 writer census 删除任一真实调用点的 bump 时 required 红。
 分别在 backend service、AfterSales/PLM bridge 与根 attendance plugin 放置可回滚 canary 写点，守卫都
 必须发现；被排除的非 platform/source-system 写点用可执行 fixture 证明不命中，而不是扩大 ignore。
@@ -940,17 +1036,29 @@ assignment 完成后前进，`any` 在第一票后前进并停用其余 live ass
 工作。
 
 **AS-G13 卡片、SLA 与 timeout delivery。** 旧 epoch 卡在激活后 fail closed，新轮卡成功；新轮
-deadline 从激活时重新计算；无 timeout 节点会清空旧 deadline，有 wall-clock/business timeout
-的节点各自取得完整新时限；calendar provider unbound/返回 null/抛错时与 T3-2 一样 fail-open
-到 wall-clock，不得 500。metrics 行缺失/更新失败必须回滚激活；删除事务内六列 reset、恢复
+deadline 从激活时重新计算；无 timeout 节点在 metrics 行存在时清空旧 deadline、metrics 缺行时仍可
+激活；有 wall-clock/business timeout 的节点各自取得完整新时限；calendar provider unbound/返回
+null/抛错时与 T3-2 一样 fail-open 到 wall-clock，不得 500。配置 timeout 但 create 时 metrics 缺行
+必须在 actor/pending 写入前 409；配置 timeout 后激活时 metrics 缺失/更新失败必须回滚激活。删除
+create-time metrics 门、事务内六列 reset、恢复
 `emitNodeActivationMetric` 或恢复旧轮 post-commit `emitNodeDecisionMetric` 时，各自时间控制测试红。
 
-对 `remind | transfer | jump` 各自构造“旧扫描完成后、新轮激活后才执行”的交错。执行器必须携带
+对 `transfer | jump` 各自构造“旧扫描完成后、新轮激活后才执行”的交错。执行器必须携带
 扫描到的完整 `{nodeKey,deadlineUtc,effect,activationSeq}`，exact-tuple CAS 返回 0，且收件人解析、
-outbox、通知、transfer、jump 调用次数均为零；改回 `(instanceId,effect)`、重读 live tuple、忽略
-affected-row 或删任一 tuple predicate 时，其对应 effect fixture 变红。
+transfer、jump 调用次数均为零；改回 `(instanceId,effect)`、重读 live tuple、忽略 affected-row 或删
+任一 tuple predicate 时，其对应 effect fixture 变红。
 
-remind 另做三点 crash-injection：exact-tuple CAS 前崩溃时 deadline 与 intent 都不变；CAS 后、
+OD-AS-5(a) 另以 route/service 双门证明 `remind` 节点的 after 请求在任何 round/actor/audit 写入前
+返回指定 409，同时无-timeout 与 transfer/jump 正控成功。以下 reminder transport、channel、
+dead-letter 与 manifest gates 只在 OD-AS-5(b) 执行；(a) 不得用这些未运行的套件宣称 durable。
+
+无 deferred round 的普通提醒保持当前 main byte-compatible。另把 AS-I12 的 W1/W2 交错做成真库
+负例：W1 扫到 origin remind 后暂停，W2 激活新轮并写入新 deadline，再恢复 W1。OD-AS-5(a) 下该
+fixture 必须因 remind-node create gate 而无法形成开放轮；OD-AS-5(b) 下 W1 的旧 tuple CAS 0、零 send、
+新 deadline 保留。若出现 deferred-round direct notifier、调用 legacy `markNodeTimeoutFired(instanceId)`、
+按 live tuple 替换扫描快照或在 CAS 前解析收件人，测试必须红。
+
+**以下均仅 OD-AS-5(b)。** remind 另做三点 crash-injection：exact-tuple CAS 前崩溃时 deadline 与 intent 都不变；CAS 后、
 enqueue 前失败时同事务整体回滚；事务提交后、dispatcher 前崩溃时 intent 仍可被重放。adapter
 失败保持可重试；相同 live assignee exact-set 的重复 dispatch 使用同一 deliveryKey，幂等 endpoint
 只产生一次外部效果。精确 target tuple 的测试证明只改显示名/email/metadata 时 fingerprint/key 不变，
@@ -1030,21 +1138,24 @@ action 则必须在同一 statement 同时 acknowledgement 与 terminal resoluti
 是 add_sign 绕过“消费 approve”的政策。
 
 **AS-G15 flag 准入与排空。** after-sign OFF 时新的合法 after 409 且数据库零变化；before/parallel
-与当前 main 的全响应和状态快照相同。即使 after-sign flag ON，global durable、durable-reminder、
-manifest v2、本 pod protocol 或 consumer readiness 任一不满足也返回 runtime-not-ready 409，零写入。
-先在全部门 ON 创建 pending，再只切 after-sign writer OFF，最后旧兄弟 approve 必须仍按 §3.3
-激活并最终完成；不能留 open round，也不能静默取消。开放轮或 reminder intent 非零时关闭
-durable-reminder/global durable，调度器必须保留 deadline/intent 并 fail loud，不能退回 legacy
-direct notify。producer admission OFF 后 consumer 必须继续排空；管理员 pending-cancel 在 writer
-OFF 时仍可用。DB singleton 任一 producer boolean 为 OFF 时，即使对应环境 flag 与缓存 readiness
-仍为 ON，新事务也必须在实例锁/业务写之前拒绝；DB boolean 为 ON 而外层 flag OFF 时同样拒绝，证明
+与当前 main 的全响应和状态快照相同。OD-AS-5(a) 下，remind 节点始终返回指定 unsupported 409，而
+无 timeout/transfer/jump 节点只依赖 after-sign 协议与 writer readiness；OD-AS-5(b) 下，即使
+after-sign flag ON，global durable、durable-reminder、manifest v2、本 pod protocol 或 consumer
+readiness 任一不满足也返回 runtime-not-ready 409，零写入。
+先在 writer 门 ON 创建 pending，再只切 after-sign writer OFF，最后旧兄弟 approve 必须仍按 §3.3
+激活并最终完成；不能留 open round，也不能静默取消。OD-AS-5(b) 下，开放轮或 reminder intent 非零
+时关闭 durable-reminder/global durable，调度器必须保留 deadline/intent 并 fail loud，不能退回 legacy
+direct notify；producer admission OFF 后 consumer 必须继续排空。管理员 pending-cancel 在 writer OFF
+时仍可用。对应功能的 DB singleton boolean 为 OFF 时，即使环境 flag 与缓存 readiness 仍为 ON，新
+producer 事务也必须在实例锁/业务写之前拒绝；DB boolean 为 ON 而外层 flag OFF 时同样拒绝，证明
 singleton 不能独立授权。
 
-**AS-G16 DB constraints。** 非法 status/aggregation/cancel reason、负 epoch/target generation、空白 node/creator/
+**AS-G16 DB constraints。** 非法 status/aggregation/cancel reason、负 epoch、空白 node/creator/
 assignee、状态字段错配（含 cancelled 半配 activation 字段）、重复 open round、重复 seat、重复
-ordinal，以及 dead-letter control 的错误 consumer key、负 fence/attempt、非法 alert/resolution state
-或 reason、lease/
-actor/replay/disposition 半配，均由具名 constraint 或 index 拒绝；迁移重放幂等。
+ordinal、`activation_entry_epoch <= origin_entry_epoch`、同实例/节点重复 activation epoch 均由
+具名 constraint 或 index 拒绝。仅 OD-AS-5(b) 还拒绝负 target generation，以及 dead-letter control
+的错误 consumer key、负 fence/attempt、非法 alert/resolution state 或 reason、lease/actor/replay/
+disposition 半配；迁移重放幂等。
 
 **AS-G16a 旧 epoch。** NULL epoch 旧实例请求 after 返回指定 409，actor seat、audit、台账、
 version 均不变；普通 approve 的 legacy fallback 与 before/parallel 回归保持当前 main。
@@ -1057,7 +1168,9 @@ alias，不能互相扩大或收窄。org-scoped 显示查询不调用全局 dir
 deferred round/seat/user id/email；无法解析者只显示 values-free 占位。权限受限查看者不看到 raw
 target IDs。分页 route 与 `ApprovalBridgeService.loadLocalHistory` 必须产生同一个合成动作形状；用
 page size 1 让 `approve`/`add_sign` 原始行跨页，仍只能得到一个逻辑动作、正确 total 且任一页不泄漏
-内部 alias，证明合成发生在 `COUNT/LIMIT/OFFSET` 之前。非 after 历史的 byte-compat corpus 覆盖
+内部 alias，证明合成发生在 `COUNT/LIMIT/OFFSET` 之前；两组相同 `occurred_at` 的 after/non-after
+动作按逻辑 id 稳定翻页。缺 approve、重复 add_sign、actor/node 不一致各自 values-free fail closed，
+证明 helper 不猜配。非 after 历史的 byte-compat corpus 覆盖
 两读取链当前各自已返回的 metadata key/value，升级前后逐字段一致；route 不新增整块 metadata，
 bridge 合成器只能删除本功能新增的内部 round alias，不得把既有 metadata 收窄为 allowlist。
 下一节点的 `prior_node_approver` 继续只读取
@@ -1066,7 +1179,12 @@ latest epoch，延迟轮完成后不得把 origin round deciders 重新 union �
 **AS-G18 crash replay。** durable delivery ON 时，在事务提交后、adapter 前崩溃并重启：新轮 task
 仍被派发且 sink 幂等；不得因重放创建第二台账或第二 assignment。
 
-**AS-G19 滚动版本与回滚。** 阶段 A1 的 worker exact-set 中只要存在一个不支持 manifest `{1,2}`、
+**AS-G19a 核心滚动版本与回滚。** OD-AS-5(a) 下，任一 serving pod 未报告
+`approvalAfterSignProtocol='v1'` 时 writer 保持 OFF；全体兼容后才能开。开放轮存在时关闭 writer
+仍须继续排空，且不得回滚到无法读取 deferred round 的 SHA。(a) 的 remind 节点在 route/service
+双门均保持 unsupported。删除对应门时指定测试红。
+
+**AS-G19b durable transport 滚动版本与回滚（仅 OD-AS-5(b)）。** 阶段 A1 的 worker exact-set 中只要存在一个不支持 manifest `{1,2}`、
 未注册 reminder consumer 或未报告 `approvalAfterSignProtocol='v1'` 的 pod，producer 保持 v1，两个
 新 flag 均保持 OFF。A2 先证明 v1 row 可被新 worker 排空，再切 producer/current manifest v2；
 global durable/consumer 未 ready 或任何 enqueue 返回 null 时 reminder flag 仍不能开。全 worker
@@ -1096,9 +1214,10 @@ route-union completeness、claim-version filter、DB admission barrier、runtime
 - 不实现真正的 before-sign；
 - 不允许多个排队的 after-sign 轮；
 - 不改变 node-entry mixed fail-closed 不变量；
-- 不虚报修复 durable-reminder flag OFF 时普通节点既有的 notify-then-mark stale-scan ABA；该 legacy
-  路径只在 after-sign writer OFF 且开放轮为 0 时保留以满足 disabled byte-compat，通用修复须另立
-  SLA reminder transport 锁；
+- 不虚报修复普通节点既有的 notify-then-mark stale-scan ABA。OD-AS-5(a) 始终保留普通节点 legacy
+  reminder 并拒绝 remind 节点的 after-sign；OD-AS-5(b) 只在 after-sign writer OFF、开放轮为 0 且
+  durable-reminder OFF 时保留该腿。deferred round 不得走 direct notify-then-mark；通用普通节点修复
+  须另立 SLA reminder transport 锁；
 - 不把目标 IDs、评论、表单值写入错误、metrics 或通用日志；
 - 不开启 staging/production flag，不代替 owner UAT。
 
@@ -1121,9 +1240,12 @@ OD-AS-2 second after-sign while one round is open:
   (c) queue another round (multi-round scheduler expands)
 
 OD-AS-3 rollout:
-  (a) [RECOMMENDED] worker-first A1 (v1+v2 + consumer, both flags OFF), producer/transport A2,
+  (a) [RECOMMENDED with OD-AS-5(a)] after-sign-v1 worker/read compatibility first,
+      plus the remind-node rejection gate, then writer flag; exact serving-set,
+      staging UAT then production
+  (b) [with OD-AS-5(b)] worker-first A1 (v1+v2 + consumer, both flags OFF), producer/transport A2,
       then after-sign writer B; exact serving/worker-set gates, staging UAT then production
-  (b) unflagged release
+  (c) unflagged release
 
 OD-AS-4 parent aggregation wording:
   (a) [RECOMMENDED] this delta supersedes parent B-5/OD-L5-5 only for aggregation:
@@ -1131,27 +1253,37 @@ OD-AS-4 parent aggregation wording:
   (b) keep the parent before/after wording (claims a before runtime that does not exist)
 
 OD-AS-5 reminder delivery:
-  (a) [RECOMMENDED] dedicated default-OFF durable-reminder transport, manifest v2 worker-first,
+  (a) [RECOMMENDED] split the capability: ship deferred-round core only for no-timeout and
+      transfer/jump nodes; exact-tuple fence all reachable effects; reject new after requests on
+      remind nodes with APPROVAL_AFTER_SIGN_REMINDER_UNSUPPORTED; move durable reminder to a
+      separate SLA transport lock
+  (b) couple Lock-5B to a dedicated default-OFF durable-reminder transport, manifest v2 worker-first,
       one canonical-JSON/SHA-256 event id per required channel, exact-tuple CAS plus all channel intents
       in one transaction; external delivery key additionally binds the current live-assignee fingerprint;
       every live-set writer bumps target generation and a custom post-send resolver revalidates
       generation/fingerprint before terminal CAS;
       strict single-channel outcomes; worker-drainable/producer-enabled lifecycle; persistent crash-safe
       dead-letter alert control and fence-CAS owner replay/disposition; an open deferred round never falls back to direct notify
-  (b) direct notify after clearing deadline, explicitly accepting permanent loss on crash
+  (c) [REJECTED] exact-tuple precheck, direct channel notify, then terminal CAS. W1 can scan the
+      origin reminder, W2 can activate the deferred round and write its deadline, then W1's legacy
+      instance-only mark can clear the new deadline; terminal CAS cannot undo the send or the clear.
+      This shape is not ratifiable under this lock.
 
 OD-AS-6 rollback floor:
   (a) [RECOMMENDED] stop outer producer admission, then close the DB singleton gates under FOR UPDATE
       so all in-flight FOR SHARE producer transactions drain before the zero snapshot; no pod below
-      after-sign-v1/manifest-v2 while any pending/active round, pending/in_progress reminder row,
-      live lease, or undisposed dead-letter exists
+      after-sign-v1 while any pending/active round exists; under OD-AS-5(b), additionally no pod below
+      manifest-v2 while any pending/in_progress reminder row, live lease, or undisposed dead-letter exists
   (b) permit rollback with open rounds (old pods can coerce after to parallel or strand ledger rows)
 
 OD-AS-7 disabled reminder compatibility:
-  (a) [RECOMMENDED] while both new flags are OFF and open rounds are zero, preserve current reminder
-      behavior byte-for-byte; enable durable reminder transport before after-sign and track the ordinary-node
-      legacy stale-scan ABA as a separate SLA lock
-  (b) suppress all reminders while durable transport is OFF (safer scan semantics but a disabled-mode regression)
+  (a) [RECOMMENDED with OD-AS-5(a)] preserve current ordinary reminder behavior byte-for-byte and reject
+      after-sign on remind nodes; track durable reminder and ordinary-node stale-scan ABA in a separate SLA lock
+  (b) [with OD-AS-5(b)] while both new flags are OFF and open rounds are zero, preserve current reminder
+      behavior byte-for-byte; enable durable reminder transport before after-sign
+  (c) [REJECTED with OD-AS-5(c)] direct deferred-round notify-then-mark has an unbounded crash/concurrency
+      window and can clear a newly activated round's deadline
+  (d) suppress all reminders while durable transport is OFF (safer scan semantics but a disabled-mode regression)
 
 Recorded decision: NONE
 Runtime authorization: NONE until this block is ratified.
@@ -1160,7 +1292,8 @@ Runtime authorization: NONE until this block is ratified.
 ## 8. Review provenance
 
 - Codex：从 exact baseline 追踪 route → `dispatchAction` → assignment/epoch/tally/advance/cancel
-  各路径，并起草本文；
+  各路径，并起草本文；本轮又逐项核对真实锁序、best-effort metrics、history 双读取链、目标上限与
+  required CI 接线，明确当前 real-DB workflow 是 PostgreSQL 16，不能冒充本文要求的 PG15 证据；
 - Kimi K3：只读架构反例复核，独立确认“重刷 epoch”会重置 threshold 计数，“当前 epoch”会
   退化为并加签，延迟轮是完整语义的唯一结构方案；其建议的“先做单席位拒绝”未被本文采纳为
   最终产品替代物，只保留为 owner 选项；
@@ -1208,4 +1341,12 @@ Runtime authorization: NONE until this block is ratified.
   第九轮构造 parser 校验后、transaction provider 取得连接前修改原 token 的交错，证明 `Readonly`
   不能阻止运行时 TOCTOU；本文改为从 descriptor value 重建并冻结 canonical token，resolver 永不接触
   原对象，同时以 `node:util.types.isProxy()` 和 `Reflect.ownKeys()` 明确拒绝透明 Proxy 与 symbol extra-key。
+  第十轮对本修订做只读反例审阅，发现 OD-AS-5(c) 仍是 P1：W1 扫到 origin reminder 后，W2 可激活
+  deferred round 并写入新 deadline，W1 再以现有 instance-only mark 清掉该值；所谓 terminal CAS 尚未
+  发生，无法修复已发送消息或已清 deadline。本文据此把 (c) 从可选实现改为明确拒绝，并把激活 CTE
+  的 origin epoch 条件写成“不得存在不同 epoch 的 live assignment”，避免在 origin 席位已停用后
+  错把空集合当激活失败。移除 (c) 后，该轮未报告剩余 P1；最终复读又核对 §3.3/AS-G10 anti-set、
+  “两个可 ratify 方案”迁移口径及 FE required 的真实 Vitest token 接线，终判 0 P1/0 P2、无设计阻塞；
+- Kimi K3 本轮另有四个只读事实盘点子任务完成，作为调用点、CI 与数据模型证据使用；汇总代理因会话
+  停滞被终止，未产出独立终判，本文不把子报告虚报为聚合 APPROVE。
   运行时代码仍未授权。
