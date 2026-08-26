@@ -148,7 +148,10 @@ function makeApp(
           revision: 2,
           questionType: 'single_choice' as const,
           prompt: QUESTION.prompt,
-          options: QUESTION.options,
+          options: [
+            Object.assign({}, QUESTION.options[0], { internalRubric: ACTOR }),
+            QUESTION.options[1],
+          ],
           correctOptionIds: QUESTION.correctOptionIds,
           points: QUESTION.points,
           explanation: QUESTION.explanation,
@@ -335,7 +338,7 @@ describe('e-learning assessment admin routes', () => {
       pageSize: 10,
     }])
     expect(JSON.stringify([banks.body, questions.body])).not.toMatch(
-      /internalOwner|internalAudit|paperSnapshot|answerKey/,
+      /internalOwner|internalAudit|internalRubric|paperSnapshot|answerKey/,
     )
   })
 
@@ -347,10 +350,24 @@ describe('e-learning assessment admin routes', () => {
     expect(unauthenticatedResponse.body).toEqual({ error: 'unauthenticated' })
     expect(unauthenticated.bankListCalls).toEqual([])
 
+    const forbidden = makeApp({ hasAdmin: false })
+    for (const path of [
+      '/api/elearning/assessment/question-banks',
+      `/api/elearning/assessment/question-banks/${BANK_ID}/questions`,
+    ]) {
+      const response = await serve(forbidden.app).get(path)
+      expect(response.status).toBe(403)
+      expect(response.body).toEqual({ error: 'Insufficient permissions' })
+    }
+    expect(forbidden.adminCalls).toBe(2)
+    expect(forbidden.bankListCalls).toEqual([])
+    expect(forbidden.questionListCalls).toEqual([])
+
     const testApp = makeApp()
     for (const path of [
       '/api/elearning/assessment/question-banks?page=0',
       '/api/elearning/assessment/question-banks?page=01',
+      '/api/elearning/assessment/question-banks?page=1000001',
       '/api/elearning/assessment/question-banks?pageSize=101',
       '/api/elearning/assessment/question-banks?page=1&page=2',
       '/api/elearning/assessment/question-banks?unknown=value',

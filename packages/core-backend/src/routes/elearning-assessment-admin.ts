@@ -26,6 +26,7 @@ import {
 } from '../services/elearning-paper-exam'
 import {
   ELEARNING_ASSESSMENT_PAGE_DEFAULT,
+  ELEARNING_ASSESSMENT_PAGE_MAX,
   ELEARNING_ASSESSMENT_PAGE_SIZE_DEFAULT,
   ELEARNING_ASSESSMENT_PAGE_SIZE_MAX,
   listElearningBankQuestions,
@@ -160,7 +161,7 @@ function paginationParams(req: Request): { page: number; pageSize: number } | nu
   const page = positiveQueryInt(
     query.page,
     ELEARNING_ASSESSMENT_PAGE_DEFAULT,
-    1_000_000,
+    ELEARNING_ASSESSMENT_PAGE_MAX,
   )
   const pageSize = positiveQueryInt(
     query.pageSize,
@@ -352,7 +353,10 @@ export function createElearningAssessmentAdminRouter(
             revision: item.revision,
             questionType: item.questionType,
             prompt: item.prompt,
-            options: item.options.map((option) => ({ ...option })),
+            options: item.options.map((option) => ({
+              id: option.id,
+              text: option.text,
+            })),
             correctOptionIds: [...item.correctOptionIds],
             points: item.points,
             explanation: item.explanation,

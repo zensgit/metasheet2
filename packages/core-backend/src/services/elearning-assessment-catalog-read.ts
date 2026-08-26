@@ -9,10 +9,10 @@ import {
 } from './elearning-exam-domain'
 
 export const ELEARNING_ASSESSMENT_PAGE_DEFAULT = 1
+export const ELEARNING_ASSESSMENT_PAGE_MAX = 1_000_000
 export const ELEARNING_ASSESSMENT_PAGE_SIZE_DEFAULT = 50
 export const ELEARNING_ASSESSMENT_PAGE_SIZE_MAX = 100
 
-const PAGE_MAX = 1_000_000
 const PG_INT32_MAX = 2_147_483_647
 const LIST_BANK_KEYS = ['orgId', 'page', 'pageSize'] as const
 const LIST_QUESTION_KEYS = ['orgId', 'bankId', 'page', 'pageSize'] as const
@@ -105,7 +105,11 @@ function requireUuid(value: unknown): string {
 }
 
 function requirePage(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > PAGE_MAX) {
+  if (
+    !Number.isSafeInteger(value)
+    || (value as number) < 1
+    || (value as number) > ELEARNING_ASSESSMENT_PAGE_MAX
+  ) {
     fail('invalid_input')
   }
   return value as number
@@ -198,7 +202,10 @@ function latestQuestion(row: Record<string, unknown>): ElearningQuestionLatestRe
     revision: asSafeInt(row.revision),
     questionType: validated.questionType,
     prompt: validated.prompt,
-    options: validated.options.map((option) => ({ ...option })),
+    options: validated.options.map((option) => ({
+      id: option.id,
+      text: option.text,
+    })),
     correctOptionIds: [...validated.answerKey.correct],
     points: validated.points,
     explanation: validated.explanation,
