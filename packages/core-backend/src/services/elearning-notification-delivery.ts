@@ -12,9 +12,13 @@ export const ELEARNING_NOTIFICATION_REQUEST_DOMAIN =
   'elearning.notification.delivery.request.v1' as const
 export const ELEARNING_NOTIFICATION_REQUEST_HASH_VERSION = 1 as const
 export const ELEARNING_NOTIFICATION_PAYLOAD_MAX_BYTES = 16 * 1024
+export const ELEARNING_NOTIFICATION_LOCK_NAMESPACE =
+  'elearning-notification-delivery' as const
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const CANONICAL_UTC_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 export type ElearningNotificationDeliveryErrorCode =
   | 'invalid_input'
@@ -73,10 +77,27 @@ function fail(code: ElearningNotificationDeliveryErrorCode): never {
   throw new ElearningNotificationDeliveryError(code)
 }
 
+function assertSupportedText(value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code === 0) fail('invalid_input')
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1)
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) {
+        fail('invalid_input')
+      }
+      index += 1
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      fail('invalid_input')
+    }
+  }
+}
+
 function requireText(value: unknown, max = 512): string {
   if (typeof value !== 'string') fail('invalid_input')
   const trimmed = value.trim()
   if (trimmed === '' || trimmed.length > max) fail('invalid_input')
+  assertSupportedText(trimmed)
   return trimmed
 }
 
@@ -86,18 +107,35 @@ function requireUuid(value: unknown): string {
 }
 
 function normalizeTimestamp(value: unknown): string {
-  const date = value instanceof Date
-    ? value
-    : typeof value === 'string' && value.trim() !== ''
-      ? new Date(value.trim())
-      : null
-  if (!date || Number.isNaN(date.getTime())) fail('invalid_input')
-  return date.toISOString()
+  if (
+    !(value instanceof Date)
+    && (typeof value !== 'string' || !CANONICAL_UTC_TIMESTAMP_RE.test(value))
+  ) {
+    fail('invalid_input')
+  }
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) fail('invalid_input')
+  const normalized = date.toISOString()
+  if (
+    !CANONICAL_UTC_TIMESTAMP_RE.test(normalized)
+    || (typeof value === 'string' && value !== normalized)
+  ) {
+    fail('invalid_input')
+  }
+  return normalized
+}
+
+function compareCanonicalKeys(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
 }
 
 function normalizeJson(value: unknown, depth = 0): unknown {
   if (depth > 16) fail('invalid_input')
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
+  if (value === null || typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'string') {
+    assertSupportedText(value)
     return value
   }
   if (typeof value === 'number') {
@@ -106,18 +144,44 @@ function normalizeJson(value: unknown, depth = 0): unknown {
   }
   if (Array.isArray(value)) {
     if (value.length > 1_000) fail('invalid_input')
-    return value.map((item) => normalizeJson(item, depth + 1))
+    return Array.from({ length: value.length }, (_, index) => {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) fail('invalid_input')
+      return normalizeJson(value[index], depth + 1)
+    })
   }
   if (!value || typeof value !== 'object') fail('invalid_input')
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) fail('invalid_input')
   const entries = Object.entries(value as Record<string, unknown>)
   if (entries.length > 256) fail('invalid_input')
+  for (const [key] of entries) assertSupportedText(key)
   return Object.fromEntries(
     entries
-      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+      .sort(([left], [right]) => compareCanonicalKeys(left, right))
       .map(([key, candidate]) => [key, normalizeJson(candidate, depth + 1)]),
   )
+}
+
+function serializeCanonicalJson(value: unknown): string {
+  if (value === null || typeof value === 'boolean') return JSON.stringify(value)
+  if (typeof value === 'string') {
+    assertSupportedText(value)
+    return JSON.stringify(value)
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail('invalid_input')
+    return JSON.stringify(value)
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => serializeCanonicalJson(item)).join(',')}]`
+  }
+  if (!value || typeof value !== 'object') fail('invalid_input')
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([left], [right]) => compareCanonicalKeys(left, right))
+  return `{${entries.map(([key, candidate]) => {
+    assertSupportedText(key)
+    return `${JSON.stringify(key)}:${serializeCanonicalJson(candidate)}`
+  }).join(',')}}`
 }
 
 export function normalizeElearningNotificationPayload(
@@ -140,17 +204,17 @@ export function canonicalizeElearningNotificationRequest(input: {
   payload: Record<string, unknown>
   recipientUserId: string
 }): string {
-  return JSON.stringify(normalizeJson({
+  return serializeCanonicalJson({
     assignmentMemberId: input.assignmentMemberId,
     channel: 'platform',
     domain: ELEARNING_NOTIFICATION_REQUEST_DOMAIN,
     dueAt: input.dueAt,
     kind: 'assignment_reminder',
-    payload: input.payload,
+    payload: normalizeJson(input.payload),
     recipientRole: 'learner',
     recipientUserId: input.recipientUserId,
     version: ELEARNING_NOTIFICATION_REQUEST_HASH_VERSION,
-  }))
+  })
 }
 
 export function hashElearningNotificationRequest(input: {
@@ -168,7 +232,7 @@ export function elearningNotificationDeliveryLockKey(
   orgId: string,
   sourceKey: string,
 ): string {
-  return `elearning-notification-delivery:${orgId}:${sourceKey}`
+  return JSON.stringify([orgId, sourceKey])
 }
 
 function storedText(value: unknown): string | null {
@@ -224,8 +288,11 @@ export async function enqueueElearningNotificationDelivery(
     return await db.transaction(async (tx) => {
       await tx.query(
         `/* elearning-notification-delivery:lock */
-         SELECT pg_advisory_xact_lock(hashtext($1))`,
-        [elearningNotificationDeliveryLockKey(orgId, sourceKey)],
+         SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+        [
+          ELEARNING_NOTIFICATION_LOCK_NAMESPACE,
+          elearningNotificationDeliveryLockKey(orgId, sourceKey),
+        ],
       )
 
       const existing = await tx.query(

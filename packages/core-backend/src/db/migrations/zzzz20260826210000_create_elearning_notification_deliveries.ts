@@ -23,6 +23,8 @@ export const ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_FN =
   'elearning_notification_deliveries_identity_guard'
 export const ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_TRIGGER =
   'trg_elearning_notification_deliveries_identity_guard'
+export const ELEARNING_NOTIFICATION_DELIVERIES_TRUNCATE_TRIGGER =
+  'trg_elearning_notification_deliveries_truncate_guard'
 
 export const ELEARNING_NOTIFICATION_DELIVERY_STATUSES = [
   'pending',
@@ -151,8 +153,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     LANGUAGE plpgsql
     AS $$
     BEGIN
-      IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'elearning_notification_deliveries DELETE is not permitted';
+      IF TG_OP IN ('DELETE', 'TRUNCATE') THEN
+        RAISE EXCEPTION 'elearning_notification_deliveries destructive operation is not permitted';
       END IF;
 
       IF NEW.id IS DISTINCT FROM OLD.id
@@ -182,9 +184,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       FOR EACH ROW
       EXECUTE FUNCTION elearning_notification_deliveries_identity_guard()
   `.execute(db)
+
+  await sql`
+    CREATE TRIGGER trg_elearning_notification_deliveries_truncate_guard
+      BEFORE TRUNCATE ON elearning_notification_deliveries
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION elearning_notification_deliveries_identity_guard()
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`
+    DROP TRIGGER IF EXISTS trg_elearning_notification_deliveries_truncate_guard
+      ON elearning_notification_deliveries
+  `.execute(db)
   await sql`
     DROP TRIGGER IF EXISTS trg_elearning_notification_deliveries_identity_guard
       ON elearning_notification_deliveries

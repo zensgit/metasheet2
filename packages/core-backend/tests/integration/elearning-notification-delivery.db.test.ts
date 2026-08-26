@@ -19,6 +19,7 @@ import {
   ELEARNING_NOTIFICATION_DELIVERIES_MEMBER_INDEX,
   ELEARNING_NOTIFICATION_DELIVERIES_ORG_SOURCE_UNIQ,
   ELEARNING_NOTIFICATION_DELIVERIES_TABLE,
+  ELEARNING_NOTIFICATION_DELIVERIES_TRUNCATE_TRIGGER,
 } from '../../src/db/migrations/zzzz20260826210000_create_elearning_notification_deliveries'
 import {
   ElearningNotificationDeliveryError,
@@ -329,19 +330,29 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
     expect(indexByName.get(ELEARNING_NOTIFICATION_DELIVERIES_MEMBER_INDEX))
       .toContain('(org_id, assignment_member_id, created_at)')
 
-    const trigger = await pool.query<{ fn: string; name: string }>(
+    const triggers = await pool.query<{ fn: string; name: string }>(
       `SELECT trigger_info.tgname AS name, function_info.proname AS fn
          FROM pg_trigger trigger_info
          JOIN pg_proc function_info ON function_info.oid = trigger_info.tgfoid
         WHERE trigger_info.tgrelid = $1::regclass
           AND NOT trigger_info.tgisinternal
-          AND trigger_info.tgname = $2`,
-      [ELEARNING_NOTIFICATION_DELIVERIES_TABLE, ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_TRIGGER],
+          AND trigger_info.tgname = ANY($2::text[])
+        ORDER BY trigger_info.tgname`,
+      [ELEARNING_NOTIFICATION_DELIVERIES_TABLE, [
+        ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_TRIGGER,
+        ELEARNING_NOTIFICATION_DELIVERIES_TRUNCATE_TRIGGER,
+      ]],
     )
-    expect(trigger.rows).toEqual([{
-      name: ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_TRIGGER,
-      fn: ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_FN,
-    }])
+    expect(triggers.rows).toEqual([
+      {
+        name: ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_TRIGGER,
+        fn: ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_FN,
+      },
+      {
+        name: ELEARNING_NOTIFICATION_DELIVERIES_TRUNCATE_TRIGGER,
+        fn: ELEARNING_NOTIFICATION_DELIVERIES_IDENTITY_FN,
+      },
+    ])
 
     const missingOrg = await expectPgError(
       () => pool.query(
@@ -509,5 +520,17 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       { org_id: orgA, count: 1 },
       { org_id: orgB, count: 1 },
     ])
+
+    const truncateClient = await pool.connect()
+    try {
+      await truncateClient.query('BEGIN')
+      await expectPgError(
+        () => truncateClient.query(`TRUNCATE ${ELEARNING_NOTIFICATION_DELIVERIES_TABLE}`),
+        'P0001',
+      )
+    } finally {
+      await truncateClient.query('ROLLBACK')
+      truncateClient.release()
+    }
   })
 })

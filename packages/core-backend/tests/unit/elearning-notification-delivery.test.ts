@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  ELEARNING_NOTIFICATION_LOCK_NAMESPACE,
   canonicalizeElearningNotificationRequest,
   elearningNotificationDeliveryLockKey,
   enqueueElearningNotificationDelivery,
@@ -77,6 +78,24 @@ describe('e-learning notification delivery intent', () => {
       payload: { 'é': 4, z: 2, 'ä': 3, A: 1 },
     })
     expect(unicodeKeys).toContain('"payload":{"A":1,"z":2,"ä":3,"é":4}')
+    const integerLikeKeys = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { 2: 'two', 10: 'ten', A: 'letter' },
+    })
+    expect(integerLikeKeys)
+      .toContain('"payload":{"10":"ten","2":"two","A":"letter"}')
+    let deepestPayload: Record<string, unknown> = { leaf: true }
+    for (let depth = 0; depth < 15; depth += 1) {
+      deepestPayload = { nested: deepestPayload }
+    }
+    expect(() => canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: deepestPayload,
+    })).not.toThrow()
     const baselineHash = hashElearningNotificationRequest({
       assignmentMemberId: MEMBER,
       recipientUserId: USER,
@@ -131,6 +150,7 @@ describe('e-learning notification delivery intent', () => {
       'elearning-notification-delivery:insert',
     ])
     expect(db.calls[0]?.params).toEqual([
+      ELEARNING_NOTIFICATION_LOCK_NAMESPACE,
       elearningNotificationDeliveryLockKey(ORG, input().sourceKey),
     ])
   })
@@ -259,6 +279,32 @@ describe('e-learning notification delivery intent', () => {
       expect(caught).toMatchObject({ code: 'not_eligible' })
       expect(`${(caught as Error).message}\n${(caught as Error).stack ?? ''}`)
         .not.toContain(ORG)
+    }
+  })
+
+  it('rejects non-canonical UTC timestamps and PostgreSQL-incompatible text', async () => {
+    const sparse = new Array(2)
+    sparse[1] = 'present'
+    const invalid = [
+      { ...input(), dueAt: '2026-08-27T01:00:00' },
+      { ...input(), dueAt: '2026-08-27T09:00:00.000+08:00' },
+      { ...input(), dueAt: '2026-02-30T01:00:00.000Z' },
+      { ...input(), sourceKey: `source\u0000key` },
+      { ...input(), payload: { message: `value\u0000body` } },
+      { ...input(), payload: { [`key\u0000name`]: true } },
+      { ...input(), payload: { message: '\ud800' } },
+      { ...input(), payload: { sparse } },
+    ]
+    for (const request of invalid) {
+      let transactions = 0
+      const db = new ScriptDb(() => result())
+      db.transaction = async () => {
+        transactions += 1
+        throw new Error('transaction must not start')
+      }
+      await expect(enqueueElearningNotificationDelivery(db, request))
+        .rejects.toMatchObject({ code: 'invalid_input' })
+      expect(transactions).toBe(0)
     }
   })
 
