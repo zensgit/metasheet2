@@ -22,8 +22,9 @@ const BASE = `${PREFIX}_base`
 const SHEET = `${PREFIX}_sheet`
 const CHECKPOINT = `${PREFIX}_checkpoint`
 const OWNER = `${PREFIX}_builder`
-const CLEANER = `${PREFIX}_cleanup`
+const CLEANER = 'archive_cleanup'
 const CLEANER_ID = `${PREFIX}_cleanup_owner`
+const ATTACKER_ID = `${PREFIX}_attacker`
 const KEY_ID = `${PREFIX}_key`
 const ANCHOR_OPERATION = randomUUID()
 const ANCHOR_SEQ = '9007199254746993'
@@ -182,6 +183,7 @@ async function claimCleanup(
   overrides: Partial<{
     expectedOwnerId: string
     expectedFence: string
+    newOwnerKind: string
     newOwnerId: string
     leaseExpiresAt: string
   }> = {},
@@ -195,7 +197,7 @@ async function claimCleanup(
       generationId,
       overrides.expectedOwnerId ?? OWNER,
       overrides.expectedFence ?? '1',
-      CLEANER,
+      overrides.newOwnerKind ?? CLEANER,
       overrides.newOwnerId ?? CLEANER_ID,
       overrides.leaseExpiresAt ?? FUTURE_LEASE,
     ],
@@ -353,6 +355,13 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     )
     expect(staleFenceRefusal.message).toBe('recovery_archive_abandoned_cleanup_claim_refused')
 
+    const wrongOwnerKindRefusal = await errorOf(
+      claimCleanup(expired, { newOwnerKind: 'archive_builder' }),
+    )
+    expect(wrongOwnerKindRefusal.message).toBe(
+      'recovery_archive_abandoned_cleanup_claim_shape_invalid',
+    )
+
     expect(await claimCleanup(expired)).toBe('2')
     const claimed = await q(
       `SELECT owner_kind, owner_id, owner_fence::text, lease_expires_at > clock_timestamp() AS live
@@ -366,6 +375,86 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
 
     const replayRefusal = await errorOf(claimCleanup(expired))
     expect(replayRefusal.message).toBe('recovery_archive_abandoned_cleanup_claim_refused')
+  })
+
+  test('an active live builder cannot be re-owned while entering abandoned cleanup posture', async () => {
+    const generationId = await insertArchive(FUTURE_LEASE)
+    const attachmentId = `${PREFIX}_attachment_live_builder`
+    await insertSourcePin(generationId, attachmentId)
+    const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
+
+    const refusal = await errorOf(
+      q(
+        `UPDATE meta_recovery_archives
+            SET build_status='abandoned',
+                owner_kind='archive_cleanup',
+                owner_id=$2,
+                owner_fence=77,
+                lease_expires_at=$3::timestamptz
+          WHERE generation_id=$1::uuid`,
+        [generationId, ATTACKER_ID, FUTURE_LEASE],
+      ),
+    )
+    expect(refusal.message).toBe('recovery_archive_active_owner_mutation_invalid')
+    expectValuesFree(refusal, [generationId, ATTACKER_ID])
+
+    const posture = await q(
+      `SELECT archive.build_status,
+              archive.owner_kind,
+              archive.owner_id,
+              archive.owner_fence::text,
+              attachment_ref.reference_state,
+              staging_object.object_state
+         FROM meta_recovery_archives archive
+         JOIN meta_recovery_archive_attachment_refs attachment_ref
+           ON attachment_ref.generation_id=archive.generation_id
+          AND attachment_ref.attachment_id=$2
+          AND attachment_ref.reference_class='source'
+         JOIN meta_recovery_archive_staging_objects staging_object
+           ON staging_object.generation_id=archive.generation_id
+          AND staging_object.staging_object_id=$3::uuid
+        WHERE archive.generation_id=$1::uuid`,
+      [generationId, attachmentId, stagingObjectId],
+    )
+    expect(posture.rows).toEqual([
+      {
+        build_status: 'active',
+        owner_kind: 'archive_builder',
+        owner_id: OWNER,
+        owner_fence: '1',
+        reference_state: 'building',
+        object_state: 'pending',
+      },
+    ])
+  })
+
+  test('an abandoning builder cannot emit cleanup receipts before an expired-lease cleanup claim', async () => {
+    const generationId = await insertArchive(FUTURE_LEASE)
+    const attachmentId = `${PREFIX}_attachment_claim_required`
+    const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
+    await abandon(generationId)
+
+    const refusal = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_staging_objects
+            SET object_state='absent',
+                terminal_receipt_sha256=$3,
+                cleanup_owner_kind='archive_builder',
+                cleanup_owner_id=$4,
+                cleanup_owner_fence=1
+          WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid`,
+        [generationId, stagingObjectId, RECEIPT_HASH, OWNER],
+      ),
+    )
+    expect(refusal.message).toBe('recovery_archive_staging_cleanup_owner_invalid')
+
+    const retained = await q(
+      `SELECT object_state, cleanup_owner_kind
+         FROM meta_recovery_archive_staging_objects
+        WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid`,
+      [generationId, stagingObjectId],
+    )
+    expect(retained.rows).toEqual([{ object_state: 'pending', cleanup_owner_kind: null }])
   })
 
   test('staging terminal receipts require the current cleanup owner and a legal transition', async () => {
@@ -682,5 +771,56 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     expect(binding.rows).toEqual([
       { proname: 'meta_recovery_archive_attachment_ref_cleanup_guard_row' },
     ])
+  })
+
+  test('up fails loud when the load-bearing D2a archive guard source drifts', async () => {
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await stagingCleanupMigration.down(trx)
+        await sql`
+          CREATE OR REPLACE FUNCTION public.meta_recovery_archives_guard_row()
+          RETURNS trigger
+          LANGUAGE plpgsql
+          SET search_path = pg_catalog, public
+          AS $$
+          BEGIN
+            RETURN NEW;
+          END $$
+        `.execute(trx)
+        await stagingCleanupMigration.up(trx)
+        throw new Error('recovery_archive_archive_guard_fingerprint_missing')
+      }),
+    )
+    expect(refusal.message).toBe('recovery_archive_staging_cleanup_source_mismatch')
+  })
+
+  test('up fails loud when the D2a attachment finalize trigger is missing', async () => {
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await stagingCleanupMigration.down(trx)
+        await sql`
+          DROP TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row
+            ON public.meta_recovery_archive_attachment_refs
+        `.execute(trx)
+        await stagingCleanupMigration.up(trx)
+        throw new Error('recovery_archive_attachment_finalize_trigger_guard_missing')
+      }),
+    )
+    expect(refusal.message).toBe('recovery_archive_staging_cleanup_source_mismatch')
+  })
+
+  test('up fails loud when a load-bearing D2a posture constraint drifts', async () => {
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await stagingCleanupMigration.down(trx)
+        await sql`
+          ALTER TABLE public.meta_recovery_archives
+            DROP CONSTRAINT chk_meta_recovery_archives_posture
+        `.execute(trx)
+        await stagingCleanupMigration.up(trx)
+        throw new Error('recovery_archive_posture_constraint_guard_missing')
+      }),
+    )
+    expect(refusal.message).toBe('recovery_archive_staging_cleanup_source_mismatch')
   })
 })

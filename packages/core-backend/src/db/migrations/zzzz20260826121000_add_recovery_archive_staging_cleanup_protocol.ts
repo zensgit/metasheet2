@@ -65,10 +65,42 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
       source_mismatch_count := source_mismatch_count + (
         SELECT CASE WHEN count(*) = 1 THEN 0 ELSE 1 END
+          FROM pg_catalog.pg_proc procedure_row
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND procedure_row.proname = 'meta_recovery_archives_guard_row'
+           AND pg_catalog.pg_get_function_identity_arguments(procedure_row.oid) = ''
+           AND procedure_row.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+           AND procedure_row.provolatile = 'v'
+           AND NOT procedure_row.prosecdef
+           AND procedure_row.prokind = 'f'
+           AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+           AND pg_catalog.md5(procedure_row.prosrc) = '3700d86df374ad924cc4b6af265d146a'
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT CASE WHEN count(*) = 1 THEN 0 ELSE 1 END
+          FROM pg_catalog.pg_proc procedure_row
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND procedure_row.proname = 'meta_recovery_archive_attachment_finalize_guard_row'
+           AND pg_catalog.pg_get_function_identity_arguments(procedure_row.oid) = ''
+           AND procedure_row.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+           AND procedure_row.provolatile = 'v'
+           AND NOT procedure_row.prosecdef
+           AND procedure_row.prokind = 'f'
+           AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+           AND pg_catalog.md5(procedure_row.prosrc) = '1747a637897551279c17cdf48e25d981'
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT CASE WHEN count(*) = 1 THEN 0 ELSE 1 END
           FROM pg_catalog.pg_trigger trigger_row
           JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
           JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
           JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
+          JOIN pg_catalog.pg_namespace procedure_namespace
+            ON procedure_namespace.oid = procedure_row.pronamespace
          WHERE namespace.nspname = 'public'
            AND relation.relname = 'meta_recovery_archive_attachment_refs'
            AND trigger_row.tgname = 'trg_meta_recovery_archive_attachment_ref_guard_row'
@@ -78,7 +110,95 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND trigger_row.tgconstraint = 0
            AND NOT trigger_row.tgdeferrable
            AND NOT trigger_row.tginitdeferred
+           AND procedure_namespace.nspname = 'public'
            AND procedure_row.proname = 'meta_recovery_archive_attachment_ref_guard_row'
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT CASE WHEN count(*) = 1 THEN 0 ELSE 1 END
+          FROM pg_catalog.pg_trigger trigger_row
+          JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
+          JOIN pg_catalog.pg_namespace procedure_namespace
+            ON procedure_namespace.oid = procedure_row.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND relation.relname = 'meta_recovery_archives'
+           AND trigger_row.tgname = 'trg_meta_recovery_archives_guard_row'
+           AND trigger_row.tgtype = 31
+           AND trigger_row.tgenabled = 'O'
+           AND NOT trigger_row.tgisinternal
+           AND trigger_row.tgconstraint = 0
+           AND NOT trigger_row.tgdeferrable
+           AND NOT trigger_row.tginitdeferred
+           AND procedure_namespace.nspname = 'public'
+           AND procedure_row.proname = 'meta_recovery_archives_guard_row'
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT CASE WHEN count(*) = 1 THEN 0 ELSE 1 END
+          FROM pg_catalog.pg_trigger trigger_row
+          JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+          JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
+          JOIN pg_catalog.pg_namespace procedure_namespace
+            ON procedure_namespace.oid = procedure_row.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND relation.relname = 'meta_recovery_archive_attachment_refs'
+           AND trigger_row.tgname = 'trg_meta_recovery_archive_attachment_finalize_guard_row'
+           AND trigger_row.tgtype = 21
+           AND trigger_row.tgenabled = 'O'
+           AND NOT trigger_row.tgisinternal
+           AND trigger_row.tgconstraint <> 0
+           AND trigger_row.tgdeferrable
+           AND trigger_row.tginitdeferred
+           AND procedure_namespace.nspname = 'public'
+           AND procedure_row.proname = 'meta_recovery_archive_attachment_finalize_guard_row'
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT CASE
+          WHEN count(*) = 11 AND pg_catalog.md5(
+            string_agg(
+              constraint_row.conname || '=' ||
+              pg_catalog.pg_get_constraintdef(constraint_row.oid, true),
+              E'\n' ORDER BY constraint_row.conname
+            )
+          ) = '64addbb06614522b2ea5521c52a570bf' THEN 0
+          ELSE 1
+        END
+          FROM pg_catalog.pg_constraint constraint_row
+          JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+          JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+         WHERE namespace.nspname = 'public'
+           AND (
+             (
+               relation.relname = 'meta_recovery_archives' AND
+               constraint_row.conname IN (
+                 'chk_meta_recovery_archives_posture',
+                 'chk_meta_recovery_archives_state',
+                 'chk_meta_recovery_archives_build_status',
+                 'chk_meta_recovery_archives_coverage_status',
+                 'chk_meta_recovery_archives_owner_kind',
+                 'chk_meta_recovery_archives_owner_id',
+                 'chk_meta_recovery_archives_owner_fence'
+               )
+             ) OR (
+               relation.relname = 'meta_recovery_archive_attachment_refs' AND
+               constraint_row.conname IN (
+                 'pk_meta_recovery_archive_attachment_refs',
+                 'fk_meta_recovery_archive_attachment_generation',
+                 'chk_meta_recovery_archive_attachment_reference_pair',
+                 'chk_meta_recovery_archive_attachment_verified_shape'
+               )
+             )
+           )
+      );
+
+      source_mismatch_count := source_mismatch_count + (
+        SELECT count(*)::integer
+          FROM public.meta_recovery_archives archive
+         WHERE archive.owner_kind = 'archive_cleanup'
       );
 
       IF source_mismatch_count <> 0 THEN
@@ -160,8 +280,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           cleanup_owner_id IS NULL AND
           cleanup_owner_fence IS NULL
         ) OR (
-          cleanup_owner_kind IS NOT NULL AND
-          length(btrim(cleanup_owner_kind)) > 0 AND
+          cleanup_owner_kind = 'archive_cleanup' AND
           cleanup_owner_id IS NOT NULL AND
           length(btrim(cleanup_owner_id)) > 0 AND
           cleanup_owner_fence IS NOT NULL AND
@@ -216,8 +335,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           object_state IN ('deleted', 'absent') AND
           terminal_receipt_sha256 IS NOT NULL AND
           terminal_receipt_sha256 ~ '^[0-9a-f]{64}$' AND
-          cleanup_owner_kind IS NOT NULL AND
-          length(btrim(cleanup_owner_kind)) > 0 AND
+          cleanup_owner_kind = 'archive_cleanup' AND
           cleanup_owner_id IS NOT NULL AND
           length(btrim(cleanup_owner_id)) > 0 AND
           cleanup_owner_fence IS NOT NULL AND
@@ -241,25 +359,72 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     SET search_path = pg_catalog, public
     AS $$
     BEGIN
-      IF OLD.build_status = 'abandoned' AND (
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.owner_kind = 'archive_cleanup' THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_cleanup_owner_reserved';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF OLD.build_status = 'active' THEN
+        IF NEW.owner_kind IS DISTINCT FROM OLD.owner_kind
+           OR NEW.owner_id IS DISTINCT FROM OLD.owner_id
+           OR NEW.owner_fence IS DISTINCT FROM OLD.owner_fence
+           OR (
+             NEW.build_status = 'abandoned' AND
+             NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
+           )
+           OR (
+             NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at AND (
+               NEW.build_status <> 'active' OR
+               OLD.lease_expires_at <= clock_timestamp() OR
+               NEW.lease_expires_at <= OLD.lease_expires_at
+             )
+           ) THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_active_owner_mutation_invalid';
+        END IF;
+      ELSIF OLD.build_status = 'abandoned' AND (
         NEW.owner_kind IS DISTINCT FROM OLD.owner_kind OR
         NEW.owner_id IS DISTINCT FROM OLD.owner_id OR
         NEW.owner_fence IS DISTINCT FROM OLD.owner_fence OR
         NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
       ) THEN
-        IF OLD.state <> 'building'
-           OR OLD.coverage_status <> 'incomplete'
-           OR OLD.lease_expires_at > clock_timestamp()
-           OR NEW.owner_kind IS NULL
-           OR length(btrim(NEW.owner_kind)) = 0
-           OR NEW.owner_id IS NULL
-           OR length(btrim(NEW.owner_id)) = 0
-           OR NEW.owner_fence <> OLD.owner_fence + 1
-           OR NEW.lease_expires_at <= clock_timestamp() THEN
+        IF NOT (
+          (
+            OLD.owner_kind = 'archive_cleanup' AND
+            NEW.owner_kind = OLD.owner_kind AND
+            NEW.owner_id = OLD.owner_id AND
+            NEW.owner_fence = OLD.owner_fence AND
+            OLD.lease_expires_at > clock_timestamp() AND
+            NEW.lease_expires_at > OLD.lease_expires_at
+          ) OR (
+            OLD.state = 'building' AND
+            OLD.coverage_status = 'incomplete' AND
+            OLD.lease_expires_at <= clock_timestamp() AND
+            NEW.owner_kind = 'archive_cleanup' AND
+            NEW.owner_id IS NOT NULL AND
+            length(btrim(NEW.owner_id)) > 0 AND
+            NEW.owner_fence = OLD.owner_fence + 1 AND
+            NEW.lease_expires_at > clock_timestamp()
+          )
+        ) THEN
           RAISE EXCEPTION USING
             ERRCODE = '55000',
             MESSAGE = 'recovery_archive_abandoned_cleanup_claim_invalid';
         END IF;
+      ELSIF OLD.build_status = 'finalized' AND (
+        NEW.owner_kind IS DISTINCT FROM OLD.owner_kind OR
+        NEW.owner_id IS DISTINCT FROM OLD.owner_id OR
+        NEW.owner_fence IS DISTINCT FROM OLD.owner_fence OR
+        NEW.lease_expires_at IS DISTINCT FROM OLD.lease_expires_at
+      ) THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_finalized_owner_immutable';
       END IF;
 
       RETURN NEW;
@@ -291,7 +456,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          OR expected_owner_fence IS NULL
          OR expected_owner_fence < 1
          OR new_owner_kind IS NULL
-         OR length(btrim(new_owner_kind)) = 0
+         OR new_owner_kind <> 'archive_cleanup'
          OR new_owner_id IS NULL
          OR length(btrim(new_owner_id)) = 0
          OR new_lease_expires_at IS NULL
@@ -302,7 +467,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       UPDATE public.meta_recovery_archives archive
-         SET owner_kind = new_owner_kind,
+         SET owner_kind = 'archive_cleanup',
              owner_id = new_owner_id,
              owner_fence = archive.owner_fence + 1,
              lease_expires_at = new_lease_expires_at
@@ -463,6 +628,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         IF parent_state <> 'building'
            OR parent_build_status <> 'abandoned'
            OR parent_coverage_status <> 'incomplete'
+           OR parent_owner_kind <> 'archive_cleanup'
            OR NOT (
              (OLD.object_state = 'pending' AND NEW.object_state = 'absent') OR
              (OLD.object_state = 'sealed' AND NEW.object_state IN ('deleted', 'absent'))
@@ -506,6 +672,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          AND archive.state = 'building'
          AND archive.build_status = 'abandoned'
          AND archive.coverage_status = 'incomplete'
+         AND archive.owner_kind = 'archive_cleanup'
          AND archive.owner_kind = NEW.cleanup_owner_kind
          AND archive.owner_id = NEW.cleanup_owner_id
          AND archive.owner_fence = NEW.cleanup_owner_fence
@@ -536,6 +703,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       parent_owner_id text;
       parent_owner_fence bigint;
       parent_lease_expires_at timestamptz;
+      parent_found boolean;
       cleanup_inventory_complete boolean;
     BEGIN
       IF TG_OP <> 'DELETE' AND NOT (
@@ -580,9 +748,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                parent_owner_id,
                parent_owner_fence,
                parent_lease_expires_at
-          FROM public.meta_recovery_archives archive
+         FROM public.meta_recovery_archives archive
          WHERE archive.generation_id = OLD.generation_id
          FOR UPDATE;
+        parent_found := FOUND;
 
         SELECT (
           EXISTS (
@@ -600,7 +769,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           )
         ) INTO cleanup_inventory_complete;
 
-        IF NOT FOUND OR NOT (
+        IF NOT parent_found OR NOT (
           (
             OLD.reference_class = 'source' AND
             OLD.reference_state = 'building' AND
@@ -625,6 +794,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             parent_state = 'building' AND
             parent_build_status = 'abandoned' AND
             parent_coverage_status = 'incomplete' AND
+            parent_owner_kind = 'archive_cleanup' AND
             OLD.cleanup_owner_kind IS NOT NULL AND
             OLD.cleanup_owner_kind = parent_owner_kind AND
             OLD.cleanup_owner_id = parent_owner_id AND
@@ -683,9 +853,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
                  parent_owner_id,
                  parent_owner_fence,
                  parent_lease_expires_at
-            FROM public.meta_recovery_archives archive
+           FROM public.meta_recovery_archives archive
            WHERE archive.generation_id = NEW.generation_id
            FOR UPDATE;
+          parent_found := FOUND;
 
           SELECT (
             EXISTS (
@@ -703,12 +874,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             )
           ) INTO cleanup_inventory_complete;
 
-          IF NOT FOUND
+          IF NOT parent_found
              OR NEW.reference_class <> 'source'
              OR NEW.reference_state <> 'building'
              OR parent_state <> 'building'
              OR parent_build_status <> 'abandoned'
              OR parent_coverage_status <> 'incomplete'
+             OR parent_owner_kind <> 'archive_cleanup'
              OR NEW.cleanup_owner_kind IS DISTINCT FROM parent_owner_kind
              OR NEW.cleanup_owner_id IS DISTINCT FROM parent_owner_id
              OR NEW.cleanup_owner_fence IS DISTINCT FROM parent_owner_fence
@@ -818,6 +990,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          AND archive.state = 'building'
          AND archive.build_status = 'abandoned'
          AND archive.coverage_status = 'incomplete'
+         AND archive.owner_kind = 'archive_cleanup'
          AND archive.owner_kind = OLD.cleanup_owner_kind
          AND archive.owner_id = OLD.cleanup_owner_id
          AND archive.owner_fence = OLD.cleanup_owner_fence
@@ -874,7 +1047,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          OR cleanup_attachment_id IS NULL
          OR length(btrim(cleanup_attachment_id)) = 0
          OR cleanup_owner_kind IS NULL
-         OR length(btrim(cleanup_owner_kind)) = 0
+         OR cleanup_owner_kind <> 'archive_cleanup'
          OR cleanup_owner_id IS NULL
          OR length(btrim(cleanup_owner_id)) = 0
          OR cleanup_owner_fence IS NULL
@@ -932,7 +1105,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
   await sql`
     CREATE TRIGGER trg_meta_recovery_archive_abandoned_cleanup_claim_guard_row
-    BEFORE UPDATE OF owner_kind, owner_id, owner_fence, lease_expires_at
+    BEFORE INSERT OR UPDATE
       ON public.meta_recovery_archives
     FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_abandoned_cleanup_claim_guard_row()
   `.execute(db)
