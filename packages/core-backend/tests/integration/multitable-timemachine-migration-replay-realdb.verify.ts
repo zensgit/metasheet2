@@ -15,6 +15,7 @@ import * as tokenBurns from '../../src/db/migrations/zzzz20260719120000_create_m
 import * as authorityLocks from '../../src/db/migrations/zzzz20260721121000_add_recovery_authority_locks'
 import * as authorityCorrection from '../../src/db/migrations/zzzz20260728120000_correct_recovery_authority_locks'
 import * as authoritySearchPath from '../../src/db/migrations/zzzz20260821120000_recovery_authority_functions_fix_search_path'
+import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -105,6 +106,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260821120000_recovery_authority_functions_fix_search_path',
     module: authoritySearchPath,
   },
+  {
+    name: 'zzzz20260826120000_create_meta_recovery_archive_catalog',
+    module: recoveryArchiveCatalog,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -126,6 +131,9 @@ const TOUCHED_RELATIONS = [
   'user_roles',
   'user_permissions',
   'users',
+  'meta_recovery_archives',
+  'meta_recovery_archive_coverage_items',
+  'meta_recovery_archive_attachment_refs',
 ]
 
 const OWNED_RELATIONS = [
@@ -137,6 +145,9 @@ const OWNED_RELATIONS = [
   'meta_record_history_operations',
   'meta_recovery_token_burns',
   'meta_record_chain_seq',
+  'meta_recovery_archives',
+  'meta_recovery_archive_coverage_items',
+  'meta_recovery_archive_attachment_refs',
 ]
 
 const OWNED_COLUMNS = [
@@ -183,7 +194,18 @@ const AUTHORITY_FUNCTIONS = [
   authorityLocks.AUTHORITY_SUBJECT_TRIGGER_FUNCTION,
 ]
 
-const OWNED_FUNCTIONS = [...OPERATION_FUNCTIONS, ...AUTHORITY_FUNCTIONS]
+const RECOVERY_ARCHIVE_FUNCTIONS = [
+  'meta_recovery_archives_guard_row',
+  'meta_recovery_archive_coverage_guard_row',
+  'meta_recovery_archive_attachment_ref_guard_row',
+  'meta_recovery_archive_attachment_finalize_guard_row',
+]
+
+const OWNED_FUNCTIONS = [
+  ...OPERATION_FUNCTIONS,
+  ...AUTHORITY_FUNCTIONS,
+  ...RECOVERY_ARCHIVE_FUNCTIONS,
+]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
   'trg_mrvm_reject_append_sealed',
@@ -192,7 +214,17 @@ const OPERATION_TRIGGERS = [
   'trg_mrho_reject_delete',
 ]
 const AUTHORITY_TRIGGERS = authorityLocks.RECOVERY_AUTHORITY_TRIGGERS.map(([, trigger]) => trigger)
-const OWNED_TRIGGERS = [...OPERATION_TRIGGERS, ...AUTHORITY_TRIGGERS]
+const RECOVERY_ARCHIVE_TRIGGERS = [
+  'trg_meta_recovery_archives_guard_row',
+  'trg_meta_recovery_archive_coverage_guard_row',
+  'trg_meta_recovery_archive_attachment_ref_guard_row',
+  'trg_meta_recovery_archive_attachment_finalize_guard_row',
+]
+const OWNED_TRIGGERS = [
+  ...OPERATION_TRIGGERS,
+  ...AUTHORITY_TRIGGERS,
+  ...RECOVERY_ARCHIVE_TRIGGERS,
+]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'
 

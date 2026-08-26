@@ -105,7 +105,7 @@ jobs:
         run: |
           pnpm -F @metasheet/core-backend db:migrate
           pnpm -F @metasheet/core-backend db:migrate
-          # The ordinary second pass proves only "nothing is pending". Exercise the 12 real
+          # The ordinary second pass proves only "nothing is pending". Exercise the 13 real
           # Time Machine migration modules in reverse down() order, prove their owned surface is
           # absent, replay up() in forward order, and compare the full catalog fingerprint.
           pnpm -F @metasheet/core-backend exec tsx tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts
