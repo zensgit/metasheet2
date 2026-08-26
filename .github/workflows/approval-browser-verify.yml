@@ -23,6 +23,10 @@ name: Approval Browser Verify
 #
 # P5-C extends the lane with a real ApprovalDetailView + Element Plus member-action dialog harness
 # at desktop/tablet/mobile viewports. This is browser/mobile/a11y acceptance, not a write-path test.
+#
+# P7-B0 extends the lane with Canvas sole-surface acceptance against the mounted production
+# TemplateAuthoringView at desktop/tablet/mobile widths. The collection preflight below prevents a
+# testMatch removal from turning this browser contract into a vacuous green.
 
 on:
   workflow_dispatch:
@@ -37,6 +41,13 @@ on:
       - 'apps/web/src/approvals/approvalFormCommands.ts'
       - 'apps/web/src/approvals/approvalFormAuthoringHistory.ts'
       - 'apps/web/src/approvals/memberActionDialogGrammar.ts'
+      - 'apps/web/src/approvals/approvalCanvasCommands.ts'
+      - 'apps/web/src/approvals/api.ts'
+      - 'apps/web/src/approvals/canvasViewport.ts'
+      - 'apps/web/src/approvals/graphLayout.ts'
+      - 'apps/web/src/approvals/components/ApprovalFlowCanvas.vue'
+      - 'apps/web/src/approvals/components/ApprovalCanvasNodeInspector.vue'
+      - 'apps/web/src/approvals/components/ApprovalGraphNodeConfigEditor.vue'
       - 'apps/web/src/approvals/store.ts'
       - 'apps/web/src/approvals/components/ApprovalUserPicker.vue'
       - 'apps/web/src/composables/useAuth.ts'
@@ -53,6 +64,7 @@ on:
       - 'apps/web/verification/approval-member-action-dialog-harness.html'
       - 'apps/web/verification/approval-member-action-dialog-harness.ts'
       - 'apps/web/verification/approval-member-action-dialog.spec.ts'
+      - 'apps/web/verification/approval-canvas-sole-surface.spec.ts'
       - 'apps/web/playwright.approval-verification.config.ts'
       - 'apps/web/tsconfig.verification-approval.json'
       - '.github/workflows/approval-browser-verify.yml'
@@ -104,6 +116,14 @@ jobs:
       - name: Type-check approval verification harnesses
         run: pnpm --filter @metasheet/web run type-check:verification-approval
 
+      - name: Assert Canvas acceptance is collected
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_list="$(pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts --list)"
+          printf '%s\n' "$test_list"
+          grep -F 'approval-canvas-sole-surface.spec.ts' <<<"$test_list"
+
       - name: Run approval browser verification (boots Vite, renders real components)
         run: pnpm --filter @metasheet/web exec playwright test --config playwright.approval-verification.config.ts
 
@@ -115,4 +135,5 @@ jobs:
           path: |
             apps/web/verification-output/afb-*.png
             apps/web/verification-output/p5c-*.png
+            apps/web/verification-output/p7-canvas-*.png
           if-no-files-found: warn

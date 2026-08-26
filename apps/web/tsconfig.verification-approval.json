@@ -24,6 +24,7 @@
     "src/**/*.vue",
     "src/**/*.d.ts",
     "verification/approval-inspector-keyboard-harness.ts",
+    "verification/approval-form-builder-mounted-harness.ts",
     "verification/approval-member-action-dialog-harness.ts"
   ]
 }
