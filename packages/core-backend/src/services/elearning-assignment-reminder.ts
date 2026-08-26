@@ -50,12 +50,29 @@ export interface ProduceElearningAssignmentReminderInput {
   dueAt: string | Date
 }
 
+export interface CheckElearningAssignmentReminderEligibilityInput {
+  /** Authoritative persisted delivery.org_id. */
+  orgId: string
+  /** Persisted delivery.assignment_member_id. */
+  assignmentMemberId: string
+  /** Persisted delivery.recipient_user_id; must still match the member. */
+  recipientUserId: string
+}
+
 export type ProduceElearningAssignmentReminderResult =
   | { outcome: 'ineligible' }
   | { outcome: 'enqueued'; deliveryId: string }
   | { outcome: 'duplicate'; deliveryId: string }
 
 type CourseHeadStatus = (typeof COURSE_HEAD_STATUSES)[number]
+
+interface AssignmentReminderCandidate {
+  assignmentId: string
+  courseVersionId: string
+  eligible: boolean
+  memberId: string
+  userId: string
+}
 
 const CANDIDATE_SQL = `/* elearning-assignment-reminder:load-candidate */
 SELECT
@@ -234,6 +251,66 @@ export function deriveElearningAssignmentReminderOccurrenceKey(input: {
   return `assignment:${assignmentId}:user:${encodeURIComponent(userId)}:window:${compactWindowTimestamp(windowStart)}`
 }
 
+async function loadAssignmentReminderCandidate(
+  db: ElearningNotificationDeliveryDb,
+  orgId: string,
+  assignmentMemberId: string,
+): Promise<AssignmentReminderCandidate> {
+  const loaded = await db.query(CANDIDATE_SQL, [orgId, assignmentMemberId])
+  const row = loaded.rows[0]
+  if (!row) fail('not_found')
+
+  const memberId = storedUuid(row.member_id)
+  if (memberId !== assignmentMemberId) fail('unavailable')
+  const assignmentId = storedUuid(row.assignment_id)
+  const courseVersionId = storedUuid(row.course_version_id)
+  const userId = storedText(row.user_id, 256)
+  const deadline = storedTimestamp(row.deadline)
+  const courseHeadStatus = storedCourseHeadStatus(row.course_head_status)
+  const videoStatus = storedVideoStatus(row.video_status)
+  const examStatus = storedExamStatus(row.exam_status)
+  if (typeof row.passed !== 'boolean') fail('unavailable')
+
+  const courseStatus = deriveElearningAssignmentCourseStatus(
+    videoStatus,
+    examStatus,
+    row.passed,
+  )
+  return {
+    assignmentId,
+    courseVersionId,
+    eligible: (
+      row.revoked_at == null
+      && deadline !== null
+      && courseHeadStatus !== 'withdrawn'
+      && courseStatus !== 'completed'
+    ),
+    memberId,
+    userId,
+  }
+}
+
+export async function checkElearningAssignmentReminderEligibility(
+  db: ElearningNotificationDeliveryDb,
+  input: CheckElearningAssignmentReminderEligibilityInput,
+): Promise<boolean> {
+  const orgId = requireText(input.orgId, 256)
+  const assignmentMemberId = requireUuid(input.assignmentMemberId)
+  const recipientUserId = requireText(input.recipientUserId, 256)
+  try {
+    const candidate = await loadAssignmentReminderCandidate(
+      db,
+      orgId,
+      assignmentMemberId,
+    )
+    if (candidate.userId !== recipientUserId) fail('unavailable')
+    return candidate.eligible
+  } catch (error) {
+    if (error instanceof ElearningAssignmentReminderError) throw error
+    fail('unavailable')
+  }
+}
+
 export async function produceElearningAssignmentReminder(
   db: ElearningNotificationDeliveryDb,
   input: ProduceElearningAssignmentReminderInput,
@@ -253,52 +330,33 @@ export async function produceElearningAssignmentReminder(
   if (Date.parse(dueAt) < Date.parse(windowStart)) fail('invalid_input')
 
   try {
-    const loaded = await db.query(CANDIDATE_SQL, [orgId, assignmentMemberId])
-    const row = loaded.rows[0]
-    if (!row) fail('not_found')
-
-    const memberId = storedUuid(row.member_id)
-    if (memberId !== assignmentMemberId) fail('unavailable')
-    const assignmentId = storedUuid(row.assignment_id)
-    const courseVersionId = storedUuid(row.course_version_id)
-    const userId = storedText(row.user_id, 256)
-    const deadline = storedTimestamp(row.deadline)
-    const courseHeadStatus = storedCourseHeadStatus(row.course_head_status)
-    const videoStatus = storedVideoStatus(row.video_status)
-    const examStatus = storedExamStatus(row.exam_status)
-    if (typeof row.passed !== 'boolean') fail('unavailable')
+    const candidate = await loadAssignmentReminderCandidate(
+      db,
+      orgId,
+      assignmentMemberId,
+    )
 
     const expectedOccurrenceKey = deriveElearningAssignmentReminderOccurrenceKey({
-      assignmentId,
-      userId,
+      assignmentId: candidate.assignmentId,
+      userId: candidate.userId,
       windowStart,
     })
     if (occurrenceKey !== expectedOccurrenceKey) fail('invalid_input')
 
-    const courseStatus = deriveElearningAssignmentCourseStatus(
-      videoStatus,
-      examStatus,
-      row.passed,
-    )
-    if (
-      row.revoked_at != null
-      || deadline === null
-      || courseHeadStatus === 'withdrawn'
-      || courseStatus === 'completed'
-    ) {
+    if (!candidate.eligible) {
       return { outcome: 'ineligible' }
     }
 
     const delivery = await enqueueElearningNotificationDelivery(db, {
       orgId,
-      assignmentMemberId: memberId,
-      recipientUserId: userId,
+      assignmentMemberId: candidate.memberId,
+      recipientUserId: candidate.userId,
       sourceKey: expectedOccurrenceKey,
       dueAt,
       payload: {
-        assignmentId,
-        assignmentMemberId: memberId,
-        courseVersionId,
+        assignmentId: candidate.assignmentId,
+        assignmentMemberId: candidate.memberId,
+        courseVersionId: candidate.courseVersionId,
         windowStart,
       },
     })

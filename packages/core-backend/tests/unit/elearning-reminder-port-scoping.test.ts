@@ -44,15 +44,22 @@ describe('e-learning L2 reminder producer port scoping', () => {
     const elearning = contextFor('plugin-elearning').services
     expect(elearning.elearningReminderProducer).toBeDefined()
     expect(typeof elearning.elearningReminderProducer?.produce).toBe('function')
+    expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
+    expect(elearning.elearningNotificationDispatch).toBeUndefined()
 
     expect(contextFor('plugin-attendance').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-attendance').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-integration-core').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-some-other').services.elearningNotificationEligibility).toBeUndefined()
   })
 
   it('rechecks master, content, and assignment flags before touching the database', async () => {
     const port = contextFor('plugin-elearning').services.elearningReminderProducer
     if (!port) throw new Error('expected e-learning reminder producer port')
+    const eligibility = contextFor('plugin-elearning').services.elearningNotificationEligibility
+    if (!eligibility) throw new Error('expected e-learning notification eligibility port')
     const poolGet = vi.spyOn(poolManager, 'get').mockImplementation(() => {
       throw new Error('database touched')
     })
@@ -75,6 +82,11 @@ describe('e-learning L2 reminder producer port scoping', () => {
     ]) {
       setFlags(flags)
       await expect(port.produce(input)).rejects.toMatchObject({ code: 'unavailable' })
+      await expect(eligibility.check({
+        orgId: input.orgId,
+        assignmentMemberId: input.assignmentMemberId,
+        recipientUserId: 'learner',
+      })).rejects.toMatchObject({ code: 'unavailable' })
     }
     expect(poolGet).not.toHaveBeenCalled()
 
@@ -84,6 +96,11 @@ describe('e-learning L2 reminder producer port scoping', () => {
       ELEARNING_ASSIGNMENT_ENABLED: 'true',
     })
     await expect(port.produce(input)).rejects.toThrow('database touched')
-    expect(poolGet).toHaveBeenCalledTimes(1)
+    await expect(eligibility.check({
+      orgId: input.orgId,
+      assignmentMemberId: input.assignmentMemberId,
+      recipientUserId: 'learner',
+    })).rejects.toThrow('database touched')
+    expect(poolGet).toHaveBeenCalledTimes(2)
   })
 })

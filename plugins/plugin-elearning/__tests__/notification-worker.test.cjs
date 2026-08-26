@@ -135,7 +135,7 @@ async function main() {
   assert.equal(/console\.(log|info|warn|error)/.test(src), false)
 
   const indexSrc = fs.readFileSync(INDEX, 'utf8')
-  assert.equal(indexSrc.includes('notification-worker'), false)
+  assert.equal(indexSrc.includes('notification-runtime'), true)
   assert.equal(indexSrc.includes('runNotificationDeliveryBatch'), false)
 
   const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf8'))

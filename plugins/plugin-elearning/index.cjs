@@ -4,6 +4,7 @@ const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller, authenticated
 const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
 const { startJobsWorker, stopJobsWorker, resolveDatabasePort, clearJobHandlers } = require('./lib/jobs.cjs')
 const { registerAssignmentReminderProducer } = require('./lib/reminder-producer.cjs')
+const { startNotificationRuntime, stopNotificationRuntime } = require('./lib/notification-runtime.cjs')
 
 const CANONICAL_METHOD = 'GET'
 const CANONICAL_PATH = '/api/elearning/capabilities'
@@ -25,6 +26,7 @@ function sendOrgContextRequired(res) {
 async function activate(context) {
   // Hot reload: host does not call deactivate() before re-activate, including
   // when the re-run throws. Stop the prior timer before every subsequent exit.
+  stopNotificationRuntime()
   stopJobsWorker()
   clearJobHandlers()
   if (!isMasterEnabled()) {
@@ -58,7 +60,9 @@ async function activate(context) {
     })
 
     startJobsWorker(context)
+    startNotificationRuntime(context)
   } catch (error) {
+    stopNotificationRuntime()
     stopJobsWorker()
     clearJobHandlers()
     throw error
@@ -66,6 +70,7 @@ async function activate(context) {
 }
 
 async function deactivate() {
+  stopNotificationRuntime()
   stopJobsWorker()
   clearJobHandlers()
 }

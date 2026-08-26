@@ -3,9 +3,10 @@
 /**
  * Inert L2 notification claim-lease kernel.
  *
- * Reachability: this module is not imported by plugin activate(). A caller
- * must inject isEnabled, checkEligibility, and dispatch. There is no timer,
- * route, env flag, or real notification channel here.
+ * Reachability: plugin activate() reaches this kernel only through the narrow
+ * notification-runtime adapter. That adapter must inject isEnabled,
+ * checkEligibility, and an effect-side-idempotent dispatch provider. There is
+ * no route, env flag, or real notification channel in this kernel.
  *
  * Eligibility contract for the injected checker (not implemented here):
  * archived assignments remain eligible; withdrawn, revoked, and completed

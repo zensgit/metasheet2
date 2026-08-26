@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   ElearningAssignmentReminderError,
+  checkElearningAssignmentReminderEligibility,
   deriveElearningAssignmentReminderOccurrenceKey,
   produceElearningAssignmentReminder,
 } from '../../src/services/elearning-assignment-reminder'
@@ -137,6 +138,33 @@ describe('e-learning assignment reminder intent producer', () => {
     const db = eligibleDb(candidate({ course_head_status: 'archived' }))
     await expect(produceElearningAssignmentReminder(db, input()))
       .resolves.toMatchObject({ outcome: 'enqueued' })
+  })
+
+  it('rechecks current recipient and course state immediately before dispatch', async () => {
+    for (const row of [candidate(), candidate({ course_head_status: 'archived' })]) {
+      await expect(checkElearningAssignmentReminderEligibility(eligibleDb(row), {
+        orgId: ORG,
+        assignmentMemberId: MEMBER,
+        recipientUserId: USER,
+      })).resolves.toBe(true)
+    }
+    for (const row of [
+      candidate({ revoked_at: DUE_AT }),
+      candidate({ deadline: null }),
+      candidate({ course_head_status: 'withdrawn' }),
+      candidate({ video_status: 'completed', exam_status: 'graded', passed: true }),
+    ]) {
+      await expect(checkElearningAssignmentReminderEligibility(eligibleDb(row), {
+        orgId: ORG,
+        assignmentMemberId: MEMBER,
+        recipientUserId: USER,
+      })).resolves.toBe(false)
+    }
+    await expect(checkElearningAssignmentReminderEligibility(eligibleDb(), {
+      orgId: ORG,
+      assignmentMemberId: MEMBER,
+      recipientUserId: 'other-user',
+    })).rejects.toMatchObject({ code: 'unavailable' })
   })
 
   it('creates no intent for revoked, no-deadline, withdrawn, or completed members', async () => {

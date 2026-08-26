@@ -29,6 +29,7 @@ import {
 } from '../../src/services/elearning-notification-delivery'
 import {
   ElearningAssignmentReminderError,
+  checkElearningAssignmentReminderEligibility,
   deriveElearningAssignmentReminderOccurrenceKey,
   produceElearningAssignmentReminder,
 } from '../../src/services/elearning-assignment-reminder'
@@ -568,6 +569,16 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       '2026-08-27T01:00:00.000Z',
     )
     expect(active).toMatchObject({ outcome: 'enqueued' })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: a.userId,
+    })).resolves.toBe(true)
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: b.userId,
+    })).rejects.toMatchObject({ code: 'unavailable' })
     await expect(produceElearningAssignmentReminder(db, {
       orgId: orgA,
       assignmentMemberId: a.memberId,
@@ -597,6 +608,11 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       '2026-08-28T00:00:00.000Z',
       '2026-08-28T02:00:00.000Z',
     )).resolves.toMatchObject({ outcome: 'enqueued' })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: a.userId,
+    })).resolves.toBe(true)
 
     await pool.query(
       `UPDATE elearning_courses
@@ -608,6 +624,11 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       '2026-08-29T00:00:00.000Z',
       '2026-08-29T01:00:00.000Z',
     )).resolves.toEqual({ outcome: 'ineligible' })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: a.userId,
+    })).resolves.toBe(false)
 
     await pool.query(
       `UPDATE elearning_courses
@@ -644,6 +665,11 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       '2026-08-30T00:00:00.000Z',
       '2026-08-30T01:00:00.000Z',
     )).resolves.toMatchObject({ outcome: 'enqueued' })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: a.userId,
+    })).resolves.toBe(true)
 
     const attemptId = randomUUID()
     await pool.query(
@@ -670,12 +696,22 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       '2026-08-31T00:00:00.000Z',
       '2026-08-31T01:00:00.000Z',
     )).resolves.toEqual({ outcome: 'ineligible' })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      recipientUserId: a.userId,
+    })).resolves.toBe(false)
 
     const otherOrgKey = deriveElearningAssignmentReminderOccurrenceKey({
       assignmentId: b.assignmentId,
       userId: b.userId,
       windowStart: '2026-09-01T00:00:00.000Z',
     })
+    await expect(checkElearningAssignmentReminderEligibility(db, {
+      orgId: orgA,
+      assignmentMemberId: b.memberId,
+      recipientUserId: b.userId,
+    })).rejects.toMatchObject({ code: 'not_found' })
     let crossOrg: unknown
     try {
       await produceElearningAssignmentReminder(db, {

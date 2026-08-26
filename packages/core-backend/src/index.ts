@@ -277,6 +277,7 @@ import { createElearningMediaPlaybackRouter } from './routes/elearning-media-pla
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
 import {
+  checkElearningAssignmentReminderEligibility,
   ElearningAssignmentReminderError,
   produceElearningAssignmentReminder,
 } from './services/elearning-assignment-reminder'
@@ -2191,6 +2192,21 @@ export class MetaSheetServer {
                     throw new ElearningAssignmentReminderError('unavailable')
                   }
                   return produceElearningAssignmentReminder(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L2 send-time guard: only plugin-elearning can ask core to recheck a
+        // persisted delivery against current assignment/course completion.
+        elearningNotificationEligibility:
+          manifest.name === 'plugin-elearning'
+            ? {
+                check: async (
+                  input: import('./services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+                ) => {
+                  if (!isElearningAssignmentSurfaceEnabled()) {
+                    throw new ElearningAssignmentReminderError('unavailable')
+                  }
+                  return checkElearningAssignmentReminderEligibility(poolManager.get(), input)
                 },
               }
             : undefined,

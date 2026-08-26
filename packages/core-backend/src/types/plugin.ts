@@ -1145,6 +1145,38 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
+   * plugin-elearning; the notification worker must call it immediately before
+   * every effect-side dispatch.
+   */
+  elearningNotificationEligibility?: {
+    check(
+      input: import('../services/elearning-assignment-reminder').CheckElearningAssignmentReminderEligibilityInput,
+    ): Promise<boolean>
+  }
+  /**
+   * Optional L2 platform-channel provider. The provider MUST deduplicate the
+   * external or durable platform effect by `(orgId, idempotencyKey)` and must
+   * return `outcome_unknown` when it cannot prove whether the effect happened.
+   * No unsafe adapter to the generic notification service is inferred.
+   */
+  elearningNotificationDispatch?: {
+    dispatch(input: {
+      assignmentMemberId: string
+      deliveryId: string
+      idempotencyKey: string
+      kind: 'assignment_reminder'
+      orgId: string
+      payload: Record<string, unknown>
+      recipientUserId: string
+    }): Promise<
+      | { outcome: 'sent' }
+      | { outcome: 'retryable'; code: string }
+      | { outcome: 'failed'; code: string }
+      | { outcome: 'outcome_unknown'; code?: string }
+    >
+  }
+  /**
    * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
    * least-privilege W4 segment-calculation port. Same posture as
    * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY
