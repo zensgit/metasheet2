@@ -27,6 +27,11 @@ import {
   produceElearningAssignmentReminder,
   type ProduceElearningAssignmentReminderInput,
 } from '../../src/services/elearning-assignment-reminder'
+import {
+  settleExpiredElearningExamAttempt,
+  type SettleExpiredElearningExamAttemptInput,
+  type SettleExpiredElearningExamAttemptResult,
+} from '../../src/services/elearning-exam'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_PLAYBACK_SECRET_ENV } from '../../src/services/elearning-media-playback'
@@ -77,6 +82,11 @@ const elearningPlugin = require('../../../../plugins/plugin-elearning/index.cjs'
     services?: {
       elearningReminderProducer?: {
         produce: (input: ProduceElearningAssignmentReminderInput) => Promise<unknown>
+      }
+      elearningExamExpirySettlement?: {
+        settle: (
+          input: SettleExpiredElearningExamAttemptInput,
+        ) => Promise<SettleExpiredElearningExamAttemptResult>
       }
     }
   }) => Promise<void>
@@ -470,6 +480,9 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       services: {
         elearningReminderProducer: {
           produce: (input) => produceElearningAssignmentReminder(database, input),
+        },
+        elearningExamExpirySettlement: {
+          settle: (input) => settleExpiredElearningExamAttempt(database, input),
         },
       },
     })
