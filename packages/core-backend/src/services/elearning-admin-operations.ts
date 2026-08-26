@@ -3,7 +3,7 @@
  *
  * Domain services remain focused on their state transitions. These wrappers
  * bind RBAC-derived global-admin context, object ACL, and management scope to
- * the same repeatable-read transaction as the protected read or write.
+ * the same transaction as the protected read or write.
  */
 import {
   assignElearningBatch,
@@ -116,14 +116,17 @@ function nestedDb(tx: ElearningAdminOperationQueryable): ElearningAdminOperation
   }
 }
 
-async function withAuthorizationSnapshot<T>(
+async function withSerializedAuthorization<T>(
   db: ElearningAdminOperationDb,
   handler: (tx: ElearningAdminOperationQueryable) => Promise<T>,
 ): Promise<T> {
   return db.transaction(async (tx) => {
+    // Object resolution can precede the object-specific advisory lock. Keep
+    // statement snapshots fresh so authorization observes a writer that
+    // committed before this operation acquired that lock.
     await tx.query(
-      `/* elearning-admin-operations:repeatable-read */
-       SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+      `/* elearning-admin-operations:read-committed */
+       SET TRANSACTION ISOLATION LEVEL READ COMMITTED`,
     )
     return handler(tx)
   })
@@ -277,7 +280,7 @@ export async function assignElearningDirectAuthorized(
   db: ElearningAdminOperationDb,
   input: AssignElearningDirectAuthorizedInput,
 ): Promise<ElearningDirectAssignmentResult> {
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const object = await loadCourseObjectByVersion(tx, input.orgId, input.courseVersionId)
     if (!object) throw new ElearningDirectAssignmentError('not_found')
     await authorizeObject(tx, { ...input, object, action: 'assign' })
@@ -294,7 +297,7 @@ export async function assignElearningBatchAuthorized(
   input: AssignElearningBatchAuthorizedInput,
 ): Promise<ElearningBatchAssignmentResult> {
   const rules = normalizeElearningBatchAssignmentRules(input.rules)
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const object = await loadCourseObjectByVersion(tx, input.orgId, input.courseVersionId)
     if (!object) throw new ElearningBatchAssignmentError('not_found')
     await authorizeObject(tx, { ...input, object, action: 'assign' })
@@ -307,7 +310,7 @@ export async function listElearningAssignmentProgressAuthorized(
   db: ElearningAdminOperationDb,
   input: ListElearningAssignmentProgressAuthorizedInput,
 ): Promise<ElearningAssignmentProgressResult> {
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const target = await loadAssignmentOperationTarget(tx, input)
     if (!target) throw new ElearningAssignmentLifecycleError('not_found')
     await authorizeObject(tx, { ...input, object: target.object, action: 'track' })
@@ -329,7 +332,7 @@ export async function revokeElearningAssignmentMemberAuthorized(
   db: ElearningAdminOperationDb,
   input: RevokeElearningAssignmentMemberAuthorizedInput,
 ): Promise<ElearningAssignmentRevocationResult> {
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const target = await loadAssignmentOperationTarget(tx, input)
     if (!target?.userId) throw new ElearningAssignmentLifecycleError('not_found')
     await authorizeObject(tx, { ...input, object: target.object, action: 'assign' })
@@ -355,7 +358,7 @@ export async function setElearningCourseScopeAuthorized(
   db: ElearningAdminOperationDb,
   input: SetElearningCourseScopeAuthorizedInput,
 ): Promise<SetElearningCourseScopeResult> {
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const object: ElearningObjectRef = { courseId: input.courseId }
     await authorizeObject(tx, { ...input, object, action: 'scope' })
     let rules: ElearningAudienceRule[]
@@ -382,7 +385,7 @@ export async function assignElearningTrainingPlanAuthorized(
   } catch {
     throw new ElearningTrainingPlanAssignmentError('invalid_input')
   }
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const object: ElearningObjectRef = { trainingPlanId: input.planId }
     await authorizeObject(tx, { ...input, object, action: 'assign' })
     await assertElearningRulesWithinAdminScope(tx, { ...input, rules })
@@ -397,7 +400,7 @@ export async function revokeElearningTrainingPlanAssignmentAuthorized(
   db: ElearningAdminOperationDb,
   input: RevokeElearningTrainingPlanAssignmentAuthorizedInput,
 ): Promise<ElearningTrainingPlanRevocationResult> {
-  return withAuthorizationSnapshot(db, async (tx) => {
+  return withSerializedAuthorization(db, async (tx) => {
     const target = await loadPlanAssignmentTarget(tx, input.orgId, input.planAssignmentId)
     if (!target) throw new ElearningTrainingPlanRevocationError('not_found')
     await authorizeObject(tx, { ...input, object: target.object, action: 'assign' })

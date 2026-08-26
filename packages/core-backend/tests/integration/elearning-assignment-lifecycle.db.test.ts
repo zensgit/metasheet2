@@ -143,14 +143,18 @@ function settled<T>(promise: Promise<T>): Promise<T | unknown> {
   )
 }
 
-class AuthorizationLockBarrierDb implements ElearningAdminOperationDb {
-  private operationLockCount = 0
+class AuthorizationBarrierDb implements ElearningAdminOperationDb {
+  private markerCount = 0
   private readonly reached: Promise<number>
   private readonly released: Promise<void>
   private resolveReached!: (pid: number) => void
   private resolveReleased!: () => void
 
-  constructor(private readonly targetPool: Pool) {
+  constructor(
+    private readonly targetPool: Pool,
+    private readonly marker: string,
+    private readonly occurrence: number,
+  ) {
     this.reached = new Promise((resolve) => {
       this.resolveReached = resolve
     })
@@ -163,14 +167,14 @@ class AuthorizationLockBarrierDb implements ElearningAdminOperationDb {
     return exec(this.targetPool, sql, params)
   }
 
-  async waitUntilAuthorizationLocksHeld(): Promise<number> {
+  async waitUntilReached(): Promise<number> {
     let timeout: NodeJS.Timeout | undefined
     try {
       return await Promise.race([
         this.reached,
         new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(
-            () => reject(new Error('timed out waiting for authorization locks')),
+            () => reject(new Error('timed out waiting for authorization barrier')),
             5_000,
           )
         }),
@@ -180,7 +184,7 @@ class AuthorizationLockBarrierDb implements ElearningAdminOperationDb {
     }
   }
 
-  releaseAuthorizationLocks(): void {
+  release(): void {
     this.resolveReleased()
   }
 
@@ -194,9 +198,9 @@ class AuthorizationLockBarrierDb implements ElearningAdminOperationDb {
       const result = await handler({
         query: async (sql, params) => {
           const queryResult = await exec(client, sql, params)
-          if (sql.includes('elearning-admin-access:operation-lock')) {
-            this.operationLockCount += 1
-            if (this.operationLockCount === 2) {
+          if (sql.includes(this.marker)) {
+            this.markerCount += 1
+            if (this.markerCount === this.occurrence) {
               this.resolveReached(pid)
               await this.released
             }
@@ -793,7 +797,59 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
     expect(visible.members.some((member) => member.userId === seed.users.c))
       .toBe(false)
 
-    const barrierDb = new AuthorizationLockBarrierDb(pool)
+    const beforeLockBarrier = new AuthorizationBarrierDb(
+      pool,
+      'elearning-admin-operations:assignment-object',
+      1,
+    )
+    const readStartedBeforeRevocation = listElearningAssignmentProgressAuthorized(
+      beforeLockBarrier,
+      {
+        orgId: org,
+        actorId: manager,
+        isGlobalAdmin: false,
+        assignmentId: seed.assignmentId,
+      },
+    )
+    void settled(readStartedBeforeRevocation)
+    let beforeLockError: unknown
+    try {
+      await beforeLockBarrier.waitUntilReached()
+      await replaceElearningObjectAcl(db, {
+        orgId: org,
+        actorId: admin,
+        isGlobalAdmin: true,
+        object: { courseId: seed.courseId },
+        granteeUserId: manager,
+        reason: 'track revocation before operation lock',
+        actions: [],
+      })
+    } catch (error) {
+      beforeLockError = error
+    } finally {
+      beforeLockBarrier.release()
+    }
+    if (beforeLockError) {
+      await settled(readStartedBeforeRevocation)
+      throw beforeLockError
+    }
+    await expect(readStartedBeforeRevocation)
+      .rejects.toMatchObject({ code: 'forbidden' })
+    await replaceElearningObjectAcl(db, {
+      orgId: org,
+      actorId: admin,
+      isGlobalAdmin: true,
+      object: { courseId: seed.courseId },
+      granteeUserId: manager,
+      reason: 'restore track after pre-lock revocation proof',
+      actions: ['track'],
+    })
+
+    const barrierDb = new AuthorizationBarrierDb(
+      pool,
+      'elearning-admin-access:operation-lock',
+      2,
+    )
     const heldRead = listElearningAssignmentProgressAuthorized(barrierDb, {
       orgId: org,
       actorId: manager,
@@ -805,7 +861,7 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
     let revokeAcl: ReturnType<typeof replaceElearningObjectAcl> | undefined
     let barrierError: unknown
     try {
-      const holderPid = await barrierDb.waitUntilAuthorizationLocksHeld()
+      const holderPid = await barrierDb.waitUntilReached()
       revoker = await pool.connect()
       await revoker.query("SET lock_timeout = '15s'")
       const waiterPid = await backendPid(revoker)
@@ -829,7 +885,7 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
     } catch (error) {
       barrierError = error
     } finally {
-      barrierDb.releaseAuthorizationLocks()
+      barrierDb.release()
     }
 
     let heldResult: Awaited<typeof heldRead>

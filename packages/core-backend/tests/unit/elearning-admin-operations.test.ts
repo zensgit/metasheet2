@@ -63,7 +63,7 @@ function authorizationDb(input: {
 } = {}): ScriptDb {
   return new ScriptDb((sql) => {
     switch (marker(sql)) {
-      case 'elearning-admin-operations:repeatable-read':
+      case 'elearning-admin-operations:read-committed':
       case 'elearning-admin-access:operation-lock':
         return result([], 1)
       case 'elearning-admin-operations:course-by-version':
@@ -189,7 +189,7 @@ describe('e-learning delegated operation authorization', () => {
     })
 
     expect(db.calls.map((call) => marker(call.sql)).slice(0, 8)).toEqual([
-      'elearning-admin-operations:repeatable-read',
+      'elearning-admin-operations:read-committed',
       'elearning-admin-operations:assignment-object',
       'elearning-admin-access:operation-lock',
       'elearning-admin-access:operation-lock',
