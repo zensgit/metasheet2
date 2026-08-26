@@ -2,7 +2,8 @@
 
 const { isMasterEnabled, getCapabilitiesPayload, isHydratedCaller, authenticatedOrgId } = require('./lib/feature-flags.cjs')
 const { sendFeatureDisabled } = require('./lib/http-errors.cjs')
-const { startJobsWorker, stopJobsWorker, resolveDatabasePort } = require('./lib/jobs.cjs')
+const { startJobsWorker, stopJobsWorker, resolveDatabasePort, clearJobHandlers } = require('./lib/jobs.cjs')
+const { registerAssignmentReminderProducer } = require('./lib/reminder-producer.cjs')
 
 const CANONICAL_METHOD = 'GET'
 const CANONICAL_PATH = '/api/elearning/capabilities'
@@ -25,6 +26,7 @@ async function activate(context) {
   // Hot reload: host does not call deactivate() before re-activate, including
   // when the re-run throws. Stop the prior timer before every subsequent exit.
   stopJobsWorker()
+  clearJobHandlers()
   if (!isMasterEnabled()) {
     return
   }
@@ -36,28 +38,36 @@ async function activate(context) {
     throw new Error('plugin-elearning requires context.api.database.query')
   }
 
-  context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
-    if (!isMasterEnabled()) {
-      sendFeatureDisabled(res)
-      return
-    }
-    const caller = req && req.user
-    if (!isHydratedCaller(caller)) {
-      sendUnauthenticated(res)
-      return
-    }
-    if (!authenticatedOrgId(req)) {
-      sendOrgContextRequired(res)
-      return
-    }
-    res.json(getCapabilitiesPayload(undefined, caller))
-  })
+  try {
+    registerAssignmentReminderProducer(context)
+    context.api.http.addRoute(CANONICAL_METHOD, CANONICAL_PATH, async (req, res) => {
+      if (!isMasterEnabled()) {
+        sendFeatureDisabled(res)
+        return
+      }
+      const caller = req && req.user
+      if (!isHydratedCaller(caller)) {
+        sendUnauthenticated(res)
+        return
+      }
+      if (!authenticatedOrgId(req)) {
+        sendOrgContextRequired(res)
+        return
+      }
+      res.json(getCapabilitiesPayload(undefined, caller))
+    })
 
-  startJobsWorker(context)
+    startJobsWorker(context)
+  } catch (error) {
+    stopJobsWorker()
+    clearJobHandlers()
+    throw error
+  }
 }
 
 async function deactivate() {
   stopJobsWorker()
+  clearJobHandlers()
 }
 
 module.exports = {

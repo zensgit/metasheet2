@@ -222,8 +222,34 @@ async function main() {
     registerJobHandler('boom', async () => {})
     assert.deepEqual(registeredKinds(), ['boom'])
     assert.throws(() => registerJobHandler('boom', async () => {}), /already registered/)
+    assert.throws(
+      () => registerJobHandler('other', async () => {}, true),
+      /canClaim must be a function/,
+    )
     assert.deepEqual(registeredKinds(), ['boom'])
     clearJobHandlers()
+  }
+
+  {
+    for (const canClaim of [() => false, () => { throw new Error('gate failed') }]) {
+      let queries = 0
+      registerJobHandler('disabled', async () => {
+        throw new Error('disabled handler must not run')
+      }, canClaim)
+      const result = await runJobsTick({
+        database: {
+          query: async () => {
+            queries += 1
+            throw new Error('disabled kind must not query')
+          },
+        },
+        workerId: 'worker-disabled',
+      })
+      assert.deepEqual(result, { claimed: 0 })
+      assert.equal(queries, 0)
+      assert.deepEqual(registeredKinds(), ['disabled'])
+      clearJobHandlers()
+    }
   }
 
   {

@@ -269,10 +269,17 @@ import internalRouter from './routes/internal'
 import cacheTestRouter from './routes/cache-test'
 import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
-import { resolveElearningCatalogFeature } from './elearning/feature-flags'
+import {
+  isElearningAssignmentSurfaceEnabled,
+  resolveElearningCatalogFeature,
+} from './elearning/feature-flags'
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
 import { getBootedElearningMediaRangeStore } from './services/elearning-media-runtime'
 import { createElearningPilotRuntime } from './services/elearning-pilot-runtime'
+import {
+  ElearningAssignmentReminderError,
+  produceElearningAssignmentReminder,
+} from './services/elearning-assignment-reminder'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -2171,6 +2178,22 @@ export class MetaSheetServer {
         // description; every other plugin gets undefined and the consumer's fail-closed path.
         approvalAssigneeResolver:
           manifest.name === 'plugin-attendance' ? this.buildApprovalAssigneeResolverPort() : undefined,
+        // E-learning L2: core owns eligibility and delivery-ledger insertion.
+        // The persisted job worker gets only this narrow port; other plugins
+        // cannot submit reminder intents through the host service surface.
+        elearningReminderProducer:
+          manifest.name === 'plugin-elearning'
+            ? {
+                produce: async (
+                  input: import('./services/elearning-assignment-reminder').ProduceElearningAssignmentReminderInput,
+                ) => {
+                  if (!isElearningAssignmentSurfaceEnabled()) {
+                    throw new ElearningAssignmentReminderError('unavailable')
+                  }
+                  return produceElearningAssignmentReminder(poolManager.get(), input)
+                },
+              }
+            : undefined,
         // W4C-2 (#4556 lock §12.2 last sentence; #4607 P3-4): host-provided strict W4
         // segment-calculation port. Least-privilege like approvalAssigneeResolver —
         // only plugin-attendance receives it; every other plugin gets undefined and the

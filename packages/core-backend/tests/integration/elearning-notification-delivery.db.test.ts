@@ -27,6 +27,11 @@ import {
   type ElearningNotificationDeliveryDb,
   type ElearningNotificationDeliveryQueryable,
 } from '../../src/services/elearning-notification-delivery'
+import {
+  ElearningAssignmentReminderError,
+  deriveElearningAssignmentReminderOccurrenceKey,
+  produceElearningAssignmentReminder,
+} from '../../src/services/elearning-assignment-reminder'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -223,7 +228,7 @@ async function seedAssignmentMember(orgId: string, userId: string) {
      ) VALUES ($1, $2, $3, $4, $5, 'manual')`,
     [memberId, orgId, assignmentId, versionId, userId],
   )
-  return { assignmentId, memberId, deadline, userId }
+  return { assignmentId, memberId, deadline, userId, versionId }
 }
 
 const CLEANUP_TRIGGERS = [
@@ -250,6 +255,8 @@ async function cleanupOrg(orgId: string): Promise<void> {
       `DELETE FROM elearning_notification_deliveries WHERE org_id = $1`,
       [orgId],
     )
+    await pool.query('DELETE FROM elearning_exam_attempts WHERE org_id = $1', [orgId])
+    await pool.query('DELETE FROM elearning_progress WHERE org_id = $1', [orgId])
     await pool.query('DELETE FROM elearning_assignment_members WHERE org_id = $1', [orgId])
     await pool.query('DELETE FROM elearning_assignments WHERE org_id = $1', [orgId])
     await pool.query('DELETE FROM elearning_course_version_items WHERE org_id = $1', [orgId])
@@ -532,5 +539,166 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       await truncateClient.query('ROLLBACK')
       truncateClient.release()
     }
+  })
+
+  it('produces assignment reminders from canonical course state and stops after withdrawal or completion', async () => {
+    const orgA = `${NS}-producer-a-${randomUUID().slice(0, 8)}`
+    const orgB = `${NS}-producer-b-${randomUUID().slice(0, 8)}`
+    committedOrgIds.push(orgA, orgB)
+    const a = await seedAssignmentMember(orgA, `${NS}-producer-learner-a`)
+    const b = await seedAssignmentMember(orgB, `${NS}-producer-learner-b`)
+
+    const produce = (windowStart: string, dueAt: string) => {
+      const occurrenceKey = deriveElearningAssignmentReminderOccurrenceKey({
+        assignmentId: a.assignmentId,
+        userId: a.userId,
+        windowStart,
+      })
+      return produceElearningAssignmentReminder(db, {
+        orgId: orgA,
+        assignmentMemberId: a.memberId,
+        occurrenceKey,
+        windowStart,
+        dueAt,
+      })
+    }
+
+    const active = await produce(
+      '2026-08-27T00:00:00.000Z',
+      '2026-08-27T01:00:00.000Z',
+    )
+    expect(active).toMatchObject({ outcome: 'enqueued' })
+    await expect(produceElearningAssignmentReminder(db, {
+      orgId: orgA,
+      assignmentMemberId: a.memberId,
+      occurrenceKey: `${deriveElearningAssignmentReminderOccurrenceKey({
+        assignmentId: a.assignmentId,
+        userId: a.userId,
+        windowStart: '2026-08-27T00:00:00.000Z',
+      })}:tampered`,
+      windowStart: '2026-08-27T00:00:00.000Z',
+      dueAt: '2026-08-27T01:00:00.000Z',
+    })).rejects.toMatchObject({ code: 'invalid_input' })
+    await expect(produce(
+      '2026-08-27T00:00:00.000Z',
+      '2026-08-27T01:00:00.000Z',
+    )).resolves.toEqual({
+      outcome: 'duplicate',
+      deliveryId: active.outcome === 'enqueued' ? active.deliveryId : '',
+    })
+
+    await pool.query(
+      `UPDATE elearning_courses
+          SET status = 'archived', updated_at = clock_timestamp()
+        WHERE org_id = $1`,
+      [orgA],
+    )
+    await expect(produce(
+      '2026-08-28T00:00:00.000Z',
+      '2026-08-28T02:00:00.000Z',
+    )).resolves.toMatchObject({ outcome: 'enqueued' })
+
+    await pool.query(
+      `UPDATE elearning_courses
+          SET status = 'withdrawn', updated_at = clock_timestamp()
+        WHERE org_id = $1`,
+      [orgA],
+    )
+    await expect(produce(
+      '2026-08-29T00:00:00.000Z',
+      '2026-08-29T01:00:00.000Z',
+    )).resolves.toEqual({ outcome: 'ineligible' })
+
+    await pool.query(
+      `UPDATE elearning_courses
+          SET status = 'active', updated_at = clock_timestamp()
+        WHERE org_id = $1`,
+      [orgA],
+    )
+    const items = await pool.query<{
+      exam_id: string | null
+      id: string
+      item_type: 'exam' | 'video'
+    }>(
+      `SELECT id, item_type, exam_id
+         FROM elearning_course_version_items
+        WHERE org_id = $1 AND course_version_id = $2
+        ORDER BY position ASC, id ASC`,
+      [orgA, a.versionId],
+    )
+    const video = items.rows.find((item) => item.item_type === 'video')
+    const exam = items.rows.find((item) => item.item_type === 'exam')
+    expect(video?.id).toBeTruthy()
+    expect(exam?.id).toBeTruthy()
+    expect(exam?.exam_id).toBeTruthy()
+
+    await pool.query(
+      `INSERT INTO elearning_progress (
+         org_id, assignment_member_id, course_version_id, course_version_item_id,
+         user_id, status, effective_ms, max_position_ms, completed_at,
+         required_at_completion
+       ) VALUES ($1, $2, $3, $4, $5, 'completed', 9000, 10000, now(), TRUE)`,
+      [orgA, a.memberId, a.versionId, video?.id, a.userId],
+    )
+    await expect(produce(
+      '2026-08-30T00:00:00.000Z',
+      '2026-08-30T01:00:00.000Z',
+    )).resolves.toMatchObject({ outcome: 'enqueued' })
+
+    const attemptId = randomUUID()
+    await pool.query(
+      `INSERT INTO elearning_exam_attempts (
+         id, org_id, exam_id, course_version_id, course_version_item_id,
+         user_id, attempt_no, paper_snapshot, status
+       ) VALUES ($1, $2, $3, $4, $5, $6, 1, '{}'::jsonb, 'started')`,
+      [attemptId, orgA, exam?.exam_id, a.versionId, exam?.id, a.userId],
+    )
+    await pool.query(
+      `UPDATE elearning_exam_attempts
+          SET status = 'submitted', answers = '{}'::jsonb, submitted_at = now()
+        WHERE org_id = $1 AND id = $2`,
+      [orgA, attemptId],
+    )
+    await pool.query(
+      `UPDATE elearning_exam_attempts
+          SET status = 'graded', auto_score = 10, total_score = 10,
+              passed = TRUE, graded_at = now()
+        WHERE org_id = $1 AND id = $2`,
+      [orgA, attemptId],
+    )
+    await expect(produce(
+      '2026-08-31T00:00:00.000Z',
+      '2026-08-31T01:00:00.000Z',
+    )).resolves.toEqual({ outcome: 'ineligible' })
+
+    const otherOrgKey = deriveElearningAssignmentReminderOccurrenceKey({
+      assignmentId: b.assignmentId,
+      userId: b.userId,
+      windowStart: '2026-09-01T00:00:00.000Z',
+    })
+    let crossOrg: unknown
+    try {
+      await produceElearningAssignmentReminder(db, {
+        orgId: orgA,
+        assignmentMemberId: b.memberId,
+        occurrenceKey: otherOrgKey,
+        windowStart: '2026-09-01T00:00:00.000Z',
+        dueAt: '2026-09-01T01:00:00.000Z',
+      })
+    } catch (error) {
+      crossOrg = error
+    }
+    expect(crossOrg).toBeInstanceOf(ElearningAssignmentReminderError)
+    expect(crossOrg).toMatchObject({ code: 'not_found' })
+    expect(`${(crossOrg as Error).message}\n${(crossOrg as Error).stack ?? ''}`)
+      .not.toContain(b.memberId)
+
+    const intents = await pool.query<{ count: number }>(
+      `SELECT count(*)::integer AS count
+         FROM elearning_notification_deliveries
+        WHERE org_id = $1`,
+      [orgA],
+    )
+    expect(intents.rows).toEqual([{ count: 3 }])
   })
 })

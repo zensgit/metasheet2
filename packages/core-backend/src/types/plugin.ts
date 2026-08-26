@@ -1132,6 +1132,19 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L2 — host-provided reminder-intent producer. Only
+   * plugin-elearning receives this port. The plugin submits a persisted job
+   * envelope; core owns same-org eligibility, canonical occurrence-key
+   * derivation, and durable notification-ledger insertion.
+   */
+  elearningReminderProducer?: {
+    produce(
+      input: import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderInput,
+    ): Promise<
+      import('../services/elearning-assignment-reminder').ProduceElearningAssignmentReminderResult
+    >
+  }
+  /**
    * W4C-2 (#4556 lock 12.2 last sentence; #4607 P3-4) — host→plugin, narrow,
    * least-privilege W4 segment-calculation port. Same posture as
    * `approvalAssigneeResolver`: core-backend is the PROVIDER, ONLY

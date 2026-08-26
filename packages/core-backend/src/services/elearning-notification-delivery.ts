@@ -106,7 +106,7 @@ function requireUuid(value: unknown): string {
   return value.toLowerCase()
 }
 
-function normalizeTimestamp(value: unknown): string {
+export function normalizeElearningNotificationTimestamp(value: unknown): string {
   if (
     !(value instanceof Date)
     && (typeof value !== 'string' || !CANONICAL_UTC_TIMESTAMP_RE.test(value))
@@ -275,7 +275,7 @@ export async function enqueueElearningNotificationDelivery(
   const assignmentMemberId = requireUuid(input.assignmentMemberId)
   const recipientUserId = requireText(input.recipientUserId, 256)
   const sourceKey = requireText(input.sourceKey)
-  const dueAt = normalizeTimestamp(input.dueAt)
+  const dueAt = normalizeElearningNotificationTimestamp(input.dueAt)
   const payload = normalizeElearningNotificationPayload(input.payload)
   const requestHash = hashElearningNotificationRequest({
     assignmentMemberId,

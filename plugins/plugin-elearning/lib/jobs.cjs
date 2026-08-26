@@ -153,17 +153,20 @@ function readRequiredPositiveInt(value) {
   return value
 }
 
-function registerJobHandler(kind, handler) {
+function registerJobHandler(kind, handler, canClaim) {
   if (typeof kind !== 'string' || kind !== kind.trim() || kind === '') {
     throw new Error('elearning jobs handler kind is required')
   }
   if (typeof handler !== 'function') {
     throw new Error('elearning jobs handler is required')
   }
+  if (canClaim !== undefined && typeof canClaim !== 'function') {
+    throw new Error('elearning jobs canClaim must be a function')
+  }
   if (handlers.has(kind)) {
     throw new Error('elearning jobs handler kind already registered')
   }
-  handlers.set(kind, handler)
+  handlers.set(kind, { handler, canClaim: canClaim || null })
 }
 
 function clearJobHandlers() {
@@ -172,6 +175,18 @@ function clearJobHandlers() {
 
 function registeredKinds() {
   return [...handlers.keys()]
+}
+
+function claimableKinds() {
+  const kinds = []
+  for (const [kind, registration] of handlers) {
+    try {
+      if (!registration.canClaim || registration.canClaim()) kinds.push(kind)
+    } catch {
+      // A broken runtime gate fails closed: do not claim its durable jobs.
+    }
+  }
+  return kinds
 }
 
 function makeWorkerId() {
@@ -225,7 +240,7 @@ function startJobsWorker(context, options) {
 }
 
 function normalizeKinds(requested) {
-  const registered = registeredKinds()
+  const registered = claimableKinds()
   const allowed = new Set(registered)
   if (!Array.isArray(requested)) return registered
   const seen = new Set()
@@ -299,7 +314,7 @@ async function finalizeJobFailure(database, input) {
 }
 
 async function finalizeClaimedJob(database, logger, job, workerId, maxAttempts) {
-  const handler = handlers.get(job.kind)
+  const handler = handlers.get(job.kind)?.handler
   const claimAttempt = readRequiredPositiveInt(job.attempts)
   if (!claimAttempt) {
     logValuesFree(logger, 'warn', 'FINALIZE_FENCE')
@@ -362,7 +377,7 @@ async function runJobsTick(override) {
   tickOwner = owner
   const generation = workerGeneration
   try {
-    const kinds = registeredKinds()
+    const kinds = claimableKinds()
     if (kinds.length === 0) return { claimed: 0 }
     const claimed = await claimDueJobs(database, {
       kinds,

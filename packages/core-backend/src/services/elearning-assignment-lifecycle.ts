@@ -349,7 +349,7 @@ function isExamStatus(value: string): value is Exclude<ElearningAssignmentExamSt
   return (EXAM_STATUSES as readonly string[]).includes(value) && value !== 'not_started'
 }
 
-function deriveCourseStatus(
+export function deriveElearningAssignmentCourseStatus(
   videoStatus: ElearningAssignmentVideoStatus,
   examStatus: ElearningAssignmentExamStatus,
   passed: boolean,
@@ -390,7 +390,7 @@ function mapMember(row: Record<string, unknown>): ElearningAssignmentProgressMem
     examStatus = examText
   }
 
-  const courseStatus = deriveCourseStatus(videoStatus, examStatus, passed)
+  const courseStatus = deriveElearningAssignmentCourseStatus(videoStatus, examStatus, passed)
   if (!(COURSE_STATUSES as readonly string[]).includes(courseStatus)) fail('unavailable')
 
   return {
