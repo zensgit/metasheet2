@@ -14,10 +14,28 @@
 // build sets `approvals/api.ts`'s `USE_MOCK` before either template or create calls, so a route
 // interception cannot observe the request body. Proving that body would require a production-build
 // server or a test-only API injection, both outside this approval-only verification scope.
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page, type Request, type Response } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 
 const OUT = 'verification-output'
+
+async function routeNetworkTemplateDependencies(page: Page): Promise<void> {
+  await page.route('**/api/plugins', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ plugins: [] }),
+  }))
+  await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+  }))
+  await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+  }))
+}
 
 async function mountFields(
   page: Page,
@@ -25,9 +43,34 @@ async function mountFields(
 ): Promise<void> {
   const canvasV2 = opts.canvasV2 ?? true
   const route = opts.route ?? 'new'
-  const networkTemplate = opts.networkTemplate === true ? '&networkTemplate=on' : ''
+  const useNetworkTemplate = opts.networkTemplate === true
+  const networkTemplate = useNetworkTemplate ? '&networkTemplate=on' : ''
+  const failedApiRequests: string[] = []
+  const nonOkApiResponses: string[] = []
+  const recordFailedApiRequest = (request: Request) => {
+    const pathname = new URL(request.url()).pathname
+    if (pathname.startsWith('/api/')) failedApiRequests.push(pathname)
+  }
+  const recordNonOkApiResponse = (response: Response) => {
+    const pathname = new URL(response.url()).pathname
+    if (pathname.startsWith('/api/') && !response.ok()) {
+      nonOkApiResponses.push(`${pathname}:${response.status()}`)
+    }
+  }
+  if (useNetworkTemplate) {
+    await routeNetworkTemplateDependencies(page)
+    page.on('requestfailed', recordFailedApiRequest)
+    page.on('response', recordNonOkApiResponse)
+  }
   await page.goto(`/verification/approval-form-builder-mounted-harness.html?canvasV2=${canvasV2 ? 'on' : 'off'}&route=${route}${networkTemplate}`)
   await page.waitForFunction(() => (window as unknown as { __AFB_MOUNT_READY__?: boolean }).__AFB_MOUNT_READY__ === true)
+  if (useNetworkTemplate) {
+    await page.waitForLoadState('networkidle')
+    page.off('requestfailed', recordFailedApiRequest)
+    page.off('response', recordNonOkApiResponse)
+    expect(failedApiRequests, 'network-backed template mount must not tolerate failed API dependencies').toEqual([])
+    expect(nonOkApiResponses, 'network-backed template mount must not tolerate non-2xx API dependencies').toEqual([])
+  }
   await page.click('[data-testid="approval-template-section-fields"]')
 }
 

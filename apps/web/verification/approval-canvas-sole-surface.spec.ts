@@ -3,7 +3,7 @@
 // template read. It proves the ordinary authoring path is Canvas-first in Chromium while the
 // explicit flag-off rollback still exposes the structured list.
 import { mkdirSync } from 'node:fs'
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
 const OUT = 'verification-output'
 
@@ -113,15 +113,49 @@ const COMPLEX_TEMPLATE = {
   },
 }
 
+const LINEAR_TEMPLATE = {
+  ...COMPLEX_TEMPLATE,
+  key: 'canvas_linear_acceptance',
+  name: 'Canvas 验收线性模板',
+  description: '普通线性流程升级浏览器验收',
+  latestVersionId: 'ver_canvas_linear_1',
+  approvalGraph: {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'approval_1',
+        type: 'approval',
+        name: '直属上级审批',
+        config: {
+          assigneeSources: [{ kind: 'direct_manager' }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'error',
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+    ],
+  },
+}
+
 async function mountFlow(
   page: Page,
-  options: { canvasV2: boolean; width: number; height: number },
+  options: {
+    canvasV2: boolean
+    width: number
+    height: number
+    template?: typeof COMPLEX_TEMPLATE | typeof LINEAR_TEMPLATE
+  },
 ): Promise<void> {
+  const template = options.template ?? COMPLEX_TEMPLATE
   await page.setViewportSize({ width: options.width, height: options.height })
   await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify(COMPLEX_TEMPLATE),
+    body: JSON.stringify(template),
   }))
   await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
     status: 200,
@@ -144,7 +178,7 @@ async function mountFlow(
   await page.waitForFunction(() => (
     window as unknown as { __AFB_MOUNT_READY__?: boolean }
   ).__AFB_MOUNT_READY__ === true)
-  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(COMPLEX_TEMPLATE.name)
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(template.name)
   await page.click('[data-testid="approval-template-section-flow"]')
 }
 
@@ -161,6 +195,23 @@ async function expectNoDocumentOverflow(page: Page): Promise<void> {
     document.documentElement.scrollWidth - document.documentElement.clientWidth
   ))
   expect(overflow).toBeLessThanOrEqual(1)
+}
+
+async function expectNoOverlap(first: Locator, second: Locator, label: string): Promise<void> {
+  const firstBox = await first.boundingBox()
+  const secondBox = await second.boundingBox()
+  expect(firstBox, `${label}: first element must be laid out`).not.toBeNull()
+  expect(secondBox, `${label}: second element must be laid out`).not.toBeNull()
+  if (!firstBox || !secondBox) return
+  const overlapWidth = Math.max(
+    0,
+    Math.min(firstBox.x + firstBox.width, secondBox.x + secondBox.width) - Math.max(firstBox.x, secondBox.x),
+  )
+  const overlapHeight = Math.max(
+    0,
+    Math.min(firstBox.y + firstBox.height, secondBox.y + secondBox.height) - Math.max(firstBox.y, secondBox.y),
+  )
+  expect(overlapWidth * overlapHeight, label).toBe(0)
 }
 
 test.beforeAll(() => {
@@ -212,10 +263,37 @@ for (const viewport of [
     await expect(page.locator('[data-testid="approval-canvas-inspector-tab-assignee"]')).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('[data-testid="approval-canvas-inspector-tab-fieldPermissions"]')).toHaveAttribute('aria-selected', 'false')
 
+    if (viewport.width === 390) {
+      await expectNoOverlap(
+        page.locator('.template-authoring__steps'),
+        approvalSelector,
+        'mobile step navigation must not cover the focused Canvas node',
+      )
+      await expectNoOverlap(
+        page.locator('.template-authoring__section-actions'),
+        approvalInspector,
+        'mobile section actions must not cover the Canvas inspector',
+      )
+    }
     await expectNoDocumentOverflow(page)
     await page.screenshot({ path: `${OUT}/p7-canvas-sole-surface-${viewport.label}.png`, fullPage: true })
   })
 }
+
+test('ordinary linear editable templates promote into Canvas without exposing the legacy step editor', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+  })
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toBeVisible()
+  await expect(canvasNode(page, 'approval_1')).toHaveAttribute('data-node-type', 'approval')
+  await expect(page.locator('[data-testid="approval-graph-readonly-list"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="approval-template-add-step"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="approval-template-step-spine"]')).toHaveCount(0)
+  await expect(page.locator('[data-testid="approval-template-step-row"]')).toHaveCount(0)
+})
 
 test('flag OFF keeps the explicit structured-list rollback and does not mount Canvas', async ({ page }) => {
   await mountFlow(page, { canvasV2: false, width: 1440, height: 900 })
