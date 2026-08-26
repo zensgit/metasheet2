@@ -22,6 +22,7 @@ import {
   ELEARNING_OBJECT_ACL_STATE_TRIGGER,
 } from '../../src/db/migrations/zzzz20260826200000_create_elearning_admin_scope_acl'
 import { authenticate } from '../../src/middleware/auth'
+import { ElearningAdminAccessError } from '../../src/services/elearning-admin-access'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_PLAYBACK_SECRET_ENV } from '../../src/services/elearning-media-playback'
@@ -428,10 +429,12 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
         return TRAINING_PLAN_READ_RESULT
       },
       assignElearningTrainingPlan: async (_db, input) => {
+        if (!input.isGlobalAdmin) throw new ElearningAdminAccessError('forbidden')
         trainingPlanAssignmentCalls.push(input)
         return TRAINING_PLAN_ASSIGNMENT_RESULT
       },
       revokeElearningTrainingPlanAssignment: async (_db, input) => {
+        if (!input.isGlobalAdmin) throw new ElearningAdminAccessError('forbidden')
         trainingPlanRevocationCalls.push(input)
         return TRAINING_PLAN_REVOCATION_RESULT
       },
@@ -845,6 +848,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       sourceKey: TRAINING_PLAN_ASSIGNMENT_BODY.sourceKey,
       deadline: TRAINING_PLAN_ASSIGNMENT_BODY.deadline,
       rules: TRAINING_PLAN_ASSIGNMENT_BODY.rules,
+      isGlobalAdmin: true,
     }])
     valuesFree(assigned.body)
 
@@ -860,7 +864,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       .set('Authorization', `Bearer ${writerToken}`)
       .send(TRAINING_PLAN_ASSIGNMENT_BODY)
     expect(denied.status).toBe(403)
-    expect(denied.body).toEqual({ error: 'Insufficient permissions' })
+    expect(denied.body).toEqual({ error: 'forbidden' })
     expect(trainingPlanAssignmentCalls).toEqual([])
 
     const legacyToken = signToken({
@@ -900,6 +904,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       actorId: adminId,
       planAssignmentId: TRAINING_PLAN_ASSIGNMENT_RESULT.planAssignmentId,
       reason: TRAINING_PLAN_REVOCATION_BODY.reason,
+      isGlobalAdmin: true,
     }])
     valuesFree(revoked.body)
 
@@ -917,7 +922,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       .set('Authorization', `Bearer ${writerToken}`)
       .send(TRAINING_PLAN_REVOCATION_BODY)
     expect(denied.status).toBe(403)
-    expect(denied.body).toEqual({ error: 'Insufficient permissions' })
+    expect(denied.body).toEqual({ error: 'forbidden' })
     expect(trainingPlanRevocationCalls).toEqual([])
 
     const legacyToken = signToken({
@@ -970,7 +975,7 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
       .set('Authorization', `Bearer ${token}`)
       .send({ reason: 'must not write', rules: [] })
     expect(res.status).toBe(403)
-    expect(res.body).toEqual({ error: 'Insufficient permissions' })
+    expect(res.body).toEqual({ error: 'forbidden' })
     expect(await scopeRevisionCount()).toBe(before)
     valuesFree(res.body)
   })
