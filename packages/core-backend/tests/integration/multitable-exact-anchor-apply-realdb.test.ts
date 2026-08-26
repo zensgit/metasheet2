@@ -109,8 +109,15 @@ const applyArgs = (
 const revSeq = (recordId: string, version: number, action: 'create' | 'update' | 'delete', snap: Record<string, unknown> | null, seq: string, opId?: string | null) =>
   q(
     `INSERT INTO meta_record_revisions (id, sheet_id, record_id, version, action, source, changed_field_ids, patch, snapshot, seq, operation_id)
-     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6::bigint,$7::uuid)`,
+     VALUES (gen_random_uuid(),$1,$2,$3,$4,'rest',ARRAY[]::text[],'{}'::jsonb,$5::jsonb,$6::bigint,$7::uuid)
+     RETURNING id::text`,
     [SHEET, recordId, version, action, snap === null ? null : JSON.stringify(snap), seq, opId ?? null],
+  )
+const markerSeq = (recordId: string, version: number, seq: string) =>
+  q(
+    `INSERT INTO meta_record_version_markers (id, sheet_id, record_id, version, kind, seq)
+     VALUES (gen_random_uuid(),$1,$2,$3,'unlock',$4::bigint)`,
+    [SHEET, recordId, version, seq],
   )
 const live = (id: string, data: Record<string, unknown>, version = 1) =>
   q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,$4)', [id, SHEET, JSON.stringify(data), version])
@@ -274,13 +281,21 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     ])
     await revSeq(R_RES, 1, 'create', { [F_STR]: 'res-at-anchor' }, sResCreate)
     await revSeq(R_REV, 2, 'update', { [F_STR]: 'rev-now' }, sUpdate)
-    await revSeq(R_RES, 1, 'delete', { [F_STR]: 'res-at-anchor' }, sResDel)
+    const deleteRevision = await revSeq(R_RES, 1, 'delete', { [F_STR]: 'res-at-anchor' }, sResDel)
     await revSeq(R_NEW, 1, 'create', { [F_STR]: 'newbie' }, sNew)
     await live(R_REV, { [F_STR]: 'rev-now' }, 2)
     await live(R_NEW, { [F_STR]: 'newbie' }, 1)
     await q(
-      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,$4)',
-      [R_RES, SHEET, JSON.stringify({ [F_STR]: 'res-at-anchor' }), 1],
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,$4,$5)`,
+      [
+        R_RES,
+        SHEET,
+        JSON.stringify({ [F_STR]: 'res-at-anchor' }),
+        1,
+        String((deleteRevision.rows[0] as { id: unknown }).id),
+      ],
     )
     return { R_REV, R_NEW, R_RES, anchorOp }
   }
@@ -312,6 +327,32 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect(revRows[0].changed_field_ids).toEqual([F_STR]) // true restorable delta only
     const ep = (await q('SELECT event_count FROM meta_record_history_operations WHERE sheet_id = $1 AND operation_id = $2::uuid', [SHEET, revRows[0].op])).rows[0] as { event_count: number }
     expect(ep.event_count).toBe(1)
+    expect(await burnCount()).toBe(1)
+  })
+
+  test('MARKER-ONLY TARGET: apply revalidates baseline v1 + marker v2 at the token-bound anchor and restores its inherited data', async () => {
+    const R = `rec_marker_apply_${TS}`
+    const ANCHOR_RECORD = `rec_marker_apply_anchor_${TS}`
+    const baselineData = { [F_STR]: 'baseline-v1' }
+    await live(R, baselineData, 1)
+    const [markerOnlySeq, anchorSeq, postAnchorSeq] = await seqBand(3)
+    await markerSeq(R, 2, markerOnlySeq)
+    await q('UPDATE meta_records SET version = 2 WHERE id = $1 AND sheet_id = $2', [R, SHEET])
+    const anchorOp = await sealAnchorOp(ANCHOR_RECORD, [
+      { seq: anchorSeq, version: 1, action: 'create', snap: { [F_STR]: 'anchor' } },
+    ])
+    await live(ANCHOR_RECORD, { [F_STR]: 'anchor' }, 1)
+    await revSeq(R, 3, 'update', { [F_STR]: 'current-v3' }, postAnchorSeq)
+    await q(
+      'UPDATE meta_records SET data = $1::jsonb, version = 3 WHERE id = $2 AND sheet_id = $3',
+      [JSON.stringify({ [F_STR]: 'current-v3' }), R, SHEET],
+    )
+
+    const pv = await preview(anchorOp)
+    expect(pv.stateMap.get(R)).toEqual({ recordId: R, exists: true, data: baselineData, version: 2 })
+    const out = await applyExactAnchorRecovery(txn, applyArgs(pv.token))
+    expect(out).toMatchObject({ ok: true, mode: 'revert', applied: { reverts: 1 } })
+    expect(await liveRow(R)).toEqual({ data: baselineData, version: 4 })
     expect(await burnCount()).toBe(1)
   })
 
@@ -363,11 +404,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
   test('CHECKPOINT-GONE / CHECKPOINT-CHANGED: the in-fence re-resolution never trusts the token echo', async () => {
     const { anchorOp } = await seedWorld()
     const pv = await preview(anchorOp)
-    // (a) remove the active checkpoint entirely ⇒ the authoritative production precheck fails first.
+    // (a) remove the active checkpoint entirely ⇒ in-fence checkpoint resolution fails before strict.
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET])
     await q('DELETE FROM meta_history_trust_checkpoints WHERE sheet_id = $1', [SHEET])
     expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
-      .toEqual({ ok: false, reason: 'history-incomplete' })
+      .toEqual({ ok: false, reason: 'no-covering-checkpoint' })
     expect(await burnCount()).toBe(0)
     // (b) restore a covering checkpoint with a DIFFERENT id than the token bound ⇒ checkpoint-changed.
     await activate()
@@ -423,6 +464,11 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
        VALUES ($1,$2,$3,$4::jsonb,5,false), ($1,$2,$5,$6::jsonb,2,true)`,
       [ckId, SHEET, R_BASE, JSON.stringify({ [F_STR]: 'from-baseline' }), R_TRASHED, JSON.stringify({ [F_STR]: 'was-trashed' })],
     )
+    // R_BASE existed at the checkpoint/anchor and was causally deleted afterwards. Without this post-floor
+    // delete, a baseline-live row missing from current live state is itself history corruption, not a valid
+    // resurrection candidate.
+    const [sBaseDelete] = await moreSeqs(1)
+    await revSeq(R_BASE, 5, 'delete', { [F_STR]: 'from-baseline' }, sBaseDelete)
     const pv = await preview(anchorOp)
     expect(pv.stateMap.get(R_BASE)).toMatchObject({ exists: true, data: { [F_STR]: 'from-baseline' } })
     expect(pv.stateMap.get(R_TRASHED)).toMatchObject({ exists: false })
@@ -1413,10 +1459,9 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     expect((await applyExactAnchorRecovery(txn, applyArgs(pv.token))).ok).toBe(true)
   })
 
-  test('MALFORMED-LIVE data: a scalar-data live row the strict precheck cannot see (all user fields absent from the latest snapshot) ⇒ recovery-trust-required — the old asRec coercion would have destructively applied over it', async () => {
-    // World: at-anchor {F_STR:'at'}; the LATEST snapshot is {} (user field removed), so the precheck's
-    // content layer compares undefined===undefined and PASSES even over a corrupt scalar-data row. Only
-    // the apply's fail-closed shape validation stands between this row and a destructive revert.
+  test('MALFORMED-LIVE data: a scalar-data live row fails in the strict target-window projection before burn/write', async () => {
+    // World: at-anchor {F_STR:'at'}; the LATEST snapshot is {} (user field removed), so a fallback-to-{}
+    // comparator would see undefined===undefined. The strict current projection must reject the raw scalar.
     const R = `rec_maldata_${TS}`
     const [sCreate, sUpdate] = await seqBand(2)
     const anchorOp = await sealAnchorOp(R, [
@@ -1428,7 +1473,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
     // Corrupt AFTER preview: the id/version fingerprint is unchanged, so no hash can refuse this.
     await q(`UPDATE meta_records SET data = '"corrupt"'::jsonb WHERE id = $1 AND sheet_id = $2`, [R, SHEET])
     expect(await applyExactAnchorRecovery(txn, applyArgs(pv.token)))
-      .toEqual({ ok: false, reason: 'recovery-trust-required' })
+      .toEqual({ ok: false, reason: 'history-incomplete' })
     expect(await burnCount()).toBe(0)
     // Repair ⇒ the same unburned token applies and the revert lands.
     await q(`UPDATE meta_records SET data = '{}'::jsonb WHERE id = $1 AND sheet_id = $2`, [R, SHEET])
@@ -1581,9 +1626,7 @@ describeIfDatabase('W0-1 v3.7 L8 — exact-anchor destructive apply (real DB)', 
       await writer.query('BEGIN')
       await writer.query('SELECT id FROM meta_records WHERE id = $1 FOR UPDATE', [recordB])
       await recovery.query('BEGIN')
-      await writer.query("SET LOCAL deadlock_timeout = '100ms'")
       await writer.query("SET LOCAL statement_timeout = '3s'")
-      await recovery.query("SET LOCAL deadlock_timeout = '100ms'")
       await recovery.query("SET LOCAL statement_timeout = '3s'")
       const recoveryPid = Number((await recovery.query('SELECT pg_backend_pid() AS pid')).rows[0]?.pid)
 

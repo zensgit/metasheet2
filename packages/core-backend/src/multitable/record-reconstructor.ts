@@ -1,5 +1,5 @@
 import type { QueryFn } from './permission-service'
-import { assertSeqString } from './history-trust-checkpoint'
+import { assertSeqString, compareSeq, SeqComparatorError } from './history-trust-checkpoint'
 
 /**
  * Global History — T5-1: as-of record reconstruction. TWO read primitives, PURE READ (writes nothing):
@@ -29,6 +29,8 @@ export interface RecordStateAtT {
   data: Record<string, unknown> | null
   /** the version of the latest <= T revision (the version the record was at, as of T). */
   version: number | null
+  /** Internal replay marker: the first trusted item was a marker, so checkpoint data/existence was inherited. */
+  inheritsCheckpointBaseline?: true
 }
 
 const asRecord = (v: unknown): Record<string, unknown> | null =>
@@ -74,8 +76,9 @@ export async function reconstructRecordsAtT(
 }
 
 /**
- * Reconstruct each record's state as of an EXACT causal anchor `seq` = the LATEST revision with `seq <= anchorSeq`
- * per record, ordered by the shared `meta_record_chain_seq` bigint (`ORDER BY record_id, seq DESC`). This is the
+ * Reconstruct each record's state as of an EXACT causal anchor `seq` from the shared trusted
+ * revisions + version-markers timeline where `trustedSinceSeq < seq <= anchorSeq`, ordered by the
+ * shared `meta_record_chain_seq` bigint (`ORDER BY record_id, seq`). This is the
  * W0-1 v3.7 §1.3 (L6-b) RECOVERY-AUTHORITY reconstruction — the state a destructive revert/reset resolves against.
  *
  * WHY seq, not created_at (the C2 fix): `seq` is allocated at write time under the L4 canonical fence, so it is
@@ -85,11 +88,10 @@ export async function reconstructRecordsAtT(
  * true as-of-anchorSeq state. `seq` is UNIQUE in the shared domain, so `seq DESC` alone is a total order — no
  * `version`/`id` tiebreak is needed (contrast the LOCK-11 tiebreaks the created_at path must carry).
  *
- * DELETE-CHAIN (LOCK-9, identical to the created_at path and the strict precheck's delete handling): a `delete`
- * revision stores the PRE-delete snapshot, so if the latest `seq <= anchorSeq` revision is a delete the record
- * did NOT exist as of the anchor → `exists:false, data:null` (never resurrected). A record with no revision
- * `seq <= anchorSeq` is absent from the map (it was created after the anchor). SAME-GENERATION contiguity /
- * chain integrity is proven separately by the strict precheck; this primitive only reads the as-of state.
+ * A marker occupies its own version but carries no payload: it inherits the nearest trusted data/existence
+ * state. If the first post-floor item is a marker, the selected checkpoint baseline supplies that state while
+ * the marker's version remains authoritative. DELETE-CHAIN (LOCK-9) remains unchanged: a delete stores the
+ * PRE-delete snapshot but makes the state absent. SAME-GENERATION contiguity is proven separately by strict.
  *
  * EXACT BIGINT (§1.1): `anchorSeq` is a decimal-string bound straight into a `::bigint` parameter — never
  * Number()/parseInt/+/-. A non-decimal-integer `anchorSeq` FAILS CLOSED (`assertSeqString` throws) rather than
@@ -97,34 +99,92 @@ export async function reconstructRecordsAtT(
  *
  * @param anchorSeq the exact causal anchor as a decimal bigint string (the sealed operation's `endpoint_seq`).
  * @param recordIds undefined → every record with a revision `seq <= anchorSeq`; otherwise only the given ids.
+ * @param trustedSinceSeq optional checkpoint trust floor; when present, pre-checkpoint/backfilled rows are excluded.
+ * @param checkpointId DB-selected checkpoint used only to hydrate marker-only baseline inheritance.
  */
 export async function reconstructRecordsAtSeq(
   query: QueryFn,
   sheetId: string,
   anchorSeq: string,
   recordIds?: string[],
+  trustedSinceSeq?: string,
+  checkpointId?: string,
 ): Promise<Map<string, RecordStateAtT>> {
   const out = new Map<string, RecordStateAtT>()
   if (!sheetId) return out
   assertSeqString(anchorSeq, 'reconstructRecordsAtSeq.anchorSeq') // fail-closed on a forged/garbage anchor
   const args: unknown[] = [sheetId, anchorSeq]
+  let floorFilter = ''
+  if (trustedSinceSeq !== undefined) {
+    assertSeqString(trustedSinceSeq, 'reconstructRecordsAtSeq.trustedSinceSeq')
+    if (compareSeq(trustedSinceSeq, anchorSeq) > 0) {
+      throw new SeqComparatorError('reconstructRecordsAtSeq: trust floor exceeds anchor')
+    }
+    args.push(trustedSinceSeq)
+    floorFilter = `AND seq > $${args.length}::bigint`
+  }
+  if (checkpointId !== undefined && trustedSinceSeq === undefined) {
+    throw new SeqComparatorError('reconstructRecordsAtSeq: checkpoint requires trust floor')
+  }
   let recFilter = ''
   if (recordIds) {
     if (recordIds.length === 0) return out
     args.push(recordIds)
     recFilter = `AND record_id = ANY($${args.length}::text[])`
   }
-  // DISTINCT ON (record_id) + `seq DESC` picks exactly the latest `seq <= anchorSeq` revision per record. Native
-  // SQL bigint comparison (`<= $2::bigint`) — exact regardless of magnitude (a >2^53 seq never collapses).
+  // Revisions and markers are one exact bigint timeline. Folding in seq order makes marker inheritance explicit:
+  // a marker updates only the version and cannot erase the closest trusted data/existence state.
+  const rangeFilter = `sheet_id = $1 AND seq <= $2::bigint ${floorFilter} ${recFilter}`
   const res = await query(
-    `SELECT DISTINCT ON (record_id) record_id, action, snapshot, version
+    `SELECT record_id, action, snapshot, version, seq, 'event' AS kind
      FROM meta_record_revisions
-     WHERE sheet_id = $1 AND seq <= $2::bigint ${recFilter}
-     ORDER BY record_id, seq DESC`,
+     WHERE ${rangeFilter}
+     UNION ALL
+     SELECT record_id, NULL::text AS action, NULL::jsonb AS snapshot, version, seq, 'marker' AS kind
+     FROM meta_record_version_markers
+     WHERE ${rangeFilter}
+     ORDER BY record_id, seq`,
     args,
   )
   for (const raw of res.rows as Array<Record<string, unknown>>) {
-    mapReconstructedRow(out, raw)
+    if (raw.kind !== 'marker') {
+      mapReconstructedRow(out, raw)
+      continue
+    }
+    const recordId = String(raw.record_id)
+    const version = typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : null
+    const inherited = out.get(recordId)
+    out.set(recordId, inherited
+      ? { ...inherited, version }
+      : {
+          recordId,
+          exists: false,
+          data: null,
+          version,
+          inheritsCheckpointBaseline: true,
+        })
+  }
+
+  const markerOnlyIds = [...out.values()]
+    .filter((state) => state.inheritsCheckpointBaseline)
+    .map((state) => state.recordId)
+  if (checkpointId !== undefined && markerOnlyIds.length > 0) {
+    const baselineRes = await query(
+      `SELECT record_id, data, is_trashed
+       FROM meta_history_baselines
+       WHERE checkpoint_id = $1 AND sheet_id = $2 AND record_id = ANY($3::text[])`,
+      [checkpointId, sheetId, markerOnlyIds],
+    )
+    for (const raw of baselineRes.rows as Array<Record<string, unknown>>) {
+      const recordId = String(raw.record_id)
+      const state = out.get(recordId)
+      if (!state?.inheritsCheckpointBaseline || typeof raw.is_trashed !== 'boolean') continue
+      out.set(recordId, {
+        ...state,
+        exists: !raw.is_trashed,
+        data: raw.is_trashed ? null : asRecord(raw.data),
+      })
+    }
   }
   return out
 }

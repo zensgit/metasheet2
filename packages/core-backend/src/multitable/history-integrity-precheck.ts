@@ -3,6 +3,7 @@ import type { QueryFn } from './permission-service'
 import { isSystemSheet } from './system-sheet-predicate'
 import { hasVersionMarkerTable, hasChainSeqColumn } from './record-history-service'
 import { checkStrictEnablementPrecondition } from './history-trust-precondition'
+import { assertSeqString, compareSeq } from './history-trust-checkpoint'
 
 /**
  * Global History — W0-1: `HISTORY_INCOMPLETE`, the fail-closed integrity PRECHECK for the destructive
@@ -67,18 +68,13 @@ import { checkStrictEnablementPrecondition } from './history-trust-precondition'
  *     sheet_id, record_id ORDER BY seq)` — computed here as a simple running counter over the seq-ordered
  *     per-record timeline (the counter only depends on which items are 'create' events, never on seq
  *     magnitude, so it carries no float-precision risk).
- *  3. ALL GENERATIONS, NOT TERMINAL-ONLY (§4/§9.3 owner High-2 — corrects the superseded v3.5 draft #4309,
- *     which validated only the current/terminal generation): `checkAllGenerationsContiguity` walks EVERY
- *     generation in a record's timeline and refuses on the FIRST hole/duplicate found anywhere, not only in
- *     the newest one. A record with a hole in an OLDER generation and a clean terminal generation still
- *     refuses — "terminal-generation-only validation is forbidden" (§4, verbatim). This lane implements the
- *     conservative "all generations reconstructable in scope" option v3.7 §9.3 explicitly permits in place of
- *     resolving an exact target/asOf generation (§1.3's exact anchor resolution is L6, DEFERRED); checking
- *     every generation is strictly stronger than checking only the one the recovery target would fall in.
- *  4. C3 DELETED-CHAIN ENUMERATION (§4/§9.3 scope item 5): records that are not live (chain-only, or present
- *     in `meta_records_trash`) are ALSO enumerated and validated (their scope requires the timeline's last
- *     item to be a delete; a trash row surviving with its ENTIRE revision chain retention-swept is
- *     unverifiable and fails closed, `chain_hole`).
+ *  3. TARGET GENERATION A (§4): production callers pass the selected checkpoint floor and sealed anchor.
+ *     The strict path validates the generation containing the latest trusted event at that anchor, not the
+ *     current/terminal generation and not unrelated pre-floor or post-anchor generations. Direct comparator
+ *     tests that omit a window retain the conservative all-generations walk as a regression seam.
+ *  4. C3 DELETED-CHAIN ENUMERATION (§4/§9.3 scope item 5): the target window includes baseline rows and
+ *     post-floor revision/marker generations, including records that existed at the anchor but are now
+ *     deleted. A separate post-floor projection still proves current live existence/version/content.
  *
  * `chain_corrupt` is a NEW reason (strict-only, never returned when the flag is off) for a within-generation
  * duplicate occupant — it replaces the DROPPED cross-generation marker `UNIQUE` constraint's job, which used
@@ -86,12 +82,9 @@ import { checkStrictEnablementPrecondition } from './history-trust-precondition'
  * `comparator_error` also covers illegal seq (non-positive, malformed, or a duplicate seq value shared by two
  * items — a shared-sequence-domain violation) — fail-closed, never coerced to zero (§9.3 scope item 6).
  *
- * STILL DEFERRED beyond this lane (unchanged from the list above, plus the v3.7-specific items): §1.2 sealed
- * operation-endpoint ledger (L6), §1.3 exact recovery anchor / resolving a target generation from a real
- * commit boundary (L6), the L4 all-writer canonical fence, the L5 trust checkpoint. C2 time-monotonicity
- * (seq-vs-version agreement within a generation) is NOT added by this lane either — it remains on the
- * pre-existing DEFERRED docket above; this lane's scope is the exact-bigint + all-generations + C3 + dup/
- * illegal-seq fail-close set (v3.7 §9.3), not the full W0 trust correction.
+ * L4 fence, L5 checkpoint, L6 sealed endpoint/exact anchor, and the production target-window call path are
+ * landed. The no-window all-generations comparator remains exported for its historical real-DB regression
+ * suite; it is no longer the recovery authority when a selected checkpoint + anchor are available.
  * ============================================================================================================
  */
 
@@ -459,6 +452,7 @@ const epochOf = (createdAt: unknown): number => {
 export async function precheckSheetHistoryIntegrity(
   query: QueryFn,
   sheetId: string,
+  window?: StrictHistoryWindow,
 ): Promise<HistoryIntegrityVerdict> {
   if (isContiguityStrictMode()) {
     // L5 P3-2 STRICT-ENABLEMENT GATE (wired here — the authoritative strict-mode entry the recovery routes
@@ -476,7 +470,7 @@ export async function precheckSheetHistoryIntegrity(
     if (!enablement.canEnable) {
       return { ok: false, reason: 'strict_enablement_unmet' }
     }
-    return precheckSheetHistoryIntegrityStrict(query, sheetId)
+    return precheckSheetHistoryIntegrityStrict(query, sheetId, window)
   }
 
   // System sheets (approval projection / people directory) are server-regenerated read models — excluded.
@@ -576,12 +570,379 @@ export async function precheckSheetHistoryIntegrity(
 // ==============================================================================================================
 
 type StrictRawTimelineRow = {
+  revision_id: unknown
   record_id: unknown
   version: unknown
   action: unknown
   snapshot: unknown
   seq: unknown
   kind: unknown
+}
+
+export interface StrictHistoryWindow {
+  checkpointId: string
+  /** Exact checkpoint floor; trusted history starts strictly after this bigint seq. */
+  trustedSinceSeq: string
+  /** Exact sealed-operation endpoint; target history ends inclusively at this bigint seq. */
+  anchorSeq: string
+}
+
+type StrictWindowItem =
+  | { kind: 'event'; revisionId: string; version: number; action: ChainEventAction; snapshot: unknown; seq: string }
+  | { kind: 'marker'; version: number; seq: string }
+
+type StrictBaselineState = {
+  data: Record<string, unknown>
+  version: number
+  isTrashed: boolean
+}
+
+type StrictProjectedState = {
+  exists: boolean
+  /** Latest trusted payload, retained across delete so a trash projection can be compared exactly. */
+  data: Record<string, unknown> | null
+  version: number | null
+  /** Known for a post-floor delete; null when absence was inherited from the checkpoint baseline. */
+  deleteRevisionId: string | null
+}
+
+type StrictTrashState = {
+  data: Record<string, unknown>
+  originalVersion: number
+  deleteRevisionId: string
+  deleteSeq: string
+}
+
+const strictVersion = (value: unknown): number => {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error('invalid strict history version')
+  }
+  return value
+}
+
+const asStrictTimelineItem = (item: StrictWindowItem): StrictTimelineItem => item.kind === 'marker'
+  ? { kind: 'marker', version: item.version, seq: item.seq }
+  : { kind: 'event', version: item.version, action: item.action, seq: item.seq }
+
+async function loadStrictWindowTimeline(
+  query: QueryFn,
+  sheetId: string,
+  trustedSinceSeq: string,
+  anchorSeq: string | undefined,
+  hasMarkers: boolean,
+): Promise<Map<string, StrictWindowItem[]>> {
+  const upperBound = anchorSeq === undefined ? '' : ' AND seq <= $3::bigint'
+  const params = anchorSeq === undefined ? [sheetId, trustedSinceSeq] : [sheetId, trustedSinceSeq, anchorSeq]
+  const timelineSql = hasMarkers
+    ? `SELECT id::text AS revision_id, record_id, version, action, snapshot, seq, 'event' AS kind
+       FROM meta_record_revisions
+       WHERE sheet_id = $1 AND seq > $2::bigint${upperBound}
+       UNION ALL
+       SELECT NULL::text AS revision_id, record_id, version, NULL AS action, NULL::jsonb AS snapshot, seq, 'marker' AS kind
+       FROM meta_record_version_markers
+       WHERE sheet_id = $1 AND seq > $2::bigint${upperBound}
+       ORDER BY record_id, seq`
+    : `SELECT id::text AS revision_id, record_id, version, action, snapshot, seq, 'event' AS kind
+       FROM meta_record_revisions
+       WHERE sheet_id = $1 AND seq > $2::bigint${upperBound}
+       ORDER BY record_id, seq`
+  const res = await query(timelineSql, params)
+  const byRecord = new Map<string, StrictWindowItem[]>()
+  const seenSeqs = new Set<string>()
+  for (const row of res.rows as StrictRawTimelineRow[]) {
+    const recordId = String(row.record_id)
+    const seq = String(row.seq ?? '')
+    if (!SEQ_FORMAT.test(seq) || seenSeqs.has(seq)) throw new Error('invalid strict history seq')
+    seenSeqs.add(seq)
+    const list = byRecord.get(recordId) ?? []
+    const previous = list[list.length - 1]
+    if (previous && compareSeq(previous.seq, seq) >= 0) throw new Error('unordered strict history seq')
+    const version = strictVersion(row.version)
+    if (row.kind === 'marker') {
+      list.push({ kind: 'marker', version, seq })
+    } else {
+      const revisionId = typeof row.revision_id === 'string' ? row.revision_id : ''
+      if (row.kind !== 'event' || (row.action !== 'create' && row.action !== 'update' && row.action !== 'delete')) {
+        throw new Error('invalid strict history event')
+      }
+      if (!revisionId) throw new Error('invalid strict history revision id')
+      list.push({ kind: 'event', revisionId, version, action: row.action, snapshot: row.snapshot, seq })
+    }
+    byRecord.set(recordId, list)
+  }
+  return byRecord
+}
+
+function validateTargetGeneration(
+  baseline: StrictBaselineState | undefined,
+  trustedSinceSeq: string,
+  items: ReadonlyArray<StrictWindowItem>,
+): ContiguityResult {
+  let active: StrictTimelineItem[] | null = baseline && !baseline.isTrashed
+    ? [{ kind: 'event', action: 'create', version: baseline.version, seq: trustedSinceSeq }]
+    : null
+  let latestClosed: StrictTimelineItem[] | null = null
+
+  for (const item of items) {
+    if (item.kind === 'marker') {
+      if (!active) return { ok: false, reason: 'chain_hole' }
+      active.push(asStrictTimelineItem(item))
+      continue
+    }
+    if (item.action === 'create') {
+      if (active) return { ok: false, reason: 'chain_hole' }
+      active = [asStrictTimelineItem(item)]
+      continue
+    }
+    if (!active) return { ok: false, reason: 'chain_hole' }
+    active.push(asStrictTimelineItem(item))
+    if (item.action === 'delete') {
+      latestClosed = active
+      active = null
+    }
+  }
+
+  if (active) {
+    const terminal = active[active.length - 1]
+    return checkAllGenerationsContiguity({ kind: 'live', liveVersion: terminal.version }, active)
+  }
+  return latestClosed ? checkAllGenerationsContiguity({ kind: 'deleted' }, latestClosed) : { ok: true }
+}
+
+function projectCurrentState(
+  baseline: StrictBaselineState | undefined,
+  items: ReadonlyArray<StrictWindowItem>,
+): { verdict: ContiguityResult; state: StrictProjectedState } {
+  let state: StrictProjectedState = baseline
+    ? {
+        exists: !baseline.isTrashed,
+        data: baseline.data,
+        version: baseline.version,
+        deleteRevisionId: null,
+      }
+    : { exists: false, data: null, version: null, deleteRevisionId: null }
+
+  for (const item of items) {
+    if (item.kind === 'marker') {
+      if (!state.exists) return { verdict: { ok: false, reason: 'chain_hole' }, state }
+      state = { ...state, version: item.version }
+      continue
+    }
+    const snapshot = isPlainRecord(item.snapshot) ? item.snapshot : {}
+    if (item.action === 'create') {
+      if (state.exists) return { verdict: { ok: false, reason: 'chain_hole' }, state }
+      state = { exists: true, data: snapshot, version: item.version, deleteRevisionId: null }
+    } else if (item.action === 'update') {
+      if (!state.exists) return { verdict: { ok: false, reason: 'chain_hole' }, state }
+      state = { exists: true, data: snapshot, version: item.version, deleteRevisionId: null }
+    } else {
+      if (!state.exists) return { verdict: { ok: false, reason: 'chain_hole' }, state }
+      state = {
+        exists: false,
+        data: snapshot,
+        version: item.version,
+        deleteRevisionId: item.revisionId,
+      }
+    }
+  }
+  return { verdict: { ok: true }, state }
+}
+
+async function precheckTargetHistoryWindow(
+  query: QueryFn,
+  sheetId: string,
+  window: StrictHistoryWindow,
+): Promise<HistoryIntegrityVerdict> {
+  try {
+    assertSeqString(window.trustedSinceSeq, 'precheckTargetHistoryWindow.trustedSinceSeq')
+    assertSeqString(window.anchorSeq, 'precheckTargetHistoryWindow.anchorSeq')
+    if (!SEQ_FORMAT.test(window.trustedSinceSeq) || !SEQ_FORMAT.test(window.anchorSeq)) {
+      return { ok: false, reason: 'comparator_error' }
+    }
+    if (!window.checkpointId || compareSeq(window.trustedSinceSeq, window.anchorSeq) > 0) {
+      return { ok: false, reason: 'comparator_error' }
+    }
+    if (!(await hasChainSeqColumn(query))) return { ok: false, reason: 'comparator_error' }
+
+    const checkpointRes = await query(
+      `SELECT trusted_since_seq::text AS trusted_since_seq
+       FROM meta_history_trust_checkpoints
+       WHERE id = $1 AND sheet_id = $2
+         AND state IN ('active', 'superseded') AND pruned_at IS NULL`,
+      [window.checkpointId, sheetId],
+    )
+    const checkpointFloor = (checkpointRes.rows[0] as { trusted_since_seq?: unknown } | undefined)?.trusted_since_seq
+    if (checkpointFloor !== window.trustedSinceSeq) return { ok: false, reason: 'comparator_error' }
+
+    const baselineRes = await query(
+      `SELECT record_id, data, version, is_trashed
+       FROM meta_history_baselines
+       WHERE checkpoint_id = $1 AND sheet_id = $2`,
+      [window.checkpointId, sheetId],
+    )
+    const baselineById = new Map<string, StrictBaselineState>()
+    for (const row of baselineRes.rows as Array<{ record_id: unknown; data: unknown; version: unknown; is_trashed: unknown }>) {
+      const recordId = String(row.record_id)
+      if (!recordId || baselineById.has(recordId) || !isPlainRecord(row.data) || typeof row.is_trashed !== 'boolean') {
+        return { ok: false, reason: 'comparator_error' }
+      }
+      baselineById.set(recordId, {
+        data: row.data,
+        version: strictVersion(row.version),
+        isTrashed: row.is_trashed,
+      })
+    }
+
+    const hasMarkers = await hasVersionMarkerTable(query)
+    const targetTimeline = await loadStrictWindowTimeline(
+      query,
+      sheetId,
+      window.trustedSinceSeq,
+      window.anchorSeq,
+      hasMarkers,
+    )
+    const currentTimeline = await loadStrictWindowTimeline(
+      query,
+      sheetId,
+      window.trustedSinceSeq,
+      undefined,
+      hasMarkers,
+    )
+
+    const targetIds = new Set<string>([...baselineById.keys(), ...targetTimeline.keys()])
+    for (const recordId of targetIds) {
+      const verdict = validateTargetGeneration(
+        baselineById.get(recordId),
+        window.trustedSinceSeq,
+        targetTimeline.get(recordId) ?? [],
+      )
+      if (!verdict.ok) return verdict
+    }
+
+    const fieldsRes = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
+    const userFieldIds = (fieldsRes.rows as Array<{ id: unknown; type: unknown }>)
+      .filter((row) => !isDerivedFieldType(String(row.type ?? '')))
+      .map((row) => String(row.id))
+    const liveRes = await query('SELECT id, data, version FROM meta_records WHERE sheet_id = $1', [sheetId])
+    const liveById = new Map<string, { data: Record<string, unknown>; version: number }>()
+    for (const row of liveRes.rows as Array<{ id: unknown; data: unknown; version: unknown }>) {
+      const recordId = typeof row.id === 'string' ? row.id : ''
+      if (!recordId || liveById.has(recordId) || !isPlainRecord(row.data)) {
+        return { ok: false, reason: 'comparator_error' }
+      }
+      liveById.set(recordId, { data: row.data, version: strictVersion(row.version) })
+    }
+    const trashRes = await query(
+      `SELECT t.id::text AS trash_id,
+              t.record_id,
+              t.data,
+              t.original_version,
+              t.delete_revision_id,
+              r.id::text AS linked_revision_id,
+              r.seq::text AS delete_seq,
+              r.version AS delete_version,
+              r.snapshot AS delete_snapshot
+       FROM meta_records_trash t
+       LEFT JOIN meta_record_revisions r
+         ON r.id::text = t.delete_revision_id
+        AND r.sheet_id = t.sheet_id
+        AND r.record_id = t.record_id
+        AND r.action = 'delete'
+       WHERE t.sheet_id = $1
+       ORDER BY t.record_id, t.deleted_at, t.id`,
+      [sheetId],
+    )
+    const trashById = new Map<string, StrictTrashState[]>()
+    const trashIds = new Set<string>()
+    for (const row of trashRes.rows as Array<{
+      record_id: unknown
+      data: unknown
+      original_version: unknown
+      delete_revision_id: unknown
+      linked_revision_id: unknown
+      delete_seq: unknown
+      delete_version: unknown
+      delete_snapshot: unknown
+    }>) {
+      const recordId = typeof row.record_id === 'string' ? row.record_id : ''
+      if (!recordId) return { ok: false, reason: 'comparator_error' }
+      trashIds.add(recordId)
+      // Checkpoint semantics are deliberately live-wins: stale trash vintages are non-authoritative while
+      // the id is currently occupied. Trashed-only ids must prove every vintage before one can be selected.
+      if (liveById.has(recordId)) continue
+      if (!isPlainRecord(row.data) || !isPlainRecord(row.delete_snapshot)) {
+        return { ok: false, reason: 'comparator_error' }
+      }
+      const originalVersion = strictVersion(row.original_version)
+      const deleteVersion = strictVersion(row.delete_version)
+      const deleteRevisionId = typeof row.delete_revision_id === 'string' ? row.delete_revision_id : ''
+      const linkedRevisionId = typeof row.linked_revision_id === 'string' ? row.linked_revision_id : ''
+      const deleteSeq = typeof row.delete_seq === 'string' ? row.delete_seq : ''
+      if (
+        !deleteRevisionId ||
+        linkedRevisionId !== deleteRevisionId ||
+        !SEQ_FORMAT.test(deleteSeq) ||
+        originalVersion !== deleteVersion ||
+        canonicalize(row.data) !== canonicalize(row.delete_snapshot)
+      ) {
+        return { ok: false, reason: 'comparator_error' }
+      }
+      const list = trashById.get(recordId) ?? []
+      list.push({ data: row.data, originalVersion, deleteRevisionId, deleteSeq })
+      trashById.set(recordId, list)
+    }
+    const currentIds = new Set<string>([
+      ...baselineById.keys(),
+      ...currentTimeline.keys(),
+      ...liveById.keys(),
+      ...trashIds,
+    ])
+    for (const recordId of currentIds) {
+      if (trashIds.has(recordId) && !baselineById.has(recordId) && !currentTimeline.has(recordId)) {
+        return { ok: false, reason: 'chain_hole' }
+      }
+      const projected = projectCurrentState(baselineById.get(recordId), currentTimeline.get(recordId) ?? [])
+      if (!projected.verdict.ok) return projected.verdict
+      const live = liveById.get(recordId)
+      if (projected.state.exists !== Boolean(live)) {
+        return {
+          ok: false,
+          reason: live && !baselineById.has(recordId) && !currentTimeline.has(recordId)
+            ? 'zero_revision_live_row'
+            : live
+              ? 'live_row_after_delete_revision'
+              : 'chain_hole',
+        }
+      }
+      if (!live) {
+        const trashRows = trashById.get(recordId) ?? []
+        if (trashRows.length > 0) {
+          const latestTrash = trashRows.reduce((latest, candidate) =>
+            compareSeq(candidate.deleteSeq, latest.deleteSeq) > 0 ? candidate : latest,
+          )
+          if (
+            !projected.state.data ||
+            projected.state.version !== latestTrash.originalVersion ||
+            canonicalize(projected.state.data) !== canonicalize(latestTrash.data) ||
+            (projected.state.deleteRevisionId !== null &&
+              projected.state.deleteRevisionId !== latestTrash.deleteRevisionId)
+          ) {
+            return { ok: false, reason: 'comparator_error' }
+          }
+        }
+        continue
+      }
+      if (projected.state.version !== live.version || !projected.state.data) return { ok: false, reason: 'chain_hole' }
+      for (const fieldId of userFieldIds) {
+        if (canonicalize(projected.state.data[fieldId]) !== canonicalize(live.data[fieldId])) {
+          return { ok: false, reason: 'content_mismatch' }
+        }
+      }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, reason: 'comparator_error' }
+  }
 }
 
 /**
@@ -594,7 +955,11 @@ type StrictRawTimelineRow = {
  * enablement precondition lives at the single production entry `precheckSheetHistoryIntegrity` above, which
  * every recovery route goes through — production code must NOT call this directly.
  */
-export async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetId: string): Promise<HistoryIntegrityVerdict> {
+export async function precheckSheetHistoryIntegrityStrict(
+  query: QueryFn,
+  sheetId: string,
+  window?: StrictHistoryWindow,
+): Promise<HistoryIntegrityVerdict> {
   // System sheets excluded — identical predicate/semantics to the non-strict path. P1-a: the TRUST signal is
   // `meta_sheets.system_kind` ONLY (server-owned, non-forgeable), read column-tolerantly via `to_jsonb` (a
   // pre-migration rolling-deploy window returns NULL instead of a 42703 that would poison the C8 in-txn
@@ -604,6 +969,8 @@ export async function precheckSheetHistoryIntegrityStrict(query: QueryFn, sheetI
   if (sheetRow && isSystemSheet({ systemKind: sheetRow.system_kind })) {
     return { ok: true }
   }
+
+  if (window) return precheckTargetHistoryWindow(query, sheetId, window)
 
   const fieldsRes = await query('SELECT id, type FROM meta_fields WHERE sheet_id = $1', [sheetId])
   const userFieldIds: string[] = []
