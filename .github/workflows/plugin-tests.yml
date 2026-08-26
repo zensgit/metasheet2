@@ -1008,6 +1008,7 @@ jobs:
             tests/integration/elearning-admin-access.db.test.ts \
             tests/integration/elearning-notification-delivery.db.test.ts \
             tests/integration/elearning-notification-worker.db.test.ts \
+            tests/integration/elearning-assessment-catalog.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

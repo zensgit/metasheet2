@@ -1585,6 +1585,11 @@ export default defineConfig({
       // it; wired as a WHOLE FILE sibling of the ledger gate in plugin-tests.yml
       // after db:migrate on the 20.x leg.
       'tests/integration/elearning-notification-worker.db.test.ts',
+      // E-learning L3 question-bank + fixed-paper revision pinning. Requires
+      // real PostgreSQL for same-org composite FKs, publish-time dense-order
+      // validation, and published-paper immutability. Wired as a whole-file
+      // post-migrate gate in plugin-tests.yml.
+      'tests/integration/elearning-assessment-catalog.db.test.ts',
       // E-learning V0.1 M1 media quota reservation. Requires real PostgreSQL (advisory-lock
       // race). Excluded from the no-DB job so a missing DATABASE_URL cannot skip-green
       // it; wired as a WHOLE FILE into plugin-tests.yml after Start Postgres + db:migrate.
