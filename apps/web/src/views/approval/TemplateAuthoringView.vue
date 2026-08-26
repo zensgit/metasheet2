@@ -4696,8 +4696,12 @@ pre {
   }
 
   .template-authoring__steps {
-    top: 0;
+    position: static;
     justify-content: flex-start;
+  }
+
+  .template-authoring__section-actions {
+    position: static;
   }
 
   .template-authoring__grid {
