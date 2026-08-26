@@ -1251,3 +1251,54 @@ paths:
         '503':
           description: unavailable
           $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/exams/attempts/{attemptId}/review:
+    get:
+      operationId: getElearningExamReview
+      summary: Get the policy-released review for one own graded attempt
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin` and
+        the exam capability gate are required. Identity and organization come
+        only from the authenticated request. `no_review` never releases a
+        review; `correctness_after_window` uses the database clock and opens at
+        the configured window end. `wrong_items_after_submit` returns only
+        incorrect rows. Current course access is re-evaluated before release,
+        so archived content still requires an effective assignment and
+        withdrawn content remains globally blocked. The closed DTO contains
+        own selections, correctness, and awarded points, but never answer keys,
+        correct option ids, explanations, examId, or passScore.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Policy-released review for the authenticated learner's own graded attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningExamReviewResult'
+        '400':
+          description: invalid_input or unsupported_item
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient permissions, or assignment_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or exam flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: course_withdrawn or review_unavailable
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'

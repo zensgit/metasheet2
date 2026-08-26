@@ -41,6 +41,7 @@ import {
   type ElearningExamDb,
   type ElearningExamQueryable,
 } from '../../src/services/elearning-exam'
+import { getElearningExamReview } from '../../src/services/elearning-exam-review'
 import {
   ElearningPaperExamError,
   publishElearningPaperExam,
@@ -207,7 +208,14 @@ async function mountExamForLearner(
   orgId: string,
   examId: string,
   label: string,
-): Promise<{ itemId: string; userId: string }> {
+): Promise<{
+  assignmentId: string
+  assignmentMemberId: string
+  courseId: string
+  courseVersionId: string
+  itemId: string
+  userId: string
+}> {
   const courseId = randomUUID()
   const versionId = randomUUID()
   const mediaId = randomUUID()
@@ -288,7 +296,14 @@ async function mountExamForLearner(
      ) VALUES ($1, $2, $3, $4, $5, 'completed', 9000, 10000, now(), TRUE)`,
     [orgId, memberId, versionId, videoItemId, userId],
   )
-  return { itemId, userId }
+  return {
+    assignmentId,
+    assignmentMemberId: memberId,
+    courseId,
+    courseVersionId: versionId,
+    itemId,
+    userId,
+  }
 }
 
 afterAll(async () => {
@@ -926,6 +941,185 @@ describe('e-learning L3 paper-bound exam rules', () => {
         totalScore: 10,
         passed: true,
         duplicate: false,
+      })
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({
+        code: 'review_unavailable',
+        message: 'review_unavailable',
+      })
+    })
+  })
+
+  it('returns only the learner wrong-item review and preserves tenant and course lifecycle boundaries', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-review')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-review')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: null,
+          shuffleQuestions: false,
+          shuffleOptions: false,
+          disclosurePolicy: 'wrong_items_after_submit',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-review',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['b'] },
+      })
+
+      const expected = {
+        attemptId: started.attemptId,
+        attemptNo: 1,
+        status: 'graded',
+        disclosurePolicy: 'wrong_items_after_submit',
+        autoScore: 0,
+        totalScore: 10,
+        passed: false,
+        questions: [{
+          position: 1,
+          questionRevisionId: paper.questionRevisionId,
+          questionType: 'single_choice',
+          prompt: 'Question runtime-review',
+          options: [
+            { id: 'a', text: 'Alpha' },
+            { id: 'b', text: 'Beta' },
+          ],
+          points: 10,
+          selected: ['b'],
+          correct: false,
+          awarded: 0,
+        }],
+      }
+      const review = await getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })
+      expect(review).toEqual(expected)
+      expect(JSON.stringify(review)).not.toMatch(
+        /answerKey|correctOptionIds|explanation|examId|passScore/,
+      )
+      const otherUserId = actor('other-review-user')
+      await client.query(
+        `INSERT INTO elearning_assignment_members (
+           id, org_id, assignment_id, course_version_id, user_id, source
+         ) VALUES ($1, $2, $3, $4, $5, 'manual')`,
+        [
+          randomUUID(),
+          orgId,
+          mount.assignmentId,
+          mount.courseVersionId,
+          otherUserId,
+        ],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: otherUserId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+      await expect(getElearningExamReview(db, {
+        orgId: org('other-review-org'),
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+
+      await client.query(
+        `UPDATE elearning_courses
+            SET status = 'archived', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.courseId],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual(expected)
+
+      await client.query(
+        `UPDATE elearning_assignment_members
+            SET revoked_at = now(),
+                revoked_by = $3,
+                revocation_reason = 'review access test'
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.assignmentMemberId, actor('review-revoker')],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'assignment_unavailable' })
+
+      await client.query(
+        `UPDATE elearning_courses
+            SET status = 'withdrawn', updated_at = now()
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, mount.courseId],
+      )
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'course_withdrawn' })
+    })
+  })
+
+  it('uses the database clock to keep after-window review closed', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-review-window')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-review-window')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(Date.now() - 60_000).toISOString(),
+          windowEndsAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+          durationSeconds: null,
+          disclosurePolicy: 'correctness_after_window',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-review-window',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })
+
+      await expect(getElearningExamReview(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({
+        code: 'review_unavailable',
+        message: 'review_unavailable',
       })
     })
   })

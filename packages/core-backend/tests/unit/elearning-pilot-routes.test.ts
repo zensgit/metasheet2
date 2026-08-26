@@ -33,6 +33,10 @@ import {
   type StartElearningExamInput,
   type SubmitElearningExamInput,
 } from '../../src/services/elearning-exam'
+import type {
+  ElearningExamReviewResult,
+  GetElearningExamReviewInput,
+} from '../../src/services/elearning-exam-review'
 import {
   ElearningLearnerCoursesError,
   type ElearningLearnerCourse,
@@ -187,6 +191,7 @@ const EXAM_ERRORS: Array<[ElearningExamErrorCode, number]> = [
   ['exam_not_open', 409],
   ['exam_closed', 409],
   ['attempt_expired', 409],
+  ['review_unavailable', 409],
   ['conflict', 409],
   ['unavailable', 503],
 ]
@@ -246,6 +251,32 @@ const EXAM_SUBMIT_RESULT: ElearningExamSubmitResult = {
   totalScore: 10,
   passed: true,
   duplicate: false,
+}
+
+const EXAM_REVIEW_RESULT: ElearningExamReviewResult = {
+  attemptId: ATTEMPT,
+  attemptNo: 1,
+  status: 'graded',
+  disclosurePolicy: 'wrong_items_after_submit',
+  autoScore: 0,
+  totalScore: 10,
+  passed: false,
+  questions: [
+    {
+      position: 1,
+      questionRevisionId: Q1,
+      questionType: 'single_choice',
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      points: 10,
+      selected: ['b'],
+      correct: false,
+      awarded: 0,
+    },
+  ],
 }
 
 const ANSWERS = { [Q1]: ['a'] }
@@ -356,6 +387,15 @@ function assertNoSecrets(body: unknown): void {
   expect(blob).not.toMatch(/paper_snapshot|sha256/)
 }
 
+function assertReviewNoSecrets(body: unknown): void {
+  const blob = JSON.stringify(body)
+  expect(blob).not.toMatch(/answer_key|answerKey|correctOptionIds|explanation/)
+  expect(blob).not.toMatch(/paper_snapshot|examId|passScore/)
+  expect(blob).not.toContain(PLAYBACK_SECRET)
+  expect(blob).not.toContain(JWT_SECRET)
+  expect(blob).not.toContain(STORAGE_KEY)
+}
+
 function assertLearnerEnvelope(body: unknown, courses = LEARNER_COURSES): void {
   expect(body).toEqual({ courses })
   expect(Array.isArray(body)).toBe(false)
@@ -377,6 +417,7 @@ function makeApp(
     examStartError?: unknown
     examSaveError?: unknown
     examSubmitError?: unknown
+    examReviewError?: unknown
     publishError?: unknown
     learnerError?: unknown
     scopeError?: unknown
@@ -387,6 +428,7 @@ function makeApp(
     examStartResult?: ElearningExamStartResult
     examSaveResult?: ElearningExamStartResult
     examSubmitResult?: ElearningExamSubmitResult
+    examReviewResult?: ElearningExamReviewResult
     publishResult?: ElearningCoursePublishResult
     learnerResult?: ElearningLearnerCourse[]
     scopeResult?: SetElearningCourseScopeResult
@@ -399,6 +441,7 @@ function makeApp(
   const examStartCalls: StartElearningExamInput[] = []
   const examSaveCalls: SaveElearningExamAnswersInput[] = []
   const examSubmitCalls: SubmitElearningExamInput[] = []
+  const examReviewCalls: GetElearningExamReviewInput[] = []
   const publishCalls: PublishElearningCourseInput[] = []
   const learnerCalls: ListElearningLearnerCoursesInput[] = []
   const scopeCalls: SetElearningCourseScopeInput[] = []
@@ -478,6 +521,12 @@ function makeApp(
       if (over.examSubmitError) throw over.examSubmitError
       return over.examSubmitResult ?? EXAM_SUBMIT_RESULT
     },
+    getElearningExamReview: async (_db, input) => {
+      examReviewCalls.push(input)
+      order.push('service')
+      if (over.examReviewError) throw over.examReviewError
+      return over.examReviewResult ?? EXAM_REVIEW_RESULT
+    },
     publishElearningCourse: async (_db, input) => {
       publishCalls.push(input)
       order.push('service')
@@ -509,6 +558,7 @@ function makeApp(
     examStartCalls,
     examSaveCalls,
     examSubmitCalls,
+    examReviewCalls,
     publishCalls,
     learnerCalls,
     scopeCalls,
@@ -687,6 +737,11 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(examSubmit.status).toBe(404)
     expect(examSubmit.body).toEqual({ error: 'not_found' })
     expect(examApp.examSubmitCalls).toHaveLength(0)
+    const examReview = await serve(examApp.app)
+      .get(`/api/elearning/exams/attempts/${ATTEMPT}/review`)
+    expect(examReview.status).toBe(404)
+    expect(examReview.body).toEqual({ error: 'not_found' })
+    expect(examApp.examReviewCalls).toHaveLength(0)
     const examTicket = await serve(examApp.app)
       .post(`/api/elearning/watch/items/${ITEM}/playback-ticket`)
       .send({})
@@ -882,6 +937,10 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       .send(SUBMIT_BODY)
     expect(anonExamSubmit.status).toBe(401)
     expect(anonExam.examSubmitCalls).toHaveLength(0)
+    const anonExamReview = await serve(anonExam.app)
+      .get(`/api/elearning/exams/attempts/${ATTEMPT}/review`)
+    expect(anonExamReview.status).toBe(401)
+    expect(anonExam.examReviewCalls).toHaveLength(0)
 
     const noOrgExam = makeApp({ org: null, hasRead: false, env: FLAG_EXAM_ON })
     const orgExamStart = await serve(noOrgExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
@@ -893,6 +952,10 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       .send(SUBMIT_BODY)
     expect(orgExamSave.status).toBe(403)
     expect(noOrgExam.examSaveCalls).toHaveLength(0)
+    const orgExamReview = await serve(noOrgExam.app)
+      .get(`/api/elearning/exams/attempts/${ATTEMPT}/review`)
+    expect(orgExamReview.status).toBe(403)
+    expect(noOrgExam.examReviewCalls).toHaveLength(0)
 
     const deniedExam = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
     const rbacExam = await serve(deniedExam.app).post(`/api/elearning/exams/items/${ITEM}/start`).send({})
@@ -914,6 +977,18 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(deniedExamSave.examSaveCalls).toHaveLength(0)
     expect(
       deniedExamSave.order.filter(
+        (step) => step === 'identity' || step === 'org' || step === 'rbac',
+      ),
+    ).toEqual(['identity', 'org', 'rbac'])
+
+    const deniedExamReview = makeApp({ hasRead: false, env: FLAG_EXAM_ON })
+    const rbacExamReview = await serve(deniedExamReview.app)
+      .get(`/api/elearning/exams/attempts/${ATTEMPT}/review`)
+    expect(rbacExamReview.status).toBe(403)
+    expect(deniedExamReview.readCalls).toBe(1)
+    expect(deniedExamReview.examReviewCalls).toHaveLength(0)
+    expect(
+      deniedExamReview.order.filter(
         (step) => step === 'identity' || step === 'org' || step === 'rbac',
       ),
     ).toEqual(['identity', 'org', 'rbac'])
@@ -1155,6 +1230,24 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     ])
     expect(examSubmitApp.readCalls).toBe(1)
 
+    const examReviewApp = makeApp({ env: FLAG_EXAM_ON })
+    const examReview = await serve(examReviewApp.app)
+      .get(
+        `/api/elearning/exams/attempts/${ATTEMPT}/review?userId=evil-user&orgId=evil-org`,
+      )
+      .set('x-user-id', 'header-user')
+    expect(examReview.status).toBe(200)
+    expect(examReview.body).toEqual(EXAM_REVIEW_RESULT)
+    assertReviewNoSecrets(examReview.body)
+    expect(examReviewApp.examReviewCalls).toEqual([
+      {
+        orgId: ORG,
+        userId: ACTOR,
+        attemptId: ATTEMPT,
+      },
+    ])
+    expect(examReviewApp.readCalls).toBe(1)
+
     const publishApp = makeApp({ env: FLAG_EXAM_ON })
     const publish = await serve(publishApp.app)
       .post(
@@ -1331,6 +1424,11 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
     expect(badAttempt.status).toBe(400)
     expect(badAttempt.body).toEqual({ error: 'invalid_input' })
     expect(extraExam.examSaveCalls).toHaveLength(0)
+    const badReviewAttempt = await serve(extraExam.app)
+      .get('/api/elearning/exams/attempts/not-a-uuid/review')
+    expect(badReviewAttempt.status).toBe(400)
+    expect(badReviewAttempt.body).toEqual({ error: 'invalid_input' })
+    expect(extraExam.examReviewCalls).toHaveLength(0)
 
     const extraPublish = makeApp({ env: FLAG_EXAM_ON })
     for (const body of [
@@ -1452,6 +1550,17 @@ describe('elearning routes (independent content/assignment/watch/exam gates)', (
       expect(submitRes.body).toEqual({ error: code })
       assertValuesFree(submitRes.body)
       expect(submitApp.examSubmitCalls).toHaveLength(1)
+
+      const reviewApp = makeApp({
+        env: FLAG_EXAM_ON,
+        examReviewError: new ElearningExamError(code),
+      })
+      const reviewRes = await serve(reviewApp.app)
+        .get(`/api/elearning/exams/attempts/${ATTEMPT}/review`)
+      expect(reviewRes.status).toBe(status)
+      expect(reviewRes.body).toEqual({ error: code })
+      assertValuesFree(reviewRes.body)
+      expect(reviewApp.examReviewCalls).toHaveLength(1)
     }
 
     for (const [code, status] of PUBLISH_ERRORS) {

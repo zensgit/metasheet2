@@ -35,6 +35,8 @@ type PublicPaper = components['schemas']['ElearningPublicPaper']
 type PublicQuestion = components['schemas']['ElearningPublicQuestion']
 type ExamStart = components['schemas']['ElearningExamStartResult']
 type ExamSubmit = components['schemas']['ElearningExamSubmitResult']
+type ExamReview = components['schemas']['ElearningExamReviewResult']
+type ExamReviewQuestion = components['schemas']['ElearningExamReviewQuestion']
 type ExamAnswers = components['schemas']['ElearningExamSubmitRequest']
 type ElearningError = components['schemas']['ElearningError']
 
@@ -90,28 +92,29 @@ function collectForbiddenKeys(
   schemas: Record<string, JsonSchema>,
   schema: JsonSchema | undefined,
   seen = new Set<string>(),
+  allowedKeys = new Set<string>(),
 ): string[] {
   if (!schema) return []
   if (schema.$ref) {
     const name = schema.$ref.replace('#/components/schemas/', '')
     if (seen.has(name)) return []
     seen.add(name)
-    return collectForbiddenKeys(schemas, schemas[name], seen)
+    return collectForbiddenKeys(schemas, schemas[name], seen, allowedKeys)
   }
   const hits: string[] = []
   for (const [key, child] of Object.entries(schema.properties ?? {})) {
-    if (isForbiddenLearnerKey(key)) hits.push(key)
-    hits.push(...collectForbiddenKeys(schemas, child, seen))
+    if (isForbiddenLearnerKey(key) && !allowedKeys.has(key)) hits.push(key)
+    hits.push(...collectForbiddenKeys(schemas, child, seen, allowedKeys))
   }
   const items = schema.items
   for (const item of items ? (Array.isArray(items) ? items : [items]) : []) {
-    hits.push(...collectForbiddenKeys(schemas, item, seen))
+    hits.push(...collectForbiddenKeys(schemas, item, seen, allowedKeys))
   }
   if (schema.additionalProperties && typeof schema.additionalProperties === 'object') {
-    hits.push(...collectForbiddenKeys(schemas, schema.additionalProperties, seen))
+    hits.push(...collectForbiddenKeys(schemas, schema.additionalProperties, seen, allowedKeys))
   }
   for (const part of [...(schema.allOf ?? []), ...(schema.oneOf ?? []), ...(schema.anyOf ?? [])]) {
-    hits.push(...collectForbiddenKeys(schemas, part, seen))
+    hits.push(...collectForbiddenKeys(schemas, part, seen, allowedKeys))
   }
   return hits
 }
@@ -150,6 +153,7 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<paths['/api/elearning/exams/items/{itemId}/start']['post']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/exams/attempts/{attemptId}/answers']['put']>().not.toBeNever()
     expectTypeOf<paths['/api/elearning/exams/attempts/{attemptId}/submit']['post']>().not.toBeNever()
+    expectTypeOf<paths['/api/elearning/exams/attempts/{attemptId}/review']['get']>().not.toBeNever()
   })
 
   it('binds success bodies to the live DTOs', () => {
@@ -213,6 +217,9 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expectTypeOf<
       paths['/api/elearning/exams/attempts/{attemptId}/submit']['post']['responses']['200']['content']['application/json']
     >().toEqualTypeOf<ExamSubmit>()
+    expectTypeOf<
+      paths['/api/elearning/exams/attempts/{attemptId}/review']['get']['responses']['200']['content']['application/json']
+    >().toEqualTypeOf<ExamReview>()
   })
 
   it('documents playback Range 200/206/416 without a JSON success body', () => {
@@ -296,6 +303,27 @@ describe('elearning V0.1 OpenAPI paths', () => {
       totalScore: number
       passed: boolean
       duplicate: boolean
+    }>()
+    expectTypeOf<ExamReviewQuestion>().toEqualTypeOf<{
+      position: number
+      questionRevisionId: string
+      questionType: 'single_choice' | 'multiple_choice' | 'true_false'
+      prompt: string
+      options: components['schemas']['ElearningPublicOption'][]
+      points: number
+      selected: string[]
+      correct: boolean
+      awarded: number
+    }>()
+    expectTypeOf<ExamReview>().toEqualTypeOf<{
+      attemptId: string
+      attemptNo: number
+      status: 'graded'
+      disclosurePolicy: 'correctness_after_submit' | 'wrong_items_after_submit' | 'correctness_after_window'
+      autoScore: number
+      totalScore: number
+      passed: boolean
+      questions: ExamReviewQuestion[]
     }>()
     expectTypeOf<Ticket>().toEqualTypeOf<{
       token: string
@@ -396,6 +424,15 @@ describe('elearning V0.1 OpenAPI paths', () => {
       {
         name: 'POST /api/elearning/exams/attempts/{attemptId}/submit 200',
         keys: collectForbiddenKeys(schemas, jsonSchemaAt(doc, '/api/elearning/exams/attempts/{attemptId}/submit', 'post', '200')),
+      },
+      {
+        name: 'GET /api/elearning/exams/attempts/{attemptId}/review 200',
+        keys: collectForbiddenKeys(
+          schemas,
+          jsonSchemaAt(doc, '/api/elearning/exams/attempts/{attemptId}/review', 'get', '200'),
+          new Set<string>(),
+          new Set(['correct']),
+        ),
       },
       {
         name: 'POST /api/elearning/watch/items/{itemId}/playback-ticket 200',

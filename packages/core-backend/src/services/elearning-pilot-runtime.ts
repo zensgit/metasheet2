@@ -40,6 +40,11 @@ import {
   type SubmitElearningExamInput,
 } from './elearning-exam'
 import {
+  getElearningExamReview,
+  type ElearningExamReviewResult,
+  type GetElearningExamReviewInput,
+} from './elearning-exam-review'
+import {
   listElearningLearnerCourses,
   type ElearningLearnerCourse,
   type ElearningLearnerCoursesDb,
@@ -145,6 +150,10 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningExamDb,
     input: SubmitElearningExamInput,
   ) => Promise<ElearningExamSubmitResult>
+  getElearningExamReview?: (
+    db: ElearningExamDb,
+    input: GetElearningExamReviewInput,
+  ) => Promise<ElearningExamReviewResult>
   publishElearningCourse?: (
     db: ElearningCoursePublishDb,
     input: PublishElearningCourseInput,
@@ -223,6 +232,8 @@ export function createElearningPilotRuntime(
     issueElearningMediaPlaybackTicket: issuePlayback,
     startElearningExam: opts.startElearningExam ?? startElearningExam,
     submitElearningExam: opts.submitElearningExam ?? submitElearningExam,
+    getElearningExamReview:
+      opts.getElearningExamReview ?? getElearningExamReview,
     publishElearningCourse:
       opts.publishElearningCourse ?? publishElearningCourse,
     listElearningLearnerCourses:

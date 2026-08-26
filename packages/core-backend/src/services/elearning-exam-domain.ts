@@ -29,6 +29,7 @@ export type ElearningExamErrorCode =
   | 'exam_not_open'
   | 'exam_closed'
   | 'attempt_expired'
+  | 'review_unavailable'
   | 'conflict'
   | 'unavailable'
 

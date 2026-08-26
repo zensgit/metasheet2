@@ -72,6 +72,7 @@ import {
   type ElearningExamDb,
   type ElearningExamErrorCode,
 } from '../services/elearning-exam'
+import { getElearningExamReview } from '../services/elearning-exam-review'
 import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
@@ -201,6 +202,7 @@ const EXAM_STATUS: Record<ElearningExamErrorCode, number> = {
   exam_not_open: 409,
   exam_closed: 409,
   attempt_expired: 409,
+  review_unavailable: 409,
   conflict: 409,
   unavailable: 503,
 }
@@ -318,6 +320,7 @@ export interface ElearningPilotRouteDeps {
   startElearningExam?: typeof startElearningExam
   saveElearningExamAnswers?: typeof saveElearningExamAnswers
   submitElearningExam?: typeof submitElearningExam
+  getElearningExamReview?: typeof getElearningExamReview
   publishElearningCourse?: typeof publishElearningCourse
   listElearningLearnerCourses?: typeof listElearningLearnerCourses
   setElearningCourseScope?: typeof setElearningCourseScopeAuthorized
@@ -428,6 +431,7 @@ export function createElearningPilotRouter(
   const startExam = deps.startElearningExam ?? startElearningExam
   const saveExamAnswers = deps.saveElearningExamAnswers ?? saveElearningExamAnswers
   const submitExam = deps.submitElearningExam ?? submitElearningExam
+  const reviewExam = deps.getElearningExamReview ?? getElearningExamReview
   const publishCourse = deps.publishElearningCourse ?? publishElearningCourse
   const listLearnerCourses =
     deps.listElearningLearnerCourses ?? listElearningLearnerCourses
@@ -1176,6 +1180,34 @@ export function createElearningPilotRouter(
           userId: ctx.actorId,
           attemptId,
           answers: body.answers,
+        })
+        res.status(200).json(result)
+      } catch (error) {
+        if (error instanceof ElearningExamError) {
+          res.status(EXAM_STATUS[error.code]).json({ error: error.code })
+          return
+        }
+        res.status(500).json({ error: 'internal_error' })
+      }
+    }),
+  )
+
+  router.get(
+    '/api/elearning/exams/attempts/:attemptId/review',
+    ...gate(deps.readGuard, 'exam'),
+    asyncHandler(async (req: Request, res: Response) => {
+      const ctx = recheck(req, res, 'exam')
+      if (!ctx) return
+      const attemptId = uuidParam(req, 'attemptId')
+      if (!attemptId) {
+        invalid(res)
+        return
+      }
+      try {
+        const result = await reviewExam(deps.db, {
+          orgId: ctx.orgId,
+          userId: ctx.actorId,
+          attemptId,
         })
         res.status(200).json(result)
       } catch (error) {

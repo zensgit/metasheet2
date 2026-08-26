@@ -9121,6 +9121,115 @@
             "type": "boolean"
           }
         }
+      },
+      "ElearningExamReviewQuestion": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "position",
+          "questionRevisionId",
+          "questionType",
+          "prompt",
+          "options",
+          "points",
+          "selected",
+          "correct",
+          "awarded"
+        ],
+        "description": "Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations.",
+        "properties": {
+          "position": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "questionRevisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "questionType": {
+            "$ref": "#/components/schemas/ElearningQuestionType"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "#/components/schemas/ElearningPublicOption"
+            }
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selected": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "correct": {
+            "type": "boolean"
+          },
+          "awarded": {
+            "type": "number",
+            "minimum": 0
+          }
+        }
+      },
+      "ElearningExamReviewResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "attemptId",
+          "attemptNo",
+          "status",
+          "disclosurePolicy",
+          "autoScore",
+          "totalScore",
+          "passed",
+          "questions"
+        ],
+        "properties": {
+          "attemptId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "attemptNo": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "graded"
+            ]
+          },
+          "disclosurePolicy": {
+            "type": "string",
+            "enum": [
+              "correctness_after_submit",
+              "wrong_items_after_submit",
+              "correctness_after_window"
+            ]
+          },
+          "autoScore": {
+            "type": "number"
+          },
+          "totalScore": {
+            "type": "number"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningExamReviewQuestion"
+            }
+          }
+        }
       }
     },
     "responses": {
@@ -25309,6 +25418,68 @@
           },
           "409": {
             "description": "course_withdrawn, prerequisite_incomplete, max_attempts, or conflict",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "500": {
+            "description": "internal_error",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/exams/attempts/{attemptId}/review": {
+      "get": {
+        "operationId": "getElearningExamReview",
+        "summary": "Get the policy-released review for one own graded attempt",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin` and\nthe exam capability gate are required. Identity and organization come\nonly from the authenticated request. `no_review` never releases a\nreview; `correctness_after_window` uses the database clock and opens at\nthe configured window end. `wrong_items_after_submit` returns only\nincorrect rows. Current course access is re-evaluated before release,\nso archived content still requires an effective assignment and\nwithdrawn content remains globally blocked. The closed DTO contains\nown selections, correctness, and awarded points, but never answer keys,\ncorrect option ids, explanations, examId, or passScore.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "path",
+            "name": "attemptId",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ElearningUuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Policy-released review for the authenticated learner's own graded attempt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningExamReviewResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input or unsupported_item",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "description": "unauthenticated or missing JWT",
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED, insufficient permissions, or assignment_unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "not_found or exam flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "course_withdrawn or review_unavailable",
             "$ref": "#/components/responses/ElearningError"
           },
           "500": {

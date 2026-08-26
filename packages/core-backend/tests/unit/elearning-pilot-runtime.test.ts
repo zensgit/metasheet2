@@ -124,6 +124,32 @@ const EXAM_SUBMIT_RESULT = {
   duplicate: false,
 }
 
+const EXAM_REVIEW_RESULT = {
+  attemptId: ATTEMPT,
+  attemptNo: 1,
+  status: 'graded' as const,
+  disclosurePolicy: 'wrong_items_after_submit' as const,
+  autoScore: 0,
+  totalScore: 10,
+  passed: false,
+  questions: [
+    {
+      position: 1,
+      questionRevisionId: Q1,
+      questionType: 'single_choice' as const,
+      prompt: 'Pick one',
+      options: [
+        { id: 'a', text: 'alpha' },
+        { id: 'b', text: 'beta' },
+      ],
+      points: 10,
+      selected: ['b'],
+      correct: false,
+      awarded: 0,
+    },
+  ],
+}
+
 const ANSWERS = { [Q1]: ['a'] }
 const SUBMIT_BODY = { answers: ANSWERS }
 
@@ -273,6 +299,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(runtimeSrc).toMatch(/issueElearningMediaPlaybackTicket/)
     expect(runtimeSrc).toMatch(/startElearningExam/)
     expect(runtimeSrc).toMatch(/submitElearningExam/)
+    expect(runtimeSrc).toMatch(/getElearningExamReview/)
     expect(runtimeSrc).toMatch(/publishElearningCourse/)
     expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
     expect(runtimeSrc).toMatch(
@@ -336,6 +363,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     const ticketCalls: unknown[] = []
     const examStartCalls: unknown[] = []
     const examSubmitCalls: unknown[] = []
+    const examReviewCalls: unknown[] = []
     const publishCalls: unknown[] = []
     const learnerCalls: unknown[] = []
     const runtime = createElearningPilotRuntime({
@@ -371,6 +399,11 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
         examSubmitCalls.push(input)
         order.push('service')
         return EXAM_SUBMIT_RESULT
+      },
+      getElearningExamReview: async (_db, input) => {
+        examReviewCalls.push(input)
+        order.push('service')
+        return EXAM_REVIEW_RESULT
       },
       publishElearningCourse: async (_db, input) => {
         publishCalls.push(input)
@@ -440,6 +473,21 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
         sourceKey: SOURCE,
         deadline: undefined,
       },
+    ])
+    expect(order).toEqual(['jwt', 'rbac', 'service'])
+
+    order.length = 0
+    const examReview = await serve(app)
+      .get(
+        `/api/elearning/exams/attempts/${ATTEMPT}/review?orgId=evil-org&userId=evil-user`,
+      )
+    expect(examReview.status).toBe(200)
+    expect(examReview.body).toEqual(EXAM_REVIEW_RESULT)
+    expect(JSON.stringify(examReview.body)).not.toMatch(
+      /answer_key|answerKey|correctOptionIds|explanation|examId|passScore/,
+    )
+    expect(examReviewCalls).toEqual([
+      { orgId: ORG, userId: ACTOR, attemptId: ATTEMPT },
     ])
     expect(order).toEqual(['jwt', 'rbac', 'service'])
 

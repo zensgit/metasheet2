@@ -8920,6 +8920,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/exams/attempts/{attemptId}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the policy-released review for one own graded attempt
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin` and
+         *     the exam capability gate are required. Identity and organization come
+         *     only from the authenticated request. `no_review` never releases a
+         *     review; `correctness_after_window` uses the database clock and opens at
+         *     the configured window end. `wrong_items_after_submit` returns only
+         *     incorrect rows. Current course access is re-evaluated before release,
+         *     so archived content still requires an effective assignment and
+         *     withdrawn content remains globally blocked. The closed DTO contains
+         *     own selections, correctness, and awarded points, but never answer keys,
+         *     correct option ids, explanations, examId, or passScore.
+         */
+        get: operations["getElearningExamReview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/multitable/bases": {
         parameters: {
             query?: never;
@@ -18111,6 +18140,30 @@ export interface components {
             passed: boolean;
             duplicate: boolean;
         };
+        /** @description Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations. */
+        ElearningExamReviewQuestion: {
+            position: number;
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            questionType: components["schemas"]["ElearningQuestionType"];
+            prompt: string;
+            options: components["schemas"]["ElearningPublicOption"][];
+            points: number;
+            selected: string[];
+            correct: boolean;
+            awarded: number;
+        };
+        ElearningExamReviewResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            attemptNo: number;
+            /** @enum {string} */
+            status: "graded";
+            /** @enum {string} */
+            disclosurePolicy: "correctness_after_submit" | "wrong_items_after_submit" | "correctness_after_window";
+            autoScore: number;
+            totalScore: number;
+            passed: boolean;
+            questions: components["schemas"]["ElearningExamReviewQuestion"][];
+        };
     };
     responses: {
         /** @description Values-free e-learning error `{ error: "<code>" }` */
@@ -20207,6 +20260,42 @@ export interface operations {
             /** @description not_found or exam flags off */
             404: components["responses"]["ElearningError"];
             /** @description course_withdrawn, prerequisite_incomplete, max_attempts, or conflict */
+            409: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningExamReview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Policy-released review for the authenticated learner's own graded attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningExamReviewResult"];
+                };
+            };
+            /** @description invalid_input or unsupported_item */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient permissions, or assignment_unavailable */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or exam flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description course_withdrawn or review_unavailable */
             409: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
