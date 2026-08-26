@@ -60,6 +60,7 @@ const SHA256 = 'ab'.repeat(32)
 const BANK = '71717171-7171-4171-8171-717171717171'
 const SECOND_BANK = '72727272-7272-4272-8272-727272727272'
 const QUESTION_REVISION = '81818181-8181-4181-8181-818181818181'
+const SECOND_QUESTION_REVISION = '82828282-8282-4282-8282-828282828282'
 const PAPER = '91919191-9191-4191-8191-919191919191'
 
 async function flushUi(cycles = 8): Promise<void> {
@@ -825,6 +826,10 @@ describe('ElearningAdminView', () => {
       '2',
     )
     fillInput(
+      root.querySelector('[data-testid="elearning-assessment-duration"]') as HTMLInputElement,
+      '15',
+    )
+    fillInput(
       root.querySelector('[data-testid="elearning-assessment-disclosure"]') as HTMLSelectElement,
       'wrong_items_after_submit',
     )
@@ -843,7 +848,7 @@ describe('ElearningAdminView', () => {
       maxAttempts: 2,
       windowStartsAt: null,
       windowEndsAt: null,
-      durationSeconds: null,
+      durationSeconds: 900,
       shuffleQuestions: true,
       shuffleOptions: true,
       disclosurePolicy: 'wrong_items_after_submit',
@@ -892,25 +897,180 @@ describe('ElearningAdminView', () => {
       pageSize,
       total: 51,
     }))
-    h.listQuestions.mockImplementation(async (_bankId: string, page: number, pageSize: number) => ({
-      bank: { bankId: BANK, title: '安全题库' },
-      items: [],
-      page,
-      pageSize,
-      total: 101,
-    }))
+    h.listQuestions.mockImplementation(async (_bankId: string, page: number, pageSize: number) => {
+      const questionRevisionId = page === 1 ? QUESTION_REVISION : SECOND_QUESTION_REVISION
+      return {
+        bank: { bankId: BANK, title: '安全题库' },
+        items: [{
+          questionId: page === 1 ? COURSE : VERSION,
+          questionRevisionId,
+          revision: 1,
+          questionType: 'single_choice',
+          prompt: `第 ${page} 页题目`,
+          options: [
+            { id: 'a', text: '正确项' },
+            { id: 'b', text: '错误项' },
+          ],
+          correctOptionIds: ['a'],
+          points: page,
+          explanation: null,
+          createdAt: '2026-08-26T00:00:00.000Z',
+        }],
+        page,
+        pageSize,
+        total: 101,
+      }
+    })
 
     const root = mountView()
     await flushUi()
     ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
     await flushUi(12)
 
+    const bankPrevious = root.querySelector(
+      '[data-testid="elearning-assessment-bank-previous"]',
+    ) as HTMLButtonElement
+    const bankNext = root.querySelector(
+      '[data-testid="elearning-assessment-bank-next"]',
+    ) as HTMLButtonElement
+    expect(bankPrevious.disabled).toBe(true)
+    expect(bankNext.disabled).toBe(false)
+    expect(root.textContent).toContain('第 1 / 2 页')
+
+    const firstQuestion = root.querySelector(
+      `[data-testid="elearning-assessment-question-${QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement
+    firstQuestion.click()
+    await flushUi()
+
     ;(root.querySelector('[data-testid="elearning-assessment-question-next"]') as HTMLButtonElement).click()
     await flushUi(12)
     expect(h.listQuestions).toHaveBeenLastCalledWith(BANK, 2, 100)
 
-    ;(root.querySelector('[data-testid="elearning-assessment-bank-next"]') as HTMLButtonElement).click()
+    const questionPrevious = root.querySelector(
+      '[data-testid="elearning-assessment-question-previous"]',
+    ) as HTMLButtonElement
+    const questionNext = root.querySelector(
+      '[data-testid="elearning-assessment-question-next"]',
+    ) as HTMLButtonElement
+    expect(questionPrevious.disabled).toBe(false)
+    expect(questionNext.disabled).toBe(true)
+    const secondQuestion = root.querySelector(
+      `[data-testid="elearning-assessment-question-${SECOND_QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement
+    secondQuestion.click()
+    questionPrevious.click()
+    await flushUi(12)
+    expect(h.listQuestions).toHaveBeenLastCalledWith(BANK, 1, 100)
+    expect((root.querySelector(
+      `[data-testid="elearning-assessment-question-${QUESTION_REVISION}"] input[type="checkbox"]`,
+    ) as HTMLInputElement).checked).toBe(true)
+
+    bankNext.click()
     await flushUi(12)
     expect(h.listBanks).toHaveBeenLastCalledWith(2, 50)
+    expect((root.querySelector(
+      '[data-testid="elearning-assessment-bank-previous"]',
+    ) as HTMLButtonElement).disabled).toBe(false)
+    ;(root.querySelector('[data-testid="elearning-assessment-bank-previous"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listBanks).toHaveBeenLastCalledWith(1, 50)
+
+    fillInput(
+      root.querySelector('[data-testid="elearning-assessment-paper-title"]') as HTMLInputElement,
+      '跨页固定卷',
+    )
+    ;(root.querySelector('[data-testid="elearning-assessment-publish-paper"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.publishPaper).toHaveBeenCalledWith({
+      title: '跨页固定卷',
+      items: [
+        { questionRevisionId: QUESTION_REVISION, points: 1 },
+        { questionRevisionId: SECOND_QUESTION_REVISION, points: 2 },
+      ],
+    })
+  })
+
+  it('falls back from an empty trailing catalog page after totals shrink', async () => {
+    h.listBanks
+      .mockResolvedValueOnce({
+        items: [{
+          bankId: BANK,
+          title: '安全题库',
+          questionCount: 101,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          updatedAt: '2026-08-26T00:00:00.000Z',
+        }],
+        page: 1,
+        pageSize: 50,
+        total: 51,
+      })
+      .mockResolvedValueOnce({ items: [], page: 2, pageSize: 50, total: 1 })
+      .mockResolvedValueOnce({
+        items: [{
+          bankId: BANK,
+          title: '安全题库',
+          questionCount: 1,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          updatedAt: '2026-08-26T00:00:00.000Z',
+        }],
+        page: 1,
+        pageSize: 50,
+        total: 1,
+      })
+    const oneQuestion = [{
+      questionId: COURSE,
+      questionRevisionId: QUESTION_REVISION,
+      revision: 1,
+      questionType: 'single_choice',
+      prompt: '安全题目',
+      options: [
+        { id: 'a', text: '正确项' },
+        { id: 'b', text: '错误项' },
+      ],
+      correctOptionIds: ['a'],
+      points: 1,
+      explanation: null,
+      createdAt: '2026-08-26T00:00:00.000Z',
+    }]
+    h.listQuestions
+      .mockResolvedValueOnce({
+        bank: { bankId: BANK, title: '安全题库' },
+        items: oneQuestion,
+        page: 1,
+        pageSize: 100,
+        total: 101,
+      })
+      .mockResolvedValueOnce({
+        bank: { bankId: BANK, title: '安全题库' },
+        items: [],
+        page: 2,
+        pageSize: 100,
+        total: 1,
+      })
+      .mockResolvedValue({
+        bank: { bankId: BANK, title: '安全题库' },
+        items: oneQuestion,
+        page: 1,
+        pageSize: 100,
+        total: 1,
+      })
+
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    ;(root.querySelector('[data-testid="elearning-assessment-question-next"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listQuestions.mock.calls.slice(-2)).toEqual([[BANK, 2, 100], [BANK, 1, 100]])
+    expect(root.textContent).toContain('安全题目')
+    expect(root.querySelector('[data-testid="elearning-assessment-question-next"]')).toBeNull()
+
+    ;(root.querySelector('[data-testid="elearning-assessment-bank-next"]') as HTMLButtonElement).click()
+    await flushUi(12)
+
+    expect(h.listBanks.mock.calls.slice(-2)).toEqual([[2, 50], [1, 50]])
+    expect(root.textContent).toContain('安全题库 (1)')
+    expect(root.querySelector('[data-testid="elearning-assessment-bank-next"]')).toBeNull()
   })
 })

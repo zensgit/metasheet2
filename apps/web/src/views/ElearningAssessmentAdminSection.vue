@@ -119,9 +119,10 @@
           :data-testid="`elearning-assessment-question-${question.questionRevisionId}`"
         >
           <input
-            v-model="selectedQuestionRevisionIds"
             type="checkbox"
             :value="question.questionRevisionId"
+            :checked="selectedQuestionRevisionIds.includes(question.questionRevisionId)"
+            @change="onQuestionSelectionEvent(question, $event)"
           >
           <span class="assessment-question__body">
             <span class="assessment-question__heading">
@@ -366,7 +367,7 @@ const xlsxFile = ref<File | null>(null)
 const questions = ref<ElearningAdminQuestionRevision[]>([])
 const questionPage = ref(1)
 const questionTotal = ref(0)
-const selectedQuestionRevisionIds = ref<string[]>([])
+const selectedQuestions = ref<ElearningAdminQuestionRevision[]>([])
 const paperTitle = ref('')
 const publishedPaper = ref<ElearningFixedPaperResult | null>(null)
 const examTitle = ref('')
@@ -381,6 +382,9 @@ const publishedExam = ref<ElearningPaperExamResult | null>(null)
 const loading = computed(() => busyAction.value === 'loading')
 const busy = computed(() => busyAction.value !== null)
 const pipelineFrozen = computed(() => publishedPaper.value !== null)
+const selectedQuestionRevisionIds = computed(() => (
+  selectedQuestions.value.map((question) => question.questionRevisionId)
+))
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
@@ -411,7 +415,6 @@ async function runAction(action: BusyAction, operation: () => Promise<void>): Pr
 }
 
 async function loadQuestions(page = questionPage.value): Promise<void> {
-  selectedQuestionRevisionIds.value = []
   questions.value = []
   if (!selectedBankId.value) {
     questionPage.value = 1
@@ -419,6 +422,10 @@ async function loadQuestions(page = questionPage.value): Promise<void> {
     return
   }
   const result = await listElearningBankQuestions(selectedBankId.value, page, QUESTION_PAGE_SIZE)
+  if (result.items.length === 0 && result.total > 0 && result.page > 1) {
+    await loadQuestions(result.page - 1)
+    return
+  }
   questions.value = result.items
   questionPage.value = result.page
   questionTotal.value = result.total
@@ -426,6 +433,10 @@ async function loadQuestions(page = questionPage.value): Promise<void> {
 
 async function loadBanks(preferredBankId?: string, page = bankPage.value): Promise<void> {
   const result = await listElearningQuestionBanks(page, BANK_PAGE_SIZE)
+  if (result.items.length === 0 && result.total > 0 && result.page > 1) {
+    await loadBanks(preferredBankId, result.page - 1)
+    return
+  }
   banks.value = result.items
   bankPage.value = result.page
   bankTotal.value = result.total
@@ -479,6 +490,15 @@ function onXlsxFileChange(event: Event): void {
   xlsxFile.value = input.files && input.files[0] ? input.files[0] : null
 }
 
+function onQuestionSelectionEvent(question: ElearningAdminQuestionRevision, event: Event): void {
+  const checked = event.target instanceof HTMLInputElement && event.target.checked
+  const index = selectedQuestions.value.findIndex(
+    (selected) => selected.questionRevisionId === question.questionRevisionId,
+  )
+  if (checked && index < 0) selectedQuestions.value.push(question)
+  if (!checked && index >= 0) selectedQuestions.value.splice(index, 1)
+}
+
 async function importQuestions(): Promise<void> {
   if (!ready.value || pipelineFrozen.value) return
   if (!selectedBankId.value) {
@@ -509,12 +529,10 @@ async function publishPaper(): Promise<void> {
     showValidation('validation.questionSelectionRequired')
     return
   }
-  const byId = new Map(questions.value.map((question) => [question.questionRevisionId, question]))
-  const items = selectedQuestionRevisionIds.value.map((questionRevisionId) => {
-    const question = byId.get(questionRevisionId)
-    if (!question) throw new ElearningApiError('invalid_input', 400)
-    return { questionRevisionId, points: question.points }
-  })
+  const items = selectedQuestions.value.map((question) => ({
+    questionRevisionId: question.questionRevisionId,
+    points: question.points,
+  }))
   await runAction('paper', async () => {
     const result = await publishElearningFixedPaper({ title, items })
     publishedPaper.value = result
@@ -583,7 +601,7 @@ function resetPaperFlow(): void {
   if (busy.value) return
   publishedPaper.value = null
   publishedExam.value = null
-  selectedQuestionRevisionIds.value = []
+  selectedQuestions.value = []
   paperTitle.value = ''
   examTitle.value = ''
   passScore.value = 1
