@@ -519,7 +519,25 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       child_max bigint;
       child_min_ordinal integer;
       child_max_ordinal integer;
+      snapshot_member_count bigint;
+      operation_member_count bigint;
     BEGIN
+      IF NOT pg_catalog.pg_try_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+          'mrho_membership_v1:'
+            || pg_catalog.length(NEW.sheet_id)::text
+            || ':'
+            || NEW.sheet_id
+            || ':'
+            || NEW.operation_id::text,
+          0
+        )
+      ) THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '40001',
+          MESSAGE = 'section_causality_membership_busy';
+      END IF;
+
       SELECT COUNT(*), MAX(seq)
         INTO record_count, record_max
         FROM public.meta_record_revisions
@@ -532,11 +550,21 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         INTO section_count, section_max
         FROM public.meta_sheet_section_revisions
        WHERE sheet_id = NEW.sheet_id AND operation_id = NEW.operation_id;
+      SELECT COUNT(*)
+        INTO snapshot_member_count
+        FROM public.meta_record_history_snapshot_members
+       WHERE sheet_id = NEW.sheet_id AND parent_operation_id = NEW.operation_id;
+      SELECT COUNT(*)
+        INTO operation_member_count
+        FROM public.meta_record_history_operation_members
+       WHERE sheet_id = NEW.sheet_id AND parent_operation_id = NEW.operation_id;
 
       IF NEW.event_contract_version = 1 THEN
         IF NEW.operation_kind IS DISTINCT FROM 'ordinary'
            OR NEW.component_count IS NOT NULL
-           OR section_count <> 0 THEN
+           OR section_count <> 0
+           OR snapshot_member_count <> 0
+           OR operation_member_count <> 0 THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'section_causality_legacy_contract_invalid';
@@ -565,7 +593,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
       IF NEW.operation_kind IN ('ordinary', 'restore_chunk') THEN
         IF NEW.event_count < 1 OR actual_count <> NEW.event_count
-           OR actual_max IS DISTINCT FROM NEW.endpoint_seq THEN
+           OR actual_max IS DISTINCT FROM NEW.endpoint_seq
+           OR snapshot_member_count <> 0
+           OR operation_member_count <> 0 THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'section_causality_direct_event_mismatch';
@@ -575,7 +605,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
       IF NEW.operation_kind = 'section_bootstrap' THEN
         IF record_count <> 0 OR marker_count <> 0 OR section_count <> 1
-           OR NEW.event_count <> 1 OR actual_max IS DISTINCT FROM NEW.endpoint_seq THEN
+           OR NEW.event_count <> 1 OR actual_max IS DISTINCT FROM NEW.endpoint_seq
+           OR snapshot_member_count <> 0
+           OR operation_member_count <> 0 THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'section_causality_bootstrap_invalid';

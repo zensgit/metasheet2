@@ -61,6 +61,7 @@ const INDEXES = [
 
 type DatabaseError = Error & {
   code?: string
+  constraint?: string
   detail?: string
   where?: string
 }
@@ -768,6 +769,86 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     expectValuesFree(aggregateError, [SHEET, WORKSPACE, BASE, aggregateId])
   })
 
+  test('legacy, direct-event, and bootstrap parents refuse synthetic membership rows', async () => {
+    const legacyError = await errorOf(
+      withTxn(async (client) => {
+        const sourceId = await sealBootstrapHead(client, SHEET, 'schema', BOOTSTRAP_SEQ0)
+        const operationId = randomUUID()
+        await client.query(
+          `INSERT INTO meta_record_history_snapshot_members (
+             sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+             source_operation_id, source_head_seq, row_count, source_hash
+           ) VALUES ($1, $2::uuid, 1, 'schema', 'section_bootstrap', $3::uuid, $4::bigint, 0, $5)`,
+          [SHEET, operationId, sourceId, BOOTSTRAP_SEQ0, SHA256_A],
+        )
+        await insertRecordRevision(client, SHEET, operationId, UNION_REV_SEQ, `${SHEET}_legacy_member`)
+        await client.query(
+          `INSERT INTO meta_record_history_operations (sheet_id, operation_id, endpoint_seq, event_count)
+           VALUES ($1, $2::uuid, $3::bigint, 1)`,
+          [SHEET, operationId, UNION_REV_SEQ],
+        )
+      }),
+    )
+    expect(legacyError.message).toBe('section_causality_legacy_contract_invalid')
+
+    const directError = await errorOf(
+      withTxn(async (client) => {
+        const childId = randomUUID()
+        await insertRecordRevision(client, SHEET, childId, CHUNK_SEQ_1, `${SHEET}_direct_child`)
+        await sealDirectEventOperation(asQuery(client), {
+          sheetId: SHEET,
+          operationId: childId,
+          endpointSeq: CHUNK_SEQ_1,
+          eventCount: 1,
+          operationKind: 'restore_chunk',
+        })
+        const operationId = randomUUID()
+        await client.query(
+          `INSERT INTO meta_record_history_operation_members (
+             sheet_id, parent_operation_id, ordinal, child_operation_id,
+             child_endpoint_seq, child_event_count
+           ) VALUES ($1, $2::uuid, 1, $3::uuid, $4::bigint, 1)`,
+          [SHEET, operationId, childId, CHUNK_SEQ_1],
+        )
+        await insertRecordRevision(client, SHEET, operationId, CHUNK_SEQ_2, `${SHEET}_direct_parent`)
+        await sealDirectEventOperation(asQuery(client), {
+          sheetId: SHEET,
+          operationId,
+          endpointSeq: CHUNK_SEQ_2,
+          eventCount: 1,
+          operationKind: 'restore_chunk',
+        })
+      }),
+    )
+    expect(directError.message).toBe('section_causality_direct_event_mismatch')
+
+    const bootstrapError = await errorOf(
+      withTxn(async (client) => {
+        const sourceId = await sealBootstrapHead(client, SHEET, 'links', BOOTSTRAP_SEQ0)
+        const operationId = randomUUID()
+        await client.query(
+          `INSERT INTO meta_record_history_snapshot_members (
+             sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+             source_operation_id, source_head_seq, row_count, source_hash
+           ) VALUES ($1, $2::uuid, 1, 'links', 'section_bootstrap', $3::uuid, $4::bigint, 0, $5)`,
+          [SHEET, operationId, sourceId, BOOTSTRAP_SEQ0, SHA256_A],
+        )
+        await insertBootstrapRevision(client, SHEET, operationId, 'schema', CHUNK_SEQ_1, '0', SHA256_A)
+        await client.query(
+          `INSERT INTO meta_record_history_operations (
+             sheet_id, operation_id, endpoint_seq, event_count,
+             operation_kind, event_contract_version, component_count
+           ) VALUES ($1, $2::uuid, $3::bigint, 1, 'section_bootstrap', 2, NULL)`,
+          [SHEET, operationId, CHUNK_SEQ_1],
+        )
+      }),
+    )
+    expect(bootstrapError.message).toBe('section_causality_bootstrap_invalid')
+    expectValuesFree(legacyError, [SHEET, WORKSPACE, BASE])
+    expectValuesFree(directError, [SHEET, WORKSPACE, BASE])
+    expectValuesFree(bootstrapError, [SHEET, WORKSPACE, BASE])
+  })
+
   test('generic helper misuse cannot mint synthetic kinds', async () => {
     const client = await pool.connect()
     try {
@@ -812,23 +893,16 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     }
   })
 
-  test('parent-not-last snapshot insert is refused', async () => {
+  test('snapshot parent cannot seal before its members exist', async () => {
     const error = await errorOf(
       withTxn(async (client) => {
-        const heads = await bootstrapAllSections(client, SHEET)
+        const snapshotId = randomUUID()
         await client.query(
           `INSERT INTO meta_record_history_operations (
              sheet_id, operation_id, endpoint_seq, event_count,
              operation_kind, event_contract_version, component_count
            ) VALUES ($1, $2::uuid, $3::bigint, 0, 'archive_snapshot', 2, 9)`,
-          [SHEET, randomUUID(), SNAPSHOT_SEQ],
-        )
-        await client.query(
-          `INSERT INTO meta_record_history_snapshot_members (
-             sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
-             source_operation_id, source_head_seq, row_count, source_hash
-           ) VALUES ($1, $2::uuid, 1, $3, 'section_bootstrap', $4::uuid, $5::bigint, 0, $6)`,
-          [SHEET, heads[0]?.operationId, heads[0]?.sectionKind, heads[0]?.operationId, heads[0]?.seq, SHA256_A],
+          [SHEET, snapshotId, SNAPSHOT_SEQ],
         )
       }),
     )
@@ -973,6 +1047,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
       }),
     )
     expect(forgedCount.code).toBe('23514')
+    expect(forgedCount.message).toBe('section_causality_snapshot_direct_events_forbidden')
   })
 
   test('event_count>=1 lift is load-bearing for archive_snapshot', async () => {
@@ -986,12 +1061,47 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
           ALTER TABLE public.meta_record_history_operations
             ADD CONSTRAINT chk_mrho_event_count_positive CHECK (event_count >= 1)
         `.execute(trx)
+        const heads = []
+        for (const [index, sectionKind] of SECTION_CAUSALITY_DATA_SECTION_KINDS.entries()) {
+          const seq = bootstrapSeq(index)
+          const operationId = randomUUID()
+          await sql`
+            INSERT INTO meta_sheet_section_revisions (
+              sheet_id, section_kind, entity_key, action, payload, seq, operation_id
+            ) VALUES (
+              ${SHEET}, ${sectionKind}, ${bootstrapSectionEntityKey(sectionKind)}, 'bootstrap_snapshot',
+              jsonb_build_object('row_count', '0'::text, 'source_hash', ${SHA256_A}::text),
+              ${seq}::bigint, ${operationId}::uuid
+            )
+          `.execute(trx)
+          await sql`
+            INSERT INTO meta_record_history_operations (
+              sheet_id, operation_id, endpoint_seq, event_count,
+              operation_kind, event_contract_version, component_count
+            ) VALUES (
+              ${SHEET}, ${operationId}::uuid, ${seq}::bigint, 1, 'section_bootstrap', 2, NULL
+            )
+          `.execute(trx)
+          heads.push({ sectionKind, operationId, seq })
+        }
+        const snapshotId = randomUUID()
+        for (const [index, head] of heads.entries()) {
+          await sql`
+            INSERT INTO meta_record_history_snapshot_members (
+              sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+              source_operation_id, source_head_seq, row_count, source_hash
+            ) VALUES (
+              ${SHEET}, ${snapshotId}::uuid, ${index + 1}::int, ${head.sectionKind},
+              'section_bootstrap', ${head.operationId}::uuid, ${head.seq}::bigint, 0, ${SHA256_A}
+            )
+          `.execute(trx)
+        }
         await sql`
           INSERT INTO meta_record_history_operations (
-            sheet_id, operation_id, endpoint_seq, event_count,
-            operation_kind, event_contract_version, component_count
-          ) VALUES (
-            ${SHEET}, ${randomUUID()}::uuid, ${SNAPSHOT_SEQ}::bigint, 0,
+             sheet_id, operation_id, endpoint_seq, event_count,
+             operation_kind, event_contract_version, component_count
+           ) VALUES (
+            ${SHEET}, ${snapshotId}::uuid, ${SNAPSHOT_SEQ}::bigint, 0,
             'archive_snapshot', 2, 9
           )
         `.execute(trx)
@@ -999,6 +1109,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
       }),
     )
     expect(refusal.code).toBe('23514')
+    expect(refusal.constraint).toBe('chk_mrho_event_count_positive')
     expect(await causalityFingerprint()).toBe(initialFingerprint)
   })
 
@@ -1158,6 +1269,72 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     expect(extraSnapshot.message).toBe('section_causality_membership_sealed')
   })
 
+  test('whole-operation prune removes snapshot members first and refuses a still-referenced source', async () => {
+    let heads: Awaited<ReturnType<typeof bootstrapAllSections>> = []
+    const prunedSnapshotId = randomUUID()
+    await withTxn(async (client) => {
+      heads = await bootstrapAllSections(client, SHEET)
+      await sealArchiveSnapshotOperation(asQuery(client), {
+        sheetId: SHEET,
+        operationId: prunedSnapshotId,
+        endpointSeq: SNAPSHOT_SEQ,
+        members: await snapshotMembersFor(SHEET, heads),
+      })
+    })
+    const before = await q(
+      `SELECT
+         (SELECT count(*)::int FROM meta_record_history_operations
+           WHERE sheet_id=$1 AND operation_id=$2::uuid) AS parent_count,
+         (SELECT count(*)::int FROM meta_record_history_snapshot_members
+           WHERE sheet_id=$1 AND parent_operation_id=$2::uuid) AS member_count`,
+      [SHEET, prunedSnapshotId],
+    )
+    expect(before.rows).toEqual([{ parent_count: 1, member_count: 9 }])
+
+    await q('SELECT meta_record_history_operations_prune($1, $2::uuid)', [SHEET, prunedSnapshotId])
+    const after = await q(
+      `SELECT
+         (SELECT count(*)::int FROM meta_record_history_operations
+           WHERE sheet_id=$1 AND operation_id=$2::uuid) AS parent_count,
+         (SELECT count(*)::int FROM meta_record_history_snapshot_members
+           WHERE sheet_id=$1 AND parent_operation_id=$2::uuid) AS member_count`,
+      [SHEET, prunedSnapshotId],
+    )
+    expect(after.rows).toEqual([{ parent_count: 0, member_count: 0 }])
+
+    const retainedSnapshotId = randomUUID()
+    await withTxn(async (client) => {
+      await sealArchiveSnapshotOperation(asQuery(client), {
+        sheetId: SHEET,
+        operationId: retainedSnapshotId,
+        endpointSeq: SNAPSHOT_SEQ,
+        members: await snapshotMembersFor(SHEET, heads),
+      })
+    })
+    const sourceOperationId = heads[0]!.operationId
+    const refusal = await errorOf(
+      withTxn(async (client) => {
+        await client.query('SELECT meta_record_history_operations_prune($1, $2::uuid)', [
+          SHEET,
+          sourceOperationId,
+        ])
+      }),
+    )
+    expect(refusal.code).toBe('23503')
+    expect(refusal.constraint).toBe('fk_mrhsm_source')
+    const retained = await q(
+      `SELECT
+         (SELECT count(*)::int FROM meta_record_history_operations
+           WHERE sheet_id=$1 AND operation_id=$2::uuid) AS source_count,
+         (SELECT count(*)::int FROM meta_sheet_section_revisions
+           WHERE sheet_id=$1 AND operation_id=$2::uuid) AS source_revision_count,
+         (SELECT count(*)::int FROM meta_record_history_snapshot_members
+           WHERE sheet_id=$1 AND parent_operation_id=$3::uuid) AS member_count`,
+      [SHEET, sourceOperationId, retainedSnapshotId],
+    )
+    expect(retained.rows).toEqual([{ source_count: 1, source_revision_count: 1, member_count: 9 }])
+  })
+
   test('a concurrent transaction cannot append membership while the parent seal is uncommitted', async () => {
     const aggregateId = randomUUID()
     const chunk1 = randomUUID()
@@ -1235,6 +1412,64 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
         [SHEET, aggregateId],
       )
       expect(sealed.rows).toEqual([{ component_count: 1, member_count: 1 }])
+    } finally {
+      if (lateWriterOpen) await lateWriter.query('ROLLBACK').catch(() => {})
+      if (sealerOpen) await sealer.query('ROLLBACK').catch(() => {})
+      lateWriter.release()
+      sealer.release()
+    }
+  })
+
+  test('a membership writer cannot race ahead after a direct parent has started sealing', async () => {
+    const sourceId = await withTxn((client) => sealBootstrapHead(client, SHEET, 'schema', BOOTSTRAP_SEQ0))
+    const operationId = randomUUID()
+    const sealer = await pool.connect()
+    const lateWriter = await pool.connect()
+    let sealerOpen = false
+    let lateWriterOpen = false
+    try {
+      await sealer.query('BEGIN')
+      sealerOpen = true
+      await insertRecordRevision(sealer, SHEET, operationId, UNION_REV_SEQ, `${SHEET}_parent_lock`)
+      await sealer.query(
+        `INSERT INTO meta_record_history_operations (
+           sheet_id, operation_id, endpoint_seq, event_count,
+           operation_kind, event_contract_version, component_count
+         ) VALUES ($1, $2::uuid, $3::bigint, 1, 'ordinary', 2, NULL)`,
+        [SHEET, operationId, UNION_REV_SEQ],
+      )
+
+      await lateWriter.query('BEGIN')
+      lateWriterOpen = true
+      const concurrentError = await errorOf(
+        lateWriter.query(
+          `INSERT INTO meta_record_history_snapshot_members (
+             sheet_id, parent_operation_id, ordinal, section_kind, source_head_kind,
+             source_operation_id, source_head_seq, row_count, source_hash
+           ) VALUES ($1, $2::uuid, 1, 'schema', 'section_bootstrap', $3::uuid, $4::bigint, 0, $5)`,
+          [SHEET, operationId, sourceId, BOOTSTRAP_SEQ0, SHA256_A],
+        ),
+      )
+      expect(concurrentError.code).toBe('40001')
+      expect(concurrentError.message).toBe('section_causality_membership_busy')
+      expectValuesFree(concurrentError, [SHEET, WORKSPACE, BASE, operationId])
+      await lateWriter.query('ROLLBACK')
+      lateWriterOpen = false
+
+      await sealer.query('COMMIT')
+      sealerOpen = false
+      const sealed = await q(
+        `SELECT operation_kind,
+                (SELECT count(*)::int
+                   FROM meta_record_history_snapshot_members member_row
+                  WHERE member_row.sheet_id = operation_row.sheet_id
+                    AND member_row.parent_operation_id = operation_row.operation_id) AS member_count
+           FROM meta_record_history_operations operation_row
+          WHERE operation_row.sheet_id = $1
+            AND operation_row.operation_id = $2::uuid`,
+        [SHEET, operationId],
+      )
+      expect(sealed.rows).toEqual([{ operation_kind: 'ordinary', member_count: 0 }])
     } finally {
       if (lateWriterOpen) await lateWriter.query('ROLLBACK').catch(() => {})
       if (sealerOpen) await sealer.query('ROLLBACK').catch(() => {})
