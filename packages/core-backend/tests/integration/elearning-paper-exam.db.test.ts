@@ -21,6 +21,11 @@ import {
   ELEARNING_EXAM_WINDOW_CHECK,
 } from '../../src/db/migrations/zzzz20260826230000_extend_elearning_exam_rules'
 import {
+  ELEARNING_ATTEMPT_DEADLINE_CHECK,
+  ELEARNING_ATTEMPT_DUE_INDEX,
+  ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK,
+} from '../../src/db/migrations/zzzz20260826235900_add_elearning_exam_attempt_deadlines'
+import {
   createElearningBankQuestion,
   createElearningQuestionBank,
   publishElearningFixedPaper,
@@ -29,6 +34,8 @@ import {
 } from '../../src/services/elearning-assessment-catalog'
 import {
   ElearningExamError,
+  saveElearningExamAnswers,
+  settleExpiredElearningExamAttempt,
   startElearningExam,
   submitElearningExam,
   type ElearningExamDb,
@@ -52,6 +59,8 @@ if (!DATABASE_URL) {
 const pool = new Pool({ connectionString: DATABASE_URL, max: 4 })
 const NS = `el-paper-exam-${Date.now().toString(36)}`
 const MIGRATION_NAME = 'zzzz20260826230000_extend_elearning_exam_rules'
+const DEADLINE_MIGRATION_NAME =
+  'zzzz20260826235900_add_elearning_exam_attempt_deadlines'
 
 class ClientDb implements ElearningAssessmentCatalogDb, ElearningPaperExamDb, ElearningExamDb {
   private savepoint = 0
@@ -293,6 +302,11 @@ describe('e-learning L3 paper-bound exam rules', () => {
       [MIGRATION_NAME],
     )
     expect(migration.rows).toHaveLength(1)
+    const deadlineMigration = await pool.query(
+      'SELECT name FROM kysely_migration WHERE name = $1',
+      [DEADLINE_MIGRATION_NAME],
+    )
+    expect(deadlineMigration.rows).toHaveLength(1)
 
     const columns = await pool.query<{
       column_name: string
@@ -375,6 +389,50 @@ describe('e-learning L3 paper-bound exam rules', () => {
     expect(byName.get(ELEARNING_EXAM_DURATION_CHECK)).toContain(
       'duration_seconds >= 1',
     )
+
+    const attemptColumns = await pool.query<{
+      column_name: string
+      is_nullable: string
+    }>(
+      `SELECT column_name, is_nullable
+         FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'elearning_exam_attempts'
+          AND column_name = ANY($1::text[])
+        ORDER BY column_name`,
+      [['deadline_at', 'expired_at']],
+    )
+    expect(attemptColumns.rows).toEqual([
+      { column_name: 'deadline_at', is_nullable: 'YES' },
+      { column_name: 'expired_at', is_nullable: 'YES' },
+    ])
+    const attemptConstraints = await pool.query<{
+      conname: string
+      definition: string
+    }>(
+      `SELECT conname, pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conname = ANY($1::text[])
+        ORDER BY conname`,
+      [[ELEARNING_ATTEMPT_DEADLINE_CHECK, ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK]],
+    )
+    expect(attemptConstraints.rows).toHaveLength(2)
+    const attemptChecks = new Map(
+      attemptConstraints.rows.map((row) => [row.conname, row.definition]),
+    )
+    expect(attemptChecks.get(ELEARNING_ATTEMPT_DEADLINE_CHECK)).toContain(
+      'deadline_at > started_at',
+    )
+    expect(attemptChecks.get(ELEARNING_ATTEMPT_EXPIRY_STATE_CHECK)).toContain(
+      "status = ANY (ARRAY['expired'::text, 'graded'::text])",
+    )
+    const attemptIndex = await pool.query(
+      `SELECT indexname
+         FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = $1`,
+      [ELEARNING_ATTEMPT_DUE_INDEX],
+    )
+    expect(attemptIndex.rows).toHaveLength(1)
 
     const index = await pool.query(
       `SELECT indexname
@@ -872,13 +930,91 @@ describe('e-learning L3 paper-bound exam rules', () => {
     })
   })
 
-  it('refuses temporal paper exams until atomic expiry settlement is available', async () => {
+  it('uses the database clock to reject exams before and after their window without residue', async () => {
     await withRolledBackDb(async (client, db) => {
-      const orgId = org('runtime-temporal')
-      const paper = await seedPublishedPaper(db, orgId, 'runtime-temporal')
+      const orgId = org('runtime-window')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-window')
+      const now = Date.now()
+      const future = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(now + 10 * 60_000).toISOString(),
+          windowEndsAt: new Date(now + 20 * 60_000).toISOString(),
+          durationSeconds: 60,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const futureMount = await mountExamForLearner(
+        client,
+        orgId,
+        future.examId,
+        'runtime-window-future',
+      )
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: futureMount.userId,
+        itemId: futureMount.itemId,
+      })).rejects.toBeInstanceOf(ElearningExamError)
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: futureMount.userId,
+        itemId: futureMount.itemId,
+      })).rejects.toMatchObject({
+        code: 'exam_not_open',
+        message: 'exam_not_open',
+      })
+
+      const past = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(now - 20 * 60_000).toISOString(),
+          windowEndsAt: new Date(now - 10 * 60_000).toISOString(),
+          durationSeconds: 60,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const pastMount = await mountExamForLearner(
+        client,
+        orgId,
+        past.examId,
+        'runtime-window-past',
+      )
+      await expect(startElearningExam(db, {
+        orgId,
+        userId: pastMount.userId,
+        itemId: pastMount.itemId,
+      })).rejects.toMatchObject({
+        code: 'exam_closed',
+        message: 'exam_closed',
+      })
+      const attempts = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND exam_id = ANY($2::uuid[])`,
+        [orgId, [future.examId, past.examId]],
+      )
+      expect(attempts.rows).toEqual([{ count: 0 }])
+      const jobs = await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_jobs
+          WHERE org_id = $1 AND kind = 'exam_attempt_expiry'`,
+        [orgId],
+      )
+      expect(jobs.rows).toEqual([{ count: 0 }])
+    })
+  })
+
+  it('freezes the tighter duration/window deadline and enqueues one exact expiry job', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-deadline')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-deadline')
+      const windowEnd = new Date(Date.now() + 10 * 60_000)
       const exam = await publishElearningPaperExam(
         db,
         paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: new Date(Date.now() - 60_000).toISOString(),
+          windowEndsAt: windowEnd.toISOString(),
+          durationSeconds: 60,
           disclosurePolicy: 'no_review',
         }),
       )
@@ -886,29 +1022,213 @@ describe('e-learning L3 paper-bound exam rules', () => {
         client,
         orgId,
         exam.examId,
-        'runtime-temporal',
+        'runtime-deadline',
       )
-
-      await expect(startElearningExam(db, {
+      const started = await startElearningExam(db, {
         orgId,
         userId: mount.userId,
         itemId: mount.itemId,
-      })).rejects.toBeInstanceOf(ElearningExamError)
-      await expect(startElearningExam(db, {
-        orgId,
-        userId: mount.userId,
-        itemId: mount.itemId,
-      })).rejects.toMatchObject({
-        code: 'unsupported_item',
-        message: 'unsupported_item',
       })
-      const attempts = await client.query(
-        `SELECT count(*)::integer AS count
+      expect(started.deadlineAt).not.toBeNull()
+      const attempt = await client.query<{
+        started_at: Date
+        deadline_at: Date
+        expired_at: Date | null
+      }>(
+        `SELECT started_at, deadline_at, expired_at
            FROM elearning_exam_attempts
-          WHERE org_id = $1 AND exam_id = $2`,
-        [orgId, exam.examId],
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
       )
-      expect(attempts.rows).toEqual([{ count: 0 }])
+      const row = attempt.rows[0]
+      expect(row).toBeDefined()
+      expect(started.deadlineAt).toBe(row.deadline_at.toISOString())
+      expect(row.deadline_at.getTime() - row.started_at.getTime()).toBe(60_000)
+      expect(row.deadline_at.getTime()).toBeLessThan(windowEnd.getTime())
+      expect(row.expired_at).toBeNull()
+
+      const jobs = await client.query<{
+        kind: string
+        occurrence_key: string
+        ref: string
+        payload: Record<string, unknown>
+        due_at: Date
+      }>(
+        `SELECT kind, occurrence_key, ref, payload, due_at
+           FROM elearning_jobs
+          WHERE org_id = $1 AND kind = 'exam_attempt_expiry'`,
+        [orgId],
+      )
+      expect(jobs.rows).toEqual([{
+        kind: 'exam_attempt_expiry',
+        occurrence_key: `attempt:${started.attemptId}`,
+        ref: started.attemptId,
+        payload: {},
+        due_at: row.deadline_at,
+      }])
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'not_due' })
+      expect((await client.query(
+        `SELECT status
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ status: 'started' }])
+      expect((await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ count: 0 }])
+    })
+  })
+
+  it('rejects late API answers, grades only the last accepted save, and stays idempotent', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-api-expiry')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-api-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-api-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['b'] },
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+
+      await expect(submitElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })).rejects.toMatchObject({ code: 'attempt_expired' })
+      await expect(saveElearningExamAnswers(db, {
+        orgId,
+        userId: mount.userId,
+        attemptId: started.attemptId,
+        answers: { [paper.questionRevisionId]: ['a'] },
+      })).rejects.toMatchObject({ code: 'attempt_expired' })
+
+      const attempt = await client.query<{
+        status: string
+        answers: Record<string, string[]>
+        auto_score: string
+        total_score: string
+        passed: boolean
+        submitted_at: Date
+        deadline_at: Date
+        expired_at: Date
+      }>(
+        `SELECT status, answers, auto_score::text, total_score::text, passed,
+                submitted_at, deadline_at, expired_at
+           FROM elearning_exam_attempts
+          WHERE org_id = $1 AND id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(attempt.rows[0]).toMatchObject({
+        status: 'graded',
+        answers: { [paper.questionRevisionId]: ['b'] },
+        auto_score: '0',
+        total_score: '10',
+        passed: false,
+      })
+      expect(attempt.rows[0].submitted_at).toEqual(attempt.rows[0].deadline_at)
+      expect(attempt.rows[0].expired_at.getTime()).toBeGreaterThanOrEqual(
+        attempt.rows[0].deadline_at.getTime(),
+      )
+      const grades = await client.query(
+        `SELECT score::text, max_score::text
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )
+      expect(grades.rows).toEqual([{ score: '0', max_score: '10' }])
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+      expect((await client.query(
+        `SELECT count(*)::integer AS count
+           FROM elearning_grading_records
+          WHERE org_id = $1 AND attempt_id = $2`,
+        [orgId, started.attemptId],
+      )).rows).toEqual([{ count: 1 }])
+    })
+  })
+
+  it('materializes an expired attempt without API traffic and rejects a cross-org job ref', async () => {
+    await withRolledBackDb(async (client, db) => {
+      const orgId = org('runtime-worker-expiry')
+      const paper = await seedPublishedPaper(db, orgId, 'runtime-worker-expiry')
+      const exam = await publishElearningPaperExam(
+        db,
+        paperExamInput(orgId, paper.paperId, {
+          windowStartsAt: null,
+          windowEndsAt: null,
+          durationSeconds: 1,
+          disclosurePolicy: 'no_review',
+        }),
+      )
+      const mount = await mountExamForLearner(
+        client,
+        orgId,
+        exam.examId,
+        'runtime-worker-expiry',
+      )
+      const started = await startElearningExam(db, {
+        orgId,
+        userId: mount.userId,
+        itemId: mount.itemId,
+      })
+      await client.query('SELECT pg_sleep(1.1)')
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'settled' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId,
+        attemptId: started.attemptId,
+      })).resolves.toEqual({ outcome: 'duplicate' })
+      await expect(settleExpiredElearningExamAttempt(db, {
+        orgId: org('other'),
+        attemptId: started.attemptId,
+      })).rejects.toMatchObject({ code: 'not_found' })
+      const rows = await client.query(
+        `SELECT a.status, a.expired_at IS NOT NULL AS expired,
+                count(g.id)::integer AS grade_count
+           FROM elearning_exam_attempts a
+           LEFT JOIN elearning_grading_records g
+             ON g.org_id = a.org_id AND g.attempt_id = a.id
+          WHERE a.org_id = $1 AND a.id = $2
+          GROUP BY a.status, a.expired_at`,
+        [orgId, started.attemptId],
+      )
+      expect(rows.rows).toEqual([{
+        status: 'graded',
+        expired: true,
+        grade_count: 1,
+      }])
     })
   })
 })

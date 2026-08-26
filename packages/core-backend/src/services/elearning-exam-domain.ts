@@ -26,6 +26,9 @@ export type ElearningExamErrorCode =
   | 'unsupported_item'
   | 'prerequisite_incomplete'
   | 'max_attempts'
+  | 'exam_not_open'
+  | 'exam_closed'
+  | 'attempt_expired'
   | 'conflict'
   | 'unavailable'
 

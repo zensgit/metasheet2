@@ -36,6 +36,15 @@ import {
   type ElearningPaperSnapshot,
   type ElearningPublicPaper,
 } from './elearning-exam-domain'
+import {
+  assertElearningExamWindowOpen,
+  elearningExamDatabaseNow,
+  enqueueElearningExamExpiry,
+  hasTimedElearningExamRules,
+  insertTimedElearningExamAttempt,
+  settleExpiredElearningExamAttemptInTransaction,
+  type ExpirableElearningExamAttempt,
+} from './elearning-exam-expiry'
 
 export {
   ELEARNING_EXAM_AUTO_GRADER,
@@ -54,6 +63,12 @@ export {
   validateElearningPaperSnapshot,
 } from './elearning-exam-domain'
 
+export {
+  ELEARNING_EXAM_EXPIRY_JOB_KIND,
+  ELEARNING_EXAM_GRACE_SECONDS,
+  settleExpiredElearningExamAttempt,
+} from './elearning-exam-expiry'
+
 export type {
   ElearningExamErrorCode,
   ElearningExamGrade,
@@ -66,6 +81,11 @@ export type {
   ElearningPublicQuestion,
   ElearningQuestionType,
 } from './elearning-exam-domain'
+
+export type {
+  SettleExpiredElearningExamAttemptInput,
+  SettleExpiredElearningExamAttemptResult,
+} from './elearning-exam-expiry'
 
 export interface ElearningExamQueryable {
   query(
@@ -99,6 +119,7 @@ export interface ElearningExamStartResult {
   status: 'started'
   paper: ElearningPublicPaper
   answers: Record<string, string[]>
+  deadlineAt: string | null
   duplicate: boolean
 }
 
@@ -140,6 +161,26 @@ function hasStoredTimestamp(value: unknown): boolean {
   fail('unavailable')
 }
 
+function requireStoredDate(value: unknown): Date {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return new Date(value.getTime())
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value)
+    if (Number.isFinite(parsed.getTime())) return parsed
+  }
+  fail('unavailable')
+}
+
+function optionalStoredDate(value: unknown): Date | null {
+  if (value === null) return null
+  return requireStoredDate(value)
+}
+
+function publicTimestamp(value: Date | null): string | null {
+  return value === null ? null : value.toISOString()
+}
+
 function requireStoredUuid(value: unknown): string {
   if (typeof value !== 'string' || !UUID_RE.test(value)) fail('unavailable')
   return value.toLowerCase()
@@ -156,6 +197,7 @@ function publicStartResult(
   attemptNo: number,
   snapshot: ElearningPaperSnapshot,
   answers: Record<string, string[]>,
+  deadlineAt: Date | null,
   duplicate: boolean,
 ): ElearningExamStartResult {
   return {
@@ -164,6 +206,7 @@ function publicStartResult(
     status: 'started',
     paper: redactElearningPaperSnapshot(snapshot),
     answers: ownAnswers(answers),
+    deadlineAt: publicTimestamp(deadlineAt),
     duplicate,
   }
 }
@@ -229,7 +272,9 @@ interface ExamItem {
   passScore: number
   maxAttempts: number
   paperId: string | null
-  hasTemporalRules: boolean
+  windowStartsAt: Date | null
+  windowEndsAt: Date | null
+  durationSeconds: number | null
   shuffleQuestions: boolean
   shuffleOptions: boolean
 }
@@ -305,6 +350,8 @@ async function lockExamItem(
     : requireStoredUuid(examRow.paper_id)
   const hasWindowStart = hasStoredTimestamp(examRow.window_starts_at)
   const hasWindowEnd = hasStoredTimestamp(examRow.window_ends_at)
+  const windowStartsAt = optionalStoredDate(examRow.window_starts_at)
+  const windowEndsAt = optionalStoredDate(examRow.window_ends_at)
   const durationSeconds = examRow.duration_seconds == null
     ? null
     : requireRowInt(examRow.duration_seconds)
@@ -320,7 +367,9 @@ async function lockExamItem(
     passScore: requireRowNumber(examRow.pass_score),
     maxAttempts: requireRowInt(examRow.max_attempts),
     paperId,
-    hasTemporalRules: hasWindowStart || durationSeconds !== null,
+    windowStartsAt,
+    windowEndsAt,
+    durationSeconds,
     shuffleQuestions: requireRowBoolean(examRow.shuffle_questions),
     shuffleOptions: requireRowBoolean(examRow.shuffle_options),
   }
@@ -375,12 +424,8 @@ async function requireCompletedPriorVideos(
   if (result.rows[0]) fail('prerequisite_incomplete')
 }
 
-interface AttemptRow {
-  id: string
+interface AttemptRow extends ExpirableElearningExamAttempt {
   attemptNo: number
-  status: string
-  paperSnapshot: unknown
-  answers: unknown
   autoScore: number | null
   totalScore: number | null
   passed: boolean | null
@@ -395,7 +440,8 @@ async function lockUserAttempts(
 ): Promise<AttemptRow[]> {
   const result = await tx.query(
     `/* elearning-exam:load-attempts */
-     SELECT id, attempt_no, status, paper_snapshot, answers, auto_score, total_score, passed
+     SELECT id, attempt_no, status, paper_snapshot, answers, auto_score, total_score, passed,
+            deadline_at, expired_at
        FROM elearning_exam_attempts
       WHERE org_id = $1
         AND exam_id = $2
@@ -419,6 +465,8 @@ async function lockUserAttempts(
       autoScore: row.auto_score == null ? null : requireRowNumber(row.auto_score),
       totalScore: row.total_score == null ? null : requireRowNumber(row.total_score),
       passed: passed === true || passed === false ? passed : passed == null ? null : fail('unavailable'),
+      deadlineAt: optionalStoredDate(row.deadline_at),
+      expiredAt: optionalStoredDate(row.expired_at),
     }
   })
 }
@@ -510,7 +558,7 @@ export async function startElearningExam(
   const userId = requireActor(input.userId)
   const itemId = requireUuid(input.itemId)
 
-  return db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx) => {
     try {
       const examId = await peekExamIdFromItem(tx, orgId, itemId)
       await advisoryLock(tx, orgId, userId, itemId)
@@ -518,19 +566,37 @@ export async function startElearningExam(
       if (item.examId !== examId || item.itemId !== itemId) fail('unavailable')
       await requireCourseAccess(tx, orgId, userId, item.versionId)
       await requireCompletedPriorVideos(tx, orgId, userId, item.versionId, item.position)
-      // Deadline enforcement requires atomic expiry + grading. Until that
-      // dedicated slice lands, refuse configured windows/durations instead of
-      // silently running an untimed attempt.
-      if (item.hasTemporalRules) fail('unsupported_item')
 
       const attempts = await lockUserAttempts(tx, orgId, item.examId, userId, item.itemId)
       const started = attempts.find((row) => row.status === 'started')
       if (started) {
+        if (started.deadlineAt !== null) {
+          const settled = await settleExpiredElearningExamAttemptInTransaction(
+            tx,
+            orgId,
+            started,
+          )
+          if (settled === 'settled') return { kind: 'expired' as const }
+        }
         const snapshot = parseStoredSnapshot(started.paperSnapshot)
         const answers = parseStoredAnswers(snapshot, started.answers)
-        return publicStartResult(started.id, started.attemptNo, snapshot, answers, true)
+        return {
+          kind: 'result' as const,
+          value: publicStartResult(
+            started.id,
+            started.attemptNo,
+            snapshot,
+            answers,
+            started.deadlineAt,
+            true,
+          ),
+        }
       }
       if (attempts.length >= item.maxAttempts) fail('max_attempts')
+
+      if (hasTimedElearningExamRules(item)) {
+        assertElearningExamWindowOpen(item, await elearningExamDatabaseNow(tx))
+      }
 
       const attemptNo = attempts.reduce((max, row) => Math.max(max, row.attemptNo), 0) + 1
       const attemptId = randomUUID()
@@ -551,35 +617,57 @@ export async function startElearningExam(
         item.passScore,
         materialized,
       )
-      await tx.query(
-        `/* elearning-exam:insert-attempt */
-         INSERT INTO elearning_exam_attempts (
-           id, org_id, exam_id, course_version_id, user_id, attempt_no,
-           paper_snapshot, answers, status, course_version_item_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started', $8)`,
-        [
+      let deadlineAt: Date | null = null
+      if (hasTimedElearningExamRules(item)) {
+        deadlineAt = await insertTimedElearningExamAttempt(tx, {
           attemptId,
           orgId,
-          item.examId,
-          item.versionId,
+          examId: item.examId,
+          versionId: item.versionId,
+          itemId: item.itemId,
           userId,
           attemptNo,
-          JSON.stringify(snapshot),
-          item.itemId,
-        ],
-      )
-      return publicStartResult(
-        attemptId,
-        attemptNo,
-        snapshot,
-        canonicalizeElearningExamAnswers(snapshot, null),
-        false,
-      )
+          snapshot,
+          rules: item,
+        })
+        await enqueueElearningExamExpiry(tx, orgId, attemptId, deadlineAt)
+      } else {
+        await tx.query(
+          `/* elearning-exam:insert-attempt */
+           INSERT INTO elearning_exam_attempts (
+             id, org_id, exam_id, course_version_id, user_id, attempt_no,
+             paper_snapshot, answers, status, course_version_item_id
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NULL, 'started', $8)`,
+          [
+            attemptId,
+            orgId,
+            item.examId,
+            item.versionId,
+            userId,
+            attemptNo,
+            JSON.stringify(snapshot),
+            item.itemId,
+          ],
+        )
+      }
+      return {
+        kind: 'result' as const,
+        value: publicStartResult(
+          attemptId,
+          attemptNo,
+          snapshot,
+          canonicalizeElearningExamAnswers(snapshot, null),
+          deadlineAt,
+          false,
+        ),
+      }
     } catch (error) {
       if (error instanceof ElearningExamError) throw error
       fail('unavailable')
     }
   })
+  if (outcome.kind === 'expired') fail('attempt_expired')
+  return outcome.value
 }
 
 async function peekAttemptLockTarget(
@@ -604,15 +692,11 @@ async function peekAttemptLockTarget(
   }
 }
 
-interface LockedAttempt {
-  id: string
+interface LockedAttempt extends ExpirableElearningExamAttempt {
   attemptNo: number
-  status: string
   versionId: string
   examId: string
   itemId: string
-  paperSnapshot: unknown
-  answers: unknown
   autoScore: number | null
   totalScore: number | null
   passed: boolean | null
@@ -638,6 +722,8 @@ async function lockAttempt(
        a.auto_score,
        a.total_score,
        a.passed,
+       a.deadline_at,
+       a.expired_at,
        a.user_id,
        c.status AS course_status,
        v.status AS version_status,
@@ -684,6 +770,8 @@ async function lockAttempt(
     autoScore: row.auto_score == null ? null : requireRowNumber(row.auto_score),
     totalScore: row.total_score == null ? null : requireRowNumber(row.total_score),
     passed: passed === true || passed === false ? passed : passed == null ? null : fail('unavailable'),
+    deadlineAt: optionalStoredDate(row.deadline_at),
+    expiredAt: optionalStoredDate(row.expired_at),
   }
 }
 
@@ -715,7 +803,7 @@ export async function submitElearningExam(
   const userId = requireActor(input.userId)
   const attemptId = requireUuid(input.attemptId)
 
-  return db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx) => {
     try {
       const peeked = await peekAttemptLockTarget(tx, orgId, attemptId, userId)
       await advisoryLock(tx, orgId, userId, peeked.itemId)
@@ -724,25 +812,58 @@ export async function submitElearningExam(
       await requireCourseAccess(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
 
+      if (attempt.expiredAt !== null) {
+        if (attempt.status === 'expired') {
+          await settleExpiredElearningExamAttemptInTransaction(tx, orgId, attempt)
+        }
+        return { kind: 'expired' as const }
+      }
       if (attempt.status === 'graded') {
         const incoming = canonicalizeElearningExamAnswers(snapshot, input.answers)
         const stored = parseStoredAnswers(snapshot, attempt.answers)
         if (!elearningExamAnswersEqual(incoming, stored)) fail('conflict')
-        return publicSubmitResult(attempt.id, attempt.attemptNo, gradeFromStored(attempt, snapshot), true)
+        return {
+          kind: 'result' as const,
+          value: publicSubmitResult(
+            attempt.id,
+            attempt.attemptNo,
+            gradeFromStored(attempt, snapshot),
+            true,
+          ),
+        }
       }
+      if (attempt.status !== 'started') fail('conflict')
       const canonical = canonicalizeElearningExamAnswers(snapshot, input.answers)
       const grade = scoreElearningExam(snapshot, canonical)
       const answersJson = JSON.stringify(canonical)
       const submitted = await tx.query(
         `/* elearning-exam:submit-attempt */
-         UPDATE elearning_exam_attempts
+         WITH current_clock AS (
+           SELECT clock_timestamp() AS submitted_at
+         )
+         UPDATE elearning_exam_attempts AS attempt
             SET status = 'submitted',
                 answers = $1::jsonb,
-                submitted_at = clock_timestamp()
-          WHERE org_id = $2 AND id = $3 AND status = 'started'`,
+                submitted_at = current_clock.submitted_at
+           FROM current_clock
+          WHERE attempt.org_id = $2
+            AND attempt.id = $3
+            AND attempt.status = 'started'
+            AND (
+              attempt.deadline_at IS NULL
+              OR current_clock.submitted_at < attempt.deadline_at
+            )`,
         [answersJson, orgId, attempt.id],
       )
-      if (submitted.rowCount !== 1) fail('unavailable')
+      if (submitted.rowCount !== 1) {
+        const settled = await settleExpiredElearningExamAttemptInTransaction(
+          tx,
+          orgId,
+          attempt,
+        )
+        if (settled === 'settled') return { kind: 'expired' as const }
+        fail('unavailable')
+      }
       await tx.query(
         `/* elearning-exam:insert-grade */
          INSERT INTO elearning_grading_records (
@@ -770,12 +891,17 @@ export async function submitElearningExam(
         [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
       )
       if (graded.rowCount !== 1) fail('unavailable')
-      return publicSubmitResult(attempt.id, attempt.attemptNo, grade, false)
+      return {
+        kind: 'result' as const,
+        value: publicSubmitResult(attempt.id, attempt.attemptNo, grade, false),
+      }
     } catch (error) {
       if (error instanceof ElearningExamError) throw error
       fail('unavailable')
     }
   })
+  if (outcome.kind === 'expired') fail('attempt_expired')
+  return outcome.value
 }
 
 export async function saveElearningExamAnswers(
@@ -786,7 +912,7 @@ export async function saveElearningExamAnswers(
   const userId = requireActor(input.userId)
   const attemptId = requireUuid(input.attemptId)
 
-  return db.transaction(async (tx) => {
+  const outcome = await db.transaction(async (tx) => {
     try {
       const peeked = await peekAttemptLockTarget(tx, orgId, attemptId, userId)
       await advisoryLock(tx, orgId, userId, peeked.itemId)
@@ -794,25 +920,59 @@ export async function saveElearningExamAnswers(
       if (attempt.examId !== peeked.examId || attempt.itemId !== peeked.itemId) fail('unavailable')
       await requireCourseAccess(tx, orgId, userId, attempt.versionId)
       const snapshot = parseStoredSnapshot(attempt.paperSnapshot)
+      if (attempt.expiredAt !== null) {
+        if (attempt.status === 'expired') {
+          await settleExpiredElearningExamAttemptInTransaction(tx, orgId, attempt)
+        }
+        return { kind: 'expired' as const }
+      }
       if (attempt.status !== 'started') fail('conflict')
 
       const canonical = canonicalizeElearningExamAnswers(snapshot, input.answers)
       const stored = parseStoredAnswers(snapshot, attempt.answers)
-      if (elearningExamAnswersEqual(canonical, stored)) {
-        return publicStartResult(attempt.id, attempt.attemptNo, snapshot, canonical, true)
-      }
+      const duplicate = elearningExamAnswersEqual(canonical, stored)
       const saved = await tx.query(
         `/* elearning-exam:save-answers */
-         UPDATE elearning_exam_attempts
+         WITH current_clock AS (
+           SELECT clock_timestamp() AS saved_at
+         )
+         UPDATE elearning_exam_attempts AS attempt
             SET answers = $1::jsonb
-          WHERE org_id = $2 AND id = $3 AND status = 'started'`,
+           FROM current_clock
+          WHERE attempt.org_id = $2
+            AND attempt.id = $3
+            AND attempt.status = 'started'
+            AND (
+              attempt.deadline_at IS NULL
+              OR current_clock.saved_at < attempt.deadline_at
+            )`,
         [JSON.stringify(canonical), orgId, attempt.id],
       )
-      if (saved.rowCount !== 1) fail('unavailable')
-      return publicStartResult(attempt.id, attempt.attemptNo, snapshot, canonical, false)
+      if (saved.rowCount !== 1) {
+        const settled = await settleExpiredElearningExamAttemptInTransaction(
+          tx,
+          orgId,
+          attempt,
+        )
+        if (settled === 'settled') return { kind: 'expired' as const }
+        fail('unavailable')
+      }
+      return {
+        kind: 'result' as const,
+        value: publicStartResult(
+          attempt.id,
+          attempt.attemptNo,
+          snapshot,
+          canonical,
+          attempt.deadlineAt,
+          duplicate,
+        ),
+      }
     } catch (error) {
       if (error instanceof ElearningExamError) throw error
       fail('unavailable')
     }
   })
+  if (outcome.kind === 'expired') fail('attempt_expired')
+  return outcome.value
 }

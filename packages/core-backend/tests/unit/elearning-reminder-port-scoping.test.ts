@@ -10,6 +10,8 @@ const FLAG_NAMES = [
   'ELEARNING_ENABLED',
   'ELEARNING_CONTENT_ENABLED',
   'ELEARNING_ASSIGNMENT_ENABLED',
+  'ELEARNING_MEDIA_ENABLED',
+  'ELEARNING_ASSESSMENT_ENABLED',
 ] as const
 const originalFlags = Object.fromEntries(
   FLAG_NAMES.map((name) => [name, process.env[name]]),
@@ -44,15 +46,60 @@ describe('e-learning L2 reminder producer port scoping', () => {
     const elearning = contextFor('plugin-elearning').services
     expect(elearning.elearningReminderProducer).toBeDefined()
     expect(typeof elearning.elearningReminderProducer?.produce).toBe('function')
+    expect(typeof elearning.elearningExamExpirySettlement?.settle).toBe('function')
     expect(typeof elearning.elearningNotificationEligibility?.check).toBe('function')
     expect(elearning.elearningNotificationDispatch).toBeUndefined()
 
     expect(contextFor('plugin-attendance').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-attendance').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-attendance').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-integration-core').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-integration-core').services.elearningNotificationEligibility).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningReminderProducer).toBeUndefined()
+    expect(contextFor('plugin-some-other').services.elearningExamExpirySettlement).toBeUndefined()
     expect(contextFor('plugin-some-other').services.elearningNotificationEligibility).toBeUndefined()
+  })
+
+  it('rechecks master, content, media, and assessment flags before expiry settlement', async () => {
+    const port = contextFor('plugin-elearning').services.elearningExamExpirySettlement
+    if (!port) throw new Error('expected e-learning exam expiry settlement port')
+    const poolGet = vi.spyOn(poolManager, 'get').mockImplementation(() => {
+      throw new Error('database touched')
+    })
+    const input = {
+      orgId: 'org-exam-expiry-port',
+      attemptId: '11111111-1111-4111-8111-111111111111',
+    }
+    for (const flags of [
+      {},
+      { ELEARNING_ENABLED: 'true' },
+      { ELEARNING_ENABLED: 'true', ELEARNING_CONTENT_ENABLED: 'true' },
+      {
+        ELEARNING_ENABLED: 'true',
+        ELEARNING_CONTENT_ENABLED: 'true',
+        ELEARNING_MEDIA_ENABLED: 'true',
+      },
+      {
+        ELEARNING_ENABLED: 'true',
+        ELEARNING_CONTENT_ENABLED: 'true',
+        ELEARNING_MEDIA_ENABLED: 'true',
+        ELEARNING_ASSESSMENT_ENABLED: 'TRUE',
+      },
+    ]) {
+      setFlags(flags)
+      await expect(port.settle(input)).rejects.toMatchObject({ code: 'unavailable' })
+    }
+    expect(poolGet).not.toHaveBeenCalled()
+
+    setFlags({
+      ELEARNING_ENABLED: 'true',
+      ELEARNING_CONTENT_ENABLED: 'true',
+      ELEARNING_MEDIA_ENABLED: 'true',
+      ELEARNING_ASSESSMENT_ENABLED: 'true',
+    })
+    await expect(port.settle(input)).rejects.toThrow('database touched')
+    expect(poolGet).toHaveBeenCalledTimes(1)
   })
 
   it('rechecks master, content, and assignment flags before touching the database', async () => {

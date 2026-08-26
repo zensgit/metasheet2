@@ -271,6 +271,7 @@ import { kanbanRouter } from './routes/kanban'
 import { createPlatformAppsRouter } from './routes/platform-apps'
 import {
   isElearningAssignmentSurfaceEnabled,
+  isElearningExamSurfaceEnabled,
   resolveElearningCatalogFeature,
 } from './elearning/feature-flags'
 import { createElearningMediaPlaybackRouter } from './routes/elearning-media-playback'
@@ -281,6 +282,10 @@ import {
   ElearningAssignmentReminderError,
   produceElearningAssignmentReminder,
 } from './services/elearning-assignment-reminder'
+import {
+  ElearningExamError,
+  settleExpiredElearningExamAttempt,
+} from './services/elearning-exam'
 import { viewsRouter } from './routes/views'
 import { initAdminRoutes } from './routes/admin-routes'
 import { adminUsersRouter } from './routes/admin-users'
@@ -2192,6 +2197,21 @@ export class MetaSheetServer {
                     throw new ElearningAssignmentReminderError('unavailable')
                   }
                   return produceElearningAssignmentReminder(poolManager.get(), input)
+                },
+              }
+            : undefined,
+        // L3 timed-attempt jobs are only a materialization path. Core repeats
+        // the same feature gate and owns the database-clock settlement logic.
+        elearningExamExpirySettlement:
+          manifest.name === 'plugin-elearning'
+            ? {
+                settle: async (
+                  input: import('./services/elearning-exam').SettleExpiredElearningExamAttemptInput,
+                ) => {
+                  if (!isElearningExamSurfaceEnabled()) {
+                    throw new ElearningExamError('unavailable')
+                  }
+                  return settleExpiredElearningExamAttempt(poolManager.get(), input)
                 },
               }
             : undefined,

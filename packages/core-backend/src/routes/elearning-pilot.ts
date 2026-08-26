@@ -198,6 +198,9 @@ const EXAM_STATUS: Record<ElearningExamErrorCode, number> = {
   unsupported_item: 400,
   prerequisite_incomplete: 409,
   max_attempts: 409,
+  exam_not_open: 409,
+  exam_closed: 409,
+  attempt_expired: 409,
   conflict: 409,
   unavailable: 503,
 }

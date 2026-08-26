@@ -285,6 +285,9 @@ async function insertAttempt(input: {
   answers?: Record<string, unknown> | null
   submittedAt?: string | null
   gradedAt?: string | null
+  startedAt?: string
+  deadlineAt?: string | null
+  expiredAt?: string | null
 }): Promise<string> {
   const status = input.status ?? 'started'
   const isGraded = status === 'graded'
@@ -299,8 +302,11 @@ async function insertAttempt(input: {
     `INSERT INTO elearning_exam_attempts (
        org_id, exam_id, course_version_id, course_version_item_id, user_id, attempt_no,
        paper_snapshot, answers, auto_score, total_score, passed, status,
-       submitted_at, graded_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, '{}'::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
+       submitted_at, graded_at, started_at, deadline_at, expired_at
+     ) VALUES (
+       $1, $2, $3, $4, $5, $6, '{}'::jsonb, $7::jsonb, $8, $9, $10, $11,
+       $12, $13, $14::timestamptz, $15::timestamptz, $16::timestamptz
+     )
      RETURNING id`,
     [
       input.org,
@@ -316,6 +322,9 @@ async function insertAttempt(input: {
       status,
       submittedAt,
       gradedAt,
+      input.startedAt ?? new Date().toISOString(),
+      input.deadlineAt ?? null,
+      input.expiredAt ?? null,
     ],
   )
   return result.rows[0].id
@@ -339,8 +348,9 @@ async function expireAttempt(
 ): Promise<void> {
   await pool.query(
     `UPDATE elearning_exam_attempts
-        SET status = 'expired', answers = $2::jsonb, submitted_at = now()
-      WHERE id = $1`,
+        SET status = 'expired', answers = $2::jsonb,
+            submitted_at = deadline_at, expired_at = clock_timestamp()
+      WHERE id = $1 AND deadline_at <= clock_timestamp()`,
     [id, JSON.stringify(answers)],
   )
 }
@@ -1550,6 +1560,8 @@ describe('elearning V0.1 content/assessment schema gate (real DB)', () => {
       itemId: graph.examItemId,
       userId: actor('expire-path'),
       attemptNo: 1,
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+      deadlineAt: new Date(Date.now() - 1_000).toISOString(),
     })
     await expireAttempt(expiredId, { choice: 'final-expire' })
     const expiredMutate = await reject(() =>

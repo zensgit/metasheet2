@@ -1145,6 +1145,18 @@ export interface PluginServices {
     >
   }
   /**
+   * E-learning L3 timed-attempt settlement. Only plugin-elearning receives
+   * this port. The plugin supplies the persisted job org/ref; core owns the
+   * row lock, database-clock expiry check, immutable grading, and idempotency.
+   */
+  elearningExamExpirySettlement?: {
+    settle(
+      input: import('../services/elearning-exam').SettleExpiredElearningExamAttemptInput,
+    ): Promise<
+      import('../services/elearning-exam').SettleExpiredElearningExamAttemptResult
+    >
+  }
+  /**
    * E-learning L2 pre-dispatch eligibility recheck. Core supplies this only to
    * plugin-elearning; the notification worker must call it immediately before
    * every effect-side dispatch.

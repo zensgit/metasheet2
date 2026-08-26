@@ -45,6 +45,7 @@ const PUBLIC_START_KEYS = [
   'status',
   'paper',
   'answers',
+  'deadlineAt',
   'duplicate',
 ] as const
 
@@ -306,6 +307,8 @@ interface SubmitMemAttempt {
   autoScore: number | null
   totalScore: number | null
   passed: boolean | null
+  deadlineAt: Date | null
+  expiredAt: Date | null
 }
 
 interface SubmitMem {
@@ -336,6 +339,8 @@ function createSubmitMemoryDb(
       autoScore: null,
       totalScore: null,
       passed: null,
+      deadlineAt: null,
+      expiredAt: null,
       ...seed,
     },
     access: { ...defaultAccessMem(), ...accessSeed },
@@ -368,6 +373,8 @@ function createSubmitMemoryDb(
           auto_score: attempt.autoScore,
           total_score: attempt.totalScore,
           passed: attempt.passed,
+          deadline_at: attempt.deadlineAt,
+          expired_at: attempt.expiredAt,
           user_id: attempt.userId,
           course_status: mem.access.courseStatus,
           version_status: mem.access.versionStatus,
@@ -916,6 +923,8 @@ function createStartMemoryDb(
           autoScore: null,
           totalScore: null,
           passed: null,
+          deadlineAt: null,
+          expiredAt: null,
           ...seed,
         }]
       : [],
@@ -983,6 +992,8 @@ function createStartMemoryDb(
           auto_score: attempt.autoScore,
           total_score: attempt.totalScore,
           passed: attempt.passed,
+          deadline_at: attempt.deadlineAt,
+          expired_at: attempt.expiredAt,
         })),
         rowCount: mem.attempts.length,
       }
@@ -1016,6 +1027,8 @@ function createStartMemoryDb(
         autoScore: null,
         totalScore: null,
         passed: null,
+        deadlineAt: null,
+        expiredAt: null,
       }
       mem.attempts.push(attempt)
       return { rows: [], rowCount: 1 }
@@ -1042,6 +1055,7 @@ describe('elearning exam start own answers', () => {
       status: 'started',
       paper: redactElearningPaperSnapshot(samplePaper()),
       answers: emptyAnswers(),
+      deadlineAt: null,
       duplicate: false,
     })
     expect(mem.attempts).toHaveLength(1)
@@ -1079,6 +1093,7 @@ describe('elearning exam start own answers', () => {
       status: 'started',
       paper: redactElearningPaperSnapshot(samplePaper()),
       answers: saved,
+      deadlineAt: null,
       duplicate: true,
     })
     expect(mem.attempts).toHaveLength(1)
@@ -1100,6 +1115,7 @@ describe('elearning exam draft answer save', () => {
       status: 'started',
       paper: redactElearningPaperSnapshot(samplePaper()),
       answers: { [Q1]: ['a'], [Q2]: ['a', 'c'], [Q3]: [] },
+      deadlineAt: null,
       duplicate: false,
     })
     expect(mem.lockKeys).toEqual([elearningExamLockKey(ORG, USER, ITEM)])
@@ -1108,7 +1124,7 @@ describe('elearning exam draft answer save', () => {
     expect(mem.grades).toHaveLength(0)
   })
 
-  it('treats the same canonical body as an idempotent duplicate without rewriting', async () => {
+  it('treats the same canonical body as an idempotent duplicate', async () => {
     const { db, mem } = createSubmitMemoryDb()
     const first = await saveElearningExamAnswers(db, {
       orgId: ORG,
@@ -1127,7 +1143,7 @@ describe('elearning exam draft answer save', () => {
       ...assertPublicStartJson(first),
       duplicate: true,
     })
-    expect(mem.attempt.answers).toBe(stored)
+    expect(mem.attempt.answers).toEqual(stored)
     expect(mem.attempt.status).toBe('started')
   })
 

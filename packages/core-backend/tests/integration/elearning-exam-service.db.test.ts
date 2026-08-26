@@ -1307,6 +1307,7 @@ describe('elearning V0.1 exam service gate (real DB)', () => {
       'status',
       'paper',
       'answers',
+      'deadlineAt',
       'duplicate',
     ])
     expect(started.answers).toEqual({
