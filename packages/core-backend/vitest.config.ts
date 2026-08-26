@@ -1333,6 +1333,9 @@ export default defineConfig({
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
+      // Time Machine D2a archive-catalog recovery proof: DATABASE_URL-gated and whole-file wired
+      // into the multitable real-DB step so the no-DB job cannot skip-green it.
+      'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
