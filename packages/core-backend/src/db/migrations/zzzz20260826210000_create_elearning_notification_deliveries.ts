@@ -30,6 +30,7 @@ export const ELEARNING_NOTIFICATION_DELIVERY_STATUSES = [
   'sent',
   'retrying',
   'failed',
+  'outcome_unknown',
 ] as const
 
 export async function up(db: Kysely<unknown>): Promise<void> {
@@ -83,7 +84,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT elearning_notification_deliveries_payload_object_chk
         CHECK (jsonb_typeof(payload) = 'object'),
       CONSTRAINT elearning_notification_deliveries_status_chk
-        CHECK (status IN ('pending', 'sending', 'sent', 'retrying', 'failed')),
+        CHECK (
+          status IN (
+            'pending', 'sending', 'sent', 'retrying', 'failed', 'outcome_unknown'
+          )
+        ),
       CONSTRAINT elearning_notification_deliveries_attempt_count_chk
         CHECK (attempt_count >= 0),
       CONSTRAINT elearning_notification_deliveries_lease_state_chk
@@ -111,12 +116,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT elearning_notification_deliveries_error_state_chk
         CHECK (
           (
-            status IN ('retrying', 'failed')
+            status IN ('retrying', 'failed', 'outcome_unknown')
             AND last_error IS NOT NULL
             AND last_error ~ '^[A-Z][A-Z0-9_]{1,63}$'
           )
           OR (
-            status NOT IN ('retrying', 'failed')
+            status NOT IN ('retrying', 'failed', 'outcome_unknown')
             AND last_error IS NULL
           )
         ),

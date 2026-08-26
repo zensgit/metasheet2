@@ -67,6 +67,7 @@ export type ElearningNotificationDeliveryStatus =
   | 'sent'
   | 'retrying'
   | 'failed'
+  | 'outcome_unknown'
 
 function fail(code: ElearningNotificationDeliveryErrorCode): never {
   throw new ElearningNotificationDeliveryError(code)
@@ -197,6 +198,7 @@ function storedStatus(value: unknown): ElearningNotificationDeliveryStatus | nul
     || value === 'sent'
     || value === 'retrying'
     || value === 'failed'
+    || value === 'outcome_unknown'
     ? value
     : null
 }

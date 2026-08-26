@@ -80,6 +80,7 @@ test('this slice is an inert intent ledger, not a reachable sender', () => {
   assert.equal(migration.includes('CREATE INDEX IF NOT EXISTS'), false)
   assert.match(migration, /UNIQUE \(org_id, source_key\)/)
   assert.match(migration, /FOREIGN KEY \(org_id, assignment_member_id\)/)
+  assert.match(migration, /'outcome_unknown'/)
   assert.match(service, /enqueueElearningNotificationDelivery/)
   assert.equal(service.includes('http.addRoute'), false)
   assert.equal(service.includes('/api/elearning'), false)

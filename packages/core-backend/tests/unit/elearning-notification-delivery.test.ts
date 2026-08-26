@@ -138,7 +138,7 @@ describe('e-learning notification delivery intent', () => {
           id: '22222222-2222-4222-8222-222222222222',
           request_hash: requestHash,
           request_hash_version: 1,
-          status: 'sent',
+          status: 'outcome_unknown',
         }])
       }
       return result()
@@ -146,7 +146,7 @@ describe('e-learning notification delivery intent', () => {
 
     await expect(enqueueElearningNotificationDelivery(db, request)).resolves.toEqual({
       deliveryId: '22222222-2222-4222-8222-222222222222',
-      status: 'sent',
+      status: 'outcome_unknown',
       duplicate: true,
     })
     expect(db.calls.some(

@@ -312,6 +312,8 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
     const byName = new Map(constraints.rows.map((row) => [row.name, row.definition]))
     expect(byName.get(ELEARNING_NOTIFICATION_DELIVERIES_ORG_SOURCE_UNIQ))
       .toContain('UNIQUE (org_id, source_key)')
+    expect(byName.get('elearning_notification_deliveries_status_chk'))
+      .toContain("'outcome_unknown'::text")
     expect(byName.get('elearning_notification_deliveries_assignment_member_fk'))
       .toContain('FOREIGN KEY (org_id, assignment_member_id) REFERENCES elearning_assignment_members(org_id, id) ON DELETE RESTRICT')
 
@@ -446,6 +448,25 @@ describe('e-learning notification delivery ledger (real PostgreSQL)', () => {
       [orgA, deliveryId],
     )
     expect(sending.rows).toEqual([{ status: 'sending', attempt_count: 1 }])
+
+    const ambiguous = await pool.query<{ status: string }>(
+      `UPDATE elearning_notification_deliveries
+          SET status = 'outcome_unknown',
+              claimed_at = NULL,
+              claim_expires_at = NULL,
+              claim_worker_id = NULL,
+              last_error = 'OUTCOME_UNKNOWN',
+              updated_at = clock_timestamp()
+        WHERE org_id = $1 AND id = $2
+        RETURNING status`,
+      [orgA, deliveryId],
+    )
+    expect(ambiguous.rows).toEqual([{ status: 'outcome_unknown' }])
+    await expect(enqueueElearningNotificationDelivery(db, requestA)).resolves.toEqual({
+      deliveryId,
+      status: 'outcome_unknown',
+      duplicate: true,
+    })
 
     await expectPgError(
       () => pool.query(
