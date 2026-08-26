@@ -136,9 +136,10 @@ function fail(code: RecoveryArchiveCryptoErrorCode): never {
 
 /**
  * Run an external callback (adapter, reservation sink, sealer, provider) and normalize its
- * failure. A `RecoveryArchiveCryptoError` this module already produced survives unchanged; every
- * other throwable - including a non-Error rejection value - becomes the given closed code with no
- * message, no host, no provider text, and no cause.
+ * failure. Every throwable - including an exported `RecoveryArchiveCryptoError` instance and a
+ * non-Error rejection value - becomes a fresh closed code with no message, host, provider text, or
+ * cause. External code can construct and mutate the exported error class, so identity is not a
+ * trusted provenance signal.
  */
 async function callExternal<T>(
   code: RecoveryArchiveCryptoErrorCode,
@@ -146,8 +147,7 @@ async function callExternal<T>(
 ): Promise<T> {
   try {
     return await run();
-  } catch (error) {
-    if (error instanceof RecoveryArchiveCryptoError) throw error;
+  } catch {
     throw new RecoveryArchiveCryptoError(code);
   }
 }
@@ -158,8 +158,7 @@ function callExternalSync<T>(
 ): T {
   try {
     return run();
-  } catch (error) {
-    if (error instanceof RecoveryArchiveCryptoError) throw error;
+  } catch {
     throw new RecoveryArchiveCryptoError(code);
   }
 }
@@ -349,6 +348,7 @@ function assertGenerationDekResult(
   expectedWrappedDekId: string | null,
 ): RecoveryArchiveGenerationDek {
   let dek: unknown;
+  let dekSnapshot: Uint8Array | undefined;
   try {
     if (result === null || typeof result !== "object") {
       fail("RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_RESULT_INVALID");
@@ -391,10 +391,20 @@ function assertGenerationDekResult(
       fail("RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_RESULT_INVALID");
     }
 
-    return { dek, wrappedDekId, wrappedDek };
-  } catch (error) {
+    // Return byte snapshots, not adapter-owned views. The adapter is invoked again to derive the
+    // fingerprint and can otherwise mutate either view after validation but before reservation or
+    // sealing. Copy the wrapped blob before scrubbing in case both views share backing storage.
+    dekSnapshot = new Uint8Array(dek);
+    const wrappedDekSnapshot = new Uint8Array(wrappedDek);
     scrubRecoveryArchiveDek(dek);
-    if (error instanceof RecoveryArchiveCryptoError) throw error;
+    return {
+      dek: dekSnapshot,
+      wrappedDekId,
+      wrappedDek: wrappedDekSnapshot,
+    };
+  } catch {
+    scrubRecoveryArchiveDek(dek);
+    scrubRecoveryArchiveDek(dekSnapshot);
     fail("RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_RESULT_INVALID");
   }
 }
@@ -437,14 +447,28 @@ export function createTransactionGuardedKeyCustody(
     },
     async deriveDekFingerprint(request) {
       assertKeyCustodyCallOutsideTransaction(probe);
-      const fingerprint = await callExternal(
-        "RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED",
-        () => adapter.deriveDekFingerprint(request),
-      );
-      if (!isRecoveryArchiveDekFingerprint(fingerprint)) {
-        fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_DEK_FINGERPRINT");
+      if (!isExactDekBytes(request.dek)) {
+        fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_KEY_LENGTH");
       }
-      return fingerprint;
+      // The adapter must see the actual DEK bytes but must not retain a mutable alias to the copy
+      // later used for sealing. Its temporary view is scrubbed on every exit.
+      const adapterDek = new Uint8Array(request.dek);
+      try {
+        const fingerprint = await callExternal(
+          "RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_FAILED",
+          () =>
+            adapter.deriveDekFingerprint({
+              keyId: request.keyId,
+              dek: adapterDek,
+            }),
+        );
+        if (!isRecoveryArchiveDekFingerprint(fingerprint)) {
+          fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_DEK_FINGERPRINT");
+        }
+        return fingerprint;
+      } finally {
+        scrubRecoveryArchiveDek(adapterDek);
+      }
     },
     async macManifestRoot(request) {
       assertKeyCustodyCallOutsideTransaction(probe);
