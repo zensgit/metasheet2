@@ -1,6 +1,23 @@
 # 审批明细表 × 多维表互通设计短文(含宜搭子表单对标)
 
-日期:2026-08-25 · **v9(2026-08-26 八次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+日期:2026-08-25 · **v11(2026-08-26 十次修订)** · 状态:**PROPOSED**(§7 为五个独立裁决包:A/B/C/D1/D2)
+
+> **v11 修订说明**(第十轮终态组合与 zombie 前置对账):①`ack-terminal` 扩到全部
+> resolve-permitting event-fire 终态,闭合「业务已完成、consumer 在下一次 claim-time poison」的
+> `(done,dead_letter)`;②detail 的正常完成 CAS 也必须检查结果并重读,禁止沿用旧 helper
+> 忽略 CAS-0 后仍完成 consumer 的路径;③`resume-terminalization` 改为来源显式的
+> `resume-in-progress-after-quiescence`,按 provenance 终态化与 retryable 业务执行分别证明恢复条件,
+> 且在没有业务写 fence 的当前结构下必须先证明旧 worker 静默;④required alert 明确为
+> at-least-once,并将 CAS-0 重读的其余形状全部收敛到 fail closed。
+
+> **v10 修订说明**(第九轮崩溃重入与 poison 状态空间对账):①保留现有
+> `claimEventFiresLease` 对 `outcome_unknown` 的运输终态短路,并明确「终态已提交、
+> consumer 未确认」后的重入与 CAS-0 处置;②不再把 owner 恢复限定为
+> `(outcome_unknown,done)` 一个组合,补齐尝试上限前后可达的
+> `(outcome_unknown,dead_letter)` 与
+> `(status='in_progress' 且租约已过期,dead_letter)`;③钉死 retryable 继续
+> 通过异常抛出交回现有 reclaim 路径,不发明第三个 callback 返回值;④将
+> N=0 与「父行无子证据」、rolling-deploy 租约词汇收窄到真实 schema 状态。
 
 > **v9 修订说明**(第八轮故障分类与事件 identity 对账):①detail 新增
 > `fwb_retryable:*` 只是对现有重试集合的增量,共享 `hasRetryableFwbFailure` 不得
@@ -335,11 +352,19 @@ B 旗。底层 FWB/durable 安全能力暂不可用时，必须进入 detail 专
   父行的 `id`,再读取其子表,并要求 row index **集合**精确等于 `0..N-1`(不能只比 count,`{0,2}`
   不是两行成功)、
   每行 `event_id` 等于本次纯函数推导值、`target_record_id` 非空。完全相等才返回
-  `already_applied`;缺行、多行、错 event 或父行无子证据均以 values-free
+  `already_applied`;缺行、多行、错 event 或 **N>0 时**父行无子证据均以 values-free
   `fwb_outcome_unknown:detail_provenance_mismatch` 进入**第三种交付处置**:required alert
   必须成功上报,随后以当前 fence-CAS 将对应 `meta_automation_event_fires` 行从
   `in_progress` 终结为既有 `outcome_unknown` 并原子清 lease;不得调用
   `markEventFiresDone`,不得进入 `hasRetryableFwbFailure`,也不得等 lease 到期自动 reclaim。
+  必须保留现有 `claimEventFiresLease` 的入口终态短路:`done/outcome_unknown/failed/
+  dead_letter` 都返回运输层 `done`,而 `runWithEventDedup` 不再执行 callback。因此若进程在
+  `outcome_unknown` CAS 提交后、consumer `done` 写入前崩溃,下一次 consumer 尝试必须读到
+  该终态、跳过 callback/重复 alert,并完成运输确认;这个 `done` 只表示「不再自动执行」,
+  不得被产品或审计层解释成业务写回成功。
+  required alert 的交付语义是 **at-least-once**,不是 exactly-once:若进程在 alert 成功后、
+  终态 CAS 前崩溃或失去租约,重入允许再次告警;实现与验收不得把「终态 CAS 后重入零二次」
+  扩张为全时序恰好一次。告警聚合可使用不含用户值的稳定 incident key,但业务正确性不得依赖聚合。
   外层 outbox consumer 只有在该 sink 终态写成功后才可完成自己的运输责任;它的 `done`
   不得被解释成业务写回成功。恢复不是普通 retry:owner 必须通过 values-free、审计化操作同时锁定
   该 event-fire 与匹配的 `(outbox_id,consumer_key)` 行,以 expected status/fence 防并发漂移,并在
@@ -358,27 +383,68 @@ execution 的全部 FWB step,优先级固定为 `outcome_unknown > retryable > s
 显式 `done | outcome_unknown`;`outcome_unknown` 必须调用新增的
 `markEventFiresOutcomeUnknown(ruleId,dedupKey,fence)`,后者与 done helper 一样只允许当前
 `in_progress` fence 单行 CAS,在同一 UPDATE 中写 terminal status 并清 lease。required alert 失败、
-CAS 命中 0 行或 DB 写失败时,外层 outbox consumer 都不得完成;只有 alert 成功且
-`outcome_unknown` 已持久化后,adapter 才可返回运输层 success。旧 create/update 的 settled/retry
+CAS 命中 0 行时必须重读同一 `(rule_id,dedup_key)`:若已是
+`outcome_unknown` 且 lease 为 NULL,说明竞争者已达成同一终态,adapter 可返回运输层
+success,不得因重读再发第二条 alert;若仍是外来 fence 持有的 `in_progress`、行消失,
+或出现 `outcome_unknown` 但 lease 非 NULL 等任何其他形状,均 fail closed、不得完成。
+required alert 失败、无法证明终态已达成的 CAS-0、或 DB 读写失败时,外层 outbox consumer
+都不得完成。只有 alert 成功且 `outcome_unknown` 已持久化(由本尝试或竞争者完成)后,
+adapter 才可返回运输层 success。旧 create/update 的 settled/retry
 控制流和 event-id 字节必须不变。所有 `runWithEventDedup` 调用点必须显式返回上述闭集结果;
-任何遗漏返回值或运行时闭集外值均 fail closed,不得默认折叠为 `done`。
+任何遗漏返回值或运行时闭集外值均 fail closed,不得默认折叠为 `done`。`retryable`
+不是第三个 callback 返回值:它继续以现有异常抛出(不产生正常返回值)交回
+lease-expiry reclaim。
 
-owner 恢复操作也冻结为一个原子状态机,不留给实现自行选择。它先锁定并验证
-`event_fires(status='outcome_unknown',lease IS NULL,fence=expected)` 与匹配的
-`outbox_consumer(status='done',lease IS NULL,fence=expected)`;再验证外层 outbox event 与
-`rule_id/dedup_key` 的确定性关联及严格 replay 证据已修复。选择 **reopen** 时,同一事务把
-event-fire 改成 `in_progress`、lease 设为事务时钟之前、fence 加一,并把 consumer 改成
-`pending`、lease 清空、fence 加一、`attempts` 重置为 0、`last_error`
-清空、`updated_at` 写事务时钟;恢复审计须记录重置前的 attempts **计数**(不得含用户值)。这是
-必要的 retry-budget 重置:若保留一次 outcome-unknown claim 已达到的 `maxAttempts`,下一次
-`claimDueConsumers` 会在调用 adapter 前直接 poison。owner 转换本身不改 event-fire `attempts`,
-下一次过期租约 reclaim 才按既有规则递增。
-任一行未命中则整事务回滚。不得把
-event-fire 改成 `pending`,因为现有 `claimEventFiresLease` 对已存在 pending 行既不 fresh-claim
-也不 reclaim。下一次 dispatcher claim consumer 后,只能由 event-fire 的过期租约 reclaim 路径取得
-新 fence。选择 **terminate** 时,只允许 expected-fence CAS 将 event-fire 从
-`outcome_unknown` 改成 terminal `failed`,consumer 保持 done。两种操作均须 values-free 审计、
-显式 owner 授权;禁止普通业务 API 或自动定时器调用。
+detail 的正常 `done` 腿不得照搬现有 `runWithEventDedup` 对 `markEventFiresDone` 返回值不检查的
+行为。done CAS 命中 0 行时也必须独立重读:只有读到 `status='done' AND lease IS NULL` 才可完成
+consumer;读到外来 `in_progress`、行消失或任一其他形状都不得完成。这样 detail 新路径不会产生
+`event-fire='in_progress'` 而 consumer 已 `done` 的无驱动吸收态;旧 create/update 路径保持字节与
+控制流不变,不借 B 包顺手改写。
+
+owner 恢复操作也冻结为原子状态机,不留给实现自行选择。所有分支先锁定并验证
+event-fire、匹配的 `(outbox_id,consumer_key)` 行、两个 expected fence/租约状态和外层 outbox event 与
+`rule_id/dedup_key` 的确定性关联;任一行未命中则整事务回滚:
+
+- **ack-terminal**:`event_fires(status IN ('done','outcome_unknown','failed','dead_letter'),
+  lease IS NULL)` + `outbox_consumer(status='dead_letter',lease IS NULL)` 表示 sink 已进入
+  resolve-permitting 终态、仅运输确认在下一次 claim 前被尝试上限 poison。本操作只把 consumer
+  改成 `done`、fence 加一、`last_error` 清空、`updated_at` 写事务时钟;event-fire 保持原终态,
+  不运行 callback,不补写业务效果。尤其必须覆盖前若干次 retryable 失败后,最后一次业务执行已
+  `done`、consumer resolve 失败,下一次 claim-time poison 得到的 `(done,dead_letter)`。
+- **reopen-after-repair**:`event_fires(status='outcome_unknown',lease IS NULL)` + consumer
+  `status IN ('done','dead_letter')` 且严格 replay 证据已修复。同一事务把 event-fire 改成
+  `in_progress`、lease 设为事务时钟之前、fence 加一,并把 consumer 改成 `pending`、
+  lease 清空、fence 加一、`attempts` 重置为 0、`last_error` 清空、
+  `updated_at` 写事务时钟。
+- **resume-in-progress-after-quiescence**:`event_fires(status='in_progress',
+  lease_expires_at <= 事务时钟)` + `outbox_consumer(status='dead_letter',lease IS NULL)`。
+  租约仍存活时没有可执行分支,owner 必须等待它过期,不得提前改写。请求还必须带 values-free
+  `resume_reason` 闭集:`provenance_terminalization` 或 `retryable_execution`。前者证明
+  required-alert/DB 终态写通道已恢复;后者证明对应 FWB/基础设施依赖已恢复。两者都必须证明旧
+  adapter 所在 worker cohort 已静默或重启,因为当前 event-fire fence 只保护终态 CAS,不能阻止
+  非协作 zombie 在租约过期后提交业务事务。没有该静默证据时整笔拒绝,不能仅凭 lease expiry 前进。
+  条件满足后,同一事务保持 event-fire `in_progress`、将 lease 设为事务时钟之前并使 fence 加一;
+  consumer 改成 `pending`、清 lease、fence 加一、`attempts=0`、清 `last_error`、更新
+  `updated_at`。下一次 consumer claim 后只能通过 event-fire 过期租约 reclaim 取得新 fence;
+  provenance 来源重试终态化,execution 来源重试业务执行,两者都不得忽略严格 replay。
+  claim-time poison 会把 consumer `last_error` 统一覆盖为 `max_attempts_exhausted`,因此这两种来源
+  **不能**从当前两行自动推断。运行时只机器校验 `resume_reason` 属于闭集、该 reason 要求的
+  owner evidence reference 与静默证明 reference 均存在且类型匹配;事实来源与依赖确已恢复由
+  owner 对所引用证据负责。实现、测试和文档不得声称能从 status/last_error 自动识别真实来源。
+- **terminate**:只对上述 `outcome_unknown` + consumer `status IN ('done','dead_letter')`
+  组合允许 expected-fence CAS 将 event-fire 改成 terminal `failed`并清 lease;consumer 保持
+  原终态,不重开。`in_progress` 即使租约已过期也不得直接 terminate:过期不证明
+  zombie 事务已停止,而 event-fire fence 不能单独阻止它提交业务事务。该组合只能
+  `resume-in-progress-after-quiescence`;若 owner 需要直接终止,必须另立业务写 fence 合同。
+
+任何把 consumer 改回 `pending` 的操作都必须重置 retry budget;恢复审计记录重置前的
+attempts **计数**(不得含用户值)。若保留已达 `maxAttempts` 的值,下一次
+`claimDueConsumers` 会在调用 adapter 前直接 poison。owner 转换本身不改 event-fire
+`attempts`,下一次过期租约 reclaim 才按既有规则递增。不得把 event-fire 改成
+`pending`,因为现有 `claimEventFiresLease` 对已存在 pending 行既不 fresh-claim 也不 reclaim。
+四种操作均须 values-free 审计、显式 owner 授权;禁止普通业务 API 或自动定时器调用。审计必须
+记录操作名、`resume_reason`(若适用)、转换前两个 status/fence/attempts **计数**和静默证明类型,
+不得记录用户值。
 
 默认 PostgreSQL `READ COMMITTED` 下,竞争者的 `ON CONFLICT` 会等待赢家提交;duplicate 分支随后必须
 用一条**独立** SELECT 取得新 statement snapshot,才能读取赢家同事务提交的完整子行。若未来改变
@@ -437,14 +503,26 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
    完整赢家。空数组的 N=0 有正控;字段缺失/`null`/非数组的负例必须在 claim 前拒绝。
    把 detail 路径退回旧 duplicate 短路,或删除任一严格 replay 核对(行集/event/record id)时,
    指定 corruption golden 必须红。provenance mismatch 必须另有真库状态机 golden:分类优先级
-   `outcome_unknown > retryable > settled`,required alert 失败/CAS 失败均不完成 outer consumer,
+   `outcome_unknown > retryable > settled`,required alert 失败/无法证明终态的 CAS 失败均不完成
+   outer consumer,
    成功路径得到 event-fire `outcome_unknown` + lease NULL 和 consumer `done`;把第三态折回异常重试、
-   确定性 done 或无条件 `markEventFiresDone` 时各自指定测试必须红。owner reopen 在同一事务内完成
-   两层 expected-status/fence 转换,随后只能由 consumer claim + event-fire expired-lease reclaim
-   取得新 fence;任一 expected fence/status 错、只更新一层、改 event-fire 为 pending 或省略严格证据
-   复核时整笔影响 0/回滚。必须构造 consumer `attempts=maxAttempts` 的正控:reopen 原子清零后下一次
-   claim 确实执行 adapter;删除 attempts 重置时该测试应在 claim-time poison 且 adapter 调用数为 0。
-   terminate 只能 outcome_unknown→failed,且不得重开 consumer。
+   确定性 done 或无条件 `markEventFiresDone` 时各自指定测试必须红。还必须构造两个重入
+   顺序:①event-fire CAS 已提交、consumer 未 done 即崩溃,下一次尝试终态短路、
+   callback/alert 零二次、consumer 完成;②旧 fence CAS-0,重读为已持久化
+   `outcome_unknown` 时完成,重读为外来 `in_progress` 或 `outcome_unknown`+非空 lease 时仍重试。
+   required alert 另构造「alert 成功后、CAS 前崩溃」正控,允许重入再次告警,防止测试误宣称
+   exactly-once。detail 正常完成也须构造 stale done-CAS:只有重读为 `done`+NULL lease 才完成,
+   外来 `in_progress` 时 consumer 不得 done。中和终态短路或去掉任一 CAS-0 重读时各自指定测试
+   必须红。owner 的 ack-terminal/reopen-after-repair/
+   resume-in-progress-after-quiescence/terminate 四分支须逐一用真库钉住;status/fence/租约或关联错、
+   只更新一层、改 event-fire 为 pending 时整笔影响 0/回滚。必须构造两个
+   consumer `attempts=maxAttempts` 家族:①`outcome_unknown/dead_letter` 与
+   `done/dead_letter` 经 ack-terminal 只完成运输、保持各自 event-fire 终态;②`status='in_progress'`
+   且租约已过期 + `dead_letter` 分别从 provenance 与 retryable 两种来源进入
+   resume-in-progress-after-quiescence,原子清零后下一次 claim 确实执行 adapter。租约未过期、
+   缺 required evidence reference/静默证明 reference、闭集外 `resume_reason` 或 reference 类型与
+   reason 不匹配时必须影响 0;不得用测试虚构「数据库能判断 owner 事实分类正确」。删除 attempts
+   重置时后者应在 claim-time poison 且 adapter 调用数为 0。terminate 不得重开 consumer。
 4. **Nested mapping/execute recheck:**两个明细字段复用同一 child id,只读取指定组;不存在/跨组/类型漂移在
    rule-save/rule-enable/execute 三时点 fail closed。顶层字段重复到每行有正控。一个显式映射格为
    缺失/`null`/空白字符串时,父 claim 与所有业务写均为 0;删掉缺值门或改成跳行时指定测试必须变红。
@@ -484,7 +562,9 @@ event-fires/两个 endpoint effect,完整重放不新增 effect。系统内部�
     子表、约束、索引做精确 schema assertion,缺失/漂移即中止。激活前证明所有 dispatcher 都报告
     `create_detail_rows` capability,且 capability registry/部署 barrier 为本包明确前置基础设施,再按
     A→durable/FWB→B 开启。回滚先关 B admission、禁止/停用新 detail 规则,但新 worker 的 execution
-    支持保持有效;排空并证明不存在 pending/in_progress/reclaimable detail delivery 和仍启用规则后,
+    支持保持有效;排空并证明不存在 `status IN ('pending','in_progress')` 的 detail
+    delivery(报告必须另列 `status='in_progress' AND lease_expires_at <= now()` 计数),且不存在
+    仍启用规则后,
     部署 preflight 才允许旧 worker 回来,最后才可关 A。若无法排空,必须停车相关 delivery 并阻止旧镜像
     启动,不得让旧 `unknown_mode` 消费事件。旧镜像会拒 unknown mode 只证明不误写,
     **不证明待写效果不会丢失**。混合版本/关旗演练必须证明没有 detail event-fire 进入 done。
@@ -592,7 +672,7 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 - (b) 行级引用+伴生列:填单中可刷新;提交时切断与表的联动并成为审批内副本,批准终态再冻结。量级:中-大。
 - 安全底线:服务端以发起人身份过表 ACL;发布时目录校验;跨 org 不通。
 
-## 7. 待 owner 裁决(v9:五个独立裁决包)
+## 7. 待 owner 裁决(v11:五个独立裁决包)
 
 **A. v1.1 录入效率包 — 建议 RATIFY v7。**裁决面收窄为:①系统硬上限固定 **200**、
 嵌套 session capability 与七路径合同按 §3;②复制/上下移/删除确认/序号列/xlsx 导入/minRows 播种开工;
@@ -601,7 +681,7 @@ durable/FWB 已通过各自 UAT、additive migration 已应用、全 worker capa
 staging 激活前置。
 **不并入 A:**文件导出/回导、通用金额求和,两者各自立项,不让小包膨胀。
 
-**B. FWB v2 delta lock 包 — 建议 RATIFY v9。**裁决面为:①单一 detailSourceFieldId +
+**B. FWB v2 delta lock 包 — 建议 RATIFY v11。**裁决面为:①单一 detailSourceFieldId +
 判别式来源;②既有六元父 claim/helper/index 零改动 + additive 逐行溯源表;③一次父 claim、N 行同事务、
 严格 replay(含 N=0 与缺字段区分,不复用旧 duplicate 短路);④旧 create/update 哈希字节不变 +
 detail 专用确认哈希域;⑤以冻结的
@@ -610,7 +690,8 @@ detail 专用确认哈希域;⑤以冻结的
 ⑦新实例只追加;⑧按 §1.1 精确修订 FWB-0 数据源条款、终态冻结语义、缺值全有或全无、
 A/FWB/durable 依赖、穷尽 dispatcher、执行期权限/目标确认交集重检、admission/execution 分离、
 历史批准快照 census、终态 UPDATE 结构守卫、既有 `fwb_execution_failed`
-重试腿不变、provenance mismatch 的 `outcome_unknown` 第三处置与双账本 owner 恢复/终结、
+重试腿不变、provenance mismatch 的 `outcome_unknown` 第三处置、alert at-least-once、
+done/outcome-unknown 双 CAS-0 重读、崩溃重入与四分支 owner 恢复/终结、
 滚动部署/回滚;⑨§4.5 十一道验证门。
 任何一项写成「实现时再定」都视为未裁。owner 未逐项接受前仍为 PROPOSED,不得开实现旗。
 
