@@ -430,6 +430,13 @@ jobs:
       - name: E-learning L2 notification-delivery CI wiring contract
         run: node --test scripts/ops/elearning-notification-delivery-ci-wiring.test.mjs
 
+      # E-learning L2 notification claim-lease worker CI wiring (no DB): the
+      # plugin kernel stays in the package chain and the real-Postgres suite
+      # must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L2 notification-worker CI wiring contract
+        run: node --test scripts/ops/elearning-notification-worker-ci-wiring.test.mjs
+
       # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
       # excluded) and named as a whole-file arg of the unit canary; real-DB
       # suites stay in the post-migrate 20.x steps; frontend specs stay in
@@ -998,6 +1005,7 @@ jobs:
             tests/integration/elearning-training-plan-assignment.db.test.ts \
             tests/integration/elearning-admin-access.db.test.ts \
             tests/integration/elearning-notification-delivery.db.test.ts \
+            tests/integration/elearning-notification-worker.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.
