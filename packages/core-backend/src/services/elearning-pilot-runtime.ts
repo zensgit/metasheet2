@@ -65,6 +65,15 @@ import {
   type ElearningManualGradeResult,
   type ElearningManualGradingDb,
 } from './elearning-manual-grading'
+import {
+  getElearningManualGradingDetail,
+  listElearningManualGradingQueue,
+  type ElearningManualGradingDetail,
+  type ElearningManualGradingQueueResult,
+  type ElearningManualGradingReadDb,
+  type GetElearningManualGradingDetailInput,
+  type ListElearningManualGradingQueueInput,
+} from './elearning-manual-grading-read'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -124,7 +133,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningAdminOperationDb &
     ElearningAssessmentCatalogDb &
     ElearningPaperExamDb &
-    ElearningManualGradingDb
+    ElearningManualGradingDb &
+    ElearningManualGradingReadDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -170,6 +180,14 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningManualGradingDb,
     input: ElearningManualGradeInput,
   ) => Promise<ElearningManualGradeResult>
+  listElearningManualGradingQueue?: (
+    db: ElearningManualGradingReadDb,
+    input: ListElearningManualGradingQueueInput,
+  ) => Promise<ElearningManualGradingQueueResult>
+  getElearningManualGradingDetail?: (
+    db: ElearningManualGradingReadDb,
+    input: GetElearningManualGradingDetailInput,
+  ) => Promise<ElearningManualGradingDetail>
   publishElearningCourse?: (
     db: ElearningCoursePublishDb,
     input: PublishElearningCourseInput,
@@ -253,6 +271,10 @@ export function createElearningPilotRuntime(
       opts.getElearningExamReview ?? getElearningExamReview,
     submitElearningManualGrade:
       opts.submitElearningManualGrade ?? submitElearningManualGrade,
+    listElearningManualGradingQueue:
+      opts.listElearningManualGradingQueue ?? listElearningManualGradingQueue,
+    getElearningManualGradingDetail:
+      opts.getElearningManualGradingDetail ?? getElearningManualGradingDetail,
     publishElearningCourse:
       opts.publishElearningCourse ?? publishElearningCourse,
     listElearningLearnerCourses:

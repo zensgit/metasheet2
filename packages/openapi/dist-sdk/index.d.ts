@@ -8593,6 +8593,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assessment/manual-grading/attempts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List submitted attempts awaiting initial manual grading
+         * @description L3 grader queue. RBAC requires `elearning:grade` or
+         *     `elearning:admin`. Global administrators may read the organization;
+         *     every non-global grader must have an active management scope, and
+         *     each row is filtered by that scope in SQL. The closed response never
+         *     contains learner answers, paper snapshots, answer keys, explanations,
+         *     rubrics, grading request ids, or attempts outside the current scope.
+         */
+        get: operations["listElearningManualGradingAttempts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/assessment/manual-grading/attempts/{attemptId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the short-answer material needed for initial manual grading
+         * @description L3 grader detail. RBAC and management-scope rules match the queue.
+         *     Out-of-scope and non-awaiting attempts are not visible. The closed
+         *     response contains only short-answer prompts, points, the learner's
+         *     corresponding answers, and any initial manual grade already appended.
+         *     It never returns objective questions, answer keys, explanations,
+         *     rubrics, request ids, raw snapshots, regrade history, or another
+         *     learner's attempt.
+         */
+        get: operations["getElearningManualGradingAttempt"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/assignments/direct": {
         parameters: {
             query?: never;
@@ -18482,6 +18533,64 @@ export interface components {
             passed: boolean | null;
             duplicate: boolean;
         };
+        ElearningManualGradingQueueItem: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            examId: components["schemas"]["ElearningUuid"];
+            examTitle: string;
+            courseId: components["schemas"]["ElearningUuid"];
+            courseTitle: string;
+            attemptNo: number;
+            /** Format: date-time */
+            submittedAt: string;
+            autoScore: number;
+            manualScore: number;
+            paperMaxScore: number;
+            gradedQuestions: number;
+            manualQuestions: number;
+        };
+        ElearningManualGradingQueueResult: {
+            items: components["schemas"]["ElearningManualGradingQueueItem"][];
+            page: number;
+            pageSize: number;
+            hasMore: boolean;
+        };
+        ElearningManualGradingQuestionGrade: {
+            score: number;
+            maxScore: number;
+            comment: string | null;
+            graderId: string;
+            /** Format: date-time */
+            gradedAt: string;
+        };
+        ElearningManualGradingQuestionDetail: {
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            position: number;
+            prompt: string;
+            points: number;
+            learnerAnswer: string;
+            grade: components["schemas"]["ElearningManualGradingQuestionGrade"] | null;
+        };
+        ElearningManualGradingDetail: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            examId: components["schemas"]["ElearningUuid"];
+            examTitle: string;
+            courseId: components["schemas"]["ElearningUuid"];
+            courseTitle: string;
+            attemptNo: number;
+            /** @enum {string} */
+            status: "awaiting_manual";
+            /** Format: date-time */
+            submittedAt: string;
+            autoScore: number;
+            manualScore: number;
+            paperMaxScore: number;
+            passScore: number;
+            gradedQuestions: number;
+            manualQuestions: number;
+            questions: components["schemas"]["ElearningManualGradingQuestionDetail"][];
+        };
         /** @description Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations. */
         ElearningExamReviewQuestion: {
             position: number;
@@ -20140,6 +20249,75 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             /** @description payload_too_large */
             413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    listElearningManualGradingAttempts: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scope-filtered page ordered by submission time and attempt id. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradingQueueResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required */
+            403: components["responses"]["ElearningError"];
+            /** @description assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningManualGradingAttempt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Closed short-answer grading detail for one visible pending attempt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradingDetail"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];
             /** @description unavailable */

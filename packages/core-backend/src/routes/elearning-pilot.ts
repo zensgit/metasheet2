@@ -24,6 +24,7 @@ import {
   isElearningGlobalAdminRequest,
 } from './elearning-admin-access'
 import { createElearningAssessmentAdminRouter } from './elearning-assessment-admin'
+import { createElearningManualGradingReadRouter } from './elearning-manual-grading-read'
 import { createElearningManualGradingRouter } from './elearning-manual-grading'
 import type { ElearningAdminAccessDb } from '../services/elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from '../services/elearning-assessment-catalog'
@@ -81,6 +82,11 @@ import type {
   submitElearningManualGrade,
   ElearningManualGradingDb,
 } from '../services/elearning-manual-grading'
+import type {
+  getElearningManualGradingDetail,
+  listElearningManualGradingQueue,
+  ElearningManualGradingReadDb,
+} from '../services/elearning-manual-grading-read'
 import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
@@ -309,7 +315,8 @@ export interface ElearningPilotRouteDeps {
     ElearningAdminOperationDb &
     ElearningAssessmentCatalogDb &
     ElearningPaperExamDb &
-    ElearningManualGradingDb
+    ElearningManualGradingDb &
+    ElearningManualGradingReadDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -369,6 +376,8 @@ export interface ElearningPilotRouteDeps {
     typeof createElearningAssessmentAdminRouter
   >[0]['publishElearningPaperExam']
   submitElearningManualGrade?: typeof submitElearningManualGrade
+  listElearningManualGradingQueue?: typeof listElearningManualGradingQueue
+  getElearningManualGradingDetail?: typeof getElearningManualGradingDetail
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -540,6 +549,17 @@ export function createElearningPilotRouter(
     submitElearningManualGrade: deps.submitElearningManualGrade,
   })
   if (manualGradingRouter) router.use(manualGradingRouter)
+  const manualGradingReadRouter = createElearningManualGradingReadRouter({
+    db: deps.db,
+    env: deps.env,
+    gradeGuard,
+    viewerId: deps.viewerId,
+    orgId: deps.orgId,
+    isGlobalAdmin,
+    listElearningManualGradingQueue: deps.listElearningManualGradingQueue,
+    getElearningManualGradingDetail: deps.getElearningManualGradingDetail,
+  })
+  if (manualGradingReadRouter) router.use(manualGradingReadRouter)
 
   const asyncHandler =
     (fn: (req: Request, res: Response) => Promise<unknown>) =>

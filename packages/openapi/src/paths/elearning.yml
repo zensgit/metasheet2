@@ -611,6 +611,106 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/assessment/manual-grading/attempts:
+    get:
+      operationId: listElearningManualGradingAttempts
+      summary: List submitted attempts awaiting initial manual grading
+      description: |
+        L3 grader queue. RBAC requires `elearning:grade` or
+        `elearning:admin`. Global administrators may read the organization;
+        every non-global grader must have an active management scope, and
+        each row is filtered by that scope in SQL. The closed response never
+        contains learner answers, paper snapshots, answer keys, explanations,
+        rubrics, grading request ids, or attempts outside the current scope.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: page
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1
+        - in: query
+          name: pageSize
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Scope-filtered page ordered by submission time and attempt id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradingQueueResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/assessment/manual-grading/attempts/{attemptId}:
+    get:
+      operationId: getElearningManualGradingAttempt
+      summary: Get the short-answer material needed for initial manual grading
+      description: |
+        L3 grader detail. RBAC and management-scope rules match the queue.
+        Out-of-scope and non-awaiting attempts are not visible. The closed
+        response contains only short-answer prompts, points, the learner's
+        corresponding answers, and any initial manual grade already appended.
+        It never returns objective questions, answer keys, explanations,
+        rubrics, request ids, raw snapshots, regrade history, or another
+        learner's attempt.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      responses:
+        '200':
+          description: Closed short-answer grading detail for one visible pending attempt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradingDetail'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, or scope_required
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/assignments/direct:
     post:
       operationId: assignElearningDirect

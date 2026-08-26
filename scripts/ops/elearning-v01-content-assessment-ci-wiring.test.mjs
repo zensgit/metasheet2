@@ -26,6 +26,8 @@ const PLAYBACK_FILE = 'tests/integration/elearning-media-playback.db.test.ts'
 const ROLE_TEMPLATE_FILE = 'tests/integration/elearning-role-templates.db.test.ts'
 const MANUAL_GRADING_SERVICE_FILE =
   'tests/integration/elearning-manual-grading-service.db.test.ts'
+const MANUAL_GRADING_READ_FILE =
+  'tests/integration/elearning-manual-grading-read.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
 const MEDIA_DB_STEP_ID = 'elearning-v01-media-quota-real-db'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
@@ -47,6 +49,11 @@ const MANUAL_GRADING_SERVICE_SUITE = join(
   'packages/core-backend',
   MANUAL_GRADING_SERVICE_FILE,
 )
+const MANUAL_GRADING_READ_SUITE = join(
+  repoRoot,
+  'packages/core-backend',
+  MANUAL_GRADING_READ_FILE,
+)
 const GATE_FILES = [
   FILE,
   ATTEMPT_MIGRATION_FILE,
@@ -60,6 +67,7 @@ const GATE_FILES = [
   PLAYBACK_FILE,
   ROLE_TEMPLATE_FILE,
   MANUAL_GRADING_SERVICE_FILE,
+  MANUAL_GRADING_READ_FILE,
 ]
 const CONTENT_MIGRATION = join(
   repoRoot,
@@ -160,6 +168,10 @@ test('wired suites and content/watch migrations exist on disk', () => {
     existsSync(MANUAL_GRADING_SERVICE_SUITE),
     `wired suite packages/core-backend/${MANUAL_GRADING_SERVICE_FILE} must exist on disk`,
   )
+  assert.ok(
+    existsSync(MANUAL_GRADING_READ_SUITE),
+    `wired suite packages/core-backend/${MANUAL_GRADING_READ_FILE} must exist on disk`,
+  )
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
@@ -181,6 +193,7 @@ test('schema and watch-service gate sources throw when DATABASE_URL is missing (
     ['media-playback-service', PLAYBACK_SUITE],
     ['role-template-migration', ROLE_TEMPLATE_SUITE],
     ['manual-grading-service', MANUAL_GRADING_SERVICE_SUITE],
+    ['manual-grading-read', MANUAL_GRADING_READ_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)
