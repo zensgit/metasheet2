@@ -8564,6 +8564,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/assessment/attempts/{attemptId}/manual-grades": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Append one initial short-answer grade
+         * @description L3 initial manual-grading command. RBAC requires `elearning:grade` or
+         *     `elearning:admin`; non-global graders must also cover the learner in
+         *     their current management scope. One immutable ledger row is appended
+         *     per short-answer question. When every short answer has a grade, the
+         *     server derives the aggregate score, pass result, and final graded
+         *     state in the same transaction. Replaying the same request id, actor,
+         *     and canonical payload returns duplicate=true without another write;
+         *     conflicting reuse fails closed. This endpoint does not perform
+         *     regrading and never returns the learner answer, grader comment, answer
+         *     key, or paper snapshot. JSON limit 16 KiB.
+         */
+        post: operations["submitElearningManualGrade"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/assignments/direct": {
         parameters: {
             query?: never;
@@ -18428,6 +18457,31 @@ export interface components {
             duplicate: boolean;
         };
         ElearningExamSubmitResult: components["schemas"]["ElearningExamGradedSubmitResult"] | components["schemas"]["ElearningExamAwaitingManualSubmitResult"];
+        ElearningManualGradeRequest: {
+            requestId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            /** @description Whole points awarded; the frozen question maximum is enforced by the server. */
+            score: number;
+            /** @description Private grader comment; send null when absent. Empty or whitespace-only text is stored as null and is never returned by this endpoint. */
+            comment: string | null;
+        };
+        ElearningManualGradeResult: {
+            attemptId: components["schemas"]["ElearningUuid"];
+            questionRevisionId: components["schemas"]["ElearningUuid"];
+            score: number;
+            maxScore: number;
+            /** @enum {string} */
+            status: "awaiting_manual" | "graded";
+            gradedQuestions: number;
+            manualQuestions: number;
+            autoScore: number;
+            manualScore: number;
+            /** @description Maximum score available on the complete frozen paper. */
+            totalScore: number;
+            /** @description Null until every short-answer question has an initial grade. */
+            passed: boolean | null;
+            duplicate: boolean;
+        };
         /** @description Policy-released learner review row. Includes only the learner's own selections and a correctness boolean; never answer keys, correct option ids, or explanations. */
         ElearningExamReviewQuestion: {
             position: number;
@@ -20043,6 +20097,48 @@ export interface operations {
             /** @description not_found or assessment flags off */
             404: components["responses"]["ElearningError"];
             /** @description JSON body exceeds 1 MiB */
+            413: components["responses"]["ElearningError"];
+            /** @description internal_error */
+            500: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    submitElearningManualGrade: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attemptId: components["schemas"]["ElearningUuid"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningManualGradeRequest"];
+            };
+        };
+        responses: {
+            /** @description Current initial-grading progress or completed result. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningManualGradeResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            /** @description unauthenticated or missing JWT */
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED, insufficient grade permission, scope_required, or target_out_of_scope */
+            403: components["responses"]["ElearningError"];
+            /** @description not_found or assessment flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description conflict (attempt state, duplicate question, or request-id payload mismatch) */
+            409: components["responses"]["ElearningError"];
+            /** @description payload_too_large */
             413: components["responses"]["ElearningError"];
             /** @description internal_error */
             500: components["responses"]["ElearningError"];

@@ -24,6 +24,8 @@ const LEARNER_FILE = 'tests/integration/elearning-learner-courses.db.test.ts'
 const SCOPE_FILE = 'tests/integration/elearning-scope-access.db.test.ts'
 const PLAYBACK_FILE = 'tests/integration/elearning-media-playback.db.test.ts'
 const ROLE_TEMPLATE_FILE = 'tests/integration/elearning-role-templates.db.test.ts'
+const MANUAL_GRADING_SERVICE_FILE =
+  'tests/integration/elearning-manual-grading-service.db.test.ts'
 const STEP_ID = 'elearning-v01-content-assessment-schema-gate'
 const MEDIA_DB_STEP_ID = 'elearning-v01-media-quota-real-db'
 const VITEST_CFG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
@@ -40,6 +42,11 @@ const LEARNER_SUITE = join(repoRoot, 'packages/core-backend', LEARNER_FILE)
 const SCOPE_SUITE = join(repoRoot, 'packages/core-backend', SCOPE_FILE)
 const PLAYBACK_SUITE = join(repoRoot, 'packages/core-backend', PLAYBACK_FILE)
 const ROLE_TEMPLATE_SUITE = join(repoRoot, 'packages/core-backend', ROLE_TEMPLATE_FILE)
+const MANUAL_GRADING_SERVICE_SUITE = join(
+  repoRoot,
+  'packages/core-backend',
+  MANUAL_GRADING_SERVICE_FILE,
+)
 const GATE_FILES = [
   FILE,
   ATTEMPT_MIGRATION_FILE,
@@ -52,6 +59,7 @@ const GATE_FILES = [
   SCOPE_FILE,
   PLAYBACK_FILE,
   ROLE_TEMPLATE_FILE,
+  MANUAL_GRADING_SERVICE_FILE,
 ]
 const CONTENT_MIGRATION = join(
   repoRoot,
@@ -120,6 +128,7 @@ test('plugin-tests.yml runs schema and watch-service gates as whole-file sibling
   assert.equal(wired.includes(SCOPE_FILE), true)
   assert.equal(wired.includes(PLAYBACK_FILE), true)
   assert.equal(wired.includes(ROLE_TEMPLATE_FILE), true)
+  assert.equal(wired.includes(MANUAL_GRADING_SERVICE_FILE), true)
 
   const run = typeof step.run === 'string' ? step.run : ''
   assert.equal(/\s-t(?:\s|=|$)/.test(run), false, 'schema gate step must not use a -t filter')
@@ -147,6 +156,10 @@ test('wired suites and content/watch migrations exist on disk', () => {
   assert.ok(existsSync(SCOPE_SUITE), `wired suite packages/core-backend/${SCOPE_FILE} must exist on disk`)
   assert.ok(existsSync(PLAYBACK_SUITE), `wired suite packages/core-backend/${PLAYBACK_FILE} must exist on disk`)
   assert.ok(existsSync(ROLE_TEMPLATE_SUITE), `wired suite packages/core-backend/${ROLE_TEMPLATE_FILE} must exist on disk`)
+  assert.ok(
+    existsSync(MANUAL_GRADING_SERVICE_SUITE),
+    `wired suite packages/core-backend/${MANUAL_GRADING_SERVICE_FILE} must exist on disk`,
+  )
   assert.ok(existsSync(CONTENT_MIGRATION), 'content/assessment migration must exist on disk')
   assert.ok(existsSync(PERMISSION_MIGRATION), 'elearning permissions migration must exist on disk')
   assert.ok(existsSync(WATCH_MIGRATION), 'watch-progress migration must exist on disk')
@@ -167,6 +180,7 @@ test('schema and watch-service gate sources throw when DATABASE_URL is missing (
     ['scope-access-service', SCOPE_SUITE],
     ['media-playback-service', PLAYBACK_SUITE],
     ['role-template-migration', ROLE_TEMPLATE_SUITE],
+    ['manual-grading-service', MANUAL_GRADING_SERVICE_SUITE],
   ]) {
     const src = readFileSync(path, 'utf8')
     assert.equal(src.includes('describe.skip'), false, `${label} must not describe.skip`)

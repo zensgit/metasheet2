@@ -24,6 +24,7 @@ import {
   isElearningGlobalAdminRequest,
 } from './elearning-admin-access'
 import { createElearningAssessmentAdminRouter } from './elearning-assessment-admin'
+import { createElearningManualGradingRouter } from './elearning-manual-grading'
 import type { ElearningAdminAccessDb } from '../services/elearning-admin-access'
 import type { ElearningAssessmentCatalogDb } from '../services/elearning-assessment-catalog'
 import {
@@ -76,6 +77,10 @@ import {
 } from '../services/elearning-exam'
 import { getElearningExamReview } from '../services/elearning-exam-review'
 import type { ElearningPaperExamDb } from '../services/elearning-paper-exam'
+import type {
+  submitElearningManualGrade,
+  ElearningManualGradingDb,
+} from '../services/elearning-manual-grading'
 import {
   ElearningLearnerCoursesError,
   listElearningLearnerCourses,
@@ -303,7 +308,8 @@ export interface ElearningPilotRouteDeps {
     ElearningAdminAccessDb &
     ElearningAdminOperationDb &
     ElearningAssessmentCatalogDb &
-    ElearningPaperExamDb
+    ElearningPaperExamDb &
+    ElearningManualGradingDb
   viewerId(req: Request): string | null
   orgId(req: Request): string | null
   /** Production wiring: rbacGuard('elearning','admin'). Injected in tests. */
@@ -312,6 +318,8 @@ export interface ElearningPilotRouteDeps {
   readGuard: RequestHandler
   /** Production wiring: rbacGuardAny(['elearning:write', 'elearning:admin']). */
   writeGuard?: RequestHandler
+  /** Production wiring: rbacGuardAny(['elearning:grade', 'elearning:admin']). */
+  gradeGuard?: RequestHandler
   isGlobalAdmin?(req: Request): boolean
   env?: NodeJS.ProcessEnv
   assignElearningDirect?: typeof assignElearningDirectAuthorized
@@ -360,6 +368,7 @@ export interface ElearningPilotRouteDeps {
   publishElearningPaperExam?: Parameters<
     typeof createElearningAssessmentAdminRouter
   >[0]['publishElearningPaperExam']
+  submitElearningManualGrade?: typeof submitElearningManualGrade
 }
 
 function envOf(deps: ElearningPilotRouteDeps): NodeJS.ProcessEnv {
@@ -491,6 +500,7 @@ export function createElearningPilotRouter(
   const setCourseScope =
     deps.setElearningCourseScope ?? setElearningCourseScopeAuthorized
   const writeGuard = deps.writeGuard ?? deps.adminGuard
+  const gradeGuard = deps.gradeGuard ?? deps.adminGuard
   const isGlobalAdmin = deps.isGlobalAdmin ?? isElearningGlobalAdminRequest
   const router = Router()
   const adminAccessRouter = createElearningAdminAccessRouter({
@@ -520,6 +530,16 @@ export function createElearningPilotRouter(
     publishElearningPaperExam: deps.publishElearningPaperExam,
   })
   if (assessmentAdminRouter) router.use(assessmentAdminRouter)
+  const manualGradingRouter = createElearningManualGradingRouter({
+    db: deps.db,
+    env: deps.env,
+    gradeGuard,
+    viewerId: deps.viewerId,
+    orgId: deps.orgId,
+    isGlobalAdmin,
+    submitElearningManualGrade: deps.submitElearningManualGrade,
+  })
+  if (manualGradingRouter) router.use(manualGradingRouter)
 
   const asyncHandler =
     (fn: (req: Request, res: Response) => Promise<unknown>) =>

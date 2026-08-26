@@ -1016,6 +1016,7 @@ jobs:
             tests/integration/elearning-assessment-catalog.db.test.ts \
             tests/integration/elearning-paper-exam.db.test.ts \
             tests/integration/elearning-manual-grading-schema.db.test.ts \
+            tests/integration/elearning-manual-grading-service.db.test.ts \
             --reporter=verbose
 
       # E-learning V0.1 M1 media quota reservation against real Postgres.

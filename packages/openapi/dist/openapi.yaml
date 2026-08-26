@@ -7236,6 +7236,87 @@ components:
         mapping:
           graded: '#/components/schemas/ElearningExamGradedSubmitResult'
           awaiting_manual: '#/components/schemas/ElearningExamAwaitingManualSubmitResult'
+    ElearningManualGradeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - questionRevisionId
+        - score
+        - comment
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        score:
+          type: integer
+          minimum: 0
+          description: >-
+            Whole points awarded; the frozen question maximum is enforced by the
+            server.
+        comment:
+          type: string
+          nullable: true
+          maxLength: 4000
+          description: >-
+            Private grader comment; send null when absent. Empty or
+            whitespace-only text is stored as null and is never returned by this
+            endpoint.
+    ElearningManualGradeResult:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - questionRevisionId
+        - score
+        - maxScore
+        - status
+        - gradedQuestions
+        - manualQuestions
+        - autoScore
+        - manualScore
+        - totalScore
+        - passed
+        - duplicate
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        score:
+          type: integer
+          minimum: 0
+        maxScore:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          enum:
+            - awaiting_manual
+            - graded
+        gradedQuestions:
+          type: integer
+          minimum: 1
+        manualQuestions:
+          type: integer
+          minimum: 1
+        autoScore:
+          type: number
+          minimum: 0
+        manualScore:
+          type: integer
+          minimum: 0
+        totalScore:
+          type: number
+          minimum: 0
+          description: Maximum score available on the complete frozen paper.
+        passed:
+          type: boolean
+          nullable: true
+          description: Null until every short-answer question has an initial grade.
+        duplicate:
+          type: boolean
     ElearningExamReviewQuestion:
       type: object
       additionalProperties: false
@@ -17188,6 +17269,70 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '413':
           description: JSON body exceeds 1 MiB
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/assessment/attempts/{attemptId}/manual-grades:
+    post:
+      operationId: submitElearningManualGrade
+      summary: Append one initial short-answer grade
+      description: |
+        L3 initial manual-grading command. RBAC requires `elearning:grade` or
+        `elearning:admin`; non-global graders must also cover the learner in
+        their current management scope. One immutable ledger row is appended
+        per short-answer question. When every short answer has a grade, the
+        server derives the aggregate score, pass result, and final graded
+        state in the same transaction. Replaying the same request id, actor,
+        and canonical payload returns duplicate=true without another write;
+        conflicting reuse fails closed. This endpoint does not perform
+        regrading and never returns the learner answer, grader comment, answer
+        key, or paper snapshot. JSON limit 16 KiB.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningManualGradeRequest'
+      responses:
+        '200':
+          description: Current initial-grading progress or completed result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradeResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: >-
+            ORG_CONTEXT_REQUIRED, insufficient grade permission, scope_required,
+            or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: >-
+            conflict (attempt state, duplicate question, or request-id payload
+            mismatch)
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
           $ref: '#/components/responses/ElearningError'
         '500':
           description: internal_error

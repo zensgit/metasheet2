@@ -59,6 +59,12 @@ import {
   type IssueElearningMediaPlaybackInput,
 } from './elearning-media-playback'
 import type { ElearningPaperExamDb } from './elearning-paper-exam'
+import {
+  submitElearningManualGrade,
+  type ElearningManualGradeInput,
+  type ElearningManualGradeResult,
+  type ElearningManualGradingDb,
+} from './elearning-manual-grading'
 import type {
   ElearningWatchDb,
   ElearningWatchState,
@@ -117,12 +123,14 @@ export interface ElearningPilotRuntimeOptions {
     ElearningAdminAccessDb &
     ElearningAdminOperationDb &
     ElearningAssessmentCatalogDb &
-    ElearningPaperExamDb
+    ElearningPaperExamDb &
+    ElearningManualGradingDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
   readGuard?: RequestHandler
   writeGuard?: RequestHandler
+  gradeGuard?: RequestHandler
   viewerId?: (req: Request) => string | null
   orgId?: (req: Request) => string | null
   isGlobalAdmin?: (req: Request) => boolean
@@ -158,6 +166,10 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningExamDb,
     input: GetElearningExamReviewInput,
   ) => Promise<ElearningExamReviewResult>
+  submitElearningManualGrade?: (
+    db: ElearningManualGradingDb,
+    input: ElearningManualGradeInput,
+  ) => Promise<ElearningManualGradeResult>
   publishElearningCourse?: (
     db: ElearningCoursePublishDb,
     input: PublishElearningCourseInput,
@@ -227,6 +239,7 @@ export function createElearningPilotRuntime(
     adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
     readGuard: opts.readGuard ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
     writeGuard: opts.writeGuard ?? rbacGuardAny(['elearning:write', 'elearning:admin']),
+    gradeGuard: opts.gradeGuard ?? rbacGuardAny(['elearning:grade', 'elearning:admin']),
     isGlobalAdmin: opts.isGlobalAdmin ?? isElearningGlobalAdminRequest,
     env,
     assignElearningDirect: opts.assignElearningDirect,
@@ -238,6 +251,8 @@ export function createElearningPilotRuntime(
     submitElearningExam: opts.submitElearningExam ?? submitElearningExam,
     getElearningExamReview:
       opts.getElearningExamReview ?? getElearningExamReview,
+    submitElearningManualGrade:
+      opts.submitElearningManualGrade ?? submitElearningManualGrade,
     publishElearningCourse:
       opts.publishElearningCourse ?? publishElearningCourse,
     listElearningLearnerCourses:

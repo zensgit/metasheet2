@@ -288,6 +288,9 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(runtimeSrc).toMatch(
       /rbacGuardAny\(\s*\[\s*'elearning:read'\s*,\s*'elearning:write'\s*,\s*'elearning:admin'\s*\]\s*\)/,
     )
+    expect(runtimeSrc).toMatch(
+      /rbacGuardAny\(\s*\[\s*'elearning:grade'\s*,\s*'elearning:admin'\s*\]\s*\)/,
+    )
     expect(runtimeSrc).not.toMatch(
       /readGuard:\s*opts\.readGuard\s*\?\?\s*rbacGuard\('elearning',\s*'read'\)/,
     )
@@ -300,6 +303,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(runtimeSrc).toMatch(/startElearningExam/)
     expect(runtimeSrc).toMatch(/submitElearningExam/)
     expect(runtimeSrc).toMatch(/getElearningExamReview/)
+    expect(runtimeSrc).toMatch(/submitElearningManualGrade/)
     expect(runtimeSrc).toMatch(/publishElearningCourse/)
     expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
     expect(runtimeSrc).toMatch(

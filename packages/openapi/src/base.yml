@@ -5991,6 +5991,63 @@ components:
         mapping:
           graded: '#/components/schemas/ElearningExamGradedSubmitResult'
           awaiting_manual: '#/components/schemas/ElearningExamAwaitingManualSubmitResult'
+    ElearningManualGradeRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, questionRevisionId, score, comment]
+      properties:
+        requestId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        score:
+          type: integer
+          minimum: 0
+          description: Whole points awarded; the frozen question maximum is enforced by the server.
+        comment:
+          type: string
+          nullable: true
+          maxLength: 4000
+          description: Private grader comment; send null when absent. Empty or whitespace-only text is stored as null and is never returned by this endpoint.
+    ElearningManualGradeResult:
+      type: object
+      additionalProperties: false
+      required:
+        - attemptId
+        - questionRevisionId
+        - score
+        - maxScore
+        - status
+        - gradedQuestions
+        - manualQuestions
+        - autoScore
+        - manualScore
+        - totalScore
+        - passed
+        - duplicate
+      properties:
+        attemptId:
+          $ref: '#/components/schemas/ElearningUuid'
+        questionRevisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        score: { type: integer, minimum: 0 }
+        maxScore: { type: integer, minimum: 0 }
+        status:
+          type: string
+          enum: [awaiting_manual, graded]
+        gradedQuestions: { type: integer, minimum: 1 }
+        manualQuestions: { type: integer, minimum: 1 }
+        autoScore: { type: number, minimum: 0 }
+        manualScore: { type: integer, minimum: 0 }
+        totalScore:
+          type: number
+          minimum: 0
+          description: Maximum score available on the complete frozen paper.
+        passed:
+          type: boolean
+          nullable: true
+          description: Null until every short-answer question has an initial grade.
+        duplicate: { type: boolean }
     ElearningExamReviewQuestion:
       type: object
       additionalProperties: false

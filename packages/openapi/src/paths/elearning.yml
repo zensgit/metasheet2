@@ -551,6 +551,66 @@ paths:
           description: unavailable
           $ref: '#/components/responses/ElearningError'
 
+  /api/elearning/assessment/attempts/{attemptId}/manual-grades:
+    post:
+      operationId: submitElearningManualGrade
+      summary: Append one initial short-answer grade
+      description: |
+        L3 initial manual-grading command. RBAC requires `elearning:grade` or
+        `elearning:admin`; non-global graders must also cover the learner in
+        their current management scope. One immutable ledger row is appended
+        per short-answer question. When every short answer has a grade, the
+        server derives the aggregate score, pass result, and final graded
+        state in the same transaction. Replaying the same request id, actor,
+        and canonical payload returns duplicate=true without another write;
+        conflicting reuse fails closed. This endpoint does not perform
+        regrading and never returns the learner answer, grader comment, answer
+        key, or paper snapshot. JSON limit 16 KiB.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: path
+          name: attemptId
+          required: true
+          schema:
+            $ref: '#/components/schemas/ElearningUuid'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningManualGradeRequest'
+      responses:
+        '200':
+          description: Current initial-grading progress or completed result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningManualGradeResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          description: unauthenticated or missing JWT
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED, insufficient grade permission, scope_required, or target_out_of_scope
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: not_found or assessment flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: conflict (attempt state, duplicate question, or request-id payload mismatch)
+          $ref: '#/components/responses/ElearningError'
+        '413':
+          description: payload_too_large
+          $ref: '#/components/responses/ElearningError'
+        '500':
+          description: internal_error
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
   /api/elearning/assignments/direct:
     post:
       operationId: assignElearningDirect
