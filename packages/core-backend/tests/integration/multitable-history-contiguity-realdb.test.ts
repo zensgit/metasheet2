@@ -381,8 +381,21 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
       expect(pending).toBe('pending')
       // The phantom uncaptured write lands NOW (after the outer precheck already passed) and commits.
       await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [PH, SHEET, JSON.stringify({ [NAME]: 'phantom' })])
-      await rev(SHEET, PH, 1, 'create', { [NAME]: 'ph1' }, T0)
+      await rev(SHEET, PH, 1, 'create', { [NAME]: 'ph1' }, T2)
       await rev(SHEET, PH, 3, 'update', { [NAME]: 'phantom' }, T2) // hole at v2
+      const phantomSeqs = (await q(
+        `SELECT r.seq::text AS seq, anchor.endpoint_seq::text AS anchor_seq
+           FROM meta_record_revisions r
+           CROSS JOIN meta_record_history_operations anchor
+          WHERE r.sheet_id = $1
+            AND r.record_id = $2
+            AND anchor.sheet_id = $1
+            AND anchor.operation_id = $3::uuid
+          ORDER BY r.seq`,
+        [SHEET, PH, fixtureFor(SHEET).anchorOperationId()],
+      )).rows as Array<{ seq: string; anchor_seq: string }>
+      expect(phantomSeqs).toHaveLength(2)
+      expect(phantomSeqs.every((row) => BigInt(row.seq) > BigInt(row.anchor_seq))).toBe(true)
       await holder.query('COMMIT') // reset acquires the fence → recomputes the live-set hash → sees drift → refuses
       res = await resetP
     } finally {
