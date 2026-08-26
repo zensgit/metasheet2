@@ -202,6 +202,7 @@ jobs:
 
       # Time Machine D2a CI two-point wiring contract: the archive-catalog proof must remain
       # excluded from no-DB collection and named exactly once by the multitable real-DB step.
+      # This pre-install half is dependency-free; the real Vitest sentinel runs after install.
       - name: Time Machine D2a archive-catalog CI wiring contract
         run: node --test scripts/ops/multitable-d2-archive-ci-wiring.test.mjs
 
@@ -591,6 +592,9 @@ jobs:
         with:
           name: install-log-${{ matrix.node-version }}
           path: install.log
+
+      - name: Time Machine D2a archive-catalog fail-not-skip behavior
+        run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
 
       - name: Run attendance calculation-group W1 contract
         run: |

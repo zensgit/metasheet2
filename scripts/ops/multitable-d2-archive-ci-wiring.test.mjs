@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -20,8 +19,21 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const FILE = 'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts'
 const CONFIG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
-const CORE_BACKEND = join(repoRoot, 'packages/core-backend')
-const VITEST = join(repoRoot, 'node_modules/.bin/vitest')
+const INSTALL_STEP_MARKER = '      - name: Install dependencies (with log)\n'
+const BEHAVIOR_STEP_MARKER = '      - name: Time Machine D2a archive-catalog fail-not-skip behavior\n'
+
+function jobBody(workflow, jobName) {
+  const marker = `  ${jobName}:\n`
+  assert.equal(
+    workflow.split(marker).length - 1,
+    1,
+    `plugin-tests.yml must contain exactly one ${jobName} job`,
+  )
+  const start = workflow.indexOf(marker) + marker.length
+  const remainder = workflow.slice(start)
+  const nextJob = remainder.match(/^  [A-Za-z0-9_-]+:\s*$/m)
+  return nextJob ? remainder.slice(0, nextJob.index) : remainder
+}
 
 test('Time Machine D2a archive-catalog proof is exactly two-point wired', () => {
   const config = readFileSync(CONFIG, 'utf8')
@@ -35,6 +47,21 @@ test('Time Machine D2a archive-catalog proof is exactly two-point wired', () => 
   )
 
   const workflow = readFileSync(WORKFLOW, 'utf8')
+  const testJob = jobBody(workflow, 'test')
+  assert.equal(
+    testJob.split(INSTALL_STEP_MARKER).length - 1,
+    1,
+    'the required test job must contain exactly one dependency-install step marker',
+  )
+  assert.equal(
+    testJob.split(BEHAVIOR_STEP_MARKER).length - 1,
+    1,
+    'the required test job must contain exactly one D2a fail-not-skip behavior step',
+  )
+  assert.ok(
+    testJob.indexOf(BEHAVIOR_STEP_MARKER) > testJob.indexOf(INSTALL_STEP_MARKER),
+    'the D2a behavioral fail-not-skip proof must run after dependencies are installed',
+  )
   const step = requireExecutableRealDbStep(workflow, REAL_DB_STEP_IDS.multitable)
   assert.ok(step.env && typeof step.env === 'object' && !Array.isArray(step.env))
   assert.equal(
@@ -48,22 +75,4 @@ test('Time Machine D2a archive-catalog proof is exactly two-point wired', () => 
     1,
     `the parsed ${REAL_DB_STEP_IDS.multitable} step must contain exactly one whole-file Vitest argument ${FILE}`,
   )
-})
-
-test('the armed D2a real-DB spec fails instead of skipping when DATABASE_URL is absent', () => {
-  const env = {
-    ...process.env,
-    METASHEET_REAL_DB_TEST_STEP: '1',
-  }
-  delete env.DATABASE_URL
-
-  const result = spawnSync(VITEST, ['--config', 'vitest.integration.config.ts', 'run', FILE, '--reporter=dot'], {
-    cwd: CORE_BACKEND,
-    env,
-    encoding: 'utf8',
-  })
-  assert.ifError(result.error)
-  assert.equal(result.signal, null)
-  assert.notEqual(result.status, 0, 'the armed real-DB file must fail when DATABASE_URL is absent')
-  assert.match(`${result.stdout}\n${result.stderr}`, /recovery_archive_realdb_harness_missing_database_url/)
 })
