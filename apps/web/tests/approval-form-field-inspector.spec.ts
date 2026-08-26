@@ -456,6 +456,215 @@ describe('ApprovalFormFieldInspector — committed edits only (FB-D7)', () => {
   })
 })
 
+// --- Lock-8 type-specific properties ---------------------------------------
+
+describe('ApprovalFormFieldInspector — Lock-8 type-specific properties', () => {
+  it('renders each section only for its matching type and removes inapplicable explanation controls', async () => {
+    const number = await mountInspector([field(1, { type: 'number' })])
+    expect(
+      number.root.querySelector(
+        '[data-testid="approval-form-field-inspector-number-format"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      number.root.querySelector(
+        '[data-testid="approval-form-field-inspector-date-range"]',
+      ),
+    ).toBeNull()
+
+    const dateRange = await mountInspector([
+      field(1, { type: 'date_range' }),
+    ])
+    expect(
+      dateRange.root.querySelector(
+        '[data-testid="approval-form-field-inspector-date-range"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      dateRange.root.querySelector(
+        '[data-testid="approval-form-field-inspector-explanation"]',
+      ),
+    ).toBeNull()
+
+    const explanation = await mountInspector([
+      field(1, { type: 'explanation' }),
+    ])
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-explanation"]',
+      ),
+    ).not.toBeNull()
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-required"]',
+      ),
+    ).toBeNull()
+    expect(
+      explanation.root.querySelector(
+        '[data-testid="approval-form-field-inspector-placeholder"]',
+      ),
+    ).toBeNull()
+  })
+
+  it('number controls commit on change as three commands and three history entries', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' })])
+    await inspector.changeSelect(
+      'approval-form-field-inspector-number-currency',
+      '¥',
+    )
+    await inspector.toggle('approval-form-field-inspector-number-thousands')
+    await inspector.toggle('approval-form-field-inspector-number-uppercase')
+
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberCurrencySymbol: '¥' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberThousandsSeparator: true },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { numberUppercaseCny: true },
+      },
+    ])
+    expect(inspector.session().draft.fields[0]).toMatchObject({
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    expect(inspector.session().history.undoStack).toHaveLength(3)
+  })
+
+  it('a rejected number edit snaps every immediate control back with zero history', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' })], {
+      executeOverride: () => null,
+    })
+    await inspector.changeSelect(
+      'approval-form-field-inspector-number-currency',
+      '¥',
+    )
+    await inspector.toggle('approval-form-field-inspector-number-thousands')
+    await inspector.toggle('approval-form-field-inspector-number-uppercase')
+
+    expect(
+      inspector.select('approval-form-field-inspector-number-currency').value,
+    ).toBe('')
+    expect(
+      inspector.input('approval-form-field-inspector-number-thousands').checked,
+    ).toBe(false)
+    expect(
+      inspector.input('approval-form-field-inspector-number-uppercase').checked,
+    ).toBe(false)
+    expect(inspector.commands).toHaveLength(3)
+    expect(inspector.session().history.undoStack).toHaveLength(0)
+  })
+
+  it('date-range granularity commits immediately while its three labels settle as one combined patch', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'date_range' }),
+    ])
+    const typeSelect = inspector.select(
+      'approval-form-field-inspector-date-range-type',
+    )
+    expect(typeSelect.value).toBe('')
+    expect(typeSelect.options[0]?.disabled).toBe(true)
+
+    await inspector.changeSelect(
+      'approval-form-field-inspector-date-range-type',
+      'date_minute',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-start-label',
+      '开始时间',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-end-label',
+      '结束时间',
+    )
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-duration-label',
+      '共计',
+    )
+    expect(inspector.commands).toHaveLength(1)
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { dateRangeDateType: 'date_minute' },
+      },
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: {
+          dateRangeStartLabel: '开始时间',
+          dateRangeEndLabel: '结束时间',
+          dateRangeDurationLabel: '共计',
+        },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(2)
+  })
+
+  it('blank required date-range labels block without issuing a command', async () => {
+    const inspector = await mountInspector([
+      field(1, {
+        type: 'date_range',
+        dateRangeDateType: 'date',
+        dateRangeStartLabel: '开始',
+        dateRangeEndLabel: '结束',
+      }),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-date-range-start-label',
+      ' ',
+    )
+    await inspector.blur(
+      'approval-form-field-inspector-date-range-start-label',
+    )
+    expect(inspector.commands).toHaveLength(0)
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+    expect(inspector.vm.isDirty()).toBe(true)
+  })
+
+  it('explanation text preserves newlines, ignores plain Enter, and commits once on blur', async () => {
+    const inspector = await mountInspector([
+      field(1, { type: 'explanation' }),
+    ])
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      '第一行\n第二行',
+    )
+    await inspector.pressEnter(
+      'approval-form-field-inspector-explanation-text',
+    )
+    expect(inspector.commands).toHaveLength(0)
+    await inspector.blur('approval-form-field-inspector-explanation-text')
+    expect(inspector.commands).toEqual([
+      {
+        kind: 'update-properties',
+        localId: 'local_1',
+        patch: { explanationText: '第一行\n第二行' },
+      },
+    ])
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+
+    await inspector.typeText(
+      'approval-form-field-inspector-explanation-text',
+      ' ',
+    )
+    await inspector.blur('approval-form-field-inspector-explanation-text')
+    expect(inspector.commands).toHaveLength(1)
+    expect(inspector.session().history.undoStack).toHaveLength(1)
+    expect(inspector.status()).toBe(INSPECTOR_INVALID_BUFFER_MESSAGE)
+  })
+})
+
 // --- retype through the inspector -------------------------------------------
 
 describe('ApprovalFormFieldInspector — type change is the typed retype command', () => {

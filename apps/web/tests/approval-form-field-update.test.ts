@@ -736,6 +736,114 @@ describe('updateFormFieldProperties - committed inspector edits (FB-D7)', () => 
     ).toMatchObject({ ok: false, reason: 'field_not_found' })
     expect(source.fields[0].label).toBe('字段 1')
   })
+
+  it('writes Lock-8 properties only to their matching field types and preserves field identity', () => {
+    const source = draftWith([
+      field(1, { type: 'number' }),
+      field(2, { type: 'date_range' }),
+      field(3, { type: 'explanation' }),
+    ])
+    const before = JSON.stringify(source)
+
+    const numberResult = updateFormFieldProperties(source, 'local_1', {
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    assertOk(numberResult)
+    const dateResult = updateFormFieldProperties(
+      numberResult.draft,
+      'local_2',
+      {
+        dateRangeDateType: 'date_minute',
+        dateRangeStartLabel: '开始时间',
+        dateRangeEndLabel: '结束时间',
+        dateRangeDurationLabel: '共计',
+      },
+    )
+    assertOk(dateResult)
+    const explanationResult = updateFormFieldProperties(
+      dateResult.draft,
+      'local_3',
+      { explanationText: '第一行\n第二行' },
+    )
+    assertOk(explanationResult)
+
+    expect(explanationResult.draft.fields[0]).toMatchObject({
+      id: 'field_1',
+      localId: 'local_1',
+      type: 'number',
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+      numberUppercaseCny: true,
+    })
+    expect(explanationResult.draft.fields[1]).toMatchObject({
+      id: 'field_2',
+      localId: 'local_2',
+      type: 'date_range',
+      dateRangeDateType: 'date_minute',
+      dateRangeStartLabel: '开始时间',
+      dateRangeEndLabel: '结束时间',
+      dateRangeDurationLabel: '共计',
+    })
+    expect(explanationResult.draft.fields[2]).toMatchObject({
+      id: 'field_3',
+      localId: 'local_3',
+      type: 'explanation',
+      explanationText: '第一行\n第二行',
+    })
+    expect(JSON.stringify(source)).toBe(before)
+  })
+
+  it('rejects every type-specific property on the wrong current type, including mixed patches, with zero mutation', () => {
+    const source = draftWith([field(1)])
+    const before = JSON.stringify(source)
+    const patches: Array<
+      Parameters<typeof updateFormFieldProperties>[2]
+    > = [
+      { numberCurrencySymbol: '¥' },
+      { numberThousandsSeparator: true },
+      { numberUppercaseCny: true },
+      { dateRangeDateType: 'date' },
+      { dateRangeStartLabel: '开始' },
+      { dateRangeEndLabel: '结束' },
+      { dateRangeDurationLabel: '时长' },
+      { explanationText: '说明' },
+    ]
+    for (const patch of patches) {
+      expect(
+        updateFormFieldProperties(source, 'local_1', patch),
+      ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+      expect(JSON.stringify(source)).toBe(before)
+    }
+
+    const numberSource = draftWith([field(1, { type: 'number' })])
+    const numberBefore = JSON.stringify(numberSource)
+    expect(
+      updateFormFieldProperties(numberSource, 'local_1', {
+        numberCurrencySymbol: '¥',
+        explanationText: '不得部分写入',
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(numberSource)).toBe(numberBefore)
+  })
+
+  it('rejects an invalid date-range granularity while preserving the explicit empty draft state', () => {
+    const source = draftWith([field(1, { type: 'date_range' })])
+    const before = JSON.stringify(source)
+    expect(
+      updateFormFieldProperties(source, 'local_1', {
+        dateRangeDateType: 'week' as never,
+      }),
+    ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+    expect(JSON.stringify(source)).toBe(before)
+
+    const unset = updateFormFieldProperties(source, 'local_1', {
+      dateRangeDateType: '',
+    })
+    assertOk(unset)
+    expect(unset.draft.fields[0].dateRangeDateType).toBe('')
+  })
 })
 
 // --- detail column commands --------------------------------------------------
