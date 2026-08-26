@@ -1,13 +1,24 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { Kysely, PostgresDialect } from 'kysely'
+import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
+import {
+  RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
+  RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
+  RECOVERY_ARCHIVE_V1_SECTION_NAMES,
+} from '../../src/multitable/recovery-archive-contract'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
+
+test('sentinel: the D2a real-DB allowlist step must provide DATABASE_URL', () => {
+  if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
+    throw new Error('recovery_archive_realdb_harness_missing_database_url')
+  }
+})
 
 const RUN = randomUUID().replaceAll('-', '').slice(0, 16)
 const PREFIX = `tm_d2a_${RUN}`
@@ -52,6 +63,7 @@ const FUNCTIONS = [
   'meta_recovery_archives_guard_row',
   'meta_recovery_archive_coverage_guard_row',
   'meta_recovery_archive_attachment_ref_guard_row',
+  'meta_recovery_archive_attachment_finalize_guard_row',
 ] as const
 
 const INDEXES = [
@@ -61,30 +73,8 @@ const INDEXES = [
   'idx_meta_recovery_archives_sheet_state',
 ] as const
 
-const SOURCE_KINDS = [
-  'record_revision',
-  'marker',
-  'section_revision',
-  'config_revision',
-  'field_tombstone',
-  'link_tombstone',
-  'checkpoint_baseline',
-  'sealed_operation_endpoint',
-  'snapshot_membership',
-  'aggregate_membership',
-] as const
-
-const BOUND_SECTIONS = [
-  'schema',
-  'records',
-  'links',
-  'field_value_tombstones',
-  'link_tombstones',
-  'auto_number',
-  'attachments_index',
-  'permission_evidence',
-  'views_config',
-] as const
+const SOURCE_KINDS = RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS
+const BOUND_SECTIONS = RECOVERY_ARCHIVE_V1_SECTION_NAMES.filter((section) => section !== 'coverage_index')
 
 type ArchiveInput = {
   generationId: string
@@ -246,15 +236,14 @@ async function insertAttachmentRef(
     referenceState: string
     availability: string
     contentSha256: string | null
-    sourceMetadata: Record<string, unknown>
   }> = {},
 ): Promise<string> {
   const attachmentId = overrides.attachmentId ?? `${PREFIX}_attachment_${randomUUID()}`
   await q(
     `INSERT INTO meta_recovery_archive_attachment_refs (
        generation_id, attachment_id, reference_class, reference_state,
-       availability, content_sha256, source_metadata
-     ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb)`,
+       availability, content_sha256
+     ) VALUES ($1::uuid, $2, $3, $4, $5, $6)`,
     [
       generationId,
       attachmentId,
@@ -262,7 +251,6 @@ async function insertAttachmentRef(
       overrides.referenceState ?? 'building',
       overrides.availability ?? 'available',
       overrides.contentSha256 === undefined ? ATTACHMENT_HASH : overrides.contentSha256,
-      JSON.stringify(overrides.sourceMetadata ?? { immutableVersion: `${PREFIX}_opaque_version` }),
     ],
   )
   return attachmentId
@@ -556,6 +544,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         SYSTEM_ANCHOR_SEQ,
       ],
     )
+  })
+
+  test('the exact real-DB allowlist marker and database are active', () => {
+    expect(process.env.METASHEET_REAL_DB_TEST_STEP).toBe('1')
+    expect(process.env.DATABASE_URL).toBeTruthy()
   })
 
   afterEach(async () => {
@@ -1191,7 +1184,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     })
 
     const stored = await q(
-      `SELECT reference_class, reference_state, availability, content_sha256, source_metadata
+      `SELECT reference_class, reference_state, availability, content_sha256
          FROM meta_recovery_archive_attachment_refs
         WHERE generation_id=$1::uuid AND attachment_id=$2`,
       [archive.generationId, attachmentId],
@@ -1202,24 +1195,23 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         reference_state: 'building',
         availability: 'drifted',
         content_sha256: ATTACHMENT_HASH,
-        source_metadata: { immutableVersion: `${PREFIX}_opaque_version` },
       },
     ])
 
     await q(
       `UPDATE meta_recovery_archive_attachment_refs
-          SET availability='available', source_metadata=$3::jsonb
+          SET availability='available'
         WHERE generation_id=$1::uuid AND attachment_id=$2
           AND reference_class='source' AND reference_state='building'`,
-      [archive.generationId, attachmentId, JSON.stringify({ checked: true })],
+      [archive.generationId, attachmentId],
     )
     const mutableSource = await q(
-      `SELECT availability, source_metadata
+      `SELECT availability
          FROM meta_recovery_archive_attachment_refs
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
       [archive.generationId, attachmentId],
     )
-    expect(mutableSource.rows).toEqual([{ availability: 'available', source_metadata: { checked: true } }])
+    expect(mutableSource.rows).toEqual([{ availability: 'available' }])
 
     const crossStateMutation = await errorOf(
       q(
@@ -1236,40 +1228,106 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(duplicate.code).toBe('23505')
 
-    const archiveObjectTooEarly = await errorOf(
+    const archiveObjectWithoutMatchingSource = await errorOf(
       insertAttachmentRef(archive.generationId, {
-        attachmentId,
+        attachmentId: `${attachmentId}_unbound`,
         referenceClass: 'archive_object',
         referenceState: 'verified',
       }),
     )
-    expect(archiveObjectTooEarly.message).toBe('recovery_archive_attachment_posture_invalid')
+    expect(archiveObjectWithoutMatchingSource.message).toBe('recovery_archive_attachment_posture_invalid')
+
+    const releaseBeforeArchiveObject = await errorOf(
+      q(
+        `DELETE FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2
+            AND reference_class='source' AND reference_state='building'`,
+        [archive.generationId, attachmentId],
+      ),
+    )
+    expect(releaseBeforeArchiveObject.message).toBe('recovery_archive_attachment_posture_invalid')
 
     const finalizeWithSourcePin = await errorOf(finalizeArchive(archive.generationId))
     expect(finalizeWithSourcePin.message).toBe('recovery_archive_attachment_posture_invalid')
+  })
 
-    await q(
-      `DELETE FROM meta_recovery_archive_attachment_refs
-        WHERE generation_id=$1::uuid AND attachment_id=$2
-          AND reference_class='source' AND reference_state='building'`,
-      [archive.generationId, attachmentId],
-    )
-    await finalizeArchive(archive.generationId)
+  test('attachment finalize hands off source protection atomically before parent verification', async () => {
+    const archive = await insertArchive()
+    const attachmentId = await insertAttachmentRef(archive.generationId)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
+           generation_id, attachment_id, reference_class, reference_state,
+           availability, content_sha256
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
+        [archive.generationId, attachmentId, ATTACHMENT_HASH],
+      )
+      await client.query(
+        `DELETE FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2
+            AND reference_class='source' AND reference_state='building'`,
+        [archive.generationId, attachmentId],
+      )
+      await client.query(
+        `UPDATE meta_recovery_archives
+            SET state='verified', build_status='finalized', coverage_status='complete',
+                root_hash=$2, coverage_section_hash=$3, coverage_row_count=0,
+                manifest_mac=$4::bytea
+          WHERE generation_id=$1::uuid`,
+        [archive.generationId, ROOT_HASH, COVERAGE_HASH, Buffer.from('d2a-manifest-mac')],
+      )
 
-    const sourceTooLate = await errorOf(
-      insertAttachmentRef(archive.generationId, { attachmentId: `${attachmentId}_late` }),
-    )
-    expect(sourceTooLate.message).toBe('recovery_archive_attachment_posture_invalid')
+      const beforeCommit = await q(
+        `SELECT archive.state,
+                count(*) FILTER (WHERE attachment_ref.reference_class='source')::int AS source_refs,
+                count(*) FILTER (WHERE attachment_ref.reference_class='archive_object')::int AS archive_refs
+           FROM meta_recovery_archives archive
+           LEFT JOIN meta_recovery_archive_attachment_refs attachment_ref
+             ON attachment_ref.generation_id=archive.generation_id
+          WHERE archive.generation_id=$1::uuid
+          GROUP BY archive.state`,
+        [archive.generationId],
+      )
+      expect(beforeCommit.rows).toEqual([{ state: 'building', source_refs: 1, archive_refs: 0 }])
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
 
-    await insertAttachmentRef(archive.generationId, {
-      attachmentId,
-      referenceClass: 'archive_object',
-      referenceState: 'verified',
-    })
-    await q(
-      `UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`,
+    const afterCommit = await q(
+      `SELECT archive.state,
+              count(*) FILTER (WHERE attachment_ref.reference_class='source')::int AS source_refs,
+              count(*) FILTER (WHERE attachment_ref.reference_class='archive_object')::int AS archive_refs
+         FROM meta_recovery_archives archive
+         LEFT JOIN meta_recovery_archive_attachment_refs attachment_ref
+           ON attachment_ref.generation_id=archive.generation_id
+        WHERE archive.generation_id=$1::uuid
+        GROUP BY archive.state`,
       [archive.generationId],
     )
+    expect(afterCommit.rows).toEqual([{ state: 'verified', source_refs: 0, archive_refs: 1 }])
+
+    const sourceTooLate = await errorOf(
+      insertAttachmentRef(archive.generationId, {
+        attachmentId: `${attachmentId}_late`,
+      }),
+    )
+    expect(sourceTooLate.message).toBe('recovery_archive_attachment_posture_invalid')
+    const archiveObjectTooLate = await errorOf(
+      insertAttachmentRef(archive.generationId, {
+        attachmentId: `${attachmentId}_late`,
+        referenceClass: 'archive_object',
+        referenceState: 'verified',
+      }),
+    )
+    expect(archiveObjectTooLate.message).toBe('recovery_archive_attachment_posture_invalid')
+
+    await q(`UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`, [archive.generationId])
     const retained = await q(
       `SELECT count(*)::int AS count
          FROM meta_recovery_archive_attachment_refs
@@ -1278,6 +1336,155 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [archive.generationId],
     )
     expect(retained.rows).toEqual([{ count: 1 }])
+  })
+
+  test('archive-ref mint rechecks source availability and exact hash before the deferred finalizer', async () => {
+    const invalidSources = [
+      {
+        availability: 'missing',
+        sourceHash: null,
+        archiveHash: ATTACHMENT_HASH,
+      },
+      {
+        availability: 'mutable',
+        sourceHash: ATTACHMENT_HASH,
+        archiveHash: ATTACHMENT_HASH,
+      },
+      {
+        availability: 'drifted',
+        sourceHash: ATTACHMENT_HASH,
+        archiveHash: ATTACHMENT_HASH,
+      },
+      {
+        availability: 'available',
+        sourceHash: ATTACHMENT_HASH,
+        archiveHash: '6'.repeat(64),
+      },
+    ] as const
+
+    for (const invalidSource of invalidSources) {
+      const archive = await insertArchive()
+      const attachmentId = await insertAttachmentRef(archive.generationId, {
+        availability: invalidSource.availability,
+        contentSha256: invalidSource.sourceHash,
+      })
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const refusal = await errorOf(
+          (async () => {
+            await client.query(
+              `INSERT INTO meta_recovery_archive_attachment_refs (
+                 generation_id, attachment_id, reference_class, reference_state,
+                 availability, content_sha256
+               ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
+              [archive.generationId, attachmentId, invalidSource.archiveHash],
+            )
+            throw new Error('recovery_archive_attachment_source_validation_missing')
+          })(),
+        )
+        expect(refusal.message).toBe('recovery_archive_attachment_posture_invalid')
+      } finally {
+        await client.query('ROLLBACK').catch(() => {})
+        client.release()
+      }
+    }
+  })
+
+  test('source release rechecks availability and hash after an archive ref is minted', async () => {
+    for (const mutation of [
+      { column: 'availability', value: 'drifted' },
+      { column: 'content_sha256', value: '6'.repeat(64) },
+    ] as const) {
+      const archive = await insertArchive()
+      const attachmentId = await insertAttachmentRef(archive.generationId)
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        await client.query(
+          `INSERT INTO meta_recovery_archive_attachment_refs (
+             generation_id, attachment_id, reference_class, reference_state,
+             availability, content_sha256
+           ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
+          [archive.generationId, attachmentId, ATTACHMENT_HASH],
+        )
+        await client.query(
+          `UPDATE meta_recovery_archive_attachment_refs
+              SET ${mutation.column}=$3
+            WHERE generation_id=$1::uuid AND attachment_id=$2
+              AND reference_class='source' AND reference_state='building'`,
+          [archive.generationId, attachmentId, mutation.value],
+        )
+        const refusal = await errorOf(
+          client.query(
+            `DELETE FROM meta_recovery_archive_attachment_refs
+              WHERE generation_id=$1::uuid AND attachment_id=$2
+                AND reference_class='source' AND reference_state='building'`,
+            [archive.generationId, attachmentId],
+          ),
+        )
+        expect(refusal.message).toBe('recovery_archive_attachment_posture_invalid')
+      } finally {
+        await client.query('ROLLBACK').catch(() => {})
+        client.release()
+      }
+    }
+  })
+
+  test('archive-object protection cannot commit separately from parent finalization', async () => {
+    const archive = await insertArchive()
+    const attachmentId = await insertAttachmentRef(archive.generationId)
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
+           generation_id, attachment_id, reference_class, reference_state,
+           availability, content_sha256
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
+        [archive.generationId, attachmentId, ATTACHMENT_HASH],
+      )
+      const refusal = await errorOf(client.query('COMMIT'))
+      expect(refusal.message).toBe('recovery_archive_attachment_finalize_not_atomic')
+      await client.query('ROLLBACK').catch(() => {})
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      client.release()
+    }
+
+    const posture = await q(
+      `SELECT archive.state,
+              count(*) FILTER (WHERE attachment_ref.reference_class='source')::int AS source_refs,
+              count(*) FILTER (WHERE attachment_ref.reference_class='archive_object')::int AS archive_refs
+         FROM meta_recovery_archives archive
+         LEFT JOIN meta_recovery_archive_attachment_refs attachment_ref
+           ON attachment_ref.generation_id=archive.generation_id
+        WHERE archive.generation_id=$1::uuid
+        GROUP BY archive.state`,
+      [archive.generationId],
+    )
+    expect(posture.rows).toEqual([{ state: 'building', source_refs: 1, archive_refs: 0 }])
+  })
+
+  test('abandoned source pins remain fail-closed until owner-fence cleanup lands', async () => {
+    const archive = await insertArchive()
+    const attachmentId = await insertAttachmentRef(archive.generationId)
+    await q(
+      `UPDATE meta_recovery_archives SET build_status='abandoned'
+        WHERE generation_id=$1::uuid`,
+      [archive.generationId],
+    )
+    const refusal = await errorOf(
+      q(
+        `DELETE FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2
+            AND reference_class='source' AND reference_state='building'`,
+        [archive.generationId, attachmentId],
+      ),
+    )
+    expect(refusal.message).toBe('recovery_archive_attachment_posture_invalid')
   })
 
   test('attachment enums, verified shape, immutable archive refs, and no URI column are enforced', async () => {
@@ -1326,7 +1533,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(invalidAvailability.message).toContain('chk_meta_recovery_archive_attachment_availability')
 
-    for (const availability of ['available', 'missing', 'mutable', 'drifted']) {
+    for (const availability of RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY) {
       await insertAttachmentRef(building.generationId, {
         attachmentId: `${PREFIX}_availability_${availability}`,
         availability,
@@ -1347,22 +1554,48 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     ])
 
     const verified = await insertArchive()
-    await finalizeArchive(verified.generationId)
-    const missingVerifiedHash = await errorOf(
+    const attachmentId = await insertAttachmentRef(verified.generationId)
+    const missingArchiveHash = await errorOf(
       insertAttachmentRef(verified.generationId, {
+        attachmentId,
         referenceClass: 'archive_object',
         referenceState: 'verified',
         contentSha256: null,
       }),
     )
-    expect(missingVerifiedHash.message).toContain(
-      'chk_meta_recovery_archive_attachment_verified_shape',
-    )
+    expect(missingArchiveHash.message).toBe('recovery_archive_attachment_posture_invalid')
 
-    const attachmentId = await insertAttachmentRef(verified.generationId, {
-      referenceClass: 'archive_object',
-      referenceState: 'verified',
-    })
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
+           generation_id, attachment_id, reference_class, reference_state,
+           availability, content_sha256
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
+        [verified.generationId, attachmentId, ATTACHMENT_HASH],
+      )
+      await client.query(
+        `DELETE FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2
+            AND reference_class='source' AND reference_state='building'`,
+        [verified.generationId, attachmentId],
+      )
+      await client.query(
+        `UPDATE meta_recovery_archives
+            SET state='verified', build_status='finalized', coverage_status='complete',
+                root_hash=$2, coverage_section_hash=$3, coverage_row_count=0,
+                manifest_mac=$4::bytea
+          WHERE generation_id=$1::uuid`,
+        [verified.generationId, ROOT_HASH, COVERAGE_HASH, Buffer.from('d2a-manifest-mac')],
+      )
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
     const update = await errorOf(
       q(
         `UPDATE meta_recovery_archive_attachment_refs SET availability='missing'
@@ -1383,6 +1616,15 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(remove.message).toBe('recovery_archive_attachment_ref_immutable')
 
+    const postFinalizeInsert = await errorOf(
+      insertAttachmentRef(verified.generationId, {
+        attachmentId: `${attachmentId}_late`,
+        referenceClass: 'archive_object',
+        referenceState: 'verified',
+      }),
+    )
+    expect(postFinalizeInsert.message).toBe('recovery_archive_attachment_posture_invalid')
+
     const columns = await q(
       `SELECT column_name
          FROM information_schema.columns
@@ -1391,6 +1633,15 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           AND column_name ILIKE '%uri%'`,
     )
     expect(columns.rows).toEqual([])
+
+    const openMetadataColumns = await q(
+      `SELECT column_name
+         FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='meta_recovery_archive_attachment_refs'
+          AND column_name='source_metadata'`,
+    )
+    expect(openMetadataColumns.rows).toEqual([])
   })
 
   test('owned indexes cover sheet/state, anchor, source, and attachment lookups without CASCADE FKs', async () => {
@@ -1455,5 +1706,36 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         schemaIsUp = true
       }
     }
+  })
+
+  test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await archiveCatalogMigration.down(trx)
+        await sql`
+          ALTER TABLE public.meta_sheets
+          RENAME COLUMN system_kind TO system_kind_d2a_drift
+        `.execute(trx)
+        await archiveCatalogMigration.up(trx)
+        throw new Error('recovery_archive_source_schema_guard_missing')
+      }),
+    )
+
+    expect(refusal.message).toBe('recovery_archive_source_schema_mismatch')
+    expect(await catalogFingerprint()).toBe(initialFingerprint)
+  })
+
+  test('up fails loud on an owned-name collision and rolls the attempted down back atomically', async () => {
+    const refusal = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await archiveCatalogMigration.down(trx)
+        await sql`CREATE TABLE public.meta_recovery_archives (drifted text)`.execute(trx)
+        await archiveCatalogMigration.up(trx)
+        throw new Error('recovery_archive_owned_object_guard_missing')
+      }),
+    )
+
+    expect(refusal.message).toBe('recovery_archive_catalog_object_conflict')
+    expect(await catalogFingerprint()).toBe(initialFingerprint)
   })
 })

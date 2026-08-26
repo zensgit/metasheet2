@@ -81,7 +81,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND procedure_row.proname IN (
              'meta_recovery_archives_guard_row',
              'meta_recovery_archive_coverage_guard_row',
-             'meta_recovery_archive_attachment_ref_guard_row'
+             'meta_recovery_archive_attachment_ref_guard_row',
+             'meta_recovery_archive_attachment_finalize_guard_row'
            )
       );
 
@@ -95,7 +96,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND trigger_row.tgname IN (
              'trg_meta_recovery_archives_guard_row',
              'trg_meta_recovery_archive_coverage_guard_row',
-             'trg_meta_recovery_archive_attachment_ref_guard_row'
+             'trg_meta_recovery_archive_attachment_ref_guard_row',
+             'trg_meta_recovery_archive_attachment_finalize_guard_row'
            )
       );
 
@@ -248,7 +250,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       reference_state text NOT NULL,
       availability text NOT NULL,
       content_sha256 text,
-      source_metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
       created_at timestamptz NOT NULL DEFAULT now(),
       updated_at timestamptz NOT NULL DEFAULT now(),
       CONSTRAINT pk_meta_recovery_archive_attachment_refs
@@ -270,8 +271,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         CHECK (length(btrim(attachment_id)) > 0),
       CONSTRAINT chk_meta_recovery_archive_attachment_content_sha256
         CHECK (content_sha256 IS NULL OR content_sha256 ~ '^[0-9a-f]{64}$'),
-      CONSTRAINT chk_meta_recovery_archive_attachment_source_metadata
-        CHECK (jsonb_typeof(source_metadata) = 'object'),
       CONSTRAINT chk_meta_recovery_archive_attachment_verified_shape CHECK (
         reference_class <> 'archive_object' OR
         (availability = 'available' AND content_sha256 IS NOT NULL)
@@ -583,6 +582,37 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             ERRCODE = '55000',
             MESSAGE = 'recovery_archive_attachment_ref_immutable';
         END IF;
+
+        SELECT archive.state, archive.build_status, archive.coverage_status
+          INTO parent_state, parent_build_status, parent_coverage_status
+          FROM public.meta_recovery_archives archive
+         WHERE archive.generation_id = OLD.generation_id
+         FOR UPDATE;
+
+        IF NOT FOUND OR NOT (
+          OLD.reference_class = 'source' AND
+          OLD.reference_state = 'building' AND
+          parent_state = 'building' AND
+          parent_build_status = 'active' AND
+          parent_coverage_status = 'incomplete' AND (
+            EXISTS (
+              SELECT 1
+                FROM public.meta_recovery_archive_attachment_refs archive_ref
+               WHERE archive_ref.generation_id = OLD.generation_id
+                 AND archive_ref.attachment_id = OLD.attachment_id
+                 AND archive_ref.reference_class = 'archive_object'
+                 AND archive_ref.reference_state = 'verified'
+                 AND OLD.availability = 'available'
+                 AND OLD.content_sha256 IS NOT NULL
+                 AND archive_ref.content_sha256 = OLD.content_sha256
+            )
+          )
+        ) THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_attachment_posture_invalid';
+        END IF;
+
         RETURN OLD;
       END IF;
 
@@ -618,14 +648,51 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         ) OR (
           NEW.reference_class = 'archive_object' AND
           NEW.reference_state = 'verified' AND
-          parent_state IN ('verified', 'expired') AND
-          parent_build_status = 'finalized' AND
-          parent_coverage_status = 'complete'
+          parent_state = 'building' AND
+          parent_build_status = 'active' AND
+          parent_coverage_status = 'incomplete' AND
+          EXISTS (
+            SELECT 1
+              FROM public.meta_recovery_archive_attachment_refs source_ref
+             WHERE source_ref.generation_id = NEW.generation_id
+               AND source_ref.attachment_id = NEW.attachment_id
+               AND source_ref.reference_class = 'source'
+               AND source_ref.reference_state = 'building'
+               AND source_ref.availability = 'available'
+               AND source_ref.content_sha256 IS NOT NULL
+               AND source_ref.content_sha256 = NEW.content_sha256
+          )
         )
       ) THEN
         RAISE EXCEPTION USING
           ERRCODE = '55000',
           MESSAGE = 'recovery_archive_attachment_posture_invalid';
+      END IF;
+
+      RETURN NEW;
+    END $$
+  `.execute(db)
+
+  await sql`
+    CREATE FUNCTION public.meta_recovery_archive_attachment_finalize_guard_row()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF NEW.reference_class = 'archive_object' AND NEW.reference_state = 'verified' THEN
+        PERFORM 1
+          FROM public.meta_recovery_archives archive
+         WHERE archive.generation_id = NEW.generation_id
+           AND archive.state IN ('verified', 'expired')
+           AND archive.build_status = 'finalized'
+           AND archive.coverage_status = 'complete';
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_attachment_finalize_not_atomic';
+        END IF;
       END IF;
 
       RETURN NEW;
@@ -646,6 +713,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE TRIGGER trg_meta_recovery_archive_attachment_ref_guard_row
     BEFORE INSERT OR UPDATE OR DELETE ON public.meta_recovery_archive_attachment_refs
     FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_attachment_ref_guard_row()
+  `.execute(db)
+  await sql`
+    CREATE CONSTRAINT TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row
+    AFTER INSERT OR UPDATE ON public.meta_recovery_archive_attachment_refs
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_attachment_finalize_guard_row()
   `.execute(db)
 }
 
@@ -685,6 +758,8 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     DO $$
     BEGIN
       IF pg_catalog.to_regclass('public.meta_recovery_archive_attachment_refs') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS trg_meta_recovery_archive_attachment_finalize_guard_row
+          ON public.meta_recovery_archive_attachment_refs;
         DROP TRIGGER IF EXISTS trg_meta_recovery_archive_attachment_ref_guard_row
           ON public.meta_recovery_archive_attachment_refs;
       END IF;
@@ -709,6 +784,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP TABLE IF EXISTS public.meta_recovery_archives`.execute(db)
 
   await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archive_attachment_ref_guard_row()`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archive_attachment_finalize_guard_row()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archive_coverage_guard_row()`.execute(db)
   await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_guard_row()`.execute(db)
 }
