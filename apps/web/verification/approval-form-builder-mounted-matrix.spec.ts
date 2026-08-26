@@ -6,18 +6,67 @@
 // is NOT superseded by this file — both run in the same approval-browser-verify.yml lane.
 //
 // No backend is reachable. `/approval-templates/new` needs none (synchronous empty-draft branch).
-// The edit-mode rows (B11) use Playwright's `page.route()` to intercept `getTemplate` at the network
-// layer — a real request/response cycle, not a framework mock.
-import { test, expect, type Page } from '@playwright/test'
+// The edit-mode fixture rows pass `networkTemplate=on` and use Playwright's `page.route()` to
+// intercept `getTemplate` at the network layer — a real request/response cycle, not the DEV API
+// mock. The explicit query is load-bearing: without it, an attachment-bearing default mock could
+// make the two read-only tests pass without consuming their declared fixtures.
+import { test, expect, type Page, type Request, type Response } from '@playwright/test'
 import { mkdirSync } from 'node:fs'
 
 const OUT = 'verification-output'
 
-async function mountFields(page: Page, opts: { canvasV2?: boolean; route?: 'new' | 'edit' } = {}): Promise<void> {
+async function routeNetworkTemplateDependencies(page: Page): Promise<void> {
+  await page.route('**/api/plugins', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ plugins: [] }),
+  }))
+  await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+  }))
+  await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+  }))
+}
+
+async function mountFields(
+  page: Page,
+  opts: { canvasV2?: boolean; route?: 'new' | 'edit'; networkTemplate?: boolean } = {},
+): Promise<void> {
   const canvasV2 = opts.canvasV2 ?? true
   const route = opts.route ?? 'new'
-  await page.goto(`/verification/approval-form-builder-mounted-harness.html?canvasV2=${canvasV2 ? 'on' : 'off'}&route=${route}`)
+  const useNetworkTemplate = opts.networkTemplate === true
+  const networkTemplate = useNetworkTemplate ? '&networkTemplate=on' : ''
+  const failedApiRequests: string[] = []
+  const nonOkApiResponses: string[] = []
+  const recordFailedApiRequest = (request: Request) => {
+    const pathname = new URL(request.url()).pathname
+    if (pathname.startsWith('/api/')) failedApiRequests.push(pathname)
+  }
+  const recordNonOkApiResponse = (response: Response) => {
+    const pathname = new URL(response.url()).pathname
+    if (pathname.startsWith('/api/') && !response.ok()) {
+      nonOkApiResponses.push(`${pathname}:${response.status()}`)
+    }
+  }
+  if (useNetworkTemplate) {
+    await routeNetworkTemplateDependencies(page)
+    page.on('requestfailed', recordFailedApiRequest)
+    page.on('response', recordNonOkApiResponse)
+  }
+  await page.goto(`/verification/approval-form-builder-mounted-harness.html?canvasV2=${canvasV2 ? 'on' : 'off'}&route=${route}${networkTemplate}`)
   await page.waitForFunction(() => (window as unknown as { __AFB_MOUNT_READY__?: boolean }).__AFB_MOUNT_READY__ === true)
+  if (useNetworkTemplate) {
+    await page.waitForLoadState('networkidle')
+    page.off('requestfailed', recordFailedApiRequest)
+    page.off('response', recordNonOkApiResponse)
+    expect(failedApiRequests, 'network-backed template mount must not tolerate failed API dependencies').toEqual([])
+    expect(nonOkApiResponses, 'network-backed template mount must not tolerate non-2xx API dependencies').toEqual([])
+  }
   await page.click('[data-testid="approval-template-section-fields"]')
 }
 
@@ -285,7 +334,8 @@ test('B8b — read-only: no drag/move mutation; no slots, handles, or move butto
       }),
     }),
   )
-  await mountFields(page, { route: 'edit' })
+  await mountFields(page, { route: 'edit', networkTemplate: true })
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue('只读校验模板')
   await expect(page.locator('[data-testid="approval-template-unsupported-alert"]')).toBeVisible()
   await expect(page.locator('[data-testid="approval-form-builder-slot-start"]')).toHaveCount(0)
   await expect(page.locator('[data-testid^="approval-form-builder-handle-"]')).toHaveCount(0)
@@ -375,12 +425,14 @@ test('B11 — legacy compatibility: an unsupported field type keeps the WHOLE te
     }),
   )
   // Flag ON: whole-template lock, save disabled.
-  await mountFields(page, { canvasV2: true, route: 'edit' })
+  await mountFields(page, { canvasV2: true, route: 'edit', networkTemplate: true })
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue('复杂模板')
   await expect(page.locator('[data-testid="approval-template-unsupported-alert"]')).toBeVisible()
   await expect(page.locator('[data-testid="approval-template-save-button"]')).toBeDisabled()
 
   // Flag OFF (SAME payload): same lock, same disabled state — behavior is flag-independent.
-  await mountFields(page, { canvasV2: false, route: 'edit' })
+  await mountFields(page, { canvasV2: false, route: 'edit', networkTemplate: true })
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue('复杂模板')
   await expect(page.locator('[data-testid="approval-template-unsupported-alert"]')).toBeVisible()
   await expect(page.locator('[data-testid="approval-template-save-button"]')).toBeDisabled()
   await page.screenshot({ path: `${OUT}/afb-mounted-b11.png` })
