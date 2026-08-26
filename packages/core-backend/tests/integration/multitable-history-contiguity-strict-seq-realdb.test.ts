@@ -354,6 +354,34 @@ describeIfDatabase('W0-1 v3.7 STRICT history contiguity — seq-ordered, ALL gen
     })).toEqual({ ok: true })
   })
 
+  test('TRUST-FLOOR CURRENT DRIFT: post-anchor latest captured payload must still equal current live state', async () => {
+    const R = `rec_hcss_floor_current_drift_${TS}`
+    await rev(SHEET, R, 1, 'create', { [NAME]: 'baseline' })
+    await insertLive(SHEET, R, { [NAME]: 'baseline' }, 1)
+
+    const pool = poolManager.get()
+    const checkpoint = await pool.transaction(async ({ query }) =>
+      activateCheckpoint(query as unknown as QueryFn, { sheetId: SHEET }),
+    )
+    await rev(SHEET, R, 2, 'update', { [NAME]: 'at-anchor' })
+    const anchorSeq = String((await q(
+      'SELECT max(seq)::text AS seq FROM meta_record_revisions WHERE sheet_id = $1 AND record_id = $2',
+      [SHEET, R],
+    )).rows[0]?.seq)
+
+    await rev(SHEET, R, 3, 'update', { [NAME]: 'captured-current' })
+    await q('UPDATE meta_records SET data = $2::jsonb, version = 3 WHERE id = $1', [
+      R,
+      JSON.stringify({ [NAME]: 'uncaptured-current' }),
+    ])
+
+    expect(await precheckSheetHistoryIntegrityStrict(pool.query.bind(pool), SHEET, {
+      checkpointId: checkpoint.checkpointId,
+      trustedSinceSeq: checkpoint.trustedSinceSeq,
+      anchorSeq,
+    })).toEqual({ ok: false, reason: 'content_mismatch' })
+  })
+
   test('TARGET-WINDOW MALFORMED LIVE: scalar meta_records.data fails closed even when an empty object projection would compare equal', async () => {
     const R = `rec_hcss_bad_live_data_${TS}`
     await rev(SHEET, R, 1, 'create', {})
