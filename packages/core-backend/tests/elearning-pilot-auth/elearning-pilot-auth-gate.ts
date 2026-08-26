@@ -23,6 +23,10 @@ import {
 } from '../../src/db/migrations/zzzz20260826200000_create_elearning_admin_scope_acl'
 import { authenticate } from '../../src/middleware/auth'
 import { ElearningAdminAccessError } from '../../src/services/elearning-admin-access'
+import {
+  produceElearningAssignmentReminder,
+  type ProduceElearningAssignmentReminderInput,
+} from '../../src/services/elearning-assignment-reminder'
 import { createElearningPilotRuntime } from '../../src/services/elearning-pilot-runtime'
 import type { ElearningLearnerCourse } from '../../src/services/elearning-learner-courses'
 import { ELEARNING_MEDIA_PLAYBACK_SECRET_ENV } from '../../src/services/elearning-media-playback'
@@ -65,8 +69,14 @@ const require = createRequire(import.meta.url)
 const elearningPlugin = require('../../../../plugins/plugin-elearning/index.cjs') as {
   activate: (context: {
     api: {
+      database?: unknown
       http: {
         addRoute: (method: string, path: string, handler: express.RequestHandler) => void
+      }
+    }
+    services?: {
+      elearningReminderProducer?: {
+        produce: (input: ProduceElearningAssignmentReminderInput) => Promise<unknown>
       }
     }
   }) => Promise<void>
@@ -455,6 +465,11 @@ describe('elearning V0.1 auth/tenant/RBAC gate (real DB, dedicated process)', ()
             app.get(path, authenticate, handler)
             capabilitiesMounted = true
           },
+        },
+      },
+      services: {
+        elearningReminderProducer: {
+          produce: (input) => produceElearningAssignmentReminder(database, input),
         },
       },
     })
