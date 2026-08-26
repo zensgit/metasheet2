@@ -1024,7 +1024,7 @@
         <el-button
           type="primary"
           :loading="inFlightAction === 'comment'"
-          :disabled="!actionComment.trim()"
+          :disabled="!actionComment.trim() || commentAttachmentUploading"
           data-testid="approval-comment-submit"
           @click="submitComment"
         >
@@ -1727,6 +1727,10 @@ const commentDialogVisible = ref(false)
 // close-watcher below only ever DELETEs uploads that were never submitted.
 const commentStagedAttachments = ref<Array<{ id: string; name: string }>>([])
 const commentAttachmentUploading = ref(false)
+// Captured at each pick; incremented (invalidated) by retract BEFORE staged cleanup so a later-
+// resolving upload cannot append into a closed/unmounted/switched context. Empty staged lists
+// still invalidate — that is the in-flight-pick case (nothing to retract yet).
+let commentAttachmentLifecycleGeneration = 0
 // Cancel/close (取消 button, mask click, ESC — all flip `commentDialogVisible` via v-model) must
 // retract any staged-but-never-bound process attachment: otherwise it sits as an unbound orphan
 // until the 168h sweep AND keeps consuming the per-staged-instance upload budget (OD-L9-8's
@@ -1742,7 +1746,14 @@ const commentAttachmentUploading = ref(false)
 // comment above) — `commentDialogVisible` stays whatever it was across the reload. Factored into
 // `retractStagedCommentAttachments` and called from both `onBeforeUnmount` and the params-id watch
 // below, in addition to this close-watcher.
+//
+// Lock-9 C1: retract ALSO invalidates the in-flight pick token first. An upload that is still
+// awaiting has not yet landed in `commentStagedAttachments`, so the empty-list early-return
+// used to skip cleanup; when the deferred success resolved it appended onto the dead/switched
+// instance. Dialog close uses this same retract, so it is covered without a third site.
 function retractStagedCommentAttachments(): void {
+  commentAttachmentLifecycleGeneration += 1
+  commentAttachmentUploading.value = false
   const staged = commentStagedAttachments.value
   if (staged.length === 0) return
   commentStagedAttachments.value = []
@@ -1753,6 +1764,10 @@ function retractStagedCommentAttachments(): void {
       // to report this failure into.
     })
   }
+}
+
+function isLiveCommentAttachmentPick(generation: number): boolean {
+  return generation === commentAttachmentLifecycleGeneration
 }
 
 watch(commentDialogVisible, (visible, wasVisible) => {
@@ -2246,19 +2261,31 @@ async function onCommentAttachmentPick(event: Event): Promise<void> {
   if (picked.length === 0) return
   const instanceId = approval.value?.id
   if (!instanceId) return
+  const pickGeneration = commentAttachmentLifecycleGeneration
   commentAttachmentUploading.value = true
   try {
     // Atomic selection: a later authoritative server reject compensates (DELETE) every file
     // uploaded from THIS pick, so a refused selection leaves zero live/bindable refs behind.
     const uploaded = await uploadApprovalProcessAttachmentsAtomic(picked, instanceId)
+    if (!isLiveCommentAttachmentPick(pickGeneration)) {
+      for (const item of uploaded) {
+        void deleteApprovalAttachment(item.id).catch(() => {
+          // Best-effort: same as retract — the originating dialog/instance is already gone.
+        })
+      }
+      return
+    }
     for (let i = 0; i < uploaded.length; i += 1) {
       commentStagedAttachments.value.push({ id: uploaded[i].id, name: picked[i].name })
     }
   } catch (error) {
+    if (!isLiveCommentAttachmentPick(pickGeneration)) return
     // values-free code from the client mirror / server reject — never file contents or paths.
     ElMessage.error(error instanceof Error ? error.message : '附件上传失败')
   } finally {
-    commentAttachmentUploading.value = false
+    if (isLiveCommentAttachmentPick(pickGeneration)) {
+      commentAttachmentUploading.value = false
+    }
   }
 }
 
@@ -2502,6 +2529,7 @@ async function submitReduceSign() {
 
 async function submitComment() {
   if (!actionComment.value.trim()) return
+  if (commentAttachmentUploading.value) return
   if (inFlightAction.value) return
   const id = route.params.id as string
   actionDialogError.value = null
