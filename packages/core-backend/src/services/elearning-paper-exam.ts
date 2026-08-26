@@ -1,47 +1,47 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID } from 'node:crypto'
 
-export const ELEARNING_PAPER_EXAM_TITLE_MAX = 200;
-export const ELEARNING_PAPER_EXAM_ACTOR_MAX = 256;
+export const ELEARNING_PAPER_EXAM_TITLE_MAX = 200
+export const ELEARNING_PAPER_EXAM_ACTOR_MAX = 256
 export const ELEARNING_EXAM_DISCLOSURE_POLICIES = [
-  "no_review",
-  "correctness_after_submit",
-  "wrong_items_after_submit",
-  "correctness_after_window",
-] as const;
+  'no_review',
+  'correctness_after_submit',
+  'wrong_items_after_submit',
+  'correctness_after_window',
+] as const
 
 const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const RFC3339_RE =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
-const PG_INT32_MAX = 2147483647;
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const PG_INT32_MAX = 2147483647
 
 const CREATE_KEYS = [
-  "orgId",
-  "actorId",
-  "paperId",
-  "title",
-  "passScore",
-  "maxAttempts",
-  "windowStartsAt",
-  "windowEndsAt",
-  "durationSeconds",
-  "shuffleQuestions",
-  "shuffleOptions",
-  "disclosurePolicy",
-] as const;
+  'orgId',
+  'actorId',
+  'paperId',
+  'title',
+  'passScore',
+  'maxAttempts',
+  'windowStartsAt',
+  'windowEndsAt',
+  'durationSeconds',
+  'shuffleQuestions',
+  'shuffleOptions',
+  'disclosurePolicy',
+] as const
 
 export type ElearningExamDisclosurePolicy =
-  (typeof ELEARNING_EXAM_DISCLOSURE_POLICIES)[number];
+  (typeof ELEARNING_EXAM_DISCLOSURE_POLICIES)[number]
 
 export type ElearningPaperExamErrorCode =
-  | "invalid_input"
-  | "not_found"
-  | "unavailable";
+  | 'invalid_input'
+  | 'not_found'
+  | 'unavailable'
 
 export class ElearningPaperExamError extends Error {
   constructor(readonly code: ElearningPaperExamErrorCode) {
-    super(code);
-    this.name = "ElearningPaperExamError";
+    super(code)
+    this.name = 'ElearningPaperExamError'
   }
 }
 
@@ -49,84 +49,83 @@ export interface ElearningPaperExamQueryable {
   query(
     sql: string,
     params?: unknown[],
-  ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>;
+  ): Promise<{ rows: Array<Record<string, unknown>>; rowCount: number | null }>
 }
 
 export interface ElearningPaperExamDb {
   transaction<T>(
     handler: (tx: ElearningPaperExamQueryable) => Promise<T>,
-  ): Promise<T>;
+  ): Promise<T>
 }
 
 export interface PublishElearningPaperExamInput {
-  orgId: string;
-  actorId: string;
-  paperId: string;
-  title: string;
-  passScore: number;
-  maxAttempts: number;
-  windowStartsAt: string | null;
-  windowEndsAt: string | null;
-  durationSeconds: number | null;
-  shuffleQuestions: boolean;
-  shuffleOptions: boolean;
-  disclosurePolicy: ElearningExamDisclosurePolicy;
+  orgId: string
+  actorId: string
+  paperId: string
+  title: string
+  passScore: number
+  maxAttempts: number
+  windowStartsAt: string | null
+  windowEndsAt: string | null
+  durationSeconds: number | null
+  shuffleQuestions: boolean
+  shuffleOptions: boolean
+  disclosurePolicy: ElearningExamDisclosurePolicy
 }
 
 export interface ElearningPaperExamResult {
-  examId: string;
-  paperId: string;
-  status: "published";
-  totalPoints: number;
+  examId: string
+  paperId: string
+  status: 'published'
+  totalPoints: number
 }
 
 interface CanonicalPaperExam {
-  orgId: string;
-  actorId: string;
-  paperId: string;
-  title: string;
-  passScore: number;
-  maxAttempts: number;
-  windowStartsAt: string | null;
-  windowEndsAt: string | null;
-  durationSeconds: number | null;
-  shuffleQuestions: boolean;
-  shuffleOptions: boolean;
-  disclosurePolicy: ElearningExamDisclosurePolicy;
+  orgId: string
+  actorId: string
+  paperId: string
+  title: string
+  passScore: number
+  maxAttempts: number
+  windowStartsAt: string | null
+  windowEndsAt: string | null
+  durationSeconds: number | null
+  shuffleQuestions: boolean
+  shuffleOptions: boolean
+  disclosurePolicy: ElearningExamDisclosurePolicy
 }
 
 function fail(code: ElearningPaperExamErrorCode): never {
-  throw new ElearningPaperExamError(code);
+  throw new ElearningPaperExamError(code)
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function requireExactKeys(
   value: Record<string, unknown>,
   required: readonly string[],
 ): void {
-  const allowed = new Set(required);
+  const allowed = new Set(required)
   for (const key of Object.keys(value)) {
-    if (!allowed.has(key)) fail("invalid_input");
+    if (!allowed.has(key)) fail('invalid_input')
   }
   for (const key of required) {
-    if (!Object.prototype.hasOwnProperty.call(value, key))
-      fail("invalid_input");
+    if (!Object.prototype.hasOwnProperty.call(value, key)) fail('invalid_input')
   }
 }
 
 function requireText(value: unknown, max: number): string {
-  if (typeof value !== "string") fail("invalid_input");
-  const trimmed = value.trim();
-  if (trimmed === "" || trimmed.length > max) fail("invalid_input");
-  return trimmed;
+  if (typeof value !== 'string') fail('invalid_input')
+  const trimmed = value.trim()
+  if (trimmed === '' || trimmed.length > max) fail('invalid_input')
+  return trimmed
 }
 
 function requireUuid(value: unknown): string {
-  if (typeof value !== "string" || !UUID_RE.test(value)) fail("invalid_input");
-  return value.toLowerCase();
+  if (typeof value !== 'string' || !UUID_RE.test(value)) fail('invalid_input')
+  return value.toLowerCase()
 }
 
 function requireInt(value: unknown, min: number): number {
@@ -135,65 +134,63 @@ function requireInt(value: unknown, min: number): number {
     (value as number) < min ||
     (value as number) > PG_INT32_MAX
   ) {
-    fail("invalid_input");
+    fail('invalid_input')
   }
-  return value as number;
+  return value as number
 }
 
 function requireBoolean(value: unknown): boolean {
-  if (typeof value !== "boolean") fail("invalid_input");
-  return value;
+  if (typeof value !== 'boolean') fail('invalid_input')
+  return value
 }
 
 function requireNullableTimestamp(value: unknown): string | null {
-  if (value === null) return null;
-  if (typeof value !== "string" || !RFC3339_RE.test(value))
-    fail("invalid_input");
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) fail("invalid_input");
-  return parsed.toISOString();
+  if (value === null) return null
+  if (typeof value !== 'string' || !RFC3339_RE.test(value))
+    fail('invalid_input')
+  const parsed = new Date(value)
+  if (!Number.isFinite(parsed.getTime())) fail('invalid_input')
+  return parsed.toISOString()
 }
 
 function requireDisclosurePolicy(
   value: unknown,
 ): ElearningExamDisclosurePolicy {
   if (
-    typeof value !== "string" ||
+    typeof value !== 'string' ||
     !ELEARNING_EXAM_DISCLOSURE_POLICIES.includes(
       value as ElearningExamDisclosurePolicy,
     )
   ) {
-    fail("invalid_input");
+    fail('invalid_input')
   }
-  return value as ElearningExamDisclosurePolicy;
+  return value as ElearningExamDisclosurePolicy
 }
 
 function canonicalize(
   input: PublishElearningPaperExamInput,
 ): CanonicalPaperExam {
-  if (!isPlainObject(input)) fail("invalid_input");
-  requireExactKeys(input, CREATE_KEYS);
-  const windowStartsAt = requireNullableTimestamp(input.windowStartsAt);
-  const windowEndsAt = requireNullableTimestamp(input.windowEndsAt);
+  if (!isPlainObject(input)) fail('invalid_input')
+  requireExactKeys(input, CREATE_KEYS)
+  const windowStartsAt = requireNullableTimestamp(input.windowStartsAt)
+  const windowEndsAt = requireNullableTimestamp(input.windowEndsAt)
   if ((windowStartsAt === null) !== (windowEndsAt === null))
-    fail("invalid_input");
+    fail('invalid_input')
   if (
     windowStartsAt !== null &&
     windowEndsAt !== null &&
     Date.parse(windowStartsAt) >= Date.parse(windowEndsAt)
   ) {
-    fail("invalid_input");
+    fail('invalid_input')
   }
   const durationSeconds =
-    input.durationSeconds === null
-      ? null
-      : requireInt(input.durationSeconds, 1);
-  const disclosurePolicy = requireDisclosurePolicy(input.disclosurePolicy);
+    input.durationSeconds === null ? null : requireInt(input.durationSeconds, 1)
+  const disclosurePolicy = requireDisclosurePolicy(input.disclosurePolicy)
   if (
-    disclosurePolicy === "correctness_after_window" &&
+    disclosurePolicy === 'correctness_after_window' &&
     windowEndsAt === null
   ) {
-    fail("invalid_input");
+    fail('invalid_input')
   }
 
   return {
@@ -209,37 +206,37 @@ function canonicalize(
     shuffleQuestions: requireBoolean(input.shuffleQuestions),
     shuffleOptions: requireBoolean(input.shuffleOptions),
     disclosurePolicy,
-  };
+  }
 }
 
 function asText(value: unknown): string | null {
-  return typeof value === "string" && value !== "" ? value : null;
+  return typeof value === 'string' && value !== '' ? value : null
 }
 
 function asSafeInt(value: unknown): number | null {
-  if (typeof value === "number" && Number.isSafeInteger(value)) return value;
-  if (typeof value === "bigint") {
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return value
+  if (typeof value === 'bigint') {
     if (
       value < BigInt(Number.MIN_SAFE_INTEGER) ||
       value > BigInt(Number.MAX_SAFE_INTEGER)
     ) {
-      return null;
+      return null
     }
-    return Number(value);
+    return Number(value)
   }
-  if (typeof value === "string" && /^\d+$/.test(value)) {
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) ? parsed : null;
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) ? parsed : null
   }
-  return null;
+  return null
 }
 
 async function runValuesFree<T>(handler: () => Promise<T>): Promise<T> {
   try {
-    return await handler();
+    return await handler()
   } catch (error) {
-    if (error instanceof ElearningPaperExamError) throw error;
-    throw new ElearningPaperExamError("unavailable");
+    if (error instanceof ElearningPaperExamError) throw error
+    throw new ElearningPaperExamError('unavailable')
   }
 }
 
@@ -254,8 +251,8 @@ export async function publishElearningPaperExam(
   db: ElearningPaperExamDb,
   input: PublishElearningPaperExamInput,
 ): Promise<ElearningPaperExamResult> {
-  const canonical = canonicalize(input);
-  const examId = randomUUID();
+  const canonical = canonicalize(input)
+  const examId = randomUUID()
 
   return runValuesFree(() =>
     db.transaction(async (tx) => {
@@ -266,10 +263,10 @@ export async function publishElearningPaperExam(
         WHERE org_id = $1 AND id = $2
         FOR SHARE`,
         [canonical.orgId, canonical.paperId],
-      );
-      const paperRow = paper.rows[0];
-      if (!paperRow || asText(paperRow.status) !== "published")
-        fail("not_found");
+      )
+      const paperRow = paper.rows[0]
+      if (!paperRow || asText(paperRow.status) !== 'published')
+        fail('not_found')
 
       const totals = await tx.query(
         `/* elearning-paper-exam:paper-total */
@@ -278,19 +275,19 @@ export async function publishElearningPaperExam(
          FROM elearning_paper_questions
         WHERE org_id = $1 AND paper_id = $2`,
         [canonical.orgId, canonical.paperId],
-      );
-      const totalRow = totals.rows[0];
-      const itemCount = asSafeInt(totalRow?.item_count);
-      const totalPoints = asSafeInt(totalRow?.total_points);
+      )
+      const totalRow = totals.rows[0]
+      const itemCount = asSafeInt(totalRow?.item_count)
+      const totalPoints = asSafeInt(totalRow?.total_points)
       if (
         itemCount === null ||
         totalPoints === null ||
         itemCount < 1 ||
         totalPoints < 1
       ) {
-        fail("unavailable");
+        fail('unavailable')
       }
-      if (canonical.passScore > totalPoints) fail("invalid_input");
+      if (canonical.passScore > totalPoints) fail('invalid_input')
 
       await tx.query(
         `/* elearning-paper-exam:create */
@@ -317,22 +314,22 @@ export async function publishElearningPaperExam(
           canonical.shuffleOptions,
           canonical.disclosurePolicy,
         ],
-      );
+      )
       const published = await tx.query(
         `/* elearning-paper-exam:publish */
        UPDATE elearning_exams
           SET status = 'published', updated_at = clock_timestamp()
         WHERE org_id = $1 AND id = $2 AND status = 'draft'`,
         [canonical.orgId, examId],
-      );
-      if (published.rowCount !== 1) fail("unavailable");
+      )
+      if (published.rowCount !== 1) fail('unavailable')
 
       return {
         examId,
         paperId: canonical.paperId,
-        status: "published" as const,
+        status: 'published' as const,
         totalPoints,
-      };
+      }
     }),
-  );
+  )
 }

@@ -1,5 +1,5 @@
-import type { Kysely } from "kysely";
-import { sql } from "kysely";
+import type { Kysely } from 'kysely'
+import { sql } from 'kysely'
 
 /**
  * E-learning L3 paper-bound exam rules.
@@ -15,13 +15,13 @@ import { sql } from "kysely";
  * shuffled order in paper_snapshot, and never expose answer keys in learner
  * DTOs.
  */
-export const ELEARNING_EXAM_PAPER_FK = "elearning_exams_paper_fk";
-export const ELEARNING_EXAM_WINDOW_CHECK = "elearning_exams_window_chk";
-export const ELEARNING_EXAM_DURATION_CHECK = "elearning_exams_duration_chk";
-export const ELEARNING_EXAM_DISCLOSURE_CHECK = "elearning_exams_disclosure_chk";
+export const ELEARNING_EXAM_PAPER_FK = 'elearning_exams_paper_fk'
+export const ELEARNING_EXAM_WINDOW_CHECK = 'elearning_exams_window_chk'
+export const ELEARNING_EXAM_DURATION_CHECK = 'elearning_exams_duration_chk'
+export const ELEARNING_EXAM_DISCLOSURE_CHECK = 'elearning_exams_disclosure_chk'
 export const ELEARNING_EXAM_AFTER_WINDOW_CHECK =
-  "elearning_exams_after_window_requires_end_chk";
-export const ELEARNING_EXAM_PAPER_INDEX = "idx_elearning_exams_org_paper";
+  'elearning_exams_after_window_requires_end_chk'
+export const ELEARNING_EXAM_PAPER_INDEX = 'idx_elearning_exams_org_paper'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
@@ -33,7 +33,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       ADD COLUMN shuffle_questions boolean NOT NULL DEFAULT false,
       ADD COLUMN shuffle_options boolean NOT NULL DEFAULT false,
       ADD COLUMN disclosure_policy text NOT NULL DEFAULT 'no_review'
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     ALTER TABLE elearning_exams
@@ -66,13 +66,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           disclosure_policy <> 'correctness_after_window'
           OR window_ends_at IS NOT NULL
         )
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE INDEX idx_elearning_exams_org_paper
       ON elearning_exams (org_id, paper_id)
       WHERE paper_id IS NOT NULL
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exams_state_guard()
@@ -160,7 +160,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       RAISE EXCEPTION 'elearning_exams illegal status transition: % -> %', OLD.status, NEW.status;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exam_questions_draft_parent()
@@ -206,7 +206,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       RETURN NEW;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exams_publish_points_guard()
@@ -245,7 +245,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       RETURN NEW;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
@@ -267,7 +267,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       END IF;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exams_publish_points_guard()
@@ -299,7 +299,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       RETURN NEW;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exam_questions_draft_parent()
@@ -341,7 +341,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       RETURN NEW;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
   await sql`
     CREATE OR REPLACE FUNCTION elearning_exams_state_guard()
@@ -404,9 +404,9 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       RAISE EXCEPTION 'elearning_exams illegal status transition: % -> %', OLD.status, NEW.status;
     END;
     $fn$
-  `.execute(db);
+  `.execute(db)
 
-  await sql`DROP INDEX IF EXISTS idx_elearning_exams_org_paper`.execute(db);
+  await sql`DROP INDEX IF EXISTS idx_elearning_exams_org_paper`.execute(db)
   await sql`
     ALTER TABLE elearning_exams
       DROP CONSTRAINT IF EXISTS elearning_exams_after_window_requires_end_chk,
@@ -421,5 +421,5 @@ export async function down(db: Kysely<unknown>): Promise<void> {
       DROP COLUMN IF EXISTS window_ends_at,
       DROP COLUMN IF EXISTS window_starts_at,
       DROP COLUMN IF EXISTS paper_id
-  `.execute(db);
+  `.execute(db)
 }
