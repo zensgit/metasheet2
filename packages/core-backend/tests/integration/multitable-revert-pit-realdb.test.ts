@@ -4,7 +4,8 @@
  * KEEPS post-anchor-created records; identity drift → 409 (PIT-1); atomicity (a forced revision-insert failure leaves
  * the record UNCHANGED); reveal never composes (PIT-7, source-grep). Undelete-execute is deferred (codebase-wide
  * undelete slice); LOCK-3 row-deny is enforced via the SAME loadDeniedRecordIds seam the batch-execute test pins.
- * Destructive authority is server-resolved exact anchor (token-only execute). Runs only with DATABASE_URL.
+ * Destructive authority is server-resolved exact anchor (token-only execute). Retention active refuses preview and
+ * execute before recovery DB work, with zero writes. Runs only with DATABASE_URL.
  */
 import express, { type Express } from 'express'
 import request from 'supertest'
@@ -106,6 +107,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
     await q('DELETE FROM users WHERE id = $1', [ACTOR]).catch(() => {})
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
   })
   beforeEach(async () => {
     curRoles = ['member']
@@ -113,6 +115,7 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'true'
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     process.env.MULTITABLE_HISTORY_CONTIGUITY_STRICT = 'true'
+    delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
     await q('UPDATE meta_sheets SET row_level_read_permissions_enabled = false WHERE id = $1', [SHEET])
     await pruneSealedHistoryOperations(SHEET)
     await q('DELETE FROM meta_history_baselines WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -135,6 +138,34 @@ describeIfDatabase('multitable T8-1 Revert-to-T (real DB)', () => {
     expect(res.body?.data?.summary?.keptCreatedAfterTCount).toBe(1) // D kept
     expect(res.body?.data?.previewIdentity).toBeTruthy()
     expect(await recordRow(A)).toEqual(before) // PIT-1: preview wrote nothing
+  })
+
+  test('[P1] retention guard: SHEET_REVERT + meta revision retention enabled → 409 REVERT_RETENTION_CONFLICT, ZERO writes', async () => {
+    process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '1'
+    const beforeA = await recordRow(A)
+    const beforeCounts = await sheetRowCounts()
+
+    const pv = await revertPreview()
+    expect(pv.status).toBe(409)
+    expect(pv.body).toEqual({
+      ok: false,
+      error: {
+        code: 'REVERT_RETENTION_CONFLICT',
+        message: 'Revert-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using recovery.',
+      },
+    })
+
+    const ex = await revertExecute('x')
+    expect(ex.status).toBe(409)
+    expect(ex.body).toEqual({
+      ok: false,
+      error: {
+        code: 'REVERT_RETENTION_CONFLICT',
+        message: 'Revert-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using recovery.',
+      },
+    })
+    expect(await recordRow(A)).toEqual(beforeA)
+    expect(await sheetRowCounts()).toEqual(beforeCounts)
   })
 
   test('execute reverts A+B to the anchor-state via FORWARD revisions; D (post-anchor-created) is KEPT untouched', async () => {

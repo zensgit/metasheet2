@@ -56,6 +56,21 @@ test('buildAssessment stops on PIT_RESET plus meta revision retention (retention
   assert.match(assessment.stops.join('\n'), /pit-reset-intent-with-retention-on/)
 })
 
+test('buildAssessment stops on SHEET_REVERT plus meta revision retention (retention activates on exact \'1\')', () => {
+  const assessment = buildAssessment({
+    backend: { image: 'ghcr.io/zensgit/metasheet2-backend:abc', status: 'running' },
+    web: { image: 'ghcr.io/zensgit/metasheet2-web:abc', status: 'running' },
+    flags: collectFlagMapFromEnvText([
+      'MULTITABLE_ENABLE_SHEET_REVERT=true',
+      'MULTITABLE_META_REVISION_RETENTION_ENABLED=1',
+    ].join('\n')),
+    health: { ok: true, status: 200, body: { status: 'ok' } },
+  })
+
+  assert.equal(assessment.ok, false)
+  assert.match(assessment.stops.join('\n'), /sheet-revert-intent-with-retention-on/)
+})
+
 // R12-C regression guard: retention's real activation string is the EXACT '1' (meta-revision-retention.ts:60),
 // NOT 'true'. The pre-manifest helper used a loose TRUE_VALUES heuristic here and would have incorrectly
 // stopped on retention='true' even though the real backend treats that as OFF (silent no-op). This proves the
@@ -174,7 +189,7 @@ test('buildAssessment stops (without --strict) on undelete-without-revert-gate (
   assert.match(assessment.stops.join('\n'), /undelete-without-revert-gate/)
 })
 
-test('buildAssessment passes for a legal rung with all four illegal-combo flag pairs satisfied', () => {
+test('buildAssessment passes for a legal rung with the other four illegal-combo flag pairs satisfied', () => {
   const assessment = buildAssessment({
     backend: { image: 'ghcr.io/zensgit/metasheet2-backend:abc', status: 'running' },
     web: { image: 'ghcr.io/zensgit/metasheet2-web:abc', status: 'running' },

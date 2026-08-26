@@ -168,7 +168,15 @@ test('R2 positive control: SIDE_DOOR off never fires regardless of capture', () 
   )
 })
 
-// ── R3: PIT-reset vs retention STOP-SHIP ───────────────────────────────────────────────────────────
+// ── R3: exact-anchor Revert/Reset vs retention STOP-SHIP ───────────────────────────────────────────
+
+test('R3 sheet-revert-intent-with-retention-on: SHEET_REVERT on + retention active (\'1\') fires', () => {
+  const ids = violationIds({
+    MULTITABLE_ENABLE_SHEET_REVERT: 'true',
+    MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
+  })
+  assert.ok(ids.includes('sheet-revert-intent-with-retention-on'), `expected sheet-revert conflict, got ${ids.join(',')}`)
+})
 
 test('R3 pit-reset-intent-with-retention-on: PIT_RESET on + retention active (\'1\') fires', () => {
   const ids = violationIds({
@@ -193,6 +201,10 @@ test("R3 footgun regression guard: retention='true' does NOT count as active (ex
 
 test('R3 positive control: PIT_RESET on + retention off/unset does NOT fire', () => {
   assert.equal(violationIds({ MULTITABLE_ENABLE_PIT_RESET: 'true' }).includes('pit-reset-intent-with-retention-on'), false)
+})
+
+test('R3 positive control: SHEET_REVERT on + retention off/unset does NOT fire', () => {
+  assert.equal(violationIds({ MULTITABLE_ENABLE_SHEET_REVERT: 'true' }).includes('sheet-revert-intent-with-retention-on'), false)
 })
 
 test('R3 positive control: retention active alone (no PIT_RESET) does NOT fire', () => {
@@ -287,19 +299,21 @@ test('undelete positive control: PIT_UNDELETE off never fires regardless of SHEE
   )
 })
 
-test('a rung that stacks ALL FOUR illegal combinations fires all four named violations at once', () => {
+test('a rung that stacks every compatible retention conflict fires all four named violations', () => {
   const ids = violationIds({
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY: 'true',
     MULTITABLE_ENABLE_FIELD_RETYPE_REVERT: 'false',
     MULTITABLE_SIDE_DOOR_DELETE_TRASH_ENABLED: 'true',
     MULTITABLE_TOMBSTONE_CAPTURE_ENABLED: 'false',
     MULTITABLE_ENABLE_PIT_RESET: 'true',
+    MULTITABLE_ENABLE_SHEET_REVERT: 'true',
     MULTITABLE_META_REVISION_RETENTION_ENABLED: '1',
-    MULTITABLE_ENABLE_PIT_UNDELETE: 'true', // SHEET_REVERT unset → undelete-without-revert-gate fires
+    // SHEET_REVERT is on here to exercise its retention conflict. That makes the undelete-without-revert
+    // violation mutually exclusive; it is covered by its own targeted test above.
   })
   assert.deepEqual(
     [...ids].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture'].sort(),
   )
 })
 
@@ -312,7 +326,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })

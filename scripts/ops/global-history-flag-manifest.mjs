@@ -173,13 +173,21 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     activationValue: 'true',
     caseInsensitive: true,
     dependsOn: [],
-    conflictsWith: [],
+    conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without the trust pair before minting any token.',
+      'Revert-execute master gate (default OFF): exact-anchor recovery is WIRED (L6 resolveExactAnchor + L7 plan classification + L8 applyExactAnchorRecovery, all-or-nothing in ONE transaction; authority is exactly one historyBatchId or anchorOperationId — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED, both ids refuse 400 AMBIGUOUS_ANCHOR). Execute is TOKEN-ONLY authority: the verified previewIdentity carries the mode, and a reset-minted token refuses on this surface before any write. Both preview and execute refuse 409 REVERT_RETENTION_CONFLICT whenever meta revision retention is active, matching PIT Reset until recovery-aware retention exists. At RUNTIME both preview and execute additionally require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; not modeled as a dependsOn rule — the refusal is enforced in-process, values-free). Restores the RESTORABLE projection only (canonical record-restore-diff; derived formula/lookup/rollup values recompute post-commit, never restored history). Exact-anchor undelete/resurrection is fail-closed (409 INBOUND_UNPROVABLE; no executable token is minted for resurrect-bearing plans). Mirrors MULTITABLE_ENABLE_PIT_RESET\'s gate exactly: SAME `String(env).trim().toLowerCase() === \'true\'` resolution (hence caseInsensitive), same canManageSheetAccess (D2) floor + conservative full-table-read gate. danger=high: a whole-sheet-scale destructive bulk write over live record data with no undo. revert-preview stays UNGATED by this flag (read-only; capabilities.sheetRevertEnabled controls FE button visibility) but still refuses without retention, the trust pair, or an executable plan before minting any token.',
     // Source symbols (line numbers intentionally omitted because this route is edited frequently):
     // SHEET_REVERT_ENABLED, the handleExactAnchorExecute REVERT_DISABLED guard, capabilities.sheetRevertEnabled.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
+    source: 'packages/core-backend/src/routes/univer-meta.ts#SHEET_REVERT_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute,capabilities.sheetRevertEnabled; packages/core-backend/src/multitable/exact-anchor-recovery-route.ts#checkExactAnchorRecoveryTrust',
+    rules: [
+      {
+        kind: 'conflicts',
+        id: 'sheet-revert-intent-with-retention-on',
+        description:
+          "MULTITABLE_ENABLE_SHEET_REVERT is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — exact-anchor Revert refuses every revert-preview and revert-execute call with 409 REVERT_RETENTION_CONFLICT. Revert-to-T cannot function in this state.",
+      },
+    ],
   },
   {
     key: 'MULTITABLE_ENABLE_PIT_RESET',
@@ -190,17 +198,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     conflictsWith: ['MULTITABLE_META_REVISION_RETENTION_ENABLED'],
     danger: 'high',
     purpose:
-      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call PIT_RESET_RETENTION_BLOCKED() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
-    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + PIT_RESET_RETENTION_BLOCKED (compares
+      'R3 — PIT-reset vs retention STOP-SHIP. T8-2 / W0 L8 Reset-to-T (destructive whole-sheet EXACT-ANCHOR restore: historyBatchId/anchorOperationId only — free wall-clock asOf refuses 400 EXACT_ANCHOR_REQUIRED). Execute is TOKEN-ONLY authority with the typed confirm:\'reset\' second step; a revert-minted token refuses on this surface before any write. At RUNTIME both preview and execute also require the trust pair MULTITABLE_ENABLE_WRITER_FENCE + MULTITABLE_HISTORY_CONTIGUITY_STRICT (409 RECOVERY_TRUST_REQUIRED otherwise; enforced in-process, not a dependsOn rule). Gated by PIT_RESET_ENABLED() (`.trim().toLowerCase() === \'true\'`, so \'TRUE\'/\' true \' also activate it — unlike most other flags in this manifest). BOTH reset-preview and reset-execute additionally call isMetaRevisionRetentionEnabled() and refuse with 409 RESET_RETENTION_CONFLICT whenever meta-revision retention is active. An operator who intends to use PIT reset MUST NOT also have retention active.',
+    // Anchored by SYMBOL NAME (drift-proof): PIT_RESET_ENABLED + isMetaRevisionRetentionEnabled (compares
     // MULTITABLE_META_REVISION_RETENTION_ENABLED === '1'); both handleExactAnchorPreview('reset') and
-    // handleExactAnchorExecute('reset') call the blocked-check.
-    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,PIT_RESET_RETENTION_BLOCKED,handleExactAnchorPreview,handleExactAnchorExecute',
+    // handleExactAnchorExecute('reset') call the shared blocked-check.
+    source: 'packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_ENABLED,isMetaRevisionRetentionEnabled,sendRecoveryRetentionBlocked,handleExactAnchorPreview,handleExactAnchorExecute',
     rules: [
       {
         kind: 'conflicts',
         id: 'pit-reset-intent-with-retention-on',
         description:
-          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — PIT_RESET_RETENTION_BLOCKED() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
+          "MULTITABLE_ENABLE_PIT_RESET is active while MULTITABLE_META_REVISION_RETENTION_ENABLED is active ('1') — isMetaRevisionRetentionEnabled() will refuse every reset-preview and reset-execute call with 409 RESET_RETENTION_CONFLICT. Reset-to-T cannot function in this state.",
       },
     ],
   },
@@ -317,10 +325,10 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     type: 'boolean',
     activationValue: '1',
     dependsOn: [],
-    conflictsWith: ['MULTITABLE_ENABLE_PIT_RESET'],
+    conflictsWith: ['MULTITABLE_ENABLE_SHEET_REVERT', 'MULTITABLE_ENABLE_PIT_RESET'],
     danger: 'high',
     purpose:
-      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and is read by PIT_RESET_RETENTION_BLOCKED() to refuse PIT reset (see MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
+      'R4 — activation value is the EXACT string \'1\', NOT \'true\' (unlike every capture/replay/revert flag above). resolveMetaRevisionRetentionConfig() compares with `=== \'1\'`; setting \'true\' here is a silent no-op (retention stays disabled) — the single biggest operator footgun in this manifest. When active, ages meta_record_revisions AND meta_config_revisions (same knob set governs both, T9 D4) and makes both exact-anchor Revert and PIT Reset refuse before recovery DB work (see MULTITABLE_ENABLE_SHEET_REVERT and MULTITABLE_ENABLE_PIT_RESET). Also caps how far back 4c-1/4c-3 recovery can reach once tombstones age out — field-value tombstones have NO retention floor (link-tombstones referenced by a surviving trash row do; field-value ones do not), a ratified, accepted boundary (owner decision, not a bug).',
     // source: packages/core-backend/src/multitable/meta-revision-retention.ts:60
     source: 'packages/core-backend/src/multitable/meta-revision-retention.ts:60',
   },

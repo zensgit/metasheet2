@@ -9,9 +9,9 @@
  *
  * `--strict` additionally runs the manifest's dependency/conflict rules (`evaluateFlagRules`) against
  * the observed flags and turns any violation into a hard STOP (non-zero exit), in addition to its
- * existing job of promoting the image-tag-mismatch WARN into a STOP. The four illegal-combination
- * checks (lossy-without-base, side-door-without-capture, pit-reset-intent-with-retention-on,
- * undelete-without-revert-gate) are ALSO
+ * existing job of promoting the image-tag-mismatch WARN into a STOP. The five illegal-combination
+ * checks (lossy-without-base, side-door-without-capture, sheet-revert-intent-with-retention-on,
+ * pit-reset-intent-with-retention-on, undelete-without-revert-gate) are ALSO
  * evaluated and reported as STOPs in the default (non-strict) mode — this preserves the pre-existing
  * unconditional PIT_RESET-vs-retention stop (do not regress that to strict-only) and is the safer
  * default for an operator-facing safety helper: a plain run cannot miss a genuinely illegal config.
@@ -181,7 +181,7 @@ function buildAssessment(input, { strict = false } = {}) {
   }
 
   // R12-C: manifest-driven illegal-combination rules (lossy-without-base, side-door-without-capture,
-  // pit-reset-intent-with-retention-on, undelete-without-revert-gate). These are UNCONDITIONAL stops in
+  // sheet-revert-intent-with-retention-on, pit-reset-intent-with-retention-on, undelete-without-revert-gate). These are UNCONDITIONAL stops in
   // both modes — an illegal
   // combination is illegal regardless of whether the operator remembered --strict; this also preserves
   // the pre-existing behavior where PIT_RESET-vs-retention already stopped without --strict.

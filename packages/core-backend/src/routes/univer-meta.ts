@@ -10348,12 +10348,14 @@ export function univerMetaRouter(): Router {
   // (RECOVERY_TRUST_REQUIRED otherwise). The apply is one transaction, all-or-nothing — the legacy
   // per-record best-effort loop and the multi-transaction durable-block claim/release dance are gone.
   const PIT_RESET_ENABLED = () => String(process.env.MULTITABLE_ENABLE_PIT_RESET ?? '').trim().toLowerCase() === 'true'
-  const PIT_RESET_RETENTION_BLOCKED = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
-  const sendPitResetRetentionBlocked = (res: Response) => res.status(409).json({
+  const isMetaRevisionRetentionEnabled = () => String(process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED ?? '').trim() === '1'
+  const sendRecoveryRetentionBlocked = (res: Response, mode: 'revert' | 'reset') => res.status(409).json({
     ok: false,
     error: {
-      code: 'RESET_RETENTION_CONFLICT',
-      message: 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
+      code: mode === 'revert' ? 'REVERT_RETENTION_CONFLICT' : 'RESET_RETENTION_CONFLICT',
+      message: mode === 'revert'
+        ? 'Revert-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using recovery.'
+        : 'Reset-to-T is refused while meta revision retention is enabled; disable MULTITABLE_META_REVISION_RETENTION_ENABLED before using PIT reset.',
     },
   })
 
@@ -10729,10 +10731,10 @@ export function univerMetaRouter(): Router {
    * never receive a destructive token.
    */
   const handleExactAnchorPreview = async (req: Request, res: Response, mode: 'revert' | 'reset') => {
-    if (mode === 'reset') {
-      if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-      if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
+    if (mode === 'reset' && !PIT_RESET_ENABLED()) {
+      return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
     }
+    if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     if (!sheetId) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'sheetId is required' } })
     const parsed = parseRecoveryAnchorRequest(parseAnchorBody(req))
@@ -10833,8 +10835,8 @@ export function univerMetaRouter(): Router {
       if (!SHEET_REVERT_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'REVERT_DISABLED', message: 'Sheet revert is disabled (MULTITABLE_ENABLE_SHEET_REVERT is off).' } })
     } else {
       if (!PIT_RESET_ENABLED()) return res.status(403).json({ ok: false, error: { code: 'RESET_DISABLED', message: 'Reset-to-T is disabled (MULTITABLE_ENABLE_PIT_RESET is off).' } })
-      if (PIT_RESET_RETENTION_BLOCKED()) return sendPitResetRetentionBlocked(res)
     }
+    if (isMetaRevisionRetentionEnabled()) return sendRecoveryRetentionBlocked(res, mode)
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''
     const body = parseAnchorBody(req)
     const previewIdentity = typeof body.previewIdentity === 'string' ? body.previewIdentity : ''
