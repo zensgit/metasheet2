@@ -33,6 +33,8 @@ import {
   assignElearningDirectAuthorized,
   listElearningAssignmentProgressAuthorized,
   setElearningCourseScopeAuthorized,
+  type ElearningAdminOperationDb,
+  type ElearningAdminOperationQueryable,
 } from '../../src/services/elearning-admin-operations'
 import {
   replaceElearningAdminScopes,
@@ -106,6 +108,107 @@ class PoolLifecycleDb implements ElearningAssignmentLifecycleDb, ElearningLearne
         await client.query('ROLLBACK')
         throw error
       }
+    } finally {
+      client.release()
+    }
+  }
+}
+
+async function backendPid(client: PoolClient): Promise<number> {
+  const result = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid')
+  return result.rows[0]!.pid
+}
+
+async function waitUntilWaiterBlockedByHolder(
+  holderPid: number,
+  waiterPid: number,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ blocked: boolean }>(
+      `SELECT $2 = ANY(pg_blocking_pids($1)) AS blocked`,
+      [waiterPid, holderPid],
+    )
+    if (result.rows[0]?.blocked === true) return
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error('timed out waiting for e-learning authorization writer barrier')
+}
+
+function settled<T>(promise: Promise<T>): Promise<T | unknown> {
+  return promise.then(
+    (value) => value,
+    (error) => error,
+  )
+}
+
+class AuthorizationLockBarrierDb implements ElearningAdminOperationDb {
+  private operationLockCount = 0
+  private readonly reached: Promise<number>
+  private readonly released: Promise<void>
+  private resolveReached!: (pid: number) => void
+  private resolveReleased!: () => void
+
+  constructor(private readonly targetPool: Pool) {
+    this.reached = new Promise((resolve) => {
+      this.resolveReached = resolve
+    })
+    this.released = new Promise((resolve) => {
+      this.resolveReleased = resolve
+    })
+  }
+
+  query(sql: string, params?: unknown[]) {
+    return exec(this.targetPool, sql, params)
+  }
+
+  async waitUntilAuthorizationLocksHeld(): Promise<number> {
+    let timeout: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([
+        this.reached,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('timed out waiting for authorization locks')),
+            5_000,
+          )
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  releaseAuthorizationLocks(): void {
+    this.resolveReleased()
+  }
+
+  async transaction<T>(
+    handler: (tx: ElearningAdminOperationQueryable) => Promise<T>,
+  ): Promise<T> {
+    const client = await this.targetPool.connect()
+    try {
+      const pid = await backendPid(client)
+      await client.query('BEGIN')
+      const result = await handler({
+        query: async (sql, params) => {
+          const queryResult = await exec(client, sql, params)
+          if (sql.includes('elearning-admin-access:operation-lock')) {
+            this.operationLockCount += 1
+            if (this.operationLockCount === 2) {
+              this.resolveReached(pid)
+              await this.released
+            }
+          }
+          return queryResult
+        },
+      })
+      await client.query('COMMIT')
+      return result
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
     } finally {
       client.release()
     }
@@ -690,6 +793,77 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
     expect(visible.members.some((member) => member.userId === seed.users.c))
       .toBe(false)
 
+    const barrierDb = new AuthorizationLockBarrierDb(pool)
+    const heldRead = listElearningAssignmentProgressAuthorized(barrierDb, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      assignmentId: seed.assignmentId,
+    })
+    void settled(heldRead)
+    let revoker: PoolClient | undefined
+    let revokeAcl: ReturnType<typeof replaceElearningObjectAcl> | undefined
+    let barrierError: unknown
+    try {
+      const holderPid = await barrierDb.waitUntilAuthorizationLocksHeld()
+      revoker = await pool.connect()
+      await revoker.query("SET lock_timeout = '15s'")
+      const waiterPid = await backendPid(revoker)
+      revokeAcl = replaceElearningObjectAcl(new PoolLifecycleDb(revoker), {
+        orgId: org,
+        actorId: admin,
+        isGlobalAdmin: true,
+        object: { courseId: seed.courseId },
+        granteeUserId: manager,
+        reason: 'concurrent track revocation',
+        actions: [],
+      })
+      const winner = await Promise.race([
+        waitUntilWaiterBlockedByHolder(holderPid, waiterPid)
+          .then(() => 'blocked' as const),
+        settled(revokeAcl).then((value) => ({ settled: value })),
+      ])
+      if (winner !== 'blocked') {
+        throw new Error('ACL revocation settled before the operation released its locks')
+      }
+    } catch (error) {
+      barrierError = error
+    } finally {
+      barrierDb.releaseAuthorizationLocks()
+    }
+
+    let heldResult: Awaited<typeof heldRead>
+    try {
+      heldResult = await heldRead
+      if (revokeAcl) await revokeAcl
+    } finally {
+      if (revokeAcl) await settled(revokeAcl)
+      if (revoker) {
+        await revoker.query('ROLLBACK').catch(() => undefined)
+        revoker.release()
+      }
+    }
+    if (barrierError) throw barrierError
+    expect(heldResult.members.map((member) => member.userId)).toEqual([
+      seed.users.a,
+      seed.users.b,
+    ])
+    await expect(listElearningAssignmentProgressAuthorized(db, {
+      orgId: org,
+      actorId: manager,
+      isGlobalAdmin: false,
+      assignmentId: seed.assignmentId,
+    })).rejects.toMatchObject({ code: 'forbidden' })
+    await replaceElearningObjectAcl(db, {
+      orgId: org,
+      actorId: admin,
+      isGlobalAdmin: true,
+      object: { courseId: seed.courseId },
+      granteeUserId: manager,
+      reason: 'restore track after concurrency proof',
+      actions: ['track'],
+    })
+
     await replaceElearningAdminScopes(db, {
       orgId: org,
       actorId: admin,
@@ -745,7 +919,7 @@ describe('elearning assignment lifecycle (real PostgreSQL)', () => {
       courseVersionId: seed.versionId,
       sourceKey: `${org}-outside-target`,
     })).rejects.toMatchObject({ code: 'target_out_of_scope' })
-  })
+  }, 20_000)
 
   it('isolates lookup and revocation to the authoritative org', async () => {
     const org = orgId('home')

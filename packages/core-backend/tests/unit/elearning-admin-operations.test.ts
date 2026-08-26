@@ -188,6 +188,16 @@ describe('e-learning delegated operation authorization', () => {
       nextCursor: null,
     })
 
+    expect(db.calls.map((call) => marker(call.sql)).slice(0, 8)).toEqual([
+      'elearning-admin-operations:repeatable-read',
+      'elearning-admin-operations:assignment-object',
+      'elearning-admin-access:operation-lock',
+      'elearning-admin-access:operation-lock',
+      'elearning-admin-access:active-membership',
+      'elearning-admin-access:load-object',
+      'elearning-admin-access:object-action',
+      'elearning-admin-access:user-scope',
+    ])
     const actionCall = db.calls.find(
       (call) => marker(call.sql) === 'elearning-admin-access:object-action',
     )
