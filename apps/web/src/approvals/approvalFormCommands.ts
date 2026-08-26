@@ -158,6 +158,13 @@ const AUTHORABLE_FIELD_TYPES = new Set<AuthorableFieldType>(
   Object.keys(FIELD_LABELS) as AuthorableFieldType[],
 )
 
+const DATE_RANGE_DATE_TYPES = new Set<FieldAuthoringDraft['dateRangeDateType']>([
+  '',
+  'date',
+  'date_half_day',
+  'date_minute',
+])
+
 function successful(
   draft: TemplateAuthoringDraft,
   focusLocalId: string | null,
@@ -674,6 +681,14 @@ export interface FormFieldPropertyPatch {
   readonly visibility?: FieldVisibilityDraft
   readonly minRowsText?: string
   readonly maxRowsText?: string
+  readonly numberCurrencySymbol?: string
+  readonly numberThousandsSeparator?: boolean
+  readonly numberUppercaseCny?: boolean
+  readonly dateRangeDateType?: FieldAuthoringDraft['dateRangeDateType']
+  readonly dateRangeStartLabel?: string
+  readonly dateRangeEndLabel?: string
+  readonly dateRangeDurationLabel?: string
+  readonly explanationText?: string
 }
 
 /** Typed patch for one detail column (type changes go through `retypeFormDetailColumn`). */
@@ -711,6 +726,28 @@ export function updateFormFieldProperties(
     current.type !== 'detail'
   )
     return rejected('unsupported_field_type')
+  if (
+    (patch.numberCurrencySymbol !== undefined ||
+      patch.numberThousandsSeparator !== undefined ||
+      patch.numberUppercaseCny !== undefined) &&
+    current.type !== 'number'
+  )
+    return rejected('unsupported_field_type')
+  if (
+    (patch.dateRangeDateType !== undefined ||
+      patch.dateRangeStartLabel !== undefined ||
+      patch.dateRangeEndLabel !== undefined ||
+      patch.dateRangeDurationLabel !== undefined) &&
+    current.type !== 'date_range'
+  )
+    return rejected('unsupported_field_type')
+  if (patch.explanationText !== undefined && current.type !== 'explanation')
+    return rejected('unsupported_field_type')
+  if (
+    patch.dateRangeDateType !== undefined &&
+    !DATE_RANGE_DATE_TYPES.has(patch.dateRangeDateType)
+  )
+    return rejected('unsupported_field_type')
   const next: FieldAuthoringDraft = {
     ...current,
     ...(patch.label !== undefined ? { label: patch.label } : {}),
@@ -729,6 +766,30 @@ export function updateFormFieldProperties(
       : {}),
     ...(patch.maxRowsText !== undefined
       ? { maxRowsText: patch.maxRowsText }
+      : {}),
+    ...(patch.numberCurrencySymbol !== undefined
+      ? { numberCurrencySymbol: patch.numberCurrencySymbol }
+      : {}),
+    ...(patch.numberThousandsSeparator !== undefined
+      ? { numberThousandsSeparator: patch.numberThousandsSeparator }
+      : {}),
+    ...(patch.numberUppercaseCny !== undefined
+      ? { numberUppercaseCny: patch.numberUppercaseCny }
+      : {}),
+    ...(patch.dateRangeDateType !== undefined
+      ? { dateRangeDateType: patch.dateRangeDateType }
+      : {}),
+    ...(patch.dateRangeStartLabel !== undefined
+      ? { dateRangeStartLabel: patch.dateRangeStartLabel }
+      : {}),
+    ...(patch.dateRangeEndLabel !== undefined
+      ? { dateRangeEndLabel: patch.dateRangeEndLabel }
+      : {}),
+    ...(patch.dateRangeDurationLabel !== undefined
+      ? { dateRangeDurationLabel: patch.dateRangeDurationLabel }
+      : {}),
+    ...(patch.explanationText !== undefined
+      ? { explanationText: patch.explanationText }
       : {}),
   }
   const fields = [...draft.fields]
