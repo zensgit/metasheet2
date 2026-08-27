@@ -53,6 +53,11 @@ const {
   normalizeStockPrepApplyProductionPolicy,
   assertProductionPolicyNotExpired,
 } = require('./stock-preparation-production-policy.cjs')
+const {
+  B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+  B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  assertB2aTrialAuthorized,
+} = require('./b2a-trial-registry.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 const TABLE_ACTION_KIND = 'parameterized_table_action'
@@ -859,6 +864,44 @@ async function consumeDryRunToken(tokenStore, token, expected) {
 // So wiring this is threading two existing runtime parameters plus stamping the mapping id into the
 // job for evidence; it is not migration-shaped. It is out of scope here only because it needs its
 // own route-level tests for the stale-artifact case.
+/**
+ * THE B2a SEAM for every stock-preparation path that reads an external source through this module.
+ *
+ * WHERE IT SITS AND WHY. Each caller invokes this AFTER `normalizeActionParameters` (which is where
+ * `projectNo` becomes a validated string) and BEFORE `computeDryRun` (which is the first thing that
+ * touches `sourceAdapter` — `expandPlmProjectBom` is its first statement). Nothing between those two
+ * points performs a source read, so a refusal here means the external system was never contacted.
+ * That is asserted, not asserted-by-reading: the RED suite drives every refusal through a
+ * call-recording fake adapter and requires `read` to have been called exactly zero times.
+ *
+ * It is deliberately NOT inside `computeDryRun`. That function is also the large-BOM planner's
+ * compute path and takes no tenant; putting the gate there would either need a tenant plumbed into a
+ * pure planning function or would silently skip when one was absent — a gate that is easy to omit is
+ * not a gate.
+ *
+ * EVERY INPUT IS SERVER-RESOLVED. `registry` is built once at route registration from server config;
+ * `tenantId` is the route's own resolved tenant (the SAME value `loadTableActionSourceAdapter` scopes
+ * the external-system lookup with, so the gate and the adapter can never be talking about different
+ * tenants); `externalSystemId`/`systemKind` come off the normalized action config; `purpose` is a
+ * frozen module constant per call site. The request body's key allowlist
+ * (`normalizeTableActionBody`) does not contain any of them, and `normalizeActionParameters` accepts
+ * exactly one key (`projectNo`), so none of this is request-supplied.
+ *
+ * Returns `null` when the registry is dormant — callers then add nothing to their evidence, which is
+ * what keeps a dormant deployment byte-identical.
+ */
+function assertB2aTrialForStockPreparationRead({ registry, tenantId, action, parameters, purpose, now }) {
+  return assertB2aTrialAuthorized({
+    registry,
+    tenantId,
+    externalSystemId: action && action.source ? action.source.externalSystemId : null,
+    systemKind: action && action.source ? action.source.kind : null,
+    projectNo: parameters ? parameters.projectNo : null,
+    purpose,
+    now,
+  })
+}
+
 async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
   const expansion = await expandPlmProjectBom({
@@ -956,6 +999,15 @@ function hasHardApplyBlockingRowErrors(expansion) {
 async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
+  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    now: input.now,
+  })
   const runOnlyReview = normalizeRunOnlyConflictPolicyReview(input.conflictPolicyReview)
   const tableScopeReview = input.policyStore
     ? await loadTableScopeConflictPolicies({ action, policyStore: input.policyStore })
@@ -995,16 +1047,24 @@ async function dryRunStockPreparationAction(input = {}) {
     revision: dryRun.revision,
     canApply: dryRun.canApply,
     counts: cloneJson(dryRun.plan.counts),
-    evidence: evidenceForDryRun({
-      action,
-      parameters,
-      expansion: dryRun.expansion,
-      plan: dryRun.plan,
-      revision: dryRun.revision,
-      canApply: dryRun.canApply,
-      conflictPolicyReview: dryRun.conflictPolicyReview,
-      extFieldMapping: dryRun.extFieldMapping,
-    }),
+    evidence: {
+      ...evidenceForDryRun({
+        action,
+        parameters,
+        expansion: dryRun.expansion,
+        plan: dryRun.plan,
+        revision: dryRun.revision,
+        canApply: dryRun.canApply,
+        conflictPolicyReview: dryRun.conflictPolicyReview,
+        extFieldMapping: dryRun.extFieldMapping,
+      }),
+      // CONDITIONAL, and merged HERE rather than inside `evidenceForDryRun`, for two reasons: the
+      // dormant payload then has provably not one extra key (the ext-field-mapping wiring suite
+      // compares route evidence against a recomputed baseline by deepEqual and would catch a stray
+      // one), and `evidenceForDryRun` stays a pure function of the plan, which the large-BOM path
+      // also calls without ever having a tenant.
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+    },
   }
 }
 
@@ -1015,6 +1075,19 @@ async function dryRunStockPreparationAction(input = {}) {
 async function prepareStockPreparationMvpSnapshot(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: this handoff RE-READS the external source (it recomputes a full dry-run), so it is gated on
+  // the same footing as the visible dry-run — before `computeDryRun`, before any adapter call. It
+  // carries its OWN purpose: a registration written for the refresh action does not implicitly
+  // authorize committing that customer's BOM into the MVP snapshot tables, and an entry with
+  // `forbidReuse: true` will say so.
+  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+    now: input.now,
+  })
   const dryRun = await computeDryRun({
     action,
     parameters,
@@ -1047,16 +1120,19 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     parameters,
     expansionResult: dryRun.expansion.rows,
     revision: dryRun.revision,
-    evidence: evidenceForDryRun({
-      action,
-      parameters,
-      expansion: dryRun.expansion,
-      plan: dryRun.plan,
-      revision: dryRun.revision,
-      canApply: dryRun.canApply,
-      conflictPolicyReview: dryRun.conflictPolicyReview,
-      extFieldMapping: dryRun.extFieldMapping,
-    }),
+    evidence: {
+      ...evidenceForDryRun({
+        action,
+        parameters,
+        expansion: dryRun.expansion,
+        plan: dryRun.plan,
+        revision: dryRun.revision,
+        canApply: dryRun.canApply,
+        conflictPolicyReview: dryRun.conflictPolicyReview,
+        extFieldMapping: dryRun.extFieldMapping,
+      }),
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+    },
   }
 }
 
@@ -1164,6 +1240,20 @@ async function applyStockPreparationAction(input = {}) {
     actionId: action.actionId,
   })
   const parameters = normalizeActionParameters(input.parameters)
+  // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
+  // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
+  // outside their registered scope would also lose the artifact that proves what they planned.
+  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+    registry: input.b2aTrialRegistry,
+    tenantId: input.tenantId,
+    action,
+    parameters,
+    // The SAME purpose the dry-run used. Apply re-expands the identical source read; splitting them
+    // into two purposes would mean a deployment could register a customer for planning and then find
+    // apply refused with a valid token in hand, which is a worse failure than the gate prevents.
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    now: input.now,
+  })
   const tokenRecord = await consumeDryRunToken(input.tokenStore, input.dryRunToken, {
     actionId: action.actionId,
     parametersHash: hashJson(parameters),
@@ -1241,6 +1331,7 @@ async function applyStockPreparationAction(input = {}) {
         extFieldMapping: dryRun.extFieldMapping,
       }),
       apply: summarizeApplyResultForEvidence(applyResult),
+      ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
     },
   }
 }
@@ -1267,6 +1358,7 @@ module.exports = {
   normalizeStockPreparationActionConfig,
   publicActionMetadata,
   __internals: {
+    assertB2aTrialForStockPreparationRead,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     buildRevision,

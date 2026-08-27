@@ -330,6 +330,14 @@ const {
   StockPreparationExtFieldMappingConfigError,
   createConfiguredExtFieldMapping,
 } = require('./stock-preparation-ext-field-mapping-config.cjs')
+// B2a trial registration. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set; once set, every
+// gated stock-preparation source read must match a live, in-scope, unexpired entry.
+const {
+  B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+  B2aTrialRegistryError,
+  assertB2aTrialAuthorized,
+  createB2aTrialRegistry,
+} = require('./b2a-trial-registry.cjs')
 // #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
 // structure-only (rows always []), admin-gated, values-free evidence, no external write.
 const {
@@ -495,6 +503,10 @@ function inferHttpStatus(error) {
   // Registration-time only in practice (the mapping is built once, before any request), but mapped
   // anyway so it can never surface as an untyped 500 if a future call site builds one lazily.
   if (error instanceof StockPreparationExtFieldMappingConfigError) return error.status
+  // B2a refusals are 403 and B2a config faults are 500; both already carry `.status`, which
+  // `sendError` prefers. Mapped here anyway so the typed error can never degrade to a generic 500 if
+  // a future path strips the field.
+  if (error instanceof B2aTrialRegistryError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -2699,6 +2711,21 @@ function createHandlers(services, options = {}) {
     config: context && context.config,
     packCatalog: customerPackCatalog,
   })
+  // B2a TRIAL REGISTRATION, built once here for the same reason as the two above: a malformed
+  // registration file must fail visibly at plugin activation, not on a deployer's first dry-run.
+  //
+  // TWO STATES, and the difference between them is the difference between a gate and no gate:
+  //   * `null` (INTEGRATION_CORE_B2A_REGISTRY_PATH unset) -> DORMANT. Every stock-prep route below
+  //     behaves byte-identically to a deployment that never heard of B2a. Real customer usage
+  //     without a registration file is forbidden by the W0 operator checklist, not by this code —
+  //     see the module header for why that trade was made deliberately.
+  //   * a built registry (env set) -> ARMED. Every gated stock-prep source read must match a live
+  //     entry on (tenant, external system, project-in-scope, purpose, effective, not expired) or is
+  //     refused BEFORE `loadTableActionSourceAdapter` gets anywhere near a source row.
+  //
+  // Nothing about it is request-influenced: it is read once off server config and threaded, exactly
+  // like `stockPreparationExtFieldMapping`.
+  const b2aTrialRegistry = createB2aTrialRegistry({ config: context && context.config })
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -3934,6 +3961,13 @@ function createHandlers(services, options = {}) {
         // Configured: the SAME object the apply route passes, so both routes expand the same rows
         // and agree on the dry-run revision. It is never request-influenced.
         extFieldMapping: stockPreparationExtFieldMapping,
+        // B2a. `tenantId` is resolved the SAME way `loadTableActionSourceAdapter` scoped the
+        // external-system lookup a line above (`scopedInput` -> `resolveTenantId`), so the tenant the
+        // gate checks and the tenant whose source is about to be read are one value, not two that
+        // could disagree.
+        b2aTrialRegistry,
+        tenantId: resolveTenantId(req, {}),
+        now: Date.now(),
       }))
     },
 
@@ -3961,6 +3995,11 @@ function createHandlers(services, options = {}) {
         parameters,
         sourceAdapter,
         recordsApi: getMultitableRecordsApi(),
+        // B2a. `tenantId` here is the authenticated-user tenant this route already resolved and
+        // already scoped the adapter load with — never a query/body carrier.
+        b2aTrialRegistry,
+        tenantId,
+        now: Date.now(),
       })
       const targetProjectId = resolveIntegrationStagingProjectId(tenantId, undefined)
       const stableScope = `${tenantId}\n${action.actionId}\n${prepared.parameters.projectNo}`
@@ -4023,6 +4062,11 @@ function createHandlers(services, options = {}) {
         // FOS-4b-3-prod P2: production policy is SERVER-CONFIG-ONLY (dormant by default). Absent → undefined
         // → sandbox gate (canonical rejected). Request body never supplies it.
         productionPolicy: resolveStockPrepApplyProductionPolicy(context.config),
+        // B2a, on the same registry and the same tenant resolution the dry-run route used. Apply
+        // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
+        // right — it does not inherit the dry-run's authorization through the token.
+        b2aTrialRegistry,
+        tenantId: resolveTenantId(req, {}),
         now: Date.now(),
       }))
     },
@@ -4071,6 +4115,25 @@ function createHandlers(services, options = {}) {
         jobId,
       })
       const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
+      // B2a — the FOURTH and last call site of `loadTableActionSourceAdapter`, and the only one
+      // gated at the route rather than inside a table-action wrapper. It has to be: this path does
+      // not go through `dryRunStockPreparationAction`, it drives `runLargeBomBackgroundExpansionJob`
+      // off a STORED job. Both halves of the scope come from that stored artifact — the action
+      // snapshot's source binding and the `projectNo` that `normalizeActionParameters` validated
+      // when the job was created — so the gate reads exactly what the expansion is about to read.
+      //
+      // Gated BEFORE the adapter is loaded, so a refusal on this path costs not even an
+      // external-system registry lookup. Its own purpose: a large-BOM background expansion is a
+      // different consumer from an interactive refresh, and a `forbidReuse` registration says so.
+      assertB2aTrialAuthorized({
+        registry: b2aTrialRegistry,
+        tenantId: routeScope.tenantId,
+        externalSystemId: action.source.externalSystemId,
+        systemKind: action.source.kind,
+        projectNo: queuedJob.parameters && queuedJob.parameters.projectNo,
+        purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+        now: Date.now(),
+      })
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { principal: queuedJob.principal })
       const job = await runLargeBomBackgroundExpansionJob({
         storage: context.storage,
