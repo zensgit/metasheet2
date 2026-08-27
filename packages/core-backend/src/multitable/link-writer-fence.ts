@@ -587,6 +587,11 @@ export type FieldLinkDropFencePlan = {
   participantSheetIds: string[]
 }
 
+export type SheetLinkDeleteFencePlan = {
+  sheetId: string
+  participantSheetIds: string[]
+}
+
 type FieldLinkDropEdgeOwnerRow = {
   field_sheet_id: unknown
   source_sheet_id: unknown
@@ -774,6 +779,100 @@ export async function enterFieldLinkDropFencePlan(
     plan,
     currentConfiguredTargetSheetId,
     lockedField.rows[0],
+  )
+}
+
+async function loadSheetLinkDeleteParticipantSheetIds(
+  query: FenceQuery,
+  sheetId: string,
+): Promise<string[]> {
+  const fields = await query(
+    'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+    [sheetId],
+  )
+  const configuredTargets = buildFieldStates(
+    fields.rows
+      .filter((row): row is { id: string } => Boolean(
+        row && typeof row === 'object' && typeof (row as { id?: unknown }).id === 'string',
+      ))
+      .map((row) => row.id)
+      .sort(),
+    fields.rows,
+  ).targetSheetIds
+  const edges = await query(
+    `SELECT field_owner.sheet_id AS field_sheet_id,
+            source_record.sheet_id AS source_sheet_id,
+            target_record.sheet_id AS target_sheet_id
+       FROM meta_links edge
+       LEFT JOIN meta_fields field_owner ON field_owner.id = edge.field_id
+       LEFT JOIN meta_records source_record ON source_record.id = edge.record_id
+       LEFT JOIN meta_records target_record ON target_record.id = edge.foreign_record_id
+      WHERE field_owner.sheet_id = $1
+         OR source_record.sheet_id = $1
+         OR target_record.sheet_id = $1`,
+    [sheetId],
+  )
+  const participants = new Set<string>([sheetId, ...configuredTargets])
+  for (const raw of edges.rows) {
+    if (!raw || typeof raw !== 'object') continue
+    const row = raw as Record<string, unknown>
+    for (const key of ['field_sheet_id', 'source_sheet_id', 'target_sheet_id'] as const) {
+      const participant = row[key]
+      if (typeof participant === 'string' && participant.length > 0) participants.add(participant)
+    }
+  }
+  return [...participants].sort()
+}
+
+function assertSheetLinkDeleteParticipantsContained(
+  planned: readonly string[],
+  current: readonly string[],
+): void {
+  const fenced = new Set(planned)
+  if (current.some((sheetId) => !fenced.has(sheetId))) {
+    throw new LinkWriterFencePlanChangedError('Sheet link participants changed concurrently; retry the write')
+  }
+}
+
+/** Flag-on preflight for DELETE /sheets/:sheetId. The plan covers the deleted sheet, every configured
+ * target of its link fields, and every live edge owner whose relation disappears through the sheet
+ * cascade or explicit inbound cleanup. Flag off returns before querying. */
+export async function prepareSheetLinkDeleteFencePlan(
+  query: FenceQuery,
+  sheetId: string,
+): Promise<SheetLinkDeleteFencePlan | null> {
+  if (!isWriterFenceEnabled()) return null
+  return {
+    sheetId,
+    participantSheetIds: await loadSheetLinkDeleteParticipantSheetIds(query, sheetId),
+  }
+}
+
+/** Fence every planned participant first, pin the sheet row fail-fast, then reject participant growth.
+ * Shrink is harmless: the transaction may fence a participant whose edge disappeared before entry. */
+export async function enterSheetLinkDeleteFencePlan(
+  query: FenceQuery,
+  plan: SheetLinkDeleteFencePlan,
+): Promise<void> {
+  await fenceWriterEntriesInOrder(query, plan.participantSheetIds)
+  let sheet: Awaited<ReturnType<FenceQuery>>
+  try {
+    sheet = await query(
+      'SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE NOWAIT',
+      [plan.sheetId],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) {
+      throw new LinkWriterFencePlanChangedError('Sheet link participants changed concurrently; retry the write')
+    }
+    throw error
+  }
+  if (sheet.rows.length !== 1) {
+    throw new LinkWriterFencePlanChangedError('Sheet link participants changed concurrently; retry the write')
+  }
+  assertSheetLinkDeleteParticipantsContained(
+    plan.participantSheetIds,
+    await loadSheetLinkDeleteParticipantSheetIds(query, plan.sheetId),
   )
 }
 

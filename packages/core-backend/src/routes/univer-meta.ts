@@ -284,10 +284,12 @@ import {
   enterFieldLinkDropFencePlan,
   enterFieldLinkRestoreFencePlan,
   enterLinkWriterFencePlan,
+  enterSheetLinkDeleteFencePlan,
   LinkWriterFencePlanChangedError,
   prepareFieldLinkDropFencePlan,
   prepareFieldLinkRestoreFencePlan,
   prepareLinkWriterFencePlan,
+  prepareSheetLinkDeleteFencePlan,
   type FieldLinkRestoreFencePlan,
 } from '../multitable/link-writer-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
@@ -13252,11 +13254,18 @@ export function univerMetaRouter(): Router {
       } else if (!capabilities.canManageViews) {
         return sendForbidden(res)
       }
+      const sheetDeleteFencePlan = await prepareSheetLinkDeleteFencePlan(
+        pool.query.bind(pool),
+        sheetId,
+      )
       // Referential integrity: the sheet's records are about to be deleted by the
       // meta_sheets -> meta_records cascade. Source-side links cascade, but `meta_links.foreign_record_id`
       // carries NO FK at all (closeout removed it; the containment guard enforces its absence); remove
       // inbound edges explicitly in the same transaction before their targets vanish.
       await pool.transaction(async ({ query }) => {
+        if (sheetDeleteFencePlan) {
+          await enterSheetLinkDeleteFencePlan(query, sheetDeleteFencePlan)
+        }
         await query('DELETE FROM meta_links WHERE foreign_record_id IN (SELECT id FROM meta_records WHERE sheet_id = $1)', [sheetId])
         return query('DELETE FROM meta_sheets WHERE id = $1', [sheetId])
       })
@@ -13265,6 +13274,8 @@ export function univerMetaRouter(): Router {
       invalidateViewConfigCache()
       return res.json({ ok: true, data: { deleted: sheetId } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
       console.error('[univer-meta] delete sheet failed:', err)
