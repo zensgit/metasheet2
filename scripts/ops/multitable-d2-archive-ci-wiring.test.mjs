@@ -21,6 +21,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
 ]
 const ARCHIVE_REALDB_RE =
   /^tests\/integration\/multitable-recovery-archive-[a-z0-9-]+-realdb\.test\.ts$/

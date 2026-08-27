@@ -1,5 +1,5 @@
 /**
- * Time Machine Phase D2a/D2b only: pure recovery-archive contract and flag shape.
+ * Time Machine Phase D2a/D2b/D2d2-PREP-A: pure recovery-archive contract and flag shape.
  *
  * This module has no production caller. It does not implement archive creation,
  * canonical serialization, MAC/AEAD, storage, database, or prune behavior.
@@ -35,6 +35,48 @@ export const RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS = [
   'snapshot_membership',
   'aggregate_membership',
 ] as const
+
+/**
+ * Closed coverage binding targets, separate from the v1 manifest section list.
+ * `manifest_root` is a coverage/root token only; it is not a manifest section.
+ * `coverage_index` is derived and never a legal binding target.
+ */
+export const RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS = [
+  'schema',
+  'records',
+  'links',
+  'field_value_tombstones',
+  'link_tombstones',
+  'auto_number',
+  'attachments_index',
+  'permission_evidence',
+  'views_config',
+  'manifest_root',
+] as const
+
+const RECOVERY_ARCHIVE_COVERAGE_DATA_SECTION_TARGETS = RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS.filter(
+  (name): name is Exclude<(typeof RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS)[number], 'manifest_root'> =>
+    name !== 'manifest_root',
+)
+
+export const RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS: Readonly<
+  Record<
+    (typeof RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS)[number],
+    readonly (typeof RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS)[number][]
+  >
+> = {
+  record_revision: ['records'],
+  marker: ['records'],
+  section_revision: RECOVERY_ARCHIVE_COVERAGE_DATA_SECTION_TARGETS,
+  config_revision: ['schema', 'views_config'],
+  field_tombstone: ['field_value_tombstones'],
+  link_tombstone: ['link_tombstones'],
+  checkpoint_baseline: ['records'],
+  sealed_operation_endpoint: ['manifest_root'],
+  snapshot_membership: RECOVERY_ARCHIVE_COVERAGE_DATA_SECTION_TARGETS,
+  aggregate_membership: ['manifest_root'],
+}
+
 export const RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_CLASSES = [
   'source',
   'archive_object',
@@ -66,6 +108,7 @@ export type RecoveryArchivePayloadState = (typeof RECOVERY_ARCHIVE_PAYLOAD_STATE
 export type RecoveryArchiveBuildStatus = (typeof RECOVERY_ARCHIVE_BUILD_STATUSES)[number]
 export type RecoveryArchiveCoverageStatus = (typeof RECOVERY_ARCHIVE_COVERAGE_STATUSES)[number]
 export type RecoveryArchiveCoverageSourceKind = (typeof RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS)[number]
+export type RecoveryArchiveCoverageBindingTarget = (typeof RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS)[number]
 export type RecoveryArchiveAttachmentReferenceClass = (typeof RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_CLASSES)[number]
 export type RecoveryArchiveAttachmentReferenceState = (typeof RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_STATES)[number]
 export type RecoveryArchiveAttachmentAvailability = (typeof RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY)[number]
@@ -92,6 +135,8 @@ export type RecoveryArchiveContractErrorCode =
   | 'RECOVERY_ARCHIVE_INVALID_BUILD_STATUS'
   | 'RECOVERY_ARCHIVE_INVALID_COVERAGE_STATUS'
   | 'RECOVERY_ARCHIVE_INVALID_COVERAGE_SOURCE_KIND'
+  | 'RECOVERY_ARCHIVE_INVALID_COVERAGE_BINDING_TARGET'
+  | 'RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING'
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_REFERENCE_CLASS'
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_REFERENCE_STATE'
   | 'RECOVERY_ARCHIVE_INVALID_ATTACHMENT_AVAILABILITY'
@@ -177,6 +222,40 @@ export function isRecoveryArchiveCoverageSourceKind(value: unknown): value is Re
 
 export function assertRecoveryArchiveCoverageSourceKind(value: unknown): asserts value is RecoveryArchiveCoverageSourceKind {
   if (!isRecoveryArchiveCoverageSourceKind(value)) throwContractError('RECOVERY_ARCHIVE_INVALID_COVERAGE_SOURCE_KIND')
+}
+
+export function isRecoveryArchiveCoverageBindingTarget(value: unknown): value is RecoveryArchiveCoverageBindingTarget {
+  return isClosedValue(RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS, value)
+}
+
+export function assertRecoveryArchiveCoverageBindingTarget(
+  value: unknown,
+): asserts value is RecoveryArchiveCoverageBindingTarget {
+  if (!isRecoveryArchiveCoverageBindingTarget(value)) {
+    throwContractError('RECOVERY_ARCHIVE_INVALID_COVERAGE_BINDING_TARGET')
+  }
+}
+
+export function isRecoveryArchiveCoverageKindBinding(
+  sourceKind: unknown,
+  boundSection: unknown,
+): sourceKind is RecoveryArchiveCoverageSourceKind {
+  if (!isRecoveryArchiveCoverageSourceKind(sourceKind) || !isRecoveryArchiveCoverageBindingTarget(boundSection)) {
+    return false
+  }
+  return RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS[sourceKind].some((allowed) => allowed === boundSection)
+}
+
+/** Values-free closed assertion: reports only a contract error code. */
+export function assertRecoveryArchiveCoverageKindBinding(
+  sourceKind: unknown,
+  boundSection: unknown,
+): asserts sourceKind is RecoveryArchiveCoverageSourceKind {
+  assertRecoveryArchiveCoverageSourceKind(sourceKind)
+  assertRecoveryArchiveCoverageBindingTarget(boundSection)
+  if (!RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS[sourceKind].some((allowed) => allowed === boundSection)) {
+    throwContractError('RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING')
+  }
 }
 
 export function isRecoveryArchiveAttachmentReferenceClass(value: unknown): value is RecoveryArchiveAttachmentReferenceClass {

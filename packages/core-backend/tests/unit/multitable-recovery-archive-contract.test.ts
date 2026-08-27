@@ -8,6 +8,8 @@ import {
   assertRecoveryArchiveAttachmentReferenceClass,
   assertRecoveryArchiveAttachmentReferenceState,
   assertRecoveryArchiveBuildStatus,
+  assertRecoveryArchiveCoverageBindingTarget,
+  assertRecoveryArchiveCoverageKindBinding,
   assertRecoveryArchiveCoverageSourceKind,
   assertRecoveryArchiveCoverageStatus,
   assertRecoveryArchivePayloadState,
@@ -19,6 +21,8 @@ import {
   RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_CLASSES,
   RECOVERY_ARCHIVE_ATTACHMENT_REFERENCE_STATES,
   RECOVERY_ARCHIVE_BUILD_STATUSES,
+  RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS,
+  RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
   RECOVERY_ARCHIVE_COVERAGE_STATUSES,
   RECOVERY_ARCHIVE_FORMAT_VERSION,
@@ -122,6 +126,83 @@ describe('Time Machine D2a closed contract values', () => {
       RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
       assertRecoveryArchiveCoverageSourceKind,
       'RECOVERY_ARCHIVE_INVALID_COVERAGE_SOURCE_KIND',
+    )
+  })
+
+  test('coverage binding targets are the nine non-derived data sections plus manifest_root', () => {
+    expect(RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS).toEqual([
+      'schema',
+      'records',
+      'links',
+      'field_value_tombstones',
+      'link_tombstones',
+      'auto_number',
+      'attachments_index',
+      'permission_evidence',
+      'views_config',
+      'manifest_root',
+    ])
+    expect(RECOVERY_ARCHIVE_V1_SECTION_NAMES).not.toContain('manifest_root')
+    expect(RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS).not.toContain('coverage_index')
+    expect(RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS.slice(0, 9)).toEqual(
+      RECOVERY_ARCHIVE_V1_SECTION_NAMES.filter((name) => name !== 'coverage_index'),
+    )
+    assertClosedEnum(
+      RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS,
+      assertRecoveryArchiveCoverageBindingTarget,
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_BINDING_TARGET',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageBindingTarget('coverage_index'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_BINDING_TARGET',
+    )
+  })
+
+  test('kind-to-binding assertion is closed, pairing-exact, and values-free', () => {
+    const dataSections = RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS.filter((name) => name !== 'manifest_root')
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.record_revision).toEqual(['records'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.marker).toEqual(['records'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.checkpoint_baseline).toEqual(['records'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.field_tombstone).toEqual(['field_value_tombstones'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.link_tombstone).toEqual(['link_tombstones'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.sealed_operation_endpoint).toEqual(['manifest_root'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.aggregate_membership).toEqual(['manifest_root'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.config_revision).toEqual(['schema', 'views_config'])
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.section_revision).toEqual(dataSections)
+    expect(RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS.snapshot_membership).toEqual(dataSections)
+
+    expect(() => assertRecoveryArchiveCoverageKindBinding('record_revision', 'records')).not.toThrow()
+    expect(() => assertRecoveryArchiveCoverageKindBinding('aggregate_membership', 'manifest_root')).not.toThrow()
+    expect(() => assertRecoveryArchiveCoverageKindBinding('config_revision', 'schema')).not.toThrow()
+    expect(() => assertRecoveryArchiveCoverageKindBinding('config_revision', 'views_config')).not.toThrow()
+    for (const section of dataSections) {
+      expect(() => assertRecoveryArchiveCoverageKindBinding('section_revision', section)).not.toThrow()
+      expect(() => assertRecoveryArchiveCoverageKindBinding('snapshot_membership', section)).not.toThrow()
+    }
+
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('sealed_operation_endpoint', 'records'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('record_revision', 'manifest_root'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('config_revision', 'permission_evidence'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('section_revision', 'manifest_root'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_KIND_BINDING',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('coverage_index', 'records'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_SOURCE_KIND',
+    )
+    expectContractError(
+      () => assertRecoveryArchiveCoverageKindBinding('record_revision', 'coverage_index'),
+      'RECOVERY_ARCHIVE_INVALID_COVERAGE_BINDING_TARGET',
     )
   })
 

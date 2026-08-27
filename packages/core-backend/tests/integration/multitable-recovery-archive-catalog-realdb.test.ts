@@ -6,10 +6,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
+import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
+  RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
-  RECOVERY_ARCHIVE_V1_SECTION_NAMES,
 } from '../../src/multitable/recovery-archive-contract'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
@@ -84,7 +85,6 @@ const INDEXES = [
 ] as const
 
 const SOURCE_KINDS = RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS
-const BOUND_SECTIONS = RECOVERY_ARCHIVE_V1_SECTION_NAMES.filter((section) => section !== 'coverage_index')
 
 type ArchiveInput = {
   generationId: string
@@ -440,10 +440,24 @@ async function installCatalogIfAbsent(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_staging_objects') IS NOT NULL AS present`,
   )
   if (!cleanupPresent.rows[0]?.present) await stagingCleanupMigration.up(db)
+
+  const bindingPresent = await q(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM pg_catalog.pg_constraint constraint_row
+         JOIN pg_catalog.pg_class relation ON relation.oid = constraint_row.conrelid
+         JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE namespace.nspname = 'public'
+          AND relation.relname = 'meta_recovery_archive_coverage_items'
+          AND constraint_row.conname = 'chk_meta_recovery_archive_coverage_kind_binding'
+     ) AS present`,
+  )
+  if (!bindingPresent.rows[0]?.present) await coverageBindingMigration.up(db)
   schemaIsUp = true
 }
 
 async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
+  await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
 }
@@ -451,6 +465,7 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
 async function upCatalogStack(target: Kysely<unknown>): Promise<void> {
   await archiveCatalogMigration.up(target)
   await stagingCleanupMigration.up(target)
+  await coverageBindingMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -1089,11 +1104,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('coverage accepts exactly the D1 source kinds and non-derived v1 bound sections', async () => {
     const archive = await insertArchive()
     for (const [index, sourceKind] of SOURCE_KINDS.entries()) {
+      const allowed = RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS[sourceKind]
       await insertCoverage(archive.generationId, {
         sourceKind,
         sourceId: `${PREFIX}_kind_${index}`,
         sourceSeq: index % 2 === 0 ? ANCHOR_SEQ : null,
-        boundSection: BOUND_SECTIONS[index % BOUND_SECTIONS.length],
+        boundSection: allowed[index % allowed.length],
       })
     }
 
@@ -1111,7 +1127,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     const unknownKind = await errorOf(
       insertCoverage(archive.generationId, { sourceKind: 'timestamp_range' }),
     )
-    expect(unknownKind.message).toContain('chk_meta_recovery_archive_coverage_source_kind')
+    expect(unknownKind.message).toMatch(
+      /chk_meta_recovery_archive_coverage_(source_kind|kind_binding)/,
+    )
 
     const selfCoverage = await errorOf(
       insertCoverage(archive.generationId, { boundSection: 'coverage_index' }),

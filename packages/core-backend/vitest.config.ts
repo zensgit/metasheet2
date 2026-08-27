@@ -1340,6 +1340,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',

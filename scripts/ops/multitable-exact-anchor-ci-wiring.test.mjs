@@ -300,6 +300,7 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
   'zzzz20260826122000_add_section_causality_substrate',
   'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
+  'zzzz20260827120000_add_recovery_archive_coverage_binding',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
@@ -379,7 +380,7 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 16 Time Machine migrations in causal order',
+    'verifier must exercise the exact 17 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
@@ -425,6 +426,7 @@ function migrationReplayContract(workflow, verifier) {
     'fk_mcr_operation',
     'fk_mfvt_operation',
     'fk_mlt_operation',
+    'chk_meta_recovery_archive_coverage_kind_binding',
   ]) {
     assert.match(verifier, new RegExp(`'${constraint}'`), `verifier must check owned constraint ${constraint}`)
   }
@@ -479,7 +481,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 16 Time Machine migrations/,
+    /exact 17 Time Machine migrations/,
   )
 
   const missingArchiveCleanup = verifier.replace(
@@ -489,7 +491,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveCleanup),
-    /exact 16 Time Machine migrations/,
+    /exact 17 Time Machine migrations/,
   )
 
   const missingSectionCausality = verifier.replace(
@@ -499,7 +501,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingSectionCausality),
-    /exact 16 Time Machine migrations/,
+    /exact 17 Time Machine migrations/,
   )
 
   const missingOperationBinding = verifier.replace(
@@ -509,7 +511,17 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingOperationBinding, verifier, 'operation-binding removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingOperationBinding),
-    /exact 16 Time Machine migrations/,
+    /exact 17 Time Machine migrations/,
+  )
+
+  const missingCoverageBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',\n    module: coverageBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingCoverageBinding, verifier, 'coverage-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingCoverageBinding),
+    /exact 17 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(

@@ -19,6 +19,7 @@ import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120
 import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
 import * as operationBinding from '../../src/db/migrations/zzzz20260826122500_add_operation_binding_to_nonrecord_history'
+import * as coverageBinding from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -125,6 +126,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
     module: operationBinding,
   },
+  {
+    name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',
+    module: coverageBinding,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -218,6 +223,7 @@ const OWNED_CONSTRAINTS = [
   ['meta_config_revisions', 'fk_mcr_operation'],
   ['meta_field_value_tombstones', 'fk_mfvt_operation'],
   ['meta_link_tombstones', 'fk_mlt_operation'],
+  ['meta_recovery_archive_coverage_items', 'chk_meta_recovery_archive_coverage_kind_binding'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
