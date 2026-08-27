@@ -31,7 +31,7 @@ export type RecoveryArchiveObjectStoreErrorCode =
   | 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT'
   | 'RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED'
   | 'RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH'
-  | 'RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_PRODUCTION_REFUSED'
+  | 'RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_ENVIRONMENT_REFUSED'
   | 'RECOVERY_ARCHIVE_OBJECT_STORE_PATH_REFUSED'
 
 /** Values-free object-store failure surface. It deliberately carries no provider cause. */
@@ -64,19 +64,22 @@ export interface RecoveryArchiveObjectPutRequest extends RecoveryArchiveObjectDe
   bytes: Uint8Array
 }
 
-export interface RecoveryArchiveObjectReadRequest extends RecoveryArchiveObjectIdentity {
+export interface RecoveryArchiveObjectExpectedBinding extends RecoveryArchiveObjectIdentity {
   expectedVersion: string
   expectedSha256: string
   expectedSize: string
+  expectedExpiresAt: string
 }
 
-export interface RecoveryArchiveObjectDeleteExpiredRequest extends RecoveryArchiveObjectIdentity {
+export type RecoveryArchiveObjectReadRequest = RecoveryArchiveObjectExpectedBinding
+export type RecoveryArchiveObjectHeadRequest = RecoveryArchiveObjectExpectedBinding
+export type RecoveryArchiveObjectPinRequest = RecoveryArchiveObjectExpectedBinding
+
+export interface RecoveryArchiveObjectDeleteExpiredRequest extends RecoveryArchiveObjectExpectedBinding {
   now: string
 }
 
 export type RecoveryArchiveObjectPutOutcome = 'created' | 'existing'
-export type RecoveryArchiveObjectDeleteExpiredOutcome = 'deleted' | 'retained'
-
 export interface RecoveryArchiveObjectReadResult extends RecoveryArchiveObjectDescriptor {
   bytes: Uint8Array
 }
@@ -86,6 +89,10 @@ export interface RecoveryArchiveObjectPutResult {
   object: RecoveryArchiveObjectDescriptor
 }
 
+export type RecoveryArchiveObjectDeleteExpiredResult =
+  | { outcome: 'deleted'; object: RecoveryArchiveObjectDescriptor }
+  | { outcome: 'retained'; object: RecoveryArchiveObjectDescriptor | null }
+
 /**
  * Closed public boundary used by future D-H2 capture/finalize code. Every method performs a fresh
  * transaction-depth check before it can reach its provider.
@@ -93,24 +100,29 @@ export interface RecoveryArchiveObjectPutResult {
 export interface RecoveryArchiveObjectStore {
   put(request: RecoveryArchiveObjectPutRequest): Promise<RecoveryArchiveObjectPutResult>
   get(request: RecoveryArchiveObjectReadRequest): Promise<RecoveryArchiveObjectReadResult>
-  head(identity: RecoveryArchiveObjectIdentity): Promise<RecoveryArchiveObjectDescriptor | null>
-  deleteExpired(request: RecoveryArchiveObjectDeleteExpiredRequest): Promise<RecoveryArchiveObjectDeleteExpiredOutcome>
-  pin(identity: RecoveryArchiveObjectIdentity): Promise<RecoveryArchiveObjectDescriptor>
+  head(request: RecoveryArchiveObjectHeadRequest): Promise<RecoveryArchiveObjectDescriptor | null>
+  deleteExpired(request: RecoveryArchiveObjectDeleteExpiredRequest): Promise<RecoveryArchiveObjectDeleteExpiredResult>
+  pin(request: RecoveryArchiveObjectPinRequest): Promise<RecoveryArchiveObjectDescriptor>
 }
 
 /**
  * Provider seam. Implementations must use exclusive-create semantics: a repeated put returns
  * `existing` only when the immutable descriptor is exact; it may never replace existing bytes.
+ * Pin and conditional delete are atomic provider operations over the same exact binding. Every
+ * concrete provider needs its own concurrency acceptance gate; process-local wrapper state is not
+ * authority for a multi-process store.
  */
 export interface RecoveryArchiveObjectStoreProvider {
   put(request: RecoveryArchiveObjectPutRequest): Promise<RecoveryArchiveObjectPutResult>
   get(request: RecoveryArchiveObjectReadRequest): Promise<RecoveryArchiveObjectReadResult>
-  head(identity: RecoveryArchiveObjectIdentity): Promise<RecoveryArchiveObjectDescriptor | null>
-  deleteExpired(request: RecoveryArchiveObjectDeleteExpiredRequest): Promise<RecoveryArchiveObjectDeleteExpiredOutcome>
-  pin(identity: RecoveryArchiveObjectIdentity): Promise<RecoveryArchiveObjectDescriptor>
+  head(request: RecoveryArchiveObjectHeadRequest): Promise<RecoveryArchiveObjectDescriptor | null>
+  /** Atomically delete only the exact expected binding when it is both expired and unpinned. */
+  deleteExpired(request: RecoveryArchiveObjectDeleteExpiredRequest): Promise<RecoveryArchiveObjectDeleteExpiredResult>
+  /** Atomically pin only the exact expected binding. A successful pin and delete may never both win. */
+  pin(request: RecoveryArchiveObjectPinRequest): Promise<RecoveryArchiveObjectDescriptor>
 }
 
-export type RecoveryArchiveLocalObjectStoreEnvironment = 'test' | 'staging' | 'production'
+export type RecoveryArchiveLocalObjectStoreEnvironment = 'test'
 
 interface BoundObject {
   version: string
@@ -183,7 +195,7 @@ function readProviderExactRecord(value: unknown, keys: readonly string[]): Recor
   }
 }
 
-function assertIdentity(identity: unknown, result = false): asserts identity is RecoveryArchiveObjectIdentity {
+function parseIdentity(identity: unknown, result = false): RecoveryArchiveObjectIdentity {
   const read = result
     ? readProviderExactRecord(identity, ['generationId', 'objectId'])
     : readExactRecord(identity, ['generationId', 'objectId'])
@@ -195,14 +207,15 @@ function assertIdentity(identity: unknown, result = false): asserts identity is 
   ) {
     fail(result ? 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT' : 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
   }
+  return { generationId: read.generationId, objectId: read.objectId }
 }
 
 function parseDescriptor(value: unknown, result = false): RecoveryArchiveObjectDescriptor {
   const read = result
     ? readProviderExactRecord(value, ['expiresAt', 'generationId', 'objectId', 'pinned', 'sha256', 'size', 'version'])
     : readExactRecord(value, ['expiresAt', 'generationId', 'objectId', 'pinned', 'sha256', 'size', 'version'])
+  const identity = parseIdentity({ generationId: read.generationId, objectId: read.objectId }, result)
   try {
-    assertIdentity({ generationId: read.generationId, objectId: read.objectId }, result)
     assertLowercaseSha256Hex(read.sha256)
     assertCanonicalNonnegativeDecimalString(read.size)
   } catch {
@@ -218,8 +231,7 @@ function parseDescriptor(value: unknown, result = false): RecoveryArchiveObjectD
     fail(result ? 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT' : 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
   }
   return {
-    generationId: read.generationId as string,
-    objectId: read.objectId as string,
+    ...identity,
     version: read.version as string,
     sha256: read.sha256 as string,
     size: read.size as string,
@@ -228,13 +240,9 @@ function parseDescriptor(value: unknown, result = false): RecoveryArchiveObjectD
   }
 }
 
-function assertDescriptor(value: unknown, result = false): asserts value is RecoveryArchiveObjectDescriptor {
-  parseDescriptor(value, result)
-}
-
-function assertPutRequest(value: unknown): asserts value is RecoveryArchiveObjectPutRequest {
+function parsePutRequest(value: unknown): RecoveryArchiveObjectPutRequest {
   const read = readExactRecord(value, ['bytes', 'expiresAt', 'generationId', 'objectId', 'pinned', 'sha256', 'size', 'version'])
-  assertDescriptor({
+  const descriptor = parseDescriptor({
     expiresAt: read.expiresAt,
     generationId: read.generationId,
     objectId: read.objectId,
@@ -246,28 +254,64 @@ function assertPutRequest(value: unknown): asserts value is RecoveryArchiveObjec
   if (!(read.bytes instanceof Uint8Array)) {
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
   }
+  return { ...descriptor, bytes: new Uint8Array(read.bytes) }
 }
 
-function assertReadRequest(value: unknown): asserts value is RecoveryArchiveObjectReadRequest {
-  const read = readExactRecord(value, ['expectedSha256', 'expectedSize', 'expectedVersion', 'generationId', 'objectId'])
-  assertIdentity({ generationId: read.generationId, objectId: read.objectId })
+function parseExpectedBinding(value: unknown): RecoveryArchiveObjectExpectedBinding {
+  const read = readExactRecord(value, [
+    'expectedExpiresAt',
+    'expectedSha256',
+    'expectedSize',
+    'expectedVersion',
+    'generationId',
+    'objectId',
+  ])
+  const identity = parseIdentity({ generationId: read.generationId, objectId: read.objectId })
   try {
     assertLowercaseSha256Hex(read.expectedSha256)
     assertCanonicalNonnegativeDecimalString(read.expectedSize)
   } catch {
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
   }
-  if (typeof read.expectedVersion !== 'string' || read.expectedVersion.trim().length === 0) {
+  if (
+    typeof read.expectedVersion !== 'string' ||
+    read.expectedVersion.trim().length === 0 ||
+    typeof read.expectedExpiresAt !== 'string' ||
+    !isRecoveryArchiveUtcTimestamp(read.expectedExpiresAt)
+  ) {
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
+  }
+  return {
+    ...identity,
+    expectedVersion: read.expectedVersion,
+    expectedSha256: read.expectedSha256 as string,
+    expectedSize: read.expectedSize as string,
+    expectedExpiresAt: read.expectedExpiresAt,
   }
 }
 
-function assertDeleteExpiredRequest(value: unknown): asserts value is RecoveryArchiveObjectDeleteExpiredRequest {
-  const read = readExactRecord(value, ['generationId', 'now', 'objectId'])
-  assertIdentity({ generationId: read.generationId, objectId: read.objectId })
+function parseDeleteExpiredRequest(value: unknown): RecoveryArchiveObjectDeleteExpiredRequest {
+  const read = readExactRecord(value, [
+    'expectedExpiresAt',
+    'expectedSha256',
+    'expectedSize',
+    'expectedVersion',
+    'generationId',
+    'now',
+    'objectId',
+  ])
+  const expected = parseExpectedBinding({
+    generationId: read.generationId,
+    objectId: read.objectId,
+    expectedVersion: read.expectedVersion,
+    expectedSha256: read.expectedSha256,
+    expectedSize: read.expectedSize,
+    expectedExpiresAt: read.expectedExpiresAt,
+  })
   if (typeof read.now !== 'string' || !isRecoveryArchiveUtcTimestamp(read.now)) {
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
   }
+  return { ...expected, now: read.now }
 }
 
 function byteBinding(bytes: Uint8Array): { sha256: string; size: string } {
@@ -288,6 +332,18 @@ function bindingOf(object: RecoveryArchiveObjectDescriptor): BoundObject {
     size: object.size,
     expiresAt: object.expiresAt,
   }
+}
+
+function expectedBindingMatches(
+  expected: RecoveryArchiveObjectExpectedBinding,
+  object: RecoveryArchiveObjectDescriptor,
+): boolean {
+  return (
+    object.version === expected.expectedVersion &&
+    object.sha256 === expected.expectedSha256 &&
+    object.size === expected.expectedSize &&
+    object.expiresAt === expected.expectedExpiresAt
+  )
 }
 
 function assertSameIdentity(left: RecoveryArchiveObjectIdentity, right: RecoveryArchiveObjectIdentity, result = true): void {
@@ -334,52 +390,31 @@ export function createTransactionGuardedRecoveryArchiveObjectStore(
   provider: RecoveryArchiveObjectStoreProvider,
   transactionDepth: RecoveryArchiveTransactionDepthProbe,
 ): RecoveryArchiveObjectStore {
-  const bindings = new Map<string, BoundObject>()
-  const pinned = new Set<string>()
-
-  function remember(object: RecoveryArchiveObjectDescriptor): void {
-    const key = identityKey(object)
-    const binding = bindingOf(object)
-    const previous = bindings.get(key)
-    if (previous && !sameBinding(previous, binding)) {
-      fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
-    }
-    bindings.set(key, binding)
-    if (object.pinned) pinned.add(key)
-  }
-
   return {
     async put(request) {
       assertOutsideTransaction(transactionDepth)
-      assertPutRequest(request)
-      const bytes = new Uint8Array(request.bytes)
-      const actual = byteBinding(bytes)
-      if (actual.sha256 !== request.sha256 || actual.size !== request.size) {
+      const expected = parsePutRequest(request)
+      const actual = byteBinding(expected.bytes)
+      if (actual.sha256 !== expected.sha256 || actual.size !== expected.size) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
-      const key = identityKey(request)
-      const previous = bindings.get(key)
-      if (previous && !sameBinding(previous, bindingOf(request))) {
-        fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
-      }
-      const result = await callProvider(() => provider.put({ ...request, bytes }))
+      const result = await callProvider(() => provider.put({ ...expected, bytes: new Uint8Array(expected.bytes) }))
       const read = readProviderExactRecord(result, ['object', 'outcome'])
       if (read.outcome !== 'created' && read.outcome !== 'existing') {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
       }
       const object = parseDescriptor(read.object, true)
-      assertSameIdentity(request, object)
-      if (!sameBinding(bindingOf(request), bindingOf(object)) || (previous && read.outcome !== 'existing')) {
+      assertSameIdentity(expected, object)
+      if (!sameBinding(bindingOf(expected), bindingOf(object)) || (expected.pinned && !object.pinned)) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
-      remember(object)
       return { outcome: read.outcome, object: copyDescriptor(object) }
     },
 
     async get(request) {
       assertOutsideTransaction(transactionDepth)
-      assertReadRequest(request)
-      const result = await callProvider(() => provider.get(request))
+      const expected = parseExpectedBinding(request)
+      const result = await callProvider(() => provider.get({ ...expected }))
       const read = readProviderExactRecord(result, ['bytes', 'expiresAt', 'generationId', 'objectId', 'pinned', 'sha256', 'size', 'version'])
       const object = parseDescriptor({
         generationId: read.generationId,
@@ -393,69 +428,75 @@ export function createTransactionGuardedRecoveryArchiveObjectStore(
       if (!(read.bytes instanceof Uint8Array)) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
       }
-      assertSameIdentity(request, object)
-      if (object.version !== request.expectedVersion || object.sha256 !== request.expectedSha256 || object.size !== request.expectedSize) {
+      assertSameIdentity(expected, object)
+      if (!expectedBindingMatches(expected, object)) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
       const actual = byteBinding(read.bytes)
       if (actual.sha256 !== object.sha256 || actual.size !== object.size) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
-      remember(object)
       return { ...copyDescriptor(object), bytes: new Uint8Array(read.bytes) }
     },
 
-    async head(identity) {
+    async head(request) {
       assertOutsideTransaction(transactionDepth)
-      assertIdentity(identity)
-      const object = await callProvider(() => provider.head(identity))
+      const expected = parseExpectedBinding(request)
+      const object = await callProvider(() => provider.head({ ...expected }))
       if (object === null) return null
-      assertDescriptor(object, true)
-      assertSameIdentity(identity, object)
-      remember(object)
-      return copyDescriptor(object)
+      const descriptor = parseDescriptor(object, true)
+      assertSameIdentity(expected, descriptor)
+      if (!expectedBindingMatches(expected, descriptor)) {
+        fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+      }
+      return copyDescriptor(descriptor)
     },
 
     async deleteExpired(request) {
       assertOutsideTransaction(transactionDepth)
-      assertDeleteExpiredRequest(request)
-      const key = identityKey(request)
-      if (pinned.has(key)) return 'retained'
-      const outcome = await callProvider(() => provider.deleteExpired(request))
-      if (outcome !== 'deleted' && outcome !== 'retained') {
+      const expected = parseDeleteExpiredRequest(request)
+      const result = await callProvider(() => provider.deleteExpired({ ...expected }))
+      const read = readProviderExactRecord(result, ['object', 'outcome'])
+      if (read.outcome !== 'deleted' && read.outcome !== 'retained') {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
       }
-      if (outcome === 'deleted') bindings.delete(key)
-      return outcome
+      if (read.object === null) {
+        if (read.outcome !== 'retained') fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
+        return { outcome: 'retained', object: null }
+      }
+      const object = parseDescriptor(read.object, true)
+      assertSameIdentity(expected, object)
+      if (!expectedBindingMatches(expected, object) || (read.outcome === 'deleted' && object.pinned)) {
+        fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+      }
+      return { outcome: read.outcome, object: copyDescriptor(object) }
     },
 
-    async pin(identity) {
+    async pin(request) {
       assertOutsideTransaction(transactionDepth)
-      assertIdentity(identity)
-      const object = await callProvider(() => provider.pin(identity))
-      assertDescriptor(object, true)
-      assertSameIdentity(identity, object)
+      const expected = parseExpectedBinding(request)
+      const object = parseDescriptor(await callProvider(() => provider.pin({ ...expected })), true)
+      assertSameIdentity(expected, object)
+      if (!expectedBindingMatches(expected, object)) {
+        fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+      }
       if (!object.pinned) fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
-      remember(object)
       return copyDescriptor(object)
     },
   }
 }
 
-/**
- * Test/staging-only local implementation. It exists to exercise the adapter boundary, never to
- * satisfy production durability requirements. Its in-memory metadata is intentionally not a D3
- * catalog substitute.
- */
+/** Test-only local implementation. Its process-local metadata is not staging or D3 authority. */
 export function createLocalRecoveryArchiveObjectStoreProvider(options: {
   environment: RecoveryArchiveLocalObjectStoreEnvironment
   basePath: string
 }): RecoveryArchiveObjectStoreProvider {
-  if (options.environment === 'production') {
-    fail('RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_PRODUCTION_REFUSED')
+  if ((options as { environment?: unknown }).environment !== 'test') {
+    fail('RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_ENVIRONMENT_REFUSED')
   }
   const basePath = path.resolve(options.basePath)
   const objects = new Map<string, RecoveryArchiveObjectDescriptor>()
+  const locks = new Map<string, Promise<void>>()
 
   function containedPath(identity: RecoveryArchiveObjectIdentity): string {
     try {
@@ -465,61 +506,120 @@ export function createLocalRecoveryArchiveObjectStoreProvider(options: {
     }
   }
 
+  async function withObjectLock<T>(identity: RecoveryArchiveObjectIdentity, work: () => Promise<T>): Promise<T> {
+    const key = identityKey(identity)
+    const previous = locks.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const current = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const tail = previous.then(() => current)
+    locks.set(key, tail)
+    await previous
+    try {
+      return await work()
+    } finally {
+      release()
+      if (locks.get(key) === tail) locks.delete(key)
+    }
+  }
+
+  function requireExpected(
+    request: RecoveryArchiveObjectExpectedBinding,
+    object: RecoveryArchiveObjectDescriptor,
+  ): void {
+    if (!expectedBindingMatches(request, object)) {
+      fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+    }
+  }
+
+  async function readVerifiedBytes(object: RecoveryArchiveObjectDescriptor): Promise<Uint8Array> {
+    const fullPath = containedPath(object)
+    try {
+      const bytes = new Uint8Array(await fs.readFile(fullPath))
+      const actual = byteBinding(bytes)
+      if (actual.sha256 !== object.sha256 || actual.size !== object.size) {
+        fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+      }
+      return bytes
+    } catch (error) {
+      if (error instanceof RecoveryArchiveObjectStoreError) throw error
+      fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
+    }
+  }
+
   return {
     async put(request) {
-      const key = identityKey(request)
-      const existing = objects.get(key)
-      if (existing) {
-        return { outcome: 'existing', object: copyDescriptor(existing) }
-      }
-      const fullPath = containedPath(request)
-      try {
-        await fs.mkdir(path.dirname(fullPath), { recursive: true })
-        await fs.writeFile(fullPath, request.bytes, { flag: 'wx' })
-      } catch {
-        fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
-      }
-      const object = copyDescriptor(request)
-      objects.set(key, object)
-      return { outcome: 'created', object: copyDescriptor(object) }
+      return withObjectLock(request, async () => {
+        const key = identityKey(request)
+        const existing = objects.get(key)
+        if (existing) {
+          await readVerifiedBytes(existing)
+          return { outcome: 'existing', object: copyDescriptor(existing) }
+        }
+        const fullPath = containedPath(request)
+        try {
+          await fs.mkdir(path.dirname(fullPath), { recursive: true })
+          await fs.writeFile(fullPath, request.bytes, { flag: 'wx' })
+        } catch {
+          fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
+        }
+        const object = copyDescriptor(request)
+        objects.set(key, object)
+        return { outcome: 'created', object: copyDescriptor(object) }
+      })
     },
 
     async get(request) {
-      const object = objects.get(identityKey(request))
-      if (!object) fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
-      const fullPath = containedPath(object)
-      try {
-        return { ...copyDescriptor(object), bytes: new Uint8Array(await fs.readFile(fullPath)) }
-      } catch {
-        fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
-      }
+      return withObjectLock(request, async () => {
+        const object = objects.get(identityKey(request))
+        if (!object) fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
+        requireExpected(request, object)
+        return { ...copyDescriptor(object), bytes: await readVerifiedBytes(object) }
+      })
     },
 
-    async head(identity) {
-      const object = objects.get(identityKey(identity))
-      return object ? copyDescriptor(object) : null
+    async head(request) {
+      return withObjectLock(request, async () => {
+        const object = objects.get(identityKey(request))
+        if (!object) return null
+        requireExpected(request, object)
+        await readVerifiedBytes(object)
+        return copyDescriptor(object)
+      })
     },
 
     async deleteExpired(request) {
-      const key = identityKey(request)
-      const object = objects.get(key)
-      if (!object || object.pinned || object.expiresAt > request.now) return 'retained'
-      const fullPath = containedPath(object)
-      try {
-        await fs.unlink(fullPath)
-      } catch {
-        fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
-      }
-      objects.delete(key)
-      return 'deleted'
+      return withObjectLock(request, async () => {
+        const key = identityKey(request)
+        const object = objects.get(key)
+        if (!object) return { outcome: 'retained', object: null }
+        requireExpected(request, object)
+        if (object.pinned || object.expiresAt > request.now) {
+          return { outcome: 'retained', object: copyDescriptor(object) }
+        }
+        await readVerifiedBytes(object)
+        const fullPath = containedPath(object)
+        try {
+          await fs.unlink(fullPath)
+        } catch {
+          fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
+        }
+        objects.delete(key)
+        return { outcome: 'deleted', object: copyDescriptor(object) }
+      })
     },
 
-    async pin(identity) {
-      const object = objects.get(identityKey(identity))
-      if (!object) fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
-      const pinnedObject = { ...object, pinned: true }
-      objects.set(identityKey(identity), pinnedObject)
-      return copyDescriptor(pinnedObject)
+    async pin(request) {
+      return withObjectLock(request, async () => {
+        const object = objects.get(identityKey(request))
+        if (!object) fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
+        requireExpected(request, object)
+        await readVerifiedBytes(object)
+        const pinnedObject = { ...object, pinned: true }
+        objects.set(identityKey(request), pinnedObject)
+        return copyDescriptor(pinnedObject)
+      })
     },
   }
 }

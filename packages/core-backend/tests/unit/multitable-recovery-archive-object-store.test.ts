@@ -9,7 +9,6 @@ import {
   RecoveryArchiveObjectStoreError,
   createLocalRecoveryArchiveObjectStoreProvider,
   createTransactionGuardedRecoveryArchiveObjectStore,
-  type RecoveryArchiveObjectDeleteExpiredOutcome,
   type RecoveryArchiveObjectDeleteExpiredRequest,
   type RecoveryArchiveObjectDescriptor,
   type RecoveryArchiveObjectIdentity,
@@ -65,6 +64,7 @@ function readRequest(request: RecoveryArchiveObjectPutRequest): RecoveryArchiveO
     expectedVersion: request.version,
     expectedSha256: request.sha256,
     expectedSize: request.size,
+    expectedExpiresAt: request.expiresAt,
   }
 }
 
@@ -133,9 +133,9 @@ function createCountingProvider(request: RecoveryArchiveObjectPutRequest): Recov
       calls.push('head')
       return object
     },
-    async deleteExpired(): Promise<RecoveryArchiveObjectDeleteExpiredOutcome> {
+    async deleteExpired() {
       calls.push('deleteExpired')
-      return 'retained'
+      return { outcome: 'retained', object }
     },
     async pin() {
       calls.push('pin')
@@ -152,14 +152,20 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
 
     await expect(store.put(first)).resolves.toMatchObject({ outcome: 'created', object: descriptorFrom(first) })
     await expect(store.put(first)).resolves.toMatchObject({ outcome: 'existing', object: descriptorFrom(first) })
-    await expect(store.head(identity(first.generationId, first.objectId))).resolves.toEqual(descriptorFrom(first))
+    await expect(store.head(readRequest(first))).resolves.toEqual(descriptorFrom(first))
     await expect(store.get(readRequest(first))).resolves.toEqual({ ...descriptorFrom(first), bytes: new Uint8Array(first.bytes) })
-    await expect(store.deleteExpired({ generationId: first.generationId, objectId: first.objectId, now: AFTER_EXPIRY })).resolves.toBe('deleted')
-    await expect(store.head(identity(first.generationId, first.objectId))).resolves.toBeNull()
+    await expect(store.deleteExpired({ ...readRequest(first), now: AFTER_EXPIRY })).resolves.toEqual({
+      outcome: 'deleted',
+      object: descriptorFrom(first),
+    })
+    await expect(store.head(readRequest(first))).resolves.toBeNull()
 
     await expect(store.put(second)).resolves.toMatchObject({ outcome: 'created' })
-    await expect(store.pin(identity(second.generationId, second.objectId))).resolves.toEqual({ ...descriptorFrom(second), pinned: true })
-    await expect(store.deleteExpired({ generationId: second.generationId, objectId: second.objectId, now: AFTER_EXPIRY })).resolves.toBe('retained')
+    await expect(store.pin(readRequest(second))).resolves.toEqual({ ...descriptorFrom(second), pinned: true })
+    await expect(store.deleteExpired({ ...readRequest(second), now: AFTER_EXPIRY })).resolves.toEqual({
+      outcome: 'retained',
+      object: { ...descriptorFrom(second), pinned: true },
+    })
     await expect(store.get(readRequest(second))).resolves.toEqual({ ...descriptorFrom(second), pinned: true, bytes: new Uint8Array(second.bytes) })
   })
 
@@ -231,14 +237,14 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
 
   test('refuses each provider verb before it is reached whenever a transaction is open', async () => {
     const request = putRequest(identity())
-    const objectIdentity = identity(request.generationId, request.objectId)
-    const deleteRequest: RecoveryArchiveObjectDeleteExpiredRequest = { ...objectIdentity, now: AFTER_EXPIRY }
+    const expected = readRequest(request)
+    const deleteRequest: RecoveryArchiveObjectDeleteExpiredRequest = { ...expected, now: AFTER_EXPIRY }
     const calls: Array<(store: ReturnType<typeof createTransactionGuardedRecoveryArchiveObjectStore>) => Promise<unknown>> = [
       (store) => store.put(request),
       (store) => store.get(readRequest(request)),
-      (store) => store.head(objectIdentity),
+      (store) => store.head(expected),
       (store) => store.deleteExpired(deleteRequest),
-      (store) => store.pin(objectIdentity),
+      (store) => store.pin(expected),
     ]
 
     for (const call of calls) {
@@ -253,7 +259,7 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
         throw new Error('unreadable')
       },
     }
-    await expect(asyncCodeOf(() => createTransactionGuardedRecoveryArchiveObjectStore(createCountingProvider(request), unknownDepth).head(request))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_TRANSACTION_DEPTH_UNKNOWN')
+    await expect(asyncCodeOf(() => createTransactionGuardedRecoveryArchiveObjectStore(createCountingProvider(request), unknownDepth).head(readRequest(request)))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_TRANSACTION_DEPTH_UNKNOWN')
   })
 
   test('rejects malformed closed request shapes before a provider receives them', async () => {
@@ -266,9 +272,12 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     expect(provider.calls).toEqual([])
   })
 
-  test('local provider is explicit test/staging only and refuses a path escape through resolveWithinBase', async () => {
-    expect(codeOf(() => createLocalRecoveryArchiveObjectStoreProvider({ environment: 'production', basePath: os.tmpdir() }))).toBe(
-      'RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_PRODUCTION_REFUSED',
+  test('local provider is explicit test-only and refuses a path escape through resolveWithinBase', async () => {
+    expect(codeOf(() => createLocalRecoveryArchiveObjectStoreProvider({
+      environment: 'production' as 'test',
+      basePath: os.tmpdir(),
+    }))).toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_ENVIRONMENT_REFUSED',
     )
 
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2e-path-'))
@@ -295,5 +304,104 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
 
     await expect(asyncCodeOf(() => store.get(readRequest(request)))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+  })
+
+  test('snapshots caller bindings before a provider can mutate its request', async () => {
+    const request = putRequest(identity())
+    const foreign = putRequest(identity(), { bytes: Buffer.from('foreign-generation', 'utf8'), pinned: true })
+
+    const provider = createCountingProvider(request)
+    provider.get = async (providerRequest) => {
+      Object.assign(providerRequest, readRequest(foreign))
+      return { ...descriptorFrom(foreign), bytes: new Uint8Array(foreign.bytes) }
+    }
+    provider.head = async (providerRequest) => {
+      Object.assign(providerRequest, readRequest(foreign))
+      return descriptorFrom(foreign)
+    }
+    provider.pin = async (providerRequest) => {
+      Object.assign(providerRequest, readRequest(foreign))
+      return descriptorFrom(foreign)
+    }
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+
+    await expect(asyncCodeOf(() => store.get(readRequest(request)))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+    )
+    await expect(asyncCodeOf(() => store.head(readRequest(request)))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+    )
+    await expect(asyncCodeOf(() => store.pin(readRequest(request)))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+    )
+  })
+
+  test('binds expiry across stateless read, pin, and destructive provider verbs', async () => {
+    const request = putRequest(identity())
+    const drifted = { ...descriptorFrom(request), expiresAt: '2028-08-28T00:00:00.000Z' }
+    const provider = createCountingProvider(request)
+    provider.get = async () => ({ ...drifted, bytes: new Uint8Array(request.bytes) })
+    provider.head = async () => drifted
+    provider.pin = async () => ({ ...drifted, pinned: true })
+    provider.deleteExpired = async () => ({ outcome: 'deleted', object: drifted })
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+    const expected = readRequest(request)
+
+    for (const call of [
+      () => store.get(expected),
+      () => store.head(expected),
+      () => store.pin(expected),
+      () => store.deleteExpired({ ...expected, now: AFTER_EXPIRY }),
+    ]) {
+      await expect(asyncCodeOf(call)).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+    }
+  })
+
+  test('requires a requested put pin and serializes local pin before conditional deletion', async () => {
+    const pinnedRequest = putRequest(identity(), { pinned: true })
+    const unpinnedProvider = createCountingProvider(pinnedRequest)
+    unpinnedProvider.put = async () => ({
+      outcome: 'created',
+      object: { ...descriptorFrom(pinnedRequest), pinned: false },
+    })
+    const guarded = createTransactionGuardedRecoveryArchiveObjectStore(unpinnedProvider, depthProbe(0))
+    await expect(asyncCodeOf(() => guarded.put(pinnedRequest))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH',
+    )
+
+    const store = await localStore()
+    const expiring = putRequest(identity(), { expiresAt: BEFORE_EXPIRY })
+    await store.put(expiring)
+    const expected = readRequest(expiring)
+    const pinPromise = store.pin(expected)
+    const deletePromise = store.deleteExpired({ ...expected, now: AFTER_EXPIRY })
+    const [pinResult, deleteResult] = await Promise.all([pinPromise, deletePromise])
+    expect(pinResult.pinned).toBe(true)
+    expect(deleteResult).toEqual({ outcome: 'retained', object: { ...descriptorFrom(expiring), pinned: true } })
+  })
+
+  test('local test provider verifies bytes on head and rejects every non-test runtime environment', async () => {
+    for (const environment of ['staging', 'production', 'prod', 'development', '', undefined]) {
+      expect(codeOf(() => createLocalRecoveryArchiveObjectStoreProvider({
+        environment: environment as 'test',
+        basePath: os.tmpdir(),
+      }))).toBe('RECOVERY_ARCHIVE_OBJECT_STORE_LOCAL_ENVIRONMENT_REFUSED')
+    }
+
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2e-head-'))
+    temporaryRoots.push(root)
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(
+      createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root }),
+      depthProbe(0),
+    )
+    const request = putRequest(identity())
+    await store.put(request)
+    await fs.writeFile(
+      path.join(root, 'generations', request.generationId, request.objectId),
+      Buffer.from('tampered-on-disk', 'utf8'),
+    )
+    await expect(asyncCodeOf(() => store.head(readRequest(request)))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED',
+    )
   })
 })
