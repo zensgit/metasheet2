@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { pathToFileURL } from 'node:url'
 /**
  * T8-2 Reset-to-T — staging acceptance harness (one-click error-code + behavior evidence).
  *
@@ -547,6 +548,6 @@ async function main() {
 // Guard the entrypoint (same pattern as scripts/ops/multitable-recovery-schema-containment.mjs): importing
 // this module for its exported pure body-builders (unit tests) must never execute the harness or exit the
 // host process.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => { console.error('\nFATAL (setup or harness error):', e.message); process.exitCode = 2 })
 }
