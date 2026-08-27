@@ -246,6 +246,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       parent_owner_id text;
       parent_owner_fence bigint;
       parent_lease_expires_at timestamptz;
+      resolved_key_id text;
+      parent_key_id text;
       authority_changed boolean;
     BEGIN
       IF TG_OP = 'DELETE' THEN
@@ -303,7 +305,17 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            OR length(btrim(NEW.source_owner_id)) = 0
            OR NEW.source_owner_fence IS NULL
            OR NEW.source_owner_fence < 1
-           OR NEW.source_lease_until IS NULL THEN
+           OR NEW.source_lease_until IS NULL
+           OR (NEW.immutable_version IS NOT NULL AND length(btrim(NEW.immutable_version)) = 0)
+           OR (NEW.content_sha256 IS NOT NULL AND NEW.content_sha256 !~ '^[0-9a-f]{64}$')
+           OR (NEW.content_size_bytes IS NOT NULL AND NEW.content_size_bytes < 0)
+           OR (
+             NEW.availability = 'available' AND (
+               NEW.immutable_version IS NULL OR
+               NEW.content_sha256 IS NULL OR
+               NEW.content_size_bytes IS NULL
+             )
+           ) THEN
           RAISE EXCEPTION USING
             ERRCODE = '23514',
             MESSAGE = 'recovery_archive_source_pin_shape_invalid';
@@ -357,9 +369,36 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         NEW.source_lease_until IS DISTINCT FROM OLD.source_lease_until
       );
 
+      IF NEW.reference_class IN ('source', 'archive_object')
+         AND (authority_changed OR NEW.reference_class = 'archive_object') THEN
+        SELECT archive.key_id
+          INTO resolved_key_id
+          FROM public.meta_recovery_archives archive
+         WHERE archive.generation_id = NEW.generation_id;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_source_pin_parent_invalid';
+        END IF;
+
+        PERFORM 1
+          FROM public.meta_recovery_archive_keys key_row
+         WHERE key_row.key_id = resolved_key_id
+           AND key_row.state = 'active'
+         FOR UPDATE;
+
+        IF NOT FOUND THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '55000',
+            MESSAGE = 'recovery_archive_source_pin_key_unavailable';
+        END IF;
+      END IF;
+
       SELECT archive.state,
              archive.build_status,
              archive.coverage_status,
+             archive.key_id,
              archive.owner_kind,
              archive.owner_id,
              archive.owner_fence,
@@ -367,6 +406,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         INTO parent_state,
              parent_build_status,
              parent_coverage_status,
+             parent_key_id,
              parent_owner_kind,
              parent_owner_id,
              parent_owner_fence,
@@ -379,6 +419,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         RAISE EXCEPTION USING
           ERRCODE = '55000',
           MESSAGE = 'recovery_archive_source_pin_parent_invalid';
+      END IF;
+
+      IF resolved_key_id IS NOT NULL AND parent_key_id IS DISTINCT FROM resolved_key_id THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_source_pin_key_unavailable';
       END IF;
 
       IF NEW.reference_class = 'source' AND authority_changed THEN

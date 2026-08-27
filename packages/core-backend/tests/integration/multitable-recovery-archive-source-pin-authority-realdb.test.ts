@@ -232,6 +232,27 @@ async function waitForLeaseExpiry(leaseUntil: string): Promise<void> {
   throw new Error('recovery_archive_source_pin_lease_expiry_timeout')
 }
 
+async function backendPid(client: PoolClient): Promise<number> {
+  const result = await client.query('SELECT pg_backend_pid() AS pid')
+  return Number(result.rows[0]?.pid)
+}
+
+async function waitForBlockedBy(waiterPid: number, blockerPid: number): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    const result = await q(
+      `SELECT wait_event_type = 'Lock'
+              AND $2::int = ANY(pg_catalog.pg_blocking_pids($1::int)) AS blocked
+         FROM pg_catalog.pg_stat_activity
+        WHERE pid=$1::int`,
+      [waiterPid, blockerPid],
+    )
+    if (result.rows[0]?.blocked === true) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error('recovery_archive_source_pin_lock_order_probe_timeout')
+}
+
 async function authorityFingerprint(): Promise<string> {
   const result = await q(
     `SELECT pg_catalog.md5(string_agg(component, E'\n' ORDER BY component)) AS fingerprint
@@ -513,6 +534,131 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     }
   })
 
+  test('raw source-pin admission and verification both close when the exact key retires', async () => {
+    const generationId = await insertArchive()
+    const mutableAttachmentId = `${PREFIX}_raw_retiring_verify`
+    await q(
+      `INSERT INTO meta_recovery_archive_attachment_refs (
+         generation_id, attachment_id, reference_class, reference_state, availability,
+         source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
+       ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 1, $5::timestamptz)`,
+      [generationId, mutableAttachmentId, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+    )
+
+    try {
+      await q(
+        `UPDATE meta_recovery_archive_keys
+            SET state='retiring', row_version=row_version + 1
+          WHERE key_id=$1`,
+        [KEY_ID],
+      )
+
+      const insertRefusal = await errorOf(q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
+           generation_id, attachment_id, reference_class, reference_state, availability,
+           source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
+         ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 1, $5::timestamptz)`,
+        [generationId, `${PREFIX}_raw_retiring_insert`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+      ))
+      expect(insertRefusal.message).toBe('recovery_archive_source_pin_key_unavailable')
+
+      const verifyRefusal = await errorOf(q(
+        `UPDATE meta_recovery_archive_attachment_refs
+            SET availability='available', immutable_version=$3,
+                content_sha256=$4, content_size_bytes=$5::bigint
+          WHERE generation_id=$1::uuid AND attachment_id=$2
+            AND reference_class='source' AND reference_state='building'`,
+        [generationId, mutableAttachmentId, SOURCE_VERSION, CONTENT_HASH, CONTENT_SIZE],
+      ))
+      expect(verifyRefusal.message).toBe('recovery_archive_source_pin_key_unavailable')
+      expectValuesFree(insertRefusal, [generationId, OWNER_ID, PREFIX])
+      expectValuesFree(verifyRefusal, [generationId, mutableAttachmentId, OWNER_ID])
+
+      const posture = await q(
+        `SELECT attachment_id, availability
+           FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid
+          ORDER BY attachment_id`,
+        [generationId],
+      )
+      expect(posture.rows).toEqual([
+        { attachment_id: mutableAttachmentId, availability: 'mutable' },
+      ])
+    } finally {
+      await transaction(async ({ query }) => {
+        await query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+        await query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+        await query(
+          `UPDATE meta_recovery_archive_keys SET state='active', row_version=1 WHERE key_id=$1`,
+          [KEY_ID],
+        )
+        await query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+      })
+    }
+  })
+
+  test.each(['helper', 'raw'] as const)(
+    '%s source-pin admission locks the active key before waiting for the generation',
+    async (path) => {
+      const generationId = await insertArchive()
+      const attachmentId = `${PREFIX}_${path}_key_before_generation`
+      const generationClient = await pool.connect()
+      const pinClient = await pool.connect()
+      const retirementClient = await pool.connect()
+      let pinPromise: Promise<unknown> | undefined
+      try {
+        await generationClient.query('BEGIN')
+        await generationClient.query(
+          `SELECT 1 FROM meta_recovery_archives WHERE generation_id=$1::uuid FOR UPDATE`,
+          [generationId],
+        )
+        const generationPid = await backendPid(generationClient)
+
+        await pinClient.query('BEGIN')
+        const pinPid = await backendPid(pinClient)
+        pinPromise = path === 'helper'
+          ? claimRecoveryArchiveSourcePinIntent(
+            (text, values) => pinClient.query(text, values),
+            owner(generationId, attachmentId),
+          )
+          : pinClient.query(
+            `INSERT INTO meta_recovery_archive_attachment_refs (
+               generation_id, attachment_id, reference_class, reference_state, availability,
+               source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
+             ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 1, $5::timestamptz)`,
+            [generationId, attachmentId, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+          )
+        await waitForBlockedBy(pinPid, generationPid)
+
+        await retirementClient.query('BEGIN')
+        await retirementClient.query(`SET LOCAL lock_timeout = '100ms'`)
+        const retirement = await errorOf(retirementClient.query(
+          `UPDATE meta_recovery_archive_keys
+              SET state='retiring', row_version=row_version + 1
+            WHERE key_id=$1`,
+          [KEY_ID],
+        ))
+        expect(retirement.code).toBe('55P03')
+        await retirementClient.query('ROLLBACK')
+
+        await generationClient.query('COMMIT')
+        await pinPromise
+        await pinClient.query('COMMIT')
+      } catch (error) {
+        await retirementClient.query('ROLLBACK').catch(() => {})
+        await generationClient.query('ROLLBACK').catch(() => {})
+        await pinClient.query('ROLLBACK').catch(() => {})
+        if (pinPromise) await pinPromise.catch(() => {})
+        throw error
+      } finally {
+        retirementClient.release()
+        pinClient.release()
+        generationClient.release()
+      }
+    },
+    15_000,
+  )
+
   test('helper normalizes duplicate and malformed claims without echoing values', async () => {
     const generationId = await insertArchive()
     const attachmentId = `${PREFIX}_duplicate`
@@ -607,6 +753,8 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       [generationId, attachmentId, CONTENT_HASH],
     ))
     expect(refusal.code).toBe('23514')
+    expect(refusal.message).toBe('recovery_archive_source_pin_shape_invalid')
+    expectValuesFree(refusal, [generationId, attachmentId, CONTENT_HASH, OWNER_ID])
 
     await claimIntent(generationId, `${attachmentId}_helper`)
     const invalidHash = await errorOf(transaction(({ query }) => verifyRecoveryArchiveSourcePin(query, {
