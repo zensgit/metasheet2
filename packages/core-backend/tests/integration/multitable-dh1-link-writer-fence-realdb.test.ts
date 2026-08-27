@@ -28,7 +28,11 @@ import {
   RecordWriteService,
   type RecordPatchInput as WriteRecordPatchInput,
 } from '../../src/multitable/record-write-service'
-import { deleteRecord as deletePluginRecord } from '../../src/multitable/records'
+import {
+  createRecord as createPluginRecord,
+  deleteRecord as deletePluginRecord,
+  patchRecord as patchPluginRecord,
+} from '../../src/multitable/records'
 import { deriveCapabilities, type AccessInfo } from '../../src/multitable/sheet-capabilities'
 import { createRecordWriteHelpers, univerMetaRouter } from '../../src/routes/univer-meta'
 
@@ -43,6 +47,7 @@ const DECOY = `sheet_dh1_lwf_d_${TS}`
 const F_NOTE = `fld_dh1_lwf_note_${TS}`
 const F_LINK = `fld_dh1_lwf_link_${TS}`
 const F_BACK = `fld_dh1_lwf_back_${TS}`
+const VIEW = `view_dh1_lwf_${TS}`
 const R_SOURCE = `rec_dh1_lwf_source_${TS}`
 const R_TARGET = `rec_dh1_lwf_target_${TS}`
 const R_DECOY = `rec_dh1_lwf_decoy_${TS}`
@@ -201,6 +206,7 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_NOTE, SOURCE, 'Note', 'string', '{}', 1])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_LINK, SOURCE, 'Related', 'link', JSON.stringify({ foreignSheetId: TARGET }), 2])
     await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [F_BACK, TARGET, 'Back', 'link', JSON.stringify({ foreignSheetId: SOURCE }), 1])
+    await q('INSERT INTO meta_views (id, sheet_id, name, type, config) VALUES ($1,$2,$3,$4,$5::jsonb)', [VIEW, SOURCE, 'D-H1 form', 'form', '{}'])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R_SOURCE, SOURCE, JSON.stringify({ [F_NOTE]: 'before', [F_LINK]: [] }), ACTOR])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R_TARGET, TARGET, '{}', ACTOR])
     await q('INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)', [R_DECOY, DECOY, '{}', ACTOR])
@@ -234,6 +240,7 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
     await q('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
     await q('DELETE FROM meta_record_history_operations WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
+    await q('DELETE FROM meta_views WHERE id = $1', [VIEW]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
@@ -293,6 +300,115 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
     })
     createdRecordIds.add(result.recordId)
     expect(await edgeCount(result.recordId)).toBe(1)
+  })
+
+  test('flag OFF keeps plugin create query-inert before its legacy source fence', async () => {
+    delete process.env[FLAG]
+    const observedSql: string[] = []
+    const result = await poolManager.get().transaction(async ({ query }) => createPluginRecord({
+      query: (async (sql: string, params?: unknown[]) => {
+        observedSql.push(sql)
+        return query(sql, params)
+      }) as never,
+      sheetId: SOURCE,
+      data: { [F_LINK]: [R_TARGET] },
+    }))
+    createdRecordIds.add(result.id)
+    expect(observedSql[0]).toMatch(/pg_advisory_xact_lock/)
+    expect(observedSql.some((sql) => /meta_fields[\s\S]+id = ANY/i.test(sql))).toBe(false)
+    expect(await edgeCount(result.id)).toBe(1)
+  })
+
+  test('flag ON keeps plugin and public-form link writers usable when only a decoy is blocked', async () => {
+    process.env[FLAG] = 'true'
+    await setBlock(DECOY, 'applying')
+
+    const pluginCreated = await poolManager.get().transaction(async ({ query }) => createPluginRecord({
+      query: query as never,
+      sheetId: SOURCE,
+      data: { [F_LINK]: [R_TARGET] },
+    }))
+    createdRecordIds.add(pluginCreated.id)
+    expect(await edgeCount(pluginCreated.id)).toBe(1)
+
+    const pluginPatched = await poolManager.get().transaction(async ({ query }) => patchPluginRecord({
+      query: query as never,
+      sheetId: SOURCE,
+      recordId: R_SOURCE,
+      changes: { [F_LINK]: [R_TARGET] },
+    }))
+    expect(pluginPatched).toMatchObject({ version: 2, data: { [F_LINK]: [R_TARGET] } })
+    expect(await edgeCount(R_SOURCE)).toBe(1)
+
+    const formCreate = await request(buildApp())
+      .post(`/api/multitable/views/${VIEW}/submit`)
+      .send({ data: { [F_LINK]: [R_TARGET] } })
+    expect(formCreate.status).toBe(200)
+    expect(formCreate.body.data.mode).toBe('create')
+    const formRecordId = String(formCreate.body.data.record.id)
+    createdRecordIds.add(formRecordId)
+    expect(await edgeCount(formRecordId)).toBe(1)
+
+    const formEdit = await request(buildApp())
+      .post(`/api/multitable/views/${VIEW}/submit`)
+      .send({
+        recordId: formRecordId,
+        expectedVersion: 1,
+        data: { [F_LINK]: [] },
+      })
+    expect(formEdit.status).toBe(200)
+    expect(formEdit.body.data).toMatchObject({
+      mode: 'update',
+      record: { id: formRecordId, version: 2 },
+    })
+    expect(await edgeCount(formRecordId)).toBe(0)
+  })
+
+  test('plugin create and patch both refuse a blocked target before record or edge mutation', async () => {
+    process.env[FLAG] = 'true'
+    await setBlock(TARGET, 'applying')
+    const before = Number(((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [SOURCE])).rows[0] as { n: number }).n)
+
+    await expect(poolManager.get().transaction(async ({ query }) => createPluginRecord({
+      query: query as never,
+      sheetId: SOURCE,
+      data: { [F_LINK]: [R_TARGET] },
+    }))).rejects.toBeInstanceOf(SheetWriterBlockedError)
+    await expect(poolManager.get().transaction(async ({ query }) => patchPluginRecord({
+      query: query as never,
+      sheetId: SOURCE,
+      recordId: R_SOURCE,
+      changes: { [F_LINK]: [R_TARGET] },
+    }))).rejects.toBeInstanceOf(SheetWriterBlockedError)
+
+    expect(Number(((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [SOURCE])).rows[0] as { n: number }).n)).toBe(before)
+    expect(await readSource()).toMatchObject({ version: 1, data: { [F_LINK]: [] } })
+    expect(await edgeCount(R_SOURCE)).toBe(0)
+  })
+
+  test('public form create and edit both refuse a blocked target with the shared values-free 409', async () => {
+    process.env[FLAG] = 'true'
+    await setBlock(TARGET, 'applying')
+
+    for (const body of [
+      { data: { [F_LINK]: [R_TARGET] } },
+      { recordId: R_SOURCE, expectedVersion: 1, data: { [F_LINK]: [R_TARGET] } },
+    ]) {
+      const response = await request(buildApp())
+        .post(`/api/multitable/views/${VIEW}/submit`)
+        .send(body)
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'RECOVERY_IN_PROGRESS',
+          message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+        },
+      })
+    }
+
+    expect(await readSource()).toMatchObject({ version: 1, data: { [F_LINK]: [] } })
+    expect(await edgeCount(R_SOURCE)).toBe(0)
   })
 
   test('REST patch and bulk patch both refuse a blocked target before record or edge mutation', async () => {
@@ -436,6 +552,70 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
 
       await expect(patchPromise).rejects.toBeInstanceOf(RecordPatchFieldValidationError)
       expect(await readSource()).toMatchObject({ version: 1, data: { [F_LINK]: [] } })
+      expect(await edgeCount(R_SOURCE)).toBe(0)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('plugin patch rechecks target existence after a concurrent target delete releases its fence', async () => {
+    process.env[FLAG] = 'true'
+    const blocker = await connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TARGET)])
+      await blocker.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])
+
+      const patchPromise = poolManager.get().transaction(async ({ query }) => patchPluginRecord({
+        query: query as never,
+        sheetId: SOURCE,
+        recordId: R_SOURCE,
+        changes: { [F_LINK]: [R_TARGET] },
+      }))
+      await waitForAdvisoryWaiter(blockerPid)
+      await blocker.query('COMMIT')
+
+      const error = await patchPromise.catch((caught: unknown) => caught)
+      expect(error).toBeInstanceOf(LinkWriterFencePlanChangedError)
+      expect((error as Error).message).toBe('Linked records changed concurrently; retry the write')
+      expect(JSON.stringify({ message: (error as Error).message })).not.toContain(R_TARGET)
+      expect(await readSource()).toMatchObject({ version: 1, data: { [F_LINK]: [] } })
+      expect(await edgeCount(R_SOURCE)).toBe(0)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('public form rechecks target existence after a concurrent delete and returns values-free 409', async () => {
+    process.env[FLAG] = 'true'
+    const blocker = await connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TARGET)])
+      await blocker.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/views/${VIEW}/submit`)
+        .send({ data: { [F_LINK]: [R_TARGET] } })
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'LINK_WRITER_FENCE_PLAN_CHANGED',
+          message: 'Linked records changed concurrently; retry the write',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(R_TARGET)
+      expect(Number(((await q('SELECT count(*)::int AS n FROM meta_records WHERE sheet_id = $1', [SOURCE])).rows[0] as { n: number }).n)).toBe(1)
       expect(await edgeCount(R_SOURCE)).toBe(0)
     } finally {
       await blocker.query('ROLLBACK').catch(() => {})

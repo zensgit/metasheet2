@@ -32,7 +32,11 @@ import {
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
 import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
   enterRecordLinkDeleteFencePlan,
+  LinkWriterFencePlanChangedError,
+  prepareLinkWriterFencePlan,
   prepareRecordLinkDeleteFencePlan,
   type RecordLinkDeleteFencePlan,
 } from './link-writer-fence'
@@ -317,6 +321,7 @@ async function validateLinkIds(
   fieldId: string,
   config: LinkFieldConfig,
   ids: string[],
+  fencePlanActive = false,
 ): Promise<void> {
   if (config.limitSingleRecord && ids.length > 1) {
     throw new MultitableRecordValidationError(`Only one linked record is allowed: ${fieldId}`)
@@ -334,6 +339,9 @@ async function validateLinkIds(
   const found = new Set((exists.rows as any[]).map((row: any) => String(row.id)))
   const missing = ids.filter((id) => !found.has(id))
   if (missing.length > 0) {
+    if (fencePlanActive) {
+      throw new LinkWriterFencePlanChangedError('Linked records changed concurrently; retry the write')
+    }
     throw new MultitableRecordValidationError(
       `Linked record(s) not found in sheet ${config.foreignSheetId}: ${missing.join(', ')}`,
     )
@@ -344,6 +352,7 @@ async function buildNormalizedPatch(
   query: MultitableRecordsQueryFn,
   fields: LoadedMultitableField[],
   data: Record<string, unknown>,
+  fencePlanActive = false,
 ): Promise<{
   patch: Record<string, unknown>
   linkUpdates: Map<string, string[]>
@@ -373,7 +382,7 @@ async function buildNormalizedPatch(
         )
       }
       const ids = normalizeLinkIds(rawValue)
-      await validateLinkIds(query, fieldId, config, ids)
+      await validateLinkIds(query, fieldId, config, ids, fencePlanActive)
       patch[fieldId] = ids
       linkUpdates.set(fieldId, ids)
       continue
@@ -505,13 +514,30 @@ export async function patchRecord(
   input: PatchMultitableRecordInput,
 ): Promise<LoadedMultitableRecord> {
   const query = input.query
-  // W0-1 L4 (canonical fence): the plugin-SDK patch runs its OWN UPDATE (not via RecordService) inside the
-  // SDK-provided transaction — fence + durable-block check first. No-op & byte-identical when
-  // MULTITABLE_ENABLE_WRITER_FENCE is off.
-  await fenceWriterEntry(query, input.sheetId)
+  const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+    query,
+    input.sheetId,
+    Object.keys(input.changes),
+  )
+  // Flag ON derives every link target before taking any lock, then enters the complete sorted fence set.
+  // Flag OFF makes the preflight query-inert and preserves the existing no-op fenceWriterEntry path.
+  if (linkWriterFencePlan) {
+    await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+  } else {
+    await fenceWriterEntry(query, input.sheetId)
+  }
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
+  if (linkWriterFencePlan) {
+    assertLinkWriterFencePlanMatchesFieldGuards(
+      linkWriterFencePlan,
+      new Map(fields.map((field) => [field.id, {
+        type: field.type,
+        link: readLinkFieldConfig(field),
+      }])),
+    )
+  }
 
   const existing = await getRecord({
     query,
@@ -521,7 +547,12 @@ export async function patchRecord(
   // Record-lock guard (rank-8 review M1; decision d/e). The plugin SDK carries no per-record actor
   // identity → `ensureRecordNotLocked(null, …)` makes a locked record hard read-only to plugins.
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
-  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.changes)
+  const { patch, linkUpdates } = await buildNormalizedPatch(
+    query,
+    fields,
+    input.changes,
+    linkWriterFencePlan !== null,
+  )
   const nextData = {
     ...existing.data,
     ...patch,
@@ -612,24 +643,39 @@ export async function createRecord(
   input: CreateMultitableRecordInput,
 ): Promise<CreatedMultitableRecord> {
   const query = input.query
-  // W0-1 L4cov (close the plugin-create PARTIAL gap — L4 map's records.ts:592). The sheet-write fence is
-  // acquired UNCONDITIONALLY: it predates L4 as the auto-number allocation-serialization lock (it serialises
-  // record-create against CREATE-FIELD auto-number backfill — see auto-number-service.ts), so gating it behind
-  // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
-  // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
-  // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
-  // if a recovery/archive owner holds a durable `{fencing,applying,paused_retryable,archiving}` block on this
-  // sheet, refuse with
-  // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
-  // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
-  // preserve the pre-existing unconditional fence.
-  await acquireAutoNumberSheetWriteLock(query, input.sheetId)
-  if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
+  const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+    query,
+    input.sheetId,
+    Object.keys(input.data),
+  )
+  // Plugin create has always taken the source fence unconditionally for auto-number serialization. Flag OFF
+  // preserves that exact path. Flag ON replaces the single-source entry with the planned source+target batch,
+  // which includes the same source key and performs every durable-block check after the ordered fences.
+  if (linkWriterFencePlan) {
+    await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+  } else {
+    await acquireAutoNumberSheetWriteLock(query, input.sheetId)
+    if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, input.sheetId)
+  }
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
   const { fields } = await loadSheetAndFields(query, input.sheetId)
+  if (linkWriterFencePlan) {
+    assertLinkWriterFencePlanMatchesFieldGuards(
+      linkWriterFencePlan,
+      new Map(fields.map((field) => [field.id, {
+        type: field.type,
+        link: readLinkFieldConfig(field),
+      }])),
+    )
+  }
 
-  const { patch, linkUpdates } = await buildNormalizedPatch(query, fields, input.data)
+  const { patch, linkUpdates } = await buildNormalizedPatch(
+    query,
+    fields,
+    input.data,
+    linkWriterFencePlan !== null,
+  )
   Object.assign(patch, await allocateAutoNumberValues(query, input.sheetId, fields.map((field) => ({
     id: field.id,
     type: field.type,

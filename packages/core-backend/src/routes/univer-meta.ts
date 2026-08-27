@@ -279,7 +279,12 @@ import {
   isWriterFenceEnabled,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
-import { LinkWriterFencePlanChangedError } from '../multitable/link-writer-fence'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  LinkWriterFencePlanChangedError,
+  prepareLinkWriterFencePlan,
+} from '../multitable/link-writer-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -15087,6 +15092,14 @@ export function univerMetaRouter(): Router {
       const recordId = parsed.data.recordId
       let resultRecordId = recordId ?? buildId('rec')
       let nextVersion = 1
+      const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+        pool.query.bind(pool),
+        view.sheetId,
+        Object.keys(data),
+      )
+      if (linkWriterFencePlan) {
+        assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+      }
 
       // P1#2d REPLACE — build the form.submitted payload ONCE before the txn (stable `_eventId`) so the
       // same-txn durable enqueue (flag ON, at the end of BOTH the EDIT and CREATE branches below) and the
@@ -15101,14 +15114,30 @@ export function univerMetaRouter(): Router {
       })
 
       await pool.transaction(async ({ query }) => {
-        // W0-1 L4cov (close the form-submit create/edit PARTIAL gap — L4 map's univer-meta.ts:14585). The
-        // canonical sheet fence stays UNCONDITIONAL (the pre-existing auto-number serialization lock — the
-        // form-submit CREATE branch allocates auto-numbers below; byte-identical when the L4 flag is off), then
-        // a flag-gated durable recovery-block refusal covers BOTH the EDIT (UPDATE @14655) and CREATE (INSERT
-        // @14743) branches of this handler in one place. A block observed here throws `SheetWriterBlockedError`,
-        // caught in this handler's catch and mapped to 409 RECOVERY_IN_PROGRESS (same shape as reset/revert).
-        await acquireAutoNumberSheetWriteLock(query, view.sheetId)
-        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        // Flag OFF preserves the form submitter's pre-existing unconditional source fence for auto-number
+        // allocation. Flag ON enters the complete source+target plan in one sorted batch and rechecks every
+        // submitted target while those fences are held, covering both edit and create branches.
+        if (linkWriterFencePlan) {
+          await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+          for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+            if (ids.length === 0) continue
+            const exists = await query(
+              'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+              [cfg.foreignSheetId, ids],
+            )
+            const found = new Set(
+              (exists.rows as Array<Record<string, unknown>>)
+                .map((row) => (typeof row.id === 'string' ? row.id : ''))
+                .filter((id) => id.length > 0),
+            )
+            if (ids.some((id) => !found.has(id))) {
+              throw new LinkWriterFencePlanChangedError('Linked records changed concurrently; retry the write')
+            }
+          }
+        } else {
+          await acquireAutoNumberSheetWriteLock(query, view.sheetId)
+          if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, view.sheetId)
+        }
         // W0-1 L6-a: mint the sealed operation after the fence — covers BOTH the EDIT and CREATE branches of
         // this handler (one form submit = one operation). Inert ⇒ byte-identical to L4cov.
         const op = await mintOperation(query, view.sheetId)
@@ -15432,10 +15461,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
-      // W0-1 L4cov: the fence's durable-block refusal (added at this handler's txn entry) surfaces here.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof VersionConflictError) {
         return res.status(409).json({
           ok: false,
