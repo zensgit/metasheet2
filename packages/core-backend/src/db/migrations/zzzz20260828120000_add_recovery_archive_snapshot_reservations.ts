@@ -17,7 +17,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           SELECT pg_catalog.to_regclass(name) AS object_oid
             FROM unnest(ARRAY[
               'public.meta_recovery_archive_snapshot_reservations',
-              'public.uq_mrasr_parent_per_generation'
+              'public.uq_mrasr_parent_per_generation',
+              'public.meta_recovery_archive_section_bootstrap_markers',
+              'public.pk_mrasbm_sheet',
+              'public.uq_mrasbm_generation',
+              'public.uq_mrasbm_snapshot_operation'
             ]::text[]) AS names(name)
         ) owned_relations
        WHERE owned_relations.object_oid IS NOT NULL;
@@ -30,7 +34,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND procedure_row.proname IN (
              'meta_recovery_archive_snapshot_reservation_guard_row',
              'meta_recovery_archive_snapshot_reservation_guard_set',
-             'meta_recovery_archive_snapshot_reservation_guard_truncate'
+             'meta_recovery_archive_snapshot_reservation_guard_truncate',
+             'meta_recovery_archive_section_bootstrap_marker_guard_row',
+             'meta_recovery_archive_section_bootstrap_marker_guard_truncate'
            )
       );
 
@@ -44,7 +50,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND trigger_row.tgname IN (
              'trg_mrasr_guard_row',
              'trg_mrasr_guard_set',
-             'trg_mrasr_guard_truncate'
+             'trg_mrasr_guard_truncate',
+             'trg_mrasbm_guard_row',
+             'trg_mrasbm_guard_truncate'
            )
       );
 
@@ -129,6 +137,22 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE UNIQUE INDEX uq_mrasr_parent_per_generation
       ON public.meta_recovery_archive_snapshot_reservations(generation_id)
       WHERE reservation_kind = 'archive_snapshot'
+  `.execute(db)
+
+  await sql`
+    CREATE TABLE public.meta_recovery_archive_section_bootstrap_markers (
+      sheet_id text NOT NULL,
+      generation_id uuid NOT NULL,
+      snapshot_operation_id uuid NOT NULL,
+      source_vector_hash text NOT NULL,
+      initialized_at timestamptz NOT NULL DEFAULT now(),
+      CONSTRAINT pk_mrasbm_sheet PRIMARY KEY (sheet_id),
+      CONSTRAINT uq_mrasbm_generation UNIQUE (generation_id),
+      CONSTRAINT uq_mrasbm_snapshot_operation UNIQUE (snapshot_operation_id),
+      CONSTRAINT chk_mrasbm_sheet CHECK (length(btrim(sheet_id)) > 0),
+      CONSTRAINT chk_mrasbm_source_vector_hash
+        CHECK (source_vector_hash ~ '^[0-9a-f]{64}$')
+    )
   `.execute(db)
 
   await sql`
@@ -297,6 +321,90 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     BEFORE TRUNCATE ON public.meta_recovery_archive_snapshot_reservations
     FOR EACH STATEMENT EXECUTE FUNCTION public.meta_recovery_archive_snapshot_reservation_guard_truncate()
   `.execute(db)
+
+  await sql`
+    CREATE FUNCTION public.meta_recovery_archive_section_bootstrap_marker_guard_row()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $$
+    DECLARE
+      parent_row record;
+    BEGIN
+      IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_section_bootstrap_marker_immutable';
+      END IF;
+
+      IF NEW.sheet_id IS NULL
+         OR length(btrim(NEW.sheet_id)) = 0
+         OR NEW.generation_id IS NULL
+         OR NEW.snapshot_operation_id IS NULL
+         OR NEW.source_vector_hash IS NULL
+         OR NEW.source_vector_hash !~ '^[0-9a-f]{64}$'
+         OR NEW.initialized_at IS NULL THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '23514',
+          MESSAGE = 'recovery_archive_section_bootstrap_marker_shape_invalid';
+      END IF;
+
+      SELECT archive.sheet_id, archive.source_vector_hash, archive.state,
+             archive.build_status, archive.coverage_status,
+             reservation.operation_id
+        INTO parent_row
+        FROM public.meta_recovery_archives archive
+        JOIN public.meta_recovery_archive_snapshot_reservations reservation
+          ON reservation.generation_id = archive.generation_id
+         AND reservation.reservation_kind = 'archive_snapshot'
+       WHERE archive.generation_id = NEW.generation_id
+       FOR KEY SHARE OF archive, reservation;
+
+      IF NOT FOUND
+         OR parent_row.sheet_id IS DISTINCT FROM NEW.sheet_id
+         OR parent_row.source_vector_hash IS DISTINCT FROM NEW.source_vector_hash
+         OR parent_row.state IS DISTINCT FROM 'building'
+         OR parent_row.build_status IS DISTINCT FROM 'active'
+         OR parent_row.coverage_status IS DISTINCT FROM 'incomplete'
+         OR parent_row.operation_id IS DISTINCT FROM NEW.snapshot_operation_id THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_section_bootstrap_marker_parent_invalid';
+      END IF;
+
+      RETURN NEW;
+    END $$
+  `.execute(db)
+
+  await sql`
+    CREATE FUNCTION public.meta_recovery_archive_section_bootstrap_marker_guard_truncate()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM public.meta_recovery_archive_section_bootstrap_markers LIMIT 1
+      ) THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_section_bootstrap_marker_immutable';
+      END IF;
+      RETURN NULL;
+    END $$
+  `.execute(db)
+
+  await sql`
+    CREATE TRIGGER trg_mrasbm_guard_row
+    BEFORE INSERT OR UPDATE OR DELETE ON public.meta_recovery_archive_section_bootstrap_markers
+    FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_section_bootstrap_marker_guard_row()
+  `.execute(db)
+
+  await sql`
+    CREATE TRIGGER trg_mrasbm_guard_truncate
+    BEFORE TRUNCATE ON public.meta_recovery_archive_section_bootstrap_markers
+    FOR EACH STATEMENT EXECUTE FUNCTION public.meta_recovery_archive_section_bootstrap_marker_guard_truncate()
+  `.execute(db)
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
@@ -309,8 +417,30 @@ export async function down(db: Kysely<unknown>): Promise<void> {
           ERRCODE = '55000',
           MESSAGE = 'recovery_archive_snapshot_reservation_nonempty';
       END IF;
+      IF pg_catalog.to_regclass('public.meta_recovery_archive_section_bootstrap_markers') IS NOT NULL
+         AND EXISTS (SELECT 1 FROM public.meta_recovery_archive_section_bootstrap_markers LIMIT 1) THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55000',
+          MESSAGE = 'recovery_archive_section_bootstrap_marker_nonempty';
+      END IF;
     END $$
   `.execute(db)
+
+  await sql`
+    DO $$
+    BEGIN
+      IF pg_catalog.to_regclass('public.meta_recovery_archive_section_bootstrap_markers') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS trg_mrasbm_guard_truncate
+          ON public.meta_recovery_archive_section_bootstrap_markers;
+        DROP TRIGGER IF EXISTS trg_mrasbm_guard_row
+          ON public.meta_recovery_archive_section_bootstrap_markers;
+      END IF;
+    END $$
+  `.execute(db)
+
+  await sql`DROP TABLE IF EXISTS public.meta_recovery_archive_section_bootstrap_markers`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archive_section_bootstrap_marker_guard_truncate()`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archive_section_bootstrap_marker_guard_row()`.execute(db)
 
   await sql`
     DO $$

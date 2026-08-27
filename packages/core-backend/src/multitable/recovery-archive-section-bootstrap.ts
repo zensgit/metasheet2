@@ -18,6 +18,7 @@ const RESERVATION_COUNT = SECTION_CAUSALITY_DATA_SECTION_KINDS.length + 1
 export type RecoveryArchiveSectionBootstrapErrorCode =
   | 'RECOVERY_ARCHIVE_BOOTSTRAP_INVALID_INPUT'
   | 'RECOVERY_ARCHIVE_BOOTSTRAP_GENERATION_UNAVAILABLE'
+  | 'RECOVERY_ARCHIVE_BOOTSTRAP_ALREADY_INITIALIZED'
   | 'RECOVERY_ARCHIVE_BOOTSTRAP_RESERVATION_INCOMPLETE'
   | 'RECOVERY_ARCHIVE_BOOTSTRAP_RESERVATION_MISMATCH'
   | 'RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE'
@@ -89,6 +90,13 @@ type AllocatedSeqRow = {
   endpoint_seq: unknown
 }
 
+type BootstrapMarkerRow = {
+  sheet_id: unknown
+  generation_id: unknown
+  snapshot_operation_id: unknown
+  source_vector_hash: unknown
+}
+
 /**
  * Allocates one immutable operation/sequence identity for each data section and a greater parent
  * identity. The caller must provide one database transaction; sequence gaps after rollback are
@@ -103,6 +111,9 @@ export async function reserveRecoveryArchiveSnapshotIdentities(
 
   const existing = await readReservationRows(query, input.generationId)
   if (existing.length > 0) return normalizeReservationPlan(existing, input)
+  if (await readBootstrapMarker(query, input.sheetId)) {
+    throw new RecoveryArchiveSectionBootstrapError('RECOVERY_ARCHIVE_BOOTSTRAP_ALREADY_INITIALIZED')
+  }
 
   const allocated = await query(
     `SELECT ordinal::int AS ordinal, nextval('meta_record_chain_seq')::text AS endpoint_seq
@@ -151,11 +162,13 @@ export async function reserveRecoveryArchiveSnapshotIdentities(
 }
 
 /**
- * Consumes an existing reservation into nine bootstrap endpoints plus one snapshot parent LAST.
- * The caller must provide one database transaction. A committed retry is read-only and returns the
- * same plan; a partial visible result is refused rather than repaired in place.
+ * Low-level consumption primitive for nine bootstrap endpoints plus one snapshot parent LAST.
+ * The D-H2 caller must already hold and recheck the canonical fence, active-key ownership, archive
+ * writer-block lease, and live source vector in their required order. This function deliberately
+ * does not claim that authority. The caller must provide one database transaction. A committed
+ * retry is read-only; a partial visible result is refused rather than repaired in place.
  */
-export async function finalizeRecoveryArchiveBootstrapSnapshot(
+export async function consumeRecoveryArchiveBootstrapReservations(
   query: SealQuery,
   input: RecoveryArchiveBootstrapOwnerInput & {
     sections: readonly RecoveryArchiveSectionBootstrapContent[]
@@ -174,6 +187,7 @@ export async function finalizeRecoveryArchiveBootstrapSnapshot(
     [plan.sheetId, plan.snapshotOperationId],
   )
   if (parent.rows.length > 0) {
+    await assertBootstrapMarkerMatches(query, plan)
     await assertCommittedSnapshotMatches(query, plan, contents, parent.rows[0] as Record<string, unknown>)
     return plan
   }
@@ -192,6 +206,21 @@ export async function finalizeRecoveryArchiveBootstrapSnapshot(
   )
   if (Number((partial.rows[0] as { count?: unknown } | undefined)?.count ?? 0) !== 0) {
     throw new RecoveryArchiveSectionBootstrapError('RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE')
+  }
+
+  const insertedMarker = await query(
+    `INSERT INTO meta_recovery_archive_section_bootstrap_markers (
+       sheet_id, generation_id, snapshot_operation_id, source_vector_hash
+     ) VALUES ($1, $2::uuid, $3::uuid, $4)
+     ON CONFLICT DO NOTHING`,
+    [plan.sheetId, plan.generationId, plan.snapshotOperationId, plan.sourceVectorHash],
+  )
+  if (insertedMarker.rowCount !== 1) {
+    const marker = await readBootstrapMarker(query, plan.sheetId)
+    if (markerMatchesPlan(marker, plan)) {
+      throw new RecoveryArchiveSectionBootstrapError('RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE')
+    }
+    throw new RecoveryArchiveSectionBootstrapError('RECOVERY_ARCHIVE_BOOTSTRAP_ALREADY_INITIALIZED')
   }
 
   const members: ArchiveSnapshotMemberInput[] = []
@@ -282,6 +311,38 @@ async function readReservationRows(query: SealQuery, generationId: string): Prom
     [generationId],
   )
   return result.rows as ReservationRow[]
+}
+
+async function readBootstrapMarker(query: SealQuery, sheetId: string): Promise<BootstrapMarkerRow | undefined> {
+  const result = await query(
+    `SELECT sheet_id, generation_id::text AS generation_id,
+            snapshot_operation_id::text AS snapshot_operation_id, source_vector_hash
+       FROM meta_recovery_archive_section_bootstrap_markers
+      WHERE sheet_id = $1`,
+    [sheetId],
+  )
+  return result.rows[0] as BootstrapMarkerRow | undefined
+}
+
+function markerMatchesPlan(
+  marker: BootstrapMarkerRow | undefined,
+  plan: RecoveryArchiveSnapshotReservationPlan,
+): boolean {
+  return (
+    marker?.sheet_id === plan.sheetId &&
+    marker.generation_id === plan.generationId &&
+    marker.snapshot_operation_id === plan.snapshotOperationId &&
+    marker.source_vector_hash === plan.sourceVectorHash
+  )
+}
+
+async function assertBootstrapMarkerMatches(
+  query: SealQuery,
+  plan: RecoveryArchiveSnapshotReservationPlan,
+): Promise<void> {
+  if (!markerMatchesPlan(await readBootstrapMarker(query, plan.sheetId), plan)) {
+    throw new RecoveryArchiveSectionBootstrapError('RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE')
+  }
 }
 
 function normalizeReservationPlan(

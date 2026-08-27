@@ -8,7 +8,7 @@ import * as sectionCausalityMigration from '../../src/db/migrations/zzzz20260826
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import { OperationLedger, sealOperation } from '../../src/multitable/operation-ledger'
 import {
-  finalizeRecoveryArchiveBootstrapSnapshot,
+  consumeRecoveryArchiveBootstrapReservations,
   RecoveryArchiveSectionBootstrapError,
   reserveRecoveryArchiveSnapshotIdentities,
   type RecoveryArchiveBootstrapOwnerInput,
@@ -288,9 +288,16 @@ async function installIfAbsent(): Promise<void> {
   if (count === 0) await sectionCausalityMigration.up(db)
   else if (count !== TABLES.length) throw new Error('section_causality_partial_schema')
   const reservation = await q(
-    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_snapshot_reservations')::text AS relation`,
+    `SELECT count(*)::int AS count
+       FROM unnest(ARRAY[
+         'meta_recovery_archive_snapshot_reservations',
+         'meta_recovery_archive_section_bootstrap_markers'
+       ]::text[]) AS owned(name)
+      WHERE pg_catalog.to_regclass('public.' || owned.name) IS NOT NULL`,
   )
-  if (!reservation.rows[0]?.relation) await snapshotReservationMigration.up(db)
+  const reservationCount = Number(reservation.rows[0]?.count ?? 0)
+  if (reservationCount === 0) await snapshotReservationMigration.up(db)
+  else if (reservationCount !== 2) throw new Error('snapshot_reservation_partial_schema')
   schemaIsUp = true
 }
 
@@ -305,13 +312,27 @@ async function withRolledBackTxn(fn: (client: PoolClient) => Promise<void>): Pro
   }
 }
 
-async function seedBuildingGeneration(client: PoolClient): Promise<RecoveryArchiveBootstrapOwnerInput> {
+async function seedBuildingGeneration(
+  client: PoolClient,
+  reuseActiveCheckpoint = false,
+): Promise<RecoveryArchiveBootstrapOwnerInput> {
   const generationId = randomUUID()
   const anchorOperationId = randomUUID()
-  const checkpointId = `${PREFIX}_di0_checkpoint_${randomUUID()}`
+  const anchorRecordId = `${PREFIX}_di0_anchor_${randomUUID()}`
+  const checkpointId = reuseActiveCheckpoint
+    ? String(
+        (
+          await client.query(
+            `SELECT id FROM meta_history_trust_checkpoints
+              WHERE sheet_id=$1 AND state='active'`,
+            [SHEET],
+          )
+        ).rows[0]?.id ?? '',
+      )
+    : `${PREFIX}_di0_checkpoint_${randomUUID()}`
   const seq = await client.query(`SELECT nextval('meta_record_chain_seq')::text AS seq`)
   const anchorSeq = String(seq.rows[0]?.seq)
-  await insertRecordRevision(client, SHEET, anchorOperationId, anchorSeq, `${PREFIX}_di0_anchor`)
+  await insertRecordRevision(client, SHEET, anchorOperationId, anchorSeq, anchorRecordId)
   await sealDirectEventOperation(asQuery(client), {
     sheetId: SHEET,
     operationId: anchorOperationId,
@@ -319,11 +340,13 @@ async function seedBuildingGeneration(client: PoolClient): Promise<RecoveryArchi
     eventCount: 1,
     operationKind: 'ordinary',
   })
-  await client.query(
-    `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
-     VALUES ($1, $2, 'active', $3::bigint)`,
-    [checkpointId, SHEET, anchorSeq],
-  )
+  if (!reuseActiveCheckpoint) {
+    await client.query(
+      `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
+       VALUES ($1, $2, 'active', $3::bigint)`,
+      [checkpointId, SHEET, anchorSeq],
+    )
+  }
   const input: RecoveryArchiveBootstrapOwnerInput = {
     generationId,
     sheetId: SHEET,
@@ -552,7 +575,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     })
   })
 
-  test('D-I0 finalize rolls back partial work, retries deterministically, and seals parent last', async () => {
+  test('D-I0 consume rolls back partial work, retries deterministically, and seals parent last', async () => {
     await withRolledBackTxn(async (client) => {
       const input = await seedBuildingGeneration(client)
       const plan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
@@ -567,7 +590,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
         return client.query(text, params)
       }
       await expect(
-        finalizeRecoveryArchiveBootstrapSnapshot(injectedQuery, { ...input, sections: contents }),
+        consumeRecoveryArchiveBootstrapReservations(injectedQuery, { ...input, sections: contents }),
       ).rejects.toThrow('injected_di0_finalize_failure')
       await client.query('ROLLBACK TO SAVEPOINT failed_finalize')
 
@@ -578,16 +601,18 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
            (SELECT count(*)::int FROM meta_record_history_operations
              WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS operations,
            (SELECT count(*)::int FROM meta_record_history_snapshot_members
-             WHERE sheet_id=$1 AND parent_operation_id=$3::uuid) AS members`,
+             WHERE sheet_id=$1 AND parent_operation_id=$3::uuid) AS members,
+           (SELECT count(*)::int FROM meta_recovery_archive_section_bootstrap_markers
+             WHERE sheet_id=$1) AS markers`,
         [
           input.sheetId,
           [...plan.sections.map((section) => section.operationId), plan.snapshotOperationId],
           plan.snapshotOperationId,
         ],
       )
-      expect(afterRollback.rows[0]).toEqual({ revisions: 0, operations: 0, members: 0 })
+      expect(afterRollback.rows[0]).toEqual({ revisions: 0, operations: 0, members: 0, markers: 0 })
 
-      const retried = await finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), {
+      const retried = await consumeRecoveryArchiveBootstrapReservations(asQuery(client), {
         ...input,
         sections: contents,
       })
@@ -614,8 +639,22 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
         [input.sheetId, plan.snapshotOperationId],
       )
       expect(memberCount.rows[0]?.count).toBe(9)
+      const marker = await client.query(
+        `SELECT generation_id::text AS generation_id,
+                snapshot_operation_id::text AS snapshot_operation_id, source_vector_hash
+           FROM meta_recovery_archive_section_bootstrap_markers
+          WHERE sheet_id=$1`,
+        [input.sheetId],
+      )
+      expect(marker.rows).toEqual([
+        {
+          generation_id: input.generationId,
+          snapshot_operation_id: plan.snapshotOperationId,
+          source_vector_hash: input.sourceVectorHash,
+        },
+      ])
 
-      await finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), { ...input, sections: contents })
+      await consumeRecoveryArchiveBootstrapReservations(asQuery(client), { ...input, sections: contents })
       const retryCounts = await client.query(
         `SELECT
            (SELECT count(*)::int FROM meta_sheet_section_revisions
@@ -634,6 +673,71 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
     })
   })
 
+  test('D-I0 permits only one successful bootstrap generation per sheet', async () => {
+    await withRolledBackTxn(async (client) => {
+      const firstInput = await seedBuildingGeneration(client)
+      const secondInput = await seedBuildingGeneration(client, true)
+      const firstPlan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), firstInput)
+      const secondPlan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), secondInput)
+
+      await consumeRecoveryArchiveBootstrapReservations(asQuery(client), {
+        ...firstInput,
+        sections: di0Contents(),
+      })
+      const duplicate = await errorOf(
+        consumeRecoveryArchiveBootstrapReservations(asQuery(client), {
+          ...secondInput,
+          sections: di0Contents(),
+        }),
+      )
+      expect(duplicate).toBeInstanceOf(RecoveryArchiveSectionBootstrapError)
+      expect((duplicate as RecoveryArchiveSectionBootstrapError).code).toBe(
+        'RECOVERY_ARCHIVE_BOOTSTRAP_ALREADY_INITIALIZED',
+      )
+      expectValuesFree(duplicate, [firstInput.generationId, secondInput.generationId, firstInput.sheetId])
+
+      const committed = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM meta_record_history_operations
+             WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS first_operations,
+           (SELECT count(*)::int FROM meta_record_history_operations
+             WHERE sheet_id=$1 AND operation_id=ANY($3::uuid[])) AS second_operations,
+           (SELECT count(*)::int FROM meta_recovery_archive_section_bootstrap_markers
+             WHERE sheet_id=$1 AND generation_id=$4::uuid
+               AND snapshot_operation_id=$5::uuid) AS markers`,
+        [
+          firstInput.sheetId,
+          [...firstPlan.sections.map((section) => section.operationId), firstPlan.snapshotOperationId],
+          [...secondPlan.sections.map((section) => section.operationId), secondPlan.snapshotOperationId],
+          firstInput.generationId,
+          firstPlan.snapshotOperationId,
+        ],
+      )
+      expect(committed.rows[0]).toEqual({ first_operations: 10, second_operations: 0, markers: 1 })
+
+      await client.query('SAVEPOINT immutable_marker')
+      const immutable = await errorOf(
+        client.query(
+          `UPDATE meta_recovery_archive_section_bootstrap_markers
+              SET initialized_at=initialized_at + interval '1 second'
+            WHERE sheet_id=$1`,
+          [firstInput.sheetId],
+        ),
+      )
+      expect(immutable.message).toBe('recovery_archive_section_bootstrap_marker_immutable')
+      expectValuesFree(immutable, [firstInput.generationId, firstInput.sheetId])
+      await client.query('ROLLBACK TO SAVEPOINT immutable_marker')
+
+      await client.query('SAVEPOINT truncate_marker')
+      const truncate = await errorOf(
+        client.query('TRUNCATE TABLE meta_recovery_archive_section_bootstrap_markers'),
+      )
+      expect(truncate.message).toBe('recovery_archive_section_bootstrap_marker_immutable')
+      expectValuesFree(truncate, [firstInput.generationId, firstInput.sheetId])
+      await client.query('ROLLBACK TO SAVEPOINT truncate_marker')
+    })
+  })
+
   test('D-I0 keeps reservations unusable after the owning generation is abandoned', async () => {
     await withRolledBackTxn(async (client) => {
       const input = await seedBuildingGeneration(client)
@@ -644,7 +748,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
       )
 
       const error = await errorOf(
-        finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), { ...input, sections: di0Contents() }),
+        consumeRecoveryArchiveBootstrapReservations(asQuery(client), { ...input, sections: di0Contents() }),
       )
       expect(error).toBeInstanceOf(RecoveryArchiveSectionBootstrapError)
       expect((error as RecoveryArchiveSectionBootstrapError).code).toBe(

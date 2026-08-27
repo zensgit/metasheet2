@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 
 import {
-  finalizeRecoveryArchiveBootstrapSnapshot,
+  consumeRecoveryArchiveBootstrapReservations,
   RecoveryArchiveSectionBootstrapError,
   reserveRecoveryArchiveSnapshotIdentities,
   type RecoveryArchiveBootstrapOwnerInput,
@@ -58,6 +58,15 @@ function contents() {
   }))
 }
 
+function markerRow(rows = reservationRows()) {
+  return {
+    sheet_id: SHEET_ID,
+    generation_id: GENERATION_ID,
+    snapshot_operation_id: rows[9]?.operation_id,
+    source_vector_hash: SOURCE_VECTOR_HASH,
+  }
+}
+
 async function errorOf(promise: Promise<unknown>): Promise<RecoveryArchiveSectionBootstrapError> {
   try {
     await promise
@@ -91,6 +100,7 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
     const query = vi.fn<SealQuery>(async (sql, params = []) => {
       if (sql.includes('FROM meta_recovery_archives')) return { rows: [generationRow()] }
       if (sql.includes('FROM meta_recovery_archive_snapshot_reservations')) return { rows: persisted }
+      if (sql.includes('FROM meta_recovery_archive_section_bootstrap_markers')) return { rows: [] }
       if (sql.includes("nextval('meta_record_chain_seq')")) {
         return {
           rows: Array.from({ length: 10 }, (_, index) => ({ ordinal: index + 1, endpoint_seq: String(201 + index) })),
@@ -127,6 +137,22 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
     expect(BigInt(plan.snapshotSeq)).toBeGreaterThan(
       plan.sections.reduce((max, section) => (BigInt(section.endpointSeq) > max ? BigInt(section.endpointSeq) : max), 0n),
     )
+  })
+
+  test('refuses to allocate a second generation after the sheet bootstrap marker exists', async () => {
+    const query = vi.fn<SealQuery>(async (sql) => {
+      if (sql.includes('FROM meta_recovery_archives')) return { rows: [generationRow()] }
+      if (sql.includes('FROM meta_recovery_archive_snapshot_reservations')) return { rows: [] }
+      if (sql.includes('FROM meta_recovery_archive_section_bootstrap_markers')) {
+        return { rows: [{ ...markerRow(), generation_id: '22222222-2222-4222-8222-222222222222' }] }
+      }
+      throw new Error('unexpected_query')
+    })
+
+    const error = await errorOf(reserveRecoveryArchiveSnapshotIdentities(query, INPUT))
+
+    expect(error.code).toBe('RECOVERY_ARCHIVE_BOOTSTRAP_ALREADY_INITIALIZED')
+    expect(query.mock.calls.some(([sql]) => sql.includes("nextval('meta_record_chain_seq')"))).toBe(false)
   })
 
   test('refuses generation owner or source-vector drift before reading reservations', async () => {
@@ -167,7 +193,7 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
 
     for (const sections of invalidSets) {
       const query = vi.fn<SealQuery>()
-      const error = await errorOf(finalizeRecoveryArchiveBootstrapSnapshot(query, { ...INPUT, sections }))
+      const error = await errorOf(consumeRecoveryArchiveBootstrapReservations(query, { ...INPUT, sections }))
       expect(error.code).toBe('RECOVERY_ARCHIVE_BOOTSTRAP_INVALID_INPUT')
       expect(query).not.toHaveBeenCalled()
     }
@@ -177,6 +203,7 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
     const rows = reservationRows()
     const sectionContents = contents()
     let corruptSourceHash = false
+    let corruptMarker = false
     const query = vi.fn<SealQuery>(async (sql) => {
       if (sql.includes('FROM meta_recovery_archives')) return { rows: [generationRow()] }
       if (sql.includes('FROM meta_recovery_archive_snapshot_reservations') && !sql.includes('JOIN')) {
@@ -192,6 +219,15 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
               event_contract_version: 2,
               component_count: 9,
             },
+          ],
+        }
+      }
+      if (sql.includes('FROM meta_recovery_archive_section_bootstrap_markers')) {
+        return {
+          rows: [
+            corruptMarker
+              ? { ...markerRow(rows), snapshot_operation_id: '22222222-2222-4222-8222-222222222222' }
+              : markerRow(rows),
           ],
         }
       }
@@ -218,13 +254,22 @@ describe('generation-bound recovery archive bootstrap reservations', () => {
       throw new Error('unexpected_query')
     })
 
-    const plan = await finalizeRecoveryArchiveBootstrapSnapshot(query, { ...INPUT, sections: sectionContents })
+    const plan = await consumeRecoveryArchiveBootstrapReservations(query, { ...INPUT, sections: sectionContents })
 
     expect(plan.snapshotOperationId).toBe(rows[9]?.operation_id)
     expect(query.mock.calls.some(([sql]) => sql.trimStart().startsWith('INSERT'))).toBe(false)
 
     corruptSourceHash = true
-    const error = await errorOf(finalizeRecoveryArchiveBootstrapSnapshot(query, { ...INPUT, sections: sectionContents }))
+    const error = await errorOf(
+      consumeRecoveryArchiveBootstrapReservations(query, { ...INPUT, sections: sectionContents }),
+    )
     expect(error.code).toBe('RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE')
+
+    corruptSourceHash = false
+    corruptMarker = true
+    const markerError = await errorOf(
+      consumeRecoveryArchiveBootstrapReservations(query, { ...INPUT, sections: sectionContents }),
+    )
+    expect(markerError.code).toBe('RECOVERY_ARCHIVE_BOOTSTRAP_PARTIAL_FINALIZE')
   })
 })

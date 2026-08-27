@@ -170,6 +170,7 @@ const TOUCHED_RELATIONS = [
   'meta_record_history_snapshot_members',
   'meta_record_history_operation_members',
   'meta_recovery_archive_snapshot_reservations',
+  'meta_recovery_archive_section_bootstrap_markers',
 ]
 
 const OWNED_RELATIONS = [
@@ -189,6 +190,7 @@ const OWNED_RELATIONS = [
   'meta_record_history_snapshot_members',
   'meta_record_history_operation_members',
   'meta_recovery_archive_snapshot_reservations',
+  'meta_recovery_archive_section_bootstrap_markers',
 ]
 
 const OWNED_COLUMNS = [
@@ -246,6 +248,10 @@ const OWNED_CONSTRAINTS = [
   ['meta_recovery_archive_coverage_items', 'chk_meta_recovery_archive_coverage_kind_binding'],
   ['meta_recovery_archive_snapshot_reservations', 'fk_mrasr_generation'],
   ['meta_recovery_archive_snapshot_reservations', 'chk_mrasr_shape'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'pk_mrasbm_sheet'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'uq_mrasbm_generation'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'uq_mrasbm_snapshot_operation'],
+  ['meta_recovery_archive_section_bootstrap_markers', 'chk_mrasbm_source_vector_hash'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
@@ -288,6 +294,8 @@ const SNAPSHOT_RESERVATION_FUNCTIONS = [
   'meta_recovery_archive_snapshot_reservation_guard_row',
   'meta_recovery_archive_snapshot_reservation_guard_set',
   'meta_recovery_archive_snapshot_reservation_guard_truncate',
+  'meta_recovery_archive_section_bootstrap_marker_guard_row',
+  'meta_recovery_archive_section_bootstrap_marker_guard_truncate',
 ]
 
 const OWNED_FUNCTIONS = [
@@ -334,6 +342,8 @@ const SNAPSHOT_RESERVATION_TRIGGERS = [
   'trg_mrasr_guard_row',
   'trg_mrasr_guard_set',
   'trg_mrasr_guard_truncate',
+  'trg_mrasbm_guard_row',
+  'trg_mrasbm_guard_truncate',
 ]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
