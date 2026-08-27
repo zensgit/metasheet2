@@ -333,10 +333,19 @@ const {
 // B2a trial registration. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set; once set, every
 // gated stock-preparation source read must match a live, in-scope, unexpired entry.
 const {
+  readPlanSourceObjects,
+  B2A_REGISTRATION_REQUIRED,
+  B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+  B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
+  B2A_PURPOSE_PIPELINE_RUNNER_READ,
+  B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
   B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
-  B2aTrialRegistryError,
-  assertB2aTrialAuthorized,
-  createB2aTrialRegistry,
+  C6_SAFE_LIFECYCLE_REQUIRED,
+  SEALED_SNAPSHOT_BINDING_REF,
+  B2aReadAuthorizationError,
+  assertB2aReadAuthorization,
+  createB2aRegistry,
 } = require('./b2a-trial-registry.cjs')
 // #3751 MVP: readiness / ensure / option-sync for the 9 frozen MVP tables. Metadata-only,
 // structure-only (rows always []), admin-gated, values-free evidence, no external write.
@@ -506,7 +515,7 @@ function inferHttpStatus(error) {
   // B2a refusals are 403 and B2a config faults are 500; both already carry `.status`, which
   // `sendError` prefers. Mapped here anyway so the typed error can never degrade to a generic 500 if
   // a future path strips the field.
-  if (error instanceof B2aTrialRegistryError) return error.status
+  if (error instanceof B2aReadAuthorizationError) return error.status
   if (/NotFound/.test(name)) return 404
   if (/Conflict/.test(name)) return 409
   if (/Validation|Transform|Watermark|DeadLetter/.test(name)) return 400
@@ -706,6 +715,24 @@ function stockPreparationPlmAutoPersistEnabled() {
 // Direct readonly table-action -> internal MVP persistence is a separately staged capability. It is
 // deliberately NOT implied by either source-run auto-persist flag: only the exact literal `true`
 // enables this manually-invoked admin write route, and a missing/malformed value stays fail-closed.
+// ONE HTTP REQUEST = ONE B2a SOURCE-READ RUN.
+//
+// `sourceReadOperationLimit` is 1, and the guard distinguishes "another page of the read I already
+// authorized" from "a second read" by Run identity. Every page of one request's read happens inside
+// that request, so a fresh id per request is exactly the boundary the limit is written against — and
+// it is generated SERVER-SIDE so a caller cannot present someone else's run id and ride their claim.
+//
+// The large-BOM expansion path deliberately does NOT use this: its Run is the stored job, so it
+// passes the job id and a re-run of the same job continues on the claim it already holds.
+// The sealed-snapshot runtime binding's frozen `objectKey`. Restated as a literal rather than
+// imported out of the pinned sealed-export store, so a silent change there surfaces here as a B2a
+// refusal (an object outside the registered scope) instead of as agreeing drift on both sides.
+const SEALED_SNAPSHOT_OBJECT_KEY = 'stock-preparation-bom'
+
+function b2aRunId(label) {
+  return `${label}:${crypto.randomUUID()}`
+}
+
 function stockPreparationTableActionMvpPersistEnabled() {
   return String(process.env.MULTITABLE_STOCK_PREP_TABLE_ACTION_MVP_PERSIST_ENABLED ?? '').trim().toLowerCase() === 'true'
 }
@@ -2725,7 +2752,7 @@ function createHandlers(services, options = {}) {
   //
   // Nothing about it is request-influenced: it is read once off server config and threaded, exactly
   // like `stockPreparationExtFieldMapping`.
-  const b2aTrialRegistry = createB2aTrialRegistry({ config: context && context.config })
+  const b2aTrialRegistry = createB2aRegistry({ config: context && context.config })
 
   function getMultitableRecordsApi() {
     const records = context && context.api && context.api.multitable && context.api.multitable.records
@@ -2921,6 +2948,137 @@ function createHandlers(services, options = {}) {
       })
     }
     return provisioning
+  }
+
+  /**
+   * ENTRY POINT (2)/(3): the pipeline-shaped B2a guard.
+   *
+   * Both the C6 external-write dry-run/apply and the ordinary pipeline runner read a source that is
+   * described by a PIPELINE row, so both fill the key the same way and share one helper. It is
+   * called BEFORE the first credential reload (`getExternalSystemForAdapter` decrypts), which is
+   * itself before adapter creation and long before any wire read.
+   *
+   * `pipeline.projectId` is NULLABLE. A pipeline with no project id cannot be B2a-authorized: the
+   * guard refuses it with `missing_scope`. Deliberate — a null data scope is not a wildcard, and
+   * treating it as one would let every project-less pipeline through the moment the gate is armed.
+   */
+  async function assertB2aPipelineReadAuthorized(req, pipeline, { tenantScope, purpose, runId }) {
+    // DORMANT -> return before the metadata read below. Without this short-circuit an unarmed
+    // deployment would make one EXTRA `getExternalSystem` call per C6 dry-run, which is a
+    // behavioural difference — small, but exactly the kind the dormancy guarantee is supposed to
+    // exclude, and the existing C6 route test counts those calls.
+    if (!b2aTrialRegistry) return null
+    // The system TYPE, resolved through the CREDENTIAL-STRIPPED accessor. This is a platform
+    // metadata read, not a credential reload — `getExternalSystem` never decrypts — so the fence
+    // still precedes everything the contract names, while the registration keeps its full key: a
+    // binding repointed at a different adapter kind stops matching a registration written for the
+    // old one. The adapter-capable accessor (which DOES decrypt) is still several lines away.
+    const sourceSystem = await externalSystems.getExternalSystem(scopedInput(req, { id: pipeline.sourceSystemId }))
+    return assertB2aReadAuthorization({
+      registry: b2aTrialRegistry,
+      store: context.storage,
+      // The PIPELINE ROW's own tenant, not a request carrier: `resolveTenantId` honours a
+      // body/query tenant for a tenantless platform admin, and the tenant this read is authorized
+      // against must be the one that owns the record.
+      tenantScope: firstString(pipeline.tenantId) || tenantScope,
+      sourceSystemType: sourceSystem && sourceSystem.kind,
+      sourceBindingRef: pipeline.sourceSystemId,
+      dataScopeRef: pipeline.projectId,
+      sourceObjects: [pipeline.sourceObject],
+      purpose,
+      runId,
+      now: Date.now(),
+    })
+  }
+
+  /**
+   * ENTRY POINT (3) + THE E3-01 SAFE-LIFECYCLE CLOSURE, for the ordinary pipeline runner.
+   *
+   * Both fences live here because both must land before `runner.runPipeline`, which resolves and
+   * decrypts BOTH systems and creates BOTH adapters as its first act (`loadPipelineContext`).
+   * Placing them at the route also covers dead-letter replay, which re-enters `runPipeline`.
+   *
+   * WHY THE ROUTE AND NOT THE RUNNER. The runner is constructed in index.cjs with a closed dep list
+   * that does not include server config, so it cannot see the registry without a new dep; the routes
+   * already hold the ONE registry built at activation. The cost is stated rather than hidden: a
+   * future in-process caller that invokes `runner.runPipeline` directly would bypass both fences.
+   * Every caller that exists today — `pipelinesRun`, `pipelinesDryRun`, `deadLettersReplay` — is a
+   * route and is covered.
+   *
+   * E3-01: the ordinary non-dry `pipeline-runner -> metasheet:multitable upsert` path is a live,
+   * token-less write to a MetaSheet target, outside the C6 dry-run -> token -> apply lifecycle. It
+   * is reachable TODAY at all three layers — the route forwards no `dryRun`, `pipelines.cjs`
+   * validates target ROLE but never target KIND, and the adapter's `upsert` has no lifecycle guard —
+   * so "physically unreachable" is not an available claim and a real fence is required.
+   *
+   * The fence is scoped to an ARMED B2a deployment, matching the contract's own wording ("对部署
+   * runtime 中可触达 B2a MetaSheet target 的…路径"). That keeps the dormancy guarantee the rest of
+   * this change rests on: with the registry unset, every existing pipeline behaves exactly as before.
+   * It is NOT the general closure of that bypass for non-B2a deployments — see the honest gap list.
+   */
+  async function assertPipelineRunAllowed(req, { pipelineId, dryRun, runLabel }) {
+    // Dormant -> nothing to do, and not one extra platform read happens either.
+    if (!b2aTrialRegistry) return null
+    const scope = scopedInput(req, { id: pipelineId })
+    const pipeline = await pipelineRegistry.getPipeline(scope)
+
+    if (!dryRun) {
+      // Credential-STRIPPED accessor: identifying the target kind must not itself reload secrets.
+      const targetSystem = await externalSystems.getExternalSystem(scopedInput(req, { id: pipeline.targetSystemId }))
+      if (targetSystem && targetSystem.kind === MULTITABLE_WRITE_TARGET_KIND) {
+        throw new HttpRouteError(
+          403,
+          C6_SAFE_LIFECYCLE_REQUIRED,
+          'a live MetaSheet multitable write must go through the C6 dry-run -> token -> apply lifecycle',
+          { reason: 'ordinary_runner_multitable_write', pipelineId: pipeline.id, dryRun: false },
+        )
+      }
+    }
+
+    return assertB2aPipelineReadAuthorized(req, pipeline, {
+      tenantScope: scope.tenantId,
+      purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+      runId: b2aRunId(runLabel),
+    })
+  }
+
+  /**
+   * ENTRY POINT (1): the stock-preparation BOM expansion, fenced AT THE ROUTE.
+   *
+   * WHY HERE AS WELL AS IN THE WRAPPER. The table-action wrappers guard before `computeDryRun`,
+   * which is before any `sourceAdapter.read` — but `loadTableActionSourceAdapter` runs EARLIER, in
+   * the route, and it calls `getExternalSystemForAdapter`, which DECRYPTS the source system's
+   * credentials. The contract puts the fence before "任何外部/源数据库连接、credential reload、源查询
+   * 或 sourceAdapter.read", so the wrapper alone is one step too late. This hoists it.
+   *
+   * THE TWO GUARDS SHARE A RUN. The route claims the operation and hands the SAME `runId` to the
+   * wrapper, whose guard then CONTINUES on that claim rather than trying to take a second one — the
+   * same "bounded paging inside one operation" rule the large-BOM job relies on. So the evidence
+   * stanza a small-route dry-run carries reports `operationClaimed: false` / `operationContinued:
+   * true`: the claim was taken a few lines earlier, in the same Run.
+   *
+   * The wrapper's guard is kept rather than replaced, deliberately: it is the only thing standing
+   * between a FUTURE in-process caller of `dryRunStockPreparationAction` and an unfenced read.
+   *
+   * `parameters` is normalized here purely to resolve `projectNo` before the adapter load. The
+   * wrapper normalizes again from the same raw body — `normalizeActionParameters` is pure and
+   * idempotent, so the two cannot disagree.
+   */
+  async function assertB2aStockPreparationReadAuthorized(action, rawParameters, { tenantScope, purpose, runId }) {
+    if (!b2aTrialRegistry) return null
+    const parameters = normalizeActionParameters(rawParameters)
+    return assertB2aReadAuthorization({
+      registry: b2aTrialRegistry,
+      store: context.storage,
+      tenantScope,
+      sourceSystemType: action.source.kind,
+      sourceBindingRef: action.source.externalSystemId,
+      dataScopeRef: parameters.projectNo,
+      sourceObjects: readPlanSourceObjects(action.source.readPlan),
+      purpose,
+      runId,
+      now: Date.now(),
+    })
   }
 
   async function loadTableActionSourceAdapter(req, action, options = {}) {
@@ -3668,6 +3826,13 @@ function createHandlers(services, options = {}) {
     async pipelinesRun(req, res) {
       requireAccess(req, 'write')
       const body = requestBody(req)
+      // B2a entry point (3) + E3-01. `pipelinesRun` never forwards `dryRun` (see `publicRunInput`),
+      // so this route is unconditionally the non-dry one.
+      await assertPipelineRunAllowed(req, {
+        pipelineId: requestParams(req).id,
+        dryRun: false,
+        runLabel: 'pipeline-run',
+      })
       return sendOk(res, await runner.runPipeline(scopedInput(req, {
         ...publicRunInput(body),
         pipelineId: requestParams(req).id,
@@ -3678,6 +3843,13 @@ function createHandlers(services, options = {}) {
     async pipelinesDryRun(req, res) {
       requireAccess(req, 'write')
       const body = requestBody(req)
+      // B2a entry point (3): a dry run still READS the source, so it is gated. The E3-01 write
+      // fence does not apply — the dry path calls `previewUpsert`, never `upsert`.
+      await assertPipelineRunAllowed(req, {
+        pipelineId: requestParams(req).id,
+        dryRun: true,
+        runLabel: 'pipeline-dry-run',
+      })
       return sendOk(res, await runner.runPipeline(scopedInput(req, {
         ...publicRunInput(body),
         pipelineId: requestParams(req).id,
@@ -3708,6 +3880,16 @@ function createHandlers(services, options = {}) {
           pipelineId: pipeline.id,
         })
       }
+      // B2a ENTRY POINT (2). Here, not lower: the very next statement decrypts the source system's
+      // credentials, and the contract puts the fence before any external/source connect, credential
+      // reload or source query. `sourceSystemKind` is deliberately null — it is not knowable until
+      // after that decrypt, so a registration for this purpose may not pin an adapter kind. Stated
+      // rather than faked.
+      await assertB2aPipelineReadAuthorized(req, pipeline, {
+        tenantScope: scope.tenantId,
+        purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
+        runId: b2aRunId('c6-external-write-dry-run'),
+      })
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
@@ -3813,6 +3995,14 @@ function createHandlers(services, options = {}) {
           pipelineId: pipeline.id,
         })
       }
+      // B2a ENTRY POINT (2), apply half. Apply RE-RUNS the planner and therefore RE-READS the
+      // source, so it is a source-read Run in its own right and is gated in its own right — it does
+      // not inherit the dry-run's authorization through the token.
+      await assertB2aPipelineReadAuthorized(req, pipeline, {
+        tenantScope: scope.tenantId,
+        purpose: B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
+        runId: b2aRunId('c6-external-write-apply'),
+      })
       const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
         ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
         : externalSystems.getExternalSystem.bind(externalSystems)
@@ -3943,6 +4133,14 @@ function createHandlers(services, options = {}) {
       const body = normalizeTableActionBody(requestBody(req))
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const dryRunTenantId = resolveTenantId(req, {})
+      const dryRunB2aRunId = b2aRunId('table-action-dry-run')
+      // B2a entry point (1), ahead of the credential reload inside the adapter load below.
+      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        tenantScope: dryRunTenantId,
+        purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+        runId: dryRunB2aRunId,
+      })
       const sourceAdapter = await loadTableActionSourceAdapter(req, action)
       return sendOk(res, await dryRunStockPreparationAction({
         action,
@@ -3966,7 +4164,9 @@ function createHandlers(services, options = {}) {
         // gate checks and the tenant whose source is about to be read are one value, not two that
         // could disagree.
         b2aTrialRegistry,
-        tenantId: resolveTenantId(req, {}),
+        b2aClaimStore: context.storage,
+        b2aRunId: dryRunB2aRunId,
+        tenantId: dryRunTenantId,
         now: Date.now(),
       }))
     },
@@ -3989,6 +4189,14 @@ function createHandlers(services, options = {}) {
       const parameters = normalizeActionParameters(body.parameters)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction({ tenantId, actionId }))
+      const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
+      // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
+      // into the internal snapshot tables is a different consumer from an interactive refresh.
+      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        tenantScope: tenantId,
+        purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
+        runId: mvpPersistB2aRunId,
+      })
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
       const prepared = await prepareStockPreparationMvpSnapshot({
         action,
@@ -3998,6 +4206,8 @@ function createHandlers(services, options = {}) {
         // B2a. `tenantId` here is the authenticated-user tenant this route already resolved and
         // already scoped the adapter load with — never a query/body carrier.
         b2aTrialRegistry,
+        b2aClaimStore: context.storage,
+        b2aRunId: mvpPersistB2aRunId,
         tenantId,
         now: Date.now(),
       })
@@ -4036,6 +4246,15 @@ function createHandlers(services, options = {}) {
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId })))
+      const applyTenantId = resolveTenantId(req, {})
+      const applyB2aRunId = b2aRunId('table-action-apply')
+      // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
+      // so a refusal never burns a single-use dry-run token.
+      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        tenantScope: applyTenantId,
+        purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+        runId: applyB2aRunId,
+      })
       const sourceAdapter = await loadTableActionSourceAdapter(req, action)
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       return sendOk(res, await applyStockPreparationAction({
@@ -4066,7 +4285,9 @@ function createHandlers(services, options = {}) {
         // RE-EXPANDS the source, so it is a source read in its own right and is gated in its own
         // right — it does not inherit the dry-run's authorization through the token.
         b2aTrialRegistry,
-        tenantId: resolveTenantId(req, {}),
+        b2aClaimStore: context.storage,
+        b2aRunId: applyB2aRunId,
+        tenantId: applyTenantId,
         now: Date.now(),
       }))
     },
@@ -4125,13 +4346,19 @@ function createHandlers(services, options = {}) {
       // Gated BEFORE the adapter is loaded, so a refusal on this path costs not even an
       // external-system registry lookup. Its own purpose: a large-BOM background expansion is a
       // different consumer from an interactive refresh, and a `forbidReuse` registration says so.
-      assertB2aTrialAuthorized({
+      await assertB2aReadAuthorization({
         registry: b2aTrialRegistry,
-        tenantId: routeScope.tenantId,
-        externalSystemId: action.source.externalSystemId,
-        systemKind: action.source.kind,
-        projectNo: queuedJob.parameters && queuedJob.parameters.projectNo,
+        store: context.storage,
+        tenantScope: routeScope.tenantId,
+        sourceSystemType: action.source.kind,
+        sourceBindingRef: action.source.externalSystemId,
+        dataScopeRef: queuedJob.parameters && queuedJob.parameters.projectNo,
+        sourceObjects: readPlanSourceObjects(action.source.readPlan),
         purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+        // The JOB ID is the Run identity here, deliberately: re-running the SAME stored job
+        // continues on the claim it already holds (bounded paging inside one operation), while a
+        // NEW job is a new Run and needs its own registration.
+        runId: `large-bom:${jobId}`,
         now: Date.now(),
       })
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { principal: queuedJob.principal })
@@ -5574,10 +5801,43 @@ function createHandlers(services, options = {}) {
           'an authenticated actor identity is required',
         )
       }
+      const sealedSnapshotTenantId = resolveAuthUserTenantId(req)
+      // B2a ENTRY POINT (4): the sealed-snapshot SQL Server session.
+      //
+      // Gated at the ROUTE, before `run(...)`, which is the last point outside the sealed-export
+      // tree. Everything after this line — loading the active binding, decrypting its credentials,
+      // opening the mssql pool — happens inside `lib/sealed-export/stock-preparation-runtime-core`,
+      // so a fence there would be a change to a digest-pinned module with its own manifest to
+      // re-pin.
+      //
+      // THIS GUARD IS WEAKER THAN THE OTHER THREE, and the weakness is named rather than papered
+      // over: the runtime resolves its OWN active binding internally, so at this point the route
+      // cannot know which external system the session will open. `sourceBindingRef` is therefore a
+      // SENTINEL, and a registration for this purpose authorizes the SESSION for a tenant, purpose
+      // and data scope without pinning the binding instance. Closing that gap means threading the
+      // registry into the runtime's validated dep list inside the pinned sealed-export tree — a
+      // change with its own blast radius, deliberately not ridden along here.
+      //
+      // The `operationId` IS the Run identity, which is the right boundary: the sealed-snapshot
+      // runtime already treats one operation as one capture, so re-driving the same operation
+      // continues on its claim while a new operation needs its own registration.
+      await assertB2aReadAuthorization({
+        registry: b2aTrialRegistry,
+        store: context.storage,
+        tenantScope: sealedSnapshotTenantId,
+        // Pinned by the sealed-snapshot authority module, which refuses any other kind.
+        sourceSystemType: 'data-source:sql-readonly',
+        sourceBindingRef: SEALED_SNAPSHOT_BINDING_REF,
+        dataScopeRef: SEALED_SNAPSHOT_OBJECT_KEY,
+        sourceObjects: [SEALED_SNAPSHOT_OBJECT_KEY],
+        purpose: B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
+        runId: `sealed-snapshot:${input.operationId}`,
+        now: Date.now(),
+      })
       return sendOk(res, await stockPreparationSqlServerRuntime.run({
         actor,
         operationId: input.operationId,
-        tenantId: resolveAuthUserTenantId(req),
+        tenantId: sealedSnapshotTenantId,
         workspaceId: null,
       }))
     },
@@ -5637,6 +5897,31 @@ function createHandlers(services, options = {}) {
         throw new HttpRouteError(501, 'REPLAY_NOT_IMPLEMENTED', 'Dead-letter replay is not implemented')
       }
       const body = requestBody(req)
+      // B2a entry point (3), second door. `replayDeadLetter` re-enters `runPipeline` with no
+      // `dryRun`, so it is another live non-dry run of the same pipeline and gets the same fence.
+      // The dead-letter row names its pipeline, so the pipeline id has to be resolved first.
+      if (b2aTrialRegistry) {
+        // The dead-letter row names the pipeline this replay will re-run, and that pipeline id is
+        // what both fences key on. `deadLetterStore` is contracted for `listDeadLetters` ONLY
+        // (`requireService` above asserts exactly that), so a single-row accessor may not exist.
+        // FAIL CLOSED when it does not: an armed deployment refuses a replay whose scope it cannot
+        // resolve, rather than replaying unfenced. That is the same default-refuse posture unknown
+        // entry points get, and it costs nothing while the gate is dormant.
+        if (typeof deadLetters.getDeadLetter !== 'function') {
+          throw new HttpRouteError(
+            403,
+            B2A_REGISTRATION_REQUIRED,
+            'dead-letter replay cannot resolve its pipeline scope for the B2a read guard',
+            { reason: 'replay_scope_unresolvable' },
+          )
+        }
+        const deadLetter = await deadLetters.getDeadLetter(scopedInput(req, { id: requestParams(req).id }))
+        await assertPipelineRunAllowed(req, {
+          pipelineId: deadLetter && deadLetter.pipelineId,
+          dryRun: false,
+          runLabel: 'pipeline-dead-letter-replay',
+        })
+      }
       return sendOk(res, await runner.replayDeadLetter(scopedInput(req, {
         tenantId: body.tenantId,
         workspaceId: body.workspaceId,

@@ -56,7 +56,8 @@ const {
 const {
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-  assertB2aTrialAuthorized,
+  assertB2aReadAuthorization,
+  readPlanSourceObjects,
 } = require('./b2a-trial-registry.cjs')
 
 const PLM_STOCK_PREPARATION_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
@@ -890,14 +891,25 @@ async function consumeDryRunToken(tokenStore, token, expected) {
  * Returns `null` when the registry is dormant — callers then add nothing to their evidence, which is
  * what keeps a dormant deployment byte-identical.
  */
-function assertB2aTrialForStockPreparationRead({ registry, tenantId, action, parameters, purpose, now }) {
-  return assertB2aTrialAuthorized({
+async function assertB2aTrialForStockPreparationRead({ registry, store, tenantId, action, parameters, purpose, runId, now }) {
+  const source = (action && action.source) || {}
+  return assertB2aReadAuthorization({
     registry,
-    tenantId,
-    externalSystemId: action && action.source ? action.source.externalSystemId : null,
-    systemKind: action && action.source ? action.source.kind : null,
-    projectNo: parameters ? parameters.projectNo : null,
+    store,
+    tenantScope: tenantId,
+    // The system TYPE the runtime can actually verify is the adapter kind
+    // (`data-source:sql-readonly` / `bridge:legacy-sql-readonly`). Naming it here rather than a
+    // human product label means a binding repointed at a different adapter kind stops matching a
+    // registration written for the old one — which is the property worth having. The product name a
+    // human would use lives in the reviewed file's prose fields, not in anything code can check.
+    sourceSystemType: source.kind,
+    sourceBindingRef: source.externalSystemId,
+    dataScopeRef: parameters ? parameters.projectNo : null,
+    // The plan's OWN object list, so a plan repointed at one extra table stops matching a
+    // registration that did not enumerate it.
+    sourceObjects: readPlanSourceObjects(source.readPlan),
     purpose,
+    runId,
     now,
   })
 }
@@ -1000,11 +1012,13 @@ async function dryRunStockPreparationAction(input = {}) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
-  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
     tenantId: input.tenantId,
     action,
     parameters,
+    runId: input.b2aRunId,
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     now: input.now,
   })
@@ -1080,11 +1094,13 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
   // carries its OWN purpose: a registration written for the refresh action does not implicitly
   // authorize committing that customer's BOM into the MVP snapshot tables, and an entry with
   // `forbidReuse: true` will say so.
-  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
     tenantId: input.tenantId,
     action,
     parameters,
+    runId: input.b2aRunId,
     purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
     now: input.now,
   })
@@ -1243,11 +1259,13 @@ async function applyStockPreparationAction(input = {}) {
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume
   // on purpose — a refusal must not burn a single-use dry-run token, or an operator who is simply
   // outside their registered scope would also lose the artifact that proves what they planned.
-  const b2aTrialRegistration = assertB2aTrialForStockPreparationRead({
+  const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
+    store: input.b2aClaimStore,
     tenantId: input.tenantId,
     action,
     parameters,
+    runId: input.b2aRunId,
     // The SAME purpose the dry-run used. Apply re-expands the identical source read; splitting them
     // into two purposes would mean a deployment could register a customer for planning and then find
     // apply refused with a valid token in hand, which is a worse failure than the gate prevents.

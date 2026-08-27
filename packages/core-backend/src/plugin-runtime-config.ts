@@ -148,7 +148,7 @@ export function resolvePluginRuntimeConfig(
   const b2aTrialRegistry = readDeployJsonObjectFile(
     env,
     INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV,
-    'a JSON object with registryId, registryVersion and entries'
+    'a JSON object with registryId, registryVersion and registrations'
   )
 
   return {

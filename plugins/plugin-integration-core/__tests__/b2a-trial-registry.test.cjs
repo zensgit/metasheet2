@@ -1,14 +1,19 @@
 'use strict'
 
-// THE B2a REGISTRY CONTRACT — normalization at load, and the gate decision at check.
+// THE B2a REGISTRATION CONTRACT — normalization at load, and the guard decision at check.
 //
-// This suite pins what the module DOES. b2a-trial-registry-wiring.test.cjs pins the only thing that
-// makes any of it matter: that the real HTTP routes reach it, and that a refusal happens before a
-// single source row is read.
+// This suite pins what the registry DECIDES. b2a-trial-registry-wiring.test.cjs pins the only thing
+// that makes any of it matter: that the four inventoried read entry points reach it, and that a
+// refusal happens before a single source row is read.
+//
+// Case ids follow the acceptance matrix (R-01 … R-04) so the verification record maps 1:1. R-05
+// (SQL Server timeout / stable paging / row+page caps), R-06 (schema contract and drift) and R-08
+// (expiry disposition of value-bearing artifacts) are NOT covered here and are NOT claimed — see the
+// gap list in the change description.
 //
 // Hermetic: no DB, no network, no filesystem, no wall clock (every check is handed an explicit
-// `now`). Values-free: the only literals are synthetic ids, frozen reason tokens and ISO timestamps
-// this file authors itself.
+// `now`, and the claim store is an in-memory Map). Values-free: the only literals are synthetic ids,
+// frozen reason tokens and ISO timestamps this file authors itself.
 
 const assert = require('node:assert/strict')
 const path = require('node:path')
@@ -16,17 +21,30 @@ const path = require('node:path')
 const LIB = path.join(__dirname, '..', 'lib')
 
 const {
-  B2A_TRIAL_REGISTRY_CONFIG_KEY,
+  B2A_REGISTRY_CONFIG_KEY,
   B2A_PURPOSES,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+  B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
+  B2A_PURPOSE_PIPELINE_RUNNER_READ,
+  B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
+  B2A_ERROR_CODES,
+  B2A_REGISTRATION_REQUIRED,
+  B2A_AUTHORIZATION_INVALID,
+  B2A_SCOPE_MISMATCH,
+  B2A_SOURCE_TIMEOUT,
+  B2A_PAGE_LIMIT_EXCEEDED,
+  B2A_SCHEMA_DRIFT,
+  C6_SAFE_LIFECYCLE_REQUIRED,
+  B2A_REGISTRY_INVALID,
   B2A_EXPIRY_HANDLINGS,
   MAX_B2A_REGISTRATION_WINDOW_MS,
-  B2aTrialRegistryError,
-  assertB2aTrialAuthorized,
-  createB2aTrialRegistry,
-  resolveB2aTrialRegistryConfig,
+  B2aReadAuthorizationError,
+  assertB2aReadAuthorization,
+  createB2aRegistry,
+  readPlanSourceObjects,
+  resolveB2aRegistryConfig,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
 
 const {
@@ -38,22 +56,49 @@ const {
   PLM_STOCK_PREPARATION_ACTION_ID,
 } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 
+const {
+  PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+} = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
+
 // The literal the HOST writes onto server config (packages/core-backend/src/plugin-runtime-config.ts).
 // Stated as a literal rather than imported and compared to itself: a self-referential assertion
 // passes just as happily when the constant is mistyped and the gate is permanently dormant.
-assert.equal(B2A_TRIAL_REGISTRY_CONFIG_KEY, 'b2aTrialRegistry')
+assert.equal(B2A_REGISTRY_CONFIG_KEY, 'b2aTrialRegistry')
+
+// The FROZEN error vocabulary, restated for the same reason.
+assert.deepEqual([...B2A_ERROR_CODES], [
+  'B2A_REGISTRATION_REQUIRED',
+  'B2A_AUTHORIZATION_INVALID',
+  'B2A_SCOPE_MISMATCH',
+  'B2A_SOURCE_TIMEOUT',
+  'B2A_PAGE_LIMIT_EXCEEDED',
+  'B2A_SCHEMA_DRIFT',
+  'C6_SAFE_LIFECYCLE_REQUIRED',
+])
+assert.equal(B2A_REGISTRATION_REQUIRED, 'B2A_REGISTRATION_REQUIRED')
+assert.equal(B2A_AUTHORIZATION_INVALID, 'B2A_AUTHORIZATION_INVALID')
+assert.equal(B2A_SCOPE_MISMATCH, 'B2A_SCOPE_MISMATCH')
+assert.equal(B2A_SOURCE_TIMEOUT, 'B2A_SOURCE_TIMEOUT')
+assert.equal(B2A_PAGE_LIMIT_EXCEEDED, 'B2A_PAGE_LIMIT_EXCEEDED')
+assert.equal(B2A_SCHEMA_DRIFT, 'B2A_SCHEMA_DRIFT')
+assert.equal(C6_SAFE_LIFECYCLE_REQUIRED, 'C6_SAFE_LIFECYCLE_REQUIRED')
 
 const TENANT = 'tenant_1'
 const OTHER_TENANT = 'tenant_2'
 const PLM_SYSTEM = 'plm_sql_source'
 const K3_SYSTEM = 'k3_sql_source'
-const SYSTEM_KIND = 'data-source:sql-readonly'
+const SYSTEM_TYPE = 'data-source:sql-readonly'
+const OTHER_SYSTEM_TYPE = 'bridge:legacy-sql-readonly'
 const IN_SCOPE_PROJECT = 'P-001'
 const OUT_OF_SCOPE_PROJECT = 'P-999'
+const OBJECT_A = 'DN_PDM_PathExAttrInfo'
+const OBJECT_B = 'DN_PDM_PartLibraryInfo'
+const UNLISTED_OBJECT = 'DN_PDM_SecretTable'
 
 const T0 = Date.parse('2026-08-01T00:00:00Z')
 const DAY_MS = 24 * 60 * 60 * 1000
 const NOW = T0 + 10 * DAY_MS
+const RUN = 'run-a'
 
 // Whole seconds render without a fractional part; sub-second offsets KEEP theirs, because the
 // window-cap boundary cases below are one millisecond wide and a lossy formatter would quietly turn
@@ -62,44 +107,56 @@ function iso(ms) {
   return new Date(ms).toISOString().replace(/\.000Z$/, 'Z')
 }
 
-function entry(overrides = {}) {
+function registration(overrides = {}) {
   return {
-    entryId: 'b2a-factory-a-plm',
-    tenantId: TENANT,
-    sourceBinding: { externalSystemId: PLM_SYSTEM },
-    projectScope: { projectNos: [IN_SCOPE_PROJECT, 'P-002'] },
+    registrationId: 'b2a-factory-a-plm',
+    tenantScope: TENANT,
+    sourceSystemType: SYSTEM_TYPE,
+    sourceBindingRef: PLM_SYSTEM,
+    projectDataScope: { dataScopeRefs: [IN_SCOPE_PROJECT, 'P-002'] },
+    objectScope: { sourceObjects: [OBJECT_A, OBJECT_B] },
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-    owner: 'owner-a',
+    ownerPrincipalRef: 'owner-ref-a',
+    authorizationRef: 'auth-ref-a',
+    operationRef: 'op-ref-a',
     effectiveAt: iso(T0),
     expiresAt: iso(T0 + 60 * DAY_MS),
     forbidReuse: true,
-    b2bCondition: 'migrate onto the generalized binding before expiry',
-    expiryHandling: 'refuse',
+    sourceReadOperationLimit: 1,
+    artifactReplayLimit: 0,
+    consumptionState: 'unconsumed',
+    consumedAt: null,
+    b2bMigrationCondition: 'migrate onto the generalized binding before expiry',
+    expiryHandling: 'deny_replay',
+    status: 'active',
+    registrationVersion: 1,
     ...overrides,
   }
 }
 
-function registryConfig(entries, overrides = {}) {
-  return {
-    registryId: 'b2a-2026-q3',
-    registryVersion: 1,
-    entries,
-    ...overrides,
-  }
+function registryConfig(registrations, overrides = {}) {
+  return { registryId: 'b2a-2026-q3', registryVersion: 1, registrations, ...overrides }
 }
 
-function build(entries, overrides) {
-  return createB2aTrialRegistry({ config: { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: registryConfig(entries, overrides) } })
+function build(registrations, overrides) {
+  return createB2aRegistry({ config: { [B2A_REGISTRY_CONFIG_KEY]: registryConfig(registrations, overrides) } })
+}
+
+function store() {
+  return new Map()
 }
 
 function check(registry, overrides = {}) {
-  return assertB2aTrialAuthorized({
+  return assertB2aReadAuthorization({
     registry,
-    tenantId: TENANT,
-    externalSystemId: PLM_SYSTEM,
-    systemKind: SYSTEM_KIND,
-    projectNo: IN_SCOPE_PROJECT,
+    store: overrides.store || store(),
+    tenantScope: TENANT,
+    sourceSystemType: SYSTEM_TYPE,
+    sourceBindingRef: PLM_SYSTEM,
+    dataScopeRef: IN_SCOPE_PROJECT,
+    sourceObjects: [OBJECT_A],
     purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    runId: RUN,
     now: NOW,
     ...overrides,
   })
@@ -114,150 +171,199 @@ function captured(fn) {
   return null
 }
 
-function assertConfigThrow(entries, label, overrides) {
-  const error = captured(() => build(entries, overrides))
-  assert.ok(error, `${label}: load must throw`)
-  assert.ok(error instanceof B2aTrialRegistryError, `${label}: wrong error class (${error && error.name})`)
-  assert.equal(error.code, 'B2A_TRIAL_REGISTRY_INVALID', label)
-  assert.equal(error.status, 500, `${label}: a broken deployment is a 500, not a refused caller`)
+async function capturedAsync(promise) {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  return null
 }
 
-function assertRefusal(registry, overrides, reason, label) {
-  const error = captured(() => check(registry, overrides))
-  assert.ok(error, `${label}: the gate must refuse`)
-  assert.ok(error instanceof B2aTrialRegistryError, `${label}: wrong error class (${error && error.name})`)
-  assert.equal(error.code, 'B2A_TRIAL_REGISTRATION_REQUIRED', label)
+function assertConfigThrow(registrations, label, overrides) {
+  const error = captured(() => build(registrations, overrides))
+  assert.ok(error, `${label}: load must throw`)
+  assert.ok(error instanceof B2aReadAuthorizationError, `${label}: wrong error class (${error && error.name})`)
+  assert.equal(error.code, B2A_REGISTRY_INVALID, label)
+  assert.equal(error.status, 500, `${label}: a broken deployment is a 500, not a refused caller`)
+  return error
+}
+
+const FORBIDDEN_IN_EVIDENCE = Object.freeze([
+  IN_SCOPE_PROJECT, OUT_OF_SCOPE_PROJECT, TENANT, OTHER_TENANT,
+  PLM_SYSTEM, K3_SYSTEM, OBJECT_A, OBJECT_B, UNLISTED_OBJECT,
+  'owner-ref-a', 'auth-ref-a', 'op-ref-a',
+  'migrate onto the generalized binding before expiry', '2026-08', '2026-09',
+])
+
+async function assertRefusal(registry, overrides, code, reason, label) {
+  const error = await capturedAsync(check(registry, overrides))
+  assert.ok(error, `${label}: the guard must refuse`)
+  assert.ok(error instanceof B2aReadAuthorizationError, `${label}: wrong error class (${error && error.name})`)
+  assert.equal(error.code, code, `${label}: wrong FIXED code`)
   assert.equal(error.status, 403, label)
   assert.equal(error.details.reason, reason, `${label}: wrong reason token`)
-  // VALUES-FREE. A refusal may name entry ids, the source system id (already public in this
-  // plugin's TABLE_ACTION_SOURCE_INVALID detail) and booleans. It must never carry a project
-  // number, a tenant id, an owner, a migration condition or a date.
+  // VALUES-FREE. A refusal may name registration ids, registry ids, fixed codes, reason tokens,
+  // booleans and counts. It must never carry a tenant, a binding ref, a data-scope ref, a source
+  // object name, an owner/authorization/operation ref, a migration condition or a date.
   const text = JSON.stringify({ message: error.message, details: error.details })
-  for (const forbidden of [
-    IN_SCOPE_PROJECT,
-    OUT_OF_SCOPE_PROJECT,
-    TENANT,
-    OTHER_TENANT,
-    'owner-a',
-    'migrate onto the generalized binding before expiry',
-    '2026-08',
-  ]) {
+  for (const forbidden of FORBIDDEN_IN_EVIDENCE) {
     assert.equal(text.includes(forbidden), false, `${label}: refusal leaked ${JSON.stringify(forbidden)}`)
   }
   return error
 }
 
-// ── 1. DORMANCY: no key, no gate ──────────────────────────────────────────────
+// ── DORMANCY: no key, no gate ────────────────────────────────────────────────
 
-function dormantWhenTheKeyIsAbsent() {
-  // The three shapes the host can hand over when INTEGRATION_CORE_B2A_REGISTRY_PATH is unset.
-  assert.equal(createB2aTrialRegistry({ config: {} }), null, 'absent key is dormant')
-  assert.equal(createB2aTrialRegistry({}), null, 'absent config is dormant')
-  assert.equal(createB2aTrialRegistry(), null, 'no argument at all is dormant')
-  assert.equal(createB2aTrialRegistry({ config: { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: undefined } }), null)
-  assert.equal(createB2aTrialRegistry({ config: { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: null } }), null)
-  assert.equal(resolveB2aTrialRegistryConfig({}), undefined)
+async function dormantWhenTheKeyIsAbsent() {
+  assert.equal(createB2aRegistry({ config: {} }), null, 'absent key is dormant')
+  assert.equal(createB2aRegistry({}), null, 'absent config is dormant')
+  assert.equal(createB2aRegistry(), null, 'no argument at all is dormant')
+  assert.equal(createB2aRegistry({ config: { [B2A_REGISTRY_CONFIG_KEY]: undefined } }), null)
+  assert.equal(createB2aRegistry({ config: { [B2A_REGISTRY_CONFIG_KEY]: null } }), null)
+  assert.equal(resolveB2aRegistryConfig({}), undefined)
 
-  // And the gate, handed a dormant registry, returns null rather than a stanza — which is what lets
+  // The guard, handed a dormant registry, returns null rather than a stanza — which is what lets
   // every caller add NOTHING to its evidence and stay byte-identical.
-  assert.equal(assertB2aTrialAuthorized({ registry: null }), null)
-  assert.equal(assertB2aTrialAuthorized({ registry: undefined }), null)
-  assert.equal(assertB2aTrialAuthorized({}), null)
-  // Dormant short-circuits BEFORE every other validation: a call with no tenant, no system, no
-  // project, no purpose and no clock is still simply not gated.
-  assert.equal(assertB2aTrialAuthorized({ registry: null, tenantId: null, projectNo: null, now: NaN }), null)
+  assert.equal(await assertB2aReadAuthorization({ registry: null }), null)
+  assert.equal(await assertB2aReadAuthorization({ registry: undefined }), null)
+  assert.equal(await assertB2aReadAuthorization({}), null)
+  // Dormant short-circuits BEFORE every other validation: a call with no tenant, no binding, no
+  // scope, no purpose, no store and no clock is still simply not gated.
+  assert.equal(await assertB2aReadAuthorization({ registry: null, tenantScope: null, now: NaN, store: null }), null)
 }
 
 // `false` is FATAL here where the ext-field mapping treats it as "switched off". That module needs a
 // kill switch an operator can reach without taking the plugin down; the whole point of this one is
 // that it cannot be switched off from inside the file it governs.
 function switchingItOffFromInsideTheFileIsRefused() {
-  for (const raw of [false, true, 0, 1, 'off', [], [entry()]]) {
-    const error = captured(() => createB2aTrialRegistry({ config: { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: raw } }))
+  for (const raw of [false, true, 0, 1, 'off', [], [registration()]]) {
+    const error = captured(() => createB2aRegistry({ config: { [B2A_REGISTRY_CONFIG_KEY]: raw } }))
     assert.ok(error, `${JSON.stringify(raw)} must not be accepted as a registry`)
-    assert.equal(error.code, 'B2A_TRIAL_REGISTRY_INVALID')
+    assert.equal(error.code, B2A_REGISTRY_INVALID)
     assert.equal(error.status, 500)
-    // The message points at the ONE supported way to be dormant, which is a deployment act.
     assert.ok(error.message.includes('INTEGRATION_CORE_B2A_REGISTRY_PATH'), 'the message names the env var')
   }
 }
 
-// ── 2. LOAD-TIME VALIDATION: closed key sets, required fields ─────────────────
+// ── LOAD-TIME VALIDATION ─────────────────────────────────────────────────────
 
-function registryEnvelopeIsValidated() {
+async function registryEnvelopeIsValidated() {
   assertConfigThrow([], 'a registry must name itself', { registryId: undefined })
   assertConfigThrow([], 'registryVersion must be a positive integer', { registryVersion: 0 })
   assertConfigThrow([], 'registryVersion must be an integer', { registryVersion: 1.5 })
-  assertConfigThrow([], 'registryVersion must be present', { registryVersion: undefined })
   assertConfigThrow([], 'an unknown envelope key is refused', { note: 'hello' })
 
-  const missingEntries = captured(() => createB2aTrialRegistry({
-    config: { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: { registryId: 'r', registryVersion: 1 } },
+  const missing = captured(() => createB2aRegistry({
+    config: { [B2A_REGISTRY_CONFIG_KEY]: { registryId: 'r', registryVersion: 1 } },
   }))
-  assert.ok(missingEntries, 'entries is required')
-  assert.equal(missingEntries.code, 'B2A_TRIAL_REGISTRY_INVALID')
+  assert.ok(missing, 'registrations is required')
+  assert.equal(missing.code, B2A_REGISTRY_INVALID)
 
   // AN ARMED, EMPTY REGISTRY IS LEGAL and refuses everything. This is the correct state for a
   // deployment that has armed the gate and has no approved exception yet; rejecting it would push
   // operators toward leaving the env var unset instead, which is strictly worse.
   const empty = build([])
   assert.notEqual(empty, null, 'an empty registry is ARMED, not dormant')
-  assert.equal(empty.entryCount, 0)
-  assertRefusal(empty, {}, 'no_entry', 'an armed empty registry refuses everything')
+  assert.equal(empty.registrationCount, 0)
+  await assertRefusal(empty, {}, B2A_REGISTRATION_REQUIRED, 'no_registration', 'an armed empty registry refuses everything')
 }
 
 function everyRegisteredFieldIsRequired() {
-  // The freeze asks the registration to state applicable customer / system / data scope / no-reuse /
-  // owner / expiry / B2b condition / overrun handling. Each one is refused when absent, at load.
-  for (const field of ['entryId', 'tenantId', 'owner', 'b2bCondition', 'expiryHandling', 'effectiveAt', 'expiresAt']) {
-    assertConfigThrow([entry({ [field]: undefined })], `${field} is required`)
-    assertConfigThrow([entry({ [field]: '   ' })], `${field} may not be blank`)
+  // The contract asks each registration to state applicable tenant / system type / binding / data
+  // scope / object scope / purpose / owner / authorization / operation / window / migration
+  // condition / expiry handling / status / version. Each is refused when absent, AT LOAD.
+  const requiredStrings = [
+    'registrationId', 'tenantScope', 'sourceSystemType', 'sourceBindingRef', 'purpose',
+    'ownerPrincipalRef', 'authorizationRef', 'operationRef', 'effectiveAt', 'expiresAt',
+    'b2bMigrationCondition', 'expiryHandling', 'status', 'consumptionState',
+  ]
+  for (const field of requiredStrings) {
+    assertConfigThrow([registration({ [field]: undefined })], `${field} is required`)
+    assertConfigThrow([registration({ [field]: '   ' })], `${field} may not be blank`)
   }
-  assertConfigThrow([entry({ sourceBinding: undefined })], 'sourceBinding is required')
-  assertConfigThrow([entry({ projectScope: undefined })], 'projectScope is required')
-  assertConfigThrow([entry({ forbidReuse: undefined })], 'forbidReuse is required')
-  assertConfigThrow([entry({ forbidReuse: 'true' })], 'forbidReuse must be a real boolean')
+  assertConfigThrow([registration({ projectDataScope: undefined })], 'projectDataScope is required')
+  assertConfigThrow([registration({ objectScope: undefined })], 'objectScope is required')
+  assertConfigThrow([registration({ registrationVersion: undefined })], 'registrationVersion is required')
+  assertConfigThrow([registration({ registrationVersion: 0 })], 'registrationVersion must be positive')
 
   // Closed key sets at all three levels.
-  assertConfigThrow([entry({ notAKey: 1 })], 'an unknown entry key is refused')
-  assertConfigThrow([entry({ sourceBinding: { externalSystemId: PLM_SYSTEM, host: 'x' } })], 'an unknown binding key is refused')
-  assertConfigThrow([entry({ projectScope: { projectNos: [IN_SCOPE_PROJECT], all: true } })], 'an unknown scope key is refused')
-  assertConfigThrow([{ ...entry(), entryId: 1 }], 'a non-string entryId is refused')
-  assertConfigThrow(['not-an-object'], 'a non-object entry is refused')
+  assertConfigThrow([registration({ notAKey: 1 })], 'an unknown registration key is refused')
+  assertConfigThrow([registration({ objectScope: { sourceObjects: [OBJECT_A], all: true } })], 'an unknown object-scope key is refused')
+  assertConfigThrow([registration({ projectDataScope: { dataScopeRefs: [IN_SCOPE_PROJECT], all: true } })], 'an unknown data-scope key is refused')
+  assertConfigThrow(['not-an-object'], 'a non-object registration is refused')
 
-  // expiryHandling is a CLOSED token, not prose: a field that reads like a control and is not one is
-  // worse than no field.
-  assert.deepEqual([...B2A_EXPIRY_HANDLINGS], ['refuse'])
-  assertConfigThrow([entry({ expiryHandling: 'notify the owner' })], 'expiryHandling must be a known token')
-
-  // Duplicate entry ids would make an evidence stanza ambiguous about WHICH registration authorized
-  // a read, which is the one thing the stanza exists to say.
-  assertConfigThrow([entry(), entry({ tenantId: OTHER_TENANT })], 'a duplicate entryId is refused')
+  // Closed vocabularies.
+  assert.deepEqual([...B2A_EXPIRY_HANDLINGS], ['deny_replay', 'purge'])
+  assertConfigThrow([registration({ expiryHandling: 'notify the owner' })], 'expiryHandling must be a known token')
+  assertConfigThrow([registration({ status: 'paused' })], 'status must be a known token')
+  assertConfigThrow([registration({ consumptionState: 'maybe' })], 'consumptionState must be a known token')
 }
 
-// THE KEY. tenant+project alone was ruled INSUFFICIENT because one customer can connect several
-// PLM/ERP systems; the external-system id is what tells them apart, so an entry may not omit it.
+// A registration references a MANAGED BINDING. It never carries a host, an IP, a username, a
+// password, a token or a connection string — and the refusal names that rule rather than the generic
+// "unsupported key", which a deployer would read as an invitation to find the supported spelling.
+function connectionDetailIsRefusedByName() {
+  for (const key of ['host', 'port', 'username', 'password', 'token', 'connectionString', 'dsn', 'database']) {
+    const error = assertConfigThrow([registration({ [key]: 'x' })], `${key} is refused`)
+    assert.equal(error.details.reason, 'connection_detail_forbidden', `${key}: the refusal must name the rule`)
+    assert.ok(error.message.includes('managed binding'), `${key}: the message states why`)
+  }
+}
+
+// §6.1 fixes these three. They are spelled out in the file rather than defaulted, so a reviewer
+// reading a registration sees the constraint it operates under instead of having to know it.
+function theFixedFieldsAreFixed() {
+  assertConfigThrow([registration({ forbidReuse: false })], 'a B2a registration may not be written reusable')
+  assertConfigThrow([registration({ forbidReuse: undefined })], 'forbidReuse must be stated')
+  assertConfigThrow([registration({ forbidReuse: 'true' })], 'forbidReuse must be a real boolean')
+  assertConfigThrow([registration({ sourceReadOperationLimit: 2 })], 'sourceReadOperationLimit must be 1')
+  assertConfigThrow([registration({ sourceReadOperationLimit: undefined })], 'sourceReadOperationLimit must be stated')
+
+  // artifactReplayLimit defaults to 0, and in THIS cut may only be 0: a non-zero replay count needs
+  // an O4 authorization reference the codebase cannot record or verify, and a number the code cannot
+  // check is a field that reads like a control and is not one.
+  assert.equal(build([registration({ artifactReplayLimit: undefined })]).registrations[0].artifactReplayLimit, 0)
+  const replay = assertConfigThrow([registration({ artifactReplayLimit: 1 })], 'a non-zero replay limit is refused')
+  assert.equal(replay.details.reason, 'artifact_replay_not_authorized')
+  assertConfigThrow([registration({ artifactReplayLimit: -1 })], 'a negative replay limit is refused')
+  assertConfigThrow([registration({ artifactReplayLimit: 1.5 })], 'a fractional replay limit is refused')
+}
+
+// A one-time authorization cannot afford ambiguity about whether it has been spent.
+function consumptionStateAndTimestampMustAgree() {
+  assertConfigThrow([registration({ consumptionState: 'consumed' })], 'consumed requires a timestamp')
+  assertConfigThrow(
+    [registration({ consumptionState: 'unconsumed', consumedAt: iso(T0) })],
+    'unconsumed must not carry a timestamp',
+  )
+  assertConfigThrow(
+    [registration({ consumptionState: 'consumed', consumedAt: '2026' })],
+    'consumedAt must be strict ISO',
+  )
+  assert.ok(build([registration({ consumptionState: 'consumed', consumedAt: iso(T0 + DAY_MS) })]))
+}
+
+// THE KEY. tenant+project alone was ruled INSUFFICIENT; the binding is what tells two of a
+// customer's systems apart, and neither half may be omitted.
 function theSourceBindingIsMandatory() {
-  assertConfigThrow([entry({ sourceBinding: {} })], 'a binding must name its external system')
-  assertConfigThrow([entry({ sourceBinding: { externalSystemId: '  ' } })], 'a blank external system id is refused')
-  assertConfigThrow([entry({ sourceBinding: { systemKind: SYSTEM_KIND } })], 'systemKind alone is not a binding')
-  assertConfigThrow([entry({ sourceBinding: { externalSystemId: PLM_SYSTEM, systemKind: '' } })], 'a blank systemKind is refused')
+  assertConfigThrow([registration({ sourceBindingRef: undefined })], 'a registration must name its binding')
+  assertConfigThrow([registration({ sourceSystemType: undefined })], 'a registration must name its system type')
 }
 
 // "允许读写的数据范围" with no enumeration is not a scope. There is deliberately no wildcard.
-function theProjectScopeMustEnumerate() {
-  assertConfigThrow([entry({ projectScope: {} })], 'a scope must enumerate projects')
-  assertConfigThrow([entry({ projectScope: { projectNos: [] } })], 'an empty scope is refused')
-  assertConfigThrow([entry({ projectScope: { projectNos: '*' } })], 'a wildcard string is not a scope')
-  assertConfigThrow([entry({ projectScope: { projectNos: [IN_SCOPE_PROJECT, ''] } })], 'a blank project number is refused')
-  assertConfigThrow([entry({ projectScope: { projectNos: [IN_SCOPE_PROJECT, IN_SCOPE_PROJECT] } })], 'a repeated project number is refused')
+function theScopesMustEnumerate() {
+  for (const [field, key] of [['projectDataScope', 'dataScopeRefs'], ['objectScope', 'sourceObjects']]) {
+    assertConfigThrow([registration({ [field]: {} })], `${field} must enumerate`)
+    assertConfigThrow([registration({ [field]: { [key]: [] } })], `an empty ${field} is refused`)
+    assertConfigThrow([registration({ [field]: { [key]: '*' } })], `a wildcard string is not a ${field}`)
+    assertConfigThrow([registration({ [field]: { [key]: ['a', ''] } })], `a blank ${field} entry is refused`)
+    assertConfigThrow([registration({ [field]: { [key]: ['a', 'a'] } })], `a repeated ${field} entry is refused`)
+  }
 }
 
-// ── 3. BOUNDED TIME ───────────────────────────────────────────────────────────
+// ── BOUNDED TIME ─────────────────────────────────────────────────────────────
 
-// Strict ISO-8601 with time AND zone. `Date.parse` alone accepts "2999" and turns a bounded window
-// into a millennium. The vector table is shared with the production-policy module's parser so the
-// deliberate duplication of `parseStrictIsoTimestamp` cannot drift silently.
 const ISO_VECTORS = Object.freeze([
   ['2026-09-01T00:00:00Z', true],
   ['2026-09-01T00:00:00.500Z', true],
@@ -274,13 +380,14 @@ const ISO_VECTORS = Object.freeze([
   ['', false],
 ])
 
+// Strict ISO-8601 with time AND zone. `Date.parse` alone accepts "2999" and turns a bounded window
+// into a millennium. The vector table is shared with the production-policy module's parser so the
+// deliberate duplication of `parseStrictIsoTimestamp` cannot drift silently.
 function timestampsAreStrictIsoAndAgreeWithTheProductionPolicyParser() {
   for (const [value, accepted] of ISO_VECTORS) {
-    // B2a side: vary `expiresAt` with an effectiveAt far enough back to stay inside the window cap.
-    const b2a = captured(() => build([entry({ effectiveAt: '2026-08-30T00:00:00Z', expiresAt: value })]))
+    const b2a = captured(() => build([registration({ effectiveAt: '2026-08-30T00:00:00Z', expiresAt: value })]))
     assert.equal(b2a === null, accepted, `B2a expiresAt ${JSON.stringify(value)} acceptance`)
 
-    // Production-policy side: the SAME vector through the module this parser was lifted from.
     const policy = captured(() => normalizeStockPrepApplyProductionPolicy({
       enabled: true,
       authorizedTargetObjectId: PROD_CANONICAL_OBJECT_ID,
@@ -293,233 +400,366 @@ function timestampsAreStrictIsoAndAgreeWithTheProductionPolicyParser() {
     }))
     assert.equal(policy === null, accepted, `production-policy expiresAt ${JSON.stringify(value)} acceptance`)
   }
-
-  // effectiveAt is held to the same standard.
-  assertConfigThrow([entry({ effectiveAt: '2026' })], 'effectiveAt must be strict ISO')
+  assertConfigThrow([registration({ effectiveAt: '2026' })], 'effectiveAt must be strict ISO')
 }
 
 function theWindowIsBounded() {
   assert.equal(MAX_B2A_REGISTRATION_WINDOW_MS, 180 * DAY_MS)
-  // At the cap: accepted. One millisecond past it: refused, at LOAD, without any clock.
-  assert.notEqual(build([entry({ effectiveAt: iso(T0), expiresAt: iso(T0 + MAX_B2A_REGISTRATION_WINDOW_MS) })]), null)
+  assert.notEqual(build([registration({ effectiveAt: iso(T0), expiresAt: iso(T0 + MAX_B2A_REGISTRATION_WINDOW_MS) })]), null)
   assertConfigThrow(
-    [entry({ effectiveAt: iso(T0), expiresAt: iso(T0 + MAX_B2A_REGISTRATION_WINDOW_MS + 1) })],
+    [registration({ effectiveAt: iso(T0), expiresAt: iso(T0 + MAX_B2A_REGISTRATION_WINDOW_MS + 1) })],
     'a window longer than the bounded exception window is refused',
   )
-  // A "限时" exception that never ends, spelled as two individually well-formed timestamps.
-  assertConfigThrow([entry({ effectiveAt: iso(T0), expiresAt: '2999-01-01T00:00:00Z' })], 'a millennium is not a window')
-  assertConfigThrow([entry({ effectiveAt: iso(T0), expiresAt: iso(T0) })], 'expiresAt must be after effectiveAt')
-  assertConfigThrow([entry({ effectiveAt: iso(T0 + DAY_MS), expiresAt: iso(T0) })], 'a reversed window is refused')
+  assertConfigThrow([registration({ effectiveAt: iso(T0), expiresAt: '2999-01-01T00:00:00Z' })], 'a millennium is not a window')
+  assertConfigThrow([registration({ effectiveAt: iso(T0), expiresAt: iso(T0) })], 'expiresAt must be after effectiveAt')
+  assertConfigThrow([registration({ effectiveAt: iso(T0 + DAY_MS), expiresAt: iso(T0) })], 'a reversed window is refused')
 }
 
-// The module holds no clock: expiry against the WALL CLOCK is a CHECK-time decision, deliberately
-// (an activation that depends on the time of day would take the whole plugin down at midnight).
-// An already-expired entry LOADS and then refuses every single call.
-function expiryIsCheckedAtCheckTimeNotLoadTime() {
-  const expired = build([entry({ effectiveAt: iso(T0), expiresAt: iso(T0 + DAY_MS) })])
-  assert.notEqual(expired, null, 'a well-formed but expired entry LOADS')
-  assert.equal(expired.entryCount, 1)
-  const error = assertRefusal(expired, {}, 'expired', 'an expired registration refuses at check time')
-  assert.equal(error.details.notExpired, false)
-  assert.equal(error.details.effective, true)
-  assert.equal(error.details.expiryHandling, 'refuse', 'the refusal states the rule it is applying')
+// ── R-01: missing / not-yet-effective / expired / revoked / consumed ─────────
 
-  // The boundary is exclusive at the top: at `expiresAt` exactly, it is expired.
-  const boundary = build([entry({ effectiveAt: iso(T0), expiresAt: iso(NOW) })])
-  assertRefusal(boundary, {}, 'expired', 'expiry is exclusive at the top of the window')
-  assert.ok(check(build([entry({ effectiveAt: iso(T0), expiresAt: iso(NOW + 1) })])), 'one ms before expiry still passes')
+async function R01_registrationLifecycleRefusals() {
+  // MISSING — armed, and nothing in it covers this tenant.
+  await assertRefusal(build([registration({ tenantScope: OTHER_TENANT })]), {},
+    B2A_REGISTRATION_REQUIRED, 'no_registration', 'R-01 unregistered tenant')
 
-  // …and inclusive at the bottom.
-  assert.ok(check(build([entry({ effectiveAt: iso(NOW), expiresAt: iso(NOW + DAY_MS) })])), 'effectiveAt is inclusive')
-  const notYet = build([entry({ effectiveAt: iso(NOW + 1), expiresAt: iso(NOW + DAY_MS) })])
-  const early = assertRefusal(notYet, {}, 'not_yet_effective', 'a future registration does not authorize today')
+  // The module holds no clock: wall-clock expiry is a CHECK-time decision, deliberately (an
+  // activation that depended on the time of day would take the whole plugin down at midnight).
+  // An already-expired registration LOADS and then refuses every single call.
+  const expired = build([registration({ effectiveAt: iso(T0), expiresAt: iso(T0 + DAY_MS) })])
+  assert.notEqual(expired, null, 'a well-formed but expired registration LOADS')
+  const expiredError = await assertRefusal(expired, {}, B2A_REGISTRATION_REQUIRED, 'expired', 'R-01 expired')
+  assert.equal(expiredError.details.notExpired, false)
+  assert.equal(expiredError.details.expiryHandling, 'deny_replay', 'the refusal states the disposition rule')
+
+  // Boundaries: exclusive at the top, inclusive at the bottom.
+  await assertRefusal(build([registration({ effectiveAt: iso(T0), expiresAt: iso(NOW) })]), {},
+    B2A_REGISTRATION_REQUIRED, 'expired', 'R-01 expiry is exclusive at the top')
+  assert.ok(await check(build([registration({ effectiveAt: iso(T0), expiresAt: iso(NOW + 1) })])), 'one ms before expiry passes')
+  assert.ok(await check(build([registration({ effectiveAt: iso(NOW), expiresAt: iso(NOW + DAY_MS) })])), 'effectiveAt is inclusive')
+
+  const early = await assertRefusal(
+    build([registration({ effectiveAt: iso(NOW + 1), expiresAt: iso(NOW + DAY_MS) })]), {},
+    B2A_REGISTRATION_REQUIRED, 'not_yet_effective', 'R-01 not yet effective')
   assert.equal(early.details.effective, false)
 
+  // REVOKED.
+  await assertRefusal(build([registration({ status: 'revoked' })]), {},
+    B2A_REGISTRATION_REQUIRED, 'revoked', 'R-01 revoked')
+
+  // CONSUMED, as recorded in the file.
+  await assertRefusal(build([registration({ consumptionState: 'consumed', consumedAt: iso(T0 + DAY_MS) })]), {},
+    B2A_AUTHORIZATION_INVALID, 'already_consumed', 'R-01 already consumed')
+
   // No clock, no decision. Fail-closed rather than defaulting to "now".
-  assertRefusal(build([entry()]), { now: undefined }, 'missing_now', 'a missing clock refuses')
-  assertRefusal(build([entry()]), { now: NaN }, 'missing_now', 'a NaN clock refuses')
-  assertRefusal(build([entry()]), { now: '1754000000000' }, 'missing_now', 'a string clock refuses')
-}
-
-// ── 4. THE GATE DECISION ──────────────────────────────────────────────────────
-
-function aMatchingEntryPasses() {
-  const registry = build([entry()])
-  const stanza = check(registry)
-  assert.deepEqual(stanza, {
-    armed: true,
-    registryId: 'b2a-2026-q3',
-    registryVersion: 1,
-    entryId: 'b2a-factory-a-plm',
-    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
-    sourceSystemId: PLM_SYSTEM,
-    sourceBindingMatched: true,
-    projectInScope: true,
-    effective: true,
-    notExpired: true,
-    forbidReuse: true,
-    expiryHandling: 'refuse',
-  })
-  assert.ok(Object.isFrozen(stanza), 'the stanza is frozen')
-  // VALUES-FREE on the PASS path too: ids and booleans, never a project number, a tenant, an owner
-  // or a date.
-  const text = JSON.stringify(stanza)
-  for (const forbidden of [IN_SCOPE_PROJECT, TENANT, 'owner-a', '2026-08', 'migrate onto']) {
-    assert.equal(text.includes(forbidden), false, `pass stanza leaked ${JSON.stringify(forbidden)}`)
+  for (const bad of [undefined, NaN, '1754000000000']) {
+    await assertRefusal(build([registration()]), { now: bad },
+      B2A_AUTHORIZATION_INVALID, 'missing_now', `R-01 clock ${String(bad)} refuses`)
+  }
+  // No Run identity, no one-operation limit.
+  await assertRefusal(build([registration()]), { runId: undefined },
+    B2A_AUTHORIZATION_INVALID, 'missing_run_id', 'R-01 missing run id')
+  // No durable store, no one-time authorization. Fail-closed rather than an unlimited read.
+  for (const bad of [undefined, null, {}, { get() {} }]) {
+    await assertRefusal(build([registration()]), { store: bad },
+      B2A_AUTHORIZATION_INVALID, 'claim_store_unavailable', 'R-01 no claim store')
   }
 }
 
-// THE R-09 LESSON, made executable. The production-policy instrument is process-global and carries
-// NO tenant and NO project field, so it can only ever say "this server may apply". These four
-// refusals are the four dimensions that shape could not express.
-function theEntryIsScopedOnAllFourDimensions() {
-  const registry = build([entry()])
-  assertRefusal(registry, { tenantId: OTHER_TENANT }, 'no_entry', 'another tenant is not covered')
-  assertRefusal(registry, { externalSystemId: K3_SYSTEM }, 'no_entry', 'the SAME customer\'s OTHER system is not covered')
-  assertRefusal(registry, { projectNo: OUT_OF_SCOPE_PROJECT }, 'project_out_of_scope', 'a project outside the scope is refused')
-  assertRefusal(registry, { purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST }, 'purpose_not_permitted', 'another consumer is refused')
+// ── R-02: source / data-scope / object / purpose out of bounds ───────────────
 
-  // The one that motivated the key: a tenant with TWO registered systems gets an entry per system,
-  // and neither authorizes the other.
+async function R02_scopeRefusals() {
+  const registry = build([registration()])
+
+  // THE R-09 DIMENSION: the SAME customer's OTHER system. Tenant matches, data scope matches, and
+  // the registration names a different binding.
+  await assertRefusal(registry, { sourceBindingRef: K3_SYSTEM },
+    B2A_REGISTRATION_REQUIRED, 'no_registration', 'R-02 the customer\'s OTHER system')
+  await assertRefusal(registry, { sourceSystemType: OTHER_SYSTEM_TYPE },
+    B2A_REGISTRATION_REQUIRED, 'no_registration', 'R-02 a repointed adapter kind')
+  await assertRefusal(registry, { tenantScope: OTHER_TENANT },
+    B2A_REGISTRATION_REQUIRED, 'no_registration', 'R-02 another tenant')
+
+  await assertRefusal(registry, { dataScopeRef: OUT_OF_SCOPE_PROJECT },
+    B2A_SCOPE_MISMATCH, 'data_scope_mismatch', 'R-02 data scope out of bounds')
+
+  // THE WIDENED QUERY. The read reaches one table the registration did not enumerate.
+  const widened = await assertRefusal(registry, { sourceObjects: [OBJECT_A, UNLISTED_OBJECT] },
+    B2A_SCOPE_MISMATCH, 'object_out_of_scope', 'R-02 widened object set')
+  assert.equal(widened.details.unauthorizedObjectCount, 1, 'the COUNT is reported, never the name')
+  assert.equal(widened.details.objectInScope, false)
+  // A subset of the enumerated objects is fine; the scope is a ceiling, not an exact match.
+  assert.ok(await check(registry, { sourceObjects: [OBJECT_A, OBJECT_B] }))
+
+  await assertRefusal(registry, { purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST },
+    B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'R-02 another consumer')
+
+  // An under-specified call refuses, per dimension, with booleans only.
+  for (const [field, flag] of [
+    ['tenantScope', 'tenantResolved'],
+    ['sourceSystemType', 'sourceSystemTypeResolved'],
+    ['sourceBindingRef', 'sourceBindingResolved'],
+    ['dataScopeRef', 'dataScopeResolved'],
+  ]) {
+    const error = await assertRefusal(registry, { [field]: undefined },
+      B2A_SCOPE_MISMATCH, 'missing_scope', `R-02 missing ${field}`)
+    assert.equal(error.details[flag], false, `${flag} is reported as unresolved`)
+    await assertRefusal(registry, { [field]: '   ' }, B2A_SCOPE_MISMATCH, 'missing_scope', `R-02 blank ${field}`)
+  }
+  const noObjects = await assertRefusal(registry, { sourceObjects: [] },
+    B2A_SCOPE_MISMATCH, 'missing_scope', 'R-02 no source objects')
+  assert.equal(noObjects.details.objectCount, 0)
+
+  // A tenant with TWO registered systems gets a registration per system, and neither authorizes the
+  // other — the case that motivated the key.
   const two = build([
-    entry({ entryId: 'b2a-plm', sourceBinding: { externalSystemId: PLM_SYSTEM } }),
-    entry({ entryId: 'b2a-k3', sourceBinding: { externalSystemId: K3_SYSTEM }, projectScope: { projectNos: ['P-777'] } }),
+    registration({ registrationId: 'b2a-plm', operationRef: 'op-plm', sourceBindingRef: PLM_SYSTEM }),
+    registration({
+      registrationId: 'b2a-k3',
+      operationRef: 'op-k3',
+      sourceBindingRef: K3_SYSTEM,
+      projectDataScope: { dataScopeRefs: ['P-777'] },
+    }),
   ])
-  assert.equal(check(two).entryId, 'b2a-plm')
-  assert.equal(check(two, { externalSystemId: K3_SYSTEM, projectNo: 'P-777' }).entryId, 'b2a-k3')
-  // …and the PLM entry's project scope does not travel to the K3 binding.
-  assertRefusal(two, { externalSystemId: K3_SYSTEM }, 'project_out_of_scope', 'scope does not cross bindings')
+  assert.equal((await check(two)).registrationId, 'b2a-plm')
+  assert.equal((await check(two, { sourceBindingRef: K3_SYSTEM, dataScopeRef: 'P-777' })).registrationId, 'b2a-k3')
+  await assertRefusal(two, { sourceBindingRef: K3_SYSTEM },
+    B2A_SCOPE_MISMATCH, 'data_scope_mismatch', 'R-02 scope does not cross bindings')
 
-  // `no_entry` cannot name an entry it did not find.
-  const noEntry = captured(() => check(registry, { tenantId: OTHER_TENANT }))
-  assert.equal('entryIds' in noEntry.details, false)
-  assert.equal('candidateEntryIds' in noEntry.details, false)
+  // `no_registration` cannot name a registration it did not find.
+  const notFound = await capturedAsync(check(registry, { tenantScope: OTHER_TENANT }))
+  assert.equal('registrationIds' in notFound.details, false)
 }
 
-// systemKind, when an entry pins one, is a second lock on the binding — an entry approved for a
-// read-only SQL source must not authorize the same id after it is repointed at another adapter kind.
-function systemKindPinsTheBindingWhenDeclared() {
-  const pinned = build([entry({ sourceBinding: { externalSystemId: PLM_SYSTEM, systemKind: SYSTEM_KIND } })])
-  assert.ok(check(pinned), 'the pinned kind matches')
-  assertRefusal(pinned, { systemKind: 'bridge:legacy-sql-readonly' }, 'no_entry', 'a repointed adapter kind is not covered')
-  assertRefusal(pinned, { systemKind: undefined }, 'no_entry', 'an unresolved kind does not satisfy a pin')
-
-  // Omitted: the entry does not care which adapter kind serves the id.
-  const unpinned = build([entry()])
-  assert.ok(check(unpinned, { systemKind: 'bridge:legacy-sql-readonly' }))
-  assert.ok(check(unpinned, { systemKind: undefined }))
-}
-
-// WHAT forbidReuse ACTUALLY ENFORCES. A `purpose` is the identity of a CALL SITE — a frozen constant
-// at every call site, never request-derived — so a SECOND consumer reaching for the same narrow
-// binding presents a different purpose and is refused even though tenant, system and project all
-// match. That is the mechanically enforceable core of "禁止被其他应用复用".
-function forbidReuseBindsAnEntryToOneConsumer() {
+// UNKNOWN ENTRY POINTS DEFAULT-REFUSE. Unreachable from a request (purposes are module constants at
+// every call site); it fires when a NEW read path is added without being inventoried.
+async function unknownEntryPointsDefaultRefuse() {
   assert.deepEqual([...B2A_PURPOSES], [
     B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
     B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
     B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+    B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
+    B2A_PURPOSE_PIPELINE_RUNNER_READ,
+    B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
   ])
+  const registry = build([registration()])
+  for (const bad of ['some.new.read.path', undefined, '', 'STOCK-PREPARATION.TABLE-ACTION']) {
+    await assertRefusal(registry, { purpose: bad },
+      B2A_REGISTRATION_REQUIRED, 'unknown_entry_point', `an undeclared call site (${String(bad)}) is refused`)
+  }
+  // …and a registration cannot name one either, so the vocabulary has exactly one authority.
+  assertConfigThrow([registration({ purpose: 'some.new.read.path' })], 'an unrecognized purpose is refused at load')
+}
 
-  const locked = build([entry({ forbidReuse: true, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION })])
-  assert.equal(check(locked).forbidReuse, true)
-  for (const other of [B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST, B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM]) {
-    const error = assertRefusal(locked, { purpose: other }, 'purpose_not_permitted', `reuse by ${other} is refused`)
-    assert.equal(error.details.forbidReuse, true)
-    assert.deepEqual(error.details.candidateEntryIds, ['b2a-factory-a-plm'])
+// ── R-03: the operation claim ────────────────────────────────────────────────
+
+async function R03_oneRegistrationIsOneSourceReadOperation() {
+  const shared = store()
+  const registry = build([registration()])
+
+  const first = await check(registry, { store: shared })
+  assert.equal(first.operationClaimed, true, 'the first guarded read CLAIMS the operation')
+  assert.equal(first.operationContinued, false)
+  assert.equal(first.pageReads, 1)
+  assert.equal(first.sourceReadOperationLimit, 1)
+
+  // SAME RUN -> allowed. Bounded paging inside one operation, and a path that legitimately re-enters
+  // the guard for the same Run (the large-BOM job, whose runId is its job id) continues on its claim.
+  const continued = await check(registry, { store: shared })
+  assert.equal(continued.operationClaimed, false)
+  assert.equal(continued.operationContinued, true, 'the same Run continues on the claim it holds')
+  assert.equal(continued.pageReads, 2, 're-entries are counted so evidence can show the read stayed bounded')
+
+  // ANOTHER RUN -> refused. A new source-read Run needs a new operation.
+  const reused = await assertRefusal(registry, { store: shared, runId: 'run-b' },
+    B2A_AUTHORIZATION_INVALID, 'operation_already_consumed', 'R-03 a second Run is refused')
+  assert.equal(reused.details.sourceReadOperationLimit, 1)
+
+  // A SECOND registration with its own operation authorizes the second Run — which is the shape a
+  // deployment must write, and a visible edit to a reviewed file.
+  const twoOps = build([
+    registration({ registrationId: 'b2a-op-1', operationRef: 'op-1' }),
+    registration({ registrationId: 'b2a-op-2', operationRef: 'op-2' }),
+  ])
+  const fresh = store()
+  assert.equal((await check(twoOps, { store: fresh, runId: 'run-x' })).operationClaimed, true)
+  const second = await check(twoOps, { store: fresh, runId: 'run-y' })
+  assert.equal(second.operationClaimed, true, 'the sibling operation is still available')
+  // …and a THIRD run finds both spent.
+  await assertRefusal(twoOps, { store: fresh, runId: 'run-z' },
+    B2A_AUTHORIZATION_INVALID, 'operation_already_consumed', 'R-03 both operations spent')
+}
+
+// ── R-04: concurrent duplicates, version downgrade, cross-app reuse ──────────
+
+async function R04_uniquenessVersionAndReuse() {
+  // DUPLICATE REGISTRATION, load-time half: two ACTIVE registrations for the same tenant, binding,
+  // scope, purpose and operation.
+  const dupId = assertConfigThrow([registration(), registration({ operationRef: 'op-other' })],
+    'a duplicate registrationId is refused')
+  assert.equal(dupId.details.reason, 'duplicate_registration_id')
+  const dupKey = assertConfigThrow([registration(), registration({ registrationId: 'b2a-second' })],
+    'two active registrations for the same key are refused')
+  assert.equal(dupKey.details.reason, 'duplicate_active_registration')
+  // Superseding by REVOKING and writing a replacement stays possible — a revoked record is history.
+  assert.ok(build([
+    registration({ registrationId: 'b2a-old', status: 'revoked' }),
+    registration({ registrationId: 'b2a-new' }),
+  ]), 'a revoked predecessor does not collide with its replacement')
+
+  // VERSION DOWNGRADE. Rewinding `registrationVersion` is how a spent or narrowed authorization
+  // would be resurrected by editing the file back to an older, wider revision; the file alone cannot
+  // detect it, because each load sees only what it was given.
+  const shared = store()
+  const v2 = build([registration({ registrationVersion: 2 })])
+  assert.equal((await check(v2, { store: shared })).registrationVersion, 2)
+  const v1 = build([registration({ registrationVersion: 1 })])
+  await assertRefusal(v1, { store: shared, runId: 'run-later' },
+    B2A_AUTHORIZATION_INVALID, 'registration_version_downgrade', 'R-04 version downgrade')
+  // The SAME version is NOT a downgrade. Presenting it again still refuses — but for the OPERATION
+  // reason, not the version one, which is the distinction being pinned: the version guard fires on a
+  // rewind, not on ordinary re-presentation of the revision in force.
+  await assertRefusal(build([registration({ registrationVersion: 2 })]), { store: shared, runId: 'run-same-v' },
+    B2A_AUTHORIZATION_INVALID, 'operation_already_consumed', 'R-04 equal version is not a downgrade')
+
+  // CROSS-APPLICATION REUSE. `purpose` is the identity of a CALL SITE, so a different read path
+  // reaching for the same binding is refused although tenant, binding and scope all match.
+  const locked = build([registration()])
+  for (const other of B2A_PURPOSES.filter((p) => p !== B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION)) {
+    const error = await assertRefusal(locked, { purpose: other },
+      B2A_SCOPE_MISMATCH, 'purpose_not_permitted', `R-04 reuse by ${other}`)
+    assert.equal(error.details.forbidReuse, true, 'the refusal says WHY it refused')
   }
 
-  // forbidReuse:true without a purpose is meaningless, so it is refused at LOAD rather than silently
-  // degrading to a wildcard.
-  assertConfigThrow([entry({ forbidReuse: true, purpose: undefined })], 'forbidReuse without a purpose is refused')
-
-  // The explicit, reviewable opposite: a SHARED registration. It has to be written down —
-  // `forbidReuse: false` AND an omitted purpose — rather than defaulted into.
-  const shared = build([entry({ entryId: 'b2a-shared', forbidReuse: false, purpose: undefined })])
-  for (const purpose of B2A_PURPOSES) {
-    assert.equal(check(shared, { purpose }).entryId, 'b2a-shared', `a shared entry serves ${purpose}`)
-  }
-  assert.equal(check(shared).forbidReuse, false)
-
-  // A purpose OUTSIDE the closed vocabulary is refused even against a shared entry. This is
-  // unreachable from a request (purposes are module constants); it exists so that ADDING a call site
-  // without declaring one fails loudly instead of inheriting somebody else's registration.
-  assertRefusal(shared, { purpose: 'some.new.read.path' }, 'unknown_purpose', 'an undeclared call site is refused')
-  assertRefusal(shared, { purpose: undefined }, 'unknown_purpose', 'a call site with no purpose is refused')
-  assertConfigThrow([entry({ purpose: 'some.new.read.path' })], 'an unrecognized purpose is refused at load')
-
-  // A per-purpose registration set: two locked entries on the SAME binding, each serving only its
-  // own consumer. This is the shape a deployment must write when it wants two call sites — a
-  // reviewable act, which is the point. What this module does NOT claim: it cannot stop a human
-  // ADDING that second entry. The file is a reviewed artifact; that is a review control.
+  // The explicit, reviewable opposite: a per-consumer registration set. This module cannot and does
+  // not claim to stop a human writing that second registration — the file is a review control — only
+  // to make it a visible edit.
   const perPurpose = build([
-    entry({ entryId: 'b2a-refresh', purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION }),
-    entry({ entryId: 'b2a-mvp', purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST }),
+    registration({ registrationId: 'b2a-refresh', operationRef: 'op-refresh' }),
+    registration({
+      registrationId: 'b2a-large-bom',
+      operationRef: 'op-large-bom',
+      purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+    }),
   ])
-  assert.equal(check(perPurpose).entryId, 'b2a-refresh')
-  assert.equal(check(perPurpose, { purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST }).entryId, 'b2a-mvp')
-  assertRefusal(perPurpose, { purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM }, 'purpose_not_permitted', 'the third consumer is still refused')
+  const fresh = store()
+  assert.equal((await check(perPurpose, { store: fresh })).registrationId, 'b2a-refresh')
+  assert.equal(
+    (await check(perPurpose, { store: fresh, purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM, runId: 'run-lb' })).registrationId,
+    'b2a-large-bom',
+  )
+  await assertRefusal(perPurpose, { store: fresh, purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ },
+    B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'R-04 the third consumer is still refused')
 }
 
-function anUnderSpecifiedCallIsRefused() {
-  const registry = build([entry()])
-  for (const [field, label] of [['tenantId', 'tenantResolved'], ['externalSystemId', 'sourceSystemResolved'], ['projectNo', 'projectResolved']]) {
-    const error = assertRefusal(registry, { [field]: undefined }, 'missing_scope', `a missing ${field} refuses`)
-    assert.equal(error.details[label], false, `${label} is reported as unresolved`)
-    assertRefusal(registry, { [field]: '   ' }, 'missing_scope', `a blank ${field} refuses`)
+// ── THE PASS STANZA ──────────────────────────────────────────────────────────
+
+async function aMatchingRegistrationPasses() {
+  const stanza = await check(build([registration()]))
+  assert.deepEqual(stanza, {
+    armed: true,
+    registryId: 'b2a-2026-q3',
+    registryVersion: 1,
+    registrationId: 'b2a-factory-a-plm',
+    registrationVersion: 1,
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    sourceBindingMatched: true,
+    dataScopeInScope: true,
+    objectInScope: true,
+    objectCount: 1,
+    effective: true,
+    notExpired: true,
+    forbidReuse: true,
+    sourceReadOperationLimit: 1,
+    artifactReplayLimit: 0,
+    expiryHandling: 'deny_replay',
+    operationClaimed: true,
+    operationContinued: false,
+    pageReads: 1,
+  })
+  assert.ok(Object.isFrozen(stanza), 'the stanza is frozen')
+  // VALUES-FREE on the PASS path too.
+  const text = JSON.stringify(stanza)
+  for (const forbidden of FORBIDDEN_IN_EVIDENCE) {
+    assert.equal(text.includes(forbidden), false, `pass stanza leaked ${JSON.stringify(forbidden)}`)
   }
 }
 
-// A caller that reaches the gate with something that is not a built registry must never fall through
-// to "allow". It is not a refusable caller either — it is a wiring bug.
-function aMalformedRegistryAtCheckTimeIsFailClosed() {
-  for (const bogus of [{}, { registryId: 'r' }, { entries: [] }, 'registry', 7, true, []]) {
-    const error = captured(() => assertB2aTrialAuthorized({ registry: bogus, tenantId: TENANT, projectNo: IN_SCOPE_PROJECT, now: NOW }))
+// When several live registrations authorize the same call, evidence must name the NARROWEST
+// authorization in force — deterministically, so the stanza is reproducible.
+async function theSoonestExpiringLiveRegistrationWins() {
+  const make = (id, op, expiresAt) => registration({ registrationId: id, operationRef: op, expiresAt })
+  const registry = build([
+    make('b2a-long', 'op-long', iso(T0 + 90 * DAY_MS)),
+    make('b2a-short', 'op-short', iso(T0 + 30 * DAY_MS)),
+  ])
+  assert.equal((await check(registry)).registrationId, 'b2a-short')
+  const reversed = build([
+    make('b2a-short', 'op-short', iso(T0 + 30 * DAY_MS)),
+    make('b2a-long', 'op-long', iso(T0 + 90 * DAY_MS)),
+  ])
+  assert.equal((await check(reversed)).registrationId, 'b2a-short', 'stable under input order')
+
+  // An EXPIRED sibling does not poison the live one.
+  const mixed = build([
+    make('b2a-stale', 'op-stale', iso(T0 + DAY_MS)),
+    make('b2a-live', 'op-live', iso(T0 + 60 * DAY_MS)),
+  ])
+  assert.equal((await check(mixed)).registrationId, 'b2a-live')
+}
+
+// A caller reaching the guard with something that is not a built registry must never fall through to
+// "allow". It is not a refusable caller either — it is a wiring bug.
+async function aMalformedRegistryAtCheckTimeIsFailClosed() {
+  for (const bogus of [{}, { registryId: 'r' }, { registrations: [] }, 'registry', 7, true, []]) {
+    const error = await capturedAsync(assertB2aReadAuthorization({
+      registry: bogus, store: store(), tenantScope: TENANT, dataScopeRef: IN_SCOPE_PROJECT, now: NOW,
+    }))
     assert.ok(error, `${JSON.stringify(bogus)} must not be accepted as a registry`)
-    assert.equal(error.code, 'B2A_TRIAL_REGISTRY_INVALID')
+    assert.equal(error.code, B2A_REGISTRY_INVALID)
     assert.equal(error.status, 500)
   }
 }
 
-// When several live entries authorize the same call, evidence must name the NARROWEST authorization
-// in force rather than an arbitrary one — deterministically, so the stanza is reproducible.
-function theSoonestExpiringLiveEntryWins() {
-  const registry = build([
-    entry({ entryId: 'b2a-long', forbidReuse: false, purpose: undefined, expiresAt: iso(T0 + 90 * DAY_MS) }),
-    entry({ entryId: 'b2a-short', forbidReuse: false, purpose: undefined, expiresAt: iso(T0 + 30 * DAY_MS) }),
-  ])
-  assert.equal(check(registry).entryId, 'b2a-short')
-  // Stable under input order.
-  const reversed = build([
-    entry({ entryId: 'b2a-short', forbidReuse: false, purpose: undefined, expiresAt: iso(T0 + 30 * DAY_MS) }),
-    entry({ entryId: 'b2a-long', forbidReuse: false, purpose: undefined, expiresAt: iso(T0 + 90 * DAY_MS) }),
-  ])
-  assert.equal(check(reversed).entryId, 'b2a-short')
+async function theBuiltRegistryIsImmutable() {
+  const registry = build([registration()])
+  assert.ok(Object.isFrozen(registry))
+  assert.ok(Object.isFrozen(registry.registrations))
+  assert.ok(Object.isFrozen(registry.registrations[0]))
+  assert.ok(Object.isFrozen(registry.registrations[0].projectDataScope.dataScopeRefs))
+  assert.ok(Object.isFrozen(registry.registrations[0].objectScope.sourceObjects))
+  try { registry.registrations[0].objectScope.sourceObjects.push(UNLISTED_OBJECT) } catch { /* frozen */ }
+  await assertRefusal(registry, { sourceObjects: [UNLISTED_OBJECT] },
+    B2A_SCOPE_MISMATCH, 'object_out_of_scope', 'a frozen scope cannot be widened in place')
 
-  // An EXPIRED entry alongside a live one does not poison the live one.
-  const mixed = build([
-    entry({ entryId: 'b2a-stale', forbidReuse: false, purpose: undefined, effectiveAt: iso(T0), expiresAt: iso(T0 + DAY_MS) }),
-    entry({ entryId: 'b2a-live', forbidReuse: false, purpose: undefined, effectiveAt: iso(T0), expiresAt: iso(T0 + 60 * DAY_MS) }),
-  ])
-  assert.equal(check(mixed).entryId, 'b2a-live')
+  // The registry does not alias the caller's config object: mutating the source after the build must
+  // not change what the guard enforces.
+  const config = { [B2A_REGISTRY_CONFIG_KEY]: registryConfig([registration()]) }
+  const built = createB2aRegistry({ config })
+  config[B2A_REGISTRY_CONFIG_KEY].registrations[0].projectDataScope.dataScopeRefs.push(OUT_OF_SCOPE_PROJECT)
+  await assertRefusal(built, { dataScopeRef: OUT_OF_SCOPE_PROJECT },
+    B2A_SCOPE_MISMATCH, 'data_scope_mismatch', 'a post-build config mutation does not reach the guard')
 }
 
-function theBuiltRegistryIsImmutable() {
-  const registry = build([entry()])
-  assert.ok(Object.isFrozen(registry))
-  assert.ok(Object.isFrozen(registry.entries))
-  assert.ok(Object.isFrozen(registry.entries[0]))
-  assert.ok(Object.isFrozen(registry.entries[0].projectScope.projectNos))
-  // A mutation attempt must not widen the scope.
-  try { registry.entries[0].projectScope.projectNos.push(OUT_OF_SCOPE_PROJECT) } catch { /* frozen */ }
-  assertRefusal(registry, { projectNo: OUT_OF_SCOPE_PROJECT }, 'project_out_of_scope', 'a frozen scope cannot be widened in place')
-
-  // The registry does not alias the caller's config object either: mutating the source after the
-  // build must not change what the gate enforces.
-  const config = { [B2A_TRIAL_REGISTRY_CONFIG_KEY]: registryConfig([entry()]) }
-  const built = createB2aTrialRegistry({ config })
-  config[B2A_TRIAL_REGISTRY_CONFIG_KEY].entries[0].projectScope.projectNos.push(OUT_OF_SCOPE_PROJECT)
-  assertRefusal(built, { projectNo: OUT_OF_SCOPE_PROJECT }, 'project_out_of_scope', 'a post-build config mutation does not reach the gate')
+// The object list handed to the guard comes from the READ PLAN ITSELF, which is what makes
+// `objectScope` an enforceable ceiling rather than a label.
+function theReadPlanNamesItsOwnObjects() {
+  const objects = readPlanSourceObjects(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  // Read off the shipped plan rather than restated, so a plan that grows a section shows up here.
+  const expected = [
+    'DN_PDM_BomDetailsInfo', 'DN_PDM_BomHeadInfo', 'DN_PDM_OrderDetailInfo', 'DN_PDM_OrderHeadInfo',
+    'DN_PDM_PartLibraryInfo', 'DN_PDM_PathExAttrInfo', 'DN_PDM_PathInfo',
+  ]
+  assert.deepEqual([...objects], expected, 'every object the expansion queries is enumerated')
+  assert.ok(Object.isFrozen(objects))
+  // Sorted and de-duplicated, so the list does not depend on key order.
+  assert.deepEqual(readPlanSourceObjects({ b: { object: 'B' }, a: { object: 'A' }, c: { object: 'A' } }), ['A', 'B'])
+  // Degenerate inputs yield an EMPTY list, which the guard treats as `missing_scope` — a refusal,
+  // never a pass.
+  for (const bad of [undefined, null, 'plan', 42, {}, []]) {
+    assert.deepEqual(readPlanSourceObjects(bad), [], `${JSON.stringify(bad)} yields no objects`)
+  }
+  // Nested and array-shaped plans are walked.
+  assert.deepEqual(readPlanSourceObjects({ steps: [{ object: 'X' }, { nested: { object: 'Y' } }] }), ['X', 'Y'])
 }
 
 const TESTS = [
@@ -527,23 +767,34 @@ const TESTS = [
   switchingItOffFromInsideTheFileIsRefused,
   registryEnvelopeIsValidated,
   everyRegisteredFieldIsRequired,
+  connectionDetailIsRefusedByName,
+  theFixedFieldsAreFixed,
+  consumptionStateAndTimestampMustAgree,
   theSourceBindingIsMandatory,
-  theProjectScopeMustEnumerate,
+  theScopesMustEnumerate,
   timestampsAreStrictIsoAndAgreeWithTheProductionPolicyParser,
   theWindowIsBounded,
-  expiryIsCheckedAtCheckTimeNotLoadTime,
-  aMatchingEntryPasses,
-  theEntryIsScopedOnAllFourDimensions,
-  systemKindPinsTheBindingWhenDeclared,
-  forbidReuseBindsAnEntryToOneConsumer,
-  anUnderSpecifiedCallIsRefused,
+  R01_registrationLifecycleRefusals,
+  R02_scopeRefusals,
+  unknownEntryPointsDefaultRefuse,
+  R03_oneRegistrationIsOneSourceReadOperation,
+  R04_uniquenessVersionAndReuse,
+  aMatchingRegistrationPasses,
+  theSoonestExpiringLiveRegistrationWins,
   aMalformedRegistryAtCheckTimeIsFailClosed,
-  theSoonestExpiringLiveEntryWins,
   theBuiltRegistryIsImmutable,
+  theReadPlanNamesItsOwnObjects,
 ]
 
-for (const test of TESTS) {
-  test()
-  process.stdout.write(`  ${test.name} OK\n`)
+async function main() {
+  for (const test of TESTS) {
+    await test()
+    process.stdout.write(`  ${test.name} OK\n`)
+  }
+  process.stdout.write('b2a-trial-registry.test.cjs OK\n')
 }
-process.stdout.write('b2a-trial-registry.test.cjs OK\n')
+
+main().catch((error) => {
+  process.exitCode = 1
+  throw error
+})

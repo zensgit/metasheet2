@@ -323,18 +323,28 @@ describe('plugin runtime config resolution', () => {
     const REGISTRY = {
       registryId: 'b2a-2026-q3',
       registryVersion: 1,
-      entries: [{
-        entryId: 'b2a-factory-a-plm',
-        tenantId: 'tenant_1',
-        sourceBinding: { externalSystemId: 'plm_sql_source' },
-        projectScope: { projectNos: ['P-001'] },
+      registrations: [{
+        registrationId: 'b2a-factory-a-plm',
+        tenantScope: 'tenant_1',
+        sourceSystemType: 'data-source:sql-readonly',
+        sourceBindingRef: 'plm_sql_source',
+        projectDataScope: { dataScopeRefs: ['P-001'] },
+        objectScope: { sourceObjects: ['DN_PDM_PathExAttrInfo'] },
         purpose: 'stock-preparation.table-action',
-        owner: 'owner-a',
+        ownerPrincipalRef: 'owner-ref-a',
+        authorizationRef: 'auth-ref-a',
+        operationRef: 'op-ref-a',
         effectiveAt: '2026-08-01T00:00:00Z',
         expiresAt: '2026-09-01T00:00:00Z',
         forbidReuse: true,
-        b2bCondition: 'migrate onto the generalized binding before expiry',
-        expiryHandling: 'refuse',
+        sourceReadOperationLimit: 1,
+        artifactReplayLimit: 0,
+        consumptionState: 'unconsumed',
+        consumedAt: null,
+        b2bMigrationCondition: 'migrate onto the generalized binding before expiry',
+        expiryHandling: 'deny_replay',
+        status: 'active',
+        registrationVersion: 1,
       }],
     }
 
@@ -376,9 +386,9 @@ describe('plugin runtime config resolution', () => {
     // The shape message is this key's OWN: sharing a reader must not blur the diagnosis a deployer
     // gets, and an ARRAY of entries with no envelope is the plausible mistake here.
     it('fails closed when the file is not a JSON object, naming the shape this key wants', () => {
-      const file = writeRegistryFile(JSON.stringify(REGISTRY.entries))
+      const file = writeRegistryFile(JSON.stringify(REGISTRY.registrations))
       expect(() => resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file }))
-        .toThrow(`${ENV_KEY} must point at a JSON object with registryId, registryVersion and entries`)
+        .toThrow(`${ENV_KEY} must point at a JSON object with registryId, registryVersion and registrations`)
     })
 
     it('is inert for any other plugin', () => {
@@ -391,9 +401,9 @@ describe('plugin runtime config resolution', () => {
     // activation. Keeping the host dumb here is deliberate — one authority over what a registration
     // may say, not two that could drift.
     it('does not second-guess the entry contents; the plugin owns that validation', () => {
-      const file = writeRegistryFile(JSON.stringify({ registryId: 'r', registryVersion: 1, entries: [{ nonsense: true }] }))
+      const file = writeRegistryFile(JSON.stringify({ registryId: 'r', registryVersion: 1, registrations: [{ nonsense: true }] }))
       const config = resolvePluginRuntimeConfig('plugin-integration-core', { [ENV_KEY]: file })
-      expect(config.b2aTrialRegistry).toEqual({ registryId: 'r', registryVersion: 1, entries: [{ nonsense: true }] })
+      expect(config.b2aTrialRegistry).toEqual({ registryId: 'r', registryVersion: 1, registrations: [{ nonsense: true }] })
     })
 
     // All three keys are independent: arming the gate must not require or disturb the other two.
