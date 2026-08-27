@@ -198,6 +198,40 @@ describe('cleanupOrphanMultitableAttachments', () => {
     )
   })
 
+  it('keeps guarded orphan storage failures values-free', async () => {
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    const sentinel = 'tenant/sheet-sensitive/private.bin'
+    const queryFn = vi.fn().mockResolvedValue({
+      rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_file_id: 'file-1', storage_path: sentinel }],
+    })
+    const transactionQuery = vi.fn(async (text: string) => {
+      if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
+      if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
+      if (text.startsWith('SELECT id, sheet_id, storage_file_id')) {
+        return { rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_file_id: 'file-1', storage_path: sentinel }] }
+      }
+      if (text.startsWith('SELECT 1')) return { rows: [] }
+      if (text.startsWith('UPDATE multitable_attachments')) {
+        return { rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_file_id: 'file-1', storage_path: sentinel }] }
+      }
+      throw new Error('unexpected_transaction_query')
+    })
+    const logger = new Logger('AttachmentCleanupTest')
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+
+    await expect(cleanupOrphanMultitableAttachments({
+      queryFn,
+      transactionFn: async (work) => work({ query: transactionQuery }),
+      storage: { delete: vi.fn().mockRejectedValue(new Error(`provider denied ${sentinel}`)) },
+      logger,
+    })).resolves.toEqual({ inspected: 1, deleted: 0, skipped: 1 })
+
+    expect(warn).toHaveBeenCalledWith('MULTITABLE_ATTACHMENT_STORAGE_DELETE_FAILED')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel)
+  })
+
   it('fails closed when the locked orphan row no longer belongs to the fenced sheet', async () => {
     vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
     vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
@@ -335,6 +369,38 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
 
     const lockedRead = transactionQuery.mock.calls.find(([text]) => String(text).startsWith('SELECT id, sheet_id, storage_path'))
     expect(lockedRead?.[1]).toEqual(['att-1', 24])
+  })
+
+  it('keeps guarded blob-purge storage failures values-free', async () => {
+    vi.stubEnv('MULTITABLE_RECOVERY_ARCHIVE_ENABLED', 'true')
+    vi.stubEnv('MULTITABLE_ENABLE_WRITER_FENCE', 'true')
+    const sentinel = 'tenant/sheet-sensitive/private.bin'
+    const queryFn = vi.fn().mockResolvedValue({
+      rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_path: sentinel }],
+    })
+    const transactionQuery = vi.fn(async (text: string) => {
+      if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
+      if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
+      if (text.startsWith('SELECT id, sheet_id, storage_path')) {
+        return { rows: [{ id: 'att-1', sheet_id: 'sheet-a', storage_path: sentinel }] }
+      }
+      if (text.startsWith('SELECT 1')) return { rows: [] }
+      throw new Error('unexpected_transaction_query')
+    })
+    const logger = new Logger('AttachmentPurgeTest')
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => undefined)
+
+    await expect(sweepMultitableAttachmentBlobPurge({
+      queryFn,
+      transactionFn: async (work) => work({ query: transactionQuery }),
+      storage: { deleteByKey: vi.fn().mockRejectedValue(new Error(`provider denied ${sentinel}`)) },
+      graceHours: 24,
+      logger,
+    })).resolves.toEqual({ inspected: 1, purged: 0, skipped: 1 })
+
+    expect(warn).toHaveBeenCalledWith('MULTITABLE_ATTACHMENT_BLOB_PURGE_STORAGE_DELETE_FAILED')
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(sentinel)
   })
 
   it('fails closed when the locked blob row no longer belongs to the fenced sheet', async () => {

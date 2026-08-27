@@ -292,7 +292,7 @@ async function cleanupOrphanMultitableAttachmentsWithSourcePinGuard(input: {
       } catch (error) {
         if (!isMissingStorageFile(error)) {
           skipped += 1
-          logger.warn('Multitable attachment cleanup storage delete failed', error as Error)
+          logger.warn('MULTITABLE_ATTACHMENT_STORAGE_DELETE_FAILED')
           continue
         }
       }
@@ -490,7 +490,7 @@ async function sweepMultitableAttachmentBlobPurgeWithSourcePinGuard(input: {
       } catch (error) {
         if (!isMissingStorageFile(error)) {
           skipped += 1
-          logger.warn('Multitable attachment blob purge storage delete failed', error as Error)
+          logger.warn('MULTITABLE_ATTACHMENT_BLOB_PURGE_STORAGE_DELETE_FAILED')
           continue
         }
       }
