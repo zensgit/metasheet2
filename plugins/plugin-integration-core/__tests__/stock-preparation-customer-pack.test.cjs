@@ -67,8 +67,16 @@ function assertThrowsReason(fn, reason, label) {
 
 function purityAndCoupling() {
   // The module must stay pure: no fs, no net, no DB, no host API. Its only
-  // project dependencies are the three schema authorities it reuses rather
-  // than duplicates (template vocabulary, ext_ namespace, option normalizer).
+  // project dependencies are the four schema authorities it reuses rather
+  // than duplicates (template vocabulary, ext_ namespace, option normalizer,
+  // and the sandbox-objectId rule).
+  //
+  // target-provisioning joined the list when a pack gained its optional
+  // `targetObjectId`. It is on this list for exactly the reason the other three
+  // are: the alternative was a second copy of the sandbox namespace regex, and a
+  // copied rule is one that drifts. The module it pulls in is itself pure at
+  // load time (its host calls all take a `context` argument), so the no-I/O
+  // assertions below still hold — they are re-checked here rather than assumed.
   const source = fs.readFileSync(MODULE_PATH, 'utf8')
   const requireCalls = [...source.matchAll(/require\((['"])([^'"]+)\1\)/g)].map((match) => match[2])
   assert.deepEqual(
@@ -76,9 +84,10 @@ function purityAndCoupling() {
     [
       './stock-preparation-extension-namespace.cjs',
       './stock-preparation-option-sync.cjs',
+      './stock-preparation-target-provisioning.cjs',
       './stock-preparation-templates.cjs',
     ],
-    'pack module must require exactly the three schema authorities and nothing else',
+    'pack module must require exactly the four schema authorities and nothing else',
   )
   for (const forbidden of ['node:fs', 'node:http', 'node:https', 'node:child_process', 'pg', 'mssql']) {
     assert.ok(!requireCalls.includes(forbidden), `pack module must not require ${forbidden}`)
@@ -128,7 +137,20 @@ function validSamplePasses() {
   // scratch rather than trusted.
   const forged = { ...pack, packId: 'forged-pack' }
   assert.equal(isNormalizedCustomerPack(forged), false, 'a spread copy must lose the brand')
-  assertThrowsReason(() => normalizeCustomerPack(forged), 'PACK_UNKNOWN_KEY', 'spread copy re-validated')
+  // The DERIVED keys normalization adds are what make a spread copy fail re-validation,
+  // and there are two of them at different depths. This used to trip the TOP-LEVEL gate on
+  // `targetObjectId`; that key is now authorable (optional, sandbox-only), so the copy gets
+  // one gate further and is caught by the field-level derived key `preserveOnRefresh`.
+  // The property under test is unchanged and is asserted directly below: a spread copy is
+  // re-validated from scratch, never trusted.
+  assertThrowsReason(() => normalizeCustomerPack(forged), 'EXTENSION_FIELD_UNKNOWN_KEY', 'spread copy re-validated')
+  // And the top-level gate still fires on its own, so widening PACK_KEYS by one key did not
+  // open the door to arbitrary top-level keys.
+  assertThrowsReason(
+    () => normalizeCustomerPack({ ...FACTORY_A_SAMPLE_PACK, smuggled: 'x' }),
+    'PACK_UNKNOWN_KEY',
+    'top-level unknown key still refused',
+  )
 }
 
 function hideOwnershipsResolvesAgainstBothCatalogs() {
