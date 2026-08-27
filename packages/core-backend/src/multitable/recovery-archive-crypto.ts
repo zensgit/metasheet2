@@ -1056,7 +1056,81 @@ export interface RecoveryArchiveReserveThenSealInput {
   uploadSealedSection?: (sealed: RecoveryArchiveSealedSection) => Promise<void>;
 }
 
+const RECOVERY_ARCHIVE_RESERVE_BINDING_KEYS = [
+  "formatVersion",
+  "generationId",
+  "workspaceId",
+  "baseId",
+  "sheetId",
+  "anchorOperationId",
+  "anchorSeq",
+  "checkpointId",
+  "keyId",
+  "aeadAlgorithm",
+] as const;
+
+type RecoveryArchiveReserveBinding = Omit<
+  RecoveryArchiveCryptoBinding,
+  "dekFingerprint" | "wrappedDekId"
+>;
+
+function snapshotRecoveryArchiveReserveBinding(
+  value: unknown,
+): Readonly<RecoveryArchiveReserveBinding> {
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+    }
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== RECOVERY_ARCHIVE_RESERVE_BINDING_KEYS.length) {
+      fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+    }
+
+    const expected = new Set<string>(RECOVERY_ARCHIVE_RESERVE_BINDING_KEYS);
+    const snapshot: Record<string, unknown> = Object.create(null);
+    for (const key of keys) {
+      if (typeof key !== "string" || !expected.has(key)) {
+        fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !("value" in descriptor)
+      ) {
+        fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+      }
+      snapshot[key] = descriptor.value;
+    }
+
+    const binding = snapshot as unknown as RecoveryArchiveReserveBinding;
+    if (
+      binding.formatVersion !== RECOVERY_ARCHIVE_FORMAT_VERSION ||
+      !isBoundIdentity(binding.generationId) ||
+      !isBoundIdentity(binding.workspaceId) ||
+      !isBoundIdentity(binding.baseId) ||
+      !isBoundIdentity(binding.sheetId) ||
+      !isBoundIdentity(binding.anchorOperationId) ||
+      !isPositiveDecimalString(binding.anchorSeq) ||
+      !isBoundIdentity(binding.checkpointId) ||
+      !isBoundIdentity(binding.keyId) ||
+      !isRecoveryArchiveAeadAlgorithm(binding.aeadAlgorithm)
+    ) {
+      fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+    }
+    return Object.freeze(binding);
+  } catch {
+    fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+  }
+}
+
 export interface RecoveryArchiveReserveThenSealResult {
+  /** Binding passed to every sealer call; only the default sealer proves it entered the AEAD AAD. */
+  binding: Readonly<RecoveryArchiveCryptoBinding>;
   dekFingerprint: string;
   wrappedDekId: string;
   reservations: readonly RecoveryArchiveNonceReservation[];
@@ -1081,6 +1155,7 @@ export interface RecoveryArchiveReserveThenSealResult {
 export async function reserveThenSealRecoveryArchiveSections(
   input: RecoveryArchiveReserveThenSealInput,
 ): Promise<RecoveryArchiveReserveThenSealResult> {
+  const binding = snapshotRecoveryArchiveReserveBinding(input.binding);
   const sections = input.sections;
   if (!Array.isArray(sections) || sections.length === 0) {
     fail("RECOVERY_ARCHIVE_CRYPTO_INVALID_SECTION_PLAN");
@@ -1145,29 +1220,39 @@ export async function reserveThenSealRecoveryArchiveSections(
     generationDek =
       dekSource.kind === "produce"
         ? await custody.produceGenerationDek({
-            keyId: input.binding.keyId,
-            generationId: input.binding.generationId,
+            keyId: binding.keyId,
+            generationId: binding.generationId,
           })
         : await custody.unwrapGenerationDek({
-            keyId: input.binding.keyId,
-            generationId: input.binding.generationId,
+            keyId: binding.keyId,
+            generationId: binding.generationId,
             wrappedDekId: dekSource.wrappedDekId,
             wrappedDek: dekSource.wrappedDek,
           });
 
     const dekFingerprint = await custody.deriveDekFingerprint({
-      keyId: input.binding.keyId,
+      keyId: binding.keyId,
       dek: generationDek.dek,
     });
 
+    const sealedBinding: Readonly<RecoveryArchiveCryptoBinding> = Object.freeze({
+      ...binding,
+      wrappedDekId: generationDek.wrappedDekId,
+      dekFingerprint,
+    });
+    assertCryptoBinding(
+      sealedBinding,
+      "RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING",
+    );
+
     const reservations: RecoveryArchiveNonceReservation[] = plans.map(
       (plan) => ({
-        dekFingerprint,
+        dekFingerprint: sealedBinding.dekFingerprint,
         nonceHex: plan.nonceHex,
-        generationId: input.binding.generationId,
+        generationId: sealedBinding.generationId,
         sectionName: plan.sectionName,
-        aeadAlgorithm: input.binding.aeadAlgorithm,
-        formatVersion: input.binding.formatVersion,
+        aeadAlgorithm: sealedBinding.aeadAlgorithm,
+        formatVersion: sealedBinding.formatVersion,
       }),
     );
 
@@ -1187,10 +1272,7 @@ export async function reserveThenSealRecoveryArchiveSections(
         callExternalSync("RECOVERY_ARCHIVE_CRYPTO_SEAL_FAILED", () =>
           sealSection({
             binding: {
-              ...input.binding,
-              dekFingerprint,
-              wrappedDekId: (generationDek as RecoveryArchiveGenerationDek)
-                .wrappedDekId,
+              ...sealedBinding,
               sectionName: plan.sectionName,
               plaintextSha256: plan.plaintextSha256,
             },
@@ -1218,8 +1300,9 @@ export async function reserveThenSealRecoveryArchiveSections(
     }
 
     return {
-      dekFingerprint,
-      wrappedDekId: generationDek.wrappedDekId,
+      binding: sealedBinding,
+      dekFingerprint: sealedBinding.dekFingerprint,
+      wrappedDekId: sealedBinding.wrappedDekId,
       reservations,
       sealedSections,
     };

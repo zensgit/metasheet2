@@ -1751,9 +1751,10 @@ describe("Phase D2h reservation before encryption and upload", () => {
     const custody = createTestCustody();
     const spy = harness();
     const plan = fullSnapshotSections();
+    const binding = generationBinding();
 
     const result = await reserveThenSealRecoveryArchiveSections({
-      binding: generationBinding(),
+      binding,
       keyCustody: custody,
       transactionDepth: depthProbe(0),
       dekSource: { kind: "produce" },
@@ -1780,6 +1781,61 @@ describe("Phase D2h reservation before encryption and upload", () => {
       plan.map((section) => toRecoveryArchiveNonceHex(section.nonce)),
     );
     expect(result.dekFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(result.binding).toEqual({
+      ...binding,
+      wrappedDekId: result.wrappedDekId,
+      dekFingerprint: result.dekFingerprint,
+    });
+    expect(Object.isFrozen(result.binding)).toBe(true);
+  });
+
+  test("snapshots one stable binding before any async adapter call", async () => {
+    const mutableBinding = generationBinding();
+    const expectedBinding = { ...mutableBinding };
+    const custody = createTestCustody();
+    const pending = reserveThenSealRecoveryArchiveSections({
+      binding: mutableBinding,
+      keyCustody: custody,
+      transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" },
+      sections: fullSnapshotSections(),
+      reserveNonces: async () => {},
+    });
+
+    mutableBinding.keyId = "mutated-after-first-await";
+    mutableBinding.generationId = randomUUID();
+    const result = await pending;
+
+    expect(result.binding.keyId).toBe(expectedBinding.keyId);
+    expect(result.binding.generationId).toBe(expectedBinding.generationId);
+  });
+
+  test("refuses binding accessors without invoking them or reaching key custody", async () => {
+    const hostileBinding = generationBinding() as Record<string, unknown>;
+    let getterReads = 0;
+    Object.defineProperty(hostileBinding, "keyId", {
+      enumerable: true,
+      get() {
+        getterReads += 1;
+        return `hostile-key-${getterReads}`;
+      },
+    });
+    const custody = createTestCustody();
+
+    expect(
+      await asyncCodeOf(() =>
+        reserveThenSealRecoveryArchiveSections({
+          binding: hostileBinding as never,
+          keyCustody: custody,
+          transactionDepth: depthProbe(0),
+          dekSource: { kind: "produce" },
+          sections: fullSnapshotSections(),
+          reserveNonces: async () => {},
+        }),
+      ),
+    ).toBe("RECOVERY_ARCHIVE_CRYPTO_INVALID_AAD_BINDING");
+    expect(getterReads).toBe(0);
+    expect(custody.calls).toEqual([]);
   });
 
   test("fingerprinting cannot mutate the DEK later used for reservation and sealing", async () => {
