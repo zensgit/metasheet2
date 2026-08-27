@@ -100,6 +100,26 @@ export async function acquireCanonicalSheetFencesInOrder(
 }
 
 /**
+ * Flag-gated multi-sheet writer entry. Acquire every canonical fence in sorted order before checking any
+ * durable block so two mirrored multi-sheet writers cannot deadlock by presenting their sheets in opposite
+ * order. With the writer-fence flag off this performs no query and preserves the legacy path.
+ */
+export async function fenceWriterEntriesInOrder(
+  query: FenceQuery,
+  sheetIds: readonly string[],
+  opts?: { bypassBlockCheck?: boolean },
+): Promise<string[]> {
+  if (!isWriterFenceEnabled()) return []
+  const ordered = await acquireCanonicalSheetFencesInOrder(query, sheetIds)
+  if (!opts?.bypassBlockCheck) {
+    for (const sheetId of ordered) {
+      await assertNoActiveWriterBlock(query, sheetId)
+    }
+  }
+  return ordered
+}
+
+/**
  * Durable writer-blocking states committed onto `meta_sheets.recovery_writer_state` by a recovery operation.
  * While the sheet carries one of these, a fenced writer that acquires the fence and observes the state must
  * refuse/park (see `assertNoActiveWriterBlock`). NULL = no block.
