@@ -254,6 +254,10 @@ const {
   createK3WiseC6WriteSource,
   deriveK3WiseC6PlannerTargetConfig,
 } = require('./adapters/k3-wise-c6-write-profile.cjs')
+// E4 / G-4 LAYER 1 of FOUR (HG v1.2 §10.2). The permanent K3 external-write fence. Required at
+// the ROUTE so the refusal happens before the request can cost anything: no credential reload, no
+// dry-run token consumption, no source read, no adapter construction, no wire call.
+const { assertK3ExternalWriteRefused } = require('./k3-external-write-permanent-fence.cjs')
 const {
   PLM_STOCK_PREPARATION_ACTION_ID,
   StockPreparationTableActionError,
@@ -3786,19 +3790,11 @@ function createHandlers(services, options = {}) {
           pipelineId: pipeline.id,
         })
       }
-      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
-        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-        : externalSystems.getExternalSystem.bind(externalSystems)
-      const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
-        id: pipeline.sourceSystemId,
-        tenantId: body.tenantId,
-        workspaceId: body.workspaceId,
-      }))
       // `getExternalSystem` is the credential-STRIPPED public accessor. The SOURCE has always used
-      // the adapter-capable one (a few lines above); the TARGET never did — so an adapter-backed
-      // target (K3) arrived with NO credentials and the C6 dry-run died with
-      // K3_WISE_CREDENTIALS_MISSING before a single wire call. Reproduced against the real
-      // registry: flipping this one accessor makes the whole lifecycle pass.
+      // the adapter-capable one (below); the TARGET never did — so an adapter-backed target (K3)
+      // arrived with NO credentials and the C6 dry-run died with K3_WISE_CREDENTIALS_MISSING
+      // before a single wire call. Reproduced against the real registry: flipping this one
+      // accessor makes the whole lifecycle pass.
       //
       // Peek first, then re-load WITH credentials only for kinds that actually build a target
       // adapter. Kinds served by dataSourceWrites keep the config-only load they were designed
@@ -3809,6 +3805,33 @@ function createHandlers(services, options = {}) {
         workspaceId: body.workspaceId,
       })
       let targetSystem = await externalSystems.getExternalSystem(targetSystemScope)
+      // ===== E4 LAYER 1 of FOUR — the outermost independent fence (HG v1.2 §10.2.1) =======
+      // The credential-STRIPPED peek above is hoisted ahead of the source load ON PURPOSE: it is
+      // the cheapest fact that identifies the target, and this refusal must land before the
+      // request can cost anything. At this point NOTHING has happened yet — no source system has
+      // been loaded with credentials, no adapter-backed credential RELOAD has run (that is the
+      // block just below), no source adapter exists, no run has been opened in the run logger,
+      // and `applyExternalWrite` — which is what consumes the single-use dry-run token — has not
+      // been called. A refused apply therefore burns NOTHING: a token minted before this fence
+      // shipped is still unconsumed after the refusal, and stays presentable until its own TTL
+      // expires. That property is witnessed, not asserted, in the fence suite.
+      //
+      // The three deeper fences (layer 2 `applyExternalWrite`, layer 3 the K3 write source, layer 4
+      // the K3 WebAPI adapter) do not depend on this one — a caller that skips HTTP entirely still
+      // cannot reach a K3 Save. Acceptance E4-01.
+      assertK3ExternalWriteRefused(
+        (status, code, message, details) => new HttpRouteError(status, code, message, details),
+        targetSystem,
+      )
+      // ===================================================================================
+      const loadSourceSystem = typeof externalSystems.getExternalSystemForAdapter === 'function'
+        ? externalSystems.getExternalSystemForAdapter.bind(externalSystems)
+        : externalSystems.getExternalSystem.bind(externalSystems)
+      const sourceSystem = await loadSourceSystem(scopedAuthenticatedWriteInput(req, {
+        id: pipeline.sourceSystemId,
+        tenantId: body.tenantId,
+        workspaceId: body.workspaceId,
+      }))
       if (
         targetSystem
         && ADAPTER_BACKED_C6_TARGET_KINDS.has(targetSystem.kind)
