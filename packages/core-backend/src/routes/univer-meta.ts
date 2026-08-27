@@ -16906,6 +16906,8 @@ export function univerMetaRouter(): Router {
 
       return res.json({ ok: true, data: { deleted: recordId } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }

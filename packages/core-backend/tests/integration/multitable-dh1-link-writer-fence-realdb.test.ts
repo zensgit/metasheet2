@@ -13,8 +13,14 @@ import {
   canonicalSheetFenceKey,
 } from '../../src/multitable/canonical-sheet-fence'
 import {
+  AutomationExecutor,
+  type AutomationDeps,
+  type AutomationRule,
+} from '../../src/multitable/automation-executor'
+import {
   LinkWriterFencePlanChangedError,
   enterLinkWriterFencePlan,
+  prepareRecordLinkDeleteFencePlan,
   prepareLinkWriterFencePlan,
 } from '../../src/multitable/link-writer-fence'
 import { RecordPatchFieldValidationError, RecordService } from '../../src/multitable/record-service'
@@ -22,6 +28,7 @@ import {
   RecordWriteService,
   type RecordPatchInput as WriteRecordPatchInput,
 } from '../../src/multitable/record-write-service'
+import { deleteRecord as deletePluginRecord } from '../../src/multitable/records'
 import { deriveCapabilities, type AccessInfo } from '../../src/multitable/sheet-capabilities'
 import { createRecordWriteHelpers, univerMetaRouter } from '../../src/routes/univer-meta'
 
@@ -98,6 +105,28 @@ const makeWriteService = () => {
     helpers,
   )
 }
+
+const resolveSheetAccess = async () => ({ capabilities })
+
+const makeAutomationExecutor = () => {
+  const deps: AutomationDeps = {
+    eventBus,
+    queryFn: (sql, params) => q(sql, params),
+    transaction: async (handler) => poolManager.get().transaction(async ({ query }) => handler({ query } as never)),
+  } as unknown as AutomationDeps
+  return new AutomationExecutor(deps)
+}
+
+const deleteAutomationRule = (): AutomationRule => ({
+  id: `rule_dh1_lwf_delete_${TS}`,
+  name: 'D-H1 delete',
+  sheetId: TARGET,
+  trigger: { type: 'record.updated', config: {} },
+  actions: [{ type: 'delete_record', config: {} }],
+  enabled: true,
+  createdBy: ACTOR,
+  createdAt: new Date().toISOString(),
+}) as unknown as AutomationRule
 
 const writeInput = (value: string[]): WriteRecordPatchInput => ({
   sheetId: SOURCE,
@@ -283,6 +312,84 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
     await expect(makeWriteService().patchRecords(writeInput([R_TARGET]))).rejects.toBeInstanceOf(SheetWriterBlockedError)
     expect(await readSource()).toMatchObject({ version: 1, data: { [F_LINK]: [] } })
     expect(await edgeCount(R_SOURCE)).toBe(0)
+  })
+
+  test('record-delete plan is query-inert while the writer fence is off', async () => {
+    delete process.env[FLAG]
+    let queries = 0
+    const plan = await prepareRecordLinkDeleteFencePlan(async () => {
+      queries += 1
+      return { rows: [] }
+    }, TARGET, R_TARGET)
+    expect(plan).toBeNull()
+    expect(queries).toBe(0)
+  })
+
+  test('REST, plugin, and automation hard deletes all refuse a blocked inbound owner sheet', async () => {
+    process.env[FLAG] = 'true'
+    await q('UPDATE meta_records SET data = $3::jsonb WHERE id = $1 AND sheet_id = $2', [R_SOURCE, SOURCE, JSON.stringify({ [F_NOTE]: 'before', [F_LINK]: [R_TARGET] })])
+    await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_dh1_delete_${TS}`, F_LINK, R_SOURCE, R_TARGET])
+    await setBlock(SOURCE, 'applying')
+
+    await expect(makeRecordService().deleteRecord({
+      recordId: R_TARGET,
+      actorId: ACTOR,
+      access,
+      resolveSheetAccess,
+    })).rejects.toBeInstanceOf(SheetWriterBlockedError)
+
+    await expect(poolManager.get().transaction(async ({ query }) => deletePluginRecord({
+      query: query as never,
+      sheetId: TARGET,
+      recordId: R_TARGET,
+    }))).rejects.toBeInstanceOf(SheetWriterBlockedError)
+
+    const execution = await makeAutomationExecutor().execute(deleteAutomationRule(), {
+      sheetId: TARGET,
+      recordId: R_TARGET,
+      actorId: ACTOR,
+      data: {},
+    })
+    expect(execution.steps[0]).toMatchObject({
+      status: 'failed',
+      error: 'Sheet is temporarily locked for writes by a recovery operation',
+    })
+    expect((await q('SELECT count(*)::int AS n FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])).rows[0]).toEqual({ n: 1 })
+    expect(await edgeCount(R_SOURCE)).toBe(1)
+  })
+
+  test('HTTP record delete maps a newly committed participant to values-free 409 before destruction', async () => {
+    process.env[FLAG] = 'true'
+    const blocker = await connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TARGET)])
+
+      const responsePromise = request(buildApp())
+        .delete(`/api/multitable/records/${R_TARGET}`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await q('INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)', [`lnk_dh1_drift_${TS}`, F_LINK, R_SOURCE, R_TARGET])
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'LINK_WRITER_FENCE_PLAN_CHANGED',
+          message: 'Link relation participants changed concurrently; retry the write',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(R_TARGET)
+      expect(JSON.stringify(response.body)).not.toContain(SOURCE)
+      expect((await q('SELECT count(*)::int AS n FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])).rows[0]).toEqual({ n: 1 })
+      expect(await edgeCount(R_SOURCE)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
   })
 
   test('partial-success bulk patch preserves the whole-request 409 contract for a blocked target', async () => {

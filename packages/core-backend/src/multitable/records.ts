@@ -32,6 +32,11 @@ import {
 import { TombstoneCaptureCapExceededError } from './tombstone-capture'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
 import {
+  enterRecordLinkDeleteFencePlan,
+  prepareRecordLinkDeleteFencePlan,
+  type RecordLinkDeleteFencePlan,
+} from './link-writer-fence'
+import {
   listRecords as listRecordsViaQueryService,
   queryRecords as queryRecordsViaQueryService,
   queryRecordsWithCursor as queryRecordsWithCursorViaQueryService,
@@ -701,6 +706,7 @@ export async function createRecord(
  */
 async function deleteRecordWithRecoverability(
   input: DeleteMultitableRecordInput,
+  linkDeleteFencePlan: RecordLinkDeleteFencePlan | null,
 ): Promise<DeletedMultitableRecord> {
   const query = input.query
 
@@ -715,7 +721,8 @@ async function deleteRecordWithRecoverability(
   // (The D-1 delete branch in `deleteRecord` is fenced too as of L4-cov-services: with the flag ON it
   // enforces the OD-7 transactional-query contract, takes this same fence, and mints/seals its operation —
   // the former "L4-SEAM: needs the txn wrap" enumeration is closed, not merely recorded.)
-  await fenceWriterEntry(query, input.sheetId)
+  if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+  else await fenceWriterEntry(query, input.sheetId)
   // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
   const op = await mintOperation(query, input.sheetId)
 
@@ -865,10 +872,16 @@ export async function deleteRecord(
   // be deleted via the SDK (it must be unlocked first through the explicit unlock action).
   await guardRecordNotLockedForPlugin(query, input.sheetId, input.recordId)
 
+  const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+    query,
+    input.sheetId,
+    input.recordId,
+  )
+
   // D-2 (side-door delete recoverability, #4004): opt-in recoverability parity with the UI path. Default
   // OFF ⇒ fall through to the D-1 code below, byte-identically (§1.9).
   if (isSideDoorDeleteTrashEnabled()) {
-    return await deleteRecordWithRecoverability(input)
+    return await deleteRecordWithRecoverability(input, linkDeleteFencePlan)
   }
 
   // W0-1 L4-cov-services (owner directive: fold the deferred D-1 delete branch into H1-DELETE's
@@ -881,7 +894,8 @@ export async function deleteRecord(
   // `sealOperation` no-ops — this branch stays byte-identical D-1 behaviour (§1.9).
   if (isWriterFenceEnabled()) {
     await assertTransactionalQuery(query, 'plugin')
-    await fenceWriterEntry(query, input.sheetId)
+    if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+    else await fenceWriterEntry(query, input.sheetId)
   }
   const op = await mintOperation(query, input.sheetId)
 

@@ -56,7 +56,9 @@ import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-inte
 import {
   assertLinkWriterFencePlanMatchesFieldGuards,
   enterLinkWriterFencePlan,
+  enterRecordLinkDeleteFencePlan,
   prepareLinkWriterFencePlan,
+  prepareRecordLinkDeleteFencePlan,
 } from './link-writer-fence'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
@@ -868,6 +870,12 @@ export class RecordService {
     // the ONE shared rule (`ensureRecordNotLocked`) so every mutation path enforces it identically.
     ensureRecordNotLocked(actorId, recordRow, () => new RecordPermissionError('Record is locked'))
 
+    const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      recordId,
+    )
+
     // P1#2 REPLACE — build the deleted-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
     // (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same event identity.
     const deletedEventPayload = withAutomationEventId({
@@ -878,7 +886,8 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST (before any read/check), then refuse if a recovery holds a
       // durable block. No-op & byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkDeleteFencePlan) await enterRecordLinkDeleteFencePlan(query, linkDeleteFencePlan)
+      else await fenceWriterEntry(query, sheetId)
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const lockedRecordRes = await query(

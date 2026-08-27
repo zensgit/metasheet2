@@ -64,6 +64,10 @@ import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './f
 import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
 import {
+  assertRecordLinkDeleteFencePlanCurrent,
+  prepareRecordLinkDeleteFencePlan,
+} from './link-writer-fence'
+import {
   assertTransactionalQuery,
   captureSideDoorInboundTombstones,
   insertSideDoorTrashRow,
@@ -2508,10 +2512,20 @@ export class AutomationExecutor {
         _automationDepth: ((context.triggerEvent as Record<string, unknown>)?._automationDepth as number ?? 0) + 1,
       })
 
-      const step = await this.withTransaction(effectiveSheetId, async (query) => {
-        // #4196 Class-A claim — FIRST statement, SAME transaction as the delete+revision below. A
-        // duplicate (retry/replay) short-circuits: return the already-applied success and skip the DELETE,
-        // link cleanup, tombstones and revision entirely. The (no-op) transaction still commits cleanly.
+      const linkDeleteFencePlan = await prepareRecordLinkDeleteFencePlan(
+        this.deps.queryFn,
+        effectiveSheetId,
+        effectiveRecordId,
+      )
+      const linkDeleteFenceSheetIds = linkDeleteFencePlan?.participantSheetIds ?? effectiveSheetId
+      const step = await this.withTransaction(linkDeleteFenceSheetIds, async (query) => {
+        if (linkDeleteFencePlan) {
+          await assertRecordLinkDeleteFencePlanCurrent(query, linkDeleteFencePlan)
+        }
+        // #4196 Class-A claim — FIRST mutation/claim after the read-only fence-plan recheck, in the SAME
+        // transaction as the delete+revision below. A duplicate (retry/replay) short-circuits: return the
+        // already-applied success and skip the DELETE, link cleanup, tombstones and revision entirely. The
+        // (no-op) transaction still commits cleanly.
         if (await this.claimClassAOrSkip(query, identity, 'delete_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('delete_record')
         }

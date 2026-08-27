@@ -17,10 +17,23 @@ export class LinkWriterFencePlanChangedError extends Error {
   readonly code = 'LINK_WRITER_FENCE_PLAN_CHANGED'
   readonly statusCode = 409
 
-  constructor() {
-    super('Link field configuration changed concurrently; retry the write')
+  constructor(message = 'Link field configuration changed concurrently; retry the write') {
+    super(message)
     this.name = 'LinkWriterFencePlanChangedError'
   }
+}
+
+export class RecordLinkFencePlanChangedError extends LinkWriterFencePlanChangedError {
+  constructor() {
+    super('Link relation participants changed concurrently; retry the write')
+    this.name = 'RecordLinkFencePlanChangedError'
+  }
+}
+
+export type RecordLinkDeleteFencePlan = {
+  owningSheetId: string
+  recordId: string
+  participantSheetIds: string[]
 }
 
 export type LinkWriterFenceFieldGuard = {
@@ -173,4 +186,83 @@ export async function enterLinkWriterFencePlan(
   ) {
     throw new LinkWriterFencePlanChangedError()
   }
+}
+
+async function loadRecordLinkParticipantSheetIds(
+  query: FenceQuery,
+  owningSheetId: string,
+  recordId: string,
+): Promise<string[]> {
+  const result = await query(
+    `SELECT field_owner.sheet_id AS field_sheet_id,
+            source_record.sheet_id AS source_sheet_id,
+            target_record.sheet_id AS target_sheet_id
+       FROM meta_links edge
+       LEFT JOIN meta_fields field_owner ON field_owner.id = edge.field_id
+       LEFT JOIN meta_records source_record ON source_record.id = edge.record_id
+       LEFT JOIN meta_records target_record ON target_record.id = edge.foreign_record_id
+      WHERE edge.record_id = $1 OR edge.foreign_record_id = $1`,
+    [recordId],
+  )
+  const sheetIds = new Set<string>([owningSheetId])
+  for (const raw of result.rows) {
+    if (!raw || typeof raw !== 'object') continue
+    const row = raw as Record<string, unknown>
+    for (const key of ['field_sheet_id', 'source_sheet_id', 'target_sheet_id'] as const) {
+      const sheetId = row[key]
+      if (typeof sheetId === 'string' && sheetId.length > 0) sheetIds.add(sheetId)
+    }
+  }
+  return [...sheetIds].sort()
+}
+
+/**
+ * Flag-on preflight for a record hard-delete. Every live edge touching the record contributes both its
+ * source-owner and target sheet, because the delete removes the authoritative relation for both projections.
+ * Flag off returns null before querying.
+ */
+export async function prepareRecordLinkDeleteFencePlan(
+  query: FenceQuery,
+  owningSheetId: string,
+  recordId: string,
+): Promise<RecordLinkDeleteFencePlan | null> {
+  if (!isWriterFenceEnabled()) return null
+  return {
+    owningSheetId,
+    recordId,
+    participantSheetIds: await loadRecordLinkParticipantSheetIds(query, owningSheetId, recordId),
+  }
+}
+
+/**
+ * Re-read the participant set after every planned sheet fence is held. A newly committed edge from an
+ * undiscovered sheet cannot be locked safely after this point without violating the global order, so drift
+ * fails closed and the caller retries from a fresh preflight. Correctness also requires every live edge
+ * writer to take both its source and target sheet fences before mutation: that shared target fence prevents
+ * an edge from appearing after this re-read and before the caller captures/deletes the relation set.
+ */
+export async function assertRecordLinkDeleteFencePlanCurrent(
+  query: FenceQuery,
+  plan: RecordLinkDeleteFencePlan,
+): Promise<void> {
+  const current = await loadRecordLinkParticipantSheetIds(
+    query,
+    plan.owningSheetId,
+    plan.recordId,
+  )
+  if (
+    current.length !== plan.participantSheetIds.length ||
+    current.some((sheetId, index) => sheetId !== plan.participantSheetIds[index])
+  ) {
+    throw new RecordLinkFencePlanChangedError()
+  }
+}
+
+/** Acquire every participant fence in the canonical order, check every durable block, then prove the plan. */
+export async function enterRecordLinkDeleteFencePlan(
+  query: FenceQuery,
+  plan: RecordLinkDeleteFencePlan,
+): Promise<void> {
+  await fenceWriterEntriesInOrder(query, plan.participantSheetIds)
+  await assertRecordLinkDeleteFencePlanCurrent(query, plan)
 }
