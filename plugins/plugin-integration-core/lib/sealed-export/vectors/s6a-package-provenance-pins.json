@@ -67,10 +67,10 @@
     "pg": "^8.11.3"
   },
   "runtimeFiles": {
-    "pluginPackageJson": "dec0577661467d89c1b027e4ee6f69ad1be0d586eab42ce9e36bab1ad74f6c98",
+    "pluginPackageJson": "6dc882f9178a4664fb11fc4554251650d331248aab2ba7f75ebf0342a2297dbb",
     "pnpmLock": "8ca98ceef0c84b821c4b20a0f0cf0b50b87dfb51a26b6a2d21a9912a1733680f",
-    "pluginIndex": "c1c94fdc7a4027cda6a966d51a01447530906b90bdd999a82023ba636ae59938",
-    "pluginHttpRoutes": "3207a00050f4b11286e0a0ad755d99c6540771baf16789b05b173c13d113b67b",
+    "pluginIndex": "3c1c4e6173b9b66ca5f0eeba6e369bf9e4d1d3ba67270e2003313a4d7c5d0d2a",
+    "pluginHttpRoutes": "ebe56c9052adc3452f962c73d1b3a49b7c5a22a305d7591c87e4986a9728da2c",
     "s6aProvisioningCli": "d3320b27da7ab358ca068a3766a375e669fb6922f24ba0186ba0828c3e1d9da8",
     "s6aAcceptanceRunner": "eb58824cba1ab03361a6a4fba409f3f7a120dcda61d4c3d6cad2b82311d62624",
     "s6aOnpremRunbook": "1f4ba2b7fadbad0acb97e18d13f2be7ad6071fa372ac44e0aa4e17995e94c410",

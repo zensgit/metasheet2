@@ -21,6 +21,7 @@ const { createDb } = require('./lib/db.cjs')
 const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
+const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
 const {
   createStockPreparationPackInstallStore,
 } = require('./lib/stock-preparation-pack-install-store.cjs')
@@ -72,6 +73,7 @@ let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationPackInstallStore = null
+let stockPreparationConfirmationDecisionLease = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
 let adapterRegistry = null
@@ -249,6 +251,9 @@ module.exports = {
     // pack's `ext_` columns enumerable, which is what lets a PLM refresh honour their ownership
     // bands instead of falling back to the frozen-template ones.
     stockPreparationPackInstallStore = createStockPreparationPackInstallStore({ db })
+    // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
+    // confirmation-decision ledger. The reconcile route fails closed without it.
+    stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
     // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
     // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
     readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
@@ -354,6 +359,7 @@ module.exports = {
         readSourceConfigStore,
         stockPreparationAuditStore,
         stockPreparationPackInstallStore,
+        stockPreparationConfirmationDecisionLease,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
         adapterRegistry,
