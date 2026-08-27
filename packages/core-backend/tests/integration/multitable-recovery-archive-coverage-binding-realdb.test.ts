@@ -246,8 +246,13 @@ async function truncateCoverage(): Promise<void> {
   const reservationTarget = reservationTable.rows[0]?.present
     ? 'meta_recovery_archive_snapshot_reservations,'
     : ''
+  const objectTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+  )
+  const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
   await q(
     `TRUNCATE TABLE
+       ${objectTarget}
        ${reservationTarget}
        meta_recovery_archive_staging_objects,
        meta_recovery_archive_attachment_refs,

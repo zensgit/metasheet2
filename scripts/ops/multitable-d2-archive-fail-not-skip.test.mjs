@@ -29,6 +29,18 @@ const files = [
     sentinel: 'recovery_archive_coverage_binding_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts',
+    sentinel: 'recovery_archive_key_registry_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
+    sentinel: 'recovery_archive_source_pin_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
+    sentinel: 'recovery_archive_object_receipt_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
     sentinel: 'recovery_archive_crypto_registry_realdb_harness_missing_database_url',
   },

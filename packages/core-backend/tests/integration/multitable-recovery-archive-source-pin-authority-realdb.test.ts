@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as sourcePinMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import { cleanupOrphanMultitableAttachments } from '../../src/multitable/attachment-orphan-retention'
+import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import {
   claimRecoveryArchiveSourcePinIntent,
   RecoveryArchiveSourcePinError,
@@ -95,8 +96,13 @@ async function installIfAbsent(): Promise<void> {
 }
 
 async function truncateCatalog(): Promise<void> {
+  const objectTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+  )
+  const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
   await q(
     `TRUNCATE TABLE
+       ${objectTarget}
        meta_recovery_archive_snapshot_reservations,
        meta_recovery_archive_staging_objects,
        meta_recovery_archive_attachment_refs,
@@ -851,6 +857,70 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const client = await pool.connect()
     try {
       await client.query('BEGIN')
+      const objectAuthority = await client.query(
+        `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+      )
+      const hasObjectAuthority = objectAuthority.rows[0]?.present === true
+      if (hasObjectAuthority) {
+        for (const [index, sectionName] of RECOVERY_ARCHIVE_V1_SECTION_NAMES.entries()) {
+          const objectId = (index + 1).toString(16).padStart(64, '0')
+          await client.query(
+            `INSERT INTO meta_recovery_archive_objects (
+               generation_id, object_id, object_class, section_name, attachment_id,
+               key_id, provider_version, plaintext_sha256, ciphertext_sha256, size_bytes,
+               idempotency_key, put_receipt_sha256, head_receipt_sha256,
+               owner_kind, owner_id, owner_fence
+             ) VALUES (
+               $1::uuid, $2, 'section', $3, NULL,
+               $4, $5, $6, $7, 1,
+               $2, $8, $9,
+               $10, $11, 1
+             )`,
+            [
+              generationId,
+              objectId,
+              sectionName,
+              KEY_ID,
+              `source-pin-section-${index}`,
+              '6'.repeat(64),
+              '7'.repeat(64),
+              '8'.repeat(64),
+              '9'.repeat(64),
+              OWNER_KIND,
+              OWNER_ID,
+            ],
+          )
+        }
+        await client.query(
+          `INSERT INTO meta_recovery_archive_objects (
+             generation_id, object_id, object_class, section_name, attachment_id,
+             key_id, provider_version, plaintext_sha256, ciphertext_sha256, size_bytes,
+             idempotency_key, put_receipt_sha256, head_receipt_sha256,
+             owner_kind, owner_id, owner_fence
+           ) VALUES
+             ($1::uuid, $2, 'manifest', NULL, NULL, $3, 'source-pin-manifest',
+              $4, $5, 1, $2, $6, $7, $8, $9, 1),
+             ($1::uuid, $10, 'attachment', NULL, $11, $3, 'source-pin-attachment',
+              $12, $13, 1, $10, $14, $15, $8, $9, 1)`,
+          [
+            generationId,
+            'f'.repeat(64),
+            KEY_ID,
+            '6'.repeat(64),
+            '7'.repeat(64),
+            '8'.repeat(64),
+            '9'.repeat(64),
+            OWNER_KIND,
+            OWNER_ID,
+            'e'.repeat(64),
+            attachmentId,
+            CONTENT_HASH,
+            '7'.repeat(64),
+            '8'.repeat(64),
+            '9'.repeat(64),
+          ],
+        )
+      }
       await client.query(
         `INSERT INTO meta_recovery_archive_attachment_refs (
            generation_id, attachment_id, reference_class, reference_state, availability,
@@ -858,6 +928,14 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
          ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, $5::bigint)`,
         [generationId, attachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
       )
+      if (hasObjectAuthority) {
+        await client.query(
+          `UPDATE meta_recovery_archive_objects
+              SET state='verified', verified_at=clock_timestamp()
+            WHERE generation_id=$1::uuid`,
+          [generationId],
+        )
+      }
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,

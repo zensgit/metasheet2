@@ -10,10 +10,12 @@ import * as coverageBindingMigration from '../../src/db/migrations/zzzz202608271
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
+import * as objectReceiptAuthorityMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
+  RECOVERY_ARCHIVE_V1_SECTION_NAMES,
 } from '../../src/multitable/recovery-archive-contract'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
@@ -129,6 +131,123 @@ let initialFingerprint = ''
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
 
+type ArchiveQuery = typeof q
+
+function objectFixtureHash(generationId: string, slot: string, field: string): string {
+  return createHash('sha256').update(`${generationId}|${slot}|${field}`).digest('hex')
+}
+
+async function seedVerifiedObjectRosterIfPresent(
+  query: ArchiveQuery,
+  generationId: string,
+  attachmentIds: string[] = [],
+): Promise<void> {
+  const presence = await query(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+  )
+  if (presence.rows[0]?.present !== true) return
+
+  const parentResult = await query(
+    `SELECT state, build_status, coverage_status, key_id, owner_kind, owner_id,
+            owner_fence::text, lease_expires_at > clock_timestamp() AS lease_live
+       FROM meta_recovery_archives
+      WHERE generation_id=$1::uuid`,
+    [generationId],
+  )
+  const parent = parentResult.rows[0]
+  if (
+    parent?.state !== 'building' ||
+    parent.build_status !== 'active' ||
+    parent.coverage_status !== 'incomplete' ||
+    parent.lease_live !== true
+  ) {
+    return
+  }
+
+  const slots: Array<{
+    objectClass: 'section' | 'attachment' | 'manifest'
+    slot: string
+    sectionName: string | null
+    attachmentId: string | null
+    plaintextSha256: string
+  }> = RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => ({
+    objectClass: 'section',
+    slot: `section:${sectionName}`,
+    sectionName,
+    attachmentId: null,
+    plaintextSha256: objectFixtureHash(generationId, `section:${sectionName}`, 'plaintext'),
+  }))
+  slots.push({
+    objectClass: 'manifest',
+    slot: 'manifest',
+    sectionName: null,
+    attachmentId: null,
+    plaintextSha256: objectFixtureHash(generationId, 'manifest', 'plaintext'),
+  })
+
+  for (const attachmentId of attachmentIds) {
+    const source = await query(
+      `SELECT content_sha256
+         FROM meta_recovery_archive_attachment_refs
+        WHERE generation_id=$1::uuid AND attachment_id=$2
+          AND reference_class='source' AND reference_state='building'
+          AND availability='available'`,
+      [generationId, attachmentId],
+    )
+    if (typeof source.rows[0]?.content_sha256 !== 'string') {
+      throw new Error('recovery_archive_catalog_object_fixture_source_missing')
+    }
+    slots.push({
+      objectClass: 'attachment',
+      slot: `attachment:${attachmentId}`,
+      sectionName: null,
+      attachmentId,
+      plaintextSha256: source.rows[0].content_sha256,
+    })
+  }
+
+  for (const slot of slots) {
+    const objectId = objectFixtureHash(generationId, slot.slot, 'object')
+    await query(
+      `INSERT INTO meta_recovery_archive_objects (
+         generation_id, object_id, object_class, section_name, attachment_id,
+         key_id, provider_version, plaintext_sha256, ciphertext_sha256, size_bytes,
+         idempotency_key, put_receipt_sha256, head_receipt_sha256,
+         owner_kind, owner_id, owner_fence
+       ) VALUES (
+         $1::uuid, $2, $3, $4, $5,
+         $6, $7, $8, $9, 1,
+         $2, $10, $11,
+         $12, $13, $14::bigint
+       )
+       ON CONFLICT (generation_id, object_id) DO NOTHING`,
+      [
+        generationId,
+        objectId,
+        slot.objectClass,
+        slot.sectionName,
+        slot.attachmentId,
+        parent.key_id,
+        `${PREFIX}_fixture_v1`,
+        slot.plaintextSha256,
+        objectFixtureHash(generationId, slot.slot, 'ciphertext'),
+        objectFixtureHash(generationId, slot.slot, 'put'),
+        objectFixtureHash(generationId, slot.slot, 'head'),
+        parent.owner_kind,
+        parent.owner_id,
+        parent.owner_fence,
+      ],
+    )
+  }
+
+  await query(
+    `UPDATE meta_recovery_archive_objects
+        SET state='verified', verified_at=clock_timestamp()
+      WHERE generation_id=$1::uuid AND state='uploaded'`,
+    [generationId],
+  )
+}
+
 function archiveInput(overrides: Partial<ArchiveInput> = {}): ArchiveInput {
   return {
     generationId: randomUUID(),
@@ -202,18 +321,30 @@ async function insertArchive(overrides: Partial<ArchiveInput> = {}): Promise<Arc
 }
 
 async function finalizeArchive(generationId: string, coverageRowCount = '0'): Promise<void> {
-  await q(
-    `UPDATE meta_recovery_archives
-        SET state = 'verified',
-            build_status = 'finalized',
-            coverage_status = 'complete',
-            root_hash = $2,
-            coverage_section_hash = $3,
-            coverage_row_count = $4::bigint,
-            manifest_mac = $5::bytea
-      WHERE generation_id = $1::uuid`,
-    [generationId, ROOT_HASH, COVERAGE_HASH, coverageRowCount, Buffer.from('d2a-manifest-mac')],
-  )
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const query: ArchiveQuery = (text, values) => client.query(text, values)
+    await seedVerifiedObjectRosterIfPresent(query, generationId)
+    await query(
+      `UPDATE meta_recovery_archives
+          SET state = 'verified',
+              build_status = 'finalized',
+              coverage_status = 'complete',
+              root_hash = $2,
+              coverage_section_hash = $3,
+              coverage_row_count = $4::bigint,
+              manifest_mac = $5::bytea
+        WHERE generation_id = $1::uuid`,
+      [generationId, ROOT_HASH, COVERAGE_HASH, coverageRowCount, Buffer.from('d2a-manifest-mac')],
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function insertCoverage(
@@ -328,8 +459,13 @@ async function truncateCatalog(): Promise<void> {
   const reservationTarget = reservationTable.rows[0]?.present
     ? 'meta_recovery_archive_snapshot_reservations,'
     : ''
+  const objectTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
+  )
+  const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
   await q(
     `TRUNCATE TABLE
+       ${objectTarget}
        ${reservationTarget}
        meta_recovery_archive_staging_objects,
        meta_recovery_archive_attachment_refs,
@@ -514,20 +650,30 @@ async function installCatalogIfAbsent(): Promise<void> {
   schemaIsUp = true
 }
 
-async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
+async function downCatalogStack(target: Kysely<unknown>): Promise<boolean> {
+  const objectAuthority = await sql<{ present: boolean }>`
+    SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present
+  `.execute(target)
+  const restoreObjectAuthority = objectAuthority.rows[0]?.present === true
+  if (restoreObjectAuthority) await objectReceiptAuthorityMigration.down(target)
   await sourcePinAuthorityMigration.down(target)
   await snapshotReservationMigration.down(target)
   await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
+  return restoreObjectAuthority
 }
 
-async function upCatalogStack(target: Kysely<unknown>): Promise<void> {
+async function upCatalogStack(
+  target: Kysely<unknown>,
+  restoreObjectAuthority = false,
+): Promise<void> {
   await archiveCatalogMigration.up(target)
   await stagingCleanupMigration.up(target)
   await coverageBindingMigration.up(target)
   await snapshotReservationMigration.up(target)
   await sourcePinAuthorityMigration.up(target)
+  if (restoreObjectAuthority) await objectReceiptAuthorityMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -1401,6 +1547,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
          ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
         [archive.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
       )
+      await seedVerifiedObjectRosterIfPresent(
+        (text, values) => client.query(text, values),
+        archive.generationId,
+        [attachmentId],
+      )
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2
@@ -1743,6 +1894,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
          ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
         [verified.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
       )
+      await seedVerifiedObjectRosterIfPresent(
+        (text, values) => client.query(text, values),
+        verified.generationId,
+        [attachmentId],
+      )
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2
@@ -1873,7 +2029,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           ALTER TABLE public.meta_recovery_archives
             DROP CONSTRAINT fk_meta_recovery_archives_key
         `.execute(trx)
-        await downCatalogStack(trx)
+        const restoreObjectAuthority = await downCatalogStack(trx)
         await upCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_recovery_archives
@@ -1889,6 +2045,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           BEFORE INSERT ON public.meta_recovery_archives
           FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_key_reference_guard_row()
         `.execute(trx)
+        if (restoreObjectAuthority) await objectReceiptAuthorityMigration.up(trx)
         throw new Error('recovery_archive_catalog_replay_rollback')
       }),
     )
@@ -1899,12 +2056,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        await downCatalogStack(trx)
+        const restoreObjectAuthority = await downCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_sheets
           RENAME COLUMN system_kind TO system_kind_d2a_drift
         `.execute(trx)
-        await upCatalogStack(trx)
+        await upCatalogStack(trx, restoreObjectAuthority)
         throw new Error('recovery_archive_source_schema_guard_missing')
       }),
     )
@@ -1916,9 +2073,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on an owned-name collision and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        await downCatalogStack(trx)
+        const restoreObjectAuthority = await downCatalogStack(trx)
         await sql`CREATE TABLE public.meta_recovery_archives (drifted text)`.execute(trx)
-        await upCatalogStack(trx)
+        await upCatalogStack(trx, restoreObjectAuthority)
         throw new Error('recovery_archive_owned_object_guard_missing')
       }),
     )
