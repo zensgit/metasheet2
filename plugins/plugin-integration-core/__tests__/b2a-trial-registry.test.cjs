@@ -6,10 +6,9 @@
 // that makes any of it matter: that the four inventoried read entry points reach it, and that a
 // refusal happens before a single source row is read.
 //
-// Case ids follow the acceptance matrix (R-01 … R-04) so the verification record maps 1:1. R-05
-// (SQL Server timeout / stable paging / row+page caps), R-06 (schema contract and drift) and R-08
-// (expiry disposition of value-bearing artifacts) are NOT covered here and are NOT claimed — see the
-// gap list in the change description.
+// Case ids follow the acceptance matrix (R-01 … R-06, plus the unit halves of E3-02 and E3-05) so
+// the verification record maps 1:1. R-08 (expiry disposition of value-bearing artifacts) is NOT
+// covered here and is NOT claimed — see the gap list in the change description.
 //
 // Hermetic: no DB, no network, no filesystem, no wall clock (every check is handed an explicit
 // `now`, and the claim store is an in-memory Map). Values-free: the only literals are synthetic ids,
@@ -37,11 +36,24 @@ const {
   B2A_PAGE_LIMIT_EXCEEDED,
   B2A_SCHEMA_DRIFT,
   C6_SAFE_LIFECYCLE_REQUIRED,
+  C6_FULL_BATCH_INCOMPLETE,
   B2A_REGISTRY_INVALID,
   B2A_EXPIRY_HANDLINGS,
   MAX_B2A_REGISTRATION_WINDOW_MS,
+  B2A_TIMEOUT_CAUSE_CLASSES,
+  B2A_PAGE_LIMIT_CAUSE_CLASSES,
+  B2A_INCOMPLETE_BATCH_CAUSE_CLASSES,
+  B2A_SCHEMA_CONTRACT_VERSION,
+  SCHEMA_CONTRACT_KEY_PREFIX,
   B2aReadAuthorizationError,
   assertB2aReadAuthorization,
+  assertB2aFullBatchComplete,
+  assertB2aSchemaContract,
+  assertB2aSourceUnchangedAfterRead,
+  b2aSourceReadCauseClass,
+  classifyB2aSourceReadCause,
+  mapB2aSourceReadError,
+  runB2aGuardedSourceRead,
   createB2aRegistry,
   readPlanSourceObjects,
   resolveB2aRegistryConfig,
@@ -58,6 +70,7 @@ const {
 
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  INCOMPLETE_READ_ERROR_TYPES,
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
 
 // The literal the HOST writes onto server config (packages/core-backend/src/plugin-runtime-config.ts).
@@ -74,6 +87,7 @@ assert.deepEqual([...B2A_ERROR_CODES], [
   'B2A_PAGE_LIMIT_EXCEEDED',
   'B2A_SCHEMA_DRIFT',
   'C6_SAFE_LIFECYCLE_REQUIRED',
+  'C6_FULL_BATCH_INCOMPLETE',
 ])
 assert.equal(B2A_REGISTRATION_REQUIRED, 'B2A_REGISTRATION_REQUIRED')
 assert.equal(B2A_AUTHORIZATION_INVALID, 'B2A_AUTHORIZATION_INVALID')
@@ -82,6 +96,7 @@ assert.equal(B2A_SOURCE_TIMEOUT, 'B2A_SOURCE_TIMEOUT')
 assert.equal(B2A_PAGE_LIMIT_EXCEEDED, 'B2A_PAGE_LIMIT_EXCEEDED')
 assert.equal(B2A_SCHEMA_DRIFT, 'B2A_SCHEMA_DRIFT')
 assert.equal(C6_SAFE_LIFECYCLE_REQUIRED, 'C6_SAFE_LIFECYCLE_REQUIRED')
+assert.equal(C6_FULL_BATCH_INCOMPLETE, 'C6_FULL_BATCH_INCOMPLETE')
 
 const TENANT = 'tenant_1'
 const OTHER_TENANT = 'tenant_2'
@@ -762,6 +777,360 @@ function theReadPlanNamesItsOwnObjects() {
   assert.deepEqual(readPlanSourceObjects({ steps: [{ object: 'X' }, { nested: { object: 'Y' } }] }), ['X', 'Y'])
 }
 
+// ── R-05: THE CAUSE-CLASS ROSTERS ARE THE WHOLE CONTRACT ─────────────────────
+
+// Each roster restated as a literal. Importing the constant and comparing it to itself passes just
+// as happily when a token is misspelled and the class it was meant to catch falls through unmapped.
+async function R05_theCauseClassRostersAreClosedAndRestated() {
+  assert.deepEqual([...B2A_TIMEOUT_CAUSE_CLASSES], [
+    'read_time_limit_exceeded', 'ETIMEOUT', 'ETIMEDOUT', 'ESOCKETTIMEDOUT',
+    'TimeoutError', 'AbortError', 'TIMEOUT', 'BRIDGE_AGENT_TIMEOUT',
+  ])
+  assert.deepEqual([...B2A_PAGE_LIMIT_CAUSE_CLASSES], [
+    'read_page_limit_exceeded', 'max_rows_exceeded', 'read_count_exceeded', 'SOURCE_RUN_RESULT_TOO_LARGE',
+  ])
+  assert.deepEqual([...B2A_INCOMPLETE_BATCH_CAUSE_CLASSES], ['read_cursor_broken'])
+  // Every expander bound the stock-preparation path can produce is on exactly one roster. A bound
+  // that fell off every roster would surface as an unclassified failure, which is the defect this
+  // machinery exists to remove.
+  for (const type of INCOMPLETE_READ_ERROR_TYPES) {
+    assert.ok(classifyB2aSourceReadCause(type), `${type} is on no roster`)
+  }
+}
+
+// The class is read STRUCTURALLY: `details.code`, then `code`, then `name`. Never the message —
+// which is where a driver puts the host, the query and sometimes a value.
+async function R05_theCauseClassIsStructuralNeverTheMessage() {
+  assert.equal(b2aSourceReadCauseClass({ details: { code: 'read_count_exceeded' }, code: 'X', name: 'Y' }), 'read_count_exceeded')
+  assert.equal(b2aSourceReadCauseClass({ code: 'ETIMEOUT', name: 'RequestError' }), 'ETIMEOUT')
+  assert.equal(b2aSourceReadCauseClass({ name: 'TimeoutError' }), 'TimeoutError')
+  assert.equal(b2aSourceReadCauseClass({ message: 'Timeout: Request failed to complete in 30000ms' }), null)
+  assert.equal(b2aSourceReadCauseClass(null), null)
+}
+
+// AN UNRECOGNIZED FAILURE IS NOT MAPPED. A fixed code that means "something went wrong" is not
+// evidence, and claiming a classification the code cannot make is worse than leaving the original
+// error alone. This is also the E4-06 discipline restated for the read side: a read-only failure
+// must never come back wearing a code that belongs to a different property.
+async function R05_anUnrecognizedCauseIsLeftAlone() {
+  const authorization = { registryId: 'r', registryVersion: 1, registrationId: 'reg', purpose: 'p' }
+  assert.equal(mapB2aSourceReadError(new Error('Row limit 20000 exceeds the maximum 10000'), authorization), null,
+    'the host row ceiling throws a bare Error with no code; matching its MESSAGE would be brittle and values-bearing')
+  assert.equal(mapB2aSourceReadError({ code: 'ECONNREFUSED' }, authorization), null)
+
+  const original = Object.assign(new Error('boom'), { code: 'ECONNREFUSED' })
+  const passedThrough = await runB2aGuardedSourceRead(authorization, () => { throw original }).catch((error) => error)
+  assert.equal(passedThrough, original, 'an unmapped failure propagates as the very same object')
+}
+
+// The mapped error carries the fixed code AND keeps the original cause class and cause object.
+async function R05_aMappedFailureKeepsItsOriginalCauseClass() {
+  const authorization = { registryId: 'r', registryVersion: 1, registrationId: 'reg', purpose: 'p' }
+  const original = Object.assign(new Error('Timeout: Request failed to complete in 30000ms'), {
+    name: 'RequestError', code: 'ETIMEOUT',
+  })
+  const mapped = await runB2aGuardedSourceRead(authorization, () => { throw original }).catch((error) => error)
+  assert.ok(mapped instanceof B2aReadAuthorizationError)
+  assert.equal(mapped.code, B2A_SOURCE_TIMEOUT)
+  assert.equal(mapped.status, 504)
+  assert.equal(mapped.details.reason, 'source_read_timeout')
+  assert.equal(mapped.details.causeClass, 'ETIMEOUT', 'the read-only original cause class is kept, not swallowed')
+  assert.equal(mapped.cause, original)
+  // VALUES-FREE: the driver's message never reaches the surfaced error.
+  assert.equal(JSON.stringify(mapped.details).includes('30000ms'), false)
+
+  const capExceeded = await runB2aGuardedSourceRead(authorization, () => {
+    throw Object.assign(new Error('x'), { name: 'StockPreparationBomExpansionError', details: { code: 'max_rows_exceeded' } })
+  }).catch((error) => error)
+  assert.equal(capExceeded.code, B2A_PAGE_LIMIT_EXCEEDED)
+  assert.equal(capExceeded.status, 409)
+
+  // DORMANT: no wrapping at all, so a dormant deployment's error objects are the ones it had.
+  const dormant = await runB2aGuardedSourceRead(null, () => { throw original }).catch((error) => error)
+  assert.equal(dormant, original)
+}
+
+// E3-02, unit half: the expander CATCHES its bounds and returns them as data, so the result side has
+// to classify too. `read_failed` carries the preserved cause class, which is how a swallowed driver
+// timeout still surfaces as a timeout rather than as a generic incompleteness.
+async function E3_02_theResultSideClassifiesTheExpandersOwnBounds() {
+  const authorization = { registryId: 'r', registryVersion: 1, registrationId: 'reg', purpose: 'p' }
+  const refusal = (errors) => captured(() => assertB2aFullBatchComplete(authorization, errors))
+
+  assert.equal(refusal([]), null, 'a complete batch is not refused')
+  assert.equal(refusal(undefined), null)
+  assert.equal(assertB2aFullBatchComplete(null, [{ type: 'max_rows_exceeded' }]), undefined, 'dormant refuses nothing')
+
+  const cap = refusal([{ type: 'max_rows_exceeded', maxRows: 10 }])
+  assert.equal(cap.code, B2A_PAGE_LIMIT_EXCEEDED)
+  assert.equal(cap.details.fullBatch, false)
+  assert.equal(cap.details.errorEntryCount, 1)
+
+  const elapsed = refusal([{ type: 'read_time_limit_exceeded' }])
+  assert.equal(elapsed.code, B2A_SOURCE_TIMEOUT)
+
+  const swallowedTimeout = refusal([{ type: 'read_failed', causeClass: 'ETIMEOUT', message: 'Timeout after 30000ms' }])
+  assert.equal(swallowedTimeout.code, B2A_SOURCE_TIMEOUT, 'the class survived the expander catching the throw')
+  assert.equal(swallowedTimeout.details.causeClass, 'ETIMEOUT')
+  assert.equal(JSON.stringify(swallowedTimeout.details).includes('30000ms'), false)
+
+  const brokenCursor = refusal([{ type: 'read_cursor_broken', page: 2 }])
+  assert.equal(brokenCursor.code, C6_FULL_BATCH_INCOMPLETE)
+  assert.equal(brokenCursor.details.reason, 'source_read_cursor_broken')
+
+  // An UNCLASSIFIABLE failure still refuses — any global error means the batch is not the full
+  // batch — but it names the property rather than inventing a cause, and echoes no class at all.
+  const unclassified = refusal([{ type: 'read_failed', causeClass: 'ECONNREFUSED', message: 'connect ECONNREFUSED' }])
+  assert.equal(unclassified.code, C6_FULL_BATCH_INCOMPLETE)
+  assert.equal(unclassified.details.reason, 'source_read_incomplete')
+  assert.equal('causeClass' in unclassified.details, false, 'an unrostered class is never echoed into evidence')
+
+  // A timeout beats a bound beats bare incompleteness, so evidence names the FIRST cause, not the
+  // last error the expander happened to append.
+  assert.equal(refusal([
+    { type: 'read_failed', causeClass: 'ECONNREFUSED' },
+    { type: 'max_rows_exceeded' },
+    { type: 'read_time_limit_exceeded' },
+  ]).code, B2A_SOURCE_TIMEOUT)
+}
+
+// ── R-06: THE SCHEMA CONTRACT ────────────────────────────────────────────────
+
+function schemaAdapter(schema, { onGetSchema } = {}) {
+  const calls = []
+  return {
+    calls,
+    adapter: {
+      async getSchema(input = {}) {
+        calls.push(input.object)
+        if (onGetSchema) {
+          const injected = onGetSchema(input)
+          if (injected !== undefined) return injected
+        }
+        return { object: input.object, fields: (schema[input.object] || []).map((f) => ({ ...f })) }
+      },
+      async read() { throw new Error('the contract check must never read a row') },
+    },
+  }
+}
+
+const SQL_SCHEMA = Object.freeze({
+  [OBJECT_A]: [{ name: 'FileCode', type: 'nvarchar', nullable: false }, { name: 'Parent_OBJ_ID', type: 'nvarchar', nullable: true }],
+  [OBJECT_B]: [{ name: 'OBJ_ID', type: 'nvarchar', nullable: false }, { name: 'IdentityNo', type: 'nvarchar', nullable: false }],
+})
+
+async function contractFor(schema, { store: claimStore = store(), extFieldMapping, adapterOptions } = {}) {
+  const source = schemaAdapter(schema, adapterOptions)
+  const authorization = { registryId: 'b2a-2026-q3', registryVersion: 1, registrationId: 'b2a-factory-a-plm', registrationVersion: 1, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION }
+  const result = await assertB2aSchemaContract({
+    store: claimStore,
+    authorization,
+    sourceAdapter: source.adapter,
+    sourceObjects: [OBJECT_A, OBJECT_B],
+    extFieldMapping,
+    now: NOW,
+  })
+  return { result, source, store: claimStore, authorization }
+}
+
+// FIRST READ PINS; AN IDENTICAL SCHEMA PASSES. The record lands in the SAME durable store the
+// operation claim uses, under its own prefix — the registry file is a read-only deploy artifact.
+async function R06_theFirstArmedReadPinsAndAnIdenticalSchemaPasses() {
+  const claimStore = store()
+  const first = await contractFor(SQL_SCHEMA, { store: claimStore })
+  assert.equal(first.result.schemaContractPinned, true)
+  assert.equal(first.result.objectCount, 2)
+  assert.equal(first.result.fieldCount, 4)
+  assert.deepEqual(first.source.calls, [OBJECT_A, OBJECT_B].slice().sort(),
+    'exactly one getSchema per plan object, in a SORTED order so the digest cannot depend on call order')
+
+  const keys = [...claimStore.keys()]
+  assert.deepEqual(keys, [`${SCHEMA_CONTRACT_KEY_PREFIX}b2a-factory-a-plm`], 'keyed to the registration id, not its version')
+  const stored = claimStore.get(keys[0])
+  assert.equal(stored.schemaContractVersion, B2A_SCHEMA_CONTRACT_VERSION)
+  // VALUES-FREE AT REST: no column name, no object name, no type token in the clear.
+  const text = JSON.stringify(stored)
+  for (const identifier of ['FileCode', 'IdentityNo', 'nvarchar', OBJECT_A, OBJECT_B]) {
+    assert.equal(text.includes(identifier), false, `the stored contract leaked ${identifier}`)
+  }
+  for (const [key, value] of Object.entries(stored.fields)) {
+    assert.match(key, /^[0-9a-f]{32}$/)
+    assert.match(value, /^[0-9a-f]{32}$/)
+  }
+
+  const second = await contractFor(SQL_SCHEMA, { store: claimStore })
+  assert.equal(second.result.schemaContractPinned, false, 'the second read COMPARES')
+  assert.equal(second.result.schemaDrift, false)
+  assert.equal(second.result.schemaDigest, first.result.schemaDigest)
+
+  // DORMANT: no authorization, no probe, no record.
+  const dormantStore = store()
+  const dormantAdapter = schemaAdapter(SQL_SCHEMA)
+  assert.equal(await assertB2aSchemaContract({
+    store: dormantStore, authorization: null, sourceAdapter: dormantAdapter.adapter, sourceObjects: [OBJECT_A], now: NOW,
+  }), null)
+  assert.deepEqual(dormantAdapter.calls, [], 'a dormant deployment does not probe the source schema')
+  assert.equal(dormantStore.size, 0)
+}
+
+// EVERY DRIFT KIND REFUSES, AND THE REFUSAL COUNTS THEM WITHOUT NAMING THEM.
+async function R06_driftRefusesWithCountsAndNoNames() {
+  const cases = [
+    ['field missing', { ...SQL_SCHEMA, [OBJECT_B]: SQL_SCHEMA[OBJECT_B].slice(1) }, { missingFieldCount: 1, changedFieldCount: 0, addedFieldCount: 0 }],
+    ['type change', { ...SQL_SCHEMA, [OBJECT_B]: SQL_SCHEMA[OBJECT_B].map((f, i) => (i === 0 ? { ...f, type: 'int' } : f)) }, { missingFieldCount: 0, changedFieldCount: 1, addedFieldCount: 0 }],
+    ['nullability change', { ...SQL_SCHEMA, [OBJECT_B]: SQL_SCHEMA[OBJECT_B].map((f, i) => (i === 0 ? { ...f, nullable: true } : f)) }, { missingFieldCount: 0, changedFieldCount: 1, addedFieldCount: 0 }],
+    // A WIDENED source is still a CHANGED source. §13 names three kinds and this is not literally
+    // one of them, but the contract is a digest and "identical schema passes" is the pass condition;
+    // re-pinning is meant to be a deliberate act, not something a DDL does on the deployment's behalf.
+    ['field added', { ...SQL_SCHEMA, [OBJECT_B]: [...SQL_SCHEMA[OBJECT_B], { name: 'Extra', type: 'nvarchar', nullable: true }] }, { missingFieldCount: 0, changedFieldCount: 0, addedFieldCount: 1 }],
+  ]
+  for (const [label, drifted, counts] of cases) {
+    const claimStore = store()
+    await contractFor(SQL_SCHEMA, { store: claimStore })
+    const error = await contractFor(drifted, { store: claimStore }).then(() => null, (e) => e)
+    assert.ok(error instanceof B2aReadAuthorizationError, label)
+    assert.equal(error.code, B2A_SCHEMA_DRIFT, label)
+    assert.equal(error.status, 409, label)
+    assert.equal(error.details.reason, 'schema_contract_drift', label)
+    assert.equal(error.details.missingFieldCount, counts.missingFieldCount, label)
+    assert.equal(error.details.changedFieldCount, counts.changedFieldCount, label)
+    assert.equal(error.details.addedFieldCount, counts.addedFieldCount, label)
+    const text = JSON.stringify(error.details)
+    for (const identifier of ['FileCode', 'IdentityNo', 'Extra', 'nvarchar', OBJECT_A, OBJECT_B]) {
+      assert.equal(text.includes(identifier), false, `${label}: refusal leaked ${identifier}`)
+    }
+  }
+}
+
+// MAPPING DRIFT (§13's 映射漂移) is not a source property. The `ext_` mapping's IDENTITY is folded
+// into the digest, so swapping it — or configuring one where there was none — is drift even when the
+// source never moved.
+async function R06_mappingIdentityDriftIsDriftEvenWhenTheSourceDidNotMove() {
+  const mapping = (mappingId, mappingVersion) => ({ mappingId, mappingVersion, targets: [] })
+  const claimStore = store()
+  await contractFor(SQL_SCHEMA, { store: claimStore, extFieldMapping: mapping('pack-a', 1) })
+
+  const versionBump = await contractFor(SQL_SCHEMA, { store: claimStore, extFieldMapping: mapping('pack-a', 2) }).then(() => null, (e) => e)
+  assert.equal(versionBump.code, B2A_SCHEMA_DRIFT)
+  assert.equal(versionBump.details.mappingChanged, true)
+  assert.equal(versionBump.details.missingFieldCount, 0, 'the SOURCE did not move; only the mapping did')
+
+  const removed = await contractFor(SQL_SCHEMA, { store: claimStore }).then(() => null, (e) => e)
+  assert.equal(removed.code, B2A_SCHEMA_DRIFT, 'removing a configured mapping is drift too')
+
+  const unchanged = await contractFor(SQL_SCHEMA, { store: claimStore, extFieldMapping: mapping('pack-a', 1) })
+  assert.equal(unchanged.result.schemaDrift, false)
+}
+
+// THE TWO ADAPTERS SPELL NULLABILITY DIFFERENTLY, AND ONE OF THEM INVERTS IT.
+//
+//   data-source:sql-readonly   -> { name, type, nullable }
+//   bridge:legacy-sql-readonly -> { name, label, type, required }     (required = NOT nullable)
+//
+// A contract that read `nullable` alone would record `undefined` for every bridge column and then
+// pass a source whose nullability changed — a control that looks total and matches on a constant.
+async function R06_bridgeRequiredIsReadAsInvertedNullability() {
+  const bridgeNotNull = { [OBJECT_A]: [{ name: 'FileCode', label: 'FileCode', type: 'nvarchar', required: true }] }
+  const bridgeNullable = { [OBJECT_A]: [{ name: 'FileCode', label: 'FileCode', type: 'nvarchar', required: false }] }
+  const sqlNotNull = { [OBJECT_A]: [{ name: 'FileCode', type: 'nvarchar', nullable: false }] }
+
+  const one = await assertB2aSchemaContract({
+    store: store(),
+    authorization: { registryId: 'r', registryVersion: 1, registrationId: 'reg-bridge', registrationVersion: 1, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION },
+    sourceAdapter: schemaAdapter(bridgeNotNull).adapter,
+    sourceObjects: [OBJECT_A],
+    now: NOW,
+  })
+  const two = await assertB2aSchemaContract({
+    store: store(),
+    authorization: { registryId: 'r', registryVersion: 1, registrationId: 'reg-sql', registrationVersion: 1, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION },
+    sourceAdapter: schemaAdapter(sqlNotNull).adapter,
+    sourceObjects: [OBJECT_A],
+    now: NOW,
+  })
+  assert.equal(one.schemaDigest, two.schemaDigest, '`required: true` and `nullable: false` are the same declared shape')
+
+  // And flipping the bridge's `required` MOVES the digest, which is the assertion that fails when
+  // the inverted spelling is dropped.
+  const claimStore = store()
+  await contractFor(bridgeNotNull, { store: claimStore })
+  const flipped = await contractFor(bridgeNullable, { store: claimStore }).then(() => null, (e) => e)
+  assert.equal(flipped.code, B2A_SCHEMA_DRIFT)
+  assert.equal(flipped.details.changedFieldCount, 1)
+}
+
+// FAIL-CLOSED WHERE THE CONTRACT CANNOT BE ESTABLISHED. "No contract" must never read as "no drift".
+// Every REAL adapter has `getSchema` — `contracts.cjs` lists it in `REQUIRED_ADAPTER_METHODS`, so an
+// adapter without one cannot be registered — which is why refusing here costs a deployment nothing
+// and closes the one hole that would otherwise turn the whole check off.
+async function R06_anAdapterThatCannotDescribeItselfFailsClosed() {
+  const authorization = { registryId: 'r', registryVersion: 1, registrationId: 'reg', registrationVersion: 1, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION }
+  const refuse = (options) => assertB2aSchemaContract({ store: store(), authorization, now: NOW, ...options })
+    .then(() => null, (error) => error)
+
+  const noFacade = await refuse({ sourceAdapter: { async read() { return {} } }, sourceObjects: [OBJECT_A] })
+  assert.equal(noFacade.code, B2A_SCHEMA_DRIFT)
+  assert.equal(noFacade.details.reason, 'schema_facade_unavailable')
+
+  const noObjects = await refuse({ sourceAdapter: schemaAdapter(SQL_SCHEMA).adapter, sourceObjects: [] })
+  assert.equal(noObjects.details.reason, 'schema_scope_empty')
+
+  const unreadable = await refuse({
+    sourceAdapter: schemaAdapter(SQL_SCHEMA, { onGetSchema: () => ({ object: OBJECT_A }) }).adapter,
+    sourceObjects: [OBJECT_A],
+  })
+  assert.equal(unreadable.details.reason, 'schema_unreadable')
+
+  // A contract pinned in a format this runtime cannot compare is treated as drift, not as absence.
+  const staleStore = store()
+  staleStore.set(`${SCHEMA_CONTRACT_KEY_PREFIX}reg`, { schemaContractVersion: 0, schemaDigest: 'x', fields: {} })
+  const stale = await refuse({ store: staleStore, sourceAdapter: schemaAdapter(SQL_SCHEMA).adapter, sourceObjects: [OBJECT_A] })
+  assert.equal(stale.details.reason, 'schema_contract_version_mismatch')
+
+  // R-05 REACHES THE SCHEMA PROBE TOO: it is a source read and is hardened as one, so a `getSchema`
+  // that times out surfaces the timeout code rather than an unclassified 500.
+  const timedOut = await refuse({
+    sourceAdapter: schemaAdapter(SQL_SCHEMA, {
+      onGetSchema: () => { throw Object.assign(new Error('t'), { name: 'RequestError', code: 'ETIMEOUT' }) },
+    }).adapter,
+    sourceObjects: [OBJECT_A],
+  })
+  assert.equal(timedOut.code, B2A_SOURCE_TIMEOUT)
+  assert.equal(timedOut.details.causeClass, 'ETIMEOUT')
+
+  // The store itself is required, for the same reason the operation claim requires it: without
+  // durable state a first-read pin cannot be a pin.
+  const noStore = await assertB2aSchemaContract({
+    store: null, authorization, sourceAdapter: schemaAdapter(SQL_SCHEMA).adapter, sourceObjects: [OBJECT_A], now: NOW,
+  }).then(() => null, (error) => error)
+  assert.equal(noStore.details.reason, 'claim_store_unavailable')
+}
+
+// E3-05, unit half: the post-read comparison, and the one thing it is honest about not covering.
+async function E3_05_theMidReadComparisonUsesThePreReadDigest() {
+  const authorization = { registryId: 'r', registryVersion: 1, registrationId: 'reg', registrationVersion: 1, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION }
+  const claimStore = store()
+  const { result: contract } = await contractFor(SQL_SCHEMA, { store: claimStore })
+
+  const unchanged = await assertB2aSourceUnchangedAfterRead({
+    authorization, contract, sourceAdapter: schemaAdapter(SQL_SCHEMA).adapter, sourceObjects: [OBJECT_A, OBJECT_B],
+  })
+  assert.deepEqual(unchanged, { sourceUnchangedAcrossRead: true })
+
+  const moved = { ...SQL_SCHEMA, [OBJECT_B]: SQL_SCHEMA[OBJECT_B].slice(1) }
+  const error = await assertB2aSourceUnchangedAfterRead({
+    authorization, contract, sourceAdapter: schemaAdapter(moved).adapter, sourceObjects: [OBJECT_A, OBJECT_B],
+  }).then(() => null, (e) => e)
+  assert.equal(error.code, C6_FULL_BATCH_INCOMPLETE)
+  assert.equal(error.details.reason, 'source_changed_mid_read')
+  assert.equal(error.details.missingFieldCount, 1)
+  assert.equal(error.details.fullBatch, false)
+
+  // DORMANT, and no-contract: both are no-ops rather than refusals, so an unarmed read is untouched.
+  assert.equal(await assertB2aSourceUnchangedAfterRead({ authorization: null, contract }), null)
+  assert.equal(await assertB2aSourceUnchangedAfterRead({ authorization, contract: null }), null)
+}
+
 const TESTS = [
   dormantWhenTheKeyIsAbsent,
   switchingItOffFromInsideTheFileIsRefused,
@@ -784,6 +1153,17 @@ const TESTS = [
   aMalformedRegistryAtCheckTimeIsFailClosed,
   theBuiltRegistryIsImmutable,
   theReadPlanNamesItsOwnObjects,
+  R05_theCauseClassRostersAreClosedAndRestated,
+  R05_theCauseClassIsStructuralNeverTheMessage,
+  R05_anUnrecognizedCauseIsLeftAlone,
+  R05_aMappedFailureKeepsItsOriginalCauseClass,
+  E3_02_theResultSideClassifiesTheExpandersOwnBounds,
+  R06_theFirstArmedReadPinsAndAnIdenticalSchemaPasses,
+  R06_driftRefusesWithCountsAndNoNames,
+  R06_mappingIdentityDriftIsDriftEvenWhenTheSourceDidNotMove,
+  R06_bridgeRequiredIsReadAsInvertedNullability,
+  R06_anAdapterThatCannotDescribeItselfFailsClosed,
+  E3_05_theMidReadComparisonUsesThePreReadDigest,
 ]
 
 async function main() {

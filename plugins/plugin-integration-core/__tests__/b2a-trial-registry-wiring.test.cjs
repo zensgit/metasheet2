@@ -12,9 +12,10 @@
 // everyone remembering to be careful. Every assertion below would have been red then — most of them
 // vacuously, because there was nothing to call.
 //
-// Case ids follow the acceptance matrix (R-01, R-02, R-07, E3-01). NOT covered and NOT claimed here:
-// R-05 (SQL Server timeout / stable paging / row+page caps), R-06 (schema contract and drift), R-08
-// (expiry disposition of value-bearing artifacts), E3-02..E3-05 (full-batch and watermark guards).
+// Case ids follow the acceptance matrix: R-01, R-02, R-05, R-06, R-07, E3-01..E3-05. NOT covered and
+// NOT claimed here: R-08 (expiry disposition of value-bearing artifacts), and the ROW-LEVEL half of
+// E3-05 (a data generation that moves mid-read), which no source on this path can report — see the
+// note above `E3_05_aMidReadSourceChangeRefuses`.
 //
 // Hermetic and dependency-free: no DB, no network, no filesystem writes. Values-free: the only
 // literals are schema ids, frozen reason tokens, synthetic scope refs and synthetic cell text.
@@ -38,7 +39,12 @@ const {
   B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
   B2A_REGISTRATION_REQUIRED,
   B2A_SCOPE_MISMATCH,
+  B2A_SOURCE_TIMEOUT,
+  B2A_PAGE_LIMIT_EXCEEDED,
+  B2A_SCHEMA_DRIFT,
   C6_SAFE_LIFECYCLE_REQUIRED,
+  C6_FULL_BATCH_INCOMPLETE,
+  SCHEMA_CONTRACT_KEY_PREFIX,
   SEALED_SNAPSHOT_BINDING_REF,
   readPlanSourceObjects,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
@@ -129,17 +135,49 @@ function sourceData() {
   }
 }
 
+// The structural schema every fake source reports. Shape copied from the two real read-only
+// adapters: `data-source:sql-readonly` emits `{ name, type, nullable }`, `bridge:legacy-sql-readonly`
+// emits `{ name, label, type, required }` — the contract has to read both, so both are exercised.
+function sourceSchema() {
+  const columnsFor = (object) => {
+    const rows = sourceData()[object]
+    const names = Array.isArray(rows) && rows.length > 0 ? Object.keys(rows[0]) : ['OBJ_ID']
+    return names.map((name) => ({ name, type: 'nvarchar', nullable: false }))
+  }
+  const out = {}
+  for (const object of Object.keys(sourceData())) out[object] = columnsFor(object)
+  return out
+}
+
 /**
  * THE CALL-RECORDING FAKE. `reads` is the whole point of this suite: "refused before any source
  * read" is not an argument about statement order, it is `reads.length === 0` after a refusal.
+ *
+ * `getSchema` is present because every REAL adapter has it — `contracts.cjs` lists it in
+ * `REQUIRED_ADAPTER_METHODS`, so an adapter without one cannot be registered. R-06's contract check
+ * fails closed on an adapter that cannot describe itself, and a fixture without `getSchema` would
+ * therefore be testing a shape the runtime cannot produce.
  */
-function createRecordingSourceAdapter(data = sourceData()) {
+function createRecordingSourceAdapter(data = sourceData(), options = {}) {
   const reads = []
+  const schemaReads = []
+  const state = { schema: options.schema || sourceSchema(), pages: options.pages || null }
   return {
     reads,
+    schemaReads,
+    state,
     adapter: {
+      async getSchema(input = {}) {
+        schemaReads.push(input.object)
+        const fields = state.schema[input.object]
+        return { object: input.object, fields: Array.isArray(fields) ? fields.map(clone) : [] }
+      },
       async read(input = {}) {
         reads.push(input.object)
+        if (typeof options.onRead === 'function') {
+          const injected = options.onRead(input, { reads, schemaReads, state })
+          if (injected !== undefined) return injected
+        }
         const rows = Array.isArray(data[input.object]) ? data[input.object] : []
         const matches = rows.filter((row) =>
           Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected))
@@ -287,19 +325,20 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
   }
 }
 
-function actionConfig() {
+function actionConfig(overrides = {}) {
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
     source: { externalSystemId: SOURCE_SYSTEM_ID, kind: SYSTEM_KIND },
     target: { sheetId: SHEET_ID, objectId: OBJECT_ID },
+    ...overrides,
   }
 }
 
-function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true } = {}) {
+function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage } = {}) {
   const routes = new Map()
   const spies = createSpies()
   const config = {
-    stockPreparationTableActions: [actionConfig()],
+    stockPreparationTableActions: [actionConfig(action)],
     stockPrepApplySandbox: { enabled: true, allowedTargetObjectIds: [OBJECT_ID] },
   }
   // THE ARMING SWITCH, exactly as the host writes it: the key is present only when
@@ -319,7 +358,7 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
     },
     // `durable: true` is what the large-BOM job store demands; it is also the claim store the B2a
     // operation limit is recorded in.
-    storage: Object.assign(new Map(), { durable: true }),
+    storage: storage || Object.assign(new Map(), { durable: true }),
     config,
   }
   httpRoutes.registerIntegrationRoutes({
@@ -359,6 +398,7 @@ const APPLY_ROUTE = '/api/integration/table-actions/:actionId/apply'
 const MVP_PERSIST_ROUTE = '/api/integration/table-actions/:actionId/mvp-persist'
 const LARGE_BOM_START_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs'
 const LARGE_BOM_RUN_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/run'
+const LARGE_BOM_PLAN_ROUTE = '/api/integration/table-actions/:actionId/large-bom/expansion-jobs/:jobId/plan'
 const C6_DRY_RUN_ROUTE = '/api/integration/pipelines/:id/external-write/dry-run'
 const PIPELINE_RUN_ROUTE = '/api/integration/pipelines/:id/run'
 const PIPELINE_DRY_RUN_ROUTE = '/api/integration/pipelines/:id/dry-run'
@@ -883,6 +923,420 @@ async function aRequestCannotSupplyOrDisarmTheRegistry() {
   }
 }
 
+// ── R-05 / R-06 / E3-02..E3-05: READ HARDENING, THE SCHEMA CONTRACT, FULL BATCH ─────────────
+//
+// Everything below is ARMED-ONLY by construction, and each case re-runs its own fixture DORMANT to
+// prove it. That is not ceremony: the whole change rests on a deployment that has not set
+// INTEGRATION_CORE_B2A_REGISTRY_PATH behaving exactly as it did before, and a guard that fires on
+// both sides would break that silently.
+//
+// WHICH FIXED CODE, AND WHY IT IS NOT ALWAYS `C6_FULL_BATCH_INCOMPLETE`. §15.2 R-05 asks for a fixed
+// timeout/limit code and E3-02 asks for `C6_FULL_BATCH_INCOMPLETE`, and a row cap is honestly BOTH.
+// The split taken here: when a HARDENED BOUND explains why the batch is short, the code names that
+// bound (`B2A_SOURCE_TIMEOUT` / `B2A_PAGE_LIMIT_EXCEEDED`) because that is what the caller can act
+// on; when nothing does — a broken cursor, an unclassifiable read failure, a source that moved
+// mid-read — the code names the property (`C6_FULL_BATCH_INCOMPLETE`). EVERY one of them carries
+// `fullBatch: false` and produces no plan, no revision and no token, which is the invariant E3-02
+// actually asserts, so `assertIncompleteBatchRefusal` checks the invariant on all of them and the
+// code only where the case pins a specific cause.
+const INCOMPLETE_BATCH_CODES = Object.freeze([
+  B2A_SOURCE_TIMEOUT, B2A_PAGE_LIMIT_EXCEEDED, C6_FULL_BATCH_INCOMPLETE,
+])
+
+function assertIncompleteBatchRefusal(res, { code, reason, causeClass, status = 409 }, records, label) {
+  assert.equal(res.statusCode, status, `${label}: expected ${status}, got ${res.statusCode} ${JSON.stringify(res.body)}`)
+  assert.equal(res.body.ok, false, label)
+  assert.ok(INCOMPLETE_BATCH_CODES.includes(res.body.error.code),
+    `${label}: ${res.body.error.code} is not one of the frozen incomplete-batch codes`)
+  if (code) assert.equal(res.body.error.code, code, `${label}: ${JSON.stringify(res.body.error)}`)
+  if (reason) assert.equal(res.body.error.details.reason, reason, `${label}: wrong reason token`)
+  if (causeClass) assert.equal(res.body.error.details.causeClass, causeClass, `${label}: cause class not preserved`)
+  // NO BUSINESS ARTIFACT. The refusal body is an error, so there is no plan, no revision and no
+  // token in it; and the records API — the only thing that could have written a target row — was
+  // never touched.
+  assert.equal(res.body.data, undefined, `${label}: a refusal must carry no plan payload`)
+  if (records) {
+    const writes = records.calls.filter(([name]) => name !== 'queryRecords')
+    assert.deepEqual(writes, [], `${label}: target writes must be 0`)
+  }
+  const text = JSON.stringify(res.body)
+  for (const forbidden of FORBIDDEN_IN_RESPONSE) {
+    assert.equal(text.includes(forbidden), false, `${label}: response leaked ${JSON.stringify(forbidden)}`)
+  }
+}
+
+// R-05 — A SOURCE TIMEOUT SURFACES THE FIXED CODE, NOT THE DRIVER'S.
+//
+// The failure injected is the one the host's `requestTimeout` actually produces: mssql/tedious
+// raises `RequestError` with `code: 'ETIMEOUT'`. Nothing in this repo recognized that token before —
+// `inferHttpStatus` turned it into a 500 carrying the driver's own message, which is both
+// values-bearing and useless as evidence. Note the expander CATCHES the throw and records it as a
+// global error, so this also pins that the ORIGINAL CAUSE CLASS survives that catch: without it the
+// seam could only say "incomplete", never "timed out".
+async function R05_armedSourceTimeoutSurfacesTheFixedCode() {
+  const timeout = () => {
+    const error = new Error('Timeout: Request failed to complete in 30000ms')
+    error.name = 'RequestError'
+    error.code = 'ETIMEOUT'
+    throw error
+  }
+  const source = createRecordingSourceAdapter(sourceData(), { onRead: timeout })
+  const records = createRecordsApi()
+  const { routes } = mount({ registrations: [registration()], source, records })
+  const res = await routeDryRun(routes)
+  assertIncompleteBatchRefusal(res, {
+    code: B2A_SOURCE_TIMEOUT, reason: 'source_read_timeout', causeClass: 'ETIMEOUT', status: 504,
+  }, records, 'R-05 timeout')
+
+  // DORMANT, same injected failure: no B2a code, and the pre-change shape is untouched.
+  const dormantSource = createRecordingSourceAdapter(sourceData(), { onRead: timeout })
+  const dormant = await routeDryRun(mount({ source: dormantSource }).routes)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment still returns its ordinary failed dry-run')
+  assert.equal(dormant.body.data.status, 'failed')
+  assert.equal(dormant.body.data.canApply, false)
+  assert.equal(dormant.body.data.dryRunToken, null, 'a failed dry-run mints no token, armed or not')
+}
+
+// R-05 — A ROW/PAGE CAP SURFACES THE FIXED LIMIT CODE.
+//
+// `maxReadCount: 1` is the smallest bound the action schema accepts and the read plan needs several
+// objects, so the second page trips `read_count_exceeded` deterministically — no clock, no data
+// volume. The four expander bounds share one fixed code on purpose: from the caller's side
+// "the row cap fired" and "the page cap fired" are the same fact, and §15.2 R-05 asks for one.
+async function R05_armedRowAndPageCapSurfaceTheFixedLimitCode() {
+  const source = createRecordingSourceAdapter()
+  const records = createRecordsApi()
+  const { routes } = mount({
+    registrations: [registration()], source, records, action: { maxReadCount: 1 },
+  })
+  const res = await routeDryRun(routes)
+  assertIncompleteBatchRefusal(res, {
+    code: B2A_PAGE_LIMIT_EXCEEDED, reason: 'source_read_bound_exceeded', causeClass: 'read_count_exceeded',
+  }, records, 'R-05 cap')
+
+  // DORMANT: the same bound fires, and the same truncated-but-unappliable dry-run comes back that
+  // came back before this change. `canApply: false` was ALREADY true here — what was missing was a
+  // fixed code and the refusal to build a plan off a partial read.
+  const dormant = await routeDryRun(mount({
+    source: createRecordingSourceAdapter(), action: { maxReadCount: 1 },
+  }).routes)
+  assert.equal(dormant.statusCode, 200)
+  assert.equal(dormant.body.data.canApply, false)
+  assert.ok(dormant.body.data.evidence.expansion.errorTypes.includes('read_count_exceeded'))
+}
+
+// R-06 — THE FIRST ARMED READ PINS THE CONTRACT; AN IDENTICAL SCHEMA PASSES.
+//
+// Two mounts, because one registration authorizes exactly one source-read Run: the second mount
+// re-presents the contract the first one pinned, which is what a second Run under a fresh
+// registration sees. The contract lives in the SAME durable store the operation claim and the
+// registration-version floor use — the registry file is a read-only deploy artifact and is never
+// written to.
+async function R06_firstArmedReadPinsTheContractAndAnIdenticalSchemaPasses() {
+  const first = mount({ registrations: [registration()], source: createRecordingSourceAdapter() })
+  const pinned = await routeDryRun(first.routes)
+  assert.equal(pinned.statusCode, 200, JSON.stringify(pinned.body))
+  const stanza = pinned.body.data.evidence.b2aSchemaContract
+  assert.ok(stanza, 'an armed read stamps the contract stanza')
+  assert.equal(stanza.schemaContractPinned, true, 'the FIRST armed read pins')
+  assert.equal(stanza.schemaDrift, false)
+  assert.equal(stanza.objectCount, STOCK_PREP_OBJECTS.length, 'the contract covers every object the plan touches')
+  assert.ok(Number.isInteger(stanza.fieldCount) && stanza.fieldCount > 0)
+  // VALUES-FREE: a digest, two counts, two booleans and a version. No column name, no object name.
+  assert.deepEqual(Object.keys(stanza).sort(), [
+    'fieldCount', 'objectCount', 'schemaContractPinned', 'schemaContractVersion', 'schemaDigest', 'schemaDrift',
+  ])
+  assert.match(stanza.schemaDigest, /^[0-9a-f]{64}$/)
+
+  const contractKeys = [...first.context.storage.keys()].filter((key) => key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX))
+  assert.equal(contractKeys.length, 1, 'exactly one contract record, keyed to the registration')
+  const stored = first.context.storage.get(contractKeys[0])
+  assert.equal(JSON.stringify(stored).includes('IdentityNo'), false, 'no column name is stored in the clear')
+  assert.equal(JSON.stringify(stored).includes('DN_PDM_PartLibraryInfo'), false, 'no object name is stored in the clear')
+
+  // SAME SCHEMA, SECOND RUN -> passes, and reports that it compared rather than pinned.
+  const storage = Object.assign(new Map(first.context.storage), { durable: true })
+  for (const key of [...storage.keys()]) {
+    if (!key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX)) storage.delete(key)
+  }
+  const second = mount({ registrations: [registration()], source: createRecordingSourceAdapter(), storage })
+  const compared = await routeDryRun(second.routes)
+  assert.equal(compared.statusCode, 200, JSON.stringify(compared.body))
+  assert.equal(compared.body.data.evidence.b2aSchemaContract.schemaContractPinned, false, 'the second read COMPARES')
+  assert.equal(compared.body.data.evidence.b2aSchemaContract.schemaDrift, false)
+  assert.equal(compared.body.data.evidence.b2aSchemaContract.schemaDigest,
+    stanza.schemaDigest, 'an identical schema produces an identical digest')
+  assert.equal(compared.body.data.revision, pinned.body.data.revision, 'and the plan is the plan it was')
+}
+
+// R-06 — DRIFT REFUSES BEFORE ANY BUSINESS ARTIFACT.
+//
+// Three drift kinds, each on the SAME pinned contract: a column dropped, a column retyped, and the
+// `ext_` mapping identity changed (§13's 映射漂移, which is not a source property at all). Every one
+// refuses with the fixed code, and `source.reads.length === 0` is the load-bearing assertion: the
+// contract is compared before the first ROW is read, so no plan, revision or evidence can exist.
+async function R06_schemaDriftRefusesBeforeAnyBusinessArtifact() {
+  const seed = mount({ registrations: [registration()], source: createRecordingSourceAdapter() })
+  assert.equal((await routeDryRun(seed.routes)).statusCode, 200)
+  const pinnedStorage = () => {
+    const storage = Object.assign(new Map(), { durable: true })
+    for (const [key, value] of seed.context.storage) {
+      if (key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX)) storage.set(key, value)
+    }
+    assert.equal(storage.size, 1, 'the pinned contract was carried forward')
+    return storage
+  }
+
+  const dropped = sourceSchema()
+  dropped.DN_PDM_PartLibraryInfo = dropped.DN_PDM_PartLibraryInfo.slice(1)
+  const retyped = sourceSchema()
+  retyped.DN_PDM_PartLibraryInfo = retyped.DN_PDM_PartLibraryInfo.map((column, index) =>
+    (index === 0 ? { ...column, type: 'int' } : column))
+  const renullabled = sourceSchema()
+  renullabled.DN_PDM_PartLibraryInfo = renullabled.DN_PDM_PartLibraryInfo.map((column, index) =>
+    (index === 0 ? { ...column, nullable: true } : column))
+
+  for (const [label, schema] of [['field missing', dropped], ['type change', retyped], ['nullability change', renullabled]]) {
+    const source = createRecordingSourceAdapter(sourceData(), { schema })
+    const records = createRecordsApi()
+    const { routes } = mount({ registrations: [registration()], source, records, storage: pinnedStorage() })
+    const res = await routeDryRun(routes)
+    assert.equal(res.statusCode, 409, `${label}: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, B2A_SCHEMA_DRIFT, label)
+    assert.equal(res.body.error.details.reason, 'schema_contract_drift', label)
+    assert.equal(source.reads.length, 0, `${label}: drift refuses BEFORE the first source row`)
+    assert.deepEqual(records.calls, [], `${label}: no target read or write happened`)
+    assert.equal(res.body.data, undefined, `${label}: no plan payload`)
+    const text = JSON.stringify(res.body)
+    for (const forbidden of [...FORBIDDEN_IN_RESPONSE, 'IdentityNo', 'DN_PDM_PartLibraryInfo']) {
+      assert.equal(text.includes(forbidden), false, `${label}: leaked ${JSON.stringify(forbidden)}`)
+    }
+  }
+
+  // DORMANT with the same drifted source: nothing is compared and nothing refuses.
+  const dormant = await routeDryRun(mount({
+    source: createRecordingSourceAdapter(sourceData(), { schema: dropped }),
+  }).routes)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment has no contract to drift from')
+  assert.equal('b2aSchemaContract' in dormant.body.data.evidence, false, 'and stamps no contract stanza')
+}
+
+// E3-02 — A BROKEN CURSOR REFUSES, WHERE IT USED TO TRUNCATE IN SILENCE.
+//
+// THE DEFECT THIS PINS. `readAll`'s page loop terminated on `!result.nextCursor`, so a page that
+// reported `done: false` and supplied no cursor ended the batch and returned what it had. The
+// planner then received a PARTIAL BOM as if it were the whole one — `canApply: true`, a token
+// minted, a revision that hashes a truncated expansion. That is §9.1(3)'s 断游标 case and it was
+// reachable in production, not hypothetical.
+//
+// The check is `done === false`, not falsy, because the ordinary single-page shape
+// (`{ records: [...] }`) leaves `done` UNDEFINED and must keep terminating normally — an assertion
+// the dormant leg below would catch if it were widened.
+async function E3_02_brokenCursorRefusesAndNoPlanIsProduced() {
+  const brokenCursor = (input) => (input.object === PLM_STOCK_PREPARATION_BOM_READ_PLAN.pathExAttr.object
+    ? { records: sourceData()[input.object].map(clone), done: false, nextCursor: null }
+    : undefined)
+  const source = createRecordingSourceAdapter(sourceData(), { onRead: brokenCursor })
+  const records = createRecordsApi()
+  const { routes } = mount({ registrations: [registration()], source, records })
+  const res = await routeDryRun(routes)
+  assertIncompleteBatchRefusal(res, {
+    code: C6_FULL_BATCH_INCOMPLETE, reason: 'source_read_cursor_broken', causeClass: 'read_cursor_broken',
+  }, records, 'E3-02 broken cursor')
+  assert.equal(res.body.error.details.fullBatch, false, 'the refusal states the property it failed')
+
+  // DORMANT: byte-identically the old behaviour, truncation included. The guard is armed-only, and
+  // this leg is what proves it rather than asserting it.
+  const dormantSource = createRecordingSourceAdapter(sourceData(), { onRead: brokenCursor })
+  const dormant = await routeDryRun(mount({ source: dormantSource }).routes)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment keeps the loop it had')
+  assert.equal(dormant.body.data.evidence.expansion.errorTypes.includes('read_cursor_broken'), false)
+
+  // AND THE ORDINARY TERMINATION IS UNTOUCHED WHEN ARMED: `done: true` with no cursor is a complete
+  // batch, and `done` absent is the common fixture shape. Neither may be read as a broken cursor.
+  const ordinary = await routeDryRun(mount({
+    registrations: [registration()],
+    source: createRecordingSourceAdapter(sourceData(), {
+      onRead: (input) => ({ records: (sourceData()[input.object] || []).filter((row) =>
+        Object.entries(input.filters || {}).every(([field, expected]) => row[field] === expected)).map(clone) }),
+    }),
+  }).routes)
+  assert.equal(ordinary.statusCode, 200, `a cursorless complete page is not a broken cursor: ${JSON.stringify(ordinary.body)}`)
+}
+
+// E3-03 — NO WATERMARK IS READ OR ADVANCED ON THE DEDICATED PATH. (PROVEN, not guarded.)
+//
+// The property holds STRUCTURALLY: the dedicated stock-preparation path never asks for one. So this
+// is a proof in two independent halves, because either alone is weak:
+//
+//   GREP HALF     — the three modules that make up the dedicated path contain no watermark token at
+//                   all. This catches a future edit that adds watermark machinery even on a code
+//                   path this suite's fixtures never reach.
+//   RUNTIME HALF  — every read request the path actually issues is inspected: no `watermark`, no
+//                   `watermarkConfig`, and no cursor carrying the source adapter's watermark prefix
+//                   (`dswm1:`, from data-source-sql-readonly-source-adapter.cjs). And no key in the
+//                   durable store — the one place a watermark could be persisted — names one.
+//
+// A mutation that wires a watermark in must fail BOTH halves, which is the property §9.1(5) freezes:
+// B2a `full_snapshot` neither reads, sets, nor advances an incremental watermark, in any end state.
+async function E3_03_noWatermarkIsReadOrAdvancedOnTheDedicatedPath() {
+  const fs = require('node:fs')
+  const DEDICATED_PATH_MODULES = [
+    'stock-preparation-bom-expansion.cjs',
+    'stock-preparation-table-actions.cjs',
+    'stock-preparation-large-bom-jobs.cjs',
+  ]
+  for (const module of DEDICATED_PATH_MODULES) {
+    const text = fs.readFileSync(path.join(LIB, module), 'utf8')
+    const hits = text.match(/watermark/gi) || []
+    assert.deepEqual(hits, [], `${module} names a watermark ${hits.length} time(s); the dedicated path has none`)
+  }
+
+  const requests = []
+  const source = createRecordingSourceAdapter(sourceData(), {
+    onRead: (input) => { requests.push(input); return undefined },
+  })
+  const { routes, context } = mount({ registrations: [registration()], source })
+  const res = await routeDryRun(routes)
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  assert.ok(requests.length > 0, 'the path did read its source')
+  for (const request of requests) {
+    assert.equal('watermark' in request, false, 'a read request carried a watermark')
+    assert.equal('watermarkConfig' in request, false, 'a read request carried a watermark config')
+    assert.equal(String(request.cursor || '').startsWith('dswm1:'), false, 'a read used a watermark cursor')
+    assert.deepEqual(Object.keys(request).sort().filter((key) => /water|since|incremental/i.test(key)), [])
+  }
+  for (const key of context.storage.keys()) {
+    assert.equal(/water|high_?water|incremental/i.test(key), false, `durable key ${key} looks like a watermark`)
+  }
+}
+
+// E3-04 — A MULTI-PAGE BATCH IS ONE PLAN, ONE TOKEN, ONE CLAIM. (PROVEN, not guarded.)
+//
+// §9.1(2): cursor paging produces no independent approval, token or watermark. The dedicated path
+// holds this structurally — paging happens INSIDE one `expandPlmProjectBom` call, inside one guarded
+// Run — so this pins the counts rather than adding a guard. The fixture pages the largest object
+// three ways so the assertion is about a genuinely multi-page batch, not a single-page one.
+async function E3_04_aMultiPageBatchProducesExactlyOnePlanAndOneToken() {
+  const PAGED_OBJECT = PLM_STOCK_PREPARATION_BOM_READ_PLAN.orderDetail.object
+  const rows = [
+    { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '2', sort_id: '1' },
+    { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '3', sort_id: '2' },
+    { order_id: 'ORDER-1', part_id: 'PART-A', quantity: '4', sort_id: '3' },
+  ]
+  let pages = 0
+  const source = createRecordingSourceAdapter(sourceData(), {
+    onRead: (input) => {
+      if (input.object !== PAGED_OBJECT) return undefined
+      const index = input.cursor ? Number(input.cursor) : 0
+      pages += 1
+      const last = index >= rows.length - 1
+      return {
+        records: [clone(rows[index])],
+        done: last,
+        nextCursor: last ? null : String(index + 1),
+      }
+    },
+  })
+  const records = createRecordsApi()
+  const { routes, context } = mount({ registrations: [registration()], source, records })
+  const res = await routeDryRun(routes)
+  assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+  assert.equal(pages, rows.length, 'the batch really did span several pages')
+
+  // ONE plan: one revision, one set of counts, and a row count that is the SUM of the pages — a
+  // per-page plan would have produced the last page's rows only.
+  assert.equal(typeof res.body.data.revision, 'string')
+  assert.equal(res.body.data.evidence.expansion.rowsExpanded, rows.length, 'every page landed in the one plan')
+  // ONE token, for the whole batch.
+  const tokenKeys = [...context.storage.keys()].filter((key) => key.startsWith('integration:table-action:dry-run-token:'))
+  assert.equal(tokenKeys.length, 1, 'a multi-page batch mints exactly one dry-run token')
+  // ONE operation claim, continued across the pages rather than re-taken per page.
+  const claimKeys = [...context.storage.keys()].filter((key) => key.startsWith('integration:b2a:operation-claim:'))
+  assert.equal(claimKeys.length, 1, 'a multi-page batch spends exactly one operation claim')
+  assert.equal(res.body.data.evidence.b2aTrialRegistration.sourceReadOperationLimit, 1)
+  // ONE schema contract, not one per page.
+  const contractKeys = [...context.storage.keys()].filter((key) => key.startsWith(SCHEMA_CONTRACT_KEY_PREFIX))
+  assert.equal(contractKeys.length, 1)
+}
+
+// E3-05 — A SOURCE THAT CHANGES MID-READ REFUSES. (GUARDED, for the half that is observable.)
+//
+// The schema is re-read after the batch and compared to the digest the pre-read check agreed on, so
+// a DDL change while the batch was in flight refuses with a fixed incomplete code and no plan.
+//
+// WHAT IS NOT COVERED, and is DEFERRED rather than faked: a ROW-LEVEL generation change. These
+// sources carry no generation marker, snapshot token or change counter, so "the rows moved under us
+// mid-read" is not observable from here at any cost short of source-side snapshot isolation — which
+// is Mirror-spike machinery, and anything built for it now would be replaced by it. The half that IS
+// observable is guarded here; the half that is not is named in the change description.
+async function E3_05_aMidReadSourceChangeRefuses() {
+  const source = createRecordingSourceAdapter(sourceData(), {
+    onRead: (input, ctx) => {
+      // Mutate the schema the moment the batch has started, so the pre-read pin and the post-read
+      // check see two different sources.
+      ctx.state.schema = { ...ctx.state.schema, [input.object]: [{ name: 'renamed', type: 'nvarchar', nullable: false }] }
+      return undefined
+    },
+  })
+  const records = createRecordsApi()
+  const { routes } = mount({ registrations: [registration()], source, records })
+  const res = await routeDryRun(routes)
+  assertIncompleteBatchRefusal(res, {
+    code: C6_FULL_BATCH_INCOMPLETE, reason: 'source_changed_mid_read',
+  }, records, 'E3-05 mid-read change')
+  assert.equal(res.body.error.details.fullBatch, false)
+  assert.ok(source.reads.length > 0, 'the batch was read before the change was detected')
+
+  // DORMANT: the same mid-read change, and nothing looks.
+  const dormant = await routeDryRun(mount({
+    source: createRecordingSourceAdapter(sourceData(), {
+      onRead: (input, ctx) => {
+        ctx.state.schema = { ...ctx.state.schema, [input.object]: [] }
+        return undefined
+      },
+    }),
+  }).routes)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment reads no schema at all')
+}
+
+// E3-02, background half — PROVEN, not guarded. The large-BOM path already holds the property
+// structurally and this pins the mechanism rather than adding a second one: ANY global error makes
+// `expandPlmProjectBom` return `valid: false`, which makes the job `failed` and `authoritative:
+// false`, and `tableActionLargeBomExpansionJobPlan` refuses a non-authoritative artifact BEFORE it
+// builds a plan. So a truncated background expansion cannot become a plan on this path either — by
+// a different route than the small path's refusal, and worth pinning precisely because it differs.
+async function E3_02_aTruncatedBackgroundExpansionNeverBecomesAPlan() {
+  const registrations = [registration({
+    registrationId: 'b2a-large-bom',
+    operationRef: 'op-large-bom',
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
+  })]
+  const records = createRecordsApi()
+  const { routes } = mount({
+    registrations, records, source: createRecordingSourceAdapter(), action: { maxReadCount: 1 },
+  })
+  const started = await call(routes, 'POST', LARGE_BOM_START_ROUTE, {
+    user: READ_USER, params: ACTION_PARAMS, body: { parameters: { projectNo: PROJECT_NO } },
+  })
+  const jobId = started.body.data.jobId || started.body.data.id
+  const ran = await call(routes, 'POST', LARGE_BOM_RUN_ROUTE, {
+    user: READ_USER, params: { ...ACTION_PARAMS, jobId }, body: {},
+  })
+  assert.equal(ran.statusCode, 200, JSON.stringify(ran.body))
+  assert.equal(ran.body.data.status, 'failed', 'a bounded background expansion does not complete')
+  assert.equal(ran.body.data.authoritative, false, 'and it is never authoritative')
+
+  const planned = await call(routes, 'POST', LARGE_BOM_PLAN_ROUTE, {
+    user: READ_USER, params: { ...ACTION_PARAMS, jobId }, body: {},
+  })
+  assert.equal(planned.body.ok, false, `a truncated artifact must not plan: ${JSON.stringify(planned.body)}`)
+  assert.equal(planned.body.error.code, 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
+  assert.equal(planned.body.data, undefined, 'plan payloads = 0')
+  const writes = records.calls.filter(([name]) => name !== 'queryRecords')
+  assert.deepEqual(writes, [], 'target writes = 0')
+}
+
 const TESTS = [
   unsetEnvIsDormantAndByteIdentical,
   unsetEnvLeavesTheOtherEntryPointsUntouched,
@@ -896,6 +1350,15 @@ const TESTS = [
   E3_01_ordinaryMultitableWriteIsRefused,
   aMalformedRegistryFailsAtRegistrationNotOnTheFirstRead,
   aRequestCannotSupplyOrDisarmTheRegistry,
+  R05_armedSourceTimeoutSurfacesTheFixedCode,
+  R05_armedRowAndPageCapSurfaceTheFixedLimitCode,
+  R06_firstArmedReadPinsTheContractAndAnIdenticalSchemaPasses,
+  R06_schemaDriftRefusesBeforeAnyBusinessArtifact,
+  E3_02_brokenCursorRefusesAndNoPlanIsProduced,
+  E3_02_aTruncatedBackgroundExpansionNeverBecomesAPlan,
+  E3_03_noWatermarkIsReadOrAdvancedOnTheDedicatedPath,
+  E3_04_aMultiPageBatchProducesExactlyOnePlanAndOneToken,
+  E3_05_aMidReadSourceChangeRefuses,
 ]
 
 async function main() {

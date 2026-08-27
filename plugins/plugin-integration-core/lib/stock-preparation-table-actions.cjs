@@ -57,6 +57,11 @@ const {
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
   assertB2aReadAuthorization,
+  assertB2aFullBatchComplete,
+  assertB2aSchemaContract,
+  assertB2aSourceUnchangedAfterRead,
+  b2aSchemaContractEvidence,
+  runB2aGuardedSourceRead,
   readPlanSourceObjects,
 } = require('./b2a-trial-registry.cjs')
 
@@ -914,9 +919,59 @@ async function assertB2aTrialForStockPreparationRead({ registry, store, tenantId
   })
 }
 
-async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping }) {
+/**
+ * THE READ-HARDENING AND FULL-BATCH SEAM, for every stock-preparation path that expands a BOM.
+ *
+ * All three entry points (dry-run, apply, MVP-persist) funnel through `computeDryRun`, so this is
+ * the one place the four properties can be enforced once rather than three times:
+ *
+ *   R-05  a source timeout or a row/page bound surfaces as the FIXED B2a code, mapped from the
+ *         underlying cause class at the seam — `runB2aGuardedSourceRead` for a throw,
+ *         `assertB2aFullBatchComplete` for the bounds the expander catches and returns as data.
+ *   R-06  the schema contract is pinned on the first armed read and compared on every one after,
+ *         BEFORE the source is touched and therefore before any plan, row, revision or evidence.
+ *   E3-02 an incomplete batch refuses BEFORE the plan is built, rather than planning off a partial
+ *         read that merely cannot be applied. WHICH fixed code depends on what explains the
+ *         shortfall: a hardened bound names itself (`B2A_SOURCE_TIMEOUT` / `B2A_PAGE_LIMIT_EXCEEDED`,
+ *         which is what R-05 asks for and what a caller can act on), and everything else — a broken
+ *         cursor, an unclassifiable read failure, a source that moved mid-read — names the property
+ *         (`C6_FULL_BATCH_INCOMPLETE`). All of them carry `fullBatch: false` and produce no plan.
+ *   E3-05 the source schema is re-read after the batch and must not have moved under it.
+ *
+ * ALL FOUR ARE ARMED-ONLY. `b2aTrialRegistration` is `null` on a dormant deployment and every one of
+ * these calls returns immediately, so the dormant path performs the same reads, builds the same
+ * plan, and produces the same evidence keys it did before this seam existed.
+ *
+ * BOUNDED PAGING AND THE REGISTRATION SCOPE — CHECKED, AND THE ANSWER IS NO. §6.1's record carries
+ * `sourceReadOperationLimit` (fixed at 1, and about OPERATIONS, not pages) and `artifactReplayLimit`
+ * (fixed at 0). There is no page-, row- or time-bound field in the registration schema, so an armed
+ * read's paging limits are the ACTION's (`action.maxPages`/`maxRows`/`maxReadCount`/`maxElapsedMs`),
+ * exactly as they are when dormant. Adding such a field was explicitly out of scope, and inventing
+ * one to clamp against would be a new schema key, not a use of an existing one.
+ */
+async function assertB2aReadHardeningBeforeExpansion({ b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now }) {
+  if (!b2aTrialRegistration) return null
+  return assertB2aSchemaContract({
+    store: b2aClaimStore,
+    authorization: b2aTrialRegistration,
+    sourceAdapter,
+    // The PLAN's own objects — the same list the guard matched against `objectScope`, so the contract
+    // covers exactly what the read will touch and not a hardcoded roster that would keep passing
+    // when the plan grew a section.
+    sourceObjects: readPlanSourceObjects(action.source.readPlan),
+    extFieldMapping,
+    now,
+  })
+}
+
+async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, plannedAt, runId, runOnlyReview, tableScopeReview, installedFieldProperties, extFieldMapping, b2aTrialRegistration, b2aClaimStore, b2aNow }) {
   assertExtFieldMappingAgreesWithAction(action, extFieldMapping)
-  const expansion = await expandPlmProjectBom({
+  // R-06, BEFORE the first source row. A drifted schema refuses here, which is before `expansion`,
+  // before `plan`, before `revision` and before any evidence exists to be produced.
+  const b2aSchemaContract = await assertB2aReadHardeningBeforeExpansion({
+    b2aTrialRegistration, b2aClaimStore, action, sourceAdapter, extFieldMapping, now: b2aNow,
+  })
+  const expansion = await runB2aGuardedSourceRead(b2aTrialRegistration, () => expandPlmProjectBom({
     sourceAdapter,
     projectNo: parameters.projectNo,
     readPlan: action.source.readPlan,
@@ -927,6 +982,21 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     maxDepth: action.maxDepth,
     maxRows: action.maxRows,
     extFieldMapping,
+    // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
+    // being a silent truncation and becomes a refusal.
+    requireCompleteBatch: Boolean(b2aTrialRegistration),
+  }))
+  // R-05 + E3-02, result side: the expander CATCHES its own bounds and returns them as global error
+  // entries, so a truncated batch arrives as data rather than as a throw. Classified here, before
+  // the plan.
+  assertB2aFullBatchComplete(b2aTrialRegistration, expansion.errors)
+  // E3-05: the source must not have changed shape while the batch was being read.
+  await assertB2aSourceUnchangedAfterRead({
+    authorization: b2aTrialRegistration,
+    contract: b2aSchemaContract,
+    sourceAdapter,
+    sourceObjects: readPlanSourceObjects(action.source.readPlan),
+    extFieldMapping,
   })
   const hasGlobalErrors = Array.isArray(expansion.errors) && expansion.errors.length > 0
   const hasHardRowErrors = hasHardApplyBlockingRowErrors(expansion)
@@ -936,7 +1006,7 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // vanish according to whether the PROJECT exists in the source, which is a property of the data;
     // whether a mapping is configured is a property of the deployment, and evidence should only ever
     // report the second.
-    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping }
+    return { expansion, existingRows: [], plan: emptyPlan(), revision, canApply: false, hasGlobalErrors, extFieldMapping, b2aSchemaContract }
   }
   const existingRows = await readExistingStockPreparationRows(recordsApi, action.target, parameters.projectNo)
   const duplicateDiagnostics = duplicateExpandedKeyDiagnosticsForRows(expansion.rows)
@@ -970,6 +1040,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // and hashing the mapping as well would move every stored revision for deployments that have
     // none.
     extFieldMapping,
+    // `null` when dormant, so a caller merging it into evidence adds no key at all.
+    b2aSchemaContract,
   }
 }
 
@@ -1042,6 +1114,11 @@ async function dryRunStockPreparationAction(input = {}) {
     // row shape exactly; `computeDryRun` reconciles a present one against `action.extensionFieldIds`
     // before a single row is read.
     extFieldMapping: input.extFieldMapping,
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   let dryRunToken = null
   if (dryRun.canApply) {
@@ -1078,6 +1155,10 @@ async function dryRunStockPreparationAction(input = {}) {
       // one), and `evidenceForDryRun` stays a pure function of the plan, which the large-BOM path
       // also calls without ever having a tenant.
       ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
   }
 }
@@ -1121,6 +1202,11 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // coerce values that the very next function drops — production for no consumer, which is the
     // defect this change exists to remove, not to reproduce. Carrying `ext_` into a snapshot line is
     // a snapshot-schema change with its own migration.
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   if (dryRun.expansion.status === 'not_found') {
     throw new StockPreparationTableActionError(404, 'STOCK_PREPARATION_MVP_SOURCE_PROJECT_NOT_FOUND', 'source project was not found')
@@ -1148,6 +1234,10 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
         extFieldMapping: dryRun.extFieldMapping,
       }),
       ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
   }
 }
@@ -1298,6 +1388,11 @@ async function applyStockPreparationAction(input = {}) {
     // expand with the SAME mapping the dry-run used. Passing it on one path and not the other would
     // turn every apply into a TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH.
     extFieldMapping: input.extFieldMapping,
+    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
+    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    b2aTrialRegistration,
+    b2aClaimStore: input.b2aClaimStore,
+    b2aNow: input.now,
   })
   if (tokenRecord.revision !== dryRun.revision) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
@@ -1350,6 +1445,10 @@ async function applyStockPreparationAction(input = {}) {
       }),
       apply: summarizeApplyResultForEvidence(applyResult),
       ...(b2aTrialRegistration ? { b2aTrialRegistration } : {}),
+      // R-06's values-free half: one digest, three integers and two booleans — no column name, no
+      // object name. Conditional for the same reason as the stanza above: a dormant deployment adds
+      // no key, so its evidence stays byte-identical to what it produced before R-06 existed.
+      ...(dryRun.b2aSchemaContract ? { b2aSchemaContract: b2aSchemaContractEvidence(dryRun.b2aSchemaContract) } : {}),
     },
   }
 }

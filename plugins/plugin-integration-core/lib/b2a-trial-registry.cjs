@@ -153,6 +153,10 @@ const B2A_SOURCE_TIMEOUT = 'B2A_SOURCE_TIMEOUT'
 const B2A_PAGE_LIMIT_EXCEEDED = 'B2A_PAGE_LIMIT_EXCEEDED'
 const B2A_SCHEMA_DRIFT = 'B2A_SCHEMA_DRIFT'
 const C6_SAFE_LIFECYCLE_REQUIRED = 'C6_SAFE_LIFECYCLE_REQUIRED'
+// §9.1(3) and E3-02/E3-05 name this code; §13's suggested roster does not list it, because §13 lists
+// the REGISTRY codes and this one belongs to the full-batch property. It is in the frozen vocabulary
+// because the acceptance matrix asserts on it by name.
+const C6_FULL_BATCH_INCOMPLETE = 'C6_FULL_BATCH_INCOMPLETE'
 // Load-time faults are a broken DEPLOYMENT, not a refused caller, so they carry their own code and a
 // 500. They are never emitted in response to a request: the registry is built at activation.
 const B2A_REGISTRY_INVALID = 'B2A_REGISTRY_INVALID'
@@ -165,6 +169,7 @@ const B2A_ERROR_CODES = Object.freeze([
   B2A_PAGE_LIMIT_EXCEEDED,
   B2A_SCHEMA_DRIFT,
   C6_SAFE_LIFECYCLE_REQUIRED,
+  C6_FULL_BATCH_INCOMPLETE,
 ])
 
 // ─── THE CLOSED ENTRY-POINT VOCABULARY (§13 PR-C: "inventory and guard four entry points") ────
@@ -1032,6 +1037,498 @@ async function assertB2aReadAuthorization(options = {}) {
   throw lastRefusal
 }
 
+// ─── R-05: THE READ-HARDENING CODES, SURFACED AT THE SEAM ────────────────────
+//
+// `B2A_SOURCE_TIMEOUT` and `B2A_PAGE_LIMIT_EXCEEDED` were frozen vocabulary with NO PRODUCER: pinned
+// by test, exported, never thrown. This is the producer, and it is a MAPPER, not new adapter
+// behaviour. The hardening itself already exists at two layers and neither is touched here:
+//
+//   * the HOST sets the driver's `requestTimeout` (packages/core-backend/src/data-adapters/
+//     MSSQLAdapter.ts, `connection.requestTimeoutMs`, default 30s);
+//   * the stock-preparation expander enforces its own row/page/read-count/elapsed budgets
+//     (stock-preparation-bom-expansion.cjs — `maxRows`, `maxPages`, `maxReadCount`, `maxElapsedMs`).
+//
+// What was missing is that an ARMED B2a read surfaced those failures as whatever the driver happened
+// to throw. An mssql request timeout arrives as a raw driver error (`name: 'RequestError'`,
+// `code: 'ETIMEOUT'`) that nothing in this repo recognizes, and `inferHttpStatus` turns it into a
+// 500 with a dynamic message — which is both values-BEARING and unusable as evidence.
+//
+// SO: WHAT IS MAPPED, AND WHAT IS NOT.
+//
+//   MAPPED. A failure whose CAUSE CLASS — `error.details.code`, else `error.code`, else `error.name`
+//   — is on one of the closed rosters below. The roster is the whole contract: a cause class that is
+//   not on it is NOT mapped and propagates exactly as it did before, because inventing a fixed code
+//   for an unrecognized failure would claim a classification the code cannot make.
+//
+//   NOT MAPPED, and stated rather than papered over: the host's own row ceiling
+//   (`resolveEffectiveLimit` in BaseAdapter.ts, limit > 10000) throws a BARE `Error` with no `code`
+//   and `name === 'Error'`. It is structurally indistinguishable from any other bare error, and the
+//   only thing that identifies it is its MESSAGE. Matching on a message would be both brittle and a
+//   values-discipline violation dressed as a control, so that one ceiling stays unmapped. It is also
+//   unreachable from this path in practice — the expander's `pageLimit` defaults to 1000 and its own
+//   `maxRows` budget fires first — but "unreachable in practice" is not the same as "mapped", and
+//   this comment is the difference.
+//
+// THE ORIGINAL CAUSE CLASS IS NOT SWALLOWED. The mapped error carries `causeClass` (a token from the
+// closed roster — never a message, never a value) and `cause` (the original error object, for a log
+// sink that has one). A read-only failure therefore surfaces as a read-only fixed code and keeps its
+// provenance; it is never re-labelled as an authorization refusal or a write fence.
+
+// An elapsed/wall-clock failure. `read_time_limit_exceeded` is the expander's own `maxElapsedMs`
+// budget; the rest are what the transport layers below it actually produce.
+const B2A_TIMEOUT_CAUSE_CLASSES = Object.freeze([
+  'read_time_limit_exceeded',   // stock-preparation-bom-expansion.cjs, maxElapsedMs
+  'ETIMEOUT',                   // mssql/tedious request timeout (the host's `requestTimeout`)
+  'ETIMEDOUT',                  // node socket timeout
+  'ESOCKETTIMEDOUT',
+  'TimeoutError',
+  'AbortError',                 // an AbortController fired by a timeout race
+  'TIMEOUT',                    // http-adapter.cjs / k3-wise-webapi-adapter.cjs
+  'BRIDGE_AGENT_TIMEOUT',       // bridge-agent-readonly-adapter.cjs
+])
+
+// A bound on HOW MUCH was read, not on how long it took. All four of the expander's bounded types
+// live here: from the caller's side "the row cap fired" and "the page cap fired" are the same fact —
+// the read was bounded before it finished — and §15.2 R-05 asks for one fixed limit code, not four.
+const B2A_PAGE_LIMIT_CAUSE_CLASSES = Object.freeze([
+  'read_page_limit_exceeded',
+  'max_rows_exceeded',
+  'read_count_exceeded',
+  'SOURCE_RUN_RESULT_TOO_LARGE',
+])
+
+// The batch stopped short for a reason that is neither a clock nor a declared bound — the source
+// said "not done" and then offered nowhere to continue from. §9.1(3) calls this 断游标.
+const B2A_INCOMPLETE_BATCH_CAUSE_CLASSES = Object.freeze([
+  'read_cursor_broken',
+])
+
+/**
+ * The structural class of a read failure. `details.code` first, because the expander's own bounded
+ * errors carry their type there; then `code`, which is where drivers put theirs; then `name`, which
+ * is the last thing that is still a CLASS rather than a value.
+ *
+ * A message is never consulted. That is the point.
+ */
+function b2aSourceReadCauseClass(error) {
+  if (!error || typeof error !== 'object') return null
+  const detailCode = isPlainObject(error.details) ? optionalString(error.details.code) : null
+  return detailCode || optionalString(error.code) || optionalString(error.name)
+}
+
+/**
+ * Cause class -> fixed code + coarse reason, or `null` when the class is not on any roster.
+ */
+function classifyB2aSourceReadCause(causeClass) {
+  if (!causeClass) return null
+  if (B2A_TIMEOUT_CAUSE_CLASSES.includes(causeClass)) {
+    return { code: B2A_SOURCE_TIMEOUT, status: 504, reason: 'source_read_timeout' }
+  }
+  if (B2A_PAGE_LIMIT_CAUSE_CLASSES.includes(causeClass)) {
+    return { code: B2A_PAGE_LIMIT_EXCEEDED, status: 409, reason: 'source_read_bound_exceeded' }
+  }
+  if (B2A_INCOMPLETE_BATCH_CAUSE_CLASSES.includes(causeClass)) {
+    return { code: C6_FULL_BATCH_INCOMPLETE, status: 409, reason: 'source_read_cursor_broken' }
+  }
+  return null
+}
+
+function b2aSourceReadEvidence(authorization) {
+  if (!isPlainObject(authorization)) return {}
+  return {
+    registryId: authorization.registryId,
+    registryVersion: authorization.registryVersion,
+    registrationId: authorization.registrationId,
+    purpose: authorization.purpose,
+  }
+}
+
+/**
+ * Map ONE read failure to a fixed B2a code, or return `null` to leave it alone.
+ *
+ * Returning `null` rather than a catch-all code is deliberate: an unrecognized failure is a failure
+ * this module cannot classify, and a fixed code that means "something went wrong" is not evidence.
+ */
+function mapB2aSourceReadError(error, authorization) {
+  const causeClass = b2aSourceReadCauseClass(error)
+  const classified = classifyB2aSourceReadCause(causeClass)
+  if (!classified) return null
+  const mapped = new B2aReadAuthorizationError(classified.status, classified.code,
+    'the B2a-authorized source read did not complete within its hardened bounds', {
+      reason: classified.reason,
+      ...b2aSourceReadEvidence(authorization),
+      // The read-only original cause CLASS, kept. A token from a closed roster, never a message.
+      causeClass,
+    })
+  mapped.cause = error
+  return mapped
+}
+
+/**
+ * THE WRAPPER. Run a source read under an armed B2a authorization and surface its hardened failures
+ * as fixed codes.
+ *
+ * DORMANT (`authorization == null`) calls `read()` and returns it, with no try/catch and no mapping
+ * — the dormant path stays byte-identical, error objects included.
+ */
+async function runB2aGuardedSourceRead(authorization, read) {
+  if (authorization === null || authorization === undefined) return read()
+  try {
+    return await read()
+  } catch (error) {
+    const mapped = mapB2aSourceReadError(error, authorization)
+    if (mapped) throw mapped
+    throw error
+  }
+}
+
+/**
+ * THE RESULT-SIDE HALF, and the reason R-05 needed two surfaces rather than one.
+ *
+ * The stock-preparation expander does not THROW its bounded failures at the caller. It CATCHES them
+ * and records them as global error entries (`expansion.errors[].type`), so `expandPlmProjectBom`
+ * returns a truncated result and the wrapper above never sees an exception. The bound is real; it
+ * simply arrives as data instead of as a throw.
+ *
+ * So the same rosters are applied to the returned error TYPES. Order matters: a timeout and a bound
+ * are distinguishable, and evidence should say which fired, so timeout wins over bound wins over
+ * "incomplete for some other reason".
+ *
+ * E3-02 IS THE REST OF THIS FUNCTION. §9.1(3) requires that a source read which did not complete —
+ * maxRows/maxPages, a broken cursor, a generation change — produce a fixed code and NO executable
+ * plan. Any global error at all means the batch is not the full batch, so ANY unclassified global
+ * error still refuses, with `C6_FULL_BATCH_INCOMPLETE`. Called BEFORE the plan and the revision are
+ * built, which is what "不得生成可执行计划" means when it is code.
+ *
+ * A `read_failed` entry carries the ORIGINAL CAUSE CLASS the expander preserved (`causeClass` —
+ * `error.code || error.name`), which is how a driver timeout swallowed into a global error still
+ * surfaces as `B2A_SOURCE_TIMEOUT` instead of collapsing into a generic incompleteness. Both an
+ * entry's `type` and its `causeClass` are offered to the rosters; only a class that MATCHES a roster
+ * is ever echoed, so an unrecognized driver code never reaches evidence.
+ *
+ * @param {object|null} authorization the guard's stanza; `null` => dormant => no-op
+ * @param {object[]}    errors        `expansion.errors`, in the order the expander recorded them
+ */
+function assertB2aFullBatchComplete(authorization, errors) {
+  if (authorization === null || authorization === undefined) return
+  const entries = (Array.isArray(errors) ? errors : []).filter(isPlainObject)
+  if (entries.length === 0) return
+  const classes = []
+  for (const entry of entries) {
+    const type = optionalString(entry.type)
+    if (type) classes.push(type)
+    const causeClass = optionalString(entry.causeClass)
+    if (causeClass) classes.push(causeClass)
+  }
+
+  const timeout = classes.find((value) => B2A_TIMEOUT_CAUSE_CLASSES.includes(value))
+  const bounded = classes.find((value) => B2A_PAGE_LIMIT_CAUSE_CLASSES.includes(value))
+  const causeClass = timeout || bounded || classes.find((value) =>
+    B2A_INCOMPLETE_BATCH_CAUSE_CLASSES.includes(value)) || null
+  const classified = causeClass ? classifyB2aSourceReadCause(causeClass) : null
+
+  const code = classified ? classified.code : C6_FULL_BATCH_INCOMPLETE
+  const status = classified ? classified.status : 409
+  const reason = classified ? classified.reason : 'source_read_incomplete'
+  throw new B2aReadAuthorizationError(status, code,
+    'the B2a source read did not return a complete batch, so no plan may be produced', {
+      reason,
+      ...b2aSourceReadEvidence(authorization),
+      // A COUNT of failing error kinds, and the classified cause when there is one. The unclassified
+      // types are not echoed: `read_failed` carries a driver message and this stanza carries none.
+      ...(causeClass ? { causeClass } : {}),
+      errorEntryCount: entries.length,
+      fullBatch: false,
+    })
+}
+
+// ─── R-06: THE SCHEMA CONTRACT, AND DRIFT ────────────────────────────────────
+//
+// §13 PR-C: "首次读取固定 schema contract/digest，字段缺失、类型或映射漂移在生成业务制品前返回固定错误码".
+//
+// WHAT IS PINNED. The structure of the source objects the READ PLAN will touch — column name, column
+// type, column nullability — read through the adapter's own `getSchema` facade. NEVER a row: the
+// contract is metadata about the source, and sampling data to describe a schema would put customer
+// values into a durable record that exists precisely so no values have to be kept.
+//
+// WHAT IS STORED IS VALUES-FREE, and more strictly than it strictly had to be. This module's
+// evidence discipline (see the header) already refuses to emit a SOURCE OBJECT NAME, so a contract
+// that stored column names in the clear would be the one place in this file where an identifier
+// leaked into durable state. It stores DIGESTS instead:
+//
+//     fieldKey  = sha256(object \0 columnName)[0..32)     -> identity of a column, not its name
+//     fieldType = sha256(type \0 nullable)[0..32)         -> its declared shape
+//
+// which is enough to tell the three drift kinds apart by COUNT — a key that vanished is a missing
+// field, a key whose type digest moved is a type change, a key that appeared is a widened source —
+// without any of them being reconstructible into a name. §15.1 asks for "布尔项、整数计数"; this is that.
+//
+// MAPPING DRIFT is the third kind §13 names and it is not a source property at all: it is which
+// `ext_` mapping was in force. The mapping's IDENTITY (`mappingId` + `mappingVersion`) is folded in,
+// so swapping the mapping under a pinned registration is drift even when the source never moved.
+//
+// ANY DIFFERENCE REFUSES, including a purely ADDITIVE one. §13 names three kinds and an added column
+// is not literally one of them, but the contract is a DIGEST and the acceptance condition is
+// "identical schema passes". A source that grew a column is a source that changed under a
+// one-time authorization; refusing is the fail-closed reading and re-pinning is a deliberate act.
+//
+// COST, stated: an ARMED read now makes one `getSchema` call per plan object before the read (to pin
+// or compare) and one after it (E3-05's mid-read check). A DORMANT read makes none — the whole path
+// is skipped when the authorization is `null`.
+
+const SCHEMA_CONTRACT_KEY_PREFIX = 'integration:b2a:schema-contract:'
+const B2A_SCHEMA_CONTRACT_VERSION = 1
+
+function schemaContractKey(registrationId) {
+  return `${SCHEMA_CONTRACT_KEY_PREFIX}${registrationId}`
+}
+
+function shortDigest(...parts) {
+  return crypto.createHash('sha256').update(parts.join('\u0000')).digest('hex').slice(0, 32)
+}
+
+/**
+ * Nullability across two adapters that spell it differently, and one of them inverted.
+ *
+ *   data-source:sql-readonly   -> `{ name, type, nullable }`
+ *   bridge:legacy-sql-readonly -> `{ name, label, type, required }`   (required = NOT nullable)
+ *
+ * A contract that read `nullable` alone would record `undefined` for every bridge column and then
+ * pass a source whose nullability changed — a control that looks total and matches on a constant.
+ * Unknown stays `unknown` rather than defaulting to a value, so a facade that reports neither cannot
+ * be mistaken for one that reports "nullable".
+ */
+function fieldNullability(field) {
+  if (typeof field.nullable === 'boolean') return field.nullable ? 'nullable' : 'not_null'
+  if (typeof field.required === 'boolean') return field.required ? 'not_null' : 'nullable'
+  return 'unknown'
+}
+
+/**
+ * Read the CURRENT structural schema of the plan's objects and reduce it to a values-free contract.
+ *
+ * Runs through `runB2aGuardedSourceRead`, so a `getSchema` that times out surfaces as
+ * `B2A_SOURCE_TIMEOUT` rather than as an unclassified 500 — the schema probe is a source read and is
+ * hardened as one.
+ */
+async function computeB2aSchemaContract({ authorization, sourceAdapter, sourceObjects, extFieldMapping }) {
+  if (!sourceAdapter || typeof sourceAdapter.getSchema !== 'function') {
+    // FAIL-CLOSED. An armed read whose adapter cannot describe its own source cannot honour a schema
+    // contract, and "no contract" must not read as "no drift".
+    throw new B2aReadAuthorizationError(409, B2A_SCHEMA_DRIFT,
+      'a B2a-gated read requires a source adapter that can report its schema', {
+        reason: 'schema_facade_unavailable',
+        ...b2aSourceReadEvidence(authorization),
+      })
+  }
+  const objects = [...new Set((Array.isArray(sourceObjects) ? sourceObjects : [])
+    .map(optionalString).filter(Boolean))].sort()
+  if (objects.length === 0) {
+    throw new B2aReadAuthorizationError(409, B2A_SCHEMA_DRIFT,
+      'a B2a-gated read must name the source objects its schema contract covers', {
+        reason: 'schema_scope_empty',
+        ...b2aSourceReadEvidence(authorization),
+      })
+  }
+
+  const fields = {}
+  for (const object of objects) {
+    const described = await runB2aGuardedSourceRead(authorization, () => sourceAdapter.getSchema({ object }))
+    const describedFields = isPlainObject(described) && Array.isArray(described.fields) ? described.fields : null
+    if (!describedFields) {
+      throw new B2aReadAuthorizationError(409, B2A_SCHEMA_DRIFT,
+        'the source adapter did not describe one of the objects this B2a read plan touches', {
+          reason: 'schema_unreadable',
+          ...b2aSourceReadEvidence(authorization),
+        })
+    }
+    for (const field of describedFields) {
+      if (!isPlainObject(field)) continue
+      const name = optionalString(field.name)
+      if (!name) continue
+      const type = optionalString(field.type) || 'unknown'
+      fields[shortDigest(object, name)] = shortDigest(type, fieldNullability(field))
+    }
+  }
+
+  // The mapping's IDENTITY, not its content: a slug and an integer, hashed anyway so the contract is
+  // one uniform shape. `none` is a distinct value from any configured mapping, so CONFIGURING a
+  // mapping under a pinned registration is itself drift.
+  const mappingDigest = isPlainObject(extFieldMapping)
+    ? shortDigest('mapping', String(extFieldMapping.mappingId), String(extFieldMapping.mappingVersion))
+    : shortDigest('mapping', 'none')
+
+  const fieldKeys = Object.keys(fields).sort()
+  const schemaDigest = crypto.createHash('sha256')
+    .update(JSON.stringify([B2A_SCHEMA_CONTRACT_VERSION, mappingDigest, fieldKeys.map((key) => [key, fields[key]])]))
+    .digest('hex')
+
+  return Object.freeze({
+    schemaContractVersion: B2A_SCHEMA_CONTRACT_VERSION,
+    objectCount: objects.length,
+    fieldCount: fieldKeys.length,
+    mappingDigest,
+    schemaDigest,
+    fields: Object.freeze({ ...fields }),
+  })
+}
+
+/**
+ * Compare a freshly computed contract against the pinned one and report the drift by COUNT.
+ */
+function diffB2aSchemaContract(pinned, current) {
+  const pinnedFields = isPlainObject(pinned) && isPlainObject(pinned.fields) ? pinned.fields : {}
+  const currentFields = isPlainObject(current.fields) ? current.fields : {}
+  let missingFieldCount = 0
+  let changedFieldCount = 0
+  let addedFieldCount = 0
+  for (const key of Object.keys(pinnedFields)) {
+    if (!Object.prototype.hasOwnProperty.call(currentFields, key)) missingFieldCount += 1
+    else if (currentFields[key] !== pinnedFields[key]) changedFieldCount += 1
+  }
+  for (const key of Object.keys(currentFields)) {
+    if (!Object.prototype.hasOwnProperty.call(pinnedFields, key)) addedFieldCount += 1
+  }
+  const mappingChanged = pinned.mappingDigest !== current.mappingDigest
+  return {
+    missingFieldCount,
+    changedFieldCount,
+    addedFieldCount,
+    mappingChanged,
+    drifted: pinned.schemaDigest !== current.schemaDigest,
+  }
+}
+
+/**
+ * R-06. PIN on the first armed read for a registration; COMPARE on every one after it.
+ *
+ * Called AFTER `assertB2aReadAuthorization` (so only an authorized read ever probes the source) and
+ * BEFORE any business artifact — no plan, no rows, no revision, no evidence stanza is built between
+ * the guard and this check.
+ *
+ * PERSISTENCE. The plugin's durable KV (`context.storage` — Postgres `plugin_kv`, namespaced per
+ * plugin, survives restart), under its own key prefix, which is the SAME store and the same shape
+ * the operation claim and the registration-version floor already use a few functions above. The
+ * registry file itself is a read-only deploy artifact and is never written. Keyed by
+ * `registrationId` alone — a deployment-authored slug, and deliberately NOT by registrationVersion:
+ * bumping the version must not silently drop a pinned contract and re-pin whatever the source
+ * happens to look like that morning. Re-pinning is `store.delete` on this key, an explicit act.
+ *
+ * @returns {Promise<object|null>} `null` when dormant; otherwise a frozen values-free stanza.
+ */
+async function assertB2aSchemaContract({ store, authorization, sourceAdapter, sourceObjects, extFieldMapping, now } = {}) {
+  if (authorization === null || authorization === undefined) return null
+  const claimStore = requireClaimStore(store)
+  const current = await computeB2aSchemaContract({ authorization, sourceAdapter, sourceObjects, extFieldMapping })
+  const key = schemaContractKey(authorization.registrationId)
+  const stored = await claimStore.get(key)
+
+  if (!isPlainObject(stored) || typeof stored.schemaDigest !== 'string') {
+    await claimStore.set(key, {
+      schemaContractVersion: current.schemaContractVersion,
+      registrationVersion: authorization.registrationVersion,
+      purpose: authorization.purpose,
+      objectCount: current.objectCount,
+      fieldCount: current.fieldCount,
+      mappingDigest: current.mappingDigest,
+      schemaDigest: current.schemaDigest,
+      fields: { ...current.fields },
+      pinnedAtMs: Number.isFinite(now) ? now : null,
+    })
+    return frozenSchemaContractStanza(true, current)
+  }
+
+  // A contract pinned by an older version of THIS code cannot be compared field-for-field, and
+  // treating an incomparable record as "no drift" is the failure this whole check exists to prevent.
+  if (stored.schemaContractVersion !== current.schemaContractVersion) {
+    throw new B2aReadAuthorizationError(409, B2A_SCHEMA_DRIFT,
+      'the pinned B2a schema contract was written in a format this runtime cannot compare', {
+        reason: 'schema_contract_version_mismatch',
+        ...b2aSourceReadEvidence(authorization),
+      })
+  }
+
+  const diff = diffB2aSchemaContract(stored, current)
+  if (diff.drifted) {
+    throw new B2aReadAuthorizationError(409, B2A_SCHEMA_DRIFT,
+      'the source schema no longer matches the contract pinned for this B2a registration', {
+        reason: 'schema_contract_drift',
+        ...b2aSourceReadEvidence(authorization),
+        missingFieldCount: diff.missingFieldCount,
+        changedFieldCount: diff.changedFieldCount,
+        addedFieldCount: diff.addedFieldCount,
+        mappingChanged: diff.mappingChanged,
+      })
+  }
+
+  return frozenSchemaContractStanza(false, current)
+}
+
+/**
+ * The stanza a caller carries forward: the pinned/compared result, plus the field digest map the
+ * mid-read check needs to diff against. `b2aSchemaContractEvidence` is what goes into evidence —
+ * every key here is a digest, a count or a boolean, but a whole field map is noise in a stanza whose
+ * job is to be readable.
+ */
+function frozenSchemaContractStanza(pinned, current) {
+  return Object.freeze({
+    schemaContractPinned: pinned,
+    schemaContractVersion: current.schemaContractVersion,
+    objectCount: current.objectCount,
+    fieldCount: current.fieldCount,
+    mappingDigest: current.mappingDigest,
+    schemaDigest: current.schemaDigest,
+    schemaDrift: false,
+    fields: current.fields,
+  })
+}
+
+function b2aSchemaContractEvidence(contract) {
+  if (!isPlainObject(contract)) return null
+  return {
+    schemaContractPinned: contract.schemaContractPinned === true,
+    schemaContractVersion: contract.schemaContractVersion,
+    objectCount: contract.objectCount,
+    fieldCount: contract.fieldCount,
+    schemaDigest: contract.schemaDigest,
+    schemaDrift: contract.schemaDrift === true,
+  }
+}
+
+/**
+ * E3-05, the half this cut can actually enforce: the source must not have CHANGED SHAPE between the
+ * moment the batch started and the moment it finished.
+ *
+ * Re-reads the same schema after the read and compares it to the digest the pre-read check agreed
+ * on. A DDL change mid-batch — a column dropped, retyped, added — refuses with
+ * `C6_FULL_BATCH_INCOMPLETE` and no plan is built.
+ *
+ * WHAT THIS DOES NOT COVER, said plainly rather than implied: a ROW-LEVEL generation change. Nothing
+ * in these sources carries a generation marker, a snapshot token or a change counter, so "the data
+ * moved under us mid-read" is not observable from here at all. Detecting it needs source-side
+ * snapshot isolation or a generation column — Mirror-spike machinery — and a version built now would
+ * be replaced by it. That half is DEFERRED, and the deferral is the honest answer rather than a
+ * check that fires on nothing.
+ */
+async function assertB2aSourceUnchangedAfterRead({ authorization, contract, sourceAdapter, sourceObjects, extFieldMapping } = {}) {
+  if (authorization === null || authorization === undefined) return null
+  if (!isPlainObject(contract)) return null
+  const after = await computeB2aSchemaContract({ authorization, sourceAdapter, sourceObjects, extFieldMapping })
+  if (after.schemaDigest === contract.schemaDigest) {
+    return Object.freeze({ sourceUnchangedAcrossRead: true })
+  }
+  const diff = diffB2aSchemaContract(contract, after)
+  throw new B2aReadAuthorizationError(409, C6_FULL_BATCH_INCOMPLETE,
+    'the source schema changed while this B2a batch was being read', {
+      reason: 'source_changed_mid_read',
+      ...b2aSourceReadEvidence(authorization),
+      missingFieldCount: diff.missingFieldCount,
+      changedFieldCount: diff.changedFieldCount,
+      addedFieldCount: diff.addedFieldCount,
+      fullBatch: false,
+    })
+}
+
 module.exports = {
   B2A_REGISTRY_CONFIG_KEY,
   B2A_PURPOSES,
@@ -1051,7 +1548,21 @@ module.exports = {
   B2A_PAGE_LIMIT_EXCEEDED,
   B2A_SCHEMA_DRIFT,
   C6_SAFE_LIFECYCLE_REQUIRED,
+  C6_FULL_BATCH_INCOMPLETE,
   B2A_REGISTRY_INVALID,
+  B2A_TIMEOUT_CAUSE_CLASSES,
+  B2A_PAGE_LIMIT_CAUSE_CLASSES,
+  B2A_INCOMPLETE_BATCH_CAUSE_CLASSES,
+  B2A_SCHEMA_CONTRACT_VERSION,
+  SCHEMA_CONTRACT_KEY_PREFIX,
+  b2aSourceReadCauseClass,
+  classifyB2aSourceReadCause,
+  mapB2aSourceReadError,
+  runB2aGuardedSourceRead,
+  assertB2aFullBatchComplete,
+  assertB2aSchemaContract,
+  assertB2aSourceUnchangedAfterRead,
+  b2aSchemaContractEvidence,
   B2A_EXPIRY_HANDLINGS,
   B2A_CONSUMPTION_STATES,
   B2A_STATUSES,

@@ -4346,7 +4346,7 @@ function createHandlers(services, options = {}) {
       // Gated BEFORE the adapter is loaded, so a refusal on this path costs not even an
       // external-system registry lookup. Its own purpose: a large-BOM background expansion is a
       // different consumer from an interactive refresh, and a `forbidReuse` registration says so.
-      await assertB2aReadAuthorization({
+      const largeBomB2aAuthorization = await assertB2aReadAuthorization({
         registry: b2aTrialRegistry,
         store: context.storage,
         tenantScope: routeScope.tenantId,
@@ -4368,7 +4368,16 @@ function createHandlers(services, options = {}) {
         actionId,
         jobId,
         sourceAdapter,
-        expansionOptions: largeBomExpansionOptionsForAction(action),
+        expansionOptions: {
+          ...largeBomExpansionOptionsForAction(action),
+          // E3-02's 断游标 half on the background path. ARMED ONLY: a page that reports `done: false`
+          // and offers no cursor stops being a silent truncation and becomes a failed expansion —
+          // which on THIS path already means `authoritative: false`, and therefore no plan, because
+          // `tableActionLargeBomExpansionJobPlan` refuses a non-authoritative artifact before it
+          // builds one. The other half of E3-02 (maxRows/maxPages/read_time_limit) needs no guard
+          // here for the same reason: every bounded expansion sets `valid: false`.
+          requireCompleteBatch: Boolean(largeBomB2aAuthorization),
+        },
       })
       return sendOk(res, largeBomJobResponse(publicBackgroundExpansionJob(job)))
     },
