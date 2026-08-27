@@ -9,6 +9,7 @@ import * as stagingCleanupMigration from '../../src/db/migrations/zzzz2026082612
 import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
+import * as legalHoldMigration from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import * as objectReceiptAuthorityMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
 import {
@@ -17,6 +18,7 @@ import {
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
 } from '../../src/multitable/recovery-archive-contract'
+import { expireRecoveryArchiveAfterLegalHoldCheck } from '../../src/multitable/recovery-archive-legal-holds'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
@@ -59,6 +61,7 @@ const SOURCE_HASH = '4'.repeat(64)
 const ATTACHMENT_HASH = '5'.repeat(64)
 const LEASE_EXPIRES_AT = '2099-01-01T00:00:00.000Z'
 const EXPIRES_AT = '2099-12-31T00:00:00.000Z'
+const DUE_EXPIRES_AT = '2000-01-01T00:00:00.000Z'
 
 const TABLES = [
   'meta_recovery_archives',
@@ -347,6 +350,30 @@ async function finalizeArchive(generationId: string, coverageRowCount = '0'): Pr
   }
 }
 
+async function withArchiveTransaction<T>(work: (query: ArchiveQuery) => Promise<T>): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await work((text, values) => client.query(text, values))
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
+async function expireArchiveWithLegalHoldAuthority(generationId: string) {
+  return withArchiveTransaction((query) => expireRecoveryArchiveAfterLegalHoldCheck(query, {
+    workspaceId: WORKSPACE,
+    baseId: BASE,
+    sheetId: SHEET,
+    generationId,
+  }))
+}
+
 async function insertCoverage(
   generationId: string,
   overrides: Partial<{
@@ -463,15 +490,48 @@ async function truncateCatalog(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
   )
   const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
-  await q(
-    `TRUNCATE TABLE
-       ${objectTarget}
-       ${reservationTarget}
-       meta_recovery_archive_staging_objects,
-       meta_recovery_archive_attachment_refs,
-       meta_recovery_archive_coverage_items,
-       meta_recovery_archives`,
+  const legalHoldTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
   )
+  const legalHoldTarget = legalHoldTable.rows[0]?.present
+    ? 'meta_recovery_archive_legal_holds,'
+    : ''
+  if (!legalHoldTarget) {
+    await q(
+      `TRUNCATE TABLE
+         ${objectTarget}
+         ${reservationTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         meta_recovery_archives`,
+    )
+    return
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_legal_holds IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_legal_holds DISABLE TRIGGER USER')
+    await client.query(
+      `TRUNCATE TABLE
+         ${objectTarget}
+         ${reservationTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         ${legalHoldTarget}
+         meta_recovery_archives`,
+    )
+    await client.query('ALTER TABLE meta_recovery_archive_legal_holds ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function seedSealedOperation(
@@ -650,7 +710,15 @@ async function installCatalogIfAbsent(): Promise<void> {
   schemaIsUp = true
 }
 
-async function downCatalogStack(target: Kysely<unknown>): Promise<boolean> {
+async function downCatalogStack(target: Kysely<unknown>): Promise<{
+  restoreLegalHoldAuthority: boolean
+  restoreObjectAuthority: boolean
+}> {
+  const legalHoldAuthority = await sql<{ present: boolean }>`
+    SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present
+  `.execute(target)
+  const restoreLegalHoldAuthority = legalHoldAuthority.rows[0]?.present === true
+  if (restoreLegalHoldAuthority) await legalHoldMigration.down(target)
   const objectAuthority = await sql<{ present: boolean }>`
     SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present
   `.execute(target)
@@ -661,7 +729,7 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<boolean> {
   await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
-  return restoreObjectAuthority
+  return { restoreLegalHoldAuthority, restoreObjectAuthority }
 }
 
 async function upCatalogStack(
@@ -1147,8 +1215,8 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     expect(reactivate.message).toBe('recovery_archive_transition_invalid')
   })
 
-  test('verified can only advance to expired and never rolls back', async () => {
-    const archive = await insertArchive()
+  test('verified catalog posture expires only through D3 authority and never rolls back', async () => {
+    const archive = await insertArchive({ expiresAt: DUE_EXPIRES_AT })
     await finalizeArchive(archive.generationId)
 
     const toBuilding = await errorOf(
@@ -1171,16 +1239,35 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(toAbandoned.message).toBe('recovery_archive_transition_invalid')
 
-    await q(
+    const directExpiry = await errorOf(q(
       `UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`,
       [archive.generationId],
-    )
-    const expired = await q(
+    ))
+    expect(directExpiry.message).toBe('recovery_archive_expiry_not_authorized')
+    expectValuesFree(directExpiry, [archive.generationId, WORKSPACE, BASE, SHEET, KEY_ID])
+    const stillVerified = await q(
       `SELECT state, build_status, coverage_status
          FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
       [archive.generationId],
     )
-    expect(expired.rows).toEqual([
+    expect(stillVerified.rows).toEqual([
+      { state: 'verified', build_status: 'finalized', coverage_status: 'complete' },
+    ])
+
+    const expired = await expireArchiveWithLegalHoldAuthority(archive.generationId)
+    expect(expired).toMatchObject({
+      workspaceId: WORKSPACE,
+      baseId: BASE,
+      sheetId: SHEET,
+      generationId: archive.generationId,
+      state: 'expired',
+    })
+    const expiredState = await q(
+      `SELECT state, build_status, coverage_status
+         FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
+      [archive.generationId],
+    )
+    expect(expiredState.rows).toEqual([
       { state: 'expired', build_status: 'finalized', coverage_status: 'complete' },
     ])
 
@@ -1191,6 +1278,23 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       ),
     )
     expect(rollback.message).toBe('recovery_archive_transition_invalid')
+    expectValuesFree(rollback, [archive.generationId, WORKSPACE, BASE, SHEET, KEY_ID])
+
+    const invalidRollback = await errorOf(
+      q(
+        `UPDATE meta_recovery_archives
+            SET state='building', build_status='abandoned', coverage_status='incomplete'
+          WHERE generation_id=$1::uuid`,
+        [archive.generationId],
+      ),
+    )
+    expect(invalidRollback.message).toBe('recovery_archive_transition_invalid')
+    expectValuesFree(invalidRollback, [archive.generationId, WORKSPACE, BASE, SHEET, KEY_ID])
+    const stillExpired = await q(
+      `SELECT state FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
+      [archive.generationId],
+    )
+    expect(stillExpired.rows).toEqual([{ state: 'expired' }])
   })
 
   test('binding identity is immutable and verified payload fields cannot be rewritten', async () => {
@@ -1535,7 +1639,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('attachment finalize hands off source protection atomically before parent verification', async () => {
-    const archive = await insertArchive()
+    const archive = await insertArchive({ expiresAt: DUE_EXPIRES_AT })
     const attachmentId = await insertAttachmentRef(archive.generationId)
     const client = await pool.connect()
     try {
@@ -1615,7 +1719,8 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(archiveObjectTooLate.message).toBe('recovery_archive_attachment_posture_invalid')
 
-    await q(`UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`, [archive.generationId])
+    const expired = await expireArchiveWithLegalHoldAuthority(archive.generationId)
+    expect(expired).toMatchObject({ generationId: archive.generationId, state: 'expired' })
     const retained = await q(
       `SELECT count(*)::int AS count
          FROM meta_recovery_archive_attachment_refs
@@ -2029,7 +2134,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           ALTER TABLE public.meta_recovery_archives
             DROP CONSTRAINT fk_meta_recovery_archives_key
         `.execute(trx)
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restoreAuthorities = await downCatalogStack(trx)
         await upCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_recovery_archives
@@ -2045,7 +2150,8 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           BEFORE INSERT ON public.meta_recovery_archives
           FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_key_reference_guard_row()
         `.execute(trx)
-        if (restoreObjectAuthority) await objectReceiptAuthorityMigration.up(trx)
+        if (restoreAuthorities.restoreObjectAuthority) await objectReceiptAuthorityMigration.up(trx)
+        if (restoreAuthorities.restoreLegalHoldAuthority) await legalHoldMigration.up(trx)
         throw new Error('recovery_archive_catalog_replay_rollback')
       }),
     )
@@ -2056,12 +2162,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restoreAuthorities = await downCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_sheets
           RENAME COLUMN system_kind TO system_kind_d2a_drift
         `.execute(trx)
-        await upCatalogStack(trx, restoreObjectAuthority)
+        await upCatalogStack(trx, restoreAuthorities.restoreObjectAuthority)
         throw new Error('recovery_archive_source_schema_guard_missing')
       }),
     )
@@ -2073,9 +2179,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on an owned-name collision and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restoreAuthorities = await downCatalogStack(trx)
         await sql`CREATE TABLE public.meta_recovery_archives (drifted text)`.execute(trx)
-        await upCatalogStack(trx, restoreObjectAuthority)
+        await upCatalogStack(trx, restoreAuthorities.restoreObjectAuthority)
         throw new Error('recovery_archive_owned_object_guard_missing')
       }),
     )

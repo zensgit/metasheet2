@@ -27,6 +27,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
 ]
 const ARCHIVE_REALDB_RE =
   /^tests\/integration\/multitable-recovery-archive-[a-z0-9-]+-realdb\.test\.ts$/
@@ -124,14 +125,14 @@ test('D2 archive roster contract rejects a duplicate section-causality whole-fil
   })
 })
 
-test('D2 archive roster contract rejects dropping operation-binding from the union', () => {
+test('D2 archive roster contract rejects dropping legal-hold authority from the union', () => {
   const config = readFileSync(CONFIG, 'utf8')
   const workflow = readFileSync(WORKFLOW, 'utf8')
   const dropped = workflow.replace(
-    '            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts \\\n',
+    '            tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \\\n',
     '',
   )
-  assert.notEqual(dropped, workflow, 'operation-binding removal mutation must apply')
+  assert.notEqual(dropped, workflow, 'legal-hold authority removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true
