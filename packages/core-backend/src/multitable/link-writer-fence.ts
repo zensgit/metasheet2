@@ -3,6 +3,7 @@ import {
   isWriterFenceEnabled,
   type FenceQuery,
 } from './canonical-sheet-fence'
+import { isFieldAlwaysReadOnly } from './permission-derivation'
 
 type LinkFieldFenceState = 'missing' | 'non-link' | 'link-unconfigured' | `link:${string}`
 
@@ -30,9 +31,35 @@ export class RecordLinkFencePlanChangedError extends LinkWriterFencePlanChangedE
   }
 }
 
+function isLockNotAvailable(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { code?: unknown }).code === '55P03')
+}
+
 export type RecordLinkDeleteFencePlan = {
   owningSheetId: string
   recordId: string
+  participantSheetIds: string[]
+}
+
+export type RecordLinkRestoreTargetInput = {
+  fieldId: string
+  recordIds: readonly string[]
+}
+
+type RecordLinkRestoreTargetGroup = {
+  fieldId: string
+  targetSheetId: string
+  recordIds: string[]
+}
+
+export type RecordLinkRestoreFencePlan = {
+  sourceSheetId: string
+  deleteRevisionId: string | null
+  candidateFieldIds: string[]
+  fieldStates: LinkFieldFenceState[]
+  writableLinkFieldIds: string[]
+  outboundTargetGroups: RecordLinkRestoreTargetGroup[]
+  inboundParticipantSheetIds: string[]
   participantSheetIds: string[]
 }
 
@@ -71,7 +98,7 @@ function resolveForeignSheetId(
 function buildFieldStates(
   candidateFieldIds: readonly string[],
   rows: unknown[],
-): { fieldStates: LinkFieldFenceState[]; targetSheetIds: string[] } {
+): { fieldStates: LinkFieldFenceState[]; targetSheetIds: string[]; writableLinkFieldIds: string[] } {
   const rowById = new Map<string, Record<string, unknown>>()
   for (const raw of rows) {
     if (!raw || typeof raw !== 'object') continue
@@ -80,10 +107,14 @@ function buildFieldStates(
   }
 
   const targets = new Set<string>()
+  const writableLinkFieldIds: string[] = []
   const fieldStates = candidateFieldIds.map((fieldId): LinkFieldFenceState => {
     const row = rowById.get(fieldId)
     if (!row) return 'missing'
     if (row.type !== 'link') return 'non-link'
+    if (!isFieldAlwaysReadOnly({ type: 'link', property: normalizeProperty(row.property) })) {
+      writableLinkFieldIds.push(fieldId)
+    }
     const foreign = resolveForeignSheetId(row.property)
     if (foreign.kind === 'ambiguous') throw new LinkWriterFencePlanChangedError()
     if (foreign.kind === 'unconfigured') return 'link-unconfigured'
@@ -91,7 +122,7 @@ function buildFieldStates(
     return `link:${foreign.sheetId}`
   })
 
-  return { fieldStates, targetSheetIds: [...targets].sort() }
+  return { fieldStates, targetSheetIds: [...targets].sort(), writableLinkFieldIds }
 }
 
 async function loadCandidateFieldStates(
@@ -99,8 +130,10 @@ async function loadCandidateFieldStates(
   sourceSheetId: string,
   candidateFieldIds: readonly string[],
   lockRows: boolean,
-): Promise<{ fieldStates: LinkFieldFenceState[]; targetSheetIds: string[] }> {
-  if (candidateFieldIds.length === 0) return { fieldStates: [], targetSheetIds: [] }
+): Promise<{ fieldStates: LinkFieldFenceState[]; targetSheetIds: string[]; writableLinkFieldIds: string[] }> {
+  if (candidateFieldIds.length === 0) {
+    return { fieldStates: [], targetSheetIds: [], writableLinkFieldIds: [] }
+  }
   const result = await query(
     `SELECT id, type, property
        FROM meta_fields
@@ -109,6 +142,13 @@ async function loadCandidateFieldStates(
     [sourceSheetId, candidateFieldIds],
   )
   return buildFieldStates(candidateFieldIds, result.rows)
+}
+
+function fieldStatesMatch(
+  expected: readonly LinkFieldFenceState[],
+  current: readonly LinkFieldFenceState[],
+): boolean {
+  return expected.length === current.length && expected.every((state, index) => state === current[index])
 }
 
 /**
@@ -180,11 +220,229 @@ export async function enterLinkWriterFencePlan(
     plan.candidateFieldIds,
     true,
   )
-  if (
-    current.fieldStates.length !== plan.fieldStates.length ||
-    current.fieldStates.some((state, index) => state !== plan.fieldStates[index])
-  ) {
+  if (!fieldStatesMatch(plan.fieldStates, current.fieldStates)) {
     throw new LinkWriterFencePlanChangedError()
+  }
+}
+
+async function loadInboundRestoreParticipantSheetIds(
+  query: FenceQuery,
+  deleteRevisionId: string,
+): Promise<string[]> {
+  const fieldOwners = await query(
+    `SELECT f.sheet_id
+       FROM meta_link_tombstones t
+       JOIN meta_fields f ON f.id = t.field_id
+      WHERE t.source_revision_id = $1 AND t.reason = 'record_delete'`,
+    [deleteRevisionId],
+  )
+  const recordOwners = await query(
+    `SELECT n.sheet_id
+       FROM meta_link_tombstones t
+       JOIN meta_records n ON n.id = t.record_id
+      WHERE t.source_revision_id = $1 AND t.reason = 'record_delete'`,
+    [deleteRevisionId],
+  )
+  const sheetIds = new Set<string>()
+  for (const raw of [...fieldOwners.rows, ...recordOwners.rows]) {
+    if (!raw || typeof raw !== 'object') continue
+    const sheetId = (raw as Record<string, unknown>).sheet_id
+    if (typeof sheetId === 'string' && sheetId.length > 0) sheetIds.add(sheetId)
+  }
+  return [...sheetIds].sort()
+}
+
+async function lockInboundRestoreParticipantRows(
+  query: FenceQuery,
+  deleteRevisionId: string,
+  participantSheetIds: readonly string[],
+): Promise<void> {
+  try {
+    await query(
+      `SELECT 1
+         FROM meta_link_tombstones t
+         JOIN meta_fields f ON f.id = t.field_id
+        WHERE t.source_revision_id = $1 AND t.reason = 'record_delete'
+          AND f.sheet_id = ANY($2::text[])
+        FOR SHARE OF f NOWAIT`,
+      [deleteRevisionId, participantSheetIds],
+    )
+    await query(
+      `SELECT 1
+         FROM meta_link_tombstones t
+         JOIN meta_records n ON n.id = t.record_id
+        WHERE t.source_revision_id = $1 AND t.reason = 'record_delete'
+          AND n.sheet_id = ANY($2::text[])
+        FOR SHARE OF n NOWAIT`,
+      [deleteRevisionId, participantSheetIds],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new RecordLinkFencePlanChangedError()
+    throw error
+  }
+}
+
+function canonicalRestoreTargets(
+  targets: readonly RecordLinkRestoreTargetInput[],
+): Array<{ fieldId: string; recordIds: string[] }> {
+  const idsByField = new Map<string, Set<string>>()
+  for (const target of targets) {
+    if (typeof target.fieldId !== 'string' || target.fieldId.length === 0) continue
+    const ids = idsByField.get(target.fieldId) ?? new Set<string>()
+    for (const recordId of target.recordIds) {
+      if (typeof recordId === 'string' && recordId.length > 0) ids.add(recordId)
+    }
+    if (ids.size > 0) idsByField.set(target.fieldId, ids)
+  }
+  return [...idsByField.entries()]
+    .map(([fieldId, recordIds]) => ({ fieldId, recordIds: [...recordIds].sort() }))
+    .sort((a, b) => a.fieldId.localeCompare(b.fieldId))
+}
+
+/**
+ * Flag-on preflight for trash restore. Outbound targets come from the locked trash snapshot candidate,
+ * while inbound participants come from the deletion's causal tombstone anchor. No query is issued when
+ * the writer-fence flag is off.
+ */
+export async function prepareRecordLinkRestoreFencePlan(
+  query: FenceQuery,
+  input: {
+    sourceSheetId: string
+    deleteRevisionId: string | null
+    candidateFieldIds: readonly string[]
+    outboundTargets: readonly RecordLinkRestoreTargetInput[]
+  },
+): Promise<RecordLinkRestoreFencePlan | null> {
+  if (!isWriterFenceEnabled()) return null
+  const outboundTargets = canonicalRestoreTargets(input.outboundTargets)
+  const candidateFieldIds = [...new Set([
+    ...input.candidateFieldIds,
+    ...outboundTargets.map(({ fieldId }) => fieldId),
+  ])].filter((fieldId) => typeof fieldId === 'string' && fieldId.length > 0).sort()
+  const loaded = await loadCandidateFieldStates(query, input.sourceSheetId, candidateFieldIds, false)
+  const stateByFieldId = new Map(candidateFieldIds.map((fieldId, index) => [fieldId, loaded.fieldStates[index]]))
+  const writableFieldIds = new Set(loaded.writableLinkFieldIds)
+  const outboundTargetGroups = outboundTargets.map(({ fieldId, recordIds }) => {
+    const state = stateByFieldId.get(fieldId)
+    if (!state?.startsWith('link:') || !writableFieldIds.has(fieldId)) {
+      throw new RecordLinkFencePlanChangedError()
+    }
+    return { fieldId, recordIds, targetSheetId: state.slice('link:'.length) }
+  })
+  const inboundParticipantSheetIds = input.deleteRevisionId
+    ? await loadInboundRestoreParticipantSheetIds(query, input.deleteRevisionId)
+    : []
+  const participantSheetIds = [...new Set([
+    input.sourceSheetId,
+    ...loaded.targetSheetIds,
+    ...inboundParticipantSheetIds,
+  ])].sort()
+  return {
+    sourceSheetId: input.sourceSheetId,
+    deleteRevisionId: input.deleteRevisionId,
+    candidateFieldIds,
+    fieldStates: loaded.fieldStates,
+    writableLinkFieldIds: loaded.writableLinkFieldIds,
+    outboundTargetGroups,
+    inboundParticipantSheetIds,
+    participantSheetIds,
+  }
+}
+
+/** The trash row is locked after the participant fences. Its causal anchor and outbound IDs must still
+ * match the preflight; otherwise the caller would restore a snapshot whose participants were never fenced. */
+export function assertRecordLinkRestoreTrashStateCurrent(
+  plan: RecordLinkRestoreFencePlan,
+  input: {
+    deleteRevisionId: string | null
+    outboundTargets: readonly RecordLinkRestoreTargetInput[]
+  },
+): void {
+  const current = canonicalRestoreTargets(input.outboundTargets)
+  if (input.deleteRevisionId !== plan.deleteRevisionId || current.length !== plan.outboundTargetGroups.length) {
+    throw new RecordLinkFencePlanChangedError()
+  }
+  for (let index = 0; index < current.length; index += 1) {
+    const expected = plan.outboundTargetGroups[index]
+    const actual = current[index]
+    if (
+      !expected || !actual || expected.fieldId !== actual.fieldId ||
+      expected.recordIds.length !== actual.recordIds.length ||
+      expected.recordIds.some((recordId, recordIndex) => recordId !== actual.recordIds[recordIndex])
+    ) {
+      throw new RecordLinkFencePlanChangedError()
+    }
+  }
+}
+
+/** Acquire every restore participant fence in one global order, then lock/re-read the definitions. Inbound
+ * shrink is allowed because replay deliberately tolerates a missing neighbour/field; growth is unsafe because
+ * the newly discovered sheet was not fenced. */
+export async function enterRecordLinkRestoreFencePlan(
+  query: FenceQuery,
+  plan: RecordLinkRestoreFencePlan,
+): Promise<void> {
+  await fenceWriterEntriesInOrder(query, plan.participantSheetIds)
+  const currentFields = await loadCandidateFieldStates(
+    query,
+    plan.sourceSheetId,
+    plan.candidateFieldIds,
+    true,
+  )
+  if (!fieldStatesMatch(plan.fieldStates, currentFields.fieldStates)) {
+    throw new RecordLinkFencePlanChangedError()
+  }
+  if (
+    plan.writableLinkFieldIds.length !== currentFields.writableLinkFieldIds.length ||
+    plan.writableLinkFieldIds.some((fieldId, index) => fieldId !== currentFields.writableLinkFieldIds[index])
+  ) {
+    throw new RecordLinkFencePlanChangedError()
+  }
+  if (plan.deleteRevisionId) {
+    const currentInbound = await loadInboundRestoreParticipantSheetIds(query, plan.deleteRevisionId)
+    const fencedParticipants = new Set(plan.participantSheetIds)
+    if (currentInbound.some((sheetId) => !fencedParticipants.has(sheetId))) {
+      throw new RecordLinkFencePlanChangedError()
+    }
+    await lockInboundRestoreParticipantRows(query, plan.deleteRevisionId, plan.participantSheetIds)
+  }
+}
+
+/** Run after the restored row INSERT so self-links are live. Target rows are locked until COMMIT and every
+ * target must still belong to the sheet whose field definition supplied the fenced participant. */
+export async function assertRecordLinkRestoreTargetsLive(
+  query: FenceQuery,
+  plan: RecordLinkRestoreFencePlan,
+): Promise<void> {
+  const recordIds = [...new Set(plan.outboundTargetGroups.flatMap(({ recordIds: ids }) => ids))].sort()
+  if (recordIds.length === 0) return
+  const targetSheetIds = [...new Set(plan.outboundTargetGroups.map(({ targetSheetId }) => targetSheetId))].sort()
+  let result: Awaited<ReturnType<FenceQuery>>
+  try {
+    result = await query(
+      `SELECT id, sheet_id
+         FROM meta_records
+        WHERE id = ANY($1::text[])
+          AND sheet_id = ANY($2::text[])
+        FOR SHARE NOWAIT`,
+      [recordIds, targetSheetIds],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new RecordLinkFencePlanChangedError()
+    throw error
+  }
+  const sheetByRecordId = new Map<string, string>()
+  for (const raw of result.rows) {
+    if (!raw || typeof raw !== 'object') continue
+    const row = raw as Record<string, unknown>
+    if (typeof row.id === 'string' && typeof row.sheet_id === 'string') {
+      sheetByRecordId.set(row.id, row.sheet_id)
+    }
+  }
+  for (const group of plan.outboundTargetGroups) {
+    if (group.recordIds.some((recordId) => sheetByRecordId.get(recordId) !== group.targetSheetId)) {
+      throw new RecordLinkFencePlanChangedError()
+    }
   }
 }
 

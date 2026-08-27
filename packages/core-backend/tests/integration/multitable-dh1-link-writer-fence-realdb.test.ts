@@ -21,6 +21,7 @@ import {
   LinkWriterFencePlanChangedError,
   enterLinkWriterFencePlan,
   prepareRecordLinkDeleteFencePlan,
+  prepareRecordLinkRestoreFencePlan,
   prepareLinkWriterFencePlan,
 } from '../../src/multitable/link-writer-fence'
 import { RecordPatchFieldValidationError, RecordService } from '../../src/multitable/record-service'
@@ -38,6 +39,8 @@ import { createRecordWriteHelpers, univerMetaRouter } from '../../src/routes/uni
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
+const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
+const INBOUND_FLAG = 'MULTITABLE_ENABLE_RECORD_UNDELETE_INBOUND'
 const TS = Date.now()
 const ACTOR = `u_dh1_lwf_${TS}`
 const BASE = `base_dh1_lwf_${TS}`
@@ -52,6 +55,7 @@ const R_SOURCE = `rec_dh1_lwf_source_${TS}`
 const R_TARGET = `rec_dh1_lwf_target_${TS}`
 const R_DECOY = `rec_dh1_lwf_decoy_${TS}`
 const createdRecordIds = new Set<string>()
+const trashedRecordIds = new Set<string>()
 
 type Client = {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
@@ -171,6 +175,56 @@ const readSource = async (): Promise<{ data: Record<string, unknown>; version: n
 const edgeCount = async (recordId: string): Promise<number> =>
   Number(((await q('SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_LINK, recordId])).rows[0] as { n: number }).n)
 
+const exactEdgeCount = async (fieldId: string, recordId: string, foreignRecordId: string): Promise<number> =>
+  Number(((await q(
+    'SELECT count(*)::int AS n FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+    [fieldId, recordId, foreignRecordId],
+  )).rows[0] as { n: number }).n)
+
+const trashCount = async (recordId: string): Promise<number> =>
+  Number(((await q('SELECT count(*)::int AS n FROM meta_records_trash WHERE record_id = $1', [recordId])).rows[0] as { n: number }).n)
+
+const deletedRecordId = (label: string) => `rec_dh1_rr_${label}_${TS}`
+
+const deleteRestoreFixture = async (input: {
+  label: string
+  outbound?: boolean
+  inbound?: boolean
+}): Promise<string> => {
+  const recordId = deletedRecordId(input.label)
+  const data = input.outbound ? { [F_LINK]: [R_TARGET] } : {}
+  createdRecordIds.add(recordId)
+  trashedRecordIds.add(recordId)
+  await q(
+    'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
+    [recordId, SOURCE, JSON.stringify(data), ACTOR],
+  )
+  if (input.outbound) {
+    await q(
+      'INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
+      [`lnk_dh1_rr_out_${input.label}_${TS}`.slice(0, 50), F_LINK, recordId, R_TARGET],
+    )
+  }
+  if (input.inbound) {
+    await q(
+      'UPDATE meta_records SET data = $3::jsonb WHERE id = $1 AND sheet_id = $2',
+      [R_TARGET, TARGET, JSON.stringify({ [F_BACK]: [recordId] })],
+    )
+    await q(
+      'INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$4)',
+      [`lnk_dh1_rr_in_${input.label}_${TS}`.slice(0, 50), F_BACK, R_TARGET, recordId],
+    )
+  }
+  await makeRecordService().deleteRecord({
+    recordId,
+    actorId: ACTOR,
+    access,
+    resolveSheetAccess,
+  })
+  expect(await trashCount(recordId)).toBe(1)
+  return recordId
+}
+
 const waitForAdvisoryWaiter = async (blockerPid: number): Promise<void> => {
   const deadline = Date.now() + 5_000
   while (Date.now() < deadline) {
@@ -188,6 +242,21 @@ const waitForAdvisoryWaiter = async (blockerPid: number): Promise<void> => {
   }
   throw new Error('route did not park on the canonical fence')
 }
+
+const settleWhileMutationLockHeld = async <T>(promise: Promise<T>, label: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`${label} waited on an unfenced row lock`)), 3_000)
+    promise.then(
+      (value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
 
 test('sentinel: D-H1 link writer fence real-DB lane must not skip-green', () => {
   if (process.env.METASHEET_REAL_DB_TEST_STEP === '1' && !process.env.DATABASE_URL) {
@@ -214,6 +283,8 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
 
   afterEach(async () => {
     delete process.env[FLAG]
+    delete process.env[CAPTURE_FLAG]
+    delete process.env[INBOUND_FLAG]
     __resetRecoveryWriterStateColumnProbe()
     await setBlock(SOURCE, null)
     await setBlock(TARGET, null)
@@ -226,12 +297,20 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
       createdRecordIds.clear()
     }
     await q('DELETE FROM meta_links WHERE field_id = $1 AND record_id = $2', [F_LINK, R_SOURCE])
+    if (trashedRecordIds.size > 0) {
+      const ids = [...trashedRecordIds]
+      await q('DELETE FROM meta_link_tombstones WHERE record_id = ANY($1::text[]) OR foreign_record_id = ANY($1::text[])', [ids]).catch(() => {})
+      await q('DELETE FROM meta_records_trash WHERE record_id = ANY($1::text[])', [ids]).catch(() => {})
+      trashedRecordIds.clear()
+    }
     await q(
       'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4) ON CONFLICT (id) DO NOTHING',
       [R_TARGET, TARGET, '{}', ACTOR],
     )
+    await q('UPDATE meta_records SET sheet_id = $2, data = $3::jsonb, version = 1 WHERE id = $1', [R_TARGET, TARGET, '{}'])
     await q('UPDATE meta_records SET data = $3::jsonb, version = 1 WHERE id = $1 AND sheet_id = $2', [R_SOURCE, SOURCE, JSON.stringify({ [F_NOTE]: 'before', [F_LINK]: [] })])
     await q('UPDATE meta_fields SET property = $2::jsonb WHERE id = $1', [F_LINK, JSON.stringify({ foreignSheetId: TARGET })])
+    await q('UPDATE meta_fields SET sheet_id = $2, property = $3::jsonb WHERE id = $1', [F_BACK, TARGET, JSON.stringify({ foreignSheetId: SOURCE })])
   })
 
   afterAll(async () => {
@@ -439,6 +518,422 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
     }, TARGET, R_TARGET)
     expect(plan).toBeNull()
     expect(queries).toBe(0)
+  })
+
+  test('record-restore plan is query-inert while the writer fence is off', async () => {
+    delete process.env[FLAG]
+    let queries = 0
+    const plan = await prepareRecordLinkRestoreFencePlan(async () => {
+      queries += 1
+      return { rows: [] }
+    }, {
+      sourceSheetId: SOURCE,
+      deleteRevisionId: null,
+      candidateFieldIds: [F_LINK],
+      outboundTargets: [{ fieldId: F_LINK, recordIds: [R_TARGET] }],
+    })
+    expect(plan).toBeNull()
+    expect(queries).toBe(0)
+  })
+
+  test('trash restore fences outbound and inbound participants, then rebuilds both edge directions', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'ok', outbound: true, inbound: true })
+
+    const restored = await makeRecordService().restoreRecord({
+      recordId,
+      actorId: ACTOR,
+      access,
+      resolveSheetAccess,
+    })
+
+    expect(restored.inbound).toMatchObject({ replayed: 1, recoverable: true })
+    expect(await exactEdgeCount(F_LINK, recordId, R_TARGET)).toBe(1)
+    expect(await exactEdgeCount(F_BACK, R_TARGET, recordId)).toBe(1)
+    expect(await trashCount(recordId)).toBe(0)
+  })
+
+  test('trash restore inserts the restored row before target liveness so an outbound self-link remains valid', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = deletedRecordId('self')
+    createdRecordIds.add(recordId)
+    trashedRecordIds.add(recordId)
+    await q('UPDATE meta_fields SET property = $2::jsonb WHERE id = $1', [F_LINK, JSON.stringify({ foreignSheetId: SOURCE })])
+    await q(
+      'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
+      [recordId, SOURCE, JSON.stringify({ [F_LINK]: [recordId] }), ACTOR],
+    )
+    await q(
+      'INSERT INTO meta_links (id, field_id, record_id, foreign_record_id) VALUES ($1,$2,$3,$3)',
+      [`lnk_dh1_rr_self_${TS}`.slice(0, 50), F_LINK, recordId],
+    )
+    await makeRecordService().deleteRecord({ recordId, actorId: ACTOR, access, resolveSheetAccess })
+
+    await makeRecordService().restoreRecord({ recordId, actorId: ACTOR, access, resolveSheetAccess })
+
+    expect(await exactEdgeCount(F_LINK, recordId, recordId)).toBe(1)
+    expect(await trashCount(recordId)).toBe(0)
+  })
+
+  test('trash restore refuses a blocked outbound target before recreating the record or edge', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'blocked', outbound: true })
+    await setBlock(TARGET, 'applying')
+
+    const response = await request(buildApp())
+      .post(`/api/multitable/records/${recordId}/restore`)
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_IN_PROGRESS',
+        message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toContain(recordId)
+    expect(JSON.stringify(response.body)).not.toContain(TARGET)
+
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+    expect(await exactEdgeCount(F_LINK, recordId, R_TARGET)).toBe(0)
+    expect(await trashCount(recordId)).toBe(1)
+  })
+
+  test('trash restore rechecks target liveness after a concurrent target delete and returns values-free 409', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'target_race', outbound: true })
+    const blocker = await connect()
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(TARGET)])
+      await blocker.query('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(recordId)
+      expect(JSON.stringify(response.body)).not.toContain(R_TARGET)
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await exactEdgeCount(F_LINK, recordId, R_TARGET)).toBe(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('trash restore fails closed without waiting on an in-flight outbound target move', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'target_move_lock', outbound: true })
+    const mover = await connect()
+    let responsePromise: Promise<request.Response> | undefined
+    try {
+      await mover.query('BEGIN')
+      await mover.query('UPDATE meta_records SET sheet_id = $2 WHERE id = $1', [R_TARGET, DECOY])
+      responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+
+      const response = await settleWhileMutationLockHeld(responsePromise, 'outbound target recheck')
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await exactEdgeCount(F_LINK, recordId, R_TARGET)).toBe(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await mover.query('ROLLBACK').catch(() => {})
+      await responsePromise?.catch(() => {})
+      mover.release()
+    }
+  })
+
+  test('trash restore rejects an outbound field target change after preflight', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'field_race', outbound: true })
+    const blocker = await connect()
+    const firstFenceSheet = [SOURCE, TARGET].sort()[0]
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(firstFenceSheet)])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await q('UPDATE meta_fields SET property = $2::jsonb WHERE id = $1', [F_LINK, JSON.stringify({ foreignSheetId: DECOY })])
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(DECOY)
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('trash restore rejects an outbound field becoming read-only after preflight', async () => {
+    process.env[FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'field_readonly_race', outbound: true })
+    const blocker = await connect()
+    const firstFenceSheet = [SOURCE, TARGET].sort()[0]
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(firstFenceSheet)])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await q('UPDATE meta_fields SET property = $2::jsonb WHERE id = $1', [
+        F_LINK,
+        JSON.stringify({ foreignSheetId: TARGET, mirrorOf: 'field_source' }),
+      ])
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(recordId)
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('trash restore refuses a blocked inbound owner sheet before replay mutation', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'in_blocked', inbound: true })
+    await setBlock(TARGET, 'applying')
+
+    await expect(makeRecordService().restoreRecord({
+      recordId,
+      actorId: ACTOR,
+      access,
+      resolveSheetAccess,
+    })).rejects.toBeInstanceOf(SheetWriterBlockedError)
+
+    expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+    expect(await exactEdgeCount(F_BACK, R_TARGET, recordId)).toBe(0)
+    expect(await trashCount(recordId)).toBe(1)
+  })
+
+  test('trash restore rejects inbound participant growth after its preflight', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'in_growth', inbound: true })
+    const blocker = await connect()
+    const firstFenceSheet = [SOURCE, TARGET].sort()[0]
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(firstFenceSheet)])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await q('UPDATE meta_fields SET sheet_id = $2 WHERE id = $1', [F_BACK, DECOY])
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(DECOY)
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('trash restore fails closed without waiting on an in-flight inbound field move', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'in_field_move_lock', inbound: true })
+    const mover = await connect()
+    let responsePromise: Promise<request.Response> | undefined
+    try {
+      await mover.query('BEGIN')
+      await mover.query('UPDATE meta_fields SET sheet_id = $2 WHERE id = $1', [F_BACK, DECOY])
+      responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+
+      const response = await settleWhileMutationLockHeld(responsePromise, 'inbound participant recheck')
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await exactEdgeCount(F_BACK, R_TARGET, recordId)).toBe(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await mover.query('ROLLBACK').catch(() => {})
+      await responsePromise?.catch(() => {})
+      mover.release()
+    }
+  })
+
+  test('trash restore skips an inbound neighbor resurrected on an unfenced sheet after plan entry', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'late_neighbor_sheet', inbound: true })
+    await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])
+    const rawPool = poolManager.get()
+    let decoyInserted = false
+    const racingPool = {
+      query: rawPool.query.bind(rawPool),
+      transaction: async <T>(handler: (client: { query: typeof q }) => Promise<T>): Promise<T> =>
+        rawPool.transaction(async ({ query }) => handler({
+          query: async (sql: string, params?: unknown[]) => {
+            const result = await query(sql, params)
+            if (
+              !decoyInserted &&
+              params?.[0] === recordId &&
+              /INSERT INTO meta_records[\s\S]+RETURNING version/.test(sql)
+            ) {
+              await q(
+                'INSERT INTO meta_records (id, sheet_id, data, version, created_by) VALUES ($1,$2,$3::jsonb,1,$4)',
+                [R_TARGET, DECOY, JSON.stringify({ [F_BACK]: [recordId] }), ACTOR],
+              )
+              decoyInserted = true
+            }
+            return result
+          },
+        })),
+    }
+
+    const restored = await makeRecordService(racingPool as never).restoreRecord({
+      recordId,
+      actorId: ACTOR,
+      access,
+      resolveSheetAccess,
+    })
+
+    expect(decoyInserted).toBe(true)
+    expect(restored.inbound).toMatchObject({
+      replayed: 0,
+      recoverable: true,
+      skipped: { alreadyPresent: 1 },
+    })
+    expect(await exactEdgeCount(F_BACK, R_TARGET, recordId)).toBe(0)
+    expect(await trashCount(recordId)).toBe(0)
+  })
+
+  test('trash restore rejects a changed locked trash anchor instead of replaying an unfenced vintage', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'anchor', inbound: true })
+    const blocker = await connect()
+    const firstFenceSheet = [SOURCE, TARGET].sort()[0]
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtext($1))', [canonicalSheetFenceKey(firstFenceSheet)])
+
+      const responsePromise = request(buildApp())
+        .post(`/api/multitable/records/${recordId}/restore`)
+        .then((response) => response)
+      await waitForAdvisoryWaiter(blockerPid)
+      await q('UPDATE meta_records_trash SET delete_revision_id = $2 WHERE record_id = $1', [recordId, randomUUID()])
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'CONFLICT',
+          message: 'Cannot restore: linked records changed concurrently; retry',
+        },
+      })
+      expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [recordId])).rows).toHaveLength(0)
+      expect(await trashCount(recordId)).toBe(1)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('trash restore keeps the existing inbound neighbor-gone skip semantics under the writer fence', async () => {
+    process.env[FLAG] = 'true'
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[INBOUND_FLAG] = 'true'
+    const recordId = await deleteRestoreFixture({ label: 'neighbor_gone', inbound: true })
+    await q('DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2', [R_TARGET, TARGET])
+
+    const restored = await makeRecordService().restoreRecord({
+      recordId,
+      actorId: ACTOR,
+      access,
+      resolveSheetAccess,
+    })
+
+    expect(restored.inbound).toMatchObject({
+      replayed: 0,
+      recoverable: true,
+      skipped: { neighborGone: 1 },
+    })
+    expect(await exactEdgeCount(F_BACK, R_TARGET, recordId)).toBe(0)
+    expect(await trashCount(recordId)).toBe(0)
   })
 
   test('REST, plugin, and automation hard deletes all refuse a blocked inbound owner sheet', async () => {

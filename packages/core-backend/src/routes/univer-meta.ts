@@ -17084,6 +17084,8 @@ export function univerMetaRouter(): Router {
       // 4c-3 §6 honest signal (omitted-when-off/absent — flag-off responses stay byte-identical):
       return res.json({ ok: true, data: { restored: result.recordId, sheetId: result.sheetId, ...(result.inbound ? { inbound: result.inbound } : {}) } })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePermissionError) {
         return sendForbidden(res, err.message)
       }
