@@ -766,6 +766,50 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     expect(invalidHash.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_INVALID_INPUT')
   })
 
+  test('raw source and archive-object shape refusals stay values-free', async () => {
+    const generationId = await insertArchive()
+    const sourceAttachmentId = `${PREFIX}_raw_source_shape`
+    const invalidAvailability = `${PREFIX}_invalid_availability`
+    await claimIntent(generationId, sourceAttachmentId)
+
+    const invalidSource = await errorOf(q(
+      `UPDATE meta_recovery_archive_attachment_refs
+          SET availability=$3
+        WHERE generation_id=$1::uuid
+          AND attachment_id=$2
+          AND reference_class='source'`,
+      [generationId, sourceAttachmentId, invalidAvailability],
+    ))
+    expect(invalidSource.code).toBe('23514')
+    expect(invalidSource.message).toBe('recovery_archive_source_pin_shape_invalid')
+    expectValuesFree(invalidSource, [
+      generationId,
+      sourceAttachmentId,
+      invalidAvailability,
+      OWNER_ID,
+    ])
+
+    const archiveAttachmentId = `${PREFIX}_raw_archive_shape`
+    await claimIntent(generationId, archiveAttachmentId)
+    await verifyIntent(generationId, archiveAttachmentId)
+    const invalidArchiveObject = await errorOf(q(
+      `INSERT INTO meta_recovery_archive_attachment_refs (
+         generation_id, attachment_id, reference_class, reference_state, availability,
+         content_sha256, immutable_version, content_size_bytes
+       ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'missing', $3, $4, $5::bigint)`,
+      [generationId, archiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
+    ))
+    expect(invalidArchiveObject.code).toBe('23514')
+    expect(invalidArchiveObject.message).toBe('recovery_archive_archive_object_shape_invalid')
+    expectValuesFree(invalidArchiveObject, [
+      generationId,
+      archiveAttachmentId,
+      CONTENT_HASH,
+      ARCHIVE_VERSION,
+      OWNER_ID,
+    ])
+  })
+
   test('archive-object authority is distinct, immutable, and source release cannot remove it', async () => {
     const generationId = await insertArchive()
     const attachmentId = `${PREFIX}_archive_object`

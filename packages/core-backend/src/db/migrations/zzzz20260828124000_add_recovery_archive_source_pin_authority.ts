@@ -298,39 +298,6 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         RETURN OLD;
       END IF;
 
-      IF NEW.reference_class = 'source' THEN
-        IF NEW.source_owner_kind IS NULL
-           OR length(btrim(NEW.source_owner_kind)) = 0
-           OR NEW.source_owner_id IS NULL
-           OR length(btrim(NEW.source_owner_id)) = 0
-           OR NEW.source_owner_fence IS NULL
-           OR NEW.source_owner_fence < 1
-           OR NEW.source_lease_until IS NULL
-           OR (NEW.immutable_version IS NOT NULL AND length(btrim(NEW.immutable_version)) = 0)
-           OR (NEW.content_sha256 IS NOT NULL AND NEW.content_sha256 !~ '^[0-9a-f]{64}$')
-           OR (NEW.content_size_bytes IS NOT NULL AND NEW.content_size_bytes < 0)
-           OR (
-             NEW.availability = 'available' AND (
-               NEW.immutable_version IS NULL OR
-               NEW.content_sha256 IS NULL OR
-               NEW.content_size_bytes IS NULL
-             )
-           ) THEN
-          RAISE EXCEPTION USING
-            ERRCODE = '23514',
-            MESSAGE = 'recovery_archive_source_pin_shape_invalid';
-        END IF;
-      ELSIF NEW.reference_class = 'archive_object' THEN
-        IF NEW.source_owner_kind IS NOT NULL
-           OR NEW.source_owner_id IS NOT NULL
-           OR NEW.source_owner_fence IS NOT NULL
-           OR NEW.source_lease_until IS NOT NULL THEN
-          RAISE EXCEPTION USING
-            ERRCODE = '23514',
-            MESSAGE = 'recovery_archive_archive_object_shape_invalid';
-        END IF;
-      END IF;
-
       IF TG_OP = 'UPDATE' THEN
         IF OLD.reference_class = 'archive_object' AND OLD.reference_state = 'verified' THEN
           RAISE EXCEPTION USING
@@ -358,6 +325,48 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           RAISE EXCEPTION USING
             ERRCODE = '55000',
             MESSAGE = 'recovery_archive_source_pin_owner_immutable';
+        END IF;
+      END IF;
+
+      IF NEW.reference_class = 'source' THEN
+        IF NEW.availability NOT IN ('available', 'missing', 'mutable', 'drifted')
+           OR NEW.source_owner_kind IS NULL
+           OR length(btrim(NEW.source_owner_kind)) = 0
+           OR NEW.source_owner_id IS NULL
+           OR length(btrim(NEW.source_owner_id)) = 0
+           OR NEW.source_owner_fence IS NULL
+           OR NEW.source_owner_fence < 1
+           OR NEW.source_lease_until IS NULL
+           OR (NEW.immutable_version IS NOT NULL AND length(btrim(NEW.immutable_version)) = 0)
+           OR (NEW.content_sha256 IS NOT NULL AND NEW.content_sha256 !~ '^[0-9a-f]{64}$')
+           OR (NEW.content_size_bytes IS NOT NULL AND NEW.content_size_bytes < 0)
+           OR (
+             NEW.availability = 'available' AND (
+               NEW.immutable_version IS NULL OR
+               NEW.content_sha256 IS NULL OR
+               NEW.content_size_bytes IS NULL
+             )
+           ) THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'recovery_archive_source_pin_shape_invalid';
+        END IF;
+      ELSIF NEW.reference_class = 'archive_object' THEN
+        IF NEW.availability <> 'available'
+           OR NEW.immutable_version IS NULL
+           OR length(btrim(NEW.immutable_version)) = 0
+           OR NEW.content_size_bytes IS NULL
+           OR NEW.content_size_bytes < 0
+           OR NEW.source_owner_kind IS NOT NULL
+           OR NEW.source_owner_id IS NOT NULL
+           OR NEW.source_owner_fence IS NOT NULL
+           OR NEW.source_lease_until IS NOT NULL
+           OR NEW.cleanup_owner_kind IS NOT NULL
+           OR NEW.cleanup_owner_id IS NOT NULL
+           OR NEW.cleanup_owner_fence IS NOT NULL THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'recovery_archive_archive_object_shape_invalid';
         END IF;
       END IF;
 

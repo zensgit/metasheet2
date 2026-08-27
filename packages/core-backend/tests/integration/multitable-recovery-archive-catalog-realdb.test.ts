@@ -1685,10 +1685,21 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(archiveBuildingCrossPair.message).toBe('recovery_archive_attachment_posture_invalid')
 
+    const invalidAvailabilityId = `${PREFIX}_invalid_availability`
+    const invalidAvailabilityValue = 'hash_mismatch'
     const invalidAvailability = await errorOf(
-      insertAttachmentRef(building.generationId, { availability: 'hash_mismatch' }),
+      insertAttachmentRef(building.generationId, {
+        attachmentId: invalidAvailabilityId,
+        availability: invalidAvailabilityValue,
+      }),
     )
-    expect(invalidAvailability.message).toContain('chk_meta_recovery_archive_attachment_availability')
+    expect(invalidAvailability.message).toBe('recovery_archive_source_pin_shape_invalid')
+    expectValuesFree(invalidAvailability, [
+      building.generationId,
+      invalidAvailabilityId,
+      invalidAvailabilityValue,
+      OWNER,
+    ])
 
     for (const availability of RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY) {
       await insertAttachmentRef(building.generationId, {
