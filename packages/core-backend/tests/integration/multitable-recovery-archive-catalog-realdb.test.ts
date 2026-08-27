@@ -9,6 +9,7 @@ import * as stagingCleanupMigration from '../../src/db/migrations/zzzz2026082612
 import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
+import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
@@ -76,6 +77,7 @@ const FUNCTIONS = [
   'meta_recovery_archive_attachment_ref_cleanup_guard_row',
   'meta_recovery_archive_attachment_cleanup_finalize_guard_row',
   'meta_recovery_archive_release_abandoned_source_pin',
+  'meta_recovery_archive_attachment_authority_guard_row',
 ] as const
 
 const INDEXES = [
@@ -252,18 +254,53 @@ async function insertAttachmentRef(
   }> = {},
 ): Promise<string> {
   const attachmentId = overrides.attachmentId ?? `${PREFIX}_attachment_${randomUUID()}`
+  const referenceClass = overrides.referenceClass ?? 'source'
+  const referenceState = overrides.referenceState ?? 'building'
+  const availability = overrides.availability ?? 'available'
+  const contentSha256 = overrides.contentSha256 === undefined
+    ? ATTACHMENT_HASH
+    : overrides.contentSha256
+
+  if (referenceClass === 'source') {
+    await q(
+      `INSERT INTO meta_recovery_archive_attachment_refs (
+         generation_id, attachment_id, reference_class, reference_state,
+         availability, content_sha256,
+         source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
+       )
+       SELECT archive.generation_id, $2, 'source', $3, 'mutable', NULL,
+              archive.owner_kind, archive.owner_id, archive.owner_fence, archive.lease_expires_at
+         FROM meta_recovery_archives archive
+        WHERE archive.generation_id=$1::uuid`,
+      [generationId, attachmentId, referenceState],
+    )
+    if (availability !== 'mutable') {
+      await q(
+        `UPDATE meta_recovery_archive_attachment_refs
+            SET availability=$3,
+                content_sha256=$4,
+                immutable_version=CASE WHEN $3='available' THEN $5 ELSE NULL END,
+                content_size_bytes=CASE WHEN $3='available' THEN 1 ELSE NULL END
+          WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
+        [generationId, attachmentId, availability, contentSha256, `${PREFIX}_source_version`],
+      )
+    }
+    return attachmentId
+  }
+
   await q(
     `INSERT INTO meta_recovery_archive_attachment_refs (
        generation_id, attachment_id, reference_class, reference_state,
-       availability, content_sha256
-     ) VALUES ($1::uuid, $2, $3, $4, $5, $6)`,
+       availability, content_sha256, immutable_version, content_size_bytes
+     ) VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, 1)`,
     [
       generationId,
       attachmentId,
-      overrides.referenceClass ?? 'source',
-      overrides.referenceState ?? 'building',
-      overrides.availability ?? 'available',
-      overrides.contentSha256 === undefined ? ATTACHMENT_HASH : overrides.contentSha256,
+      referenceClass,
+      referenceState,
+      availability,
+      contentSha256,
+      `${PREFIX}_archive_version`,
     ],
   )
   return attachmentId
@@ -463,10 +500,22 @@ async function installCatalogIfAbsent(): Promise<void> {
      ) AS present`,
   )
   if (!bindingPresent.rows[0]?.present) await coverageBindingMigration.up(db)
+
+  const sourcePinAuthorityPresent = await q(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM information_schema.columns
+        WHERE table_schema='public'
+          AND table_name='meta_recovery_archive_attachment_refs'
+          AND column_name='source_owner_kind'
+     ) AS present`,
+  )
+  if (!sourcePinAuthorityPresent.rows[0]?.present) await sourcePinAuthorityMigration.up(db)
   schemaIsUp = true
 }
 
 async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
+  await sourcePinAuthorityMigration.down(target)
   await snapshotReservationMigration.down(target)
   await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
@@ -478,6 +527,7 @@ async function upCatalogStack(target: Kysely<unknown>): Promise<void> {
   await stagingCleanupMigration.up(target)
   await coverageBindingMigration.up(target)
   await snapshotReservationMigration.up(target)
+  await sourcePinAuthorityMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -1285,10 +1335,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
 
     await q(
       `UPDATE meta_recovery_archive_attachment_refs
-          SET availability='available'
+          SET availability='available',
+              immutable_version=$3,
+              content_size_bytes=1
         WHERE generation_id=$1::uuid AND attachment_id=$2
           AND reference_class='source' AND reference_state='building'`,
-      [archive.generationId, attachmentId],
+      [archive.generationId, attachmentId, `${PREFIX}_source_version`],
     )
     const mutableSource = await q(
       `SELECT availability
@@ -1345,9 +1397,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       await client.query(
         `INSERT INTO meta_recovery_archive_attachment_refs (
            generation_id, attachment_id, reference_class, reference_state,
-           availability, content_sha256
-         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-        [archive.generationId, attachmentId, ATTACHMENT_HASH],
+           availability, content_sha256, immutable_version, content_size_bytes
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+        [archive.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
       )
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
@@ -1461,9 +1513,14 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
             await client.query(
               `INSERT INTO meta_recovery_archive_attachment_refs (
                  generation_id, attachment_id, reference_class, reference_state,
-                 availability, content_sha256
-               ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-              [archive.generationId, attachmentId, invalidSource.archiveHash],
+                 availability, content_sha256, immutable_version, content_size_bytes
+               ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+              [
+                archive.generationId,
+                attachmentId,
+                invalidSource.archiveHash,
+                `${PREFIX}_archive_version`,
+              ],
             )
             throw new Error('recovery_archive_attachment_source_validation_missing')
           })(),
@@ -1476,7 +1533,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     }
   })
 
-  test('source release rechecks availability and hash after an archive ref is minted', async () => {
+  test('verified source refuses availability and hash rewrites after an archive ref is minted', async () => {
     for (const mutation of [
       { column: 'availability', value: 'drifted' },
       { column: 'content_sha256', value: '6'.repeat(64) },
@@ -1489,26 +1546,41 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         await client.query(
           `INSERT INTO meta_recovery_archive_attachment_refs (
              generation_id, attachment_id, reference_class, reference_state,
-             availability, content_sha256
-           ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-          [archive.generationId, attachmentId, ATTACHMENT_HASH],
+             availability, content_sha256, immutable_version, content_size_bytes
+           ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+          [archive.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
         )
-        await client.query(
-          `UPDATE meta_recovery_archive_attachment_refs
-              SET ${mutation.column}=$3
-            WHERE generation_id=$1::uuid AND attachment_id=$2
-              AND reference_class='source' AND reference_state='building'`,
-          [archive.generationId, attachmentId, mutation.value],
-        )
+        await client.query('SAVEPOINT before_source_mutation')
         const refusal = await errorOf(
           client.query(
-            `DELETE FROM meta_recovery_archive_attachment_refs
+            `UPDATE meta_recovery_archive_attachment_refs
+                SET ${mutation.column}=$3
               WHERE generation_id=$1::uuid AND attachment_id=$2
                 AND reference_class='source' AND reference_state='building'`,
-            [archive.generationId, attachmentId],
+            [archive.generationId, attachmentId, mutation.value],
           ),
         )
-        expect(refusal.message).toBe('recovery_archive_attachment_posture_invalid')
+        expect(refusal.message).toBe('recovery_archive_source_pin_verified_immutable')
+        await client.query('ROLLBACK TO SAVEPOINT before_source_mutation')
+        const retained = await client.query(
+          `SELECT reference_class, availability, content_sha256
+             FROM meta_recovery_archive_attachment_refs
+            WHERE generation_id=$1::uuid AND attachment_id=$2
+            ORDER BY reference_class`,
+          [archive.generationId, attachmentId],
+        )
+        expect(retained.rows).toEqual([
+          {
+            reference_class: 'archive_object',
+            availability: 'available',
+            content_sha256: ATTACHMENT_HASH,
+          },
+          {
+            reference_class: 'source',
+            availability: 'available',
+            content_sha256: ATTACHMENT_HASH,
+          },
+        ])
       } finally {
         await client.query('ROLLBACK').catch(() => {})
         client.release()
@@ -1525,9 +1597,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       await client.query(
         `INSERT INTO meta_recovery_archive_attachment_refs (
            generation_id, attachment_id, reference_class, reference_state,
-           availability, content_sha256
-         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-        [archive.generationId, attachmentId, ATTACHMENT_HASH],
+           availability, content_sha256, immutable_version, content_size_bytes
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+        [archive.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
       )
       const refusal = await errorOf(client.query('COMMIT'))
       expect(refusal.message).toBe('recovery_archive_attachment_finalize_not_atomic')
@@ -1656,9 +1728,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       await client.query(
         `INSERT INTO meta_recovery_archive_attachment_refs (
            generation_id, attachment_id, reference_class, reference_state,
-           availability, content_sha256
-         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-        [verified.generationId, attachmentId, ATTACHMENT_HASH],
+           availability, content_sha256, immutable_version, content_size_bytes
+         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+        [verified.generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
       )
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
@@ -1770,7 +1842,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => downCatalogStack(trx)),
     )
-    expect(refusal.message).toBe('recovery_archive_catalog_nonempty')
+    expect(refusal.message).toBe('recovery_archive_source_pin_authority_nonempty')
     expectValuesFree(refusal, [WORKSPACE, BASE, SHEET, OWNER])
     expect(await catalogSurface()).toEqual({
       tables: [...TABLES].sort(),

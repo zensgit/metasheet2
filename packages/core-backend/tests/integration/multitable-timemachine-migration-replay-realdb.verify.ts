@@ -23,6 +23,7 @@ import * as archiveWriterBlock from '../../src/db/migrations/zzzz20260826123000_
 import * as coverageBinding from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 import * as snapshotReservations from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import * as archiveKeyRegistry from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
+import * as sourcePinAuthority from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -144,6 +145,10 @@ const MIGRATIONS: NamedMigration[] = [
   {
     name: 'zzzz20260828121000_add_recovery_archive_key_registry',
     module: archiveKeyRegistry,
+  },
+  {
+    name: 'zzzz20260828124000_add_recovery_archive_source_pin_authority',
+    module: sourcePinAuthority,
   },
 ]
 

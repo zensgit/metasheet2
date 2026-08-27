@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
+import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import {
   cleanupOrphanMultitableAttachments,
   sweepMultitableAttachmentBlobPurge,
@@ -172,9 +173,14 @@ async function insertSourcePin(generationId: string, attachmentId: string): Prom
   await q(
     `INSERT INTO meta_recovery_archive_attachment_refs (
        generation_id, attachment_id, reference_class, reference_state,
-       availability, content_sha256
-     ) VALUES ($1::uuid, $2, 'source', 'building', 'available', $3)`,
-    [generationId, attachmentId, ATTACHMENT_HASH],
+       availability, content_sha256,
+       source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
+     )
+     SELECT archive.generation_id, $2, 'source', 'building', 'mutable', NULL,
+            archive.owner_kind, archive.owner_id, archive.owner_fence, archive.lease_expires_at
+       FROM meta_recovery_archives archive
+      WHERE archive.generation_id=$1::uuid`,
+    [generationId, attachmentId],
   )
 }
 
@@ -931,23 +937,31 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     const attachmentId = `${PREFIX}_attachment_archive_ref`
     await insertSourcePin(generationId, attachmentId)
     const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
-    await q(
-      `ALTER TABLE meta_recovery_archive_attachment_refs
-         DISABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row`,
-    )
-    try {
-      await q(
-        `INSERT INTO meta_recovery_archive_attachment_refs (
-           generation_id, attachment_id, reference_class, reference_state,
-           availability, content_sha256
-         ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3)`,
-        [generationId, attachmentId, ATTACHMENT_HASH],
-      )
-    } finally {
       await q(
         `ALTER TABLE meta_recovery_archive_attachment_refs
-           ENABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row`,
+           DISABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row;
+         ALTER TABLE meta_recovery_archive_attachment_refs
+           DISABLE TRIGGER trg_meta_recovery_archive_attachment_ref_guard_row;
+         ALTER TABLE meta_recovery_archive_attachment_refs
+           DISABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row`,
       )
+      try {
+        await q(
+          `INSERT INTO meta_recovery_archive_attachment_refs (
+             generation_id, attachment_id, reference_class, reference_state,
+             availability, content_sha256, immutable_version, content_size_bytes
+           ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
+          [generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
+        )
+      } finally {
+        await q(
+          `ALTER TABLE meta_recovery_archive_attachment_refs
+             ENABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row;
+           ALTER TABLE meta_recovery_archive_attachment_refs
+             ENABLE TRIGGER trg_meta_recovery_archive_attachment_ref_guard_row;
+           ALTER TABLE meta_recovery_archive_attachment_refs
+             ENABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row`,
+        )
     }
     await abandon(generationId)
     await claimCleanup(generationId)
@@ -973,6 +987,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     expect(refusal.message).toBe('recovery_archive_staging_cleanup_nonempty')
 
     await truncateCatalog()
+    await sourcePinAuthorityMigration.down(db)
     await stagingCleanupMigration.down(db)
     schemaIsUp = false
     const absent = await q(
@@ -988,6 +1003,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     expect(absent.rows).toEqual([{ staging_absent: true, cleanup_column_absent: true }])
 
     await stagingCleanupMigration.up(db)
+    await sourcePinAuthorityMigration.up(db)
     schemaIsUp = true
     const restored = await q(
       `SELECT
