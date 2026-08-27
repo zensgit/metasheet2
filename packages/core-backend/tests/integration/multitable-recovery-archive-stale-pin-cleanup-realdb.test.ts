@@ -160,6 +160,28 @@ async function insertArchive(leaseExpiresAt = FUTURE_LEASE): Promise<string> {
   return generationId
 }
 
+async function insertExpiringArchive(): Promise<string> {
+  const lease = await q(
+    `SELECT (clock_timestamp() + interval '250 milliseconds')::text AS lease_until`,
+  )
+  return insertArchive(String(lease.rows[0]?.lease_until))
+}
+
+async function waitForArchiveLeaseExpiry(generationId: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    const result = await q(
+      `SELECT lease_expires_at <= clock_timestamp() AS expired
+         FROM meta_recovery_archives
+        WHERE generation_id=$1::uuid`,
+      [generationId],
+    )
+    if (result.rows[0]?.expired === true) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error('recovery_archive_cleanup_fixture_lease_expiry_timeout')
+}
+
 async function abandon(generationId: string): Promise<void> {
   await q(
     `UPDATE meta_recovery_archives
@@ -792,10 +814,11 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   test('cleanup refuses a missing inventory proof and any generation-wide nonterminal object', async () => {
-    const missingGenerationId = await insertArchive(EXPIRED_LEASE)
+    const missingGenerationId = await insertExpiringArchive()
     const missingAttachmentId = `${PREFIX}_attachment_inventory_missing`
     await insertSourcePin(missingGenerationId, missingAttachmentId)
     await abandon(missingGenerationId)
+    await waitForArchiveLeaseExpiry(missingGenerationId)
     await claimCleanup(missingGenerationId)
 
     const missingInventory = await errorOf(
@@ -808,7 +831,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     )
     expect(missingInventory.message).toBe('recovery_archive_attachment_cleanup_authorization_invalid')
 
-    const generationId = await insertArchive(EXPIRED_LEASE)
+    const generationId = await insertExpiringArchive()
     const attachmentId = `${PREFIX}_attachment_inventory_nonterminal`
     await insertSourcePin(generationId, attachmentId)
     const attachmentStaging = await insertStagingAttachment(generationId, attachmentId)
@@ -817,6 +840,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       `${attachmentId}_sibling`,
     )
     await abandon(generationId)
+    await waitForArchiveLeaseExpiry(generationId)
     await claimCleanup(generationId)
     await finishStagingObject(generationId, attachmentStaging)
 
@@ -862,11 +886,12 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   test('a cleanup authorization cannot survive commit without consuming its exact source pin', async () => {
-    const generationId = await insertArchive(EXPIRED_LEASE)
+    const generationId = await insertExpiringArchive()
     const attachmentId = `${PREFIX}_attachment_unconsumed`
     await insertSourcePin(generationId, attachmentId)
     const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
     await abandon(generationId)
+    await waitForArchiveLeaseExpiry(generationId)
     await claimCleanup(generationId)
     await finishStagingObject(generationId, stagingObjectId)
 
@@ -896,8 +921,8 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   test('the current owner can consume one source pin without touching another generation', async () => {
-    const generationId = await insertArchive(EXPIRED_LEASE)
-    const otherGenerationId = await insertArchive(EXPIRED_LEASE)
+    const generationId = await insertExpiringArchive()
+    const otherGenerationId = await insertExpiringArchive()
     const attachmentId = `${PREFIX}_attachment_success`
     await insertSourcePin(generationId, attachmentId)
     await insertSourcePin(otherGenerationId, attachmentId)
@@ -905,6 +930,8 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     const otherStagingObjectId = await insertStagingAttachment(otherGenerationId, attachmentId)
     await abandon(generationId)
     await abandon(otherGenerationId)
+    await waitForArchiveLeaseExpiry(generationId)
+    await waitForArchiveLeaseExpiry(otherGenerationId)
     await claimCleanup(generationId)
     await claimCleanup(otherGenerationId)
     await finishStagingObject(generationId, stagingObjectId)
@@ -933,7 +960,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   test('archive-object presence blocks abandoned source-pin cleanup', async () => {
-    const generationId = await insertArchive(EXPIRED_LEASE)
+    const generationId = await insertExpiringArchive()
     const attachmentId = `${PREFIX}_attachment_archive_ref`
     await insertSourcePin(generationId, attachmentId)
     const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
@@ -964,6 +991,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
         )
     }
     await abandon(generationId)
+    await waitForArchiveLeaseExpiry(generationId)
     await claimCleanup(generationId)
     await finishStagingObject(generationId, stagingObjectId)
 

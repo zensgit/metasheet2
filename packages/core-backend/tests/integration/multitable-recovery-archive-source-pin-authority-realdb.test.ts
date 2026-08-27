@@ -273,6 +273,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
     await installIfAbsent()
     await truncateCatalog()
+    await q('INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)', [KEY_ID])
     await q('INSERT INTO meta_bases (id, name, workspace_id) VALUES ($1, $2, $3)', [
       BASE,
       `${PREFIX} Base`,
@@ -307,6 +308,12 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       ]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id=$1', [SHEET]).catch(() => {})
       await q('DELETE FROM meta_bases WHERE id=$1', [BASE]).catch(() => {})
+      await transaction(async ({ query }) => {
+        await query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+        await query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+        await query('DELETE FROM meta_recovery_archive_keys WHERE key_id=$1', [KEY_ID])
+        await query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+      })
     } finally {
       await db.destroy()
     }
