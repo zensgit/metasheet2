@@ -63,6 +63,15 @@ export type RecordLinkRestoreFencePlan = {
   participantSheetIds: string[]
 }
 
+export type FieldLinkRestoreFencePlan = {
+  sourceSheetId: string
+  fieldId: string
+  deleteRevisionId: string
+  configuredTargetSheetId: string | null
+  allowedTargetSheetIds: string[]
+  participantSheetIds: string[]
+}
+
 export type LinkWriterFenceFieldGuard = {
   type?: unknown
   link?: { foreignSheetId?: unknown } | null
@@ -444,6 +453,130 @@ export async function assertRecordLinkRestoreTargetsLive(
       throw new RecordLinkFencePlanChangedError()
     }
   }
+}
+
+type FieldLinkRestoreParticipantRow = {
+  source_sheet_id: unknown
+  target_sheet_id: unknown
+}
+
+async function loadFieldLinkRestoreParticipantRows(
+  query: FenceQuery,
+  deleteRevisionId: string,
+  fieldId: string,
+): Promise<FieldLinkRestoreParticipantRow[]> {
+  const result = await query(
+    `SELECT source_record.sheet_id AS source_sheet_id,
+            target_record.sheet_id AS target_sheet_id
+       FROM meta_link_tombstones tombstone
+       LEFT JOIN meta_records source_record ON source_record.id = tombstone.record_id
+       LEFT JOIN meta_records target_record ON target_record.id = tombstone.foreign_record_id
+      WHERE tombstone.source_revision_id = $1
+        AND tombstone.field_id = $2
+        AND tombstone.reason = 'field_delete'`,
+    [deleteRevisionId, fieldId],
+  )
+  return result.rows as FieldLinkRestoreParticipantRow[]
+}
+
+function inspectFieldLinkRestoreParticipants(
+  rows: readonly FieldLinkRestoreParticipantRow[],
+  input: {
+    sourceSheetId: string
+    configuredTargetSheetId: string | null
+    allowedTargetSheetIds?: ReadonlySet<string>
+  },
+): { alivePairCount: number; targetSheetIds: string[] } {
+  const targetSheetIds = new Set<string>()
+  let alivePairCount = 0
+  for (const row of rows) {
+    const sourceSheetId = typeof row.source_sheet_id === 'string' ? row.source_sheet_id : null
+    const targetSheetId = typeof row.target_sheet_id === 'string' ? row.target_sheet_id : null
+    if (sourceSheetId !== null && sourceSheetId !== input.sourceSheetId) {
+      throw new LinkWriterFencePlanChangedError()
+    }
+    if (targetSheetId !== null) {
+      if (input.configuredTargetSheetId !== null && targetSheetId !== input.configuredTargetSheetId) {
+        throw new LinkWriterFencePlanChangedError()
+      }
+      if (input.allowedTargetSheetIds && !input.allowedTargetSheetIds.has(targetSheetId)) {
+        throw new LinkWriterFencePlanChangedError()
+      }
+      targetSheetIds.add(targetSheetId)
+    }
+    if (sourceSheetId !== null && targetSheetId !== null) alivePairCount += 1
+  }
+  return { alivePairCount, targetSheetIds: [...targetSheetIds].sort() }
+}
+
+/**
+ * Flag-on preflight for field undelete link rehydration. The deleted definition supplies the configured target;
+ * legacy unconfigured link fields fall back to the live tombstone endpoint owners. Flag off returns before querying.
+ */
+export async function prepareFieldLinkRestoreFencePlan(
+  query: FenceQuery,
+  input: {
+    sourceSheetId: string
+    fieldId: string
+    before: Record<string, unknown>
+    deleteRevisionId: string | null
+  },
+): Promise<FieldLinkRestoreFencePlan | null> {
+  if (!isWriterFenceEnabled() || input.before.type !== 'link' || !input.deleteRevisionId) return null
+  const foreign = resolveForeignSheetId(input.before.property)
+  if (foreign.kind === 'ambiguous') throw new LinkWriterFencePlanChangedError()
+  const configuredTargetSheetId = foreign.kind === 'resolved' ? foreign.sheetId : null
+  const rows = await loadFieldLinkRestoreParticipantRows(query, input.deleteRevisionId, input.fieldId)
+  const inspected = inspectFieldLinkRestoreParticipants(rows, {
+    sourceSheetId: input.sourceSheetId,
+    configuredTargetSheetId,
+  })
+  const allowedTargetSheetIds = configuredTargetSheetId === null
+    ? inspected.targetSheetIds
+    : [configuredTargetSheetId]
+  return {
+    sourceSheetId: input.sourceSheetId,
+    fieldId: input.fieldId,
+    deleteRevisionId: input.deleteRevisionId,
+    configuredTargetSheetId,
+    allowedTargetSheetIds,
+    participantSheetIds: [...new Set([input.sourceSheetId, ...allowedTargetSheetIds])].sort(),
+  }
+}
+
+/** Acquire every planned sheet fence before locking the capture and endpoint rows. A new owner sheet fails before
+ * any unplanned row lock; NOWAIT converts an in-flight prune/move/delete into a retryable plan conflict. */
+export async function enterFieldLinkRestoreFencePlan(
+  query: FenceQuery,
+  plan: FieldLinkRestoreFencePlan,
+): Promise<void> {
+  await fenceWriterEntriesInOrder(query, plan.participantSheetIds)
+  const rows = await loadFieldLinkRestoreParticipantRows(query, plan.deleteRevisionId, plan.fieldId)
+  const inspected = inspectFieldLinkRestoreParticipants(rows, {
+    sourceSheetId: plan.sourceSheetId,
+    configuredTargetSheetId: plan.configuredTargetSheetId,
+    allowedTargetSheetIds: new Set(plan.allowedTargetSheetIds),
+  })
+  let locked: Awaited<ReturnType<FenceQuery>>
+  try {
+    locked = await query(
+      `SELECT tombstone.record_id, tombstone.foreign_record_id
+         FROM meta_link_tombstones tombstone
+         JOIN meta_records source_record ON source_record.id = tombstone.record_id
+         JOIN meta_records target_record ON target_record.id = tombstone.foreign_record_id
+        WHERE tombstone.source_revision_id = $1
+          AND tombstone.field_id = $2
+          AND tombstone.reason = 'field_delete'
+          AND source_record.sheet_id = $3
+          AND target_record.sheet_id = ANY($4::text[])
+        FOR SHARE OF tombstone, source_record, target_record NOWAIT`,
+      [plan.deleteRevisionId, plan.fieldId, plan.sourceSheetId, plan.allowedTargetSheetIds],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new LinkWriterFencePlanChangedError()
+    throw error
+  }
+  if (locked.rows.length !== inspected.alivePairCount) throw new LinkWriterFencePlanChangedError()
 }
 
 async function loadRecordLinkParticipantSheetIds(

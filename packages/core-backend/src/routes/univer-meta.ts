@@ -281,9 +281,12 @@ import {
 } from '../multitable/canonical-sheet-fence'
 import {
   assertLinkWriterFencePlanMatchesFieldGuards,
+  enterFieldLinkRestoreFencePlan,
   enterLinkWriterFencePlan,
   LinkWriterFencePlanChangedError,
+  prepareFieldLinkRestoreFencePlan,
   prepareLinkWriterFencePlan,
+  type FieldLinkRestoreFencePlan,
 } from '../multitable/link-writer-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
@@ -6672,6 +6675,7 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
   /** The field-delete revision's own id (`rev.id` at the undelete-execute call site) — scopes which
    * tombstone rows (if any) belong to THIS delete cycle, not a stray earlier/later capture for the same id. */
   deleteRevisionId?: string | null
+  linkFencePlan?: FieldLinkRestoreFencePlan | null
 }): Promise<void> {
   const { sheetId, fieldId, before, actorId } = opts
   const name = String(before.name ?? '')
@@ -6777,6 +6781,13 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
     // random `id` only), so a repeat rehydration would silently duplicate edges. Guard with NOT
     // EXISTS, mirroring the value-side `NOT (m.data ? $3)` guard. Unreachable in current flows
     // (rehydration runs only after the edges are gone) but load-bearing once 4c-3 replays inbound edges.
+    const linkFenceGuard = opts.linkFencePlan
+      ? `AND r1.sheet_id = $3
+         AND r2.sheet_id = ANY($4::text[])`
+      : ''
+    const linkFenceParams = opts.linkFencePlan
+      ? [deleteRevisionId, fieldId, opts.linkFencePlan.sourceSheetId, opts.linkFencePlan.allowedTargetSheetIds]
+      : [deleteRevisionId, fieldId]
     await query(
       `INSERT INTO meta_links (field_id, record_id, foreign_record_id)
        SELECT t.field_id, t.record_id, t.foreign_record_id
@@ -6784,13 +6795,14 @@ async function recreateFieldFromConfig(query: TxnQuery, opts: {
        JOIN meta_records r1 ON r1.id = t.record_id
        JOIN meta_records r2 ON r2.id = t.foreign_record_id
        WHERE t.source_revision_id = $1 AND t.field_id = $2 AND t.reason = 'field_delete'
+         ${linkFenceGuard}
          AND NOT EXISTS (
            SELECT 1 FROM meta_links ml
            WHERE ml.field_id = t.field_id
              AND ml.record_id = t.record_id
              AND ml.foreign_record_id = t.foreign_record_id
          )`,
-      [deleteRevisionId, fieldId],
+      linkFenceParams,
     )
     // Auto-number sequence: only for an autoNumber field whose delete revision carried a captured lastValue.
     const lastValue = (before as { lastValue?: unknown }).lastValue
@@ -9137,6 +9149,14 @@ export function univerMetaRouter(): Router {
         if (confirm.trim() !== 'undelete') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "undelete" to confirm recreating the deleted entity.' } })
         const before = (rev.before ?? {}) as Record<string, unknown>
         const undeleteSheetId = String(rev.sheet_id)
+        const fieldLinkFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkRestoreFencePlan(pool.query.bind(pool), {
+              sourceSheetId: undeleteSheetId,
+              fieldId: rev.entity_id,
+              before,
+              deleteRevisionId: rev.id,
+            })
+          : null
         let failure: { status: number; code: string; message: string } | null = null
         try {
           failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
@@ -9144,7 +9164,8 @@ export function univerMetaRouter(): Router {
             // undelete, `recreateFieldFromConfig` below re-materializes the field's cells across this sheet's
             // `meta_records`, so this txn is a record writer: take the canonical fence first, then refuse (409
             // in the outer catch) under an active recovery block. Flag-off ⇒ no-op / byte-identical.
-            await fenceWriterEntry(query, sheetId)
+            if (fieldLinkFencePlan) await enterFieldLinkRestoreFencePlan(query, fieldLinkFencePlan)
+            else await fenceWriterEntry(query, sheetId)
             // U4-L5 id-occupied check (FOR UPDATE) — also the idempotency guard: undelete when the entity already exists → reject.
             const table = rev.entity_type === 'field' ? 'meta_fields' : 'meta_views'
             const occ = (await query(`SELECT 1 FROM ${table} WHERE id = $1 FOR UPDATE`, [rev.entity_id])) as any
@@ -9161,7 +9182,16 @@ export function univerMetaRouter(): Router {
               return { status: 401, code: 'PREVIEW_IDENTITY_INVALID', message: 'A valid server-minted preview identity is required; preview before undeleting.' }
             }
             if (rev.entity_type === 'field') {
-              await recreateFieldFromConfig(query, { sheetId: undeleteSheetId, fieldId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id, deleteRevisionId: rev.id })
+              await recreateFieldFromConfig(query, {
+                sheetId: undeleteSheetId,
+                fieldId: rev.entity_id,
+                before,
+                actorId: getRequestActorId(req),
+                source: 'restore',
+                restoredFromId: rev.id,
+                deleteRevisionId: rev.id,
+                linkFencePlan: fieldLinkFencePlan,
+              })
             } else {
               await recreateViewFromConfig(query, { sheetId: undeleteSheetId, viewId: rev.entity_id, before, actorId: getRequestActorId(req), source: 'restore', restoredFromId: rev.id })
             }
@@ -9371,9 +9401,8 @@ export function univerMetaRouter(): Router {
       // W0-1 L4cov / D-H1: a fenced config-restore branch (uncreate / undelete / lossy retype-revert /
       // generic applyConfigRevert) observed a durable recovery writer-block → refuse with the same
       // 409 RECOVERY_IN_PROGRESS shape as reset/revert.
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof TombstoneCaptureCapExceededError) {
         return res.status(422).json({ ok: false, error: { code: 'TOMBSTONE_CAPTURE_CAP_EXCEEDED', message: err.message } })
       }
