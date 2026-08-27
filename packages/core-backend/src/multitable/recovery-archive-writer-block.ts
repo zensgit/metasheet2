@@ -29,6 +29,18 @@ export type ArchiveWriterBlockClaimInput = {
 
 export type ArchiveWriterBlockCurrentInput = ArchiveWriterBlockSnapshot
 
+const preparedArchiveWriterBlockBrand: unique symbol = Symbol(
+  'PreparedArchiveWriterBlockTransaction',
+)
+const preparedArchiveWriterBlockTransactions = new WeakSet<object>()
+
+export type PreparedArchiveWriterBlockTransaction = {
+  readonly [preparedArchiveWriterBlockBrand]: typeof preparedArchiveWriterBlockBrand
+  readonly query: FenceQuery
+  readonly sheetId: string
+  readonly xid: string
+}
+
 export type ArchiveWriterBlockErrorCode =
   | 'ARCHIVE_WRITER_BLOCK_DISABLED'
   | 'ARCHIVE_WRITER_BLOCK_INVALID_INPUT'
@@ -148,7 +160,19 @@ export const ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL = `SELECT
   pg_current_xact_id()::text AS xid,
   current_setting('transaction_isolation') AS isolation`
 
-const ARCHIVE_WRITER_BLOCK_SAME_XID_SQL = 'SELECT pg_current_xact_id()::text AS xid'
+export const ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL = `SELECT
+  pg_current_xact_id()::text AS xid,
+  EXISTS (
+    SELECT 1
+      FROM pg_catalog.pg_locks held_lock
+     WHERE held_lock.locktype = 'advisory'
+       AND held_lock.pid = pg_catalog.pg_backend_pid()
+       AND held_lock.mode = 'ExclusiveLock'
+       AND held_lock.granted
+       AND held_lock.objsubid = 1
+       AND held_lock.classid::bigint = ((hashtext($1)::bigint >> 32) & 4294967295)
+       AND held_lock.objid::bigint = (hashtext($1)::bigint & 4294967295)
+  ) AS fence_held`
 
 export const ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL = `UPDATE public.meta_sheets
    SET recovery_writer_state = 'archiving',
@@ -301,7 +325,40 @@ export async function readArchiveWriterBlockSchemaFingerprint(
   )
 }
 
-async function prepareTransaction(query: FenceQuery, sheetId: string): Promise<void> {
+async function requirePreparedTransaction(
+  query: FenceQuery,
+  xid: string,
+  sheetId: string,
+): Promise<void> {
+  const result = await query(ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL, [
+    canonicalSheetFenceKey(sheetId),
+  ])
+  const row = result.rows[0] as { xid?: unknown; fence_held?: unknown } | undefined
+  if (row?.xid !== xid || row.fence_held !== true) {
+    throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION')
+  }
+}
+
+function readPreparedArchiveWriterBlockTransaction(
+  token: PreparedArchiveWriterBlockTransaction,
+): PreparedArchiveWriterBlockTransaction {
+  if (
+    typeof token !== 'object'
+    || token === null
+    || !preparedArchiveWriterBlockTransactions.has(token)
+    || token[preparedArchiveWriterBlockBrand] !== preparedArchiveWriterBlockBrand
+    || typeof token.query !== 'function'
+    || typeof token.sheetId !== 'string'
+    || token.sheetId.trim().length === 0
+    || typeof token.xid !== 'string'
+    || token.xid.length === 0
+  ) {
+    throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION')
+  }
+  return token
+}
+
+async function prepareTransaction(query: FenceQuery, sheetId: string): Promise<string> {
   const prelude = await query(ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL, [
     canonicalSheetFenceKey(sheetId),
   ])
@@ -312,13 +369,81 @@ async function prepareTransaction(query: FenceQuery, sheetId: string): Promise<v
   if (typeof row.xid !== 'string' || row.xid.length === 0) {
     throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION')
   }
-  const sameXid = await query(ARCHIVE_WRITER_BLOCK_SAME_XID_SQL)
-  if ((sameXid.rows[0] as { xid?: unknown } | undefined)?.xid !== row.xid) {
-    throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION')
-  }
+  await requirePreparedTransaction(query, row.xid, sheetId)
   if ((await readArchiveWriterBlockSchemaFingerprint(query)) !== ARCHIVE_WRITER_BLOCK_SCHEMA_FINGERPRINT) {
     throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_SCHEMA_DRIFT')
   }
+  return row.xid
+}
+
+/**
+ * Acquire the canonical fence and mint an unforgeable token bound to this query/xid/sheet.
+ * There is no production caller in this slice; D-H2 will later insert caller-owned work
+ * between this prelude and the prepared claim.
+ */
+export async function prepareArchiveWriterBlockTransaction(
+  query: FenceQuery,
+  sheetIdInput: string,
+): Promise<PreparedArchiveWriterBlockTransaction> {
+  assertArchiveWriterBlockEnabled()
+  const sheetId = requireOpaque(sheetIdInput)
+  const xid = await prepareTransaction(query, sheetId)
+  const token: PreparedArchiveWriterBlockTransaction = {
+    [preparedArchiveWriterBlockBrand]: preparedArchiveWriterBlockBrand,
+    query,
+    sheetId,
+    xid,
+  }
+  preparedArchiveWriterBlockTransactions.add(token)
+  Object.freeze(token)
+  return token
+}
+
+async function casArchiveWriterBlockClaim(
+  query: FenceQuery,
+  sheetId: string,
+  ownerKind: ArchiveWriterBlockOwnerKind,
+  ownerId: string,
+  leaseUntil: string,
+  previous: ArchiveWriterBlockSnapshot | undefined,
+): Promise<ArchiveWriterBlockSnapshot> {
+  const result = previous
+    ? await query(ARCHIVE_WRITER_BLOCK_TAKEOVER_SQL, [
+        sheetId,
+        ownerKind,
+        ownerId,
+        leaseUntil,
+        previous.ownerKind,
+        previous.ownerId,
+        previous.fence,
+        previous.leaseUntil,
+        previous.updatedAt,
+      ])
+    : await query(ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL, [sheetId, ownerKind, ownerId, leaseUntil])
+  const snapshot = snapshotFromRow(result.rows[0])
+  if (!snapshot) throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_CLAIM_CONFLICT')
+  return snapshot
+}
+
+export async function claimArchiveWriterBlockPrepared(
+  prepared: PreparedArchiveWriterBlockTransaction,
+  input: ArchiveWriterBlockClaimInput,
+): Promise<ArchiveWriterBlockSnapshot> {
+  const token = readPreparedArchiveWriterBlockTransaction(prepared)
+  assertArchiveWriterBlockEnabled()
+  const ownerKind = requireOwnerKind(input?.ownerKind)
+  const ownerId = requireOpaque(input?.ownerId)
+  const leaseUntil = requireTimestamp(input?.leaseUntil)
+  const previous = input.previous ? validateSnapshot(input.previous) : undefined
+  await requirePreparedTransaction(token.query, token.xid, token.sheetId)
+  return casArchiveWriterBlockClaim(
+    token.query,
+    token.sheetId,
+    ownerKind,
+    ownerId,
+    leaseUntil,
+    previous,
+  )
 }
 
 async function runPrepared<T>(
@@ -348,23 +473,14 @@ export async function claimArchiveWriterBlock(
   const leaseUntil = requireTimestamp(input?.leaseUntil)
   const previous = input.previous ? validateSnapshot(input.previous) : undefined
 
-  return runPrepared(runner, sheetId, async (query) => {
-    const result = previous
-      ? await query(ARCHIVE_WRITER_BLOCK_TAKEOVER_SQL, [
-          sheetId,
-          ownerKind,
-          ownerId,
-          leaseUntil,
-          previous.ownerKind,
-          previous.ownerId,
-          previous.fence,
-          previous.leaseUntil,
-          previous.updatedAt,
-        ])
-      : await query(ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL, [sheetId, ownerKind, ownerId, leaseUntil])
-    const snapshot = snapshotFromRow(result.rows[0])
-    if (!snapshot) throw new ArchiveWriterBlockError('ARCHIVE_WRITER_BLOCK_CLAIM_CONFLICT')
-    return snapshot
+  return runner(async (query) => {
+    const prepared = await prepareArchiveWriterBlockTransaction(query, sheetId)
+    return claimArchiveWriterBlockPrepared(prepared, {
+      ownerKind,
+      ownerId,
+      leaseUntil,
+      previous,
+    })
   })
 }
 
@@ -459,8 +575,9 @@ export async function releaseArchiveWriterBlock(
  *
  * This function deliberately does not claim to enforce D-H2 ordering: the caller owns the
  * transaction boundary and must invoke it before the source read or live write required by that
- * protocol. It performs no fence acquisition and no mutation. The transaction-runner APIs above
- * are the only exported claim/heartbeat/release entries.
+ * protocol. It performs no fence acquisition and no mutation. The transaction-runner APIs and the
+ * prepared-token claim path above are the only exported claim/heartbeat/release entries. The
+ * prepared path has no production caller in this slice.
  */
 export async function checkArchiveWriterBlockOwnerExact(
   query: FenceQuery,

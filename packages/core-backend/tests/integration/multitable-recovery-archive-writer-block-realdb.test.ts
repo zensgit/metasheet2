@@ -12,12 +12,17 @@ import {
   type FenceQuery,
 } from '../../src/multitable/canonical-sheet-fence'
 import {
+  ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL,
   ARCHIVE_WRITER_BLOCK_EXPECTED_CONSTRAINTS,
+  ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL,
   ARCHIVE_WRITER_BLOCK_SCHEMA_FINGERPRINT,
+  ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL,
   ArchiveWriterBlockError,
   checkArchiveWriterBlockOwnerExact,
   claimArchiveWriterBlock,
+  claimArchiveWriterBlockPrepared,
   heartbeatArchiveWriterBlock,
+  prepareArchiveWriterBlockTransaction,
   readArchiveWriterBlockSchemaFingerprint,
   releaseArchiveWriterBlock,
   type ArchiveWriterBlockSnapshot,
@@ -91,6 +96,13 @@ async function dropScratch(scratch: Scratch): Promise<void> {
 
 function asQuery(client: PoolClient): FenceQuery {
   return (sql, params) => client.query(sql, params)
+}
+
+function loggingQuery(client: PoolClient, sql: string[]): FenceQuery {
+  return async (text, params) => {
+    sql.push(text)
+    return client.query(text, params)
+  }
 }
 
 function transactionRunner(pool: Pool, afterWork?: () => never): ArchiveWriterBlockTransactionRunner {
@@ -494,5 +506,165 @@ describeIfRealDbStep('D2e durable archive writer-block substrate (real DB)', () 
       }),
     ).rejects.toBeInstanceOf(ArchiveWriterBlockError)
     expect(await readSnapshot()).toBeNull()
+  })
+
+  test('prepared claim stays in one outer transaction: prelude first, caller gap, no second prelude, commit persists', async () => {
+    const client = await runtime.pool.connect()
+    const sql: string[] = []
+    let beginCount = 0
+    try {
+      const query = loggingQuery(client, sql)
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      beginCount += 1
+      const prepared = await prepareArchiveWriterBlockTransaction(query, SHEET)
+      const gap = await query('SELECT pg_current_xact_id()::text AS caller_gap_xid')
+      expect(Object.isFrozen(prepared)).toBe(true)
+      expect(prepared.query).toBe(query)
+      expect(prepared.sheetId).toBe(SHEET)
+      expect(prepared.xid).toBe((gap.rows[0] as { caller_gap_xid: string }).caller_gap_xid)
+      expect(sql[0]).toBe(ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL)
+      const claimed = await claimArchiveWriterBlockPrepared(prepared, {
+        ownerKind: 'archive_generation',
+        ownerId: OWNER,
+        leaseUntil: FUTURE,
+      })
+      expect(beginCount).toBe(1)
+      expect(sql.some((text) => /^\s*BEGIN\b/i.test(text))).toBe(false)
+      expect(sql.filter((text) => text === ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL)).toHaveLength(1)
+      const gapIndex = sql.indexOf('SELECT pg_current_xact_id()::text AS caller_gap_xid')
+      expect(gapIndex).toBeGreaterThan(0)
+      expect(sql[gapIndex + 1]).toBe(ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL)
+      expect(sql.slice(gapIndex).includes(ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL)).toBe(false)
+      expect(sql.at(-1)).toBe(ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL)
+      expect(claimed.ownerId).toBe(OWNER)
+      expect(await readSnapshot()).toBeNull()
+      await client.query('COMMIT')
+      expect((await readSnapshot())?.ownerId).toBe(OWNER)
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+    }
+  })
+
+  test('prepared claim rollback leaves no writer block', async () => {
+    const client = await runtime.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      const query = asQuery(client)
+      const prepared = await prepareArchiveWriterBlockTransaction(query, SHEET)
+      await query('SELECT 1 AS caller_gap')
+      const claimed = await claimArchiveWriterBlockPrepared(prepared, {
+        ownerKind: 'archive_generation',
+        ownerId: OWNER,
+        leaseUntil: FUTURE,
+      })
+      const inside = await client.query(
+        `SELECT recovery_writer_state AS state, recovery_writer_owner_id AS owner_id
+           FROM public.meta_sheets WHERE id = $1`,
+        [SHEET],
+      )
+      expect(inside.rows[0]).toEqual({ state: 'archiving', owner_id: OWNER })
+      expect(claimed.ownerId).toBe(OWNER)
+      expect(await readSnapshot()).toBeNull()
+      await client.query('ROLLBACK')
+      expect(await readSnapshot()).toBeNull()
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+    }
+  })
+
+  test('rolling back the preparation savepoint invalidates the token with zero writes', async () => {
+    const client = await runtime.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      await client.query('SAVEPOINT before_prepare')
+      const prepared = await prepareArchiveWriterBlockTransaction(asQuery(client), SHEET)
+      await client.query('ROLLBACK TO SAVEPOINT before_prepare')
+      const error = await errorOf(
+        claimArchiveWriterBlockPrepared(prepared, {
+          ownerKind: 'archive_generation',
+          ownerId: OWNER,
+          leaseUntil: FUTURE,
+        }),
+      )
+      expect(error).toMatchObject({ code: 'ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION' })
+      expectValuesFree(error)
+      expect(await readSnapshot()).toBeNull()
+      await client.query('ROLLBACK')
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+    }
+  })
+
+  test('a reflected token clone cannot claim while the original transaction and fence remain live', async () => {
+    const client = await runtime.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      const prepared = await prepareArchiveWriterBlockTransaction(asQuery(client), SHEET)
+      const reflectedClone = Object.fromEntries(
+        Reflect.ownKeys(prepared).map((key) => [key, prepared[key as keyof typeof prepared]]),
+      )
+      await expect(
+        claimArchiveWriterBlockPrepared(reflectedClone as never, {
+          ownerKind: 'archive_generation',
+          ownerId: OWNER,
+          leaseUntil: FUTURE,
+        }),
+      ).rejects.toMatchObject({ code: 'ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION' })
+      const inside = await client.query(
+        'SELECT recovery_writer_state AS state FROM public.meta_sheets WHERE id = $1',
+        [SHEET],
+      )
+      expect(inside.rows[0]).toEqual({ state: null })
+      await client.query('ROLLBACK')
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+    }
+  })
+
+  test('stale prepared token after commit fails NOT_IN_TRANSACTION with zero writes', async () => {
+    const client = await runtime.pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL READ COMMITTED')
+      const query = asQuery(client)
+      const prepared = await prepareArchiveWriterBlockTransaction(query, SHEET)
+      await client.query('COMMIT')
+      const error = await errorOf(
+        claimArchiveWriterBlockPrepared(prepared, {
+          ownerKind: 'archive_generation',
+          ownerId: OWNER,
+          leaseUntil: FUTURE,
+        }),
+      )
+      expect(error).toMatchObject({ code: 'ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION' })
+      expectValuesFree(error)
+      expect(await readSnapshot()).toBeNull()
+      const forged = await errorOf(
+        claimArchiveWriterBlockPrepared({} as never, {
+          ownerKind: 'archive_generation',
+          ownerId: OWNER,
+          leaseUntil: FUTURE,
+        }),
+      )
+      expect(forged).toMatchObject({ code: 'ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION' })
+      const lookalike = await errorOf(
+        claimArchiveWriterBlockPrepared(
+          { query, sheetId: SHEET, xid: '1' } as never,
+          {
+            ownerKind: 'archive_generation',
+            ownerId: OWNER,
+            leaseUntil: FUTURE,
+          },
+        ),
+      )
+      expect(lookalike).toMatchObject({ code: 'ARCHIVE_WRITER_BLOCK_NOT_IN_TRANSACTION' })
+      expect(await readSnapshot()).toBeNull()
+    } finally {
+      await client.query('ROLLBACK').catch(() => {})
+      client.release()
+    }
   })
 })

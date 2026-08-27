@@ -6,6 +6,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import {
   RECOVERY_WRITER_BLOCK_STATES,
   SheetWriterBlockedError,
+  canonicalSheetFenceKey,
   claimDurableWriterBlock,
   isWriterFenceEnabled,
   setRecoveryWriterState,
@@ -15,6 +16,7 @@ import {
   ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL,
   ARCHIVE_WRITER_BLOCK_EXPECTED_COLUMNS,
   ARCHIVE_WRITER_BLOCK_EXPECTED_CONSTRAINTS,
+  ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL,
   ARCHIVE_WRITER_BLOCK_SCHEMA_FINGERPRINT,
   ARCHIVE_WRITER_BLOCK_TAKEOVER_SQL,
   ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL,
@@ -57,7 +59,9 @@ function mockPreparedRunner(
       if (sql === ARCHIVE_WRITER_BLOCK_TRANSACTION_PRELUDE_SQL) {
         return { rows: [{ xid: '42', isolation: 'read committed' }] }
       }
-      if (sql === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
+      if (sql === ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL) {
+        return { rows: [{ xid: '42', fence_held: true }] }
+      }
       if (sql.includes('attribute.attname AS column_name')) {
         return { rows: ARCHIVE_WRITER_BLOCK_EXPECTED_COLUMNS.map((row) => ({ ...row })) }
       }
@@ -160,7 +164,7 @@ describe('D2e archive writer-block transaction runner', () => {
     expect(entered).toBe(false)
   })
 
-  test('claim callback first query is source-free fence+xid+isolation, then same-xid, schema, CAS', async () => {
+  test('claim callback first query is source-free fence+xid+isolation, then prepared-state, schema, CAS', async () => {
     enableArchiveWriterBlock()
     const log: QueryLog[] = []
     const snapshot = expectedSnapshot()
@@ -191,14 +195,15 @@ describe('D2e archive writer-block transaction runner', () => {
     expect(log[0]?.sql).toContain('pg_current_xact_id')
     expect(log[0]?.sql).toContain("current_setting('transaction_isolation')")
     expect(log[0]?.sql).not.toMatch(/meta_sheets|meta_records|recovery_writer_state/)
-    expect(log[1]?.sql).toBe('SELECT pg_current_xact_id()::text AS xid')
+    expect(log[1]?.sql).toBe(ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL)
+    expect(log[1]?.params).toEqual([canonicalSheetFenceKey('sheet-token')])
     expect(log.findIndex(({ sql }) => sql.includes('pg_constraint'))).toBeGreaterThan(1)
     expect(log.at(-1)?.sql).toBe(ARCHIVE_WRITER_BLOCK_CLEAN_CLAIM_SQL)
   })
 
-  test('autocommit/different xid and non-READ-COMMITTED runners fail before schema or CAS', async () => {
+  test('different xid, lost fence, and non-READ-COMMITTED runners fail before schema or CAS', async () => {
     enableArchiveWriterBlock()
-    for (const mutation of ['xid', 'isolation'] as const) {
+    for (const mutation of ['xid', 'fence', 'isolation'] as const) {
       const statements: string[] = []
       const runner: ArchiveWriterBlockTransactionRunner = async (work) =>
         work(async (sql) => {
@@ -211,8 +216,13 @@ describe('D2e archive writer-block transaction runner', () => {
               }],
             }
           }
-          if (sql === 'SELECT pg_current_xact_id()::text AS xid') {
-            return { rows: [{ xid: mutation === 'xid' ? '43' : '42' }] }
+          if (sql === ARCHIVE_WRITER_BLOCK_PREPARED_STATE_SQL) {
+            return {
+              rows: [{
+                xid: mutation === 'xid' ? '43' : '42',
+                fence_held: mutation !== 'fence',
+              }],
+            }
           }
           throw new Error('must_not_reach_schema')
         })
