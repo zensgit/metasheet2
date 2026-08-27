@@ -789,6 +789,18 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       OWNER_ID,
     ])
 
+    const nullSource = await errorOf(q(
+      `UPDATE meta_recovery_archive_attachment_refs
+          SET availability=NULL
+        WHERE generation_id=$1::uuid
+          AND attachment_id=$2
+          AND reference_class='source'`,
+      [generationId, sourceAttachmentId],
+    ))
+    expect(nullSource.code).toBe('23514')
+    expect(nullSource.message).toBe('recovery_archive_source_pin_shape_invalid')
+    expectValuesFree(nullSource, [generationId, sourceAttachmentId, OWNER_ID])
+
     const archiveAttachmentId = `${PREFIX}_raw_archive_shape`
     await claimIntent(generationId, archiveAttachmentId)
     await verifyIntent(generationId, archiveAttachmentId)
@@ -804,6 +816,26 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     expectValuesFree(invalidArchiveObject, [
       generationId,
       archiveAttachmentId,
+      CONTENT_HASH,
+      ARCHIVE_VERSION,
+      OWNER_ID,
+    ])
+
+    const nullArchiveAttachmentId = `${PREFIX}_raw_archive_null`
+    await claimIntent(generationId, nullArchiveAttachmentId)
+    await verifyIntent(generationId, nullArchiveAttachmentId)
+    const nullArchiveObject = await errorOf(q(
+      `INSERT INTO meta_recovery_archive_attachment_refs (
+         generation_id, attachment_id, reference_class, reference_state, availability,
+         content_sha256, immutable_version, content_size_bytes
+       ) VALUES ($1::uuid, $2, 'archive_object', 'verified', NULL, $3, $4, $5::bigint)`,
+      [generationId, nullArchiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
+    ))
+    expect(nullArchiveObject.code).toBe('23514')
+    expect(nullArchiveObject.message).toBe('recovery_archive_archive_object_shape_invalid')
+    expectValuesFree(nullArchiveObject, [
+      generationId,
+      nullArchiveAttachmentId,
       CONTENT_HASH,
       ARCHIVE_VERSION,
       OWNER_ID,

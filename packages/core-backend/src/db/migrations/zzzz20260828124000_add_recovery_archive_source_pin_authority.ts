@@ -329,7 +329,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       IF NEW.reference_class = 'source' THEN
-        IF NEW.availability NOT IN ('available', 'missing', 'mutable', 'drifted')
+        IF NEW.availability IS NULL
+           OR NEW.availability NOT IN ('available', 'missing', 'mutable', 'drifted')
            OR NEW.source_owner_kind IS NULL
            OR length(btrim(NEW.source_owner_kind)) = 0
            OR NEW.source_owner_id IS NULL
@@ -352,7 +353,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             MESSAGE = 'recovery_archive_source_pin_shape_invalid';
         END IF;
       ELSIF NEW.reference_class = 'archive_object' THEN
-        IF NEW.availability <> 'available'
+        IF NEW.availability IS NULL
+           OR NEW.availability <> 'available'
            OR NEW.immutable_version IS NULL
            OR length(btrim(NEW.immutable_version)) = 0
            OR NEW.content_size_bytes IS NULL
