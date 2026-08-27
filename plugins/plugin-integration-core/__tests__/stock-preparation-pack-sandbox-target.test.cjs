@@ -212,7 +212,7 @@ function createMockProvisioning({ objectId, sheetMissing = false } = {}) {
 // (tenant, project, object) only — the union across packs on that sheet.
 function createMockPackInstallStore() {
   const rows = new Map()
-  const key = (t, p, o, pk) => [t, p, o, pk].join(' ')
+  const key = (t, p, o, pk) => [t, p, o, pk].join('\u0000')
   return {
     rows,
     async recordInstall({ tenantId, projectId, objectId, packId, packVersion, mode, installedFields, summary, warnings }) {
