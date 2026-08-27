@@ -8,6 +8,7 @@ import * as archiveCatalogMigration from '../../src/db/migrations/zzzz2026082612
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
+import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
@@ -121,6 +122,7 @@ type DatabaseError = Error & {
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
+let keyRegistryIsUp = false
 let initialFingerprint = ''
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -507,6 +509,33 @@ async function cleanupSourceFixtures(): Promise<void> {
   ).catch(() => {})
 }
 
+async function provisionFixtureKey(): Promise<void> {
+  const surface = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_keys') IS NOT NULL AS present`,
+  )
+  if (!surface.rows[0]?.present) await keyRegistryMigration.up(db)
+  keyRegistryIsUp = true
+  await q(`INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)`, [KEY_ID])
+}
+
+async function removeFixtureKey(): Promise<void> {
+  if (!keyRegistryIsUp) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+    await client.query('DELETE FROM meta_recovery_archive_keys WHERE key_id=$1', [KEY_ID])
+    await client.query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
@@ -522,6 +551,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     if (Object.values(nonempty.rows[0] as Record<string, number>).some((count) => count !== 0)) {
       throw new Error('recovery_archive_catalog_not_empty_before_test')
     }
+    await provisionFixtureKey()
 
     initialFingerprint = await catalogFingerprint()
 
@@ -614,6 +644,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       }
       await truncateCatalog()
       await cleanupSourceFixtures()
+      await removeFixtureKey()
     } finally {
       await db.destroy()
     }
@@ -1749,19 +1780,37 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     expect(await catalogFingerprint()).toBe(initialFingerprint)
 
     await truncateCatalog()
-    await downCatalogStack(db)
-    schemaIsUp = false
-    try {
-      expect(await catalogSurface()).toEqual({ tables: [], functions: [], indexes: [] })
-      await upCatalogStack(db)
-      schemaIsUp = true
-      expect(await catalogFingerprint()).toBe(initialFingerprint)
-    } finally {
-      if (!schemaIsUp) {
-        await upCatalogStack(db)
-        schemaIsUp = true
-      }
-    }
+    const replayRollback = await errorOf(
+      db.transaction().execute(async (trx) => {
+        await sql`
+          DROP TRIGGER trg_meta_recovery_archive_key_reference_guard_row
+            ON public.meta_recovery_archives
+        `.execute(trx)
+        await sql`
+          ALTER TABLE public.meta_recovery_archives
+            DROP CONSTRAINT fk_meta_recovery_archives_key
+        `.execute(trx)
+        await downCatalogStack(trx)
+        await upCatalogStack(trx)
+        await sql`
+          ALTER TABLE public.meta_recovery_archives
+            ADD CONSTRAINT fk_meta_recovery_archives_key
+            FOREIGN KEY (key_id)
+            REFERENCES public.meta_recovery_archive_keys(key_id)
+            ON UPDATE RESTRICT
+            ON DELETE RESTRICT
+            NOT DEFERRABLE
+        `.execute(trx)
+        await sql`
+          CREATE TRIGGER trg_meta_recovery_archive_key_reference_guard_row
+          BEFORE INSERT ON public.meta_recovery_archives
+          FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_key_reference_guard_row()
+        `.execute(trx)
+        throw new Error('recovery_archive_catalog_replay_rollback')
+      }),
+    )
+    expect(replayRollback.message).toBe('recovery_archive_catalog_replay_rollback')
+    expect(await catalogFingerprint()).toBe(initialFingerprint)
   })
 
   test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {

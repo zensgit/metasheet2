@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
+import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import {
   RECOVERY_ARCHIVE_COVERAGE_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
@@ -60,6 +61,7 @@ type DatabaseError = Error & {
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
+let keyRegistryIsUp = false
 let initialFingerprint = ''
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -275,11 +277,39 @@ async function cleanupSourceFixtures(): Promise<void> {
   ])
 }
 
+async function provisionFixtureKey(): Promise<void> {
+  const surface = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_keys') IS NOT NULL AS present`,
+  )
+  if (!surface.rows[0]?.present) await keyRegistryMigration.up(db)
+  keyRegistryIsUp = true
+  await q(`INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)`, [KEY_ID])
+}
+
+async function removeFixtureKey(): Promise<void> {
+  if (!keyRegistryIsUp) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+    await client.query('DELETE FROM meta_recovery_archive_keys WHERE key_id=$1', [KEY_ID])
+    await client.query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
     await installIfAbsent()
+    await provisionFixtureKey()
     initialFingerprint = await bindingFingerprint()
 
     await q(`INSERT INTO meta_bases (id, name, workspace_id) VALUES ($1, $2, $3)`, [BASE, `${PREFIX} Base`, WORKSPACE])
@@ -313,6 +343,7 @@ describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)'
       }
       await truncateCoverage()
       await cleanupSourceFixtures()
+      await removeFixtureKey()
     } finally {
       await db.destroy()
     }

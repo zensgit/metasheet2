@@ -43,6 +43,7 @@ type DatabaseError = Error & {
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
+let keyRegistryIsUp = false
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
 
@@ -255,12 +256,41 @@ async function truncateCatalog(): Promise<void> {
   )
 }
 
+async function provisionFixtureKeyIfRequired(): Promise<void> {
+  const surface = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_keys') IS NOT NULL AS present`,
+  )
+  keyRegistryIsUp = surface.rows[0]?.present === true
+  if (keyRegistryIsUp) {
+    await q(`INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)`, [KEY_ID])
+  }
+}
+
+async function removeFixtureKeyIfRequired(): Promise<void> {
+  if (!keyRegistryIsUp) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+    await client.query('DELETE FROM meta_recovery_archive_keys WHERE key_id=$1', [KEY_ID])
+    await client.query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
     await installCleanupProtocolIfAbsent()
     await truncateCatalog()
+    await provisionFixtureKeyIfRequired()
 
     await q(
       `INSERT INTO meta_bases (id, name, workspace_id)
@@ -299,6 +329,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       ]).catch(() => {})
       await q('DELETE FROM meta_sheets WHERE id=$1', [SHEET]).catch(() => {})
       await q('DELETE FROM meta_bases WHERE id=$1', [BASE]).catch(() => {})
+      await removeFixtureKeyIfRequired()
     } finally {
       await db.destroy()
     }

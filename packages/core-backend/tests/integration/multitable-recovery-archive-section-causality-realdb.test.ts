@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as sectionCausalityMigration from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
 import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
+import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import { OperationLedger, sealOperation } from '../../src/multitable/operation-ledger'
 import {
   consumeRecoveryArchiveBootstrapReservations,
@@ -43,6 +44,7 @@ const OTHER_SHEET = `${PREFIX}_other_sheet`
 const SHA256_A = 'a'.repeat(64)
 const SHA256_B = 'b'.repeat(64)
 const DI0_SOURCE_VECTOR_HASH = 'c'.repeat(64)
+const DI0_KEY_ID = `${PREFIX}_di0_key`
 const BOOTSTRAP_SEQ0 = '9007199254742000'
 const RECORDS_HEAD_SEQ = '9007199254742009'
 const SNAPSHOT_SEQ = '9007199254742010'
@@ -77,6 +79,7 @@ type DatabaseError = Error & {
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
+let keyRegistryIsUp = false
 let initialFingerprint = ''
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -362,7 +365,7 @@ async function seedBuildingGeneration(
        lease_expires_at, expires_at
      ) VALUES (
        $1::uuid, $2, $3, $4, $5::uuid, $6::bigint,
-       $7, $8, 'tm-di0-test-key', $9, $10, $11::bigint,
+       $7, $8, $9, $10, $11, $12::bigint,
        clock_timestamp() + interval '1 hour', clock_timestamp() + interval '2 hours'
      )`,
     [
@@ -374,6 +377,7 @@ async function seedBuildingGeneration(
       anchorSeq,
       checkpointId,
       input.sourceVectorHash,
+      DI0_KEY_ID,
       input.ownerKind,
       input.ownerId,
       input.ownerFence,
@@ -415,11 +419,39 @@ async function cleanupSheetRows(): Promise<void> {
   })
 }
 
+async function provisionFixtureKey(): Promise<void> {
+  const surface = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_keys') IS NOT NULL AS present`,
+  )
+  if (!surface.rows[0]?.present) await keyRegistryMigration.up(db)
+  keyRegistryIsUp = true
+  await q(`INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)`, [DI0_KEY_ID])
+}
+
+async function removeFixtureKey(): Promise<void> {
+  if (!keyRegistryIsUp) return
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+    await client.query('DELETE FROM meta_recovery_archive_keys WHERE key_id=$1', [DI0_KEY_ID])
+    await client.query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
+
 describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
     await installIfAbsent()
+    await provisionFixtureKey()
     initialFingerprint = await causalityFingerprint()
 
     await q(`INSERT INTO meta_bases (id, name, workspace_id) VALUES ($1, $2, $3), ($4, $5, $6)`, [
@@ -772,6 +804,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
       await cleanupSheetRows()
       await q(`DELETE FROM meta_sheets WHERE id = ANY($1::text[])`, [[SHEET, OTHER_SHEET]]).catch(() => {})
       await q(`DELETE FROM meta_bases WHERE id = ANY($1::text[])`, [[BASE, OTHER_BASE]]).catch(() => {})
+      await removeFixtureKey()
     } finally {
       await db.destroy()
     }
