@@ -882,10 +882,10 @@ async function applyExactAnchorRecoveryAttempt(
       //    recoveries (source=A/foreign=B vs source=B/foreign=A) invert the fence order and ABBA-deadlock.
       //    Foreign sheets now serialise on the SAME blocking canonical fence their own fenced writers take
       //    instead of failing a NOWAIT row lock under a foreign writer that merely holds a linked record —
-      //    the availability defect this slice fixes. Deadlock-free: every writer holds at most ONE
-      //    canonical fence, and recovery holds ALL of its canonical fences before ANY (NOWAIT) row lock, so
-      //    a recovery blocked on a fence holds no row lock another writer could wait on (single global
-      //    ordered acquisition). Flag-gated ⇒ byte-identical to the prior single-sheet `fenceWriterEntry`
+      //    the availability defect this slice fixes. Deadlock-free within this recovery/link-write protocol:
+      //    each participant takes its complete canonical-fence set in the same sorted order before ANY row
+      //    lock, so a participant blocked on a fence holds no row lock another participant could wait on.
+      //    Flag-gated ⇒ byte-identical to the prior single-sheet `fenceWriterEntry`
       //    when the flag is OFF (recovery refuses at the ENV-trust gate below regardless). The durable
       //    writer-block check is kept SOURCE-only (fence-before-check), exactly as `fenceWriterEntry` did.
       if (isWriterFenceEnabled()) {

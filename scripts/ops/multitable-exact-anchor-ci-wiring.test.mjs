@@ -29,6 +29,8 @@ const FILES = [
   'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
   'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
   'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+  // D-H1 cross-sheet link writers must keep their no-skip real-DB lane in the same two-point contract.
+  'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
 ]
 const REAL_DB_STEP = 'Run multitable real-DB integration'
 

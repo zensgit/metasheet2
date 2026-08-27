@@ -53,6 +53,11 @@ import { publishMultitableSheetRealtime } from './realtime-publish'
 import { mintOperation, sealOperation } from './operation-ledger'
 import { recordRecordRevision } from './record-history-service'
 import { isRetryableLiveLinkDatabaseConflict } from './live-link-projection-integrity'
+import {
+  assertLinkWriterFencePlanMatchesFieldGuards,
+  enterLinkWriterFencePlan,
+  prepareLinkWriterFencePlan,
+} from './link-writer-fence'
 import { replayInboundLinks, isRecordUndeleteInboundEnabled, type InboundReplayResult } from './inbound-link-replay'
 import {
   notifyRecordSubscribersBestEffort,
@@ -546,12 +551,21 @@ export class RecordService {
       data: patch,
       actorId,
     })
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
     const recordRes = await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
       // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
       // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
-      await acquireCanonicalSheetFence(query, sheetId)
-      if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+      } else {
+        await acquireCanonicalSheetFence(query, sheetId)
+        if (isWriterFenceEnabled()) await assertNoActiveWriterBlock(query, sheetId)
+      }
       // W0-1 L6-a: mint the sealed operation AFTER the fence (so seq reflects commit order). Inert when the
       // fence flag is off / L6 migration absent ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
@@ -1258,6 +1272,11 @@ export class RecordService {
       throw new RecordPermissionError('Insufficient permissions')
     }
     const patchActorId = input.actorId ?? access.userId ?? null
+    const linkWriterFencePlan = await prepareLinkWriterFencePlan(
+      this.pool.query.bind(this.pool),
+      sheetId,
+      Object.keys(data),
+    )
 
     const fields = await loadFieldsForSheet(this.pool.query.bind(this.pool), sheetId)
     if (fields.length === 0) {
@@ -1265,6 +1284,9 @@ export class RecordService {
     }
 
     const fieldById = buildFieldMutationGuardMap(fields)
+    if (linkWriterFencePlan) {
+      assertLinkWriterFencePlanMatchesFieldGuards(linkWriterFencePlan, fieldById)
+    }
     const fieldErrors: Record<string, string> = {}
     const patch: Record<string, unknown> = {}
     const linkUpdates = new Map<string, { ids: string[]; cfg: LinkFieldConfig }>()
@@ -1443,7 +1465,26 @@ export class RecordService {
     await this.pool.transaction(async ({ query }) => {
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
-      await fenceWriterEntry(query, sheetId)
+      if (linkWriterFencePlan) {
+        await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+        for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
+          if (ids.length === 0) continue
+          const exists = await query(
+            'SELECT id FROM meta_records WHERE sheet_id = $1 AND id = ANY($2::text[])',
+            [cfg.foreignSheetId, ids],
+          )
+          const found = new Set(
+            (exists.rows as Array<Record<string, unknown>>)
+              .map((row) => (typeof row.id === 'string' ? row.id : ''))
+              .filter((id) => id.length > 0),
+          )
+          if (ids.some((id) => !found.has(id))) {
+            throw new RecordPatchFieldValidationError({ [fieldId]: 'Linked record not found' })
+          }
+        }
+      } else {
+        await fenceWriterEntry(query, sheetId)
+      }
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const currentRes = await query(

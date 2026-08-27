@@ -1141,6 +1141,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+      'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into

@@ -279,6 +279,7 @@ import {
   isWriterFenceEnabled,
   SheetWriterBlockedError,
 } from '../multitable/canonical-sheet-fence'
+import { LinkWriterFencePlanChangedError } from '../multitable/link-writer-fence'
 import { activateCheckpoint, CheckpointUnattributableTrashError } from '../multitable/history-trust-checkpoint'
 import type { QueryFn as TrustCheckpointQueryFn } from '../multitable/permission-service'
 import { applyFencedDerivedDataMerge, type DerivedMergeQueryFn } from '../multitable/derived-write-fence'
@@ -6032,6 +6033,39 @@ type PatchFailurePayload = {
   serverVersion?: number
 }
 
+type WriterFenceConflictPayload = {
+  statusCode: 409
+  code: 'RECOVERY_IN_PROGRESS' | 'LINK_WRITER_FENCE_PLAN_CHANGED'
+  message: string
+}
+
+function serializeWriterFenceConflict(err: unknown): WriterFenceConflictPayload | null {
+  if (err instanceof SheetWriterBlockedError) {
+    return {
+      statusCode: 409,
+      code: 'RECOVERY_IN_PROGRESS',
+      message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+    }
+  }
+  if (err instanceof LinkWriterFencePlanChangedError) {
+    return {
+      statusCode: err.statusCode,
+      code: err.code,
+      message: err.message,
+    }
+  }
+  return null
+}
+
+function sendWriterFenceConflict(res: Response, err: unknown): Response | null {
+  const failure = serializeWriterFenceConflict(err)
+  if (!failure) return null
+  return res.status(failure.statusCode).json({
+    ok: false,
+    error: { code: failure.code, message: failure.message },
+  })
+}
+
 function serializePatchFailure(recordId: string, err: unknown): PatchFailurePayload | null {
   if (err instanceof ConflictError) {
     return { recordId, code: 'CONFLICT', message: err.message }
@@ -9846,6 +9880,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds, skippedFieldIds: [] } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) {
           return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         }
@@ -9988,6 +10024,8 @@ export function univerMetaRouter(): Router {
         const newVersion = result.updated.find((u) => u.recordId === recordId)?.version ?? currentVersion + 1
         return res.json({ ok: true, data: { recordId, newVersion, noop: false, restoredFieldIds: selectedDiff.map((c) => c.fieldId) } })
       } catch (err) {
+        const writerFenceResponse = sendWriterFenceConflict(res, err)
+        if (writerFenceResponse) return writerFenceResponse
         if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'VERSION_CONFLICT', message: (err as Error).message } })
         if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(403).json({ ok: false, error: { code: 'RESTORE_FORBIDDEN', message: (err as Error).message } })
         if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: (err as Error).message } })
@@ -10144,6 +10182,8 @@ export function univerMetaRouter(): Router {
           // the WHOLE transaction rolled back → zero writes. The CAS aborts on the FIRST conflicting record, so the
           // conflict blocker list is first-only BY DESIGN (a full version preflight would reintroduce the TOCTOU we
           // deliberately avoid). denied/forbidden are reported in full above (those are preflighted, not thrown).
+          const writerFenceResponse = sendWriterFenceConflict(res, err)
+          if (writerFenceResponse) return writerFenceResponse
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record version conflicted; nothing written', blockers: [{ recordId: (err as ServiceVersionConflictError).recordId, reason: 'conflict' }] } })
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: 'All-or-nothing batch restore blocked: a record field is forbidden; nothing written', blockers: [{ recordId: '', reason: 'forbidden' }] } })
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) return res.status(409).json({ ok: false, error: { code: 'BATCH_RESTORE_BLOCKED', message: `All-or-nothing batch restore blocked: ${(err as Error).message}; nothing written`, blockers: [{ recordId: '', reason: 'error' }] } })
@@ -10167,6 +10207,7 @@ export function univerMetaRouter(): Router {
           })
           outcomes.push({ recordId: c.recordId, status: 'restored', newVersion: result.updated.find((u) => u.recordId === c.recordId)?.version, restoredFieldIds: c.diff.map((d) => d.fieldId) })
         } catch (err) {
+          if (serializeWriterFenceConflict(err)) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
           if (err instanceof ServiceVersionConflictError || err instanceof RecordServiceVersionConflictError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'conflict' }); continue }
           if (err instanceof ServiceFieldForbiddenError || err instanceof RecordServiceFieldForbiddenError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'forbidden' }); continue }
           if (err instanceof ServiceValidationError || err instanceof RecordServiceValidationError) { outcomes.push({ recordId: c.recordId, status: 'skipped', skipReason: 'error' }); continue }
@@ -13382,8 +13423,11 @@ export function univerMetaRouter(): Router {
             })
             createdRecordIds.push(created.recordId)
           } catch (error) {
+            const writerFenceFailure = serializeWriterFenceConflict(error)
             if (error instanceof RecordCreateValidationFailedError) {
               failures.push({ rowIndex, message: 'Record validation failed', code: 'VALIDATION_FAILED' })
+            } else if (writerFenceFailure) {
+              failures.push({ rowIndex, message: writerFenceFailure.message, code: writerFenceFailure.code })
             } else if (error instanceof RecordServiceFieldForbiddenError || error instanceof RecordServiceValidationError) {
               failures.push({ rowIndex, message: error.message, code: error.code })
             } else if (error instanceof RecordServicePermissionError) {
@@ -15589,6 +15633,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof RecordServicePatchFieldValidationError) {
         return res.status(err.statusCode).json({
           ok: false,
@@ -16633,6 +16679,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -16797,6 +16845,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (isRecordCreateValidationError(err)) {
         const fieldErrors = normalizeRecordCreateFieldErrors(err.fieldErrors)
         return res.status(422).json({
@@ -17373,6 +17423,8 @@ export function univerMetaRouter(): Router {
         },
       })
     } catch (err) {
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof MirrorLinkTargetUnavailableError) {
         // The ONE uniform fail-closed body (Lock C). Do not add fields, vary the message, or branch here.
         return res.status(403).json({ ok: false, error: { code: 'MIRROR_LINK_TARGET_UNAVAILABLE', message: 'Link target is not available' } })
@@ -17590,9 +17642,8 @@ export function univerMetaRouter(): Router {
       // durable recovery writer-block → refuse with the same 409 RECOVERY_IN_PROGRESS shape the
       // reset/revert/config-restore routes use, instead of falling through to a 500. (Derived-value
       // materialization refusals never reach here — they are caught + skipped at their sites.)
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       if (err instanceof ConflictError) {
         return res.status(409).json({ ok: false, error: { code: 'CONFLICT', message: err.message } })
       }
