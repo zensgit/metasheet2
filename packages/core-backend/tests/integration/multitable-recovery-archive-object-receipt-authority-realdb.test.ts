@@ -344,6 +344,12 @@ async function truncateArchiveState(): Promise<void> {
   const markerTarget = markerTable.rows[0]?.present
     ? 'meta_recovery_archive_section_bootstrap_markers,'
     : ''
+  const legalHoldTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
+  )
+  const legalHoldTarget = legalHoldTable.rows[0]?.present
+    ? 'meta_recovery_archive_legal_holds,'
+    : ''
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -356,6 +362,7 @@ async function truncateArchiveState(): Promise<void> {
          meta_recovery_archive_staging_objects,
          meta_recovery_archive_attachment_refs,
          meta_recovery_archive_coverage_items,
+         ${legalHoldTarget}
          meta_recovery_archives`,
     )
     await client.query('COMMIT')

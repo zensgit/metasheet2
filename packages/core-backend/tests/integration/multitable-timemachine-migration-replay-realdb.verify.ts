@@ -26,6 +26,7 @@ import * as archiveKeyRegistry from '../../src/db/migrations/zzzz20260828121000_
 import * as sourcePinAuthority from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import * as objectReceiptAuthority from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
 import * as claimAnchorAmendment from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
+import * as legalHoldAuthority from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -160,6 +161,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260828126000_amend_recovery_archive_claim_anchor',
     module: claimAnchorAmendment,
   },
+  {
+    name: 'zzzz20260828130000_add_recovery_archive_legal_hold_authority',
+    module: legalHoldAuthority,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -193,6 +198,7 @@ const TOUCHED_RELATIONS = [
   'meta_recovery_archive_section_bootstrap_markers',
   'meta_recovery_archive_keys',
   'meta_recovery_archive_objects',
+  'meta_recovery_archive_legal_holds',
 ]
 
 const OWNED_RELATIONS = [
@@ -215,6 +221,7 @@ const OWNED_RELATIONS = [
   'meta_recovery_archive_section_bootstrap_markers',
   'meta_recovery_archive_keys',
   'meta_recovery_archive_objects',
+  'meta_recovery_archive_legal_holds',
 ]
 
 const OWNED_COLUMNS = [
@@ -337,6 +344,13 @@ const ARCHIVE_CLAIM_ANCHOR_FUNCTIONS = [
   'meta_recovery_archives_claim_anchor_reservation_guard',
   'meta_recovery_archives_claim_anchor_operation_delete_guard',
 ]
+const ARCHIVE_LEGAL_HOLD_FUNCTIONS = [
+  'meta_recovery_archive_legal_hold_guard_row',
+  'meta_recovery_archive_legal_hold_guard_truncate',
+  'meta_recovery_archive_legal_hold_expiry_guard_row',
+  'meta_recovery_archive_expiry_authorize',
+  'meta_recovery_archive_legal_hold_release_authorize',
+]
 
 const OWNED_FUNCTIONS = [
   ...OPERATION_FUNCTIONS,
@@ -348,6 +362,7 @@ const OWNED_FUNCTIONS = [
   ...ARCHIVE_KEY_REGISTRY_FUNCTIONS,
   ...ARCHIVE_OBJECT_RECEIPT_FUNCTIONS,
   ...ARCHIVE_CLAIM_ANCHOR_FUNCTIONS,
+  ...ARCHIVE_LEGAL_HOLD_FUNCTIONS,
 ]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
@@ -403,6 +418,11 @@ const ARCHIVE_CLAIM_ANCHOR_TRIGGERS = [
   'trg_meta_recovery_archives_claim_anchor_reservation_guard',
   'trg_mrho_claim_anchor_delete_guard',
 ]
+const ARCHIVE_LEGAL_HOLD_TRIGGERS = [
+  'trg_meta_recovery_archive_legal_hold_guard_row',
+  'trg_meta_recovery_archive_legal_hold_guard_truncate',
+  'trg_meta_recovery_archives_legal_hold_expiry_guard_row',
+]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
@@ -413,6 +433,7 @@ const OWNED_TRIGGERS = [
   ...ARCHIVE_KEY_REGISTRY_TRIGGERS,
   ...ARCHIVE_OBJECT_RECEIPT_TRIGGERS,
   ...ARCHIVE_CLAIM_ANCHOR_TRIGGERS,
+  ...ARCHIVE_LEGAL_HOLD_TRIGGERS,
 ]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'

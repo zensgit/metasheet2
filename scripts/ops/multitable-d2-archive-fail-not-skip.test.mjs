@@ -52,6 +52,10 @@ const files = [
     file: 'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
     sentinel: 'recovery_archive_writer_block_realdb_harness_missing_database_url',
   },
+  {
+    file: 'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+    sentinel: 'recovery_archive_legal_hold_realdb_harness_missing_database_url',
+  },
 ]
 
 test('each armed D2 real-DB spec fails instead of skipping when DATABASE_URL is absent', () => {

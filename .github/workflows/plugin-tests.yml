@@ -1080,6 +1080,7 @@ jobs:
             tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts \
             tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts \
             tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \

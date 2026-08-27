@@ -107,6 +107,12 @@ async function truncateCatalog(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
   )
   const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
+  const legalHoldTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
+  )
+  const legalHoldTarget = legalHoldTable.rows[0]?.present
+    ? 'meta_recovery_archive_legal_holds,'
+    : ''
   await transaction(async ({ query }) => {
     await query('SET LOCAL session_replication_role = replica')
     await query(
@@ -117,6 +123,7 @@ async function truncateCatalog(): Promise<void> {
          meta_recovery_archive_staging_objects,
          meta_recovery_archive_attachment_refs,
          meta_recovery_archive_coverage_items,
+         ${legalHoldTarget}
          meta_recovery_archives`,
     )
     await query(`DELETE FROM meta_record_history_snapshot_members WHERE sheet_id=$1`, [SHEET])
