@@ -19,6 +19,7 @@ import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120
 import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
 import * as operationBinding from '../../src/db/migrations/zzzz20260826122500_add_operation_binding_to_nonrecord_history'
+import * as archiveWriterBlock from '../../src/db/migrations/zzzz20260826123000_add_archive_writer_block_ownership'
 import * as coverageBinding from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
 
 type MigrationModule = {
@@ -127,6 +128,10 @@ const MIGRATIONS: NamedMigration[] = [
     module: operationBinding,
   },
   {
+    name: 'zzzz20260826123000_add_archive_writer_block_ownership',
+    module: archiveWriterBlock,
+  },
+  {
     name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',
     module: coverageBinding,
   },
@@ -185,6 +190,11 @@ const OWNED_COLUMNS = [
   ['meta_record_revisions', 'seq'],
   ['meta_record_revisions', 'operation_id'],
   ['meta_sheets', 'recovery_writer_state'],
+  ['meta_sheets', 'recovery_writer_owner_kind'],
+  ['meta_sheets', 'recovery_writer_owner_id'],
+  ['meta_sheets', 'recovery_writer_owner_fence'],
+  ['meta_sheets', 'recovery_writer_lease_until'],
+  ['meta_sheets', 'recovery_writer_updated_at'],
   ['meta_sheets', 'system_kind'],
   ['meta_recovery_archive_attachment_refs', 'cleanup_owner_kind'],
   ['meta_recovery_archive_attachment_refs', 'cleanup_owner_id'],
@@ -213,6 +223,9 @@ const OWNED_INDEXES = [
 
 const OWNED_CONSTRAINTS = [
   ['meta_sheets', 'chk_meta_sheets_recovery_writer_state'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_kind'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_owner_tuple'],
+  ['meta_sheets', 'chk_meta_sheets_recovery_writer_fence'],
   ['meta_record_version_markers', 'uq_meta_record_version_markers_sheet_record_version'],
   ['meta_record_revisions', 'fk_mrr_operation'],
   ['meta_record_version_markers', 'fk_mrvm_operation'],

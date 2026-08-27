@@ -109,8 +109,12 @@ export async function acquireCanonicalSheetFencesInOrder(
  *                       released between those transactions, so the block MUST be durable to hold writers off.
  * - `paused_retryable`— a multi-step recovery failed part-way; the sheet stays blocked (recoverable, NOT a
  *                       stuck absorbing state — a re-run/operator clear resolves it; see release protocol).
+ * - `archiving`       — an archive generation or restore job owns the sheet through the D2e leased-owner
+ *                       protocol; recovery-only state setters cannot manufacture this state.
  */
-export const WRITER_BLOCK_STATES = ['fencing', 'applying', 'paused_retryable'] as const
+export const RECOVERY_WRITER_BLOCK_STATES = ['fencing', 'applying', 'paused_retryable'] as const
+export type RecoveryWriterBlockState = (typeof RECOVERY_WRITER_BLOCK_STATES)[number]
+export const WRITER_BLOCK_STATES = [...RECOVERY_WRITER_BLOCK_STATES, 'archiving'] as const
 export type WriterBlockState = (typeof WRITER_BLOCK_STATES)[number]
 
 export function isWriterBlockState(v: unknown): v is WriterBlockState {
@@ -192,13 +196,16 @@ export async function fenceWriterEntry(
  * canonical fence on THIS connection (the caller acquires it first, in the same claim transaction). Sets
  * `applying`. RECLAIMS a prior failed run's `paused_retryable` (so that state is recoverable, never a stuck
  * absorbing state — [[feedback_state_machine_no_stuck_absorbing_state]]); REFUSES (throws
- * `SheetWriterBlockedError`) only when another recovery is actively holding the sheet (`applying`/`fencing`).
+ * `SheetWriterBlockedError`) when another recovery is actively holding the sheet (`applying`/`fencing`) or
+ * an archive/restore owner holds it (`archiving`).
  */
 export async function claimDurableWriterBlock(query: FenceQuery, sheetId: string): Promise<void> {
   if (!(await hasRecoveryWriterStateColumn(query))) return
   const res = await query('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])
   const raw = (res.rows[0] as { recovery_writer_state?: unknown } | undefined)?.recovery_writer_state
-  if (raw === 'applying' || raw === 'fencing') throw new SheetWriterBlockedError(sheetId, raw)
+  if (raw === 'applying' || raw === 'fencing' || raw === 'archiving') {
+    throw new SheetWriterBlockedError(sheetId, raw)
+  }
   await query("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [sheetId])
 }
 
@@ -210,8 +217,11 @@ export async function claimDurableWriterBlock(query: FenceQuery, sheetId: string
 export async function setRecoveryWriterState(
   query: FenceQuery,
   sheetId: string,
-  state: WriterBlockState | null,
+  state: RecoveryWriterBlockState | null,
 ): Promise<number> {
+  if (state !== null && !(RECOVERY_WRITER_BLOCK_STATES as readonly unknown[]).includes(state)) {
+    throw new TypeError('RECOVERY_WRITER_STATE_INVALID')
+  }
   if (!(await hasRecoveryWriterStateColumn(query))) return 0
   const res = await query(
     'UPDATE meta_sheets SET recovery_writer_state = $2 WHERE id = $1',

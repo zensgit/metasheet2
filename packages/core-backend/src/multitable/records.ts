@@ -613,7 +613,8 @@ export async function createRecord(
   // the L4 flag would REGRESS auto-number correctness when the flag is off, and the module's flag-off-parity
   // contract explicitly keeps plugin-create as an unconditional `acquireCanonicalSheetFence` caller. We then add
   // — flag-gated, so flag-off stays byte-identical — the durable recovery-block check `fenceWriterEntry` runs:
-  // if a recovery holds a durable `{fencing,applying,paused_retryable}` block on this sheet, refuse with
+  // if a recovery/archive owner holds a durable `{fencing,applying,paused_retryable,archiving}` block on this
+  // sheet, refuse with
   // `SheetWriterBlockedError`. Net effect with the flag ON is exactly `fenceWriterEntry` (fence-then-check); the
   // split (vs. the sibling plugin patchRecord above, which uses `fenceWriterEntry` directly) exists ONLY to
   // preserve the pre-existing unconditional fence.

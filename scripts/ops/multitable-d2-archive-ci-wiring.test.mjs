@@ -23,6 +23,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
 ]
 const ARCHIVE_REALDB_RE =
   /^tests\/integration\/multitable-recovery-archive-[a-z0-9-]+-realdb\.test\.ts$/

@@ -1334,7 +1334,7 @@ export default defineConfig({
       // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
       // Time Machine D2 archive-catalog, stale-pin cleanup, section-causality, operation-binding,
-      // coverage-binding, and D2h crypto-registry proofs:
+      // coverage-binding, D2h crypto-registry, and D2e durable writer-block proofs:
       // DATABASE_URL-gated and whole-file wired into the multitable real-DB step so the no-DB
       // job cannot skip-green them.
       'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
@@ -1343,6 +1343,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
