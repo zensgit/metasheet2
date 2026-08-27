@@ -1,6 +1,7 @@
 import type { FenceQuery } from './canonical-sheet-fence'
 
 export type RecoveryArchiveSourcePinOwner = {
+  keyId: string
   ownerKind: string
   ownerId: string
   ownerFence: string
@@ -55,6 +56,7 @@ const CLAIM_SOURCE_PIN_SQL = `WITH locked_generation AS (
      AND archive.state = 'building'
      AND archive.build_status = 'active'
      AND archive.coverage_status = 'incomplete'
+     AND archive.key_id = $7
      AND archive.owner_kind = $3
      AND archive.owner_id = $4
      AND archive.owner_fence = $5::bigint
@@ -107,6 +109,7 @@ const VERIFY_SOURCE_PIN_SQL = `WITH locked_generation AS (
      AND archive.state = 'building'
      AND archive.build_status = 'active'
      AND archive.coverage_status = 'incomplete'
+     AND archive.key_id = $10
      AND archive.owner_kind = $3
      AND archive.owner_id = $4
      AND archive.owner_fence = $5::bigint
@@ -176,6 +179,7 @@ function requireSize(value: unknown): string {
 
 function validateOwner(input: RecoveryArchiveSourcePinOwner): RecoveryArchiveSourcePinOwner {
   return {
+    keyId: requireOpaque(input.keyId),
     ownerKind: requireOpaque(input.ownerKind),
     ownerId: requireOpaque(input.ownerId),
     ownerFence: requireFence(input.ownerFence),
@@ -217,11 +221,27 @@ async function oneRow(
   query: FenceQuery,
   sqlText: string,
   params: unknown[],
+  keyId: string,
   refusedCode: RecoveryArchiveSourcePinErrorCode,
 ): Promise<RecoveryArchiveSourcePinSnapshot> {
   await assertStableTransaction(query)
   let result: Awaited<ReturnType<FenceQuery>>
   try {
+    const lockedKey = await query(
+      `SELECT key_id
+        FROM public.meta_recovery_archive_keys
+        WHERE key_id = $1
+          AND state = 'active'
+        FOR UPDATE`,
+      [keyId],
+    )
+    if (
+      lockedKey.rowCount !== 1 ||
+      lockedKey.rows.length !== 1 ||
+      (lockedKey.rows[0] as { key_id?: unknown } | undefined)?.key_id !== keyId
+    ) {
+      throw new Error('recovery_archive_source_pin_key_unavailable')
+    }
     result = await query(sqlText, params)
   } catch {
     throw new RecoveryArchiveSourcePinError(refusedCode)
@@ -274,7 +294,9 @@ export async function claimRecoveryArchiveSourcePinIntent(
       owner.ownerId,
       owner.ownerFence,
       owner.leaseUntil,
+      owner.keyId,
     ],
+    owner.keyId,
     'RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED',
   )
 }
@@ -298,7 +320,9 @@ export async function verifyRecoveryArchiveSourcePin(
       requireOpaque(input.immutableVersion),
       requireHash(input.contentSha256),
       requireSize(input.contentSizeBytes),
+      owner.keyId,
     ],
+    owner.keyId,
     'RECOVERY_ARCHIVE_SOURCE_PIN_VERIFICATION_REFUSED',
   )
 }

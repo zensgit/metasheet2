@@ -160,6 +160,7 @@ function owner(generationId: string, attachmentId: string, leaseUntil = FUTURE_L
   return {
     generationId,
     attachmentId,
+    keyId: KEY_ID,
     ownerKind: OWNER_KIND,
     ownerId: OWNER_ID,
     ownerFence: '1',
@@ -398,7 +399,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     expect(immutable.message).toBe('recovery_archive_source_pin_verified_immutable')
   })
 
-  test('helper rejects an autocommit query before persisting a source-pin intent', async () => {
+  test('helpers reject autocommit before claim or verification can persist', async () => {
     const generationId = await insertArchive()
     const attachmentId = `${PREFIX}_autocommit`
     const refusal = await errorOf(claimRecoveryArchiveSourcePinIntent(
@@ -416,6 +417,100 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       [generationId, attachmentId],
     )
     expect(residue.rows).toEqual([{ count: 0 }])
+
+    const verificationAttachmentId = `${attachmentId}_verify`
+    await claimIntent(generationId, verificationAttachmentId)
+    const verificationRefusal = await errorOf(verifyRecoveryArchiveSourcePin(q, {
+      ...owner(generationId, verificationAttachmentId),
+      immutableVersion: SOURCE_VERSION,
+      contentSha256: CONTENT_HASH,
+      contentSizeBytes: CONTENT_SIZE,
+    }))
+    expect(verificationRefusal).toBeInstanceOf(RecoveryArchiveSourcePinError)
+    expect(verificationRefusal.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_NOT_IN_TRANSACTION')
+    const stillMutable = await q(
+      `SELECT availability FROM meta_recovery_archive_attachment_refs
+        WHERE generation_id=$1::uuid AND attachment_id=$2`,
+      [generationId, verificationAttachmentId],
+    )
+    expect(stillMutable.rows).toEqual([{ availability: 'mutable' }])
+  })
+
+  test('retiring the exact key closes source-pin admission', async () => {
+    const generationId = await insertArchive()
+    const attachmentId = `${PREFIX}_retiring_key`
+    try {
+      await q(
+        `UPDATE meta_recovery_archive_keys
+            SET state='retiring', row_version=row_version + 1
+          WHERE key_id=$1`,
+        [KEY_ID],
+      )
+      const refusal = await errorOf(transaction(({ query }) => claimRecoveryArchiveSourcePinIntent(
+        query,
+        owner(generationId, attachmentId),
+      )))
+      expect(refusal).toBeInstanceOf(RecoveryArchiveSourcePinError)
+      expect(refusal.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED')
+      const residue = await q(
+        `SELECT count(*)::int AS count FROM meta_recovery_archive_attachment_refs
+          WHERE generation_id=$1::uuid AND attachment_id=$2`,
+        [generationId, attachmentId],
+      )
+      expect(residue.rows).toEqual([{ count: 0 }])
+    } finally {
+      await transaction(async ({ query }) => {
+        await query('LOCK TABLE meta_recovery_archive_keys IN ACCESS EXCLUSIVE MODE')
+        await query('ALTER TABLE meta_recovery_archive_keys DISABLE TRIGGER USER')
+        await query(
+          `UPDATE meta_recovery_archive_keys
+              SET state='active', row_version=1
+            WHERE key_id=$1`,
+          [KEY_ID],
+        )
+        await query('ALTER TABLE meta_recovery_archive_keys ENABLE TRIGGER USER')
+      })
+    }
+  })
+
+  test('source-pin admission retains the active-key lock through commit', async () => {
+    const generationId = await insertArchive()
+    const attachmentId = `${PREFIX}_key_lock`
+    const pinClient = await pool.connect()
+    const retirementClient = await pool.connect()
+    try {
+      await pinClient.query('BEGIN')
+      await claimRecoveryArchiveSourcePinIntent(
+        (text, values) => pinClient.query(text, values),
+        owner(generationId, attachmentId),
+      )
+
+      await retirementClient.query('BEGIN')
+      await retirementClient.query(`SET LOCAL lock_timeout = '100ms'`)
+      const blocked = await errorOf(retirementClient.query(
+        `UPDATE meta_recovery_archive_keys
+            SET state='retiring', row_version=row_version + 1
+          WHERE key_id=$1`,
+        [KEY_ID],
+      ))
+      expect(blocked.code).toBe('55P03')
+      await retirementClient.query('ROLLBACK')
+      await pinClient.query('COMMIT')
+
+      const key = await q(
+        `SELECT state, row_version::text AS row_version
+           FROM meta_recovery_archive_keys WHERE key_id=$1`,
+        [KEY_ID],
+      )
+      expect(key.rows).toEqual([{ state: 'active', row_version: '1' }])
+    } catch (error) {
+      await retirementClient.query('ROLLBACK').catch(() => {})
+      await pinClient.query('ROLLBACK').catch(() => {})
+      throw error
+    } finally {
+      retirementClient.release()
+      pinClient.release()
+    }
   })
 
   test('helper normalizes duplicate and malformed claims without echoing values', async () => {
@@ -447,6 +542,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     await claimIntent(generationId, attachmentId)
 
     for (const stale of [
+      { ownerKind: `${OWNER_KIND}_stale` },
       { ownerId: `${OWNER_ID}_stale` },
       { ownerFence: '2' },
       { leaseUntil: '2098-01-01T00:00:00.000Z' },
@@ -471,6 +567,18 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       [generationId, `${attachmentId}_raw`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
     ))
     expect(staleRaw.message).toBe('recovery_archive_source_pin_owner_invalid')
+
+    const rawUpdateAttachmentId = `${attachmentId}_raw_update`
+    await claimIntent(generationId, rawUpdateAttachmentId)
+    const staleRawUpdate = await errorOf(q(
+      `UPDATE meta_recovery_archive_attachment_refs
+          SET source_lease_until='2098-01-01T00:00:00.000Z'::timestamptz
+        WHERE generation_id=$1::uuid
+          AND attachment_id=$2
+          AND reference_class='source'`,
+      [generationId, rawUpdateAttachmentId],
+    ))
+    expect(staleRawUpdate.message).toBe('recovery_archive_source_pin_owner_invalid')
 
     const expiredGenerationId = await insertArchive(EXPIRED_LEASE)
     const expiredRaw = await errorOf(q(
