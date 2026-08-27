@@ -276,15 +276,48 @@ async function truncateArchiveState(): Promise<void> {
   const reservationTarget = reservationTable.rows[0]?.present
     ? 'meta_recovery_archive_snapshot_reservations,'
     : ''
-  await q(
-    `TRUNCATE TABLE
-       meta_recovery_archive_objects,
-       ${reservationTarget}
-       meta_recovery_archive_staging_objects,
-       meta_recovery_archive_attachment_refs,
-       meta_recovery_archive_coverage_items,
-       meta_recovery_archives`,
+  const legalHoldTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present`,
   )
+  const legalHoldTarget = legalHoldTable.rows[0]?.present
+    ? 'meta_recovery_archive_legal_holds,'
+    : ''
+  if (!legalHoldTarget) {
+    await q(
+      `TRUNCATE TABLE
+         meta_recovery_archive_objects,
+         ${reservationTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         meta_recovery_archives`,
+    )
+    return
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('LOCK TABLE meta_recovery_archive_legal_holds IN ACCESS EXCLUSIVE MODE')
+    await client.query('ALTER TABLE meta_recovery_archive_legal_holds DISABLE TRIGGER USER')
+    await client.query(
+      `TRUNCATE TABLE
+         meta_recovery_archive_objects,
+         ${reservationTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         ${legalHoldTarget}
+         meta_recovery_archives`,
+    )
+    await client.query('ALTER TABLE meta_recovery_archive_legal_holds ENABLE TRIGGER USER')
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function authorityFingerprint(): Promise<string> {
