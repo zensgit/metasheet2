@@ -5,6 +5,11 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
+import {
+  cleanupOrphanMultitableAttachments,
+  sweepMultitableAttachmentBlobPurge,
+} from '../../src/multitable/attachment-orphan-retention'
+import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
@@ -33,6 +38,23 @@ const ATTACHMENT_HASH = '2'.repeat(64)
 const RECEIPT_HASH = '3'.repeat(64)
 const EXPIRED_LEASE = '2000-01-01T00:00:00.000Z'
 const FUTURE_LEASE = '2099-01-01T00:00:00.000Z'
+
+type TransactionQuery = (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+
+async function transaction<T>(work: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const result = await work({ query: client.query.bind(client) })
+    await client.query('COMMIT')
+    return result
+  } catch (error) {
+    await client.query('ROLLBACK')
+    throw error
+  } finally {
+    client.release()
+  }
+}
 
 type DatabaseError = Error & {
   code?: string
@@ -153,6 +175,23 @@ async function insertSourcePin(generationId: string, attachmentId: string): Prom
        availability, content_sha256
      ) VALUES ($1::uuid, $2, 'source', 'building', 'available', $3)`,
     [generationId, attachmentId, ATTACHMENT_HASH],
+  )
+}
+
+async function insertAttachment(
+  attachmentId: string,
+  input: { recordId: string | null; deletedAt: string | null },
+): Promise<void> {
+  await q(
+    `INSERT INTO multitable_attachments (
+       id, sheet_id, record_id, field_id, storage_file_id, filename, mime_type, size,
+       storage_path, storage_provider, metadata, created_at, updated_at, deleted_at
+     ) VALUES (
+       $1, $2, $3, NULL, $4, 'attachment', 'application/octet-stream', 1,
+       $5, 'local', '{}'::jsonb, '2000-01-01T00:00:00.000Z'::timestamptz,
+       '2000-01-01T00:00:00.000Z'::timestamptz, $6::timestamptz
+     )`,
+    [attachmentId, SHEET, input.recordId, `${attachmentId}_file`, `${attachmentId}/blob`, input.deletedAt],
   )
 }
 
@@ -312,6 +351,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   afterEach(async () => {
+    await q('DELETE FROM multitable_attachments WHERE sheet_id=$1', [SHEET])
     await truncateCatalog()
   })
 
@@ -368,6 +408,199 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
         cleanup_columns: 3,
       },
     ])
+  })
+
+  test('active source pins skip both physical attachment sweepers with zero storage calls', async () => {
+    const previousArchiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    const previousFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    try {
+      const generationId = await insertArchive()
+      const orphanAttachmentId = `${PREFIX}_orphan_pinned`
+      const deletedAttachmentId = `${PREFIX}_deleted_pinned`
+      await insertAttachment(orphanAttachmentId, { recordId: null, deletedAt: null })
+      await insertAttachment(deletedAttachmentId, { recordId: null, deletedAt: EXPIRED_LEASE })
+      await insertSourcePin(generationId, orphanAttachmentId)
+      await insertSourcePin(generationId, deletedAttachmentId)
+
+      let orphanStorageCalls = 0
+      const orphanResult = await cleanupOrphanMultitableAttachments({
+        queryFn: q,
+        transactionFn: transaction,
+        storage: {
+          delete: async () => {
+            orphanStorageCalls += 1
+          },
+        },
+      })
+      let blobStorageCalls = 0
+      const blobResult = await sweepMultitableAttachmentBlobPurge({
+        queryFn: q,
+        transactionFn: transaction,
+        storage: {
+          deleteByKey: async () => {
+            blobStorageCalls += 1
+          },
+        },
+      })
+
+      expect(orphanResult).toEqual({ inspected: 1, deleted: 0, skipped: 1 })
+      expect(blobResult).toEqual({ inspected: 1, purged: 0, skipped: 1 })
+      expect(orphanStorageCalls).toBe(0)
+      expect(blobStorageCalls).toBe(0)
+      const rows = await q(
+        `SELECT id, deleted_at IS NULL AS orphan_live, blob_purged_at IS NULL AS blob_unpurged
+           FROM multitable_attachments
+          WHERE id = ANY($1::text[])
+          ORDER BY id`,
+        [[deletedAttachmentId, orphanAttachmentId]],
+      )
+      expect(rows.rows).toEqual([
+        { id: deletedAttachmentId, orphan_live: false, blob_unpurged: true },
+        { id: orphanAttachmentId, orphan_live: true, blob_unpurged: true },
+      ])
+    } finally {
+      if (previousArchiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = previousArchiveFlag
+      if (previousFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFenceFlag
+    }
+  })
+
+  test('blob purge rechecks grace under the row lock after a restore and fresh re-delete', async () => {
+    const previousArchiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    const previousFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const attachmentId = `${PREFIX}_blob_fresh_redelete`
+    await insertAttachment(attachmentId, { recordId: null, deletedAt: EXPIRED_LEASE })
+
+    let candidateObserved = false
+    const redeleteAfterCandidate = async (text: string, values?: unknown[]) => {
+      const response = await q(text, values)
+      if (!candidateObserved && text.includes('ORDER BY deleted_at ASC')) {
+        candidateObserved = true
+        await q(
+          'UPDATE multitable_attachments SET deleted_at=clock_timestamp(), updated_at=clock_timestamp() WHERE id=$1',
+          [attachmentId],
+        )
+      }
+      return response
+    }
+
+    try {
+      let storageCalls = 0
+      const result = await sweepMultitableAttachmentBlobPurge({
+        queryFn: redeleteAfterCandidate,
+        transactionFn: transaction,
+        graceHours: 24,
+        storage: {
+          deleteByKey: async () => {
+            storageCalls += 1
+          },
+        },
+      })
+
+      expect(candidateObserved).toBe(true)
+      expect(result).toEqual({ inspected: 1, purged: 0, skipped: 1 })
+      expect(storageCalls).toBe(0)
+      const row = await q(
+        'SELECT blob_purged_at IS NULL AS unpurged FROM multitable_attachments WHERE id=$1',
+        [attachmentId],
+      )
+      expect(row.rows).toEqual([{ unpurged: true }])
+    } finally {
+      if (previousArchiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = previousArchiveFlag
+      if (previousFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFenceFlag
+    }
+  })
+
+  test('orphan sweep tombstones before storage and prevents a waiting claimant from seeing a pin-able row', async () => {
+    const previousArchiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+    const previousFenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
+    process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
+    process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+    const attachmentId = `${PREFIX}_orphan_race`
+    await insertAttachment(attachmentId, { recordId: null, deletedAt: null })
+
+    let releaseFence: (() => void) | undefined
+    const fenceRelease = new Promise<void>((resolve) => {
+      releaseFence = resolve
+    })
+    let signalFence: (() => void) | undefined
+    const fenceHeld = new Promise<void>((resolve) => {
+      signalFence = resolve
+    })
+    let firstFence = true
+    const gatedTransaction = async <T>(work: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await work({
+          query: async (text, values) => {
+            const response = await client.query(text, values)
+            if (firstFence && text.startsWith('SELECT pg_advisory_xact_lock')) {
+              firstFence = false
+              signalFence?.()
+              await fenceRelease
+            }
+            return response
+          },
+        })
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK')
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+
+    try {
+      let storageCalls = 0
+      const sweep = cleanupOrphanMultitableAttachments({
+        queryFn: q,
+        transactionFn: gatedTransaction,
+        storage: {
+          delete: async () => {
+            const state = await q('SELECT deleted_at IS NOT NULL AS tombstoned FROM multitable_attachments WHERE id=$1', [attachmentId])
+            expect(state.rows).toEqual([{ tombstoned: true }])
+            storageCalls += 1
+          },
+        },
+      })
+      await fenceHeld
+
+      const claimant = await pool.connect()
+      try {
+        await claimant.query('BEGIN')
+        const lock = claimant.query(
+          'SELECT pg_advisory_xact_lock(hashtext($1))',
+          [canonicalSheetFenceKey(SHEET)],
+        )
+        releaseFence?.()
+        await lock
+        const source = await claimant.query(
+          'SELECT id FROM multitable_attachments WHERE id=$1 AND deleted_at IS NULL FOR UPDATE',
+          [attachmentId],
+        )
+        expect(source.rows).toEqual([])
+        await claimant.query('ROLLBACK')
+      } finally {
+        claimant.release()
+      }
+      await expect(sweep).resolves.toEqual({ inspected: 1, deleted: 1, skipped: 0 })
+      expect(storageCalls).toBe(1)
+    } finally {
+      if (previousArchiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
+      else process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = previousArchiveFlag
+      if (previousFenceFlag === undefined) delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
+      else process.env.MULTITABLE_ENABLE_WRITER_FENCE = previousFenceFlag
+    }
   })
 
   test('only an expired abandoned exact owner/fence can be claimed and the fence advances once', async () => {
