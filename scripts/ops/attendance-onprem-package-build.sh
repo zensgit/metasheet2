@@ -22,6 +22,9 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  "packages/mssql-readonly-utils/package.json"
+  "packages/mssql-readonly-utils/index.cjs"
+  "packages/mssql-readonly-utils/index.d.ts"
   # The packaged migration runner resolves compiled TS migrations from dist,
   # source SQL migrations from src/db/migrations, and legacy SQL bridge
   # migrations from packages/core-backend/migrations.

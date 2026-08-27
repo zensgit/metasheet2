@@ -21,7 +21,7 @@ on:
         default: ''
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-package:
@@ -56,45 +56,16 @@ jobs:
         run: |
           chmod +x scripts/ops/attendance-onprem-package-build.sh scripts/ops/attendance-onprem-package-verify.sh
           INSTALL_DEPS=0 BUILD_WEB=0 BUILD_BACKEND=0 scripts/ops/attendance-onprem-package-build.sh
-          pkg_tgz="$(ls -1 output/releases/attendance-onprem/*.tgz | sort | tail -n 1)"
-          pkg_zip="$(ls -1 output/releases/attendance-onprem/*.zip | sort | tail -n 1)"
+          pkg_tgz="$(find output/releases/attendance-onprem -maxdepth 1 -type f -name '*.tgz' | sort | tail -n 1)"
+          pkg_zip="$(find output/releases/attendance-onprem -maxdepth 1 -type f -name '*.zip' | sort | tail -n 1)"
           pkg_meta="${pkg_tgz%.tgz}.json"
           scripts/ops/attendance-onprem-package-verify.sh "$pkg_tgz"
           scripts/ops/attendance-onprem-package-verify.sh "$pkg_zip"
-          echo "PACKAGE_FILE=$pkg_tgz" >> "$GITHUB_ENV"
-          echo "PACKAGE_FILE_ZIP=$pkg_zip" >> "$GITHUB_ENV"
-          echo "PACKAGE_META_FILE=$pkg_meta" >> "$GITHUB_ENV"
-
-      - name: Publish GitHub Release
-        if: ${{ inputs.publish_release == 'true' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          RELEASE_NAME: ${{ inputs.release_name }}
-        run: |
-          set -euo pipefail
-          if [[ -z "${RELEASE_TAG}" ]]; then
-            echo "release_tag is required when publish_release=true" >&2
-            exit 1
-          fi
-
-          resolved_name="${RELEASE_NAME:-Attendance On-Prem Package ${RELEASE_TAG}}"
-          assets=(
-            "$PACKAGE_FILE"
-            "$PACKAGE_FILE_ZIP"
-            "${PACKAGE_FILE}.sha256"
-            "${PACKAGE_FILE_ZIP}.sha256"
-            "output/releases/attendance-onprem/SHA256SUMS"
-            "$PACKAGE_META_FILE"
-          )
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-          else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --title "$resolved_name" \
-              --notes "Automated attendance on-prem package build."
-          fi
+          {
+            echo "PACKAGE_FILE=$pkg_tgz"
+            echo "PACKAGE_FILE_ZIP=$pkg_zip"
+            echo "PACKAGE_META_FILE=$pkg_meta"
+          } >> "$GITHUB_ENV"
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
@@ -116,12 +87,232 @@ jobs:
             echo "- Package (.tgz): \`${PACKAGE_FILE}\`"
             echo "- Package (.zip): \`${PACKAGE_FILE_ZIP}\`"
             echo "- Artifact: \`attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}\`"
-            if [[ "${{ inputs.publish_release }}" == "true" ]]; then
-              echo "- Release tag: \`${{ inputs.release_tag }}\`"
-            fi
+            echo "- Runtime smoke: pending \`verify-package-runtime\`"
             echo ""
             echo "Download:"
             echo '```bash'
             echo "gh run download ${{ github.run_id }} -n attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }} -D output/playwright/ga/${{ github.run_id }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  verify-package-runtime:
+    needs: build-package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: metasheet
+          POSTGRES_PASSWORD: synthetic-runtime-smoke
+          POSTGRES_DB: metasheet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U metasheet -d metasheet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      NODE_ENV: production
+      HOST: 127.0.0.1
+      PORT: 8900
+      PRODUCT_MODE: attendance
+      DEPLOYMENT_MODEL: onprem
+      JWT_SECRET: attendance-package-runtime-smoke-secret
+      BCRYPT_SALT_ROUNDS: 12
+      DATABASE_URL: postgres://metasheet:synthetic-runtime-smoke@127.0.0.1:5432/metasheet
+      DB_SSL: 'false'
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ''
+      ATTENDANCE_IMPORT_REQUIRE_TOKEN: 1
+      ATTENDANCE_IMPORT_UPLOAD_DIR: /tmp/attendance-import
+    steps:
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download uploaded package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/attendance-package-artifact
+
+      - name: Extract final ZIP package
+        run: |
+          set -euo pipefail
+          package_zip="$(find "$RUNNER_TEMP/attendance-package-artifact" -maxdepth 1 -type f -name '*.zip' | sort | tail -n 1)"
+          [[ -n "$package_zip" ]] || { echo "Final ZIP package is missing" >&2; exit 1; }
+          extract_root="$RUNNER_TEMP/attendance-package-runtime"
+          mkdir -p "$extract_root"
+          unzip -q "$package_zip" -d "$extract_root"
+          package_root="$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d | sort | head -n 1)"
+          [[ -n "$package_root" ]] || { echo "Extracted package root is missing" >&2; exit 1; }
+          echo "PACKAGE_ROOT=$package_root" >> "$GITHUB_ENV"
+
+      - name: Install dependencies from packaged workspace
+        run: |
+          set -euo pipefail
+          cd "$PACKAGE_ROOT"
+          pnpm install --frozen-lockfile
+          node -e "console.log(require.resolve('@metasheet/mssql-readonly-utils', { paths: [require('node:path').resolve('packages/core-backend')] }))"
+
+      - name: Migrate isolated package database
+        run: |
+          set -euo pipefail
+          mkdir -p "$ATTENDANCE_IMPORT_UPLOAD_DIR"
+          cd "$PACKAGE_ROOT"
+          node packages/core-backend/dist/src/db/migrate.js
+
+      - name: Start packaged backend and probe health
+        run: |
+          set -euo pipefail
+          cd "$PACKAGE_ROOT"
+          backend_log="$RUNNER_TEMP/attendance-package-backend.log"
+          node packages/core-backend/dist/src/index.js >"$backend_log" 2>&1 &
+          backend_pid=$!
+          trap 'kill "$backend_pid" >/dev/null 2>&1 || true; wait "$backend_pid" >/dev/null 2>&1 || true' EXIT
+
+          for _ in $(seq 1 60); do
+            if ! kill -0 "$backend_pid" >/dev/null 2>&1; then
+              echo "Packaged backend exited before becoming healthy" >&2
+              cat "$backend_log" >&2
+              exit 1
+            fi
+            if curl --fail --silent --show-error http://127.0.0.1:8900/health >"$RUNNER_TEMP/attendance-package-health.json"; then
+              cat "$RUNNER_TEMP/attendance-package-health.json"
+              node - "$RUNNER_TEMP/attendance-package-health.json" <<'NODE'
+          const fs = require('node:fs')
+
+          const health = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
+          if (health.ok !== true || health.pluginsSummary?.failed !== 0) {
+            throw new Error(`Packaged backend health is degraded: ${JSON.stringify(health)}`)
+          }
+          NODE
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "Packaged backend did not become healthy within 60 seconds" >&2
+          cat "$backend_log" >&2
+          exit 1
+
+  verify-package-windows-install:
+    needs: build-package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: production
+    steps:
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download uploaded package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/attendance-package-artifact
+
+      - name: Extract final ZIP package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageZip = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\attendance-package-artifact" -Filter '*.zip' -File |
+            Sort-Object FullName |
+            Select-Object -Last 1
+          if (-not $packageZip) { throw 'Final ZIP package is missing' }
+
+          $extractRoot = "$env:RUNNER_TEMP\attendance-package-windows"
+          New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+          Expand-Archive -LiteralPath $packageZip.FullName -DestinationPath $extractRoot
+          $packageRoot = Get-ChildItem -LiteralPath $extractRoot -Directory |
+            Sort-Object FullName |
+            Select-Object -First 1
+          if (-not $packageRoot) { throw 'Extracted package root is missing' }
+          "PACKAGE_ROOT=$($packageRoot.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install final package and load workspace dependency
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location -LiteralPath $env:PACKAGE_ROOT
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "const path=require('node:path'); const resolved=require.resolve('@metasheet/mssql-readonly-utils',{paths:[path.resolve('packages/core-backend')]}); require(resolved); console.log(resolved)"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  publish-release:
+    if: ${{ inputs.publish_release == 'true' }}
+    needs:
+      - build-package
+      - verify-package-runtime
+      - verify-package-windows-install
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: attendance-onprem-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: output/releases/attendance-onprem
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NAME: ${{ inputs.release_name }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required when publish_release=true" >&2
+            exit 1
+          fi
+
+          package_file="$(find output/releases/attendance-onprem -maxdepth 1 -type f -name '*.tgz' | sort | tail -n 1)"
+          package_file_zip="$(find output/releases/attendance-onprem -maxdepth 1 -type f -name '*.zip' | sort | tail -n 1)"
+          package_meta_file="${package_file%.tgz}.json"
+          [[ -f "$package_file" && -f "$package_file_zip" && -f "$package_meta_file" ]] \
+            || { echo "Verified package release assets are incomplete" >&2; exit 1; }
+
+          resolved_name="${RELEASE_NAME:-Attendance On-Prem Package ${RELEASE_TAG}}"
+          assets=(
+            "$package_file"
+            "$package_file_zip"
+            "${package_file}.sha256"
+            "${package_file_zip}.sha256"
+            "output/releases/attendance-onprem/SHA256SUMS"
+            "$package_meta_file"
+          )
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$resolved_name" \
+              --notes "Automated attendance on-prem package build; final archive runtime smoke passed."
+          fi

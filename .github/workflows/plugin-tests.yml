@@ -233,7 +233,7 @@ jobs:
             scripts/ops/fixtures/integration-k3wise/rehearsal-harness.test.mjs \
             scripts/ops/fixtures/integration-k3wise/rehearsal-driver-contract.test.mjs
 
-      # #4802 — SEVEN K3/stock-prep-line `scripts/ops` suites executed by NOTHING. A repo-wide sweep
+      # #4802 — seven K3/stock-prep-line `scripts/ops` suites executed by NOTHING. A repo-wide sweep
       # (not just this workflow's own list) found these seven `*.test.mjs` files referenced by no
       # workflow, no package.json script, and no shell script. The single non-docs hit,
       # scripts/ops/multitable-onprem-package-verify.sh:532, is a `search_fixed_string` assertion
@@ -258,10 +258,11 @@ jobs:
       # #1 in scripts/ops/ci-realdb-step-contract.mjs's header — the step disappears from the
       # required leg while every membership assertion stays green.
       #
-      # All seven are pure node:test over node: builtins + sibling .mjs modules (the SSH-fallback
+      # The original seven plus the attendance package content/runtime contracts are pure node:test
+      # over node: builtins + sibling .mjs modules (the SSH-fallback
       # legs shim a fake `ssh` onto PATH), so this runs before the pnpm install, like the steps
       # above it. This step's `id`, its `if`, the absence of `continue-on-error`, and the presence
-      # of ALL SEVEN paths as whole-file args of a real `node --test` invocation are pinned by
+      # of all nine paths as whole-file args of a real `node --test` invocation are pinned by
       # scripts/ops/integration-guard-required-wiring-contract.test.mjs (Pin 18), which runs in this
       # same required context and in `integration-guard`.
       - name: Run K3-line ops suites (required lane, #4802)
@@ -269,6 +270,8 @@ jobs:
         if: matrix.node-version == '20.x'
         run: |
           node --test \
+            scripts/ops/attendance-onprem-package-runtime-contract.test.mjs \
+            scripts/ops/attendance-onprem-package-verify-migrations.test.mjs \
             scripts/ops/integration-erp-plm-deploy-readiness.test.mjs \
             scripts/ops/integration-k3wise-postdeploy-smoke.test.mjs \
             scripts/ops/integration-k3wise-postdeploy-summary.test.mjs \

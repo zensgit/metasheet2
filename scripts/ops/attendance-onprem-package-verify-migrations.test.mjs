@@ -30,11 +30,11 @@ function writeMinimumPackage(pkgRoot, options = {}) {
     omitDistMigration,
     extraSourceMigration,
     omitSupersededAuditMarker,
+    omitMssqlReadonlyUtils,
   } = options
 
   const placeholderFiles = [
     'apps/web/package.json',
-    'packages/core-backend/package.json',
     'plugins/plugin-attendance/plugin.json',
     'plugins/plugin-attendance/index.cjs',
     'scripts/ops/attendance-onprem-start-pm2.ps1',
@@ -55,6 +55,51 @@ function writeMinimumPackage(pkgRoot, options = {}) {
 
   for (const rel of placeholderFiles) {
     writeFile(pkgRoot, rel, `${rel}\n`)
+  }
+
+  writeFile(
+    pkgRoot,
+    'packages/core-backend/package.json',
+    JSON.stringify({
+      name: '@metasheet/core-backend',
+      dependencies: {
+        '@metasheet/mssql-readonly-utils': 'workspace:*',
+      },
+    }) + '\n'
+  )
+  writeFile(
+    pkgRoot,
+    'pnpm-lock.yaml',
+    [
+      'lockfileVersion: \'9.0\'',
+      'importers:',
+      '  packages/core-backend:',
+      '    dependencies:',
+      '      \'@metasheet/mssql-readonly-utils\':',
+      '        specifier: workspace:*',
+      '        version: link:../mssql-readonly-utils',
+      '',
+    ].join('\n')
+  )
+  if (!omitMssqlReadonlyUtils) {
+    writeFile(
+      pkgRoot,
+      'packages/mssql-readonly-utils/package.json',
+      JSON.stringify({
+        name: '@metasheet/mssql-readonly-utils',
+        main: 'index.cjs',
+      }) + '\n'
+    )
+    writeFile(
+      pkgRoot,
+      'packages/mssql-readonly-utils/index.cjs',
+      'module.exports = {}\n'
+    )
+    writeFile(
+      pkgRoot,
+      'packages/mssql-readonly-utils/index.d.ts',
+      'export {}\n'
+    )
   }
 
   writeFile(pkgRoot, 'apps/web/dist/index.html', '<html>attendance</html>\n')
@@ -236,5 +281,17 @@ test('rejects a package when a source TS migration lacks compiled JS', () => {
     assert.notEqual(result.status, 0)
     assert.match(result.stderr, new RegExp(extraSourceMigration))
     assert.match(result.stderr, /Package missing compiled JS for one or more core backend TS migrations/)
+  })
+})
+
+test('rejects a package missing the core backend MSSQL workspace runtime dependency', () => {
+  withArchive({ omitMssqlReadonlyUtils: true }, (archivePath) => {
+    const result = runVerify(archivePath)
+
+    assert.notEqual(result.status, 0)
+    assert.match(
+      result.stderr,
+      /Required package content missing: packages\/mssql-readonly-utils\/package\.json/
+    )
   })
 })
