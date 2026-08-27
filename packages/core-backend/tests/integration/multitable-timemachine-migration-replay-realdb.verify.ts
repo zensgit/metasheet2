@@ -18,6 +18,7 @@ import * as authoritySearchPath from '../../src/db/migrations/zzzz20260821120000
 import * as recoveryArchiveCatalog from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 import * as recoveryArchiveStagingCleanup from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
+import * as operationBinding from '../../src/db/migrations/zzzz20260826122500_add_operation_binding_to_nonrecord_history'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -120,11 +121,16 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260826122000_add_section_causality_substrate',
     module: sectionCausality,
   },
+  {
+    name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
+    module: operationBinding,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
   'meta_field_value_tombstones',
   'meta_link_tombstones',
+  'meta_config_revisions',
   'meta_records_trash',
   'meta_record_revisions',
   'meta_record_version_markers',
@@ -181,6 +187,9 @@ const OWNED_COLUMNS = [
   ['meta_record_history_operations', 'operation_kind'],
   ['meta_record_history_operations', 'event_contract_version'],
   ['meta_record_history_operations', 'component_count'],
+  ['meta_config_revisions', 'operation_id'],
+  ['meta_field_value_tombstones', 'operation_id'],
+  ['meta_link_tombstones', 'operation_id'],
 ] as const
 
 // These indexes are created on relations that predate at least one migration in this replay set.
@@ -192,6 +201,9 @@ const OWNED_INDEXES = [
   ['meta_record_version_markers', 'idx_meta_record_version_markers_sheet_record_seq'],
   ['meta_record_revisions', 'idx_meta_record_revisions_operation'],
   ['meta_record_version_markers', 'idx_meta_record_version_markers_operation'],
+  ['meta_config_revisions', 'idx_meta_config_revisions_operation'],
+  ['meta_field_value_tombstones', 'idx_meta_field_value_tombstones_operation'],
+  ['meta_link_tombstones', 'idx_meta_link_tombstones_operation'],
 ] as const
 
 const OWNED_CONSTRAINTS = [
@@ -203,6 +215,9 @@ const OWNED_CONSTRAINTS = [
   ['meta_sheet_section_revisions', 'fk_mssr_operation'],
   ['meta_record_history_snapshot_members', 'fk_mrhsm_parent'],
   ['meta_record_history_operation_members', 'fk_mrhom_parent'],
+  ['meta_config_revisions', 'fk_mcr_operation'],
+  ['meta_field_value_tombstones', 'fk_mfvt_operation'],
+  ['meta_link_tombstones', 'fk_mlt_operation'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
@@ -240,12 +255,14 @@ const SECTION_CAUSALITY_FUNCTIONS = [
   'meta_sheet_section_revisions_guard_row',
   'meta_record_history_membership_guard_row',
 ]
+const OPERATION_BINDING_FUNCTIONS = ['meta_nonrecord_history_operation_binding_guard_row']
 
 const OWNED_FUNCTIONS = [
   ...OPERATION_FUNCTIONS,
   ...AUTHORITY_FUNCTIONS,
   ...RECOVERY_ARCHIVE_FUNCTIONS,
   ...SECTION_CAUSALITY_FUNCTIONS,
+  ...OPERATION_BINDING_FUNCTIONS,
 ]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
@@ -271,11 +288,20 @@ const SECTION_CAUSALITY_TRIGGERS = [
   'trg_mrhsm_guard_row',
   'trg_mrhom_guard_row',
 ]
+const OPERATION_BINDING_TRIGGERS = [
+  'trg_mcr_operation_binding_immutable',
+  'trg_mfvt_operation_binding_immutable',
+  'trg_mlt_operation_binding_immutable',
+  'trg_mcr_reject_append_sealed',
+  'trg_mfvt_reject_append_sealed',
+  'trg_mlt_reject_append_sealed',
+]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
   ...RECOVERY_ARCHIVE_TRIGGERS,
   ...SECTION_CAUSALITY_TRIGGERS,
+  ...OPERATION_BINDING_TRIGGERS,
 ]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'

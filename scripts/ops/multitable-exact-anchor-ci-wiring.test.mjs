@@ -299,6 +299,7 @@ const TIME_MACHINE_REPLAY_MIGRATIONS = [
   'zzzz20260826120000_create_meta_recovery_archive_catalog',
   'zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol',
   'zzzz20260826122000_add_section_causality_substrate',
+  'zzzz20260826122500_add_operation_binding_to_nonrecord_history',
 ]
 const TIME_MACHINE_REPLAY_VERIFIER =
   'tests/integration/multitable-timemachine-migration-replay-realdb.verify.ts'
@@ -378,7 +379,7 @@ function migrationReplayContract(workflow, verifier) {
   assert.deepEqual(
     names,
     TIME_MACHINE_REPLAY_MIGRATIONS,
-    'verifier must exercise the exact 15 Time Machine migrations in causal order',
+    'verifier must exercise the exact 16 Time Machine migrations in causal order',
   )
   assert.match(verifier, /for \(const migration of \[\.\.\.MIGRATIONS\]\.reverse\(\)\)/)
   assert.match(verifier, /for \(const migration of MIGRATIONS\)/)
@@ -410,6 +411,9 @@ function migrationReplayContract(workflow, verifier) {
     'idx_meta_record_version_markers_sheet_record_seq',
     'idx_meta_record_revisions_operation',
     'idx_meta_record_version_markers_operation',
+    'idx_meta_config_revisions_operation',
+    'idx_meta_field_value_tombstones_operation',
+    'idx_meta_link_tombstones_operation',
   ]) {
     assert.match(verifier, new RegExp(`'${index}'`), `verifier must check owned index ${index}`)
   }
@@ -418,8 +422,27 @@ function migrationReplayContract(workflow, verifier) {
     'uq_meta_record_version_markers_sheet_record_version',
     'fk_mrr_operation',
     'fk_mrvm_operation',
+    'fk_mcr_operation',
+    'fk_mfvt_operation',
+    'fk_mlt_operation',
   ]) {
     assert.match(verifier, new RegExp(`'${constraint}'`), `verifier must check owned constraint ${constraint}`)
+  }
+  assert.match(verifier, /'meta_config_revisions'/, 'verifier must fingerprint meta_config_revisions')
+  assert.match(
+    verifier,
+    /'meta_nonrecord_history_operation_binding_guard_row'/,
+    'verifier must own the operation-binding guard function',
+  )
+  for (const trigger of [
+    'trg_mcr_operation_binding_immutable',
+    'trg_mfvt_operation_binding_immutable',
+    'trg_mlt_operation_binding_immutable',
+    'trg_mcr_reject_append_sealed',
+    'trg_mfvt_reject_append_sealed',
+    'trg_mlt_reject_append_sealed',
+  ]) {
+    assert.match(verifier, new RegExp(`'${trigger}'`), `verifier must check owned trigger ${trigger}`)
   }
 }
 
@@ -456,7 +479,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   )
   assert.throws(
     () => migrationReplayContract(workflow, driftedMigration),
-    /exact 15 Time Machine migrations/,
+    /exact 16 Time Machine migrations/,
   )
 
   const missingArchiveCleanup = verifier.replace(
@@ -466,7 +489,7 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingArchiveCleanup, verifier, 'archive-cleanup removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingArchiveCleanup),
-    /exact 15 Time Machine migrations/,
+    /exact 16 Time Machine migrations/,
   )
 
   const missingSectionCausality = verifier.replace(
@@ -476,7 +499,17 @@ test('migration replay contract rejects migration-set or exclusion drift', () =>
   assert.notEqual(missingSectionCausality, verifier, 'section-causality removal mutation must apply')
   assert.throws(
     () => migrationReplayContract(workflow, missingSectionCausality),
-    /exact 15 Time Machine migrations/,
+    /exact 16 Time Machine migrations/,
+  )
+
+  const missingOperationBinding = verifier.replace(
+    "  {\n    name: 'zzzz20260826122500_add_operation_binding_to_nonrecord_history',\n    module: operationBinding,\n  },\n",
+    '',
+  )
+  assert.notEqual(missingOperationBinding, verifier, 'operation-binding removal mutation must apply')
+  assert.throws(
+    () => migrationReplayContract(workflow, missingOperationBinding),
+    /exact 16 Time Machine migrations/,
   )
 
   const driftedExclude = workflow.replace(

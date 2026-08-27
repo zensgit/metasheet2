@@ -20,7 +20,10 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
 ]
+const ARCHIVE_REALDB_RE =
+  /^tests\/integration\/multitable-recovery-archive-[a-z0-9-]+-realdb\.test\.ts$/
 const CONFIG = join(repoRoot, 'packages/core-backend/vitest.config.ts')
 const WORKFLOW = join(repoRoot, '.github/workflows/plugin-tests.yml')
 const INSTALL_STEP_MARKER = '      - name: Install dependencies (with log)\n'
@@ -39,20 +42,36 @@ function jobBody(workflow, jobName) {
   return nextJob ? remainder.slice(0, nextJob.index) : remainder
 }
 
-test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
-  const config = readFileSync(CONFIG, 'utf8')
+function archiveRoster(paths) {
+  return paths.filter((path) => ARCHIVE_REALDB_RE.test(path))
+}
+
+function assertExactRoster(paths, label) {
+  const roster = archiveRoster(paths)
+  assert.deepEqual(
+    FILES,
+    [...new Set(FILES)],
+    'the D2 archive FILES constant must itself be duplicate-free',
+  )
+  assert.deepEqual(
+    roster,
+    FILES,
+    `${label} must list the D2 archive real-DB roster exactly once, in order, with no duplicates or extras`,
+  )
+  const start = paths.indexOf(FILES[0])
+  assert.notEqual(start, -1, `${label} must contain the D2 archive catalog file`)
+  assert.deepEqual(
+    paths.slice(start, start + FILES.length),
+    FILES,
+    `${label} must keep the D2 archive real-DB union contiguous`,
+  )
+}
+
+function assertD2ArchiveWiring(config, workflow) {
   const excludeBody = extractTestExcludeArrayBody(config)
   assert.notEqual(excludeBody, null, 'vitest.config.ts must have a direct test.exclude array')
-  const exclusions = quotedExcludeEntries(excludeBody)
-  for (const file of FILES) {
-    assert.equal(
-      exclusions.filter((entry) => entry === file).length,
-      1,
-      `test.exclude must contain exactly one quoted ${file} entry`,
-    )
-  }
+  assertExactRoster(quotedExcludeEntries(excludeBody), 'test.exclude')
 
-  const workflow = readFileSync(WORKFLOW, 'utf8')
   const testJob = jobBody(workflow, 'test')
   assert.equal(
     testJob.split(INSTALL_STEP_MARKER).length - 1,
@@ -75,12 +94,40 @@ test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () =>
     '1',
     `${REAL_DB_STEP_IDS.multitable} must arm the D2 fail-not-skip marker with exact string '1'`,
   )
-  const fileArgs = wholeFileVitestArgs(step)
-  for (const file of FILES) {
-    assert.equal(
-      fileArgs.filter((arg) => arg === file).length,
-      1,
-      `the parsed ${REAL_DB_STEP_IDS.multitable} step must contain exactly one whole-file Vitest argument ${file}`,
-    )
-  }
+  assertExactRoster(
+    wholeFileVitestArgs(step),
+    `the parsed ${REAL_DB_STEP_IDS.multitable} whole-file Vitest arguments`,
+  )
+}
+
+test('Time Machine D2 archive real-DB proofs are exactly two-point wired', () => {
+  assertD2ArchiveWiring(readFileSync(CONFIG, 'utf8'), readFileSync(WORKFLOW, 'utf8'))
+})
+
+test('D2 archive roster contract rejects a duplicate section-causality whole-file arg', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const duplicated = workflow.replace(
+    'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \\\n            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \\\n            tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \\\n            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+  )
+  assert.notEqual(duplicated, workflow, 'section-causality duplication mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, duplicated), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('D2 archive roster contract rejects dropping operation-binding from the union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    '            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts \\\n',
+    '',
+  )
+  assert.notEqual(dropped, workflow, 'operation-binding removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
 })
