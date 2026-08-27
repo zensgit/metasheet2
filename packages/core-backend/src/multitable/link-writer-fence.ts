@@ -579,6 +579,204 @@ export async function enterFieldLinkRestoreFencePlan(
   if (locked.rows.length !== inspected.alivePairCount) throw new LinkWriterFencePlanChangedError()
 }
 
+export type FieldLinkDropFencePlan = {
+  sourceSheetId: string
+  fieldId: string
+  fieldState: LinkFieldFenceState
+  configuredTargetSheetId: string | null
+  participantSheetIds: string[]
+}
+
+type FieldLinkDropEdgeOwnerRow = {
+  field_sheet_id: unknown
+  source_sheet_id: unknown
+  target_sheet_id: unknown
+}
+
+async function loadFieldLinkDropEdgeOwnerRows(
+  query: FenceQuery,
+  fieldId: string,
+): Promise<FieldLinkDropEdgeOwnerRow[]> {
+  const result = await query(
+    `SELECT field_owner.sheet_id AS field_sheet_id,
+            source_record.sheet_id AS source_sheet_id,
+            target_record.sheet_id AS target_sheet_id
+       FROM meta_links edge
+       LEFT JOIN meta_fields field_owner ON field_owner.id = edge.field_id
+       LEFT JOIN meta_records source_record ON source_record.id = edge.record_id
+       LEFT JOIN meta_records target_record ON target_record.id = edge.foreign_record_id
+      WHERE edge.field_id = $1`,
+    [fieldId],
+  )
+  return result.rows as FieldLinkDropEdgeOwnerRow[]
+}
+
+function collectFieldLinkDropParticipantSheetIds(
+  sourceSheetId: string,
+  configuredTargetSheetId: string | null,
+  fieldSheetId: string | null,
+  rows: readonly FieldLinkDropEdgeOwnerRow[],
+): string[] {
+  const sheetIds = new Set<string>([sourceSheetId])
+  if (configuredTargetSheetId) sheetIds.add(configuredTargetSheetId)
+  if (fieldSheetId) sheetIds.add(fieldSheetId)
+  for (const row of rows) {
+    for (const key of ['field_sheet_id', 'source_sheet_id', 'target_sheet_id'] as const) {
+      const sheetId = row[key]
+      if (typeof sheetId === 'string' && sheetId.length > 0) sheetIds.add(sheetId)
+    }
+  }
+  return [...sheetIds].sort()
+}
+
+function assertFieldLinkDropParticipantsContained(
+  planned: readonly string[],
+  current: readonly string[],
+): void {
+  const fenced = new Set(planned)
+  if (current.some((sheetId) => !fenced.has(sheetId))) {
+    throw new LinkWriterFencePlanChangedError()
+  }
+}
+
+function fieldSheetIdFromRow(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object') return null
+  const sheetId = (raw as Record<string, unknown>).sheet_id
+  return typeof sheetId === 'string' && sheetId.length > 0 ? sheetId : null
+}
+
+async function assertFieldLinkDropPlanCurrent(
+  query: FenceQuery,
+  plan: FieldLinkDropFencePlan,
+  configuredTargetSheetId: string | null,
+  fieldRow: unknown,
+): Promise<void> {
+  const edgeRows = await loadFieldLinkDropEdgeOwnerRows(query, plan.fieldId)
+  assertFieldLinkDropParticipantsContained(
+    plan.participantSheetIds,
+    collectFieldLinkDropParticipantSheetIds(
+      plan.sourceSheetId,
+      configuredTargetSheetId,
+      fieldSheetIdFromRow(fieldRow),
+      edgeRows,
+    ),
+  )
+}
+
+/**
+ * Flag-on preflight for dropFieldCascade. Flag off returns before querying. Flag on always returns a
+ * plan — including missing and non-link fields — so enter can revalidate that exact state. Returning
+ * null here would let the caller take a source-only fence, and a concurrent non-link→link commit
+ * before that fence would drop an unfenced target. The participant set unions the declared source,
+ * field owner, live edge field owner, source-record owner, target-record owner, and the configured
+ * target when present.
+ */
+export async function prepareFieldLinkDropFencePlan(
+  query: FenceQuery,
+  input: { sourceSheetId: string; fieldId: string },
+): Promise<FieldLinkDropFencePlan | null> {
+  if (!isWriterFenceEnabled()) return null
+  const fieldResult = await query(
+    'SELECT id, sheet_id, type, property FROM meta_fields WHERE id = $1',
+    [input.fieldId],
+  )
+  const fieldSheetId = fieldSheetIdFromRow(fieldResult.rows[0])
+  if (fieldSheetId !== null && fieldSheetId !== input.sourceSheetId) {
+    throw new LinkWriterFencePlanChangedError()
+  }
+  const loaded = buildFieldStates([input.fieldId], fieldResult.rows)
+  const fieldState = loaded.fieldStates[0] ?? 'missing'
+  const configuredTargetSheetId = fieldState.startsWith('link:') ? fieldState.slice('link:'.length) : null
+  const edgeRows = await loadFieldLinkDropEdgeOwnerRows(query, input.fieldId)
+  return {
+    sourceSheetId: input.sourceSheetId,
+    fieldId: input.fieldId,
+    fieldState,
+    configuredTargetSheetId,
+    participantSheetIds: collectFieldLinkDropParticipantSheetIds(
+      input.sourceSheetId,
+      configuredTargetSheetId,
+      fieldSheetId,
+      edgeRows,
+    ),
+  }
+}
+
+/** Acquire every planned sheet fence before row locks, then pin the field FOR UPDATE NOWAIT so a
+ * late FK edge insert cannot appear after capture (FK inserts take KEY SHARE). Then lock current
+ * meta_links FOR UPDATE NOWAIT (endpoint rewrites that keep field_id) and live endpoints FOR SHARE
+ * NOWAIT. Shrink is allowed; an owner outside the planned set or lock contention fails closed. */
+export async function enterFieldLinkDropFencePlan(
+  query: FenceQuery,
+  plan: FieldLinkDropFencePlan,
+): Promise<void> {
+  await fenceWriterEntriesInOrder(query, plan.participantSheetIds)
+
+  let lockedField: Awaited<ReturnType<FenceQuery>>
+  try {
+    lockedField = await query(
+      `SELECT id, sheet_id, type, property
+         FROM meta_fields
+        WHERE id = $1
+        FOR UPDATE NOWAIT`,
+      [plan.fieldId],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new LinkWriterFencePlanChangedError()
+    throw error
+  }
+
+  const currentFields = buildFieldStates([plan.fieldId], lockedField.rows)
+  const currentFieldSheetId = fieldSheetIdFromRow(lockedField.rows[0])
+  if (currentFieldSheetId !== null && currentFieldSheetId !== plan.sourceSheetId) {
+    throw new LinkWriterFencePlanChangedError()
+  }
+  const currentFieldState = currentFields.fieldStates[0] ?? 'missing'
+  if (currentFieldState !== plan.fieldState) throw new LinkWriterFencePlanChangedError()
+  const currentConfiguredTargetSheetId = currentFieldState.startsWith('link:')
+    ? currentFieldState.slice('link:'.length)
+    : null
+  if (currentConfiguredTargetSheetId !== plan.configuredTargetSheetId) {
+    throw new LinkWriterFencePlanChangedError()
+  }
+
+  await assertFieldLinkDropPlanCurrent(
+    query,
+    plan,
+    currentConfiguredTargetSheetId,
+    lockedField.rows[0],
+  )
+
+  try {
+    await query(
+      `SELECT record_id, foreign_record_id
+         FROM meta_links
+        WHERE field_id = $1
+        FOR UPDATE NOWAIT`,
+      [plan.fieldId],
+    )
+    await query(
+      `SELECT 1
+         FROM meta_links edge
+         JOIN meta_records endpoint
+           ON endpoint.id IN (edge.record_id, edge.foreign_record_id)
+        WHERE edge.field_id = $1
+          AND endpoint.sheet_id = ANY($2::text[])
+        FOR SHARE OF endpoint NOWAIT`,
+      [plan.fieldId, plan.participantSheetIds],
+    )
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw new LinkWriterFencePlanChangedError()
+    throw error
+  }
+  await assertFieldLinkDropPlanCurrent(
+    query,
+    plan,
+    currentConfiguredTargetSheetId,
+    lockedField.rows[0],
+  )
+}
+
 async function loadRecordLinkParticipantSheetIds(
   query: FenceQuery,
   owningSheetId: string,

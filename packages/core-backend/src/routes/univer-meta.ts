@@ -281,9 +281,11 @@ import {
 } from '../multitable/canonical-sheet-fence'
 import {
   assertLinkWriterFencePlanMatchesFieldGuards,
+  enterFieldLinkDropFencePlan,
   enterFieldLinkRestoreFencePlan,
   enterLinkWriterFencePlan,
   LinkWriterFencePlanChangedError,
+  prepareFieldLinkDropFencePlan,
   prepareFieldLinkRestoreFencePlan,
   prepareLinkWriterFencePlan,
   type FieldLinkRestoreFencePlan,
@@ -9086,14 +9088,27 @@ export function univerMetaRouter(): Router {
         }
         const confirm = typeof req.body?.confirm === 'string' ? req.body.confirm : ''
         if (confirm.trim() !== 'uncreate') return res.status(400).json({ ok: false, error: { code: 'CONFIRM_REQUIRED', message: 'Type "uncreate" to confirm dropping the created entity.' } })
+        const fieldLinkDropFencePlan = rev.entity_type === 'field'
+          ? await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+              sourceSheetId: sheetId,
+              fieldId: rev.entity_id,
+            })
+          : null
         const failure = await pool.transaction(async ({ query }): Promise<{ status: number; code: string; message: string } | null> => {
           // W0-1 L4cov (fence the config-restore-execute record writes — un-create branch). `dropFieldCascade`
           // below strips the dropped field's key from EVERY record of this sheet's `data` (a whole-sheet
           // record-data write via the shared field-drop cascade helper), so this txn is a record writer and
           // must converge onto the canonical fence: acquire it first, then refuse (409 in the outer catch) if
           // a recovery holds a durable block. (dropFieldCascade carries its own revision disposition.)
-          // Flag-off ⇒ no-op / byte-identical.
-          await fenceWriterEntry(query, sheetId)
+          // Flag-off ⇒ no-op / byte-identical. Flag-on FIELD un-create must enter the shared plan even
+          // when preflight saw missing/non-link, so a late retype cannot sneak an unfenced target.
+          if (fieldLinkDropFencePlan) {
+            await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+          } else if (rev.entity_type === 'field' && isWriterFenceEnabled()) {
+            throw new LinkWriterFencePlanChangedError()
+          } else {
+            await fenceWriterEntry(query, sheetId)
+          }
           let fieldRow: any = null
           let viewRow: any = null
           if (rev.entity_type === 'field') {
@@ -12228,13 +12243,25 @@ export function univerMetaRouter(): Router {
       const sheetId = String((existing.rows[0] as any).sheet_id ?? '')
       const { capabilities } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageFields) return sendForbidden(res)
+      const fieldLinkDropFencePlan = await prepareFieldLinkDropFencePlan(pool.query.bind(pool), {
+        sourceSheetId: sheetId,
+        fieldId,
+      })
       const result = await pool.transaction(async ({ query }) => {
         // W0-1 L4cov: dropFieldCascade below strips the dropped field's key from every record of this sheet's
         // `data` (a whole-sheet record-data write via the shared field-drop cascade helper — the SAME cascade
         // the config-restore un-create branch fences at ~8888), so the FORWARD field-delete txn is a record
         // writer too and must take the canonical fence FIRST, then refuse (409 RECOVERY_IN_PROGRESS in the
-        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical.
-        await fenceWriterEntry(query, sheetId)
+        // catch) if a recovery holds a durable block. Flag-off ⇒ no-op / byte-identical. Flag-on must enter
+        // the shared plan even when preflight saw missing/non-link, so a late retype cannot sneak an
+        // unfenced target via a source-only fence.
+        if (fieldLinkDropFencePlan) {
+          await enterFieldLinkDropFencePlan(query, fieldLinkDropFencePlan)
+        } else if (isWriterFenceEnabled()) {
+          throw new LinkWriterFencePlanChangedError()
+        } else {
+          await fenceWriterEntry(query, sheetId)
+        }
         const existing = await query('SELECT id, sheet_id, name, type, property, "order" FROM meta_fields WHERE id = $1', [fieldId])
         if ((existing as any).rows.length === 0) throw new NotFoundError(`Field not found: ${fieldId}`)
         const row = (existing as any).rows[0]
@@ -12259,11 +12286,10 @@ export function univerMetaRouter(): Router {
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
-      // W0-1 L4cov: fence-then-block-checked forward field-delete → a durable recovery block surfaces here as
-      // 409 RECOVERY_IN_PROGRESS (same shape as reset/revert and the un-create sibling).
-      if (err instanceof SheetWriterBlockedError) {
-        return res.status(409).json({ ok: false, error: { code: 'RECOVERY_IN_PROGRESS', message: 'Another recovery operation is in progress on this sheet; retry shortly.' } })
-      }
+      // W0-1 L4cov / D-H1: fence-then-block-checked forward field-delete → a durable recovery block or a
+      // concurrent link-plan change surfaces here through the shared writer-fence mapping.
+      const writerFenceResponse = sendWriterFenceConflict(res, err)
+      if (writerFenceResponse) return writerFenceResponse
       console.error('[univer-meta] delete field failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to delete field' } })
     }

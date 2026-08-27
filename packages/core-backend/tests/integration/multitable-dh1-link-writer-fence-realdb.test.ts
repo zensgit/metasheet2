@@ -36,6 +36,7 @@ import {
 } from '../../src/multitable/records'
 import { deriveCapabilities, type AccessInfo } from '../../src/multitable/sheet-capabilities'
 import { createRecordWriteHelpers, univerMetaRouter } from '../../src/routes/univer-meta'
+import { pruneSealedHistoryOperations } from '../utils/exact-anchor-history-fixture'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
@@ -316,8 +317,9 @@ describeIfDatabase.sequential('D-H1 cross-sheet meta_links writer fence', () => 
   afterAll(async () => {
     delete process.env[FLAG]
     await q('DELETE FROM meta_links WHERE field_id = ANY($1::text[])', [[F_LINK, F_BACK]]).catch(() => {})
-    await q('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
-    await q('DELETE FROM meta_record_history_operations WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
+    for (const sheetId of [SOURCE, TARGET, DECOY]) {
+      await pruneSealedHistoryOperations(sheetId)
+    }
     await q('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
     await q('DELETE FROM meta_views WHERE id = $1', [VIEW]).catch(() => {})
     await q('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [[SOURCE, TARGET, DECOY]]).catch(() => {})
