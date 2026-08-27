@@ -356,6 +356,34 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     expect(Object.prototype.hasOwnProperty.call(providerError, 'cause')).toBe(false)
   })
 
+  test('normalizes a provider-result reflection trap whose throwable is itself hostile', async () => {
+    const request = putRequest(identity())
+    const provider = createCountingProvider(request)
+    const hostileThrowable = new Proxy(new Error('provider-result-sensitive-value'), {
+      getPrototypeOf() {
+        throw new Error('provider-result-secondary-sensitive-value')
+      },
+    })
+    const hostileResult = new Proxy(
+      { ...descriptorFrom(request), bytes: new Uint8Array(request.bytes) },
+      {
+        ownKeys() {
+          throw hostileThrowable
+        },
+      },
+    )
+    provider.get = async () => hostileResult as unknown as RecoveryArchiveObjectReadResult
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+
+    const error = await objectStoreErrorOf(() => store.get(readRequest(request)))
+    expect(error).toMatchObject({
+      code: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+      message: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+    })
+    expect(error.message).not.toContain('sensitive-value')
+    expect(Object.prototype.hasOwnProperty.call(error, 'cause')).toBe(false)
+  })
+
   test('local provider is explicit test-only and refuses a path escape through resolveWithinBase', async () => {
     expect(codeOf(() => createLocalRecoveryArchiveObjectStoreProvider({
       environment: 'production' as 'test',

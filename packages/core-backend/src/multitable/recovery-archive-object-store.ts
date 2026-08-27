@@ -199,8 +199,7 @@ function readProviderExactRecord(value: unknown, keys: readonly string[]): Recor
       result[key] = descriptor.value
     }
     return result
-  } catch (error) {
-    if (error instanceof RecoveryArchiveObjectStoreError) throw error
+  } catch {
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
   }
 }
