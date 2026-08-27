@@ -58,6 +58,19 @@ function hashEvidenceValue(value) {
   return crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
 }
 
+/**
+ * THE one authority on "is this a stock-preparation SANDBOX target objectId".
+ *
+ * Exported (not merely `__internals`) because the customer-pack normalizer now
+ * validates a pack's declared `targetObjectId` through this exact function. Two
+ * modules asking "is this a sandbox target?" must never be able to answer
+ * differently, and a copied regex is how they start to.
+ *
+ * Two refusals, both fail-closed, both reported through the closed `reason`
+ * vocabulary on `.details`:
+ *   prod_canonical        — the production canonical target is not a sandbox one
+ *   not_sandbox_namespace — anything outside `plm_stock_preparation_sandbox*`
+ */
 function assertSandboxObjectId(value, field = 'objectId') {
   const objectId = requiredString(value, field)
   if (objectId === STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId) {
@@ -628,6 +641,7 @@ module.exports = {
   CANONICAL_KEY_FIELD,
   REQUIRED_PERMISSION,
   StockPreparationTargetProvisioningError,
+  assertSandboxObjectId,
   buildStockPreparationTargetDescriptor,
   summarizeStockPreparationTargetReadiness,
   hashEvidenceValue,
@@ -645,6 +659,7 @@ module.exports = {
     buildCanonicalTargetBinding,
     hashEvidenceValue,
     sandboxStockPreparationTemplate,
+    assertSandboxObjectId,
     assertAdminPermission,
     getProvisioningApi,
     assertNoExistingFieldMutated,
