@@ -7,6 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as coverageBindingMigration from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
+import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
@@ -282,8 +283,15 @@ function expectValuesFree(error: DatabaseError, forbiddenValues: string[]): void
 
 async function truncateCatalog(): Promise<void> {
   if (!schemaIsUp) return
+  const reservationTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_snapshot_reservations') IS NOT NULL AS present`,
+  )
+  const reservationTarget = reservationTable.rows[0]?.present
+    ? 'meta_recovery_archive_snapshot_reservations,'
+    : ''
   await q(
     `TRUNCATE TABLE
+       ${reservationTarget}
        meta_recovery_archive_staging_objects,
        meta_recovery_archive_attachment_refs,
        meta_recovery_archive_coverage_items,
@@ -457,6 +465,7 @@ async function installCatalogIfAbsent(): Promise<void> {
 }
 
 async function downCatalogStack(target: Kysely<unknown>): Promise<void> {
+  await snapshotReservationMigration.down(target)
   await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
@@ -466,6 +475,7 @@ async function upCatalogStack(target: Kysely<unknown>): Promise<void> {
   await archiveCatalogMigration.up(target)
   await stagingCleanupMigration.up(target)
   await coverageBindingMigration.up(target)
+  await snapshotReservationMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {

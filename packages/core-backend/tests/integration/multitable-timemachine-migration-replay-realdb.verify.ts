@@ -21,6 +21,7 @@ import * as sectionCausality from '../../src/db/migrations/zzzz20260826122000_ad
 import * as operationBinding from '../../src/db/migrations/zzzz20260826122500_add_operation_binding_to_nonrecord_history'
 import * as archiveWriterBlock from '../../src/db/migrations/zzzz20260826123000_add_archive_writer_block_ownership'
 import * as coverageBinding from '../../src/db/migrations/zzzz20260827120000_add_recovery_archive_coverage_binding'
+import * as snapshotReservations from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -135,6 +136,10 @@ const MIGRATIONS: NamedMigration[] = [
     name: 'zzzz20260827120000_add_recovery_archive_coverage_binding',
     module: coverageBinding,
   },
+  {
+    name: 'zzzz20260828120000_add_recovery_archive_snapshot_reservations',
+    module: snapshotReservations,
+  },
 ]
 
 const TOUCHED_RELATIONS = [
@@ -164,6 +169,7 @@ const TOUCHED_RELATIONS = [
   'meta_sheet_section_revisions',
   'meta_record_history_snapshot_members',
   'meta_record_history_operation_members',
+  'meta_recovery_archive_snapshot_reservations',
 ]
 
 const OWNED_RELATIONS = [
@@ -182,6 +188,7 @@ const OWNED_RELATIONS = [
   'meta_sheet_section_revisions',
   'meta_record_history_snapshot_members',
   'meta_record_history_operation_members',
+  'meta_recovery_archive_snapshot_reservations',
 ]
 
 const OWNED_COLUMNS = [
@@ -237,6 +244,8 @@ const OWNED_CONSTRAINTS = [
   ['meta_field_value_tombstones', 'fk_mfvt_operation'],
   ['meta_link_tombstones', 'fk_mlt_operation'],
   ['meta_recovery_archive_coverage_items', 'chk_meta_recovery_archive_coverage_kind_binding'],
+  ['meta_recovery_archive_snapshot_reservations', 'fk_mrasr_generation'],
+  ['meta_recovery_archive_snapshot_reservations', 'chk_mrasr_shape'],
 ] as const
 
 const OPERATION_FUNCTIONS = [
@@ -275,6 +284,11 @@ const SECTION_CAUSALITY_FUNCTIONS = [
   'meta_record_history_membership_guard_row',
 ]
 const OPERATION_BINDING_FUNCTIONS = ['meta_nonrecord_history_operation_binding_guard_row']
+const SNAPSHOT_RESERVATION_FUNCTIONS = [
+  'meta_recovery_archive_snapshot_reservation_guard_row',
+  'meta_recovery_archive_snapshot_reservation_guard_set',
+  'meta_recovery_archive_snapshot_reservation_guard_truncate',
+]
 
 const OWNED_FUNCTIONS = [
   ...OPERATION_FUNCTIONS,
@@ -282,6 +296,7 @@ const OWNED_FUNCTIONS = [
   ...RECOVERY_ARCHIVE_FUNCTIONS,
   ...SECTION_CAUSALITY_FUNCTIONS,
   ...OPERATION_BINDING_FUNCTIONS,
+  ...SNAPSHOT_RESERVATION_FUNCTIONS,
 ]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
@@ -315,12 +330,18 @@ const OPERATION_BINDING_TRIGGERS = [
   'trg_mfvt_reject_append_sealed',
   'trg_mlt_reject_append_sealed',
 ]
+const SNAPSHOT_RESERVATION_TRIGGERS = [
+  'trg_mrasr_guard_row',
+  'trg_mrasr_guard_set',
+  'trg_mrasr_guard_truncate',
+]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
   ...RECOVERY_ARCHIVE_TRIGGERS,
   ...SECTION_CAUSALITY_TRIGGERS,
   ...OPERATION_BINDING_TRIGGERS,
+  ...SNAPSHOT_RESERVATION_TRIGGERS,
 ]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'

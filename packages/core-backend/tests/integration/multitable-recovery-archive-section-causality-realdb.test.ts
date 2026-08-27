@@ -5,7 +5,14 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as sectionCausalityMigration from '../../src/db/migrations/zzzz20260826122000_add_section_causality_substrate'
+import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260828120000_add_recovery_archive_snapshot_reservations'
 import { OperationLedger, sealOperation } from '../../src/multitable/operation-ledger'
+import {
+  finalizeRecoveryArchiveBootstrapSnapshot,
+  RecoveryArchiveSectionBootstrapError,
+  reserveRecoveryArchiveSnapshotIdentities,
+  type RecoveryArchiveBootstrapOwnerInput,
+} from '../../src/multitable/recovery-archive-section-bootstrap'
 import {
   bootstrapSectionEntityKey,
   RecoveryArchiveSealError,
@@ -35,6 +42,7 @@ const SHEET = `${PREFIX}_sheet`
 const OTHER_SHEET = `${PREFIX}_other_sheet`
 const SHA256_A = 'a'.repeat(64)
 const SHA256_B = 'b'.repeat(64)
+const DI0_SOURCE_VECTOR_HASH = 'c'.repeat(64)
 const BOOTSTRAP_SEQ0 = '9007199254742000'
 const RECORDS_HEAD_SEQ = '9007199254742009'
 const SNAPSHOT_SEQ = '9007199254742010'
@@ -279,7 +287,84 @@ async function installIfAbsent(): Promise<void> {
   const count = Number(present.rows[0]?.count ?? 0)
   if (count === 0) await sectionCausalityMigration.up(db)
   else if (count !== TABLES.length) throw new Error('section_causality_partial_schema')
+  const reservation = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_snapshot_reservations')::text AS relation`,
+  )
+  if (!reservation.rows[0]?.relation) await snapshotReservationMigration.up(db)
   schemaIsUp = true
+}
+
+async function withRolledBackTxn(fn: (client: PoolClient) => Promise<void>): Promise<void> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await fn(client)
+  } finally {
+    await client.query('ROLLBACK').catch(() => {})
+    client.release()
+  }
+}
+
+async function seedBuildingGeneration(client: PoolClient): Promise<RecoveryArchiveBootstrapOwnerInput> {
+  const generationId = randomUUID()
+  const anchorOperationId = randomUUID()
+  const checkpointId = `${PREFIX}_di0_checkpoint_${randomUUID()}`
+  const seq = await client.query(`SELECT nextval('meta_record_chain_seq')::text AS seq`)
+  const anchorSeq = String(seq.rows[0]?.seq)
+  await insertRecordRevision(client, SHEET, anchorOperationId, anchorSeq, `${PREFIX}_di0_anchor`)
+  await sealDirectEventOperation(asQuery(client), {
+    sheetId: SHEET,
+    operationId: anchorOperationId,
+    endpointSeq: anchorSeq,
+    eventCount: 1,
+    operationKind: 'ordinary',
+  })
+  await client.query(
+    `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
+     VALUES ($1, $2, 'active', $3::bigint)`,
+    [checkpointId, SHEET, anchorSeq],
+  )
+  const input: RecoveryArchiveBootstrapOwnerInput = {
+    generationId,
+    sheetId: SHEET,
+    sourceVectorHash: DI0_SOURCE_VECTOR_HASH,
+    ownerKind: 'archive_builder',
+    ownerId: `${PREFIX}_di0_owner`,
+    ownerFence: '17',
+  }
+  await client.query(
+    `INSERT INTO meta_recovery_archives (
+       generation_id, workspace_id, base_id, sheet_id, anchor_operation_id, anchor_seq,
+       checkpoint_id, source_vector_hash, key_id, owner_kind, owner_id, owner_fence,
+       lease_expires_at, expires_at
+     ) VALUES (
+       $1::uuid, $2, $3, $4, $5::uuid, $6::bigint,
+       $7, $8, 'tm-di0-test-key', $9, $10, $11::bigint,
+       clock_timestamp() + interval '1 hour', clock_timestamp() + interval '2 hours'
+     )`,
+    [
+      input.generationId,
+      WORKSPACE,
+      BASE,
+      input.sheetId,
+      anchorOperationId,
+      anchorSeq,
+      checkpointId,
+      input.sourceVectorHash,
+      input.ownerKind,
+      input.ownerId,
+      input.ownerFence,
+    ],
+  )
+  return input
+}
+
+function di0Contents() {
+  return SECTION_CAUSALITY_DATA_SECTION_KINDS.map((sectionKind, index) => ({
+    sectionKind,
+    rowCount: index === 0 ? '3' : '0',
+    sourceHash: index % 2 === 0 ? SHA256_A : SHA256_B,
+  }))
 }
 
 async function cleanupSheetRows(): Promise<void> {
@@ -335,6 +420,243 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
   test('the exact real-DB allowlist marker and database are active', () => {
     expect(process.env.METASHEET_REAL_DB_TEST_STEP).toBe('1')
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  test('D-I0 reserves one immutable exact section set and a strictly greater parent idempotently', async () => {
+    await withRolledBackTxn(async (client) => {
+      const input = await seedBuildingGeneration(client)
+      const first = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const second = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+
+      expect(second).toEqual(first)
+      expect(first.sections.map((section) => section.sectionKind)).toEqual(SECTION_CAUSALITY_DATA_SECTION_KINDS)
+      expect(new Set(first.sections.map((section) => section.operationId)).size).toBe(9)
+      expect(BigInt(first.snapshotSeq)).toBeGreaterThan(
+        first.sections.reduce(
+          (max, section) => (BigInt(section.endpointSeq) > max ? BigInt(section.endpointSeq) : max),
+          0n,
+        ),
+      )
+
+      await client.query('SET CONSTRAINTS trg_mrasr_guard_set IMMEDIATE')
+      const rows = await client.query(
+        `SELECT ordinal, reservation_kind, section_kind, operation_id::text, endpoint_seq::text
+           FROM meta_recovery_archive_snapshot_reservations
+          WHERE generation_id=$1::uuid ORDER BY ordinal`,
+        [input.generationId],
+      )
+      expect(rows.rows).toHaveLength(10)
+      expect(rows.rows.at(-1)).toMatchObject({
+        ordinal: 10,
+        reservation_kind: 'archive_snapshot',
+        section_kind: null,
+      })
+
+      const immutable = await errorOf(
+        client.query(
+          `UPDATE meta_recovery_archive_snapshot_reservations
+              SET endpoint_seq=endpoint_seq+1 WHERE generation_id=$1::uuid AND ordinal=1`,
+          [input.generationId],
+        ),
+      )
+      expect(immutable.message).toBe('recovery_archive_snapshot_reservation_immutable')
+      expectValuesFree(immutable, [input.generationId, input.sheetId, input.ownerId])
+    })
+  })
+
+  test('D-I0 permits an empty no-op truncate but refuses to erase reserved identities', async () => {
+    await withRolledBackTxn(async (client) => {
+      await client.query('TRUNCATE TABLE meta_recovery_archive_snapshot_reservations')
+      const input = await seedBuildingGeneration(client)
+      await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      await client.query('SET CONSTRAINTS trg_mrasr_guard_set IMMEDIATE')
+
+      const immutable = await errorOf(
+        client.query('TRUNCATE TABLE meta_recovery_archive_snapshot_reservations'),
+      )
+      expect(immutable.message).toBe('recovery_archive_snapshot_reservation_immutable')
+      expectValuesFree(immutable, [input.generationId, input.sheetId, input.ownerId])
+    })
+  })
+
+  test('D-I0 rejects a partial reservation set at the deferred database boundary', async () => {
+    await withRolledBackTxn(async (client) => {
+      const input = await seedBuildingGeneration(client)
+      await client.query('SAVEPOINT partial_reservation')
+      const identity = await client.query(`SELECT nextval('meta_record_chain_seq')::text AS seq`)
+      const operationId = randomUUID()
+      await client.query(
+        `INSERT INTO meta_recovery_archive_snapshot_reservations (
+           generation_id, sheet_id, source_vector_hash, owner_kind, owner_id, owner_fence,
+           ordinal, reservation_kind, section_kind, operation_id, endpoint_seq
+         ) VALUES ($1::uuid, $2, $3, $4, $5, $6::bigint, 1, 'section_bootstrap', 'schema',
+                   $7::uuid, $8::bigint)`,
+        [
+          input.generationId,
+          input.sheetId,
+          input.sourceVectorHash,
+          input.ownerKind,
+          input.ownerId,
+          input.ownerFence,
+          operationId,
+          identity.rows[0]?.seq,
+        ],
+      )
+      const error = await errorOf(client.query('SET CONSTRAINTS trg_mrasr_guard_set IMMEDIATE'))
+      expect(error.message).toBe('recovery_archive_snapshot_reservation_set_invalid')
+      expectValuesFree(error, [input.generationId, input.sheetId, input.ownerId])
+      await client.query('ROLLBACK TO SAVEPOINT partial_reservation')
+    })
+  })
+
+  test('D-I0 rejects a complete reservation set whose parent sequence is not last', async () => {
+    await withRolledBackTxn(async (client) => {
+      const input = await seedBuildingGeneration(client)
+      await client.query('SAVEPOINT parent_not_last')
+      const allocated = await client.query(
+        `SELECT ordinal::int, nextval('meta_record_chain_seq')::text AS endpoint_seq
+           FROM generate_series(1, 10) AS ordinal
+          ORDER BY ordinal`,
+      )
+      const endpointSeqs = allocated.rows.map((row) => String(row.endpoint_seq))
+      const operationIds = Array.from({ length: 10 }, () => randomUUID())
+      await client.query(
+        `INSERT INTO meta_recovery_archive_snapshot_reservations (
+           generation_id, sheet_id, source_vector_hash, owner_kind, owner_id, owner_fence,
+           ordinal, reservation_kind, section_kind, operation_id, endpoint_seq
+         )
+         SELECT $1::uuid, $2, $3, $4, $5, $6::bigint,
+                row_input.ordinal, row_input.reservation_kind, row_input.section_kind,
+                row_input.operation_id, row_input.endpoint_seq
+           FROM unnest(
+             $7::int[], $8::text[], $9::text[], $10::uuid[], $11::bigint[]
+           ) AS row_input(ordinal, reservation_kind, section_kind, operation_id, endpoint_seq)`,
+        [
+          input.generationId,
+          input.sheetId,
+          input.sourceVectorHash,
+          input.ownerKind,
+          input.ownerId,
+          input.ownerFence,
+          Array.from({ length: 10 }, (_, index) => index + 1),
+          [...SECTION_CAUSALITY_DATA_SECTION_KINDS.map(() => 'section_bootstrap'), 'archive_snapshot'],
+          [...SECTION_CAUSALITY_DATA_SECTION_KINDS, null],
+          operationIds,
+          [...endpointSeqs.slice(1), endpointSeqs[0]],
+        ],
+      )
+      const error = await errorOf(client.query('SET CONSTRAINTS trg_mrasr_guard_set IMMEDIATE'))
+      expect(error.message).toBe('recovery_archive_snapshot_reservation_set_invalid')
+      expectValuesFree(error, [input.generationId, input.sheetId, input.ownerId])
+      await client.query('ROLLBACK TO SAVEPOINT parent_not_last')
+    })
+  })
+
+  test('D-I0 finalize rolls back partial work, retries deterministically, and seals parent last', async () => {
+    await withRolledBackTxn(async (client) => {
+      const input = await seedBuildingGeneration(client)
+      const plan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const contents = di0Contents()
+      await client.query('SAVEPOINT failed_finalize')
+      let sealedBootstrapCount = 0
+      const injectedQuery: SealQuery = async (text, params) => {
+        if (text.includes('INSERT INTO meta_record_history_operations') && text.includes("'section_bootstrap'")) {
+          sealedBootstrapCount += 1
+          if (sealedBootstrapCount === 3) throw new Error('injected_di0_finalize_failure')
+        }
+        return client.query(text, params)
+      }
+      await expect(
+        finalizeRecoveryArchiveBootstrapSnapshot(injectedQuery, { ...input, sections: contents }),
+      ).rejects.toThrow('injected_di0_finalize_failure')
+      await client.query('ROLLBACK TO SAVEPOINT failed_finalize')
+
+      const afterRollback = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM meta_sheet_section_revisions
+             WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS revisions,
+           (SELECT count(*)::int FROM meta_record_history_operations
+             WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS operations,
+           (SELECT count(*)::int FROM meta_record_history_snapshot_members
+             WHERE sheet_id=$1 AND parent_operation_id=$3::uuid) AS members`,
+        [
+          input.sheetId,
+          [...plan.sections.map((section) => section.operationId), plan.snapshotOperationId],
+          plan.snapshotOperationId,
+        ],
+      )
+      expect(afterRollback.rows[0]).toEqual({ revisions: 0, operations: 0, members: 0 })
+
+      const retried = await finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), {
+        ...input,
+        sections: contents,
+      })
+      expect(retried).toEqual(plan)
+      await client.query('SET CONSTRAINTS ALL IMMEDIATE')
+
+      const sealed = await client.query(
+        `SELECT operation_kind, endpoint_seq::text AS endpoint_seq, event_count, component_count
+         FROM meta_record_history_operations
+          WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])
+          ORDER BY endpoint_seq::bigint`,
+        [input.sheetId, [...plan.sections.map((section) => section.operationId), plan.snapshotOperationId]],
+      )
+      expect(sealed.rows).toHaveLength(10)
+      expect(sealed.rows.at(-1)).toEqual({
+        operation_kind: 'archive_snapshot',
+        endpoint_seq: plan.snapshotSeq,
+        event_count: 0,
+        component_count: 9,
+      })
+      const memberCount = await client.query(
+        `SELECT count(*)::int AS count FROM meta_record_history_snapshot_members
+          WHERE sheet_id=$1 AND parent_operation_id=$2::uuid`,
+        [input.sheetId, plan.snapshotOperationId],
+      )
+      expect(memberCount.rows[0]?.count).toBe(9)
+
+      await finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), { ...input, sections: contents })
+      const retryCounts = await client.query(
+        `SELECT
+           (SELECT count(*)::int FROM meta_sheet_section_revisions
+             WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS revisions,
+           (SELECT count(*)::int FROM meta_record_history_operations
+             WHERE sheet_id=$1 AND operation_id=ANY($2::uuid[])) AS operations,
+           (SELECT count(*)::int FROM meta_record_history_snapshot_members
+             WHERE sheet_id=$1 AND parent_operation_id=$3::uuid) AS members`,
+        [
+          input.sheetId,
+          [...plan.sections.map((section) => section.operationId), plan.snapshotOperationId],
+          plan.snapshotOperationId,
+        ],
+      )
+      expect(retryCounts.rows[0]).toEqual({ revisions: 9, operations: 10, members: 9 })
+    })
+  })
+
+  test('D-I0 keeps reservations unusable after the owning generation is abandoned', async () => {
+    await withRolledBackTxn(async (client) => {
+      const input = await seedBuildingGeneration(client)
+      await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      await client.query(
+        `UPDATE meta_recovery_archives SET build_status='abandoned' WHERE generation_id=$1::uuid`,
+        [input.generationId],
+      )
+
+      const error = await errorOf(
+        finalizeRecoveryArchiveBootstrapSnapshot(asQuery(client), { ...input, sections: di0Contents() }),
+      )
+      expect(error).toBeInstanceOf(RecoveryArchiveSectionBootstrapError)
+      expect((error as RecoveryArchiveSectionBootstrapError).code).toBe(
+        'RECOVERY_ARCHIVE_BOOTSTRAP_GENERATION_UNAVAILABLE',
+      )
+      const rows = await client.query(
+        `SELECT count(*)::int AS count FROM meta_recovery_archive_snapshot_reservations
+          WHERE generation_id=$1::uuid`,
+        [input.generationId],
+      )
+      expect(rows.rows[0]?.count).toBe(10)
+    })
   })
 
   afterEach(async () => {
