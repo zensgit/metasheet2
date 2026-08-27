@@ -634,4 +634,52 @@ describeIfRealDbStep.sequential('Phase D2 key registry and reference admission (
       expect(absent.rows).toEqual([{ key_table_absent: true, foreign_key_absent: true }])
     })
   }, 120000)
+
+  test('down refuses a concurrent uncommitted key reference without dropping authority', async () => {
+    await withScratch('down_race', async (scratch) => {
+      await keyRegistryMigration.up(scratch.db)
+      const keyId = 'key-down-race'
+      const generationId = randomUUID()
+      const writer = await scratch.pool.connect()
+      const downPool = new Pool({ connectionString: databaseUrlFor(scratch.name), max: 1 })
+      const downDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: downPool }) })
+      try {
+        await downPool.query("SET statement_timeout='750ms'")
+        await writer.query('BEGIN')
+        await writer.query(`INSERT INTO ${KEY_TABLE} (key_id) VALUES ($1)`, [keyId])
+        await writer.query(
+          `INSERT INTO meta_recovery_archives (generation_id, key_id) VALUES ($1::uuid, $2)`,
+          [generationId, keyId],
+        )
+
+        const refusal = await errorOf(keyRegistryMigration.down(downDb))
+        expect(refusal.message).toBe('recovery_archive_key_registry_busy')
+        expectValuesFree(refusal, [keyId, generationId])
+        await writer.query('COMMIT')
+
+        const retained = await scratch.pool.query(
+          `SELECT pg_catalog.to_regclass('public.${KEY_TABLE}') IS NOT NULL AS key_table_present,
+                  EXISTS (
+                    SELECT 1 FROM pg_constraint
+                     WHERE conname='fk_meta_recovery_archives_key'
+                  ) AS foreign_key_present,
+                  (SELECT count(*)::int FROM ${KEY_TABLE} WHERE key_id=$1) AS key_count,
+                  (SELECT count(*)::int FROM meta_recovery_archives
+                    WHERE generation_id=$2::uuid AND key_id=$1) AS archive_count`,
+          [keyId, generationId],
+        )
+        expect(retained.rows).toEqual([{
+          key_table_present: true,
+          foreign_key_present: true,
+          key_count: 1,
+          archive_count: 1,
+        }])
+      } finally {
+        await writer.query('ROLLBACK').catch(() => {})
+        writer.release()
+        await downDb.destroy().catch(() => {})
+        await downPool.end().catch(() => {})
+      }
+    })
+  }, 120000)
 })

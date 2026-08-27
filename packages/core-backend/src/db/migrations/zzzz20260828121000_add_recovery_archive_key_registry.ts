@@ -247,33 +247,30 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`
     DO $$
     BEGIN
+      BEGIN
+        LOCK TABLE public.meta_recovery_archive_keys, public.meta_recovery_archives
+          IN ACCESS EXCLUSIVE MODE NOWAIT;
+      EXCEPTION WHEN lock_not_available THEN
+        RAISE EXCEPTION USING
+          ERRCODE = '55P03',
+          MESSAGE = 'recovery_archive_key_registry_busy';
+      END;
+
       IF EXISTS (SELECT 1 FROM public.meta_recovery_archives LIMIT 1)
          OR EXISTS (SELECT 1 FROM public.meta_recovery_archive_keys LIMIT 1) THEN
         RAISE EXCEPTION USING
           ERRCODE = '55000',
           MESSAGE = 'recovery_archive_key_registry_nonempty';
       END IF;
+
+      EXECUTE 'DROP TRIGGER trg_meta_recovery_archive_key_reference_guard_row ON public.meta_recovery_archives';
+      EXECUTE 'ALTER TABLE public.meta_recovery_archives DROP CONSTRAINT fk_meta_recovery_archives_key';
+      EXECUTE 'DROP TRIGGER trg_meta_recovery_archive_key_guard_truncate ON public.meta_recovery_archive_keys';
+      EXECUTE 'DROP TRIGGER trg_meta_recovery_archive_key_guard_row ON public.meta_recovery_archive_keys';
+      EXECUTE 'DROP TABLE public.meta_recovery_archive_keys';
+      EXECUTE 'DROP FUNCTION public.meta_recovery_archive_key_reference_guard_row()';
+      EXECUTE 'DROP FUNCTION public.meta_recovery_archive_key_guard_truncate()';
+      EXECUTE 'DROP FUNCTION public.meta_recovery_archive_key_guard_row()';
     END $$;
   `.execute(db)
-
-  await sql`
-    DROP TRIGGER trg_meta_recovery_archive_key_reference_guard_row
-      ON public.meta_recovery_archives
-  `.execute(db)
-  await sql`
-    ALTER TABLE public.meta_recovery_archives
-      DROP CONSTRAINT fk_meta_recovery_archives_key
-  `.execute(db)
-  await sql`
-    DROP TRIGGER trg_meta_recovery_archive_key_guard_truncate
-      ON public.meta_recovery_archive_keys
-  `.execute(db)
-  await sql`
-    DROP TRIGGER trg_meta_recovery_archive_key_guard_row
-      ON public.meta_recovery_archive_keys
-  `.execute(db)
-  await sql`DROP TABLE public.meta_recovery_archive_keys`.execute(db)
-  await sql`DROP FUNCTION public.meta_recovery_archive_key_reference_guard_row()`.execute(db)
-  await sql`DROP FUNCTION public.meta_recovery_archive_key_guard_truncate()`.execute(db)
-  await sql`DROP FUNCTION public.meta_recovery_archive_key_guard_row()`.execute(db)
 }
