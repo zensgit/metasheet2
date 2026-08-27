@@ -45,6 +45,12 @@ export class RecoveryArchiveObjectStoreError extends Error {
   }
 }
 
+class RecoveryArchiveLocalBindingMismatchError extends RecoveryArchiveObjectStoreError {
+  constructor() {
+    super('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+  }
+}
+
 export interface RecoveryArchiveObjectIdentity {
   /** Canonical lowercase UUID, never a URI or provider key. */
   generationId: string
@@ -135,6 +141,10 @@ function fail(code: RecoveryArchiveObjectStoreErrorCode): never {
   throw new RecoveryArchiveObjectStoreError(code)
 }
 
+function failLocalBindingMismatch(): never {
+  throw new RecoveryArchiveLocalBindingMismatchError()
+}
+
 function identityKey(identity: RecoveryArchiveObjectIdentity): string {
   return `${identity.generationId}/${identity.objectId}`
 }
@@ -195,6 +205,15 @@ function readProviderExactRecord(value: unknown, keys: readonly string[]): Recor
   }
 }
 
+function copyUint8Array(value: unknown, result = false): Uint8Array {
+  try {
+    if (value instanceof Uint8Array) return new Uint8Array(value)
+  } catch {
+    // Normalize hostile typed-array proxies below.
+  }
+  fail(result ? 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT' : 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
+}
+
 function parseIdentity(identity: unknown, result = false): RecoveryArchiveObjectIdentity {
   const read = result
     ? readProviderExactRecord(identity, ['generationId', 'objectId'])
@@ -251,10 +270,7 @@ function parsePutRequest(value: unknown): RecoveryArchiveObjectPutRequest {
     size: read.size,
     version: read.version,
   })
-  if (!(read.bytes instanceof Uint8Array)) {
-    fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST')
-  }
-  return { ...descriptor, bytes: new Uint8Array(read.bytes) }
+  return { ...descriptor, bytes: copyUint8Array(read.bytes) }
 }
 
 function parseExpectedBinding(value: unknown): RecoveryArchiveObjectExpectedBinding {
@@ -368,7 +384,14 @@ function assertOutsideTransaction(probe: RecoveryArchiveTransactionDepthProbe): 
 async function callProvider<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run()
-  } catch {
+  } catch (error) {
+    let localBindingMismatch = false
+    try {
+      localBindingMismatch = error instanceof RecoveryArchiveLocalBindingMismatchError
+    } catch {
+      // Normalize hostile provider throws below.
+    }
+    if (localBindingMismatch) fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
     fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
   }
 }
@@ -425,18 +448,16 @@ export function createTransactionGuardedRecoveryArchiveObjectStore(
         expiresAt: read.expiresAt,
         pinned: read.pinned,
       }, true)
-      if (!(read.bytes instanceof Uint8Array)) {
-        fail('RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT')
-      }
+      const bytes = copyUint8Array(read.bytes, true)
       assertSameIdentity(expected, object)
       if (!expectedBindingMatches(expected, object)) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
-      const actual = byteBinding(read.bytes)
+      const actual = byteBinding(bytes)
       if (actual.sha256 !== object.sha256 || actual.size !== object.size) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
-      return { ...copyDescriptor(object), bytes: new Uint8Array(read.bytes) }
+      return { ...copyDescriptor(object), bytes }
     },
 
     async head(request) {
@@ -506,6 +527,50 @@ export function createLocalRecoveryArchiveObjectStoreProvider(options: {
     }
   }
 
+  async function containedFilesystemPath(
+    identity: RecoveryArchiveObjectIdentity,
+    options: { createParents?: boolean; requireFile?: boolean } = {},
+  ): Promise<string> {
+    const fullPath = containedPath(identity)
+    try {
+      if (options.createParents) await fs.mkdir(basePath, { recursive: true })
+      const realBasePath = await fs.realpath(basePath)
+      const parentPath = path.dirname(fullPath)
+      const relativeParent = path.relative(basePath, parentPath)
+      let currentPath = basePath
+      let realParentPath = realBasePath
+
+      for (const segment of relativeParent.split(path.sep).filter(Boolean)) {
+        currentPath = path.join(currentPath, segment)
+        if (options.createParents) {
+          try {
+            await fs.mkdir(currentPath)
+          } catch {
+            // lstat below distinguishes an existing directory from a refused component.
+          }
+        }
+        const stats = await fs.lstat(currentPath)
+        if (stats.isSymbolicLink() || !stats.isDirectory()) throw new Error()
+        const realCurrentPath = await fs.realpath(currentPath)
+        if (realCurrentPath !== realBasePath && !realCurrentPath.startsWith(realBasePath + path.sep)) {
+          throw new Error()
+        }
+        realParentPath = realCurrentPath
+      }
+
+      const realFullPath = path.join(realParentPath, path.basename(fullPath))
+      if (options.requireFile) {
+        const stats = await fs.lstat(realFullPath)
+        if (stats.isSymbolicLink() || !stats.isFile()) throw new Error()
+        const resolvedFullPath = await fs.realpath(realFullPath)
+        if (!resolvedFullPath.startsWith(realBasePath + path.sep)) throw new Error()
+      }
+      return realFullPath
+    } catch {
+      fail('RECOVERY_ARCHIVE_OBJECT_STORE_PATH_REFUSED')
+    }
+  }
+
   async function withObjectLock<T>(identity: RecoveryArchiveObjectIdentity, work: () => Promise<T>): Promise<T> {
     const key = identityKey(identity)
     const previous = locks.get(key) ?? Promise.resolve()
@@ -534,7 +599,7 @@ export function createLocalRecoveryArchiveObjectStoreProvider(options: {
   }
 
   async function readVerifiedBytes(object: RecoveryArchiveObjectDescriptor): Promise<Uint8Array> {
-    const fullPath = containedPath(object)
+    const fullPath = await containedFilesystemPath(object, { requireFile: true })
     try {
       const bytes = new Uint8Array(await fs.readFile(fullPath))
       const actual = byteBinding(bytes)
@@ -551,16 +616,23 @@ export function createLocalRecoveryArchiveObjectStoreProvider(options: {
   return {
     async put(request) {
       return withObjectLock(request, async () => {
+        const bytes = copyUint8Array(request.bytes)
+        const actual = byteBinding(bytes)
+        if (actual.sha256 !== request.sha256 || actual.size !== request.size) {
+          fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+        }
         const key = identityKey(request)
         const existing = objects.get(key)
         if (existing) {
           await readVerifiedBytes(existing)
+          if (!sameBinding(bindingOf(request), bindingOf(existing)) || request.pinned !== existing.pinned) {
+            failLocalBindingMismatch()
+          }
           return { outcome: 'existing', object: copyDescriptor(existing) }
         }
-        const fullPath = containedPath(request)
+        const fullPath = await containedFilesystemPath(request, { createParents: true })
         try {
-          await fs.mkdir(path.dirname(fullPath), { recursive: true })
-          await fs.writeFile(fullPath, request.bytes, { flag: 'wx' })
+          await fs.writeFile(fullPath, bytes, { flag: 'wx' })
         } catch {
           fail('RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED')
         }
@@ -599,7 +671,7 @@ export function createLocalRecoveryArchiveObjectStoreProvider(options: {
           return { outcome: 'retained', object: copyDescriptor(object) }
         }
         await readVerifiedBytes(object)
-        const fullPath = containedPath(object)
+        const fullPath = await containedFilesystemPath(object, { requireFile: true })
         try {
           await fs.unlink(fullPath)
         } catch {

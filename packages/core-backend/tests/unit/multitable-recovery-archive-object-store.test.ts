@@ -111,6 +111,16 @@ async function asyncCodeOf(run: () => Promise<unknown>): Promise<string> {
   throw new Error('expected_recovery_archive_object_store_refusal')
 }
 
+async function objectStoreErrorOf(run: () => Promise<unknown>): Promise<RecoveryArchiveObjectStoreError> {
+  try {
+    await run()
+  } catch (error) {
+    expect(error).toBeInstanceOf(RecoveryArchiveObjectStoreError)
+    return error as RecoveryArchiveObjectStoreError
+  }
+  throw new Error('expected_recovery_archive_object_store_refusal')
+}
+
 function descriptorFrom(request: RecoveryArchiveObjectPutRequest): RecoveryArchiveObjectDescriptor {
   const { bytes: _, ...descriptor } = request
   return descriptor
@@ -212,6 +222,43 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     await expect(asyncCodeOf(() => store.put(changedVersion))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
   })
 
+  test('direct local provider returns existing only for the exact stored byte and metadata binding', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2e-direct-put-'))
+    temporaryRoots.push(root)
+    const provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
+    const initial = putRequest(identity())
+    const differentBytes = Buffer.from('different-direct-provider-ciphertext', 'utf8')
+
+    await expect(provider.put(initial)).resolves.toEqual({ outcome: 'created', object: descriptorFrom(initial) })
+    await expect(provider.put({ ...initial, bytes: new Uint8Array(initial.bytes) })).resolves.toEqual({
+      outcome: 'existing',
+      object: descriptorFrom(initial),
+    })
+
+    const mismatches: RecoveryArchiveObjectPutRequest[] = [
+      { ...initial, version: '2' },
+      { ...initial, sha256: 'b'.repeat(64) },
+      { ...initial, size: String(initial.bytes.byteLength + 1) },
+      { ...initial, expiresAt: '2028-08-28T00:00:00.000Z' },
+      { ...initial, pinned: true },
+      {
+        ...initial,
+        bytes: differentBytes,
+        sha256: digest(differentBytes),
+        size: String(differentBytes.byteLength),
+      },
+    ]
+    for (const mismatch of mismatches) {
+      await expect(asyncCodeOf(() => provider.put(mismatch))).resolves.toBe(
+        'RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH',
+      )
+    }
+    await expect(provider.get(readRequest(initial))).resolves.toEqual({
+      ...descriptorFrom(initial),
+      bytes: new Uint8Array(initial.bytes),
+    })
+  })
+
   test('rejects provider result drift and normalizes provider text into a values-free code', async () => {
     const request = putRequest(identity())
     const driftProvider = createCountingProvider(request)
@@ -272,6 +319,43 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     expect(provider.calls).toEqual([])
   })
 
+  test('normalizes caller and provider typed-array proxy traps without leaking values or causes', async () => {
+    const request = putRequest(identity())
+    const callerProvider = createCountingProvider(request)
+    const callerStore = createTransactionGuardedRecoveryArchiveObjectStore(callerProvider, depthProbe(0))
+    const callerBytes = new Proxy(new Uint8Array(request.bytes), {
+      getPrototypeOf() {
+        throw new Error('caller-typed-array-sensitive-value')
+      },
+    })
+
+    const callerError = await objectStoreErrorOf(() => callerStore.put({ ...request, bytes: callerBytes }))
+    expect(callerError).toMatchObject({
+      code: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST',
+      message: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_REQUEST',
+    })
+    expect(callerError.message).not.toContain('sensitive-value')
+    expect(Object.prototype.hasOwnProperty.call(callerError, 'cause')).toBe(false)
+    expect(callerProvider.calls).toEqual([])
+
+    const provider = createCountingProvider(request)
+    const providerBytes = new Proxy(new Uint8Array(request.bytes), {
+      getPrototypeOf() {
+        throw new Error('provider-typed-array-sensitive-value')
+      },
+    })
+    provider.get = async () => ({ ...descriptorFrom(request), bytes: providerBytes })
+    const providerStore = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+
+    const providerError = await objectStoreErrorOf(() => providerStore.get(readRequest(request)))
+    expect(providerError).toMatchObject({
+      code: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+      message: 'RECOVERY_ARCHIVE_OBJECT_STORE_INVALID_RESULT',
+    })
+    expect(providerError.message).not.toContain('sensitive-value')
+    expect(Object.prototype.hasOwnProperty.call(providerError, 'cause')).toBe(false)
+  })
+
   test('local provider is explicit test-only and refuses a path escape through resolveWithinBase', async () => {
     expect(codeOf(() => createLocalRecoveryArchiveObjectStoreProvider({
       environment: 'production' as 'test',
@@ -292,6 +376,20 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     } finally {
       await fs.rm(path.join(os.tmpdir(), escapedDirectory), { recursive: true, force: true })
     }
+  })
+
+  test('local provider refuses a symlinked generations parent before any outside write', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2e-symlink-root-'))
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-d2e-symlink-outside-'))
+    temporaryRoots.push(root, outside)
+    await fs.symlink(outside, path.join(root, 'generations'), 'dir')
+    const provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
+    const request = putRequest(identity())
+
+    await expect(asyncCodeOf(() => provider.put(request))).resolves.toBe(
+      'RECOVERY_ARCHIVE_OBJECT_STORE_PATH_REFUSED',
+    )
+    await expect(fs.readdir(outside)).resolves.toEqual([])
   })
 
   test('provider output must keep the exact bound identity and bytes', async () => {
