@@ -1,5 +1,6 @@
 // V0.1 e-learning chrome string table — single source for
-// ElearningLearnerView.vue and ElearningAdminView.vue.
+// ElearningLearnerView.vue, ElearningAdminView.vue, and the L3
+// ElearningManualGradingView.vue / ElearningManualGradingAttempt.vue pair.
 //
 // EN + ZH both explicit (same convention as workbench-labels.ts and
 // meta-core-labels.ts). Components read `useLocale().isZh` and call
@@ -7,10 +8,11 @@
 // helpers below for strings with scores / ids / error codes.
 //
 // NOT translated (user/data values): course titles, question prompts,
-// already-entered choice option texts, deadlines, ids, URLs, and backend
-// error codes. Error codes and HTTP statuses are interpolated raw.
-// True/false option drafts are UI-owned defaults (not user data) and are
-// localized when the question type is switched to true_false.
+// already-entered choice option texts, deadlines, ids, URLs, learner
+// answers, and backend error codes. Error codes and HTTP statuses are
+// interpolated raw. True/false option drafts are UI-owned defaults (not
+// user data) and are localized when the question type is switched to
+// true_false.
 
 import type { ElearningLearnerVideoStatus } from '../services/elearning'
 
@@ -96,6 +98,39 @@ export type ElearningLabelKey =
   | 'assessment.publishExam'
   | 'assessment.unbound'
   | 'assessment.startAnother'
+  // --- L3 manual grading chrome ---
+  | 'grading.title'
+  | 'grading.subtitle'
+  | 'grading.loadingQueue'
+  | 'grading.refresh'
+  | 'grading.previousPage'
+  | 'grading.nextPage'
+  | 'grading.queueEmpty'
+  | 'grading.columnLearner'
+  | 'grading.columnExam'
+  | 'grading.columnCourse'
+  | 'grading.columnSubmitted'
+  | 'grading.columnProgress'
+  | 'grading.openAttempt'
+  | 'grading.detailLoading'
+  | 'grading.backToQueue'
+  | 'grading.learnerIdLabel'
+  | 'grading.learnerAnswerLabel'
+  | 'grading.scoreLabel'
+  | 'grading.commentLabel'
+  | 'grading.commentPlaceholder'
+  | 'grading.submit'
+  | 'grading.submitting'
+  | 'grading.duplicateNotice'
+  | 'grading.completeNotice'
+  | 'grading.conflictRefreshNotice'
+  | 'grading.error403'
+  | 'grading.error404'
+  | 'grading.error409'
+  | 'grading.error503'
+  | 'grading.scoreRequired'
+  | 'grading.scoreInteger'
+  | 'grading.clientIdUnavailable'
   // --- Shared statuses ---
   | 'status.completed'
   | 'status.incomplete'
@@ -228,6 +263,69 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     zh: '该考试模板已发布，但尚未指派给学员，也尚未绑定课程。',
   },
   'assessment.startAnother': { en: 'Create another paper', zh: '继续创建新试卷' },
+
+  'grading.title': { en: 'Manual Grading', zh: '人工阅卷' },
+  'grading.subtitle': {
+    en: 'Grade the selected learner\'s short-answer questions. Objective questions, answer keys, explanations, rubrics, and raw snapshots are never shown here.',
+    zh: '评阅所选学员答卷中的简答题。此处永不显示客观题、标准答案、解析、评分细则或原始快照。',
+  },
+  'grading.loadingQueue': { en: 'Loading the grading queue...', zh: '正在加载阅卷队列…' },
+  'grading.refresh': { en: 'Refresh', zh: '刷新' },
+  'grading.previousPage': { en: 'Previous', zh: '上一页' },
+  'grading.nextPage': { en: 'Next', zh: '下一页' },
+  'grading.queueEmpty': { en: 'No attempts are waiting for grading.', zh: '暂无待阅卷答卷。' },
+  'grading.columnLearner': { en: 'Learner', zh: '学员' },
+  'grading.columnExam': { en: 'Exam', zh: '考试' },
+  'grading.columnCourse': { en: 'Course', zh: '课程' },
+  'grading.columnSubmitted': { en: 'Submitted', zh: '提交时间' },
+  'grading.columnProgress': { en: 'Graded', zh: '已评' },
+  'grading.openAttempt': { en: 'Grade', zh: '评阅' },
+  'grading.detailLoading': { en: 'Loading attempt...', zh: '正在加载答卷…' },
+  'grading.backToQueue': { en: 'Back to queue', zh: '返回队列' },
+  'grading.learnerIdLabel': { en: 'Learner ID', zh: '学员 ID' },
+  'grading.learnerAnswerLabel': { en: 'Learner answer', zh: '学员作答' },
+  'grading.scoreLabel': { en: 'Score', zh: '分值' },
+  'grading.commentLabel': { en: 'Comment (optional)', zh: '评语（可选）' },
+  'grading.commentPlaceholder': {
+    en: 'Private note for this grade (optional)',
+    zh: '本次评分的内部备注（可选）',
+  },
+  'grading.submit': { en: 'Submit grade', zh: '提交评分' },
+  'grading.submitting': { en: 'Submitting...', zh: '正在提交…' },
+  'grading.duplicateNotice': {
+    en: 'This grade was already recorded; no changes were made.',
+    zh: '该评分此前已记录，本次未产生变更。',
+  },
+  'grading.completeNotice': {
+    en: 'All short-answer questions are graded. This attempt is finalized.',
+    zh: '全部简答题已评阅完毕，该答卷已定稿。',
+  },
+  'grading.conflictRefreshNotice': {
+    en: 'The attempt changed elsewhere. The queue was refreshed from the first page.',
+    zh: '该答卷已在别处发生变化，待评分队列已从第一页重新刷新。',
+  },
+  'grading.error403': {
+    en: 'You do not have access to grade this attempt.',
+    zh: '您无权评阅该答卷。',
+  },
+  'grading.error404': {
+    en: 'This attempt is unavailable or has already been graded.',
+    zh: '该答卷不可用，或已被评阅完毕。',
+  },
+  'grading.error409': {
+    en: 'The grading state changed elsewhere. Refresh and try again.',
+    zh: '阅卷状态已在别处发生变化，请刷新后重试。',
+  },
+  'grading.error503': {
+    en: 'Grading is temporarily unavailable. Please try again shortly.',
+    zh: '阅卷功能暂不可用，请稍后重试。',
+  },
+  'grading.scoreRequired': { en: 'Please enter a score.', zh: '请输入分值。' },
+  'grading.scoreInteger': { en: 'Score must be a whole number.', zh: '分值须为整数。' },
+  'grading.clientIdUnavailable': {
+    en: 'Your browser does not support the secure identifier required to submit a grade.',
+    zh: '您的浏览器不支持提交评分所需的安全标识符。',
+  },
 
   'status.completed': { en: 'Completed', zh: '已完成' },
   'status.incomplete': { en: 'Incomplete', zh: '未完成' },
@@ -465,4 +563,48 @@ export function elearningAssessmentExamPublished(totalPoints: number, isZh: bool
   return isZh
     ? `独立考试模板已发布，共 ${totalPoints} 分。`
     : `Independent exam template published with ${totalPoints} total points.`
+}
+
+// --- L3 manual grading interpolation helpers ---
+
+export function elearningManualGradingQueuePageLabel(page: number, isZh: boolean): string {
+  return isZh ? `第 ${page} 页` : `Page ${page}`
+}
+
+export function elearningManualGradingProgressLabel(
+  gradedQuestions: number,
+  manualQuestions: number,
+): string {
+  return `${gradedQuestions} / ${manualQuestions}`
+}
+
+export function elearningManualGradingScoreRangeError(maxScore: number, isZh: boolean): string {
+  return isZh
+    ? `请输入 0 到 ${maxScore} 之间的整数分值。`
+    : `Enter a whole-number score from 0 to ${maxScore}.`
+}
+
+export function elearningManualGradingGradedLabel(
+  score: number,
+  maxScore: number,
+  isZh: boolean,
+): string {
+  return isZh ? `已评分：${score} / ${maxScore}` : `Graded: ${score} / ${maxScore}`
+}
+
+// Status-keyed first: the 403 from rbacGuardAny and other non-JSON-shaped error
+// bodies read back as the generic 'request_failed' code, which would otherwise
+// degrade every closed state to the same message. Falls back to the generic
+// elearningFailure(code, status, isZh) formatter for status codes with no
+// grading-specific copy (400, 401, 500, network failures, ...).
+export function elearningManualGradingErrorMessage(
+  status: number,
+  code: string,
+  isZh: boolean,
+): string {
+  if (status === 403) return elearningLabel('grading.error403', isZh)
+  if (status === 404) return elearningLabel('grading.error404', isZh)
+  if (status === 409) return elearningLabel('grading.error409', isZh)
+  if (status === 503) return elearningLabel('grading.error503', isZh)
+  return elearningFailure(code, status, isZh)
 }

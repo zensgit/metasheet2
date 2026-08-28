@@ -36,10 +36,15 @@ export const ATTENDANCE_FOCUS_ALLOWED_PATHS: readonly string[] = Object.freeze([
  * Cloud-classroom exact paths reachable inside attendance and plm-workbench focus
  * modes. Reachability only — required-feature and route permission gates still run
  * first. Sibling and prefix-neighbor paths stay redirected.
+ * '/elearning/grading': the L3 manual-grading surface — without this entry a
+ * grader working inside an attendance- or plm-focused org would be silently
+ * bounced to that focus mode's home instead of reaching a route they hold
+ * elearning:grade permission for.
  */
 export const ELEARNING_FOCUS_EXACT_PATHS: readonly string[] = Object.freeze([
   '/learn',
   '/admin/elearning',
+  '/elearning/grading',
 ])
 
 export function isElearningFocusExactPath(path: string): boolean {
