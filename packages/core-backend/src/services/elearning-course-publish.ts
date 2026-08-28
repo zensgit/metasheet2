@@ -4,6 +4,7 @@
  * Public results and errors are values-free.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import { normalizeElearningCourseVersionItems } from './elearning-course-version-items-policy'
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
 import {
   ELEARNING_WATCH_POLICY_VERSION,
@@ -468,6 +469,39 @@ export async function publishElearningCourse(
       )
       if (!media.rows[0]) fail('media_unavailable')
 
+      const [videoItem, examItem] = normalizeElearningCourseVersionItems([
+        {
+          articleRevisionId: null,
+          completionPolicyVersion: ELEARNING_WATCH_POLICY_VERSION,
+          completionThresholdBps: ELEARNING_WATCH_THRESHOLD_BPS,
+          examId: null,
+          externalLinkRevisionId: null,
+          itemId: videoItemId,
+          itemType: 'video',
+          mediaId: canonical.mediaId,
+          position: 1,
+        },
+        {
+          articleRevisionId: null,
+          completionPolicyVersion: null,
+          completionThresholdBps: null,
+          examId,
+          externalLinkRevisionId: null,
+          itemId: examItemId,
+          itemType: 'exam',
+          mediaId: null,
+          position: 2,
+        },
+      ])
+      if (
+        videoItem.itemType !== 'video'
+        || videoItem.mediaId === null
+        || videoItem.completionPolicyVersion !== ELEARNING_WATCH_POLICY_VERSION
+        || videoItem.completionThresholdBps !== ELEARNING_WATCH_THRESHOLD_BPS
+        || examItem.itemType !== 'exam'
+        || examItem.examId === null
+      ) fail('unavailable')
+
       await tx.query(
         `/* elearning-publish:insert-course */
          INSERT INTO elearning_courses (id, org_id, title, status, created_by)
@@ -538,12 +572,12 @@ export async function publishElearningCourse(
            completion_policy_version, completion_threshold_bps
          ) VALUES ($1, $2, $3, 'video', 1, $4, NULL, $5, $6)`,
         [
-          videoItemId,
+          videoItem.itemId,
           canonical.orgId,
           courseVersionId,
-          canonical.mediaId,
-          ELEARNING_WATCH_POLICY_VERSION,
-          ELEARNING_WATCH_THRESHOLD_BPS,
+          videoItem.mediaId,
+          videoItem.completionPolicyVersion,
+          videoItem.completionThresholdBps,
         ],
       )
       await tx.query(
@@ -552,7 +586,7 @@ export async function publishElearningCourse(
            id, org_id, course_version_id, item_type, position, media_id, exam_id,
            completion_policy_version, completion_threshold_bps
          ) VALUES ($1, $2, $3, 'exam', 2, NULL, $4, NULL, NULL)`,
-        [examItemId, canonical.orgId, courseVersionId, examId],
+        [examItem.itemId, canonical.orgId, courseVersionId, examItem.examId],
       )
 
       const publishedExam = await tx.query(
