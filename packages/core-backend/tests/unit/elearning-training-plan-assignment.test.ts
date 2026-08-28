@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   assignElearningTrainingPlan,
+  assignElearningTrainingPlanInTransaction,
   deriveElearningTrainingPlanChildSourceKey,
   ElearningTrainingPlanAssignmentError,
   hashElearningTrainingPlanAssignmentRequest,
@@ -136,6 +137,27 @@ describe('atomic training-plan assignment service', () => {
     expect(db.sql.filter((sql) => sql.includes(':insert-assignment'))).toHaveLength(2)
     expect(db.sql.filter((sql) => sql.includes(':insert-members'))).toHaveLength(2)
     expect(db.sql.filter((sql) => sql.includes(':insert-link'))).toHaveLength(2)
+  })
+
+  it('can execute on a caller-owned transaction without opening a nested transaction', async () => {
+    const sql: string[] = []
+    const tx: ElearningTrainingPlanAssignmentQueryable = {
+      query: async (statement, _params) => {
+        sql.push(statement)
+        return successResponder(statement)
+      },
+    }
+
+    await expect(
+      assignElearningTrainingPlanInTransaction(tx, request()),
+    ).resolves.toMatchObject({
+      assignmentCount: 2,
+      duplicate: false,
+      memberCount: 1,
+      planVersionId: PLAN_VERSION_ID,
+    })
+    expect(sql.filter((statement) => statement.includes(':lock */'))).toHaveLength(1)
+    expect(sql.filter((statement) => statement.includes(':insert-group'))).toHaveLength(1)
   })
 
   it('replays from the frozen group before reading plan or audience state', async () => {
