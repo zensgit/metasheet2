@@ -27,6 +27,7 @@ import {
   consumeRecoveryArchiveAsyncRestoreFacadeLeaseInternal,
   type RecoveryArchiveAsyncRestoreFacadeLease,
 } from './recovery-archive-async-restore'
+import { isMultitableRecoveryArchiveEnabled } from './recovery-archive-contract'
 
 export type RecoveryArchiveRestoreJobQuery = (
   sql: string,
@@ -51,6 +52,7 @@ export type RecoveryArchiveRestoreJobState =
 
 export type RecoveryArchiveRestoreJobErrorCode =
   | 'RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT'
+  | 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED'
   | 'RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID'
   | 'RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED'
   | 'RECOVERY_ARCHIVE_RESTORE_JOB_ARCHIVE_DRIFT'
@@ -350,6 +352,24 @@ export interface RecoveryArchiveRestoreJobOwnerInput
   ) => Promise<boolean>
 }
 
+export interface ListRecoveryArchiveRestoreJobsInput {
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly sheetId: string
+  readonly actorId: string
+  readonly recheckAuthority: (
+    query: RecoveryArchiveRestoreJobQuery,
+  ) => Promise<boolean>
+  readonly cursor?: string
+  readonly limit?: number
+  readonly env?: NodeJS.ProcessEnv
+}
+
+export interface RecoveryArchiveRestoreJobPage {
+  readonly entries: readonly RecoveryArchiveRestoreJobSnapshot[]
+  readonly nextCursor: string | null
+}
+
 export interface CancelRecoveryArchiveRestoreJobInput
   extends RecoveryArchiveRestoreJobOwnerInput {
   readonly replayHorizonMs: number
@@ -387,6 +407,7 @@ type JobRow = {
   terminal_operation_id: unknown
   terminal_at: unknown
   row_version: unknown
+  created_at?: unknown
 }
 
 type ChunkRow = {
@@ -1468,6 +1489,84 @@ export async function readRecoveryArchiveRestoreJobStatus(
   })
 }
 
+const RESTORE_JOB_LIST_DEFAULT_LIMIT = 20
+const RESTORE_JOB_LIST_MAX_LIMIT = 50
+const RESTORE_JOB_LIST_MAX_CURSOR_LENGTH = 512
+
+type RestoreJobListCursor = {
+  readonly createdAt: string
+  readonly jobId: string
+}
+
+export async function listRecoveryArchiveRestoreJobs(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  input: ListRecoveryArchiveRestoreJobsInput,
+): Promise<RecoveryArchiveRestoreJobPage> {
+  if (!input || typeof input.recheckAuthority !== 'function') invalidInput()
+  if (!isMultitableRecoveryArchiveEnabled(input.env ?? process.env)) {
+    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED')
+  }
+  const identity = ownerScope(input)
+  const limit = normalizeRestoreJobListLimit(input.limit)
+  const cursor = input.cursor === undefined ? null : decodeRestoreJobListCursor(input.cursor)
+
+  return transaction(async (query) => {
+    if (!(await input.recheckAuthority(query))) {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED')
+    }
+    const values: unknown[] = [
+      identity.workspaceId,
+      identity.baseId,
+      identity.sheetId,
+      identity.actorId,
+    ]
+    const cursorSql = cursor
+      ? 'AND (created_at, id) < ($5::timestamptz, $6::uuid)'
+      : ''
+    if (cursor) values.push(cursor.createdAt, cursor.jobId)
+    values.push(limit + 1)
+    const result = await query(
+      `${JOB_SNAPSHOT_SELECT}, created_at::text AS created_at
+         FROM public.meta_recovery_archive_jobs
+        WHERE workspace_id = $1
+          AND base_id = $2
+          AND sheet_id = $3
+          AND actor_id = $4
+          ${cursorSql}
+        ORDER BY created_at DESC, id DESC
+        LIMIT $${values.length}::integer`,
+      values,
+    )
+    if (!Array.isArray(result.rows)) {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID')
+    }
+    const rows = result.rows.map((row) => normalizeListedJobRow(row))
+    const hasMore = rows.length > limit
+    const entries = Object.freeze(rows.slice(0, limit).map((row) => row.snapshot))
+    return Object.freeze({
+      entries,
+      nextCursor: hasMore && entries.length > 0
+        ? encodeRestoreJobListCursor(rows[limit - 1]!)
+        : null,
+    })
+  })
+}
+
+function normalizeListedJobRow(value: unknown): {
+  readonly snapshot: RecoveryArchiveRestoreJobSnapshot
+  readonly createdAt: string
+} {
+  try {
+    const row = value as JobRow
+    return Object.freeze({
+      snapshot: snapshotFromJobRow(row),
+      createdAt: timestamp(row.created_at),
+    })
+  } catch {
+    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID')
+  }
+}
+
 /** Provenance-aware sweeper. Legacy NULL-kind burns and every ambiguous row stay forever. */
 export async function pruneEligibleRecoveryTokenBurns(
   transaction: RecoveryArchiveRestoreJobTransaction,
@@ -1854,6 +1953,42 @@ function ownerIdentity(
     actorId: opaque(input.actorId),
     jobId: opaque(input.jobId),
   })
+}
+
+function ownerScope(input: ListRecoveryArchiveRestoreJobsInput) {
+  return Object.freeze({
+    workspaceId: opaque(input.workspaceId),
+    baseId: opaque(input.baseId),
+    sheetId: opaque(input.sheetId),
+    actorId: opaque(input.actorId),
+  })
+}
+
+function normalizeRestoreJobListLimit(value: number | undefined): number {
+  if (value === undefined) return RESTORE_JOB_LIST_DEFAULT_LIMIT
+  if (!Number.isSafeInteger(value) || value < 1 || value > RESTORE_JOB_LIST_MAX_LIMIT) invalidInput()
+  return value
+}
+
+function encodeRestoreJobListCursor(row: { readonly snapshot: RecoveryArchiveRestoreJobSnapshot; readonly createdAt: string }): string {
+  return Buffer.from(JSON.stringify([row.createdAt, row.snapshot.id])).toString('base64url')
+}
+
+function decodeRestoreJobListCursor(value: string): RestoreJobListCursor {
+  if (typeof value !== 'string' || value.length < 1 || value.length > RESTORE_JOB_LIST_MAX_CURSOR_LENGTH) {
+    invalidInput()
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown
+    if (!Array.isArray(decoded) || decoded.length !== 2) invalidInput()
+    return Object.freeze({
+      createdAt: timestamp(decoded[0]),
+      jobId: uuid(decoded[1]),
+    })
+  } catch (error) {
+    if (error instanceof RecoveryArchiveRestoreJobError) throw error
+    invalidInput()
+  }
 }
 
 async function readCandidateIdentity(

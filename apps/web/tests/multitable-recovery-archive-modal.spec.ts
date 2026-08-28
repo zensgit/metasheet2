@@ -6,6 +6,7 @@ import RecoveryArchiveModal from '../src/multitable/components/RecoveryArchiveMo
 import type {
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
+  RecoveryArchiveJobPage,
   RecoveryArchiveJobSnapshot,
   RecoveryArchivePreview,
 } from '../src/multitable/api/client'
@@ -41,12 +42,18 @@ const jobSnapshot = (state: RecoveryArchiveJobSnapshot['state'], completedCount 
 })
 
 const mounted: Array<{ unmount: () => void }> = []
-const flush = async () => { await Promise.resolve(); await nextTick(); await Promise.resolve(); await nextTick() }
+const flush = async () => {
+  for (let index = 0; index < 4; index += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
 const q = (selector: string) => document.body.querySelector(selector) as HTMLElement | null
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = ''; vi.useRealTimers() })
 
 function mount(over: Partial<Record<string, unknown>> = {}) {
   const listCatalog = vi.fn(async () => catalog)
+  const listJobs = vi.fn(async (): Promise<RecoveryArchiveJobPage> => ({ entries: [], nextCursor: null }))
   const previewArchive = vi.fn(async () => syncPreview())
   const executeArchive = vi.fn(async () => executeResult)
   const acceptJob = vi.fn(async () => jobSnapshot('planned'))
@@ -54,6 +61,7 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
   const resumeJob = vi.fn(async () => jobSnapshot('planned', '2500'))
   const cancelJob = vi.fn(async () => jobSnapshot('abandoned_partial', '2500'))
   const effectiveListCatalog = (over.listCatalog as typeof listCatalog | undefined) ?? listCatalog
+  const effectiveListJobs = (over.listJobs as typeof listJobs | undefined) ?? listJobs
   const effectivePreviewArchive = (over.previewArchive as typeof previewArchive | undefined) ?? previewArchive
   const effectiveExecuteArchive = (over.executeArchive as typeof executeArchive | undefined) ?? executeArchive
   const effectiveAcceptJob = (over.acceptJob as typeof acceptJob | undefined) ?? acceptJob
@@ -73,6 +81,7 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
       visible: visible.value,
       sheetId: sheetId.value,
       listCatalog: effectiveListCatalog,
+      listJobs: effectiveListJobs,
       previewArchive: effectivePreviewArchive,
       executeArchive: effectiveExecuteArchive,
       acceptJob: effectiveAcceptJob,
@@ -85,9 +94,11 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   app.mount(container)
-  mounted.push(app)
+  const mountedApp = { unmount: () => app.unmount() }
+  mounted.push(mountedApp)
   return {
     listCatalog: effectiveListCatalog,
+    listJobs: effectiveListJobs,
     previewArchive: effectivePreviewArchive,
     executeArchive: effectiveExecuteArchive,
     acceptJob: effectiveAcceptJob,
@@ -98,10 +109,112 @@ function mount(over: Partial<Record<string, unknown>> = {}) {
     onRefresh,
     sheetId,
     visible,
+    unmount: () => {
+      const index = mounted.indexOf(mountedApp)
+      if (index >= 0) mounted.splice(index, 1)
+      mountedApp.unmount()
+    },
   }
 }
 
 describe('RecoveryArchiveModal', () => {
+  it('rediscovers the newest durable job after a full reload and resumes status polling without an action', async () => {
+    vi.useFakeTimers()
+    const listJobs = vi.fn(async (): Promise<RecoveryArchiveJobPage> => ({
+      entries: [jobSnapshot('applying', '2500')],
+      nextCursor: null,
+    }))
+    const readJob = vi.fn(async () => jobSnapshot('applying', '5000'))
+    const props = mount({ listJobs, readJob })
+    await flush()
+
+    expect(listJobs).toHaveBeenCalledWith('sheet_1', { limit: 1 })
+    expect(q('[data-test="archive-recovery-job-state"]')?.textContent).toBe('Applying')
+    expect(q('[data-test="archive-recovery-empty"]')).toBeFalsy()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+    expect(props.resumeJob).not.toHaveBeenCalled()
+    expect(props.cancelJob).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(2_000)
+    await flush()
+    expect(readJob).toHaveBeenCalledWith('sheet_1', '55555555-5555-4555-8555-555555555555')
+  })
+
+  it('does not apply a stale job-discovery response after changing sheets', async () => {
+    let resolveSheetOne!: (page: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn((sheetId: string): Promise<RecoveryArchiveJobPage> => {
+      if (sheetId === 'sheet_1') {
+        return new Promise((resolve) => { resolveSheetOne = resolve })
+      }
+      return Promise.resolve({ entries: [], nextCursor: null })
+    })
+    const props = mount({ listJobs })
+    await flush()
+
+    props.sheetId.value = 'sheet_2'
+    await flush()
+    resolveSheetOne({ entries: [jobSnapshot('applying', '2500')], nextCursor: null })
+    await flush()
+
+    expect(listJobs).toHaveBeenCalledWith('sheet_2', { limit: 1 })
+    expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
+
+    props.sheetId.value = 'sheet_1'
+    await flush()
+    expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
+  })
+
+  it('blocks catalog and actions when durable-job discovery fails', async () => {
+    const listJobs = vi.fn(async (): Promise<RecoveryArchiveJobPage> => {
+      throw { status: 503 }
+    })
+    const props = mount({ listJobs })
+    await flush()
+
+    expect(q('[data-test="archive-recovery-discovery-error"]')?.textContent).toBe('Archive recovery is currently unavailable.')
+    expect(props.listCatalog).not.toHaveBeenCalled()
+    expect(q(`[data-test="archive-recovery-entry-${generationId}"]`)).toBeFalsy()
+    expect(props.previewArchive).not.toHaveBeenCalled()
+    expect(props.acceptJob).not.toHaveBeenCalled()
+  })
+
+  it('does not cache a late discovery response after the modal closes', async () => {
+    let resolveDiscovery!: (page: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn()
+      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveDiscovery = resolve }))
+      .mockResolvedValueOnce({ entries: [], nextCursor: null })
+    const props = mount({ listJobs })
+    await flush()
+
+    ;(q('.archive-recovery__close') as HTMLButtonElement).click()
+    await flush()
+    props.visible.value = false
+    await flush()
+    resolveDiscovery({ entries: [jobSnapshot('applying', '2500')], nextCursor: null })
+    await flush()
+    props.visible.value = true
+    await flush()
+
+    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
+  })
+
+  it('does not schedule polling from a late discovery response after unmount', async () => {
+    vi.useFakeTimers()
+    let resolveDiscovery!: (page: RecoveryArchiveJobPage) => void
+    const listJobs = vi.fn(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveDiscovery = resolve }))
+    const readJob = vi.fn(async () => jobSnapshot('applying', '5000'))
+    const props = mount({ listJobs, readJob })
+    await flush()
+
+    props.unmount()
+    resolveDiscovery({ entries: [jobSnapshot('applying', '2500')], nextCursor: null })
+    await vi.advanceTimersByTimeAsync(2_000)
+    await flush()
+
+    expect(readJob).not.toHaveBeenCalled()
+  })
+
   it('executes only a server-executable whole-sheet preview after explicit confirmation', async () => {
     const props = mount()
     await flush()
@@ -243,7 +356,7 @@ describe('RecoveryArchiveModal', () => {
     const readJob = vi.fn()
       .mockRejectedValueOnce(new Error('transient-customer-sentinel'))
       .mockResolvedValueOnce(jobSnapshot('applying', '2500'))
-    const props = mount({ previewArchive: vi.fn(async () => asyncPreview()), readJob })
+    const _props = mount({ previewArchive: vi.fn(async () => asyncPreview()), readJob })
     await flush()
     ;(q(`[data-test="archive-recovery-entry-${generationId}"]`) as HTMLButtonElement).click()
     await flush()

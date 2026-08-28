@@ -130,6 +130,7 @@ import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-
 import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
 import {
   cancelRecoveryArchiveRestoreJob,
+  listRecoveryArchiveRestoreJobs,
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
   resumeRecoveryArchiveRestoreJob,
@@ -11388,6 +11389,13 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         {
           ...context,
           generationId,
+        },
+      ),
+      listJobs: (context, input) => listRecoveryArchiveRestoreJobs(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          ...input,
         },
       ),
       accept:

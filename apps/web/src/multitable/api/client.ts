@@ -1026,6 +1026,11 @@ export interface RecoveryArchiveJobSnapshot {
   rowVersion: string
 }
 
+export interface RecoveryArchiveJobPage {
+  entries: RecoveryArchiveJobSnapshot[]
+  nextCursor: string | null
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -2326,6 +2331,20 @@ export class MultitableApiClient implements CommentsApiClient {
       body: JSON.stringify({ previewIdentity }),
     })
     return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+  }
+
+  async listRecoveryArchiveJobs(
+    sheetId: string,
+    params?: { cursor?: string; limit?: number },
+  ): Promise<RecoveryArchiveJobPage> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs${qs(params ?? {})}`,
+    )
+    const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
+    return {
+      entries: Array.isArray(data.entries) ? data.entries : [],
+      nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+    }
   }
 
   async readRecoveryArchiveJob(

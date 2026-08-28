@@ -11,10 +11,12 @@
         </header>
 
         <div class="archive-recovery__body">
-          <p v-if="catalogLoading" class="archive-recovery__state" data-test="archive-recovery-loading">{{ l('loading') }}</p>
-          <p v-else-if="catalogError" class="archive-recovery__state archive-recovery__state--error" data-test="archive-recovery-catalog-error">{{ catalogError }}</p>
-          <p v-else-if="entries.length === 0" class="archive-recovery__state" data-test="archive-recovery-empty">{{ l('empty') }}</p>
-          <div v-else class="archive-recovery__catalog" data-test="archive-recovery-catalog">
+          <p v-if="jobDiscoveryLoading" class="archive-recovery__state" data-test="archive-recovery-discovery-loading">{{ l('loading') }}</p>
+          <p v-else-if="jobDiscoveryError" class="archive-recovery__state archive-recovery__state--error" data-test="archive-recovery-discovery-error">{{ jobDiscoveryError }}</p>
+          <p v-else-if="!job && catalogLoading" class="archive-recovery__state" data-test="archive-recovery-loading">{{ l('loading') }}</p>
+          <p v-else-if="!job && catalogError" class="archive-recovery__state archive-recovery__state--error" data-test="archive-recovery-catalog-error">{{ catalogError }}</p>
+          <p v-else-if="!job && entries.length === 0" class="archive-recovery__state" data-test="archive-recovery-empty">{{ l('empty') }}</p>
+          <div v-else-if="!job" class="archive-recovery__catalog" data-test="archive-recovery-catalog">
             <button
               v-for="entry in entries"
               :key="entry.generationId"
@@ -31,7 +33,7 @@
             </button>
           </div>
           <button
-            v-if="nextCursor"
+            v-if="!job && nextCursor"
             type="button"
             class="archive-recovery__load-more"
             data-test="archive-recovery-load-more"
@@ -39,7 +41,7 @@
             @click="loadCatalog(false)"
           >{{ l('loadMore') }}</button>
 
-          <div v-if="selectedEntry && !job" class="archive-recovery__preview" data-test="archive-recovery-preview-area">
+          <div v-if="jobDiscoveryResolved && selectedEntry && !job" class="archive-recovery__preview" data-test="archive-recovery-preview-area">
             <div class="archive-recovery__scope" role="group" :aria-label="l('scope')">
               <span class="archive-recovery__scope-title">{{ l('scope') }}</span>
               <label class="archive-recovery__scope-option">
@@ -127,7 +129,7 @@
             <p v-if="result" class="archive-recovery__state archive-recovery__state--success" data-test="archive-recovery-result">{{ resultLabel }}</p>
           </div>
 
-          <section v-if="job" class="archive-recovery__job" data-test="archive-recovery-job" aria-live="polite">
+          <section v-if="jobDiscoveryResolved && job" class="archive-recovery__job" data-test="archive-recovery-job" aria-live="polite">
             <div class="archive-recovery__job-head">
               <strong>{{ l('jobTitle') }}</strong>
               <span data-test="archive-recovery-job-state">{{ jobStateLabel }}</span>
@@ -167,6 +169,7 @@ import type {
   RecoveryArchiveCatalogEntry,
   RecoveryArchiveCatalogPage,
   RecoveryArchiveExecuteResult,
+  RecoveryArchiveJobPage,
   RecoveryArchiveJobSnapshot,
   RecoveryArchivePreview,
   RecoveryArchiveScope,
@@ -189,6 +192,7 @@ const props = defineProps<{
   fields: RecoveryArchiveFieldOption[]
   selectedRecordIds: string[]
   listCatalog: (sheetId: string, params?: { cursor?: string; limit?: number }) => Promise<RecoveryArchiveCatalogPage>
+  listJobs: (sheetId: string, params?: { cursor?: string; limit?: number }) => Promise<RecoveryArchiveJobPage>
   previewArchive: (sheetId: string, input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope }) => Promise<RecoveryArchivePreview>
   executeArchive: (sheetId: string, input: { previewIdentity: string; scope: RecoveryArchiveScope }) => Promise<RecoveryArchiveExecuteResult>
   acceptJob: (sheetId: string, previewIdentity: string) => Promise<RecoveryArchiveJobSnapshot>
@@ -217,11 +221,15 @@ const result = ref<RecoveryArchiveExecuteResult | null>(null)
 const job = ref<RecoveryArchiveJobSnapshot | null>(null)
 const jobBusy = ref(false)
 const jobError = ref<string | null>(null)
+const jobDiscoveryLoading = ref(false)
+const jobDiscoveryError = ref<string | null>(null)
+const jobDiscoveryResolved = ref(false)
 const jobsBySheet = new Map<string, RecoveryArchiveJobSnapshot>()
 let catalogRequest = 0
 let previewRequest = 0
 let executeRequest = 0
 let jobRequest = 0
+let jobDiscoveryRequest = 0
 let jobPollTimer: ReturnType<typeof setTimeout> | null = null
 
 const selectedEntry = computed(() => entries.value.find((entry) => entry.generationId === selectedGenerationId.value) ?? null)
@@ -354,7 +362,7 @@ function clearPreview(): void {
 }
 
 function selectEntry(generationId: string): void {
-  if (job.value) return
+  if (!jobDiscoveryResolved.value || job.value) return
   selectedGenerationId.value = generationId
   clearPreview()
 }
@@ -390,7 +398,7 @@ function buildScope(): RecoveryArchiveScope | null {
 
 async function loadCatalog(reset: boolean): Promise<void> {
   const sheetId = props.sheetId
-  if (!sheetId || catalogLoading.value || job.value || (!reset && !nextCursor.value)) return
+  if (!jobDiscoveryResolved.value || !sheetId || catalogLoading.value || job.value || (!reset && !nextCursor.value)) return
   const request = ++catalogRequest
   catalogLoading.value = true
   catalogError.value = null
@@ -412,11 +420,39 @@ async function loadCatalog(reset: boolean): Promise<void> {
   }
 }
 
+async function discoverCurrentSheetJob(): Promise<void> {
+  const sheetId = props.sheetId
+  if (!sheetId || job.value) {
+    jobDiscoveryResolved.value = Boolean(job.value)
+    return
+  }
+  const request = ++jobDiscoveryRequest
+  jobDiscoveryLoading.value = true
+  jobDiscoveryError.value = null
+  jobDiscoveryResolved.value = false
+  try {
+    const page = await props.listJobs(sheetId, { limit: 1 })
+    if (request !== jobDiscoveryRequest || !props.visible || sheetId !== props.sheetId || job.value) return
+    jobDiscoveryResolved.value = true
+    const next = page.entries[0]
+    if (next) applyJobSnapshot(sheetId, next)
+    else await loadCatalog(true)
+  } catch (error) {
+    if (request === jobDiscoveryRequest && props.visible && sheetId === props.sheetId) {
+      jobDiscoveryError.value = messageFor(error)
+    }
+  } finally {
+    if (request === jobDiscoveryRequest && props.visible && sheetId === props.sheetId) {
+      jobDiscoveryLoading.value = false
+    }
+  }
+}
+
 async function requestPreview(): Promise<void> {
   const generationId = selectedGenerationId.value
   const sheetId = props.sheetId
   const scope = buildScope()
-  if (!generationId || !sheetId || !scope || previewLoading.value || executing.value || job.value) return
+  if (!jobDiscoveryResolved.value || !generationId || !sheetId || !scope || previewLoading.value || executing.value || job.value) return
   const request = ++previewRequest
   previewLoading.value = true
   previewError.value = null
@@ -589,6 +625,7 @@ function resetForSheet(): void {
   previewRequest++
   executeRequest++
   jobRequest++
+  jobDiscoveryRequest++
   clearJobPoll()
   entries.value = []
   nextCursor.value = null
@@ -603,6 +640,9 @@ function resetForSheet(): void {
   job.value = jobsBySheet.get(props.sheetId) ?? null
   jobBusy.value = false
   jobError.value = null
+  jobDiscoveryLoading.value = false
+  jobDiscoveryError.value = null
+  jobDiscoveryResolved.value = Boolean(job.value)
 }
 
 function progressPercent(snapshot: RecoveryArchiveJobSnapshot | null): number {
@@ -619,6 +659,8 @@ function decimalCount(value: string): bigint {
 }
 
 function close(): void {
+  jobDiscoveryRequest++
+  jobDiscoveryLoading.value = false
   clearJobPoll()
   emit('close')
 }
@@ -643,16 +685,21 @@ watch(
   ([visible, sheetId], previous) => {
     if (!previous || sheetId !== previous[1]) resetForSheet()
     if (!visible) {
+      jobDiscoveryRequest++
+      jobDiscoveryLoading.value = false
       clearJobPoll()
       return
     }
     if (job.value) void refreshCurrentJob(true)
-    else void loadCatalog(true)
+    else void discoverCurrentSheetJob()
   },
   { immediate: true },
 )
 
-onBeforeUnmount(clearJobPoll)
+onBeforeUnmount(() => {
+  jobDiscoveryRequest++
+  clearJobPoll()
+})
 </script>
 
 <style scoped>

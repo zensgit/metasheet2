@@ -40,6 +40,7 @@ const preview = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['preview']>
 const executeSync = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['executeSync']>>()
 const listCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listCatalog']>>()
 const readCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readCatalog']>>()
+const listJobs = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listJobs']>>()
 const accept = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['accept']>>()
 const read = vi.fn<RecoveryArchiveRestoreOwnerService['read']>()
 const resume = vi.fn<RecoveryArchiveRestoreOwnerService['resume']>()
@@ -79,6 +80,7 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
       executeSync,
       listCatalog,
       readCatalog,
+      listJobs,
       accept,
       read,
       resume,
@@ -135,6 +137,7 @@ describe('Time Machine D5 owner routes', () => {
     executeSync.mockReset()
     listCatalog.mockReset()
     readCatalog.mockReset()
+    listJobs.mockReset()
     accept.mockReset()
     read.mockReset()
     resume.mockReset()
@@ -151,6 +154,7 @@ describe('Time Machine D5 owner routes', () => {
     })
     listCatalog.mockResolvedValue({ entries: [catalogEntry()], nextCursor: 'opaque-cursor' })
     readCatalog.mockResolvedValue(catalogEntry())
+    listJobs.mockResolvedValue({ entries: [snapshot()], nextCursor: 'opaque-job-cursor' })
     accept.mockResolvedValue(snapshot({ state: 'planned', completedCount: '0' }))
     read.mockResolvedValue(snapshot())
     resume.mockResolvedValue(snapshot({ state: 'planned' }))
@@ -425,6 +429,48 @@ describe('Time Machine D5 owner routes', () => {
     expect(resolveContext).not.toHaveBeenCalled()
     expect(read).not.toHaveBeenCalled()
     expect(resume).not.toHaveBeenCalled()
+  })
+
+  it('lists only the current owner scope with a closed values-free job projection', async () => {
+    const result = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs?limit=1&cursor=opaque`)
+
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({
+      ok: true,
+      data: {
+        entries: [{
+          jobId: JOB_ID,
+          state: 'paused_retryable',
+          totalCount: '6001',
+          completedCount: '5000',
+          resumeDeadline: '2026-08-29T00:00:00.000Z',
+          terminalAt: null,
+          rowVersion: '9',
+        }],
+        nextCursor: 'opaque-job-cursor',
+      },
+    })
+    expect(listJobs).toHaveBeenCalledWith(context, { limit: 1, cursor: 'opaque' })
+    for (const forbidden of ['workspaceId', 'baseId', 'sheetId', 'actorId', 'workerFence', 'terminalOperationId']) {
+      expect(result.text).not.toContain(forbidden)
+    }
+  })
+
+  it('rejects invalid list pagination before authority and never lists another actor', async () => {
+    const invalid = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs?limit=51`)
+    resolveContext.mockResolvedValueOnce({ ok: false, status: 403, code: 'FORBIDDEN' })
+    const denied = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs`)
+
+    expect(invalid.status).toBe(400)
+    expect(invalid.body).toEqual({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Request shape is invalid.' },
+    })
+    expect(denied.status).toBe(403)
+    expect(listJobs).not.toHaveBeenCalled()
   })
 
   it('accepts only the signed preview identity and never a caller-supplied plan', async () => {

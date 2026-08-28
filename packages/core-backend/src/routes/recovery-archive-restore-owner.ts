@@ -19,6 +19,7 @@ import {
 } from '../multitable/recovery-archive-preview'
 import {
   RecoveryArchiveRestoreJobError,
+  type RecoveryArchiveRestoreJobPage,
   type RecoveryArchiveRestoreJobQuery,
   type RecoveryArchiveRestoreJobSnapshot,
 } from '../multitable/recovery-archive-restore-jobs'
@@ -110,6 +111,10 @@ export interface RecoveryArchiveRestoreOwnerService {
     context: RecoveryArchiveRestoreOwnerContext,
     generationId: string,
   ) => Promise<RecoveryArchiveCatalogEntry>
+  readonly listJobs?: (
+    context: RecoveryArchiveRestoreOwnerContext,
+    input: { readonly cursor?: string; readonly limit?: number },
+  ) => Promise<RecoveryArchiveRestoreJobPage>
   readonly accept?: (
     context: RecoveryArchiveRestoreOwnerContext,
     input: { readonly token: string },
@@ -242,6 +247,33 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
         token: parsed.data.previewIdentity,
       })
       return res.status(202).json({ ok: true, data: projectSnapshot(snapshot) })
+    } catch (error) {
+      return sendServiceError(res, error)
+    }
+  })
+
+  router.get('/sheets/:sheetId/recovery-archive/jobs', async (req, res) => {
+    const parsed = CATALOG_QUERY_SCHEMA.safeParse(req.query)
+    if (!parsed.success) return sendValidationError(res)
+    const limit = parsed.data.limit === undefined ? undefined : Number(parsed.data.limit)
+    if (limit !== undefined && limit > 50) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!dependencies.service.listJobs) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE')
+    }
+    try {
+      const page = await dependencies.service.listJobs(context, {
+        ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
+        ...(limit === undefined ? {} : { limit }),
+      })
+      return res.json({
+        ok: true,
+        data: {
+          entries: page.entries.map(projectSnapshot),
+          nextCursor: page.nextCursor,
+        },
+      })
     } catch (error) {
       return sendServiceError(res, error)
     }
@@ -414,6 +446,8 @@ function sendServiceError(res: Response, error: unknown) {
     return sendError(res, 500, 'INTERNAL_ERROR')
   }
   switch (error.code) {
+    case 'RECOVERY_ARCHIVE_RESTORE_JOB_DISABLED':
+      return sendError(res, 503, error.code)
     case 'RECOVERY_ARCHIVE_RESTORE_JOB_NOT_FOUND':
       return sendError(res, 404, error.code)
     case 'RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED':

@@ -80,4 +80,18 @@ describe('MultitableApiClient recovery archive routes', () => {
     expect(JSON.stringify(fetchFn.mock.calls)).not.toContain('workerFence')
     expect(JSON.stringify(fetchFn.mock.calls)).not.toContain('plan')
   })
+
+  it('encodes a bounded job-list cursor as a sheet-scoped GET query', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(response({ ok: true, data: {
+      entries: [], nextCursor: null,
+    } }))
+    const client = new MultitableApiClient({ fetchFn })
+
+    await expect(client.listRecoveryArchiveJobs('sheet/a', {
+      cursor: 'opaque /?', limit: 1,
+    })).resolves.toEqual({ entries: [], nextCursor: null })
+    expect(fetchFn).toHaveBeenCalledWith(
+      '/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs?cursor=opaque%20%2F%3F&limit=1',
+    )
+  })
 })

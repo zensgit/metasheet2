@@ -584,6 +584,7 @@
       :fields="scopedGridFields"
       :selected-record-ids="[...exportSelectedRecordIds]"
       :list-catalog="recoveryArchiveCatalogWire"
+      :list-jobs="recoveryArchiveListJobsWire"
       :preview-archive="recoveryArchivePreviewWire"
       :execute-archive="recoveryArchiveExecuteWire"
       :accept-job="recoveryArchiveAcceptJobWire"
@@ -685,6 +686,7 @@ import type {
   ConfigRestoreExecuteConfirm,
   ExactAnchorRequest,
   RecoveryArchiveExecuteResult,
+  RecoveryArchiveJobPage,
   RecoveryArchiveJobSnapshot,
   RecoveryArchivePreview,
   RecoveryArchiveScope,
@@ -856,6 +858,10 @@ const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage
 const showRecoveryArchive = ref(false)
 const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
   workbench.client.listRecoveryArchiveCatalog(sheetId, params)
+const recoveryArchiveListJobsWire = (
+  sheetId: string,
+  params?: { cursor?: string; limit?: number },
+): Promise<RecoveryArchiveJobPage> => workbench.client.listRecoveryArchiveJobs(sheetId, params)
 const recoveryArchivePreviewWire = (
   sheetId: string,
   input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope },
