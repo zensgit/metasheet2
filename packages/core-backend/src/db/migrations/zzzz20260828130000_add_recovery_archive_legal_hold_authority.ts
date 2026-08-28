@@ -70,9 +70,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
       WITH expected(function_name, body_md5) AS (
         VALUES
-          ('meta_recovery_archives_claim_anchor_guard_row', 'b6e6b71be4d9ed95d8480568f44b6716'),
-          ('meta_recovery_archives_claim_anchor_reservation_guard', 'a0bd46293194e845c2b853926f35f9c5'),
-          ('meta_recovery_archives_claim_anchor_operation_delete_guard', 'd141905b7a84fc0438b4fdd2aaf22f40')
+          ('meta_recovery_archives_claim_anchor_guard_row', '66a46d613315b4da5aee176a83ca512d'),
+          ('meta_recovery_archives_claim_anchor_reservation_guard', '9d0e0a0832d262412b4464ba103ace82'),
+          ('meta_recovery_archives_claim_anchor_operation_delete_guard', '3b4da1ee807a3bb87e7a2c425367bda6')
       )
       SELECT count(*)::integer
         INTO claim_anchor_function_count
