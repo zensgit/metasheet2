@@ -63,6 +63,9 @@ describe('elearning learning-map reward policy', () => {
       stageKey: 'stage-1',
     }])
     expect(decision.creditEffects[0].effectKey).not.toBe(decision.certificateEffects[0].effectKey)
+    expect(decision.creditEffects[0].effectKey).toBe(
+      `${ELEARNING_LEARNING_MAP_REWARD_DOMAIN}:3bc07e275c4e2eb554655de55772270616acae8a73b9a39dfdfa298d1a347282`,
+    )
   })
 
   it('emits map-scoped effects only on the transition to full completion', () => {
@@ -120,6 +123,14 @@ describe('elearning learning-map reward policy', () => {
     })), 'invalid_transition')
     expectCode(() => deriveElearningLearningMapRewards(policy(), rewardInput({
       afterCompletedTaskKeys: ['task-2'],
+      beforeCompletedTaskKeys: [],
+    })), 'invalid_transition')
+    expectCode(() => deriveElearningLearningMapRewards(policy(), rewardInput({
+      afterCompletedTaskKeys: ['unknown'],
+      beforeCompletedTaskKeys: [],
+    })), 'invalid_transition')
+    expectCode(() => deriveElearningLearningMapRewards(policy(), rewardInput({
+      afterCompletedTaskKeys: ['task-1', 'task-1'],
       beforeCompletedTaskKeys: [],
     })), 'invalid_transition')
   })

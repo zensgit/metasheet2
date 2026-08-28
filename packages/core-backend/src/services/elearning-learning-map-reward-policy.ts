@@ -1,6 +1,8 @@
 /**
- * Pure L6 learning-map reward trigger policy. It emits deterministic effect
- * identities only; credit/certificate ledgers remain the persistence authority.
+ * Pure L6 learning-map reward trigger policy. It emits subject-relative effect
+ * keys only: adapters must combine them with authoritative org/user identity,
+ * and must source mapKey from the learning-domain SoR rather than a client.
+ * Credit/certificate ledgers remain the persistence authority.
  */
 import { createHash } from 'node:crypto'
 import {
@@ -113,6 +115,28 @@ function normalizeCertificateMode(value: unknown): ElearningLearningMapCertifica
   return value
 }
 
+function readCompletedTaskKeys(value: unknown): readonly string[] {
+  try {
+    if (!Array.isArray(value)) fail('invalid_input')
+    const length = value.length
+    if (Reflect.ownKeys(value).length !== length + 1) fail('invalid_input')
+    const taskKeys: string[] = []
+    const seen = new Set<string>()
+    for (let index = 0; index < length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) fail('invalid_input')
+      const taskKey = value[index]
+      if (typeof taskKey !== 'string') fail('invalid_input')
+      if (seen.has(taskKey)) fail('invalid_transition')
+      seen.add(taskKey)
+      taskKeys.push(taskKey)
+    }
+    return taskKeys
+  } catch (error) {
+    if (error instanceof ElearningLearningMapRewardPolicyError) throw error
+    fail('invalid_input')
+  }
+}
+
 function effectKey(input: {
   kind: ElearningLearningMapRewardKind
   mapKey: string
@@ -175,31 +199,27 @@ export function deriveElearningLearningMapRewards(
   const mapKey = requireText(values.mapKey)
   const creditMode = normalizeCreditMode(values.creditMode)
   const certificateMode = normalizeCertificateMode(values.certificateMode)
+  const beforeCompletedTaskKeys = readCompletedTaskKeys(values.beforeCompletedTaskKeys)
+  const afterCompletedTaskKeys = readCompletedTaskKeys(values.afterCompletedTaskKeys)
+  const afterCompletedSet = new Set(afterCompletedTaskKeys)
+  if (beforeCompletedTaskKeys.some((taskKey) => !afterCompletedSet.has(taskKey))) {
+    fail('invalid_transition')
+  }
 
   let before: ReturnType<typeof evaluateElearningLearningMap>
   let after: ReturnType<typeof evaluateElearningLearningMap>
   try {
     before = evaluateElearningLearningMap(policyInput, {
-      completedTaskKeys: values.beforeCompletedTaskKeys,
+      completedTaskKeys: beforeCompletedTaskKeys,
     })
     after = evaluateElearningLearningMap(policyInput, {
-      completedTaskKeys: values.afterCompletedTaskKeys,
+      completedTaskKeys: afterCompletedTaskKeys,
     })
   } catch (error) {
     if (error instanceof ElearningLearningMapPolicyError) {
       fail(error.code === 'invalid_progress' ? 'invalid_transition' : 'invalid_input')
     }
-    throw error
-  }
-
-  const beforeCompleted = new Set(before.stages.flatMap((stage) => (
-    stage.tasks.filter((task) => task.status === 'completed').map((task) => task.taskKey)
-  )))
-  const afterCompleted = new Set(after.stages.flatMap((stage) => (
-    stage.tasks.filter((task) => task.status === 'completed').map((task) => task.taskKey)
-  )))
-  if ([...beforeCompleted].some((taskKey) => !afterCompleted.has(taskKey))) {
-    fail('invalid_transition')
+    fail('invalid_input')
   }
 
   const newlyCompletedStageKeys = Object.freeze(after.stages
