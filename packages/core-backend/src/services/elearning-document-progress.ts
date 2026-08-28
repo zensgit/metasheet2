@@ -9,6 +9,7 @@ import {
   type ElearningDocumentPageRange,
   evaluateElearningDocumentCompletion,
 } from './elearning-document-completion-policy'
+import { normalizeElearningDocumentMediaAuthority } from './elearning-document-media-authority'
 
 /**
  * Transactional L1 document page-view command service.
@@ -89,6 +90,9 @@ export interface ElearningDocumentAuthority {
   readonly courseVersionId: string
   readonly courseVersionItemId: string
   readonly documentMediaId: string
+  readonly documentMediaKind: 'document'
+  readonly documentMediaStatus: 'ready'
+  readonly documentPageCountAuthority: 'server_probe'
   readonly policyVersion: typeof ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION
   readonly serverPageCount: number
   readonly sessionId: string
@@ -341,6 +345,7 @@ function requireAuthority(
   accessBasis: ElearningDocumentAccessBasis
   courseVersionId: string
   documentMediaId: string
+  serverPageCount: number
   sessionId: string
 } {
   if (requireStoreUuid(authority.courseVersionItemId) !== input.courseVersionItemId) {
@@ -348,10 +353,18 @@ function requireAuthority(
   }
   const sessionId = requireStoreUuid(authority.sessionId)
   if (sessionId !== input.sessionId) fail('unavailable')
+  const media = normalizeElearningDocumentMediaAuthority({
+    documentMediaId: authority.documentMediaId,
+    documentMediaKind: authority.documentMediaKind,
+    documentMediaStatus: authority.documentMediaStatus,
+    documentPageCountAuthority: authority.documentPageCountAuthority,
+    serverPageCount: authority.serverPageCount,
+  })
   return {
     accessBasis: normalizeElearningDocumentAccessBasis(authority.accessBasis),
     courseVersionId: requireStoreUuid(authority.courseVersionId),
-    documentMediaId: requireStoreUuid(authority.documentMediaId),
+    documentMediaId: media.documentMediaId,
+    serverPageCount: media.serverPageCount,
     sessionId,
   }
 }
@@ -482,7 +495,7 @@ export async function recordElearningDocumentPageView(
         courseVersionItemId: input.courseVersionItemId,
         documentMediaId: normalizedAuthority.documentMediaId,
         policyVersion: authority.policyVersion,
-        serverPageCount: authority.serverPageCount,
+        serverPageCount: normalizedAuthority.serverPageCount,
         thresholdBps: authority.thresholdBps,
       })
       if (input.pageNumber > policy.serverPageCount) fail('invalid_input')
