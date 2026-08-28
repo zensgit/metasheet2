@@ -17214,7 +17214,7 @@ async function openDedicatedLeaveRequestCard(): Promise<void> {
   await nextTick()
   if (typeof document === 'undefined') return
   const card = document.querySelector('[data-attendance-leave-request-card]')
-  if (card instanceof HTMLElement) {
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
     card.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   const typeField = document.getElementById('attendance-leave-card-type')
