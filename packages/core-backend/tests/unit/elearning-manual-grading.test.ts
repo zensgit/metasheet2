@@ -222,6 +222,26 @@ describe('e-learning manual-grading pass credit', () => {
       },
     })).resolves.toMatchObject({ status: 'graded', passed: false })
     expect(awards).toEqual([])
+
+    const disabled = finalGradeDb()
+    let disabledCalls = 0
+    await expect(submitElearningManualGrade(disabled.db, {
+      orgId: ORG,
+      actorId: ACTOR,
+      isGlobalAdmin: true,
+      attemptId: ATTEMPT_ID,
+      questionRevisionId: REVISION_ID,
+      requestId: REQUEST_ID,
+      score: 2,
+      comment: null,
+    }, {
+      env: { ELEARNING_ENABLED: 'true' },
+      awardPassExam: async () => {
+        disabledCalls += 1
+        return null
+      },
+    })).resolves.toMatchObject({ status: 'graded', passed: true })
+    expect(disabledCalls).toBe(0)
   })
 
   test('maps credit authority failure to the closed unavailable result', async () => {

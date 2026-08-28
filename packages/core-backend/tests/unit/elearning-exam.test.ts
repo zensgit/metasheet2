@@ -926,6 +926,22 @@ describe('elearning exam public submit result', () => {
       },
       env: INCENTIVE_ON,
     }])
+
+    const disabled = createSubmitMemoryDb()
+    let disabledCalls = 0
+    await expect(submitElearningExam(disabled.db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }, {
+      env: { ELEARNING_ENABLED: 'true' },
+      awardPassExam: async () => {
+        disabledCalls += 1
+        return null
+      },
+    })).resolves.toMatchObject({ passed: true })
+    expect(disabledCalls).toBe(0)
   })
 
   it('does not award a failed objective attempt and fails closed on award errors', async () => {
@@ -1137,6 +1153,19 @@ describe('elearning expired-attempt credit award', () => {
       },
       env: INCENTIVE_ON,
     }])
+
+    let disabledCalls = 0
+    await expect(settleExpiredElearningExamAttempt(db, {
+      orgId: ORG,
+      attemptId: ATTEMPT,
+    }, {
+      env: { ELEARNING_ENABLED: 'true' },
+      awardPassExam: async () => {
+        disabledCalls += 1
+        return null
+      },
+    })).resolves.toEqual({ outcome: 'settled' })
+    expect(disabledCalls).toBe(0)
 
     answers = emptyAnswers()
     awards.length = 0

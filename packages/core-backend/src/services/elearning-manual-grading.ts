@@ -15,6 +15,7 @@ import {
   type ElearningPaperSnapshot,
   type ElearningShortAnswerQuestion,
 } from './elearning-exam-domain'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import {
   awardElearningPassExamCreditInTransaction,
   type ElearningPassExamAwardOptions,
@@ -445,6 +446,7 @@ export async function submitElearningManualGrade(
   const requestId = requireUuid(input.requestId)
   const score = requireScore(input.score)
   const details = manualGradeDetails(requireComment(input.comment))
+  const env = options.env ?? process.env
 
   return db.transaction(async (tx) => {
     try {
@@ -549,11 +551,11 @@ export async function submitElearningManualGrade(
         )
         if (finalized.rowCount !== 1) fail('unavailable')
         const gradedAt = storedDate(finalized.rows[0]?.graded_at)
-        if (passed) {
+        if (passed && isElearningCreditSurfaceEnabled(env)) {
           await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
             tx,
             { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
-            options.env ?? process.env,
+            env,
           )
         }
         attempt.status = 'graded'

@@ -15,6 +15,7 @@ import {
   type ElearningExamAnswers,
   type ElearningPaperSnapshot,
 } from './elearning-exam-domain'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import {
   awardElearningPassExamCreditInTransaction,
   type ElearningPassExamAwardOptions,
@@ -313,11 +314,12 @@ export async function settleExpiredElearningExamAttemptInTransaction(
     )
     if (graded.rowCount !== 1) fail('unavailable')
     const gradedAt = requireStoredDate(graded.rows[0]?.graded_at)
-    if (grade.passed) {
+    const env = options.env ?? process.env
+    if (grade.passed && isElearningCreditSurfaceEnabled(env)) {
       await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
         tx,
         { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
-        options.env ?? process.env,
+        env,
       )
     }
   }

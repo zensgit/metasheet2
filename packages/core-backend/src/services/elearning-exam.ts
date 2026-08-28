@@ -9,6 +9,7 @@ import {
   ElearningCourseAccessError,
   resolveElearningCourseAccess,
 } from './elearning-course-access'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
 import {
   awardElearningPassExamCreditInTransaction,
   type ElearningPassExamAwardOptions,
@@ -857,6 +858,7 @@ export async function submitElearningExam(
   const orgId = requireActor(input.orgId)
   const userId = requireActor(input.userId)
   const attemptId = requireUuid(input.attemptId)
+  const env = options.env ?? process.env
 
   const outcome = await db.transaction(async (tx) => {
     try {
@@ -984,11 +986,11 @@ export async function submitElearningExam(
         )
         if (graded.rowCount !== 1) fail('unavailable')
         const gradedAt = requireStoredDate(graded.rows[0]?.graded_at)
-        if (grade.passed) {
+        if (grade.passed && isElearningCreditSurfaceEnabled(env)) {
           await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
             tx,
             { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
-            options.env ?? process.env,
+            env,
           )
         }
       }
