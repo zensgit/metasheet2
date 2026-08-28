@@ -12,7 +12,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     DO $$
     DECLARE
       source_mismatch_count integer;
-      parent_trigger_count integer;
+      predecessor_function_count integer;
+      claim_anchor_function_count integer;
+      claim_anchor_function_total_count integer;
+      claim_anchor_trigger_count integer;
+      claim_anchor_trigger_total_count integer;
+      legacy_parent_trigger_count integer;
+      archive_operation_fk_count integer;
       key_reference_function_count integer;
       key_reference_trigger_count integer;
       key_reference_constraint_count integer;
@@ -49,19 +55,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           OR attribute.attnotnull <> expected.is_not_null;
 
       SELECT count(*)::integer
-        INTO parent_trigger_count
-        FROM pg_catalog.pg_trigger trigger_row
-        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
-        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
-        JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
-        JOIN pg_catalog.pg_namespace procedure_namespace ON procedure_namespace.oid = procedure_row.pronamespace
+        INTO predecessor_function_count
+        FROM pg_catalog.pg_proc procedure_row
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
        WHERE namespace.nspname = 'public'
-         AND relation.relname = 'meta_recovery_archives'
-         AND trigger_row.tgname = 'trg_meta_recovery_archives_guard_row'
-         AND NOT trigger_row.tgisinternal
-         AND trigger_row.tgenabled = 'O'
-         AND trigger_row.tgtype = 31
-         AND procedure_namespace.nspname = 'public'
          AND procedure_row.proname = 'meta_recovery_archives_guard_row'
          AND pg_catalog.pg_get_function_identity_arguments(procedure_row.oid) = ''
          AND procedure_row.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
@@ -69,10 +66,130 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          AND NOT procedure_row.prosecdef
          AND procedure_row.prokind = 'f'
          AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
-         AND pg_catalog.md5(procedure_row.prosrc) = '3700d86df374ad924cc4b6af265d146a'
-         AND trigger_row.tgconstraint = 0
-         AND NOT trigger_row.tgdeferrable
-         AND NOT trigger_row.tginitdeferred;
+         AND pg_catalog.md5(procedure_row.prosrc) = '3700d86df374ad924cc4b6af265d146a';
+
+      WITH expected(function_name, body_md5) AS (
+        VALUES
+          ('meta_recovery_archives_claim_anchor_guard_row', 'b6e6b71be4d9ed95d8480568f44b6716'),
+          ('meta_recovery_archives_claim_anchor_reservation_guard', 'a0bd46293194e845c2b853926f35f9c5'),
+          ('meta_recovery_archives_claim_anchor_operation_delete_guard', 'd141905b7a84fc0438b4fdd2aaf22f40')
+      )
+      SELECT count(*)::integer
+        INTO claim_anchor_function_count
+        FROM expected
+        JOIN pg_catalog.pg_proc procedure_row
+          ON procedure_row.proname = expected.function_name
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+       WHERE namespace.nspname = 'public'
+         AND pg_catalog.pg_get_function_identity_arguments(procedure_row.oid) = ''
+         AND procedure_row.prorettype = 'pg_catalog.trigger'::pg_catalog.regtype
+         AND procedure_row.provolatile = 'v'
+         AND NOT procedure_row.prosecdef
+         AND procedure_row.prokind = 'f'
+         AND procedure_row.proconfig = ARRAY['search_path=pg_catalog, public']::text[]
+         AND pg_catalog.md5(procedure_row.prosrc) = expected.body_md5;
+
+      SELECT count(*)::integer
+        INTO claim_anchor_function_total_count
+        FROM pg_catalog.pg_proc procedure_row
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = procedure_row.pronamespace
+       WHERE namespace.nspname = 'public'
+         AND procedure_row.proname IN (
+           'meta_recovery_archives_claim_anchor_guard_row',
+           'meta_recovery_archives_claim_anchor_reservation_guard',
+           'meta_recovery_archives_claim_anchor_operation_delete_guard'
+         );
+
+      WITH expected(
+        relation_name,
+        trigger_name,
+        function_name,
+        trigger_type,
+        is_constraint,
+        is_deferrable,
+        is_initially_deferred
+      ) AS (
+        VALUES
+          (
+            'meta_recovery_archives',
+            'trg_meta_recovery_archives_claim_anchor_guard_row',
+            'meta_recovery_archives_claim_anchor_guard_row',
+            31,
+            false,
+            false,
+            false
+          ),
+          (
+            'meta_recovery_archives',
+            'trg_meta_recovery_archives_claim_anchor_reservation_guard',
+            'meta_recovery_archives_claim_anchor_reservation_guard',
+            21,
+            true,
+            true,
+            true
+          ),
+          (
+            'meta_record_history_operations',
+            'trg_mrho_claim_anchor_delete_guard',
+            'meta_recovery_archives_claim_anchor_operation_delete_guard',
+            11,
+            false,
+            false,
+            false
+          )
+      )
+      SELECT count(*)::integer
+        INTO claim_anchor_trigger_count
+        FROM expected
+        JOIN pg_catalog.pg_class relation ON relation.relname = expected.relation_name
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+        JOIN pg_catalog.pg_trigger trigger_row
+          ON trigger_row.tgrelid = relation.oid
+         AND trigger_row.tgname = expected.trigger_name
+        JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid = trigger_row.tgfoid
+        JOIN pg_catalog.pg_namespace procedure_namespace
+          ON procedure_namespace.oid = procedure_row.pronamespace
+       WHERE namespace.nspname = 'public'
+         AND procedure_namespace.nspname = 'public'
+         AND procedure_row.proname = expected.function_name
+         AND NOT trigger_row.tgisinternal
+         AND trigger_row.tgenabled = 'O'
+         AND trigger_row.tgtype = expected.trigger_type
+         AND (trigger_row.tgconstraint <> 0) = expected.is_constraint
+         AND trigger_row.tgdeferrable = expected.is_deferrable
+         AND trigger_row.tginitdeferred = expected.is_initially_deferred
+         AND trigger_row.tgqual IS NULL;
+
+      SELECT count(*)::integer
+        INTO claim_anchor_trigger_total_count
+        FROM pg_catalog.pg_trigger trigger_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'public'
+         AND NOT trigger_row.tgisinternal
+         AND trigger_row.tgname IN (
+           'trg_meta_recovery_archives_claim_anchor_guard_row',
+           'trg_meta_recovery_archives_claim_anchor_reservation_guard',
+           'trg_mrho_claim_anchor_delete_guard'
+         );
+
+      SELECT count(*)::integer
+        INTO legacy_parent_trigger_count
+        FROM pg_catalog.pg_trigger trigger_row
+        JOIN pg_catalog.pg_class relation ON relation.oid = trigger_row.tgrelid
+        JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+       WHERE namespace.nspname = 'public'
+         AND relation.relname = 'meta_recovery_archives'
+         AND trigger_row.tgname = 'trg_meta_recovery_archives_guard_row'
+         AND NOT trigger_row.tgisinternal;
+
+      SELECT count(*)::integer
+        INTO archive_operation_fk_count
+        FROM pg_catalog.pg_constraint constraint_row
+       WHERE constraint_row.conrelid = 'public.meta_recovery_archives'::pg_catalog.regclass
+         AND constraint_row.contype = 'f'
+         AND constraint_row.confrelid =
+             'public.meta_record_history_operations'::pg_catalog.regclass;
 
       SELECT count(*)::integer
         INTO key_reference_function_count
@@ -137,7 +254,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          AND constraint_row.convalidated;
 
       IF source_mismatch_count <> 0
-         OR parent_trigger_count <> 1
+         OR predecessor_function_count <> 1
+         OR claim_anchor_function_count <> 3
+         OR claim_anchor_function_total_count <> 3
+         OR claim_anchor_trigger_count <> 3
+         OR claim_anchor_trigger_total_count <> 3
+         OR legacy_parent_trigger_count <> 0
+         OR archive_operation_fk_count <> 0
          OR key_reference_function_count <> 1
          OR key_reference_trigger_count <> 1
          OR key_reference_constraint_count <> 1 THEN

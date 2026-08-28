@@ -4,6 +4,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 
+import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import * as legalHoldMigration from '../../src/db/migrations/zzzz20260828130000_add_recovery_archive_legal_hold_authority'
 import {
   expireRecoveryArchiveAfterLegalHoldCheck,
@@ -419,9 +420,16 @@ describeIfRealDbStep('Phase D3 legal-hold storage authority (real DB)', () => {
   })
 
   test('up and down fail loud when a pinned parent or owned authority drifts', async () => {
-    const parentDrift = await errorOf(db.transaction().execute(async (trx) => {
+    const oldSubstrate = await errorOf(db.transaction().execute(async (trx) => {
+      await claimAnchorMigration.down(trx)
+      await legalHoldMigration.up(trx)
+    }))
+    expect(oldSubstrate.code).toBe('55000')
+    expect(oldSubstrate.message).toBe('recovery_archive_legal_hold_source_schema_mismatch')
+
+    const parentFunctionDrift = await errorOf(db.transaction().execute(async (trx) => {
       await sql`
-        CREATE OR REPLACE FUNCTION public.meta_recovery_archives_guard_row()
+        CREATE OR REPLACE FUNCTION public.meta_recovery_archives_claim_anchor_guard_row()
         RETURNS trigger
         LANGUAGE plpgsql
         SET search_path = pg_catalog, public
@@ -432,8 +440,39 @@ describeIfRealDbStep('Phase D3 legal-hold storage authority (real DB)', () => {
       `.execute(trx)
       await legalHoldMigration.up(trx)
     }))
-    expect(parentDrift.code).toBe('55000')
-    expect(parentDrift.message).toBe('recovery_archive_legal_hold_source_schema_mismatch')
+    expect(parentFunctionDrift.code).toBe('55000')
+    expect(parentFunctionDrift.message).toBe('recovery_archive_legal_hold_source_schema_mismatch')
+
+    const parentTriggerDrift = await errorOf(db.transaction().execute(async (trx) => {
+      await sql`
+        DROP TRIGGER trg_meta_recovery_archives_claim_anchor_reservation_guard
+          ON public.meta_recovery_archives
+      `.execute(trx)
+      await sql`
+        CREATE CONSTRAINT TRIGGER trg_meta_recovery_archives_claim_anchor_reservation_guard
+        AFTER INSERT OR UPDATE ON public.meta_recovery_archives
+        DEFERRABLE INITIALLY IMMEDIATE
+        FOR EACH ROW
+        EXECUTE FUNCTION public.meta_recovery_archives_claim_anchor_reservation_guard()
+      `.execute(trx)
+      await legalHoldMigration.up(trx)
+    }))
+    expect(parentTriggerDrift.code).toBe('55000')
+    expect(parentTriggerDrift.message).toBe('recovery_archive_legal_hold_source_schema_mismatch')
+
+    const parentFkDrift = await errorOf(db.transaction().execute(async (trx) => {
+      await sql`
+        ALTER TABLE public.meta_recovery_archives
+          ADD CONSTRAINT fk_meta_recovery_archives_d3_drift
+          FOREIGN KEY (sheet_id, anchor_operation_id)
+          REFERENCES public.meta_record_history_operations(sheet_id, operation_id)
+          ON DELETE RESTRICT
+          NOT VALID
+      `.execute(trx)
+      await legalHoldMigration.up(trx)
+    }))
+    expect(parentFkDrift.code).toBe('55000')
+    expect(parentFkDrift.message).toBe('recovery_archive_legal_hold_source_schema_mismatch')
 
     const ownDownDrift = await errorOf(db.transaction().execute(async (trx) => {
       await sql`
