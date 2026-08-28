@@ -25,6 +25,7 @@ import * as snapshotReservations from '../../src/db/migrations/zzzz2026082812000
 import * as archiveKeyRegistry from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import * as sourcePinAuthority from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import * as objectReceiptAuthority from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
+import * as claimAnchorAmendment from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 
 type MigrationModule = {
   up(db: Kysely<unknown>): Promise<void>
@@ -154,6 +155,10 @@ const MIGRATIONS: NamedMigration[] = [
   {
     name: 'zzzz20260828125000_add_recovery_archive_object_receipt_authority',
     module: objectReceiptAuthority,
+  },
+  {
+    name: 'zzzz20260828126000_amend_recovery_archive_claim_anchor',
+    module: claimAnchorAmendment,
   },
 ]
 
@@ -327,6 +332,11 @@ const ARCHIVE_OBJECT_RECEIPT_FUNCTIONS = [
   'meta_recovery_archive_object_finalize_guard_row',
   'meta_recovery_archive_object_parent_guard_row',
 ]
+const ARCHIVE_CLAIM_ANCHOR_FUNCTIONS = [
+  'meta_recovery_archives_claim_anchor_guard_row',
+  'meta_recovery_archives_claim_anchor_reservation_guard',
+  'meta_recovery_archives_claim_anchor_operation_delete_guard',
+]
 
 const OWNED_FUNCTIONS = [
   ...OPERATION_FUNCTIONS,
@@ -337,6 +347,7 @@ const OWNED_FUNCTIONS = [
   ...SNAPSHOT_RESERVATION_FUNCTIONS,
   ...ARCHIVE_KEY_REGISTRY_FUNCTIONS,
   ...ARCHIVE_OBJECT_RECEIPT_FUNCTIONS,
+  ...ARCHIVE_CLAIM_ANCHOR_FUNCTIONS,
 ]
 const OPERATION_TRIGGERS = [
   'trg_mrr_reject_append_sealed',
@@ -387,6 +398,11 @@ const ARCHIVE_OBJECT_RECEIPT_TRIGGERS = [
   'trg_meta_recovery_archive_object_finalize_guard_row',
   'trg_meta_recovery_archives_object_parent_guard_row',
 ]
+const ARCHIVE_CLAIM_ANCHOR_TRIGGERS = [
+  'trg_meta_recovery_archives_claim_anchor_guard_row',
+  'trg_meta_recovery_archives_claim_anchor_reservation_guard',
+  'trg_mrho_claim_anchor_delete_guard',
+]
 const OWNED_TRIGGERS = [
   ...OPERATION_TRIGGERS,
   ...AUTHORITY_TRIGGERS,
@@ -396,6 +412,7 @@ const OWNED_TRIGGERS = [
   ...SNAPSHOT_RESERVATION_TRIGGERS,
   ...ARCHIVE_KEY_REGISTRY_TRIGGERS,
   ...ARCHIVE_OBJECT_RECEIPT_TRIGGERS,
+  ...ARCHIVE_CLAIM_ANCHOR_TRIGGERS,
 ]
 const TIME_MACHINE_REPLAY_FAILURE_ENV = 'TIME_MACHINE_REPLAY_INJECT_DOWN_FAILURE_AFTER'
 let activePhase: ReplayPhase = 'precondition'
