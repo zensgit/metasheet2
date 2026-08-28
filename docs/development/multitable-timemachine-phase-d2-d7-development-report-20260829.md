@@ -14,17 +14,24 @@ not deployed, no flag enabled, and no production access.
 | branch merge-base | `e0956fd5c13b5500ae68c2425b97706d8a761043` |
 | D2-D6 local head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
-| branch relation at D7 drafting | 2 commits behind / 91 commits ahead of `origin/main` |
+| final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
+| current-main integration merge | `023f5e793305401fbfdbe05d81ac9db90b1b2838` |
+| durable job rediscovery | `05d176c21d` |
+| runtime composition implementation head before reports | `bb12c9264ab9948312826fdb56ffb30abbad8a9c` |
+| implementation tree before reports | `070114408bc85489a9b5fdb4a9807258e54dc0cb` |
 
-The branch therefore requires a then-current-main replay/range-diff and complete
-exact-head CI before any merge decision. This report does not treat old-head
-green checks as merge-state evidence.
+The integration merge is a true two-parent merge of the final source evidence
+head and refreshed `origin/main`; both are ancestors. The two later commits close
+durable job rediscovery and provider-neutral application wiring on that exact
+tree. The resulting implementation remains local and has no PR or remote
+exact-head check set, so this report does not convert its local gates into
+merge-state evidence.
 
-One of the two main-only commits, `c479e9b321`, fixes false-green entry guards in
-the recovery containment workflow and reset-acceptance harness. A future replay
-must preserve that fix and rerun the resulting union; the two-commit drift is not
-mere metadata. The other main-only commit is isolated to the stock-preparation
-sandbox.
+Main commit `c479e9b321` fixes false-green entry guards in the recovery containment
+workflow and reset-acceptance harness. The candidate preserves all three affected
+file blobs byte-for-byte from `origin/main`, and the resulting containment and
+reset guards were rerun. The other main-only commit remains isolated to the
+stock-preparation sandbox.
 
 ## 2. Delivered implementation
 
@@ -70,6 +77,9 @@ The D4 head is `af84583d04bc3c95d5164bfd355bd2947c761966`.
   worker loop, aggregate terminal operation, cancellation, and resume.
 - Job handles remain sheet-scoped in the client; stale responses cannot overwrite
   a newer sheet context.
+- An owner/current-actor scoped, newest-first keyset list route now rediscovers a
+  durable job after the modal component has been recreated. Discovery is
+  fail-closed and suppresses catalog actions until it resolves.
 
 Key D5 checkpoints:
 
@@ -97,9 +107,10 @@ Commit `d0fc5a5a2b` adds:
 The execute action remains unavailable when preview/runtime authority fails. The
 UI does not infer flag state from a client-visible flag.
 
-### D7 evidence additions
+### D7 evidence and runtime closeout
 
-D7 adds tests and documents only:
+D7 closes the remaining local implementation seams without choosing a production
+provider:
 
 1. A real encrypted 5,001-record archive restore now proves a simulated worker
    disappearance after committed chunk 0, DB-clock lease expiry, immutable
@@ -109,8 +120,21 @@ D7 adds tests and documents only:
 2. A route-level flag-OFF parity test pins a historical SHA-256 over complete
    response text plus every normalized SQL statement and parameter, then compares
    unset, `false`, `TRUE`, whitespace, and `1` archive flag values.
-3. This staging runbook and the paired development/verification reports make the
-   remaining runtime and enablement gaps explicit.
+3. The server captures one canonical main-pool database runtime: transaction,
+   autocommit query, and AsyncLocalStorage transaction-depth probe. Both
+   multitable router mounts receive the same frozen runtime identity.
+4. Exact archive + writer-fence `true` is required before provider composition,
+   worker construction, or timer creation. Non-exact and OFF paths remain
+   byte-inert with respect to archive provider/database probes.
+5. The application constructs the canonical restore worker directly, starts it
+   only after the listener is active, and waits for its in-flight loop before
+   later shutdown tasks. Injected composition may provide business dependencies
+   and provider custody only; it cannot replace the worker or database authority.
+6. Direct entry with exact-ON flags but no owner-supplied composition factory
+   refuses startup. That is the intended fail-closed boundary until KMS/key
+   custody and object-store choices are ratified.
+7. This staging runbook and the paired development/verification reports keep the
+   remaining provider, staging, and remote-CI gates explicit.
 
 ## 3. Architecture boundaries preserved
 
@@ -131,12 +155,16 @@ These are real residuals, not documentation polish:
 
 | Residual | Consequence |
 |---|---|
-| application startup mounts `univerMetaRouter()` without `recoveryArchiveRuntime` | archive preview/execute/accept remains unavailable in the shipped server composition |
-| no application caller for `bootRecoveryArchiveRestoreWorker` | durable async jobs will not advance in a real server process |
 | no production object-store/KMS runtime factory | local/test providers are not production durability evidence |
+| direct-entry exact-ON has no owner-selected composition factory | startup deliberately refuses instead of silently using an unratified provider |
 | no executed staging fault/storage/KMS window | D7 cannot claim staging acceptance yet |
-| no list-jobs endpoint | a full browser reload cannot rediscover an unknown job id; in-workbench sheet switching is covered |
-| branch is behind current main | replay/range-diff and exact-head CI are still mandatory |
+| no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
+| local current-main candidate has no PR/remote check set | required-context completeness and merge-state evidence remain unproved |
+
+The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
+KMS/key custody and the production object backend as explicit owner decisions.
+Staging may use local storage, but that does not choose or prove the production
+failure domain.
 
 ## 5. Coordination status
 
@@ -144,26 +172,28 @@ These are real residuals, not documentation polish:
   implementation branches or merge any approval PR.
 - Approval FWB and automation writes continue to use the shared writer-block
   entry; D5 did not create a second authority table or lock order.
-- The cloud-classroom authority integration candidate remains frozen in its own
-  worktree. Its pending shared CI-union changes are not mixed into this Time
-  Machine D7 checkpoint.
+- The cloud-classroom authority integration candidate and its shared CI union
+  remain frozen in a separate worktree. None of those bytes are mixed into this
+  Time Machine candidate.
 
 ## 6. Change discipline
 
-- No push, PR, Ready transition, merge, deployment, dispatch, or production
+- No push, PR, Ready transition, remote merge, deployment, dispatch, or production
   access was performed for D7.
 - No flag was enabled or changed.
-- The only D7 code-tree edits are tests; runtime implementation bytes remain at
-  the D6 checkpoint.
-- One isolated local database was used for D7 and was dropped after verification;
-  exact and prefix residue counts both returned zero.
+- D7 adds only the bounded durable-list and application-runtime slices described
+  above plus their focused tests. It does not select a KMS/object-store provider.
+- Isolated local databases were used for source-head and current-main D7
+  verification and dropped after each run; exact and prefix residue counts
+  returned zero.
 
 ## 7. Next gated work
 
-1. Independent review and local D7 evidence commit.
-2. Replay onto then-current main, preserve every workflow/test union, and rerun
-   exact-head required CI with the real-DB lane at zero skipped.
-3. Implement and review the application runtime/worker/provider composition.
-4. Obtain a new owner staging-only authorization and execute the D7 runbook.
-5. Keep production and all Time Machine flags unchanged until a later, separate
+1. Obtain the explicit owner choices for KMS/key custody and the staging/production
+   object backend; do not infer them from another product surface.
+2. Publish/review the current-main candidate and require the complete exact-head
+   remote check set, including the real-DB lane at zero skipped.
+3. Obtain a new owner staging-only authorization and execute the D7 runbook,
+   including a true process restart and provider/KMS fault legs.
+4. Keep production and all Time Machine flags unchanged until a later, separate
    enablement decision.
