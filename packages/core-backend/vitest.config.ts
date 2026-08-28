@@ -1105,6 +1105,10 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0 target-generation/floor strict comparator: DATABASE_URL-gated. Keep it out of the no-DB
+      // default lane and pin its existing whole-file multitable real-DB invocation in the shared
+      // exact-anchor wiring contract, so this suite cannot collect-and-skip-green.
+      'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
       // W0 L6-b exact-anchor authority goldens: DATABASE_URL-gated and meaningful only against real
       // Postgres. Exclude from the no-DB default lane so it cannot skip-green, and keep the whole file
       // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract
@@ -1137,6 +1141,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-authority-unavailable-failclosed-realdb.test.ts',
       'tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts',
       'tests/integration/multitable-automation-marker-anchor-realdb.test.ts',
+      'tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts',
       // D-1c W0 slice ① (form-submit CREATE/EDIT public-form revision goldens): real Postgres only
       // (installs scoped failure/suppression triggers per site and drives the real submit route
       // end-to-end) — excluded HERE so it cannot skip-green in the no-DB lane, whole-file wired into
@@ -1329,6 +1334,26 @@ export default defineConfig({
       // in the no-DB lane, and whole-file wired into `Run multitable real-DB integration` in
       // plugin-tests.yml. Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-d2-sidedoor-delete-recoverability-realdb.test.ts',
+      // Time Machine D2 archive-catalog, stale-pin cleanup, section-causality, operation-binding,
+      // coverage-binding, key-registry, source-pin authority, object-receipt authority,
+      // D2h crypto-registry, D2e durable writer-block, D3 legal-hold authority, and D5 durable
+      // restore-job proofs:
+      // DATABASE_URL-gated and whole-file wired into the multitable real-DB step so the no-DB
+      // job cannot skip-green them.
+      'tests/integration/multitable-recovery-archive-catalog-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
       // 4c-3 RB matrix: real Postgres only — whole-file wired into `Run multitable real-DB
       // integration` in plugin-tests.yml (describeIfDatabase alone would skip-green here).
       'tests/integration/multitable-undelete-inbound-replay-realdb.test.ts',
@@ -1338,6 +1363,10 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // T8-1 Revert-to-T real-DB goldens, including the retention compatibility/no-oracle contract.
+      // Whole-file wired into `Run multitable real-DB integration`; exclude here so DATABASE_URL
+      // gating cannot report skip-shaped green in the default no-DB lane.
+      'tests/integration/multitable-revert-pit-realdb.test.ts',
       // T8-2 Reset-to-T goldens (flag-off/on, PIT-2 all-or-nothing, delete-set divergence including the
       // docket #46 capture-complete deleteScopeHash-mismatch golden, single-txn atomicity, D2 gate): real
       // Postgres only. Was ALREADY whole-file wired into `Run multitable real-DB integration` in
@@ -1518,6 +1547,10 @@ export default defineConfig({
       // the content/assessment + watch gates in plugin-tests.yml after
       // db:migrate on the 20.x leg.
       'tests/integration/elearning-course-publish.db.test.ts',
+      // E-learning L4 credit-ledger authority. Requires real PostgreSQL for
+      // effect identity, replay/hash conflicts, bucket locking, and balances.
+      // Excluded from the no-DB job and wired as a whole-file post-migrate gate.
+      'tests/integration/elearning-credit-ledger-authority.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of
