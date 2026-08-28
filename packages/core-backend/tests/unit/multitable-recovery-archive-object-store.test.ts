@@ -164,6 +164,11 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     await expect(store.put(first)).resolves.toMatchObject({ outcome: 'existing', object: descriptorFrom(first) })
     await expect(store.head(readRequest(first))).resolves.toEqual(descriptorFrom(first))
     await expect(store.get(readRequest(first))).resolves.toEqual({ ...descriptorFrom(first), bytes: new Uint8Array(first.bytes) })
+    await expect(store.deleteExpired({ ...readRequest(first), now: '2026-08-27T00:00:00.000Z' })).resolves.toEqual({
+      outcome: 'retained',
+      object: descriptorFrom(first),
+    })
+    await expect(store.get(readRequest(first))).resolves.toEqual({ ...descriptorFrom(first), bytes: new Uint8Array(first.bytes) })
     await expect(store.deleteExpired({ ...readRequest(first), now: AFTER_EXPIRY })).resolves.toEqual({
       outcome: 'deleted',
       object: descriptorFrom(first),
@@ -481,6 +486,18 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     ]) {
       await expect(asyncCodeOf(call)).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
     }
+  })
+
+  test('rejects a provider that reports deleting an unexpired object', async () => {
+    const request = putRequest(identity())
+    const provider = createCountingProvider(request)
+    provider.deleteExpired = async () => ({ outcome: 'deleted', object: descriptorFrom(request) })
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+
+    await expect(asyncCodeOf(() => store.deleteExpired({
+      ...readRequest(request),
+      now: BEFORE_EXPIRY,
+    }))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
   })
 
   test('requires a requested put pin and serializes local pin before conditional deletion', async () => {

@@ -486,7 +486,10 @@ export function createTransactionGuardedRecoveryArchiveObjectStore(
       }
       const object = parseDescriptor(read.object, true)
       assertSameIdentity(expected, object)
-      if (!expectedBindingMatches(expected, object) || (read.outcome === 'deleted' && object.pinned)) {
+      if (
+        !expectedBindingMatches(expected, object) ||
+        (read.outcome === 'deleted' && (object.pinned || object.expiresAt > expected.now))
+      ) {
         fail('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
       }
       return { outcome: read.outcome, object: copyDescriptor(object) }
