@@ -106,9 +106,24 @@ describe('Time Machine D2g manifest canonicalization determinism', () => {
   })
 
   test('stored manifest round-trips through fail-closed validation', () => {
-    const built = buildRecoveryArchiveManifest(BINDING, goldenSections(), 'mac-placeholder')
+    const built = buildRecoveryArchiveManifest(BINDING, goldenSections(), 'a1b2')
     const parsed = validateRecoveryArchiveManifest(JSON.parse(built.manifestJson))
     expect(parsed).toEqual(built.manifest)
+  })
+
+  test('manifest MAC is canonical lowercase even-length hex or null', () => {
+    expect(
+      buildRecoveryArchiveManifest(BINDING, goldenSections(), null).manifest.manifest_mac,
+    ).toBeNull()
+    expect(
+      buildRecoveryArchiveManifest(BINDING, goldenSections(), '00a1ff').manifest.manifest_mac,
+    ).toBe('00a1ff')
+    for (const manifestMac of ['', '0', 'abc', 'A0', 'gg', '00-11']) {
+      expectManifestError(
+        () => buildRecoveryArchiveManifest(BINDING, goldenSections(), manifestMac),
+        'RECOVERY_ARCHIVE_MANIFEST_INVALID_SHAPE',
+      )
+    }
   })
 })
 

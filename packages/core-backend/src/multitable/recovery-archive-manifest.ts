@@ -458,7 +458,10 @@ function validateBinding(value: Record<string, unknown>): void {
 }
 
 function validateManifestMac(value: unknown): void {
-  if (value !== null && (typeof value !== 'string' || value.length === 0)) {
+  if (
+    value !== null &&
+    (typeof value !== 'string' || !/^(?:[0-9a-f]{2})+$/.test(value))
+  ) {
     throwManifestError('RECOVERY_ARCHIVE_MANIFEST_INVALID_SHAPE')
   }
 }
