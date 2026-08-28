@@ -370,4 +370,84 @@ describe('elearning credit ledger PostgreSQL authority', () => {
       claimElearningCredit(storeFor(firstPool), retryable, ENABLED),
     ).resolves.toMatchObject({ awardedPoints: 10, duplicate: false, status: 'awarded' })
   })
+
+  it('serializes different effects in one local-day bucket before enforcing the daily cap', async () => {
+    await seedRule()
+    await firstPool.query(`
+      CREATE FUNCTION elearning_credit_test_pause_decision() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.user_id = 'user-credit-realdb-cap-race' THEN
+          PERFORM pg_sleep(0.2);
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await firstPool.query(`
+      CREATE TRIGGER elearning_credit_test_pause_decision
+      BEFORE INSERT ON elearning_credit_decisions
+      FOR EACH ROW EXECUTE FUNCTION elearning_credit_test_pause_decision()
+    `)
+
+    const occurredAt = '2026-01-03T00:00:00.000Z'
+    const userId = 'user-credit-realdb-cap-race'
+    await firstPool.query(
+      `INSERT INTO elearning_credit_daily_buckets (
+         org_id, user_id, behavior, local_day
+       ) VALUES ($1, $2, 'pass_exam', '2026-01-03')`,
+      [ORG, userId],
+    )
+    const settled = await Promise.all([
+      claimElearningCredit(
+        storeFor(firstPool),
+        effect({
+          effectKey: 'attempt:cap-race-a',
+          occurredAt,
+          reference: { attemptId: 'cap-race-a' },
+          userId,
+        }),
+        ENABLED,
+      ),
+      claimElearningCredit(
+        storeFor(secondPool),
+        effect({
+          effectKey: 'attempt:cap-race-b',
+          occurredAt,
+          reference: { attemptId: 'cap-race-b' },
+          userId,
+        }),
+        ENABLED,
+      ),
+    ])
+
+    await firstPool.query(
+      'DROP TRIGGER elearning_credit_test_pause_decision ON elearning_credit_decisions',
+    )
+    await firstPool.query('DROP FUNCTION elearning_credit_test_pause_decision()')
+
+    expect(
+      settled
+        .map((entry) => entry.awardedPoints)
+        .sort((left, right) => left - right),
+    ).toEqual([0, 10])
+    expect(settled.map((entry) => entry.status).sort()).toEqual(['awarded', 'exhausted'])
+    const rows = await firstPool.query<{
+      awarded: number
+      balance: number
+      buckets: number
+      decisions: number
+    }>(
+      `SELECT
+         (SELECT COALESCE(sum(awarded_points), 0)::int FROM elearning_credit_decisions
+           WHERE org_id = $1 AND user_id = $2) AS awarded,
+         (SELECT balance_points FROM elearning_credit_balances
+           WHERE org_id = $1 AND user_id = $2) AS balance,
+         (SELECT count(*)::int FROM elearning_credit_daily_buckets
+           WHERE org_id = $1 AND user_id = $2) AS buckets,
+         (SELECT count(*)::int FROM elearning_credit_decisions
+           WHERE org_id = $1 AND user_id = $2) AS decisions`,
+      [ORG, userId],
+    )
+    expect(rows.rows).toEqual([{ awarded: 10, balance: 10, buckets: 1, decisions: 2 }])
+  }, 30_000)
 })
