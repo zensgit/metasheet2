@@ -6,6 +6,7 @@ import {
   type ElearningDocumentPageViewTransaction,
   type ElearningDocumentProgressSnapshot,
   type ElearningDocumentProgressStore,
+  ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION,
   ElearningDocumentProgressError,
   recordElearningDocumentPageView,
 } from '../../src/services/elearning-document-progress'
@@ -226,6 +227,16 @@ describe('elearning document page-view runtime', () => {
       pageNumber: 3,
       receivedAt: NOW,
       requestHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      requestHashVersion: ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION,
+      requestId: REQUEST_ID,
+      sessionId: SESSION_ID,
+      userId: USER_ID,
+    }])
+    expect(store.claims).toEqual([{
+      courseVersionItemId: ITEM_ID,
+      orgId: ORG_ID,
+      requestHash: store.events[0].requestHash,
+      requestHashVersion: ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION,
       requestId: REQUEST_ID,
       sessionId: SESSION_ID,
       userId: USER_ID,

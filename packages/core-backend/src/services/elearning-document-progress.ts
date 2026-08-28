@@ -21,6 +21,7 @@ import {
 
 export const ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_DOMAIN =
   'elearning.document.page-view.v1' as const
+export const ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION = 1 as const
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -104,8 +105,9 @@ export type ElearningDocumentPageViewClaim =
 
 export interface ElearningDocumentPageViewTransaction {
   /**
-   * Must re-evaluate current course/version/access state and serialize
-   * org+user+item progress before returning. Null means fail-closed denial.
+   * Must re-evaluate current course/version/access state, verify that the
+   * active session belongs to the same org+user+item, and serialize that
+   * progress before returning. Null means fail-closed denial.
    */
   lockAccessibleDocumentForUpdate(input: {
     readonly courseVersionItemId: string
@@ -119,6 +121,7 @@ export interface ElearningDocumentPageViewTransaction {
     readonly courseVersionItemId: string
     readonly orgId: string
     readonly requestHash: string
+    readonly requestHashVersion: typeof ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION
     readonly requestId: string
     readonly sessionId: string
     readonly userId: string
@@ -137,6 +140,7 @@ export interface ElearningDocumentPageViewTransaction {
     readonly pageNumber: number
     readonly receivedAt: string
     readonly requestHash: string
+    readonly requestHashVersion: typeof ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION
     readonly requestId: string
     readonly sessionId: string
     readonly userId: string
@@ -485,6 +489,7 @@ export async function recordElearningDocumentPageView(
         courseVersionItemId: input.courseVersionItemId,
         orgId: input.orgId,
         requestHash: hash,
+        requestHashVersion: ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION,
         requestId: input.requestId,
         sessionId: input.sessionId,
         userId: input.userId,
@@ -524,6 +529,7 @@ export async function recordElearningDocumentPageView(
         pageNumber: input.pageNumber,
         receivedAt,
         requestHash: hash,
+        requestHashVersion: ELEARNING_DOCUMENT_PAGE_VIEW_REQUEST_HASH_VERSION,
         requestId: input.requestId,
         sessionId: normalizedAuthority.sessionId,
         userId: input.userId,
