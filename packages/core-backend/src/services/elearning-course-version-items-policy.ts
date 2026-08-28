@@ -1,5 +1,9 @@
 import { ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION } from './elearning-document-completion-policy'
 import {
+  ELEARNING_ARTICLE_COMPLETION_POLICY_VERSION,
+  ELEARNING_EXTERNAL_LINK_COMPLETION_POLICY_VERSION,
+} from './elearning-open-completion-policy'
+import {
   ELEARNING_WATCH_POLICY_VERSION,
   ELEARNING_WATCH_THRESHOLD_BPS,
 } from './elearning-watch-progress'
@@ -14,9 +18,10 @@ import {
  * SQL slice; this module fixes their closed item shapes first.
  */
 
-export const ELEARNING_ARTICLE_COMPLETION_POLICY_VERSION = 'article-open-v1' as const
-export const ELEARNING_EXTERNAL_LINK_COMPLETION_POLICY_VERSION =
-  'external-link-launch-v1' as const
+export {
+  ELEARNING_ARTICLE_COMPLETION_POLICY_VERSION,
+  ELEARNING_EXTERNAL_LINK_COMPLETION_POLICY_VERSION,
+} from './elearning-open-completion-policy'
 export const ELEARNING_COURSE_VERSION_MAX_ITEMS = 10_000 as const
 
 const UUID_RE =
