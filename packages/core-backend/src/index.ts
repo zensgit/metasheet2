@@ -2753,10 +2753,12 @@ export class MetaSheetServer {
     this.shuttingDown = true
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
+    let recoveryArchiveWorkerDrained = false
     try {
       // This must finish before the pool-close task is even created: an in-flight chunk may still
       // be completing its transaction while the worker loop drains.
       await this.recoveryArchiveApplication.stopWorker()
+      recoveryArchiveWorkerDrained = true
     } catch {
       this.logger.warn('Recovery archive restore worker stop failed')
     }
@@ -2872,18 +2874,22 @@ export class MetaSheetServer {
       }
     }))
 
-    // 2. Close database pool
-    shutdownTasks.push((async () => {
-      try {
-        const { pool } = await import('./db/pg')
-        if (pool) {
-          await pool.end()
-          this.logger.info('Database pool closed')
+    // 2. Close database pool only after the restore worker has definitely drained.
+    if (recoveryArchiveWorkerDrained) {
+      shutdownTasks.push((async () => {
+        try {
+          const { pool } = await import('./db/pg')
+          if (pool) {
+            await pool.end()
+            this.logger.info('Database pool closed')
+          }
+        } catch (err) {
+          this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
         }
-      } catch (err) {
-        this.logger.warn(`Database pool close error: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })())
+      })())
+    } else {
+      this.logger.warn('Database pool close skipped because recovery archive restore worker did not drain')
+    }
 
     // 3. Unload plugins gracefully
     shutdownTasks.push((async () => {

@@ -94,4 +94,18 @@ describe('MultitableApiClient recovery archive routes', () => {
       '/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs?cursor=opaque%20%2F%3F&limit=1',
     )
   })
+
+  it.each([
+    { nextCursor: null },
+    { entries: {}, nextCursor: null },
+    { entries: [] },
+  ])('rejects a malformed successful job-list response instead of treating it as absence', async (data) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
+    })
+
+    await expect(client.listRecoveryArchiveJobs('sheet/a')).rejects.toThrow(
+      'Invalid recovery archive job list response',
+    )
+  })
 })

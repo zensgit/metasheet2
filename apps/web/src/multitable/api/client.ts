@@ -2341,9 +2341,15 @@ export class MultitableApiClient implements CommentsApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs${qs(params ?? {})}`,
     )
     const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
+    if (
+      !Array.isArray(data.entries)
+      || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+    ) {
+      throw new Error('Invalid recovery archive job list response')
+    }
     return {
-      entries: Array.isArray(data.entries) ? data.entries : [],
-      nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+      entries: data.entries,
+      nextCursor: data.nextCursor,
     }
   }
 

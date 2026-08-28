@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { pool as pgPool } from '../../src/db/pg'
 
 const routeMocks = vi.hoisted(() => ({
   univerMetaRouter: vi.fn(),
@@ -140,5 +141,35 @@ describe('MetaSheetServer recovery archive wiring', () => {
     expect(isCoreBackendDirectEntry(currentModule, currentModule)).toBe(true)
     expect(isCoreBackendDirectEntry({}, currentModule)).toBe(false)
     expect(isCoreBackendDirectEntry(undefined, currentModule)).toBe(false)
+  })
+
+  it('keeps the database pool open when the restore worker cannot drain', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const stopWorker = vi.fn().mockRejectedValue(new Error('worker-stop-sentinel'))
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    ;(server as unknown as {
+      recoveryArchiveApplication: { stopWorker(): Promise<void> }
+    }).recoveryArchiveApplication = { stopWorker }
+
+    await server.stop()
+
+    expect(stopWorker).toHaveBeenCalledTimes(1)
+    expect(poolEnd).not.toHaveBeenCalled()
+  })
+
+  it('closes the database pool after the restore worker drains', async () => {
+    expect(pgPool).not.toBeNull()
+    const poolEnd = vi.spyOn(pgPool!, 'end').mockResolvedValue(undefined)
+    const stopWorker = vi.fn().mockResolvedValue(undefined)
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    ;(server as unknown as {
+      recoveryArchiveApplication: { stopWorker(): Promise<void> }
+    }).recoveryArchiveApplication = { stopWorker }
+
+    await server.stop()
+
+    expect(stopWorker).toHaveBeenCalledTimes(1)
+    expect(poolEnd).toHaveBeenCalledTimes(1)
   })
 })

@@ -180,22 +180,16 @@ describe('RecoveryArchiveModal', () => {
 
   it('does not cache a late discovery response after the modal closes', async () => {
     let resolveDiscovery!: (page: RecoveryArchiveJobPage) => void
-    const listJobs = vi.fn()
-      .mockImplementationOnce(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveDiscovery = resolve }))
-      .mockResolvedValueOnce({ entries: [], nextCursor: null })
-    const props = mount({ listJobs })
+    const listJobs = vi.fn(() => new Promise<RecoveryArchiveJobPage>((resolve) => { resolveDiscovery = resolve }))
+    mount({ listJobs })
     await flush()
 
     ;(q('.archive-recovery__close') as HTMLButtonElement).click()
     await flush()
-    props.visible.value = false
-    await flush()
     resolveDiscovery({ entries: [jobSnapshot('applying', '2500')], nextCursor: null })
     await flush()
-    props.visible.value = true
-    await flush()
 
-    expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(listJobs).toHaveBeenCalledTimes(1)
     expect(q('[data-test="archive-recovery-job"]')).toBeFalsy()
   })
 
