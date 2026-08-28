@@ -30,6 +30,7 @@ const FILES = [
   'tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
   'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
+  'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
 ]
 const ARCHIVE_REALDB_RE =
   /^tests\/integration\/multitable-recovery-archive-[a-z0-9-]+-realdb\.test\.ts$/
@@ -150,6 +151,34 @@ test('archive roster contract rejects dropping D5 restore jobs from the union', 
   )
   assert.notEqual(dropped, workflow, 'D5 restore-job removal mutation must apply')
   assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping D4 reconstruction from the union', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = workflow.replace(
+    'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
+    'tests/integration/multitable-recovery-archive-reconstruction-removed.test.ts',
+  )
+  assert.notEqual(dropped, workflow, 'D4 reconstruction removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(config, dropped), (error) => {
+    assert.match(String(error.message), /no duplicates or extras/)
+    return true
+  })
+})
+
+test('archive roster contract rejects dropping D4 reconstruction from no-DB exclusion', () => {
+  const config = readFileSync(CONFIG, 'utf8')
+  const workflow = readFileSync(WORKFLOW, 'utf8')
+  const dropped = config.replace(
+    "      'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',\n",
+    '',
+  )
+  assert.notEqual(dropped, config, 'D4 reconstruction exclusion removal mutation must apply')
+  assert.throws(() => assertD2ArchiveWiring(dropped, workflow), (error) => {
     assert.match(String(error.message), /no duplicates or extras/)
     return true
   })

@@ -60,6 +60,10 @@ const files = [
     file: 'tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts',
     sentinel: 'recovery_archive_restore_job_realdb_harness_missing_database_url',
   },
+  {
+    file: 'tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts',
+    sentinel: 'recovery_archive_reconstruction_realdb_harness_missing_database_url',
+  },
 ]
 
 test('each armed D2 real-DB spec fails instead of skipping when DATABASE_URL is absent', () => {
