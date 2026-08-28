@@ -108,16 +108,27 @@ async function errorOf(promise: Promise<unknown>): Promise<DatabaseError> {
 
 async function settleTransaction(
   client: PoolClient,
-  statement: Promise<unknown>,
+  statement: Promise<{ error: DatabaseError | null }>,
 ): Promise<DatabaseError | null> {
+  const outcome = await statement
+  if (outcome.error) {
+    await client.query('ROLLBACK').catch(() => {})
+    return outcome.error
+  }
   try {
-    await statement
     await client.query('COMMIT')
     return null
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {})
     return error as DatabaseError
   }
+}
+
+function observeStatement(statement: Promise<unknown>): Promise<{ error: DatabaseError | null }> {
+  return statement.then(
+    () => ({ error: null }),
+    (error: unknown) => ({ error: error as DatabaseError }),
+  )
 }
 
 function expectValuesFree(error: DatabaseError, forbiddenValues: readonly string[]): void {
@@ -1503,8 +1514,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       verifierOpen = true
       await seedVerifiedObjectRosterIfPresent(verifier, ids.generationId)
       const verifierPid = await backendPid(verifier)
-      const verifyWait = verifier.query(
-        `UPDATE meta_recovery_archives
+      const verifyWait = observeStatement(
+        verifier.query(
+          `UPDATE meta_recovery_archives
             SET state='verified',
                 build_status='finalized',
                 coverage_status='complete',
@@ -1512,14 +1524,15 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
                 coverage_section_hash=$3,
                 coverage_row_count=0,
                 manifest_mac=$4::bytea
-          WHERE generation_id=$1::uuid`,
-        [ids.generationId, ROOT_HASH, COVERAGE_HASH, Buffer.from('d2-claim-anchor-mac')],
+            WHERE generation_id=$1::uuid`,
+          [ids.generationId, ROOT_HASH, COVERAGE_HASH, Buffer.from('d2-claim-anchor-mac')],
+        ),
       )
 
       await deleter.query('BEGIN')
       deleterOpen = true
       const deleterPid = await backendPid(deleter)
-      const deleteWait = deleteSealedOperation(deleter, ids.snapshotOperationId)
+      const deleteWait = observeStatement(deleteSealedOperation(deleter, ids.snapshotOperationId))
 
       const deadline = Date.now() + 5_000
       let blockedPair: 'verify-waits' | 'delete-waits' | null = null
