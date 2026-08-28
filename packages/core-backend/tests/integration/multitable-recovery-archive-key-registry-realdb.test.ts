@@ -10,6 +10,12 @@ import {
   RecoveryArchiveKeyReferenceError,
   type RecoveryArchiveKeyRegistryQuery,
 } from '../../src/multitable/recovery-archive-key-registry'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropOutcome,
+  type OwnedPoolTerminationHandler,
+} from '../helpers/scratch-database'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
@@ -34,7 +40,12 @@ const TRIGGERS = [
 ] as const
 
 type DatabaseError = Error & { code?: string; detail?: string; where?: string; hint?: string }
-type Scratch = { pool: Pool; db: Kysely<unknown>; name: string }
+type Scratch = {
+  pool: Pool
+  db: Kysely<unknown>
+  name: string
+  terminationHandler: OwnedPoolTerminationHandler
+}
 
 let adminPool: Pool
 const liveScratches = new Set<Scratch>()
@@ -50,7 +61,12 @@ async function createScratch(label: string, sourceKind: 'exact' | 'wrong-key-typ
   await adminPool.query(`CREATE DATABASE "${name}"`)
   const pool = new Pool({ connectionString: databaseUrlFor(name), max: 6 })
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-  const scratch = { pool, db, name }
+  const scratch = {
+    pool,
+    db,
+    name,
+    terminationHandler: attachOwnedPoolTerminationHandler(pool),
+  }
   liveScratches.add(scratch)
   await pool.query(
     sourceKind === 'exact'
@@ -68,17 +84,13 @@ async function createScratch(label: string, sourceKind: 'exact' | 'wrong-key-typ
 
 async function dropScratch(scratch: Scratch): Promise<void> {
   liveScratches.delete(scratch)
-  await scratch.db.destroy().catch(() => {})
-  await scratch.pool.end().catch(() => {})
-  await adminPool
-    .query(
-      `SELECT pg_terminate_backend(pid)
-         FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [scratch.name],
-    )
-    .catch(() => {})
-  await adminPool.query(`DROP DATABASE IF EXISTS "${scratch.name}"`).catch(() => {})
+  try {
+    await scratch.db.destroy().catch(() => {})
+    const outcome = await dropScratchDatabase(adminPool, scratch.name)
+    console.log(formatScratchDropOutcome('recovery-archive-key-registry', outcome))
+  } finally {
+    scratch.terminationHandler.detach()
+  }
 }
 
 async function withScratch<T>(label: string, run: (scratch: Scratch) => Promise<T>): Promise<T> {
