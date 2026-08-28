@@ -145,6 +145,13 @@ function requireReferenceState(value: unknown): ElearningCoursePublishReferenceS
   return value as ElearningCoursePublishReferenceState
 }
 
+function requireMeasurementAuthority(
+  value: unknown,
+): ElearningCoursePublishMeasurementAuthority {
+  if (value !== null && value !== 'server_probe') fail('invalid_input')
+  return value as ElearningCoursePublishMeasurementAuthority
+}
+
 function nullablePositiveSafeInteger(value: unknown): number | null {
   if (value === null) return null
   if (
@@ -181,10 +188,7 @@ function normalizeAuthority(input: unknown): ElearningCoursePublishReferenceAuth
   if (referenceState !== expectedReferenceState(itemType)) {
     fail('reference_unavailable')
   }
-  const measurementAuthority = values.measurementAuthority
-  if (measurementAuthority !== null && measurementAuthority !== 'server_probe') {
-    fail('invalid_input')
-  }
+  const measurementAuthority = requireMeasurementAuthority(values.measurementAuthority)
   const serverDurationMs = nullablePositiveSafeInteger(values.serverDurationMs)
   const serverPageCount = nullablePositiveSafeInteger(values.serverPageCount)
   if (itemType === 'document') {
