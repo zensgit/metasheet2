@@ -272,7 +272,7 @@ function resolveSubmissionIntent(
   draft: Draft,
   score: number,
   comment: string | null,
-): Draft['pendingIntent'] {
+): NonNullable<Draft['pendingIntent']> {
   const pending = draft.pendingIntent
   if (pending && pending.score === score && pending.comment === comment) {
     return pending
