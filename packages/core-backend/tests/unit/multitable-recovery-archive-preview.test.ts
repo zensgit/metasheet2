@@ -176,6 +176,8 @@ function queryFixture(options: {
         "build_status = 'finalized'",
         "coverage_status = 'complete'",
         'expires_at > clock_timestamp()',
+        'FROM public.meta_recovery_archive_legal_holds',
+        "hold_row.state = 'active'",
       ]) {
         if (!normalized.includes(predicate)) throw new Error('archive authority predicate missing')
       }

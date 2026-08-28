@@ -123,8 +123,10 @@ import {
 } from '../multitable/recovery-archive-catalog'
 import {
   previewRecoveryArchive,
+  RecoveryArchivePreviewError,
   type RecoveryArchivePreviewRuntime,
 } from '../multitable/recovery-archive-preview'
+import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
 import {
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
@@ -6916,6 +6918,7 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
 
 export interface UniverMetaRouterOptions {
   readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
+  readonly recoveryArchiveAuditedReplayHorizonMs?: number
 }
 
 export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
@@ -10558,6 +10561,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       return { ok: false, status: 503, code: 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE' }
     }
     const actorId = access.userId
+    const evaluatePlanAuthorization = makePlanAuthorization(req, sheetId)
+    const mutationObserver = createRecoveryMutationObserver(req, pool, sheetId, actorId)
     return {
       ok: true,
       context: {
@@ -10565,7 +10570,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         baseId,
         sheetId,
         actorId,
-        evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
+        evaluatePlanAuthorization,
+        syncApply: {
+          preliminaryFullRead: makeFullReadEvaluator(req, sheetId),
+          stabilizeAuthorization: makeAuthorizationStabilizer(),
+          finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
+          evaluatePlanAuthorization,
+          onMutationApplied: mutationObserver.onMutationApplied,
+          afterCommit: mutationObserver.afterCommit,
+        },
         recheckAuthority: async (freshQuery) => {
           const fresh = await resolveRecoverySheetAuthority(req, freshQuery, sheetId)
           if (
@@ -10969,6 +10982,90 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     return { yjsRecordIds: [...new Set(yjsRecordIds)] }
   }
 
+  const createRecoveryMutationObserver = (
+    req: Request,
+    pool: ReturnType<typeof poolManager.get>,
+    sheetId: string,
+    actorId: string,
+  ) => {
+    const appliedReverts: AppliedRevertFact[] = []
+    const appliedDeleteIds: string[] = []
+    const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
+    const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+    const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+
+    const onMutationApplied = async (
+      query: QueryFn,
+      mutation: ExactAnchorAppliedMutation,
+    ): Promise<void> => {
+      appliedLinkInvalidations.push(...mutation.linkInvalidations)
+      const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
+        const result = await query(sql, params)
+        return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rowCount ?? null }
+      })
+      if (mutation.kind === 'revert') {
+        const payload = withAutomationEventId({
+          sheetId,
+          recordId: mutation.recordId,
+          changes: mutation.patch,
+          actorId,
+        })
+        updatedEventPayloads.push(payload)
+        appliedReverts.push({
+          recordId: mutation.recordId,
+          version: mutation.version,
+          fieldIds: mutation.changedFieldIds,
+          patch: mutation.patch,
+          revisionId: mutation.revisionId,
+        })
+        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
+      } else {
+        const payload = withAutomationEventId({
+          sheetId,
+          recordId: mutation.recordId,
+          actorId,
+        })
+        deletedEventPayloads.push(payload)
+        appliedDeleteIds.push(mutation.recordId)
+        await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
+      }
+    }
+
+    const afterCommit = async (): Promise<void> => {
+      try {
+        const side = await runRecoveryPostCommitSideEffects(
+          req,
+          pool,
+          sheetId,
+          actorId,
+          appliedReverts,
+          appliedLinkInvalidations,
+        )
+        for (const payload of updatedEventPayloads) {
+          emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', payload)
+        }
+        if (appliedDeleteIds.length > 0) {
+          publishMultitableSheetRealtime({
+            spreadsheetId: sheetId,
+            actorId,
+            source: 'multitable',
+            kind: 'record-deleted',
+            recordIds: appliedDeleteIds,
+          })
+          for (const payload of deletedEventPayloads) {
+            emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', payload)
+          }
+        }
+        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
+        void bestEffortPruneRecoveryBurns(pool)
+      } catch (error) {
+        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', error)
+      }
+    }
+
+    return { appliedReverts, appliedDeleteIds, afterCommit, onMutationApplied }
+  }
+
   /**
    * Shared PREVIEW handler for both modes. No-oracle ordering: parse shape (no DB) → 401/403 admin floor →
    * existence-hidden 403 for non-admin unknown sheets → conservative full-read 403 → system-admin-only 404 →
@@ -11160,14 +11257,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const actorId = access.userId
-      // Same-transaction mutation facts + stable event payloads (P1#2d): built ONCE inside the txn hook,
-      // durable-enqueued atomically with each mutation's writes, and REUSED verbatim for the post-commit
-      // legacy emit. A refusal rolls everything back — the collected arrays are then simply discarded.
-      const appliedReverts: AppliedRevertFact[] = []
-      const appliedDeleteIds: string[] = []
-      const appliedLinkInvalidations: ExactAnchorLinkInvalidation[] = []
-      const updatedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
-      const deletedEventPayloads: Array<Record<string, unknown> & { _eventId: string }> = []
+      const mutationObserver = createRecoveryMutationObserver(req, pool, sheetId, actorId)
       const result = await executeExactAnchorRecoveryApply(
         (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
         {
@@ -11183,30 +11273,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           stabilizeAuthorization: makeAuthorizationStabilizer(),
           finalLockedFullRead: makeFullReadEvaluator(req, sheetId),
           evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
-          onMutationApplied: async (query, mutation: ExactAnchorAppliedMutation) => {
-            appliedLinkInvalidations.push(...mutation.linkInvalidations)
-            const txnQueryable = asProducerTxnQueryable(async (sql: string, params?: unknown[]) => {
-              const r = await query(sql, params)
-              return { rows: r.rows as Array<Record<string, unknown>>, rowCount: r.rowCount ?? null }
-            })
-            if (mutation.kind === 'revert') {
-              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, changes: mutation.patch, actorId })
-              updatedEventPayloads.push(payload)
-              appliedReverts.push({
-                recordId: mutation.recordId,
-                version: mutation.version,
-                fieldIds: mutation.changedFieldIds,
-                patch: mutation.patch,
-                revisionId: mutation.revisionId,
-              })
-              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.updated', payload)
-            } else {
-              const payload = withAutomationEventId({ sheetId, recordId: mutation.recordId, actorId })
-              deletedEventPayloads.push(payload)
-              appliedDeleteIds.push(mutation.recordId)
-              await enqueueRecordEventIfDurable(txnQueryable, 'multitable.record.deleted', payload)
-            }
-          },
+          onMutationApplied: mutationObserver.onMutationApplied,
         },
       )
       if (result.ok === false) {
@@ -11214,28 +11281,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         return res.status(m.status).json({ ok: false, error: { code: m.code, message: m.message } })
       }
 
-      // Post-commit: recompute/realtime/subscribers/Yjs/legacy-emit are best-effort — NEVER a 500 after commit.
-      try {
-        const side = await runRecoveryPostCommitSideEffects(
-          req,
-          pool,
-          sheetId,
-          actorId,
-          appliedReverts,
-          appliedLinkInvalidations,
-        )
-        // Flag OFF ⇒ legacy post-commit emits (the SAME prebuilt payload objects the durable enqueue used);
-        // flag ON ⇒ suppressed (the same-txn enqueues above are the delivery path).
-        for (const p of updatedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.updated', p)
-        if (appliedDeleteIds.length > 0) {
-          publishMultitableSheetRealtime({ spreadsheetId: sheetId, actorId, source: 'multitable', kind: 'record-deleted', recordIds: appliedDeleteIds })
-          for (const p of deletedEventPayloads) emitRecordEventIfLegacy(eventBus, 'multitable.record.deleted', p)
-        }
-        await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
-        void bestEffortPruneRecoveryBurns(pool)
-      } catch (sideErr) {
-        console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', sideErr)
-      }
+      await mutationObserver.afterCommit()
 
       // Counts/ids only — no recovered values, no patches (values-free result contract).
       return res.json({
@@ -11249,8 +11295,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           revertedCount: result.applied.reverts,
           resurrectedCount: result.applied.resurrects,
           keptCreatedAfterAnchor: result.keptCreatedAfterAnchor,
-          records: appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
-          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: appliedDeleteIds } : {}),
+          records: mutationObserver.appliedReverts.map((r) => ({ recordId: r.recordId, status: 'reverted' as const, fieldIds: r.fieldIds, revisionId: r.revisionId })),
+          ...(mode === 'reset' ? { deletedCount: result.applied.deletes, deletedRecordIds: mutationObserver.appliedDeleteIds } : {}),
         },
       })
     } catch (err) {
@@ -11290,6 +11336,43 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             )
           }
         : undefined,
+      executeSync:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? async (context, input) => {
+              if (!context.syncApply) {
+                throw new RecoveryArchivePreviewError(
+                  'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE',
+                )
+              }
+              const pool = poolManager.get()
+              const result = await executeRecoveryArchiveSync(
+                recoveryArchiveRestoreTransaction,
+                pool.query.bind(pool) as unknown as RecoveryArchiveCatalogQuery,
+                options.recoveryArchiveRuntime,
+                {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                  previewIdentity: input.previewIdentity,
+                  scope: input.scope,
+                  recheckAuthority: context.recheckAuthority,
+                  preliminaryFullRead: context.syncApply.preliminaryFullRead,
+                  stabilizeAuthorization: context.syncApply.stabilizeAuthorization,
+                  finalLockedFullRead: context.syncApply.finalLockedFullRead,
+                  evaluatePlanAuthorization: context.syncApply.evaluatePlanAuthorization,
+                  ...(context.syncApply.onMutationApplied
+                    ? { onMutationApplied: context.syncApply.onMutationApplied }
+                    : {}),
+                  auditedReplayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                },
+              )
+              if (result.ok) await context.syncApply.afterCommit()
+              return result
+            }
+          : undefined,
       listCatalog: (context, input) => listRecoveryArchiveCatalog(
         recoveryArchiveCatalogTransaction,
         {

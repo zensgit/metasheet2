@@ -139,7 +139,15 @@ type ObjectRow = {
   size_bytes?: unknown
 }
 
-type LoadedArchiveAuthority = {
+export interface RecoveryArchiveAuthorityInput {
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly sheetId: string
+  readonly generationId: string
+  readonly recheckAuthority: (query: RecoveryArchivePreviewQuery) => Promise<boolean>
+}
+
+export type LoadedArchiveAuthority = {
   selectedBinding: RecoveryArchiveSelectedBinding
   keyId: string
   manifestObject: RecoveryArchiveObjectExpectedBinding
@@ -162,7 +170,7 @@ export async function previewRecoveryArchive(
   }
   if (!runtime) fail('RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE')
 
-  const archive = await loadArchiveAuthority(transaction, admitted)
+  const archive = await loadRecoveryArchiveAuthorityInternal(transaction, admitted)
   let complete
   try {
     complete = await readRecoveryArchiveCompleteSectionState({
@@ -351,14 +359,16 @@ function normalizeInput(input: RecoveryArchivePreviewInput): RecoveryArchivePrev
     actorId: opaque(input.actorId),
     generationId: uuid(input.generationId),
     mode,
-    scope: normalizeScope(input.scope),
+    scope: normalizeRecoveryArchiveScopeInternal(input.scope),
     recheckAuthority: input.recheckAuthority,
     evaluatePlanAuthorization: input.evaluatePlanAuthorization,
     env: input.env,
   })
 }
 
-function normalizeScope(value: RecoveryArchivePreviewScope): RecoveryArchivePreviewScope {
+export function normalizeRecoveryArchiveScopeInternal(
+  value: RecoveryArchivePreviewScope,
+): RecoveryArchivePreviewScope {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid()
   if (value.kind === 'whole_sheet') {
     if (Reflect.ownKeys(value).length !== 1) invalid()
@@ -379,9 +389,10 @@ function normalizeScope(value: RecoveryArchivePreviewScope): RecoveryArchivePrev
   invalid()
 }
 
-async function loadArchiveAuthority(
+/** @internal Shared server-owned catalog/object receipt authority for preview and sync execute. */
+export async function loadRecoveryArchiveAuthorityInternal(
   transaction: RecoveryArchivePreviewTransaction,
-  input: RecoveryArchivePreviewInput,
+  input: RecoveryArchiveAuthorityInput,
 ): Promise<LoadedArchiveAuthority> {
   return transaction(async (query) => {
     if (await input.recheckAuthority(query) !== true) {
@@ -399,7 +410,13 @@ async function loadArchiveAuthority(
           AND state = 'verified'
           AND build_status = 'finalized'
           AND coverage_status = 'complete'
-          AND expires_at > clock_timestamp()`,
+          AND expires_at > clock_timestamp()
+          AND NOT EXISTS (
+            SELECT 1
+              FROM public.meta_recovery_archive_legal_holds hold_row
+             WHERE hold_row.generation_id = meta_recovery_archives.generation_id
+               AND hold_row.state = 'active'
+          )`,
       [input.generationId, input.workspaceId, input.baseId, input.sheetId],
     )
     if (archiveResult.rows.length !== 1) fail('RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND')

@@ -6,7 +6,12 @@ import {
   type RecoveryArchiveCatalogEntry,
   type RecoveryArchiveCatalogPage,
 } from '../multitable/recovery-archive-catalog'
-import type { EvaluatePlanAuthorization } from '../multitable/exact-anchor-recovery-execute'
+import {
+  type EvaluatePlanAuthorization,
+  type ExactAnchorApplyInput,
+  type ExactAnchorApplyResult,
+} from '../multitable/exact-anchor-recovery-execute'
+import { mapApplyRefusal } from '../multitable/exact-anchor-recovery-route'
 import {
   RecoveryArchivePreviewError,
   type RecoveryArchivePreviewResult,
@@ -41,6 +46,10 @@ const PREVIEW_BODY_SCHEMA = z.object({
   mode: z.enum(['revert', 'reset']),
   scope: PREVIEW_SCOPE_SCHEMA,
 }).strict()
+const EXECUTE_BODY_SCHEMA = z.object({
+  previewIdentity: z.string().trim().min(1),
+  scope: PREVIEW_SCOPE_SCHEMA,
+}).strict()
 const JOB_ID_SCHEMA = z.string().uuid()
 const GENERATION_ID_SCHEMA = z.string().uuid()
 const CATALOG_QUERY_SCHEMA = z.object({
@@ -55,6 +64,16 @@ export interface RecoveryArchiveRestoreOwnerContext {
   readonly actorId: string
   readonly recheckAuthority: (query: RecoveryArchiveRestoreJobQuery) => Promise<boolean>
   readonly evaluatePlanAuthorization: EvaluatePlanAuthorization
+  readonly syncApply?: Pick<
+    ExactAnchorApplyInput,
+    | 'preliminaryFullRead'
+    | 'stabilizeAuthorization'
+    | 'finalLockedFullRead'
+    | 'evaluatePlanAuthorization'
+    | 'onMutationApplied'
+  > & {
+    readonly afterCommit: () => Promise<void>
+  }
 }
 
 export type RecoveryArchiveRestoreOwnerContextResolution =
@@ -78,6 +97,13 @@ export interface RecoveryArchiveRestoreOwnerService {
       readonly scope: RecoveryArchivePreviewScope
     },
   ) => Promise<RecoveryArchivePreviewResult>
+  readonly executeSync?: (
+    context: RecoveryArchiveRestoreOwnerContext,
+    input: {
+      readonly previewIdentity: string
+      readonly scope: RecoveryArchivePreviewScope
+    },
+  ) => Promise<ExactAnchorApplyResult>
   readonly listCatalog?: (
     context: RecoveryArchiveRestoreOwnerContext,
     input: { readonly cursor?: string; readonly limit?: number },
@@ -131,6 +157,32 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
         scope: parsed.data.scope as RecoveryArchivePreviewScope,
       })
       return res.json({ ok: true, data: projectPreview(result) })
+    } catch (error) {
+      return sendServiceError(res, error)
+    }
+  })
+
+  router.post('/sheets/:sheetId/recovery-archive/execute', async (req, res) => {
+    const parsed = EXECUTE_BODY_SCHEMA.safeParse(req.body ?? {})
+    if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!dependencies.service.executeSync) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE')
+    }
+    try {
+      const result = await dependencies.service.executeSync(context, {
+        previewIdentity: parsed.data.previewIdentity,
+        scope: parsed.data.scope as RecoveryArchivePreviewScope,
+      })
+      if (result.ok === false) {
+        const mapped = mapApplyRefusal(result.reason)
+        return res.status(mapped.status).json({
+          ok: false,
+          error: { code: mapped.code, message: mapped.message },
+        })
+      }
+      return res.json({ ok: true, data: projectSyncResult(result) })
     } catch (error) {
       return sendServiceError(res, error)
     }
@@ -302,6 +354,18 @@ function projectPreview(result: RecoveryArchivePreviewResult) {
     blockedReason: result.blockedReason,
     previewIdentity: result.previewIdentity,
     summary: result.summary,
+  }
+}
+
+function projectSyncResult(result: Extract<ExactAnchorApplyResult, { ok: true }>) {
+  return {
+    mode: result.mode,
+    anchorSeq: result.anchorSeq,
+    checkpointId: result.checkpointId,
+    revertedCount: result.applied.reverts,
+    resurrectedCount: result.applied.resurrects,
+    deletedCount: result.applied.deletes,
+    keptCreatedAfterAnchor: result.keptCreatedAfterAnchor,
   }
 }
 

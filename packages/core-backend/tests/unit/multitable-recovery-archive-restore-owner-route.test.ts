@@ -37,6 +37,7 @@ const context: RecoveryArchiveRestoreOwnerContext = {
 
 const resolveContext = vi.fn<RecoveryArchiveRestoreOwnerRouteDependencies['resolveContext']>()
 const preview = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['preview']>>()
+const executeSync = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['executeSync']>>()
 const listCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listCatalog']>>()
 const readCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readCatalog']>>()
 const read = vi.fn<RecoveryArchiveRestoreOwnerService['read']>()
@@ -74,6 +75,7 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
     resolveContext,
     service: {
       preview,
+      executeSync,
       listCatalog,
       readCatalog,
       read,
@@ -128,6 +130,7 @@ describe('Time Machine D5 owner routes', () => {
   beforeEach(() => {
     resolveContext.mockReset()
     preview.mockReset()
+    executeSync.mockReset()
     listCatalog.mockReset()
     readCatalog.mockReset()
     read.mockReset()
@@ -135,6 +138,14 @@ describe('Time Machine D5 owner routes', () => {
     cancel.mockReset()
     resolveContext.mockResolvedValue({ ok: true, context })
     preview.mockResolvedValue(previewResult())
+    executeSync.mockResolvedValue({
+      ok: true,
+      mode: 'revert',
+      anchorSeq: '9007199254740993',
+      checkpointId: 'checkpoint-owner-route',
+      applied: { reverts: 1, resurrects: 0, deletes: 0 },
+      keptCreatedAfterAnchor: 2,
+    })
     listCatalog.mockResolvedValue({ entries: [catalogEntry()], nextCursor: 'opaque-cursor' })
     readCatalog.mockResolvedValue(catalogEntry())
     read.mockResolvedValue(snapshot())
@@ -223,6 +234,99 @@ describe('Time Machine D5 owner routes', () => {
       },
     })
     expect(`${hidden.text}${invalid.text}`).not.toContain(SHEET_ID)
+  })
+
+  it('rejects caller mode, generation, and plan authority on synchronous execute', async () => {
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/execute`)
+      .send({
+        previewIdentity: 'signed-preview',
+        scope: { kind: 'whole_sheet' },
+        mode: 'reset',
+        generationId: '33333333-3333-4333-8333-333333333333',
+        plan: {},
+      })
+
+    expect(result.status).toBe(400)
+    expect(result.body).toEqual({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Request shape is invalid.' },
+    })
+    expect(resolveContext).not.toHaveBeenCalled()
+    expect(executeSync).not.toHaveBeenCalled()
+  })
+
+  it('executes only the signed identity plus closed scope and returns counts without plan data', async () => {
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/execute`)
+      .send({
+        previewIdentity: 'signed-preview',
+        scope: { kind: 'selected_records', recordIds: ['record-visible'] },
+      })
+
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({
+      ok: true,
+      data: {
+        mode: 'revert',
+        anchorSeq: '9007199254740993',
+        checkpointId: 'checkpoint-owner-route',
+        revertedCount: 1,
+        resurrectedCount: 0,
+        deletedCount: 0,
+        keptCreatedAfterAnchor: 2,
+      },
+    })
+    expect(executeSync).toHaveBeenCalledWith(context, {
+      previewIdentity: 'signed-preview',
+      scope: { kind: 'selected_records', recordIds: ['record-visible'] },
+    })
+    for (const forbidden of ['plan', 'rootHash', 'keyId', 'targetData']) {
+      expect(result.text).not.toContain(forbidden)
+    }
+  })
+
+  it('maps synchronous L8 refusals without echoing the signed identity or scope values', async () => {
+    executeSync.mockResolvedValueOnce({ ok: false, reason: 'identity-invalid' })
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/execute`)
+      .send({
+        previewIdentity: 'signed-preview-sentinel',
+        scope: { kind: 'selected_records', recordIds: ['record-sentinel'] },
+      })
+
+    expect(result.status).toBe(409)
+    expect(result.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PREVIEW_IDENTITY_INVALID',
+        message: 'Recovery preview identity rejected; the sheet changed since preview — re-preview.',
+      },
+    })
+    expect(result.text).not.toContain('signed-preview-sentinel')
+    expect(result.text).not.toContain('record-sentinel')
+  })
+
+  it('maps synchronous archive substrate failures to a fixed unavailable response', async () => {
+    executeSync.mockRejectedValueOnce(
+      new RecoveryArchivePreviewError('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID'),
+    )
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/execute`)
+      .send({
+        previewIdentity: 'signed-preview-sentinel',
+        scope: { kind: 'whole_sheet' },
+      })
+
+    expect(result.status).toBe(503)
+    expect(result.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID',
+        message: 'Archive recovery catalog is unavailable.',
+      },
+    })
+    expect(result.text).not.toContain('signed-preview-sentinel')
   })
 
   it('rejects additive catalog query keys before resolving authority', async () => {
