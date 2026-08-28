@@ -1050,6 +1050,23 @@ const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
   'totalCount',
 ] as const
 
+function isRecoveryArchiveJobUuid(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+}
+
+function isRecoveryArchiveJobDecimal(value: unknown): value is string {
+  return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
+}
+
+function isRecoveryArchiveJobPositiveDecimal(value: unknown): value is string {
+  return isRecoveryArchiveJobDecimal(value) && value !== '0'
+}
+
+function isRecoveryArchiveJobTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
 function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJobSnapshot {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const keys = Object.keys(value).sort()
@@ -1060,13 +1077,23 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
     return false
   }
   const snapshot = value as Record<string, unknown>
-  return typeof snapshot.jobId === 'string'
-    && RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
-    && typeof snapshot.totalCount === 'string'
-    && typeof snapshot.completedCount === 'string'
-    && typeof snapshot.resumeDeadline === 'string'
-    && (snapshot.terminalAt === null || typeof snapshot.terminalAt === 'string')
-    && typeof snapshot.rowVersion === 'string'
+  if (
+    !isRecoveryArchiveJobUuid(snapshot.jobId)
+    || !RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
+    || !isRecoveryArchiveJobPositiveDecimal(snapshot.totalCount)
+    || !isRecoveryArchiveJobDecimal(snapshot.completedCount)
+    || !isRecoveryArchiveJobTimestamp(snapshot.resumeDeadline)
+    || (snapshot.terminalAt !== null && !isRecoveryArchiveJobTimestamp(snapshot.terminalAt))
+    || !isRecoveryArchiveJobPositiveDecimal(snapshot.rowVersion)
+  ) {
+    return false
+  }
+  const state = snapshot.state as RecoveryArchiveJobState
+  const isTerminal = state === 'done' || state === 'abandoned_partial' || state === 'cancelled_zero_write'
+  return (isTerminal ? snapshot.terminalAt !== null : snapshot.terminalAt === null)
+    && BigInt(snapshot.completedCount) <= BigInt(snapshot.totalCount)
+    && (state !== 'done' || snapshot.completedCount === snapshot.totalCount)
+    && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
 }
 
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.

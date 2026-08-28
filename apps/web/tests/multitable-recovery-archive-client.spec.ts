@@ -6,6 +6,11 @@ function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
+const plannedJob = {
+  jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
+  resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
+} as const
+
 describe('MultitableApiClient recovery archive routes', () => {
   it('uses the sheet-scoped catalog, whole-sheet preview, and identity-only execute contracts', async () => {
     const fetchFn = vi.fn()
@@ -48,10 +53,7 @@ describe('MultitableApiClient recovery archive routes', () => {
   })
 
   it('accepts, reads, resumes, and cancels an async job without sending plan or worker fields', async () => {
-    const planned = {
-      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
-      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
-    } as const
+    const planned = plannedJob
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(response({ ok: true, data: planned }, 202))
       .mockResolvedValueOnce(response({ ok: true, data: { ...planned, state: 'applying', completedCount: '2500', rowVersion: '2' } }))
@@ -82,21 +84,34 @@ describe('MultitableApiClient recovery archive routes', () => {
   })
 
   it('encodes a bounded job-list cursor as a sheet-scoped GET query', async () => {
-    const planned = {
-      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
-      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
-    } as const
     const fetchFn = vi.fn().mockResolvedValue(response({ ok: true, data: {
-      entries: [planned], nextCursor: null,
+      entries: [plannedJob], nextCursor: 'opaque-cursor',
     } }))
     const client = new MultitableApiClient({ fetchFn })
 
     await expect(client.listRecoveryArchiveJobs('sheet/a', {
       cursor: 'opaque /?', limit: 1,
-    })).resolves.toEqual({ entries: [planned], nextCursor: null })
+    })).resolves.toEqual({ entries: [plannedJob], nextCursor: 'opaque-cursor' })
     expect(fetchFn).toHaveBeenCalledWith(
       '/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs?cursor=opaque%20%2F%3F&limit=1',
     )
+  })
+
+  it('accepts every closed job state with its valid terminal shape', async () => {
+    const terminalAt = '2026-08-29T01:00:00.000Z'
+    const entries = [
+      plannedJob,
+      { ...plannedJob, state: 'applying', completedCount: '2500', rowVersion: '2' },
+      { ...plannedJob, state: 'paused_retryable', completedCount: '2500', rowVersion: '3' },
+      { ...plannedJob, state: 'done', completedCount: '6001', terminalAt, rowVersion: '4' },
+      { ...plannedJob, state: 'abandoned_partial', completedCount: '2500', terminalAt, rowVersion: '5' },
+      { ...plannedJob, state: 'cancelled_zero_write', terminalAt, rowVersion: '6' },
+    ]
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data: { entries, nextCursor: null } })),
+    })
+
+    await expect(client.listRecoveryArchiveJobs('sheet/a')).resolves.toEqual({ entries, nextCursor: null })
   })
 
   it.each([
@@ -104,14 +119,21 @@ describe('MultitableApiClient recovery archive routes', () => {
     { entries: {}, nextCursor: null },
     { entries: [] },
     { entries: [null], nextCursor: null },
-    { entries: [{ jobId: '55555555-5555-4555-8555-555555555555' }], nextCursor: null },
+    { entries: [{ jobId: plannedJob.jobId }], nextCursor: null },
+    { entries: [{ ...plannedJob, state: 'unknown' }], nextCursor: null },
+    { entries: [{ ...plannedJob, workerFence: 'internal' }], nextCursor: null },
+    { entries: [{ ...plannedJob, jobId: 'not-a-uuid' }], nextCursor: null },
+    { entries: [{ ...plannedJob, totalCount: 'NaN' }], nextCursor: null },
+    { entries: [{ ...plannedJob, completedCount: '-1' }], nextCursor: null },
+    { entries: [{ ...plannedJob, completedCount: '6002' }], nextCursor: null },
+    { entries: [{ ...plannedJob, resumeDeadline: 'invalid' }], nextCursor: null },
+    { entries: [{ ...plannedJob, terminalAt: 'invalid' }], nextCursor: null },
+    { entries: [{ ...plannedJob, terminalAt: '2026-08-29T01:00:00.000Z' }], nextCursor: null },
+    { entries: [{ ...plannedJob, rowVersion: '0' }], nextCursor: null },
+    { entries: [{ ...plannedJob, state: 'done', completedCount: '6001' }], nextCursor: null },
+    { entries: [{ ...plannedJob, state: 'done', terminalAt: '2026-08-29T01:00:00.000Z' }], nextCursor: null },
     { entries: [{
-      jobId: '55555555-5555-4555-8555-555555555555', state: 'unknown', totalCount: '6001', completedCount: '0',
-      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
-    }], nextCursor: null },
-    { entries: [{
-      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
-      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1', workerFence: 'internal',
+      ...plannedJob, state: 'cancelled_zero_write', completedCount: '1', terminalAt: '2026-08-29T01:00:00.000Z',
     }], nextCursor: null },
   ])('rejects a malformed successful job-list response instead of treating it as absence', async (data) => {
     const client = new MultitableApiClient({
