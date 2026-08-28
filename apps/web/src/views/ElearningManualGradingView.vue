@@ -216,10 +216,16 @@ function onGraded(): void {
   void loadQueue()
 }
 
-function onConflict(): void {
+async function onConflict(detailError: string | null): Promise<void> {
   selectedAttemptId.value = null
-  reconciliationNotice.value = elearningLabel('grading.conflictRefreshNotice', isZh.value)
-  void loadQueue(1, true)
+  reconciliationNotice.value = detailError
+    ? ''
+    : elearningLabel('grading.conflictRefreshNotice', isZh.value)
+  await loadQueue(1, detailError === null)
+  if (detailError && !errorMessage.value) {
+    reconciliationNotice.value = ''
+    errorMessage.value = detailError
+  }
 }
 
 onMounted(() => {

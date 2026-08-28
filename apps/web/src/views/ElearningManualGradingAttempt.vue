@@ -168,7 +168,11 @@ import {
 } from './elearningLabels'
 
 const props = defineProps<{ attemptId: string }>()
-const emit = defineEmits<{ back: []; graded: []; conflict: [] }>()
+const emit = defineEmits<{
+  back: []
+  graded: []
+  conflict: [detailError: string | null]
+}>()
 
 const { isZh } = useLocale()
 
@@ -360,8 +364,8 @@ async function submitQuestion(question: ElearningManualGradingQuestionDetail): P
       // authoritative pending-work surface; if either read is unavailable, the
       // final visible state is an explicit error rather than stale success.
       draft.pendingIntent = null
-      await loadDetail()
-      emit('conflict')
+      const detailOutcome = await loadDetail()
+      emit('conflict', detailOutcome === 'failed' ? errorMessage.value : null)
       return
     }
     draft.error = elearningManualGradingErrorMessage(
