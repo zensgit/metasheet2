@@ -196,6 +196,28 @@ describe('elearning watch challenge schedule', () => {
     }
   })
 
+  it('rejects forged or partial schedule snapshots before resolving a due challenge', () => {
+    const schedule = createElearningWatchChallengeSchedule(policy())
+    const dueInput = { issuedCount: 0, trustedMs: 120_000 }
+    for (const forgedSchedule of [
+      { ...schedule, extra: SENTINEL },
+      { ...schedule, mode: 'unknown' },
+      { ...schedule, responseWindowMs: 120_001 },
+      { ...schedule, checkpoints: [{ ordinal: 1 }] },
+      { ...schedule, checkpoints: [{ ordinal: 2, targetTrustedMs: 1 }] },
+      { ...schedule, checkpoints: [
+        { ordinal: 1, targetTrustedMs: 2 },
+        { ordinal: 2, targetTrustedMs: 2 },
+      ] },
+      { ...schedule, checkpoints: [
+        { ordinal: 1, targetTrustedMs: schedule.videoDurationMs },
+      ] },
+      { ...schedule, mode: 'disabled' },
+    ]) {
+      expectCode(() => resolveElearningWatchChallengeDue(forgedSchedule, dueInput), 'invalid_input')
+    }
+  })
+
   it('fails closed on hostile input accessors', () => {
     const throwing = Object.defineProperty(policy(), 'policyRevision', {
       enumerable: true,

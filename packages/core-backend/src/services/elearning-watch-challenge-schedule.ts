@@ -20,6 +20,14 @@ const SCHEDULE_INPUT_KEYS = [
 ] as const
 
 const DUE_INPUT_KEYS = ['issuedCount', 'trustedMs'] as const
+const SCHEDULE_KEYS = [
+  'checkpoints',
+  'mode',
+  'policyRevision',
+  'responseWindowMs',
+  'videoDurationMs',
+] as const
+const CHECKPOINT_KEYS = ['ordinal', 'targetTrustedMs'] as const
 
 export type ElearningWatchChallengeScheduleMode =
   | 'disabled'
@@ -131,6 +139,53 @@ function requireEntropy(input: unknown, expectedLength: number): readonly number
   return Object.freeze(entropy)
 }
 
+function readSchedule(input: unknown): ElearningWatchChallengeSchedule {
+  try {
+    const values = readExactObject(input, SCHEDULE_KEYS)
+    const mode = values.mode
+    if (mode !== 'disabled' && mode !== 'scheduled' && mode !== 'short_video_exempt') {
+      fail('invalid_input')
+    }
+    const policyRevision = requirePolicyText(values.policyRevision)
+    const responseWindowMs = requireSafeInteger(values.responseWindowMs, 1)
+    const videoDurationMs = requireSafeInteger(values.videoDurationMs, 1)
+    if (responseWindowMs > MAX_RESPONSE_WINDOW_MS || !Array.isArray(values.checkpoints)) {
+      fail('invalid_input')
+    }
+
+    const checkpoints: ElearningWatchChallengeCheckpoint[] = []
+    let previousTargetTrustedMs = 0
+    for (const [index, checkpoint] of values.checkpoints.entries()) {
+      const checkpointValues = readExactObject(checkpoint, CHECKPOINT_KEYS)
+      const ordinal = requireSafeInteger(checkpointValues.ordinal, 1)
+      const targetTrustedMs = requireSafeInteger(checkpointValues.targetTrustedMs, 1)
+      if (
+        ordinal !== index + 1
+        || targetTrustedMs >= videoDurationMs
+        || targetTrustedMs <= previousTargetTrustedMs
+      ) fail('invalid_input')
+      checkpoints.push(Object.freeze({ ordinal, targetTrustedMs }))
+      previousTargetTrustedMs = targetTrustedMs
+    }
+
+    if (
+      checkpoints.length > MAX_CHALLENGES
+      || (mode === 'scheduled' ? checkpoints.length === 0 : checkpoints.length !== 0)
+    ) fail('invalid_input')
+
+    return Object.freeze({
+      checkpoints: Object.freeze(checkpoints),
+      mode,
+      policyRevision,
+      responseWindowMs,
+      videoDurationMs,
+    }) as ElearningWatchChallengeSchedule
+  } catch (error) {
+    if (error instanceof ElearningWatchChallengeScheduleError) throw error
+    fail('invalid_input')
+  }
+}
+
 function stratifiedCheckpoint(
   videoDurationMs: number,
   challengeCount: number,
@@ -206,9 +261,10 @@ export function createElearningWatchChallengeSchedule(
  * decoder; arbitrary stored JSON is not trusted state.
  */
 export function resolveElearningWatchChallengeDue(
-  schedule: ElearningWatchChallengeSchedule,
+  scheduleInput: unknown,
   input: unknown,
 ): ElearningWatchChallengeDue | null {
+  const schedule = readSchedule(scheduleInput)
   const values = readExactObject(input, DUE_INPUT_KEYS)
   const issuedCount = requireSafeInteger(values.issuedCount, 0)
   const trustedMs = requireSafeInteger(values.trustedMs, 0)
