@@ -37,6 +37,9 @@ function authority(
     courseVersionId: VERSION_ID,
     courseVersionItemId: ITEM_ID,
     documentMediaId: MEDIA_ID,
+    documentMediaKind: 'document',
+    documentMediaStatus: 'ready',
+    documentPageCountAuthority: 'server_probe',
     policyVersion: ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION,
     serverPageCount: 4,
     sessionId: SESSION_ID,
@@ -426,6 +429,22 @@ describe('elearning document page-view runtime', () => {
       'unavailable',
     )
     expect(corrupt.claims).toEqual([])
+
+    for (const override of [
+      { documentMediaKind: 'video' },
+      { documentMediaStatus: 'probing' },
+      { documentPageCountAuthority: 'client' },
+    ]) {
+      const untrusted = new FakeDocumentStore()
+      untrusted.authority = authority(
+        override as Partial<ElearningDocumentAuthority>,
+      )
+      await expectCode(
+        () => recordElearningDocumentPageView(untrusted, input()),
+        'unavailable',
+      )
+      expect(untrusted.claims).toEqual([])
+    }
 
     const dualBasis = new FakeDocumentStore()
     dualBasis.authority = authority({

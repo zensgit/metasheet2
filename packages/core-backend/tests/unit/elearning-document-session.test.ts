@@ -72,6 +72,9 @@ function authority(
     courseVersionId: VERSION_ID,
     courseVersionItemId: ITEM_ID,
     documentMediaId: MEDIA_ID,
+    documentMediaKind: 'document',
+    documentMediaStatus: 'ready',
+    documentPageCountAuthority: 'server_probe',
     policyVersion: ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION,
     serverPageCount: 4,
     thresholdBps: 7_500,
@@ -327,6 +330,22 @@ describe('elearning document session runtime', () => {
       'unavailable',
     )
     expect(corruptPolicy.creates).toEqual([])
+
+    for (const override of [
+      { documentMediaKind: 'video' },
+      { documentMediaStatus: 'probing' },
+      { documentPageCountAuthority: 'client' },
+    ]) {
+      const untrusted = new FakeDocumentSessionStore()
+      untrusted.authority = authority(
+        override as Partial<ElearningDocumentSessionAuthority>,
+      )
+      await expectCode(
+        () => startElearningDocumentSession(untrusted, input()),
+        'unavailable',
+      )
+      expect(untrusted.creates).toEqual([])
+    }
   })
 
   it('rejects contradictory completed and active server state', async () => {

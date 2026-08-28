@@ -6,6 +6,7 @@ import {
   type ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION,
   evaluateElearningDocumentCompletion,
 } from './elearning-document-completion-policy'
+import { normalizeElearningDocumentMediaAuthority } from './elearning-document-media-authority'
 import {
   createElearningDocumentProgressSnapshotFromEvaluation,
   type ElearningDocumentAccessBasis,
@@ -57,6 +58,9 @@ export interface ElearningDocumentSessionAuthority {
   readonly courseVersionId: string
   readonly courseVersionItemId: string
   readonly documentMediaId: string
+  readonly documentMediaKind: 'document'
+  readonly documentMediaStatus: 'ready'
+  readonly documentPageCountAuthority: 'server_probe'
   readonly policyVersion: typeof ELEARNING_DOCUMENT_COMPLETION_POLICY_VERSION
   readonly serverPageCount: number
   readonly thresholdBps: number
@@ -192,11 +196,18 @@ function normalizeAuthority(
   if (requireStoreUuid(authority.courseVersionItemId) !== input.courseVersionItemId) {
     fail('unavailable')
   }
+  const media = normalizeElearningDocumentMediaAuthority({
+    documentMediaId: authority.documentMediaId,
+    documentMediaKind: authority.documentMediaKind,
+    documentMediaStatus: authority.documentMediaStatus,
+    documentPageCountAuthority: authority.documentPageCountAuthority,
+    serverPageCount: authority.serverPageCount,
+  })
   const policy = createElearningDocumentCompletionPolicy({
     courseVersionItemId: input.courseVersionItemId,
-    documentMediaId: requireStoreUuid(authority.documentMediaId),
+    documentMediaId: media.documentMediaId,
     policyVersion: authority.policyVersion,
-    serverPageCount: authority.serverPageCount,
+    serverPageCount: media.serverPageCount,
     thresholdBps: authority.thresholdBps,
   })
   const completion = authority.completion === null
