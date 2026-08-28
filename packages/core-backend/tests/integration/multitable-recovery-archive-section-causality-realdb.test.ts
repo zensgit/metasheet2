@@ -9,11 +9,15 @@ import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import { OperationLedger, sealOperation } from '../../src/multitable/operation-ledger'
 import {
+  allocateRecoveryArchiveSnapshotIdentities,
   consumeRecoveryArchiveBootstrapReservations,
+  persistRecoveryArchiveSnapshotReservations,
   RecoveryArchiveSectionBootstrapError,
   reserveRecoveryArchiveSnapshotIdentities,
   type RecoveryArchiveBootstrapOwnerInput,
+  type RecoveryArchiveSnapshotReservationPlan,
 } from '../../src/multitable/recovery-archive-section-bootstrap'
+import { computeRecoveryArchiveSourceVectorHash } from '../../src/multitable/recovery-archive-source-vector'
 import {
   bootstrapSectionEntityKey,
   RecoveryArchiveSealError,
@@ -318,6 +322,7 @@ async function withRolledBackTxn(fn: (client: PoolClient) => Promise<void>): Pro
 async function seedBuildingGeneration(
   client: PoolClient,
   reuseActiveCheckpoint = false,
+  sourceVectorHash = DI0_SOURCE_VECTOR_HASH,
 ): Promise<RecoveryArchiveBootstrapOwnerInput> {
   const generationId = randomUUID()
   const anchorOperationId = randomUUID()
@@ -353,7 +358,7 @@ async function seedBuildingGeneration(
   const input: RecoveryArchiveBootstrapOwnerInput = {
     generationId,
     sheetId: SHEET,
-    sourceVectorHash: DI0_SOURCE_VECTOR_HASH,
+    sourceVectorHash,
     ownerKind: 'archive_builder',
     ownerId: `${PREFIX}_di0_owner`,
     ownerFence: '17',
@@ -384,6 +389,50 @@ async function seedBuildingGeneration(
     ],
   )
   return input
+}
+
+async function claimBootstrapReservations(
+  client: PoolClient,
+  reuseActiveCheckpoint = false,
+): Promise<{
+  input: RecoveryArchiveBootstrapOwnerInput
+  plan: RecoveryArchiveSnapshotReservationPlan
+}> {
+  const allocated = await allocateRecoveryArchiveSnapshotIdentities(asQuery(client))
+  const vector = computeRecoveryArchiveSourceVectorHash(
+    allocated.sections.map((section) => ({
+      sourceHeadKind: 'section_bootstrap',
+      sectionKind: section.sectionKind,
+      operationId: section.operationId,
+      headSeq: section.endpointSeq,
+    })),
+  )
+  const input = await seedBuildingGeneration(client, reuseActiveCheckpoint, vector.hash)
+  const plan = await persistRecoveryArchiveSnapshotReservations(
+    asQuery(client),
+    {
+      ...input,
+      ...allocated,
+    },
+    allocated,
+  )
+  const stored = await client.query(
+    `SELECT source_vector_hash FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
+    [input.generationId],
+  )
+  expect(stored.rows[0]?.source_vector_hash).toBe(vector.hash)
+  expect(plan.sourceVectorHash).toBe(vector.hash)
+  expect(
+    computeRecoveryArchiveSourceVectorHash(
+      plan.sections.map((section) => ({
+        sourceHeadKind: 'section_bootstrap',
+        sectionKind: section.sectionKind,
+        operationId: section.operationId,
+        headSeq: section.endpointSeq,
+      })),
+    ).hash,
+  ).toBe(stored.rows[0]?.source_vector_hash)
+  return { input, plan }
 }
 
 function di0Contents() {
@@ -479,11 +528,12 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
 
   test('D-I0 reserves one immutable exact section set and a strictly greater parent idempotently', async () => {
     await withRolledBackTxn(async (client) => {
-      const input = await seedBuildingGeneration(client)
-      const first = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
-      const second = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const { input, plan: first } = await claimBootstrapReservations(client)
+      const second = await persistRecoveryArchiveSnapshotReservations(asQuery(client), first)
+      const viaReserve = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
 
       expect(second).toEqual(first)
+      expect(viaReserve).toEqual(first)
       expect(first.sections.map((section) => section.sectionKind)).toEqual(SECTION_CAUSALITY_DATA_SECTION_KINDS)
       expect(new Set(first.sections.map((section) => section.operationId)).size).toBe(9)
       expect(BigInt(first.snapshotSeq)).toBeGreaterThan(
@@ -522,8 +572,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
   test('D-I0 permits an empty no-op truncate but refuses to erase reserved identities', async () => {
     await withRolledBackTxn(async (client) => {
       await client.query('TRUNCATE TABLE meta_recovery_archive_snapshot_reservations')
-      const input = await seedBuildingGeneration(client)
-      await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const { input } = await claimBootstrapReservations(client)
       await client.query('SET CONSTRAINTS trg_mrasr_guard_set IMMEDIATE')
 
       const immutable = await errorOf(
@@ -609,8 +658,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
 
   test('D-I0 consume rolls back partial work, retries deterministically, and seals parent last', async () => {
     await withRolledBackTxn(async (client) => {
-      const input = await seedBuildingGeneration(client)
-      const plan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const { input, plan } = await claimBootstrapReservations(client)
       const contents = di0Contents()
       await client.query('SAVEPOINT failed_finalize')
       let sealedBootstrapCount = 0
@@ -707,10 +755,8 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
 
   test('D-I0 permits only one successful bootstrap generation per sheet', async () => {
     await withRolledBackTxn(async (client) => {
-      const firstInput = await seedBuildingGeneration(client)
-      const secondInput = await seedBuildingGeneration(client, true)
-      const firstPlan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), firstInput)
-      const secondPlan = await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), secondInput)
+      const { input: firstInput, plan: firstPlan } = await claimBootstrapReservations(client)
+      const { input: secondInput, plan: secondPlan } = await claimBootstrapReservations(client, true)
 
       await consumeRecoveryArchiveBootstrapReservations(asQuery(client), {
         ...firstInput,
@@ -772,8 +818,7 @@ describeIfRealDbStep('Phase D2c section-causality substrate (real DB)', () => {
 
   test('D-I0 keeps reservations unusable after the owning generation is abandoned', async () => {
     await withRolledBackTxn(async (client) => {
-      const input = await seedBuildingGeneration(client)
-      await reserveRecoveryArchiveSnapshotIdentities(asQuery(client), input)
+      const { input } = await claimBootstrapReservations(client)
       await client.query(
         `UPDATE meta_recovery_archives SET build_status='abandoned' WHERE generation_id=$1::uuid`,
         [input.generationId],
