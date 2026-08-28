@@ -110,12 +110,22 @@ import {
   type ExactAnchorBody,
 } from '../multitable/exact-anchor-recovery-route'
 import {
-  pruneExpiredRecoveryTokenBurns,
   resolveForeignSheetIdFromProperty,
   type ExactAnchorAppliedMutation,
   type ExactAnchorLinkInvalidation,
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
+import {
+  pruneEligibleRecoveryTokenBurns,
+  readRecoveryArchiveRestoreJobStatus,
+  resumeRecoveryArchiveRestoreJob,
+  type RecoveryArchiveRestoreJobQuery,
+  type RecoveryArchiveRestoreJobTransaction,
+} from '../multitable/recovery-archive-restore-jobs'
+import {
+  registerRecoveryArchiveRestoreOwnerRoutes,
+  type RecoveryArchiveRestoreOwnerContextResolution,
+} from './recovery-archive-restore-owner'
 import { isRetryableLiveLinkDatabaseConflict } from '../multitable/live-link-projection-integrity'
 import {
   recordConfigRevision,
@@ -10502,6 +10512,89 @@ export function univerMetaRouter(): Router {
       return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
     }
 
+  const resolveRecoveryArchiveRestoreOwnerContext = async (
+    req: Request,
+    sheetId: string,
+  ): Promise<RecoveryArchiveRestoreOwnerContextResolution> => {
+    const pool = poolManager.get()
+    const query = pool.query.bind(pool) as unknown as TrustCheckpointQueryFn
+    const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
+    if (!access.userId) return { ok: false, status: 401, code: 'UNAUTHENTICATED' }
+    if (!capabilities.canManageSheetAccess) return { ok: false, status: 403, code: 'FORBIDDEN' }
+
+    const scopeResult = await query(
+      `SELECT sheet_row.base_id, base_row.workspace_id
+         FROM public.meta_sheets sheet_row
+         LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+        WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+      [sheetId],
+    )
+    const scope = scopeResult.rows[0] as { base_id?: unknown; workspace_id?: unknown } | undefined
+    if (!scope) {
+      return access.isAdminRole
+        ? { ok: false, status: 404, code: 'NOT_FOUND' }
+        : { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    if (!(await hasFullTableReadAccess(req, query, sheetId, access, capabilities))) {
+      return { ok: false, status: 403, code: 'FORBIDDEN' }
+    }
+    const baseId = typeof scope.base_id === 'string' ? scope.base_id.trim() : ''
+    const workspaceId = typeof scope.workspace_id === 'string' ? scope.workspace_id.trim() : ''
+    if (!baseId || !workspaceId) {
+      return { ok: false, status: 503, code: 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE' }
+    }
+    const actorId = access.userId
+    return {
+      ok: true,
+      context: {
+        workspaceId,
+        baseId,
+        sheetId,
+        actorId,
+        recheckAuthority: async (freshQuery) => {
+          const fresh = await resolveRecoverySheetAuthority(req, freshQuery, sheetId)
+          if (
+            fresh.access.userId !== actorId ||
+            !fresh.capabilities.canManageSheetAccess
+          ) {
+            return false
+          }
+          const freshScope = await freshQuery(
+            `SELECT sheet_row.base_id, base_row.workspace_id
+               FROM public.meta_sheets sheet_row
+               LEFT JOIN public.meta_bases base_row ON base_row.id = sheet_row.base_id
+              WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL`,
+            [sheetId],
+          )
+          const freshRow = freshScope.rows[0] as {
+            base_id?: unknown
+            workspace_id?: unknown
+          } | undefined
+          if (
+            freshRow?.base_id !== baseId ||
+            freshRow?.workspace_id !== workspaceId
+          ) {
+            return false
+          }
+          return hasFullTableReadAccess(
+            req,
+            freshQuery,
+            sheetId,
+            fresh.access,
+            fresh.capabilities,
+          )
+        },
+      },
+    }
+  }
+
+  const recoveryArchiveRestoreTransaction: RecoveryArchiveRestoreJobTransaction = async (work) => {
+    const pool = poolManager.get()
+    return pool.transaction(async ({ query }) => (
+      work(query as unknown as RecoveryArchiveRestoreJobQuery)
+    ))
+  }
+
   const makeAuthorizationStabilizer = () =>
     async (
       query: TrustCheckpointQueryFn,
@@ -10690,10 +10783,12 @@ export function univerMetaRouter(): Router {
     }
   }
 
-  /** Best-effort burn retention sweep after a successful recovery — never fails the HTTP response. */
+  /** Best-effort provenance-aware retention sweep — ambiguous/legacy burns are never eligible. */
   const bestEffortPruneRecoveryBurns = async (pool: ReturnType<typeof poolManager.get>) => {
     try {
-      await pruneExpiredRecoveryTokenBurns(pool.query.bind(pool) as unknown as TrustCheckpointQueryFn)
+      await pruneEligibleRecoveryTokenBurns((work) => pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      )))
     } catch (err) {
       console.warn('[univer-meta] recovery token burn prune failed (non-fatal):', err)
     }
@@ -11156,6 +11251,29 @@ export function univerMetaRouter(): Router {
   router.post('/sheets/:sheetId/revert-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'revert'))
   router.post('/sheets/:sheetId/reset-preview', (req: Request, res: Response) => handleExactAnchorPreview(req, res, 'reset'))
   router.post('/sheets/:sheetId/reset-execute', (req: Request, res: Response) => handleExactAnchorExecute(req, res, 'reset'))
+
+  registerRecoveryArchiveRestoreOwnerRoutes(router, {
+    resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
+    service: {
+      read: (context, jobId) => readRecoveryArchiveRestoreJobStatus(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      resume: (context, jobId) => resumeRecoveryArchiveRestoreJob(
+        recoveryArchiveRestoreTransaction,
+        {
+          ...context,
+          jobId,
+        },
+      ),
+      // No production KMS/object-store runtime or owner-ratified replay horizon is configured yet.
+      // Omitting `accept` and `cancel` makes those endpoints return a fixed 503 after authorization;
+      // read/resume remain available without silently choosing either unresolved owner policy.
+    },
+  })
 
   router.get('/sheets/:sheetId/records/:recordId/subscriptions', async (req: Request, res: Response) => {
     const sheetId = typeof req.params.sheetId === 'string' ? req.params.sheetId.trim() : ''

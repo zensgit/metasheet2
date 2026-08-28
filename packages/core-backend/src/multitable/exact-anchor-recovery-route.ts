@@ -726,6 +726,12 @@ export function mapApplyRefusal(reason: ExactAnchorApplyRefusal): { status: numb
         message:
           'A target record is locked; exact-anchor recovery is all-or-nothing and nothing was written. Unlock and re-preview.',
       }
+    case 'scope-too-large':
+      return {
+        status: 413,
+        code: 'ARCHIVE_SYNC_SCOPE_TOO_LARGE',
+        message: 'This archive recovery exceeds the 5,000-record synchronous ceiling; use the asynchronous restore path.',
+      }
     case 'history-incomplete':
       return mapHistoryIncompleteRefusal()
     case 'recovery-trust-required':

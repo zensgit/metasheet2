@@ -399,6 +399,21 @@ export async function prepareArchiveWriterBlockTransaction(
   return token
 }
 
+/**
+ * Prepare an existing-owner cleanup transaction after an emergency flag-off.
+ *
+ * This deliberately omits the admission flag check. Callers may only use the returned transaction
+ * state to terminalize or release an already persisted owner tuple; new claims and heartbeats keep
+ * going through the flag-gated prepared-token APIs above.
+ */
+export async function prepareArchiveWriterBlockCleanupTransaction(
+  query: FenceQuery,
+  sheetIdInput: string,
+): Promise<void> {
+  const sheetId = requireOpaque(sheetIdInput)
+  await prepareTransaction(query, sheetId)
+}
+
 async function casArchiveWriterBlockClaim(
   query: FenceQuery,
   sheetId: string,
