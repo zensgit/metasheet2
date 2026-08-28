@@ -306,6 +306,66 @@ describe('auth login routes', () => {
     })
   })
 
+  function stubAllElearningCapabilitiesOn() {
+    vi.stubEnv('ELEARNING_CONTENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSIGNMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ASSESSMENT_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_INCENTIVE_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_ANALYTICS_ENABLED', 'true')
+    vi.stubEnv('ELEARNING_MEDIA_ENABLED', 'true')
+  }
+
+  async function loginAdminForElearningPayload() {
+    authServiceMocks.login.mockResolvedValue({
+      user: {
+        id: 'user-1',
+        email: 'admin@example.com',
+        name: 'Admin',
+        role: 'admin',
+        permissions: ['attendance:admin', 'elearning:admin'],
+        created_at: new Date('2026-03-13T00:00:00.000Z'),
+        updated_at: new Date('2026-03-13T00:00:00.000Z'),
+      },
+      token: 'jwt-login-token',
+    })
+    return invokeRoute('post', '/login', {
+      body: {
+        email: 'admin@example.com',
+        password: 'WelcomePass9A',
+      },
+    })
+  }
+
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+    ['TRUE', 'TRUE'],
+    ['1', '1'],
+    ['yes', 'yes'],
+    ['true-with-trailing-space', 'true '],
+    ['true-with-leading-space', ' true'],
+  ] as const)(
+    'admin + all capability flags on + master %s keeps elearning false',
+    async (_label, master) => {
+      stubAllElearningCapabilitiesOn()
+      if (master !== undefined) vi.stubEnv('ELEARNING_ENABLED', master)
+      else delete process.env.ELEARNING_ENABLED
+      const response = await loginAdminForElearningPayload()
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.features.elearning).toBe(false)
+      expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
+    },
+  )
+
+  it('admin + all capability flags on + exact master true yields elearning true', async () => {
+    stubAllElearningCapabilitiesOn()
+    vi.stubEnv('ELEARNING_ENABLED', 'true')
+    const response = await loginAdminForElearningPayload()
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).data.features.elearning).toBe(true)
+    expect((response.body as Record<string, any>).data.features.attendanceAdmin).toBe(true)
+  })
+
   it('accepts a generic identifier payload for login', async () => {
     authServiceMocks.login.mockResolvedValue({
       user: {

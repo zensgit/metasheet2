@@ -200,6 +200,12 @@ jobs:
       - name: W0 exact-anchor L6/L7 CI wiring contract
         run: node --test scripts/ops/multitable-exact-anchor-ci-wiring.test.mjs
 
+      # Time Machine D2a CI two-point wiring contract: the archive-catalog proof must remain
+      # excluded from no-DB collection and named exactly once by the multitable real-DB step.
+      # This pre-install half is dependency-free; the real Vitest sentinel runs after install.
+      - name: Time Machine D2a archive-catalog CI wiring contract
+        run: node --test scripts/ops/multitable-d2-archive-ci-wiring.test.mjs
+
       # Production maintenance can prune Docker data on the deploy host. Keep its SSH host-identity
       # contract in the required Node 20 context so host-key pinning cannot regress behind a green PR.
       - name: Production maintenance SSH host-identity contract (required lane)
@@ -385,6 +391,71 @@ jobs:
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
         run: node --test scripts/ops/b5a-routing-policy-ci-wiring.test.mjs
+
+      # E-learning V0.1 L0-F3A: content/assessment schema gate two-point wiring (no DB).
+      # The real-Postgres suite must stay excluded from the no-DB job AND named as a
+      # whole-file arg of the 20.x step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning V0.1 content/assessment CI wiring contract
+        run: node --test scripts/ops/elearning-v01-content-assessment-ci-wiring.test.mjs
+
+      # E-learning L0 jobs claim-lease CI two-point wiring (no DB): the real-Postgres
+      # suite must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L0 jobs CI wiring contract
+        run: node --test scripts/ops/elearning-jobs-ci-wiring.test.mjs
+
+      # E-learning L2 batch assignment CI two-point wiring: focused units stay
+      # in the no-DB canary and both real-Postgres suites run post-migrate.
+      - name: E-learning L2 batch assignment CI wiring contract
+        run: node --test scripts/ops/elearning-batch-assignment-ci-wiring.test.mjs
+
+      # E-learning L2 B1 assignment lifecycle CI two-point wiring: focused
+      # units stay in the no-DB canary and the real-Postgres suite runs
+      # post-migrate.
+      - name: E-learning L2 assignment lifecycle CI wiring contract
+        run: node --test scripts/ops/elearning-assignment-lifecycle-ci-wiring.test.mjs
+
+      # E-learning L2 training-plan CI two-point wiring: focused units stay in
+      # the no-DB canary and the real-Postgres suite runs post-migrate.
+      - name: E-learning L2 training-plan CI wiring contract
+        run: node --test scripts/ops/elearning-training-plan-ci-wiring.test.mjs
+
+      # E-learning L2 atomic plan-assignment CI two-point wiring: focused units
+      # stay in the no-DB canary; the PostgreSQL suite runs after migrations.
+      - name: E-learning L2 plan-assignment CI wiring contract
+        run: node --test scripts/ops/elearning-training-plan-assignment-ci-wiring.test.mjs
+
+      # E-learning L2 delegated administration CI wiring: focused ACL/scope
+      # units stay in the no-DB canary; the PostgreSQL suite runs post-migrate.
+      - name: E-learning L2 admin-scope ACL CI wiring contract
+        run: node --test scripts/ops/elearning-admin-access-ci-wiring.test.mjs
+
+      # E-learning L2 durable notification-intent CI wiring: the internal unit
+      # stays in the no-DB canary and the ledger/FK/concurrency suite runs only
+      # after migrations on real PostgreSQL. This slice sends no notification.
+      - name: E-learning L2 notification-delivery CI wiring contract
+        run: node --test scripts/ops/elearning-notification-delivery-ci-wiring.test.mjs
+
+      # E-learning L2 notification claim-lease worker CI wiring (no DB): the
+      # plugin kernel stays in the package chain and the real-Postgres suite
+      # must stay excluded from the no-DB job AND named as a whole-file arg of
+      # the 20.x schema/service step that runs after db:migrate with DATABASE_URL.
+      - name: E-learning L2 notification-worker CI wiring contract
+        run: node --test scripts/ops/elearning-notification-worker-ci-wiring.test.mjs
+
+      # E-learning V0.1: every unit file must stay in the no-DB vitest job (not
+      # excluded) and named as a whole-file arg of the unit canary; real-DB
+      # suites stay in the post-migrate 20.x steps; frontend specs stay in
+      # elearning-web-guard.yml and run-required-web-tests.sh.
+      - name: E-learning V0.1 media CI wiring contract
+        run: node --test scripts/ops/elearning-media-ci-wiring.test.mjs
+
+      # E-learning V0.1 auth/tenant/RBAC gate wiring (no DB): dedicated config +
+      # setup + whole-file real JWT suite must stay pinned on the 20.x post-migrate
+      # step. Dropping the contract, swapping to a name filter, or folding the
+      # suite into vitest.integration.config.ts silently disables the proof.
+      - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
+        run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
 
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
@@ -586,6 +657,15 @@ jobs:
         with:
           name: install-log-${{ matrix.node-version }}
           path: install.log
+
+      - name: Time Machine D2 archive real-DB fail-not-skip behavior
+        run: node --test scripts/ops/multitable-d2-archive-fail-not-skip.test.mjs
+
+      # E-learning V0.1 L0-F2: whole-package plugin test (scripts.test && chain).
+      # Do not replace with a name filter, continue-on-error, or skip.
+      - name: Run plugin-elearning package tests
+        run: |
+          pnpm --filter plugin-elearning test
 
       - name: Run attendance calculation-group W1 contract
         run: |
@@ -800,6 +880,68 @@ jobs:
             tests/unit/approval-attachment-reconciler.test.ts \
             --reporter=dot
 
+      - name: Run elearning V0.1 unit canaries
+        id: elearning-v01-unit-canaries
+        # V0.1-L3 units: flags/plugin runtime, content/watch/assignment/exam/publish,
+        # assessment authoring/manual-grading schema, media ingest/playback,
+        # pilot routes/runtime, migration contracts.
+        # Whole-file args so a name filter matching zero tests cannot skip-green.
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/elearning-assignment-lifecycle-routes.test.ts \
+            tests/unit/elearning-assignment-lifecycle.test.ts \
+            tests/unit/elearning-assignment-reminder.test.ts \
+            tests/unit/elearning-admin-access-routes.test.ts \
+            tests/unit/elearning-admin-access.test.ts \
+            tests/unit/elearning-admin-operations.test.ts \
+            tests/unit/elearning-assessment-admin-routes.test.ts \
+            tests/unit/elearning-assessment-import.test.ts \
+            tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-reminder-port-scoping.test.ts \
+            tests/unit/elearning-batch-assignment-routes.test.ts \
+            tests/unit/elearning-batch-assignment-runtime.test.ts \
+            tests/unit/elearning-batch-assignment.test.ts \
+            tests/unit/elearning-course-publish.test.ts \
+            tests/unit/elearning-credit-ledger.test.ts \
+            tests/unit/elearning-credit-policy.test.ts \
+            tests/unit/elearning-credit-postgres.test.ts \
+            tests/unit/elearning-direct-assignment.test.ts \
+            tests/unit/elearning-exam-review.test.ts \
+            tests/unit/elearning-exam.test.ts \
+            tests/unit/elearning-flags.test.ts \
+            tests/unit/elearning-learner-courses.test.ts \
+            tests/unit/elearning-manual-grading-migration-contract.test.ts \
+            tests/unit/elearning-manual-grading-read-routes.test.ts \
+            tests/unit/elearning-manual-grading-read.test.ts \
+            tests/unit/elearning-manual-grading-routes.test.ts \
+            tests/unit/elearning-manual-grading.test.ts \
+            tests/unit/elearning-media-ingest.test.ts \
+            tests/unit/elearning-media-playback-routes.test.ts \
+            tests/unit/elearning-media-playback-runtime.test.ts \
+            tests/unit/elearning-media-playback.test.ts \
+            tests/unit/elearning-media-probe.test.ts \
+            tests/unit/elearning-media-quota.test.ts \
+            tests/unit/elearning-media-reconciler.test.ts \
+            tests/unit/elearning-media-routes.test.ts \
+            tests/unit/elearning-media-runtime.test.ts \
+            tests/unit/elearning-media-s3.test.ts \
+            tests/unit/elearning-media-storage.test.ts \
+            tests/unit/elearning-media-validation.test.ts \
+            tests/unit/elearning-pilot-routes.test.ts \
+            tests/unit/elearning-pilot-runtime.test.ts \
+            tests/unit/elearning-plugin-runtime.test.ts \
+            tests/unit/elearning-training-plan-routes.test.ts \
+            tests/unit/elearning-training-plan.test.ts \
+            tests/unit/elearning-training-plan-assignment-routes.test.ts \
+            tests/unit/elearning-training-plan-assignment.test.ts \
+            tests/unit/elearning-training-plan-revocation.test.ts \
+            tests/unit/elearning-v01-content-assessment-migration-contract.test.ts \
+            tests/unit/elearning-watch-progress.test.ts \
+            --reporter=dot
+          pnpm --dir packages/openapi/dist-sdk exec vitest run \
+            tests/elearning-paths.test.ts \
+            --watch=false
+
       - name: Start Postgres
         uses: ankane/setup-postgres@v1
         with:
@@ -851,6 +993,82 @@ jobs:
           MIGRATION_EXCLUDE: 008_plugin_infrastructure.sql,048_create_event_bus_tables.sql,049_create_bpmn_workflow_tables.sql,042a_core_model_views.sql,20250924140000_create_gantt_tables.ts,20250925_create_view_tables.sql
         run: |
           pnpm --filter @metasheet/core-backend db:migrate
+
+      # E-learning V0.1 L0-F3A content/assessment + watch-progress schema gates
+      # plus watch, direct-assignment, course-publish, exam, learner-courses,
+      # normalized scope/access, and media-playback service gates.
+      # Migrations above must already have applied the zzzz20260824*,
+      # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
+      # mutate kysely_migration.
+      # DATABASE_URL is required (bash :? and each suite throws).
+      - name: Run elearning V0.1 content/assessment schema gate
+        id: elearning-v01-content-assessment-schema-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 content/assessment schema gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-v01-content-assessment-schema.db.test.ts \
+            tests/integration/elearning-exam-attempt-item-migration.db.test.ts \
+            tests/integration/elearning-v01-watch-progress-schema.db.test.ts \
+            tests/integration/elearning-watch-progress-service.db.test.ts \
+            tests/integration/elearning-direct-assignment.db.test.ts \
+            tests/integration/elearning-course-publish.db.test.ts \
+            tests/integration/elearning-credit-ledger-authority.db.test.ts \
+            tests/integration/elearning-exam-service.db.test.ts \
+            tests/integration/elearning-learner-courses.db.test.ts \
+            tests/integration/elearning-scope-access.db.test.ts \
+            tests/integration/elearning-assignment-target-snapshot-migration.db.test.ts \
+            tests/integration/elearning-batch-assignment.db.test.ts \
+            tests/integration/elearning-assignment-lifecycle.db.test.ts \
+            tests/integration/elearning-media-playback.db.test.ts \
+            tests/integration/elearning-role-templates.db.test.ts \
+            tests/integration/elearning-jobs.db.test.ts \
+            tests/integration/elearning-training-plan.db.test.ts \
+            tests/integration/elearning-training-plan-assignment.db.test.ts \
+            tests/integration/elearning-admin-access.db.test.ts \
+            tests/integration/elearning-notification-delivery.db.test.ts \
+            tests/integration/elearning-notification-worker.db.test.ts \
+            tests/integration/elearning-assessment-catalog.db.test.ts \
+            tests/integration/elearning-paper-exam.db.test.ts \
+            tests/integration/elearning-manual-grading-schema.db.test.ts \
+            tests/integration/elearning-manual-grading-service.db.test.ts \
+            tests/integration/elearning-manual-grading-read.db.test.ts \
+            --reporter=verbose
+
+      # E-learning V0.1 M1 media quota reservation against real Postgres.
+      # DATABASE_URL is required (bash :? and the suite throws).
+      - name: Run elearning V0.1 media quota real-DB gate
+        id: elearning-v01-media-quota-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 media quota real-DB gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/elearning-media-quota.db.test.ts \
+            tests/integration/elearning-media-reconciler.db.test.ts \
+            --reporter=verbose
+
+      # E-learning V0.1 ratified gate 1: real JWT + user_orgs + DB RBAC on the
+      # production pilot runtime. Dedicated config/setup sets RBAC_BYPASS=false
+      # and RBAC_TOKEN_TRUST=false BEFORE importing auth/RBAC/runtime. Do not
+      # fold this into vitest.integration.config.ts (that setup caches trust).
+      # Whole-file + DATABASE_URL :? so a missing DB cannot skip-green.
+      - name: Run elearning V0.1 auth/tenant/RBAC gate
+        id: elearning-v01-auth-tenant-rbac-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for elearning V0.1 auth/tenant/RBAC gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.elearning-pilot-auth.config.ts run \
+            tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
+            --reporter=verbose
 
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
@@ -1060,6 +1278,20 @@ jobs:
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-writer-block-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-restore-jobs-realdb.test.ts \
+            tests/integration/multitable-recovery-archive-reconstruction-realdb.test.ts \
             tests/integration/multitable-exact-anchor-apply-realdb.test.ts \
             tests/integration/multitable-exact-anchor-route-wiring-realdb.test.ts \
             tests/integration/multitable-recovery-authority-stability-realdb.test.ts \
@@ -1068,6 +1300,7 @@ jobs:
             tests/integration/multitable-recovery-foreign-fence-availability-realdb.test.ts \
             tests/integration/recovery-conflict-classifier-realdb.test.ts \
             tests/integration/multitable-automation-marker-anchor-realdb.test.ts \
+            tests/integration/multitable-dh1-link-writer-fence-realdb.test.ts \
             tests/integration/multitable-d1c-form-submit-revision-realdb.test.ts \
             tests/integration/multitable-d1c-plugin-revision-realdb.test.ts \
             tests/integration/multitable-d1c-automation-revision-realdb.test.ts \

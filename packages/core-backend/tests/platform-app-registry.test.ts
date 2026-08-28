@@ -1,8 +1,12 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { collectPlatformApps } from '../src/platform/app-registry'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  collectPlatformApps,
+  isPlatformAppVisibleInCatalog,
+} from '../src/platform/app-registry'
+import { ELEARNING_FLAG_NAMES, resolveElearningCatalogFeature } from '../src/elearning/feature-flags'
 import type { LoadedPlugin } from '../src/core/plugin-loader'
 
 const tempDirs: string[] = []
@@ -191,5 +195,146 @@ describe('collectPlatformApps', () => {
     expect(first[0]?.id).toBe('after-sales')
     expect(second[0]?.id).toBe('after-sales')
     expect(readTextFile).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('isPlatformAppVisibleInCatalog', () => {
+  it('keeps apps visible when no predicate is provided', () => {
+    expect(isPlatformAppVisibleInCatalog(['elearning'])).toBe(true)
+    expect(isPlatformAppVisibleInCatalog(['afterSales'])).toBe(true)
+    expect(isPlatformAppVisibleInCatalog(['attendance', 'attendanceAdmin'])).toBe(true)
+  })
+
+  it('hides only flags the predicate explicitly rejects, not unknown featureFlags', () => {
+    const predicate = (flag: string) => (flag === 'elearning' ? false : undefined)
+    expect(isPlatformAppVisibleInCatalog(['elearning'], predicate)).toBe(false)
+    expect(isPlatformAppVisibleInCatalog(['elearning', 'afterSales'], predicate)).toBe(false)
+    expect(isPlatformAppVisibleInCatalog(['afterSales'], predicate)).toBe(true)
+    expect(isPlatformAppVisibleInCatalog(['attendance', 'attendanceAdmin', 'attendanceImport', 'workflow'], predicate)).toBe(true)
+    expect(isPlatformAppVisibleInCatalog(['not-a-real-feature'], predicate)).toBe(true)
+    expect(isPlatformAppVisibleInCatalog([], predicate)).toBe(true)
+  })
+})
+
+describe('collectPlatformApps catalog feature predicate', () => {
+  const flagSnapshot: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    for (const name of ELEARNING_FLAG_NAMES) {
+      flagSnapshot[name] = Object.prototype.hasOwnProperty.call(process.env, name)
+        ? process.env[name]
+        : undefined
+    }
+  })
+
+  afterEach(() => {
+    for (const name of ELEARNING_FLAG_NAMES) {
+      if (flagSnapshot[name] === undefined) delete process.env[name]
+      else process.env[name] = flagSnapshot[name]
+    }
+  })
+
+  function createMixedCatalog(): LoadedPlugin[] {
+    return [
+      createLoadedPlugin('plugin-elearning', {
+        id: 'elearning',
+        version: '0.1.0',
+        displayName: '学习中心',
+        pluginId: 'plugin-elearning',
+        runtimeModel: 'direct',
+        boundedContext: { code: 'elearning' },
+        platformDependencies: ['auth'],
+        navigation: [],
+        permissions: [],
+        featureFlags: ['elearning'],
+        objects: [],
+        workflows: [],
+        integrations: [],
+      }),
+      createLoadedPlugin('plugin-after-sales', {
+        id: 'after-sales',
+        version: '0.1.0',
+        displayName: 'After Sales',
+        pluginId: 'plugin-after-sales',
+        boundedContext: { code: 'after-sales' },
+        platformDependencies: ['multitable'],
+        navigation: [
+          { id: 'home', title: 'After Sales', path: '/p/plugin-after-sales/after-sales', location: 'main-nav', order: 1 },
+        ],
+        permissions: [],
+        featureFlags: ['afterSales'],
+        objects: [],
+        workflows: [],
+        integrations: [],
+      }),
+      createLoadedPlugin('plugin-attendance', {
+        id: 'attendance',
+        version: '0.1.0',
+        displayName: 'Attendance',
+        pluginId: 'plugin-attendance',
+        runtimeModel: 'direct',
+        boundedContext: { code: 'attendance' },
+        platformDependencies: ['workflow'],
+        navigation: [
+          { id: 'home', title: 'Attendance', path: '/attendance', location: 'main-nav', order: 50 },
+        ],
+        permissions: [],
+        featureFlags: ['attendance', 'attendanceAdmin', 'attendanceImport', 'workflow'],
+        objects: [],
+        workflows: [],
+        integrations: [],
+      }),
+      createLoadedPlugin('plugin-unknown-flag', {
+        id: 'unknown-flag-app',
+        version: '0.1.0',
+        displayName: 'Unknown Flag App',
+        pluginId: 'plugin-unknown-flag',
+        boundedContext: { code: 'unknown-flag' },
+        platformDependencies: ['auth'],
+        navigation: [],
+        permissions: [],
+        featureFlags: ['notARealProductFeature'],
+        objects: [],
+        workflows: [],
+        integrations: [],
+      }),
+    ]
+  }
+
+  function idsOf(apps: Array<{ id: string }>): string[] {
+    return apps.map((app) => app.id).sort()
+  }
+
+  it('without a predicate still collects elearning (filter is opt-in)', async () => {
+    delete process.env.ELEARNING_ENABLED
+    const result = await collectPlatformApps({ loadedPlugins: createMixedCatalog() })
+    expect(idsOf(result)).toEqual(['after-sales', 'attendance', 'elearning', 'unknown-flag-app'])
+  })
+
+  it.each([
+    ['missing', undefined],
+    ['false', 'false'],
+    ['TRUE', 'TRUE'],
+    ['true-space', 'true '],
+  ] as const)('hides elearning when master is %s and leaves unrelated apps visible', async (_label, value) => {
+    if (value === undefined) delete process.env.ELEARNING_ENABLED
+    else process.env.ELEARNING_ENABLED = value
+
+    const result = await collectPlatformApps({
+      loadedPlugins: createMixedCatalog(),
+      isCatalogFeatureEnabled: resolveElearningCatalogFeature,
+    })
+    expect(idsOf(result)).toEqual(['after-sales', 'attendance', 'unknown-flag-app'])
+    expect(result.some((app) => app.id === 'elearning' || app.displayName === '学习中心')).toBe(false)
+  })
+
+  it('shows elearning when master is exact true and still leaves unrelated apps visible', async () => {
+    process.env.ELEARNING_ENABLED = 'true'
+    const result = await collectPlatformApps({
+      loadedPlugins: createMixedCatalog(),
+      isCatalogFeatureEnabled: resolveElearningCatalogFeature,
+    })
+    expect(idsOf(result)).toEqual(['after-sales', 'attendance', 'elearning', 'unknown-flag-app'])
+    expect(result.find((app) => app.id === 'elearning')?.displayName).toBe('学习中心')
   })
 })

@@ -1,3 +1,14 @@
+import {
+  ELEARNING_ANALYTICS_ENABLED,
+  ELEARNING_ASSESSMENT_ENABLED,
+  ELEARNING_ASSIGNMENT_ENABLED,
+  ELEARNING_CONTENT_ENABLED,
+  ELEARNING_ENABLED,
+  ELEARNING_INCENTIVE_ENABLED,
+  ELEARNING_MEDIA_ENABLED,
+  isElearningFlagEnabled,
+} from '../elearning/feature-flags'
+
 /**
  * Feature Flags Configuration
  *
@@ -29,6 +40,15 @@ export const FEATURE_FLAGS = {
   useKyselyDB: process.env.USE_KYSELY === 'true' || process.env.NODE_ENV === 'test',
   kanbanDB: process.env.KANBAN_DB === 'true' || process.env.NODE_ENV === 'test',
   workflowEnabled: process.env.WORKFLOW_ENABLED === 'true',
+
+  // E-learning V0.1 named pilot (exact literal 'true' only; default OFF)
+  [ELEARNING_ENABLED]: isElearningFlagEnabled(ELEARNING_ENABLED),
+  [ELEARNING_CONTENT_ENABLED]: isElearningFlagEnabled(ELEARNING_CONTENT_ENABLED),
+  [ELEARNING_ASSIGNMENT_ENABLED]: isElearningFlagEnabled(ELEARNING_ASSIGNMENT_ENABLED),
+  [ELEARNING_ASSESSMENT_ENABLED]: isElearningFlagEnabled(ELEARNING_ASSESSMENT_ENABLED),
+  [ELEARNING_INCENTIVE_ENABLED]: isElearningFlagEnabled(ELEARNING_INCENTIVE_ENABLED),
+  [ELEARNING_ANALYTICS_ENABLED]: isElearningFlagEnabled(ELEARNING_ANALYTICS_ENABLED),
+  [ELEARNING_MEDIA_ENABLED]: isElearningFlagEnabled(ELEARNING_MEDIA_ENABLED),
 } as const;
 
 /**

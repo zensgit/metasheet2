@@ -214,6 +214,13 @@ describe('Stock Preparation route registration (source drift pin)', () => {
       expect(decide('/plm', { requiredFeature: 'nonsense' }, { hasFeature: () => false })).toEqual({ action: 'allow' })
     })
 
+    it('required-feature gate denies and allows elearning', () => {
+      expect(decide('/learn', { requiredFeature: 'elearning' }, { hasFeature: () => false }))
+        .toEqual({ action: 'redirect', target: '/HOME' })
+      expect(decide('/learn', { requiredFeature: 'elearning' }, { hasFeature: (feature) => feature === 'elearning' }))
+        .toEqual({ action: 'allow' })
+    })
+
     it('the plm allowlist is exactly the five workbench prefixes — all non-empty absolute strings', () => {
       expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
       expect(PLM_WORKBENCH_ALLOWED_PREFIXES.every((p) => typeof p === 'string' && p.startsWith('/') && p.length > 1)).toBe(true)

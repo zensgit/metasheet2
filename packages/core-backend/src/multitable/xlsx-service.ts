@@ -9,6 +9,9 @@ export type ParsedXlsxResult = {
   headers: string[]
   rows: string[][]
   sheetName: string
+  sheetCount: number
+  hasFormula: boolean
+  hasUnheadedData: boolean
   truncated: boolean
 }
 
@@ -29,7 +32,11 @@ export type WorkbookLike = {
 }
 
 export type XlsxModule = {
-  read(data: ArrayBuffer | Uint8Array, opts: { type: 'array' | 'buffer' }): WorkbookLike
+  read(data: ArrayBuffer | Uint8Array, opts: {
+    type: 'array' | 'buffer'
+    sheetRows?: number
+    cellFormula?: boolean
+  }): WorkbookLike
   write(workbook: WorkbookLike, opts: { type: 'array' | 'buffer'; bookType: 'xlsx' }): ArrayBuffer | Uint8Array | Buffer
   utils: {
     sheet_to_json(ws: unknown, opts: {
@@ -60,24 +67,108 @@ function normalizeRowCell(value: unknown): string {
 }
 
 function sanitizeSheetName(name: string): string {
-  const sanitized = name.replace(/[\[\]:*?/\\]/g, ' ').trim()
+  const sanitized = name.replace(/[[\]:*?/\\]/g, ' ').trim()
   return (sanitized || 'Sheet1').slice(0, 31)
+}
+
+function worksheetHasFormula(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  for (const [address, cell] of Object.entries(value)) {
+    if (address.startsWith('!') || !cell || typeof cell !== 'object') continue
+    const formula = (cell as Record<string, unknown>).f
+    if (typeof formula === 'string' && formula.trim() !== '') return true
+  }
+  return false
+}
+
+function worksheetExceedsRowLimit(value: unknown, maxRows: number): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const sheet = value as Record<string, unknown>
+  const rawRef = typeof sheet['!fullref'] === 'string'
+    ? sheet['!fullref']
+    : sheet['!ref']
+  if (typeof rawRef !== 'string') return false
+  const end = (rawRef.split(':')[1] ?? rawRef).replaceAll('$', '')
+  const match = /(\d+)$/.exec(end)
+  if (!match) return false
+  const lastPhysicalRow = Number(match[1])
+  return Number.isSafeInteger(lastPhysicalRow) && lastPhysicalRow > maxRows + 1
+}
+
+function worksheetColumnCount(value: unknown): number | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 0
+  const sheet = value as Record<string, unknown>
+  const rawRef = typeof sheet['!fullref'] === 'string'
+    ? sheet['!fullref']
+    : sheet['!ref']
+  if (rawRef === undefined) return 0
+  if (typeof rawRef !== 'string') return null
+  const end = (rawRef.split(':')[1] ?? rawRef).replaceAll('$', '')
+  const match = /([A-Z]+)\d+$/i.exec(end)
+  if (!match) return null
+  let count = 0
+  for (const letter of match[1].toUpperCase()) {
+    count = count * 26 + letter.charCodeAt(0) - 64
+    if (!Number.isSafeInteger(count)) return null
+  }
+  return count
 }
 
 export function parseXlsxBuffer(
   xlsx: XlsxModule,
   buffer: Buffer | ArrayBuffer | Uint8Array,
-  options?: { sheetName?: string },
+  options?: { sheetName?: string; maxRows?: number; maxColumns?: number },
 ): ParsedXlsxResult {
-  const workbook = xlsx.read(buffer, { type: 'buffer' })
+  const maxRows = options?.maxRows ?? XLSX_MAX_ROWS
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > XLSX_MAX_ROWS) {
+    throw new Error('invalid xlsx row limit')
+  }
+  const maxColumns = options?.maxColumns
+  if (maxColumns !== undefined && (!Number.isSafeInteger(maxColumns) || maxColumns < 1)) {
+    throw new Error('invalid xlsx column limit')
+  }
+  const workbook = xlsx.read(buffer, {
+    type: 'buffer',
+    ...(options?.maxRows === undefined ? {} : { sheetRows: maxRows + 2 }),
+    cellFormula: true,
+  })
+  const sheetCount = workbook.SheetNames.length
   const requestedSheet = options?.sheetName?.trim() || ''
   const sheetName = requestedSheet && workbook.SheetNames.includes(requestedSheet)
     ? requestedSheet
     : workbook.SheetNames[0]
-  if (!sheetName) return { headers: [], rows: [], sheetName: '', truncated: false }
+  if (!sheetName) {
+    return {
+      headers: [],
+      rows: [],
+      sheetName: '',
+      sheetCount,
+      hasFormula: false,
+      hasUnheadedData: false,
+      truncated: false,
+    }
+  }
 
   const ws = workbook.Sheets[sheetName]
-  if (!ws) return { headers: [], rows: [], sheetName, truncated: false }
+  if (!ws) {
+    return {
+      headers: [],
+      rows: [],
+      sheetName,
+      sheetCount,
+      hasFormula: false,
+      hasUnheadedData: false,
+      truncated: false,
+    }
+  }
+  const hasFormula = worksheetHasFormula(ws)
+  const exceedsPhysicalLimit = options?.maxRows === undefined
+    ? false
+    : worksheetExceedsRowLimit(ws, maxRows)
+  const columnCount = worksheetColumnCount(ws)
+  if (maxColumns !== undefined && (columnCount === null || columnCount > maxColumns)) {
+    throw new Error('xlsx column limit exceeded')
+  }
 
   const aoa = xlsx.utils.sheet_to_json(ws, {
     header: 1,
@@ -85,24 +176,46 @@ export function parseXlsxBuffer(
     defval: '',
     blankrows: false,
   })
-  if (aoa.length === 0) return { headers: [], rows: [], sheetName, truncated: false }
+  if (aoa.length === 0) {
+    return {
+      headers: [],
+      rows: [],
+      sheetName,
+      sheetCount,
+      hasFormula,
+      hasUnheadedData: false,
+      truncated: exceedsPhysicalLimit,
+    }
+  }
 
   const headers = (aoa[0] as unknown[]).map((cell) => normalizeHeader(cell))
   while (headers.length > 0 && headers[headers.length - 1] === '') headers.pop()
 
   const rows: string[][] = []
-  let truncated = false
+  let truncated = exceedsPhysicalLimit
+  let hasUnheadedData = false
   for (let i = 1; i < aoa.length; i += 1) {
-    if (rows.length >= XLSX_MAX_ROWS) {
+    if (rows.length >= maxRows) {
       truncated = true
       break
     }
     const raw = aoa[i] as unknown[]
+    if (raw.slice(headers.length).some((cell) => normalizeRowCell(cell).trim() !== '')) {
+      hasUnheadedData = true
+    }
     const row = headers.map((_header, index) => normalizeRowCell(raw[index]))
     if (row.some((cell) => cell.trim().length > 0)) rows.push(row)
   }
 
-  return { headers, rows, sheetName, truncated }
+  return {
+    headers,
+    rows,
+    sheetName,
+    sheetCount,
+    hasFormula,
+    hasUnheadedData,
+    truncated,
+  }
 }
 
 export function buildXlsxBuffer(

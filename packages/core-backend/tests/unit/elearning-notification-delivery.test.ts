@@ -1,0 +1,329 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  ELEARNING_NOTIFICATION_LOCK_NAMESPACE,
+  canonicalizeElearningNotificationRequest,
+  elearningNotificationDeliveryLockKey,
+  enqueueElearningNotificationDelivery,
+  hashElearningNotificationRequest,
+  type ElearningNotificationDeliveryDb,
+  type ElearningNotificationDeliveryQueryable,
+} from '../../src/services/elearning-notification-delivery'
+
+const ORG = 'org-notification-ledger'
+const MEMBER = '11111111-1111-4111-8111-111111111111'
+const USER = 'user-notification-ledger'
+const DUE_AT = '2026-08-27T01:00:00.000Z'
+
+function marker(sql: string): string | undefined {
+  return sql.match(/\/\* ([^*]+) \*\//)?.[1]
+}
+
+class ScriptDb implements ElearningNotificationDeliveryDb {
+  readonly calls: Array<{ sql: string; params?: unknown[] }> = []
+
+  constructor(
+    private readonly handler: (
+      sql: string,
+      params?: unknown[],
+    ) => { rows: Array<Record<string, unknown>>; rowCount: number | null },
+  ) {}
+
+  async query(sql: string, params?: unknown[]) {
+    this.calls.push({ sql, params })
+    return this.handler(sql, params)
+  }
+
+  async transaction<T>(
+    handler: (tx: ElearningNotificationDeliveryQueryable) => Promise<T>,
+  ): Promise<T> {
+    return handler(this)
+  }
+}
+
+function result(rows: Array<Record<string, unknown>> = []) {
+  return { rows, rowCount: rows.length }
+}
+
+function input(payload: Record<string, unknown> = { course: 'intro' }) {
+  return {
+    orgId: ORG,
+    assignmentMemberId: MEMBER,
+    recipientUserId: USER,
+    sourceKey: 'assignment:a:user:u:window:2026-08-27T01:00:00Z',
+    dueAt: DUE_AT,
+    payload,
+  }
+}
+
+describe('e-learning notification delivery intent', () => {
+  it('canonicalizes nested payload keys and UTC timestamps deterministically', () => {
+    const left = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { z: 1, nested: { b: true, a: false } },
+    })
+    const right = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { nested: { a: false, b: true }, z: 1 },
+    })
+    expect(left).toBe(right)
+    const unicodeKeys = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { 'é': 4, z: 2, 'ä': 3, A: 1 },
+    })
+    expect(unicodeKeys).toContain('"payload":{"A":1,"z":2,"ä":3,"é":4}')
+    const integerLikeKeys = canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { 2: 'two', 10: 'ten', A: 'letter' },
+    })
+    expect(integerLikeKeys)
+      .toContain('"payload":{"10":"ten","2":"two","A":"letter"}')
+    let deepestPayload: Record<string, unknown> = { leaf: true }
+    for (let depth = 0; depth < 15; depth += 1) {
+      deepestPayload = { nested: deepestPayload }
+    }
+    expect(() => canonicalizeElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: deepestPayload,
+    })).not.toThrow()
+    const baselineHash = hashElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: { z: 1, nested: { b: true, a: false } },
+    })
+    expect(baselineHash).toMatch(/^[0-9a-f]{64}$/)
+    for (const changed of [
+      {
+        assignmentMemberId: '33333333-3333-4333-8333-333333333333',
+        recipientUserId: USER,
+        dueAt: DUE_AT,
+      },
+      {
+        assignmentMemberId: MEMBER,
+        recipientUserId: `${USER}-other`,
+        dueAt: DUE_AT,
+      },
+      {
+        assignmentMemberId: MEMBER,
+        recipientUserId: USER,
+        dueAt: '2026-08-27T02:00:00.000Z',
+      },
+    ]) {
+      expect(hashElearningNotificationRequest({
+        ...changed,
+        payload: { z: 1, nested: { b: true, a: false } },
+      })).not.toBe(baselineHash)
+    }
+  })
+
+  it('locks, validates the same-org active member, and inserts one pending intent', async () => {
+    const db = new ScriptDb((sql) => {
+      if (marker(sql) === 'elearning-notification-delivery:load-member') {
+        return result([{
+          user_id: USER,
+          revoked_at: null,
+          deadline: DUE_AT,
+          course_status: 'active',
+        }])
+      }
+      return result()
+    })
+
+    const value = await enqueueElearningNotificationDelivery(db, input())
+    expect(value).toMatchObject({ status: 'pending', duplicate: false })
+    expect(value.deliveryId).toMatch(/^[0-9a-f-]{36}$/)
+    expect(db.calls.map((call) => marker(call.sql))).toEqual([
+      'elearning-notification-delivery:lock',
+      'elearning-notification-delivery:load-existing',
+      'elearning-notification-delivery:load-member',
+      'elearning-notification-delivery:insert',
+    ])
+    expect(db.calls[0]?.params).toEqual([
+      ELEARNING_NOTIFICATION_LOCK_NAMESPACE,
+      elearningNotificationDeliveryLockKey(ORG, input().sourceKey),
+    ])
+  })
+
+  it('returns an idempotent replay without re-reading mutable member state', async () => {
+    const request = input({ b: 2, a: 1 })
+    const payload = { a: 1, b: 2 }
+    const requestHash = hashElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload,
+    })
+    const db = new ScriptDb((sql) => {
+      if (marker(sql) === 'elearning-notification-delivery:load-existing') {
+        return result([{
+          id: '22222222-2222-4222-8222-222222222222',
+          request_hash: requestHash,
+          request_hash_version: 1,
+          status: 'outcome_unknown',
+        }])
+      }
+      return result()
+    })
+
+    await expect(enqueueElearningNotificationDelivery(db, request)).resolves.toEqual({
+      deliveryId: '22222222-2222-4222-8222-222222222222',
+      status: 'outcome_unknown',
+      duplicate: true,
+    })
+    expect(db.calls.some(
+      (call) => marker(call.sql) === 'elearning-notification-delivery:load-member',
+    )).toBe(false)
+  })
+
+  it('fails closed when a stored delivery identity is malformed', async () => {
+    const request = input()
+    const requestHash = hashElearningNotificationRequest({
+      assignmentMemberId: MEMBER,
+      recipientUserId: USER,
+      dueAt: DUE_AT,
+      payload: request.payload,
+    })
+    const db = new ScriptDb((sql) => {
+      if (marker(sql) === 'elearning-notification-delivery:load-existing') {
+        return result([{
+          id: 'not-a-uuid',
+          request_hash: requestHash,
+          request_hash_version: 1,
+          status: 'pending',
+        }])
+      }
+      return result()
+    })
+
+    await expect(enqueueElearningNotificationDelivery(db, request))
+      .rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  it('rejects the same source key with a different normalized request', async () => {
+    const db = new ScriptDb((sql) => {
+      if (marker(sql) === 'elearning-notification-delivery:load-existing') {
+        return result([{
+          id: '22222222-2222-4222-8222-222222222222',
+          request_hash: '0'.repeat(64),
+          request_hash_version: 1,
+          status: 'pending',
+        }])
+      }
+      return result()
+    })
+
+    let caught: unknown
+    try {
+      await enqueueElearningNotificationDelivery(db, input({ secret: 'must-not-leak' }))
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toMatchObject({ code: 'conflict' })
+    const blob = `${(caught as Error).message}\n${(caught as Error).stack ?? ''}`
+    expect(blob).not.toContain(input().sourceKey)
+    expect(blob).not.toContain('must-not-leak')
+    expect(blob).not.toContain('0'.repeat(64))
+  })
+
+  it('fails closed for ineligible assignments without leaking values', async () => {
+    for (const member of [
+      {
+        user_id: `${USER}-other`,
+        revoked_at: null,
+        deadline: DUE_AT,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: DUE_AT,
+        deadline: DUE_AT,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: null,
+        deadline: null,
+        course_status: 'active',
+      },
+      {
+        user_id: USER,
+        revoked_at: null,
+        deadline: DUE_AT,
+        course_status: 'withdrawn',
+      },
+    ]) {
+      const db = new ScriptDb((sql) => {
+        if (marker(sql) === 'elearning-notification-delivery:load-member') {
+          return result([member])
+        }
+        return result()
+      })
+
+      let caught: unknown
+      try {
+        await enqueueElearningNotificationDelivery(db, input())
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toMatchObject({ code: 'not_eligible' })
+      expect(`${(caught as Error).message}\n${(caught as Error).stack ?? ''}`)
+        .not.toContain(ORG)
+    }
+  })
+
+  it('rejects non-canonical UTC timestamps and PostgreSQL-incompatible text', async () => {
+    const sparse = new Array(2)
+    sparse[1] = 'present'
+    const invalid = [
+      { ...input(), dueAt: '2026-08-27T01:00:00' },
+      { ...input(), dueAt: '2026-08-27T09:00:00.000+08:00' },
+      { ...input(), dueAt: '2026-02-30T01:00:00.000Z' },
+      { ...input(), sourceKey: `source\u0000key` },
+      { ...input(), payload: { message: `value\u0000body` } },
+      { ...input(), payload: { [`key\u0000name`]: true } },
+      { ...input(), payload: { message: '\ud800' } },
+      { ...input(), payload: { sparse } },
+    ]
+    for (const request of invalid) {
+      let transactions = 0
+      const db = new ScriptDb(() => result())
+      db.transaction = async () => {
+        transactions += 1
+        throw new Error('transaction must not start')
+      }
+      await expect(enqueueElearningNotificationDelivery(db, request))
+        .rejects.toMatchObject({ code: 'invalid_input' })
+      expect(transactions).toBe(0)
+    }
+  })
+
+  it('maps transaction-boundary failures to a values-free unavailable error', async () => {
+    const db: ElearningNotificationDeliveryDb = {
+      query: async () => result(),
+      transaction: async () => {
+        throw new Error(`commit failed for ${ORG}`)
+      },
+    }
+
+    let caught: unknown
+    try {
+      await enqueueElearningNotificationDelivery(db, input())
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toMatchObject({ code: 'unavailable' })
+    expect(`${(caught as Error).message}\n${(caught as Error).stack ?? ''}`)
+      .not.toContain(ORG)
+  })
+})

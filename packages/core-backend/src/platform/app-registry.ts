@@ -31,10 +31,30 @@ export interface PlatformAppSummary {
   entryPath: string | null
 }
 
+/**
+ * Optional catalog gate keyed by app.manifest.featureFlags entries.
+ * `false` hides the app; `true` allows that flag; `undefined` means this
+ * predicate has no opinion. Unknown flags therefore stay visible — declared
+ * featureFlags are not treated as an all-of conjunction.
+ */
+export type PlatformAppCatalogFeaturePredicate = (flag: string) => boolean | undefined
+
 export interface CollectPlatformAppsOptions {
   loadedPlugins: Iterable<LoadedPlugin>
   pluginStatus?: Map<string, PlatformAppPluginState>
   readTextFile?: (filePath: string) => Promise<string>
+  isCatalogFeatureEnabled?: PlatformAppCatalogFeaturePredicate
+}
+
+export function isPlatformAppVisibleInCatalog(
+  featureFlags: readonly string[] | undefined,
+  isCatalogFeatureEnabled?: PlatformAppCatalogFeaturePredicate,
+): boolean {
+  if (!isCatalogFeatureEnabled) return true
+  for (const flag of featureFlags ?? []) {
+    if (isCatalogFeatureEnabled(flag) === false) return false
+  }
+  return true
 }
 
 interface CachedManifestSummary {
@@ -132,6 +152,10 @@ export async function collectPlatformApps(options: CollectPlatformAppsOptions): 
     }
 
     if (!cachedSummary) {
+      continue
+    }
+
+    if (!isPlatformAppVisibleInCatalog(cachedSummary.featureFlags, options.isCatalogFeatureEnabled)) {
       continue
     }
 
