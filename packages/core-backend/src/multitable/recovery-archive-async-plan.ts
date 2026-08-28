@@ -26,6 +26,7 @@ import {
 } from './recovery-archive-restore-jobs'
 import type { RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
 import {
+  hashAnchorRecoveryScope,
   hashExactAnchorLiveSet,
   type ExactArchiveRecoveryIdentityClaims,
   type ExactArchiveRecoveryScopeKind,
@@ -72,7 +73,9 @@ export type RecoveryArchiveAsyncChunkOperation =
 export interface RecoveryArchiveAsyncChunkPayload {
   readonly format: typeof CHUNK_FORMAT
   readonly chunkIndex: number
+  readonly expectedAnchorScopeHash: string
   readonly expectedLiveSetHash: string
+  readonly expectedFinalLiveSetHash: string
   readonly schemaHash: string
   readonly operations: readonly RecoveryArchiveAsyncChunkOperation[]
 }
@@ -105,6 +108,7 @@ export interface RecoveryArchiveAsyncPlanPayload {
   readonly anchorSeq: string
   readonly checkpointId: string
   readonly schemaHash: string
+  readonly authorizedScopeHash: string
   readonly initialLiveSetHash: string
   readonly finalLiveSetHash: string
   readonly selectedRecordIds: readonly string[]
@@ -140,9 +144,15 @@ export interface BuildRecoveryArchiveAsyncPlanInput {
   readonly anchorSeq: string
   readonly checkpointId: string
   readonly schemaHash: string
+  readonly authorizedScopeHash: string
   readonly selectedRecordIds: readonly string[]
   readonly selectedFieldIds: readonly string[]
   readonly liveRecords: ReadonlyMap<string, { readonly version: number }>
+  readonly targetRecords: ReadonlyMap<string, {
+    readonly recordId: string
+    readonly exists: boolean
+    readonly version: number | null
+  }>
   readonly liveLinks: readonly AuthoritativeLiveLinkEdge[]
   readonly revertWrites: readonly ExactAnchorRevertWriteIntent[]
   readonly deleteRecordIds: readonly string[]
@@ -163,20 +173,9 @@ export function buildRecoveryArchiveAsyncPlan(
     const chunkIndex = chunkObjects.length
     const chunkOperations = operations.slice(offset, offset + MAX_CHUNK_WRITES)
     const expectedLiveSetHash = hashLiveState(versions, links)
-    const payload: RecoveryArchiveAsyncChunkPayload = Object.freeze({
-      format: CHUNK_FORMAT,
-      chunkIndex,
-      expectedLiveSetHash,
-      schemaHash: admitted.schemaHash,
-      operations: Object.freeze(chunkOperations.map(freezeOperation)),
-    })
-    const object = objectForPayload(
-      admitted.archiveGenerationId,
-      CHUNK_OBJECT_VERSION,
-      admitted.expiresAt,
-      payload,
+    const expectedAnchorScopeHash = hashAnchorRecoveryScope(
+      chunkOperations.map((operation) => admitted.targetRecords.get(operation.recordId)!),
     )
-    chunkObjects.push(object)
     for (const operation of chunkOperations) {
       const currentVersion = versions.get(operation.recordId)
       if (currentVersion !== operation.expectedVersion) fail('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID')
@@ -199,6 +198,21 @@ export function buildRecoveryArchiveAsyncPlan(
         }
       }
     }
+    const payload: RecoveryArchiveAsyncChunkPayload = Object.freeze({
+      format: CHUNK_FORMAT,
+      chunkIndex,
+      expectedAnchorScopeHash,
+      expectedLiveSetHash,
+      expectedFinalLiveSetHash: hashLiveState(versions, links),
+      schemaHash: admitted.schemaHash,
+      operations: Object.freeze(chunkOperations.map(freezeOperation)),
+    })
+    chunkObjects.push(objectForPayload(
+      admitted.archiveGenerationId,
+      CHUNK_OBJECT_VERSION,
+      admitted.expiresAt,
+      payload,
+    ))
   }
 
   const chunks = chunkObjects.map((object, chunkIndex) => Object.freeze({
@@ -230,6 +244,7 @@ export function buildRecoveryArchiveAsyncPlan(
     anchorSeq: admitted.anchorSeq,
     checkpointId: admitted.checkpointId,
     schemaHash: admitted.schemaHash,
+    authorizedScopeHash: admitted.authorizedScopeHash,
     initialLiveSetHash,
     finalLiveSetHash: hashLiveState(versions, links),
     selectedRecordIds: Object.freeze([...admitted.selectedRecordIds]),
@@ -293,6 +308,7 @@ export async function loadRecoveryArchiveAsyncPlan(
     payload.anchorSeq !== claims.anchorSeq ||
     payload.checkpointId !== claims.checkpointId ||
     payload.schemaHash !== claims.schemaHash ||
+    payload.authorizedScopeHash !== claims.authorizedScopeHash ||
     payload.initialLiveSetHash !== claims.liveSetHash
   ) {
     fail('RECOVERY_ARCHIVE_ASYNC_PLAN_OBJECT_MISMATCH')
@@ -388,6 +404,19 @@ function admitBuildInput(input: BuildRecoveryArchiveAsyncPlanInput) {
     }
     liveRecords.set(id, live.version)
   }
+  const targetRecords = new Map<string, { recordId: string; exists: boolean; version: number | null }>()
+  for (const [recordId, target] of input.targetRecords) {
+    const id = opaque(recordId)
+    if (
+      !target || target.recordId !== id || typeof target.exists !== 'boolean' || targetRecords.has(id) ||
+      (target.exists
+        ? !Number.isSafeInteger(target.version) || (target.version as number) < 0
+        : target.version !== null)
+    ) {
+      fail('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID')
+    }
+    targetRecords.set(id, { recordId: id, exists: target.exists, version: target.version })
+  }
   const liveLinks = input.liveLinks.map((edge) => ({
     fieldId: opaque(edge.fieldId),
     recordId: opaque(edge.recordId),
@@ -428,6 +457,12 @@ function admitBuildInput(input: BuildRecoveryArchiveAsyncPlanInput) {
   if (deleteRecordIds.some((recordId) => !liveRecords.has(recordId) || revertWriteByRecordId.has(recordId))) {
     fail('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID')
   }
+  if (
+    [...revertWriteByRecordId.keys()].some((recordId) => targetRecords.get(recordId)?.exists !== true) ||
+    deleteRecordIds.some((recordId) => targetRecords.get(recordId)?.exists !== false)
+  ) {
+    fail('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID')
+  }
 
   return {
     workspaceId: opaque(input.workspaceId),
@@ -445,9 +480,11 @@ function admitBuildInput(input: BuildRecoveryArchiveAsyncPlanInput) {
     anchorSeq: decimal(input.anchorSeq),
     checkpointId: opaque(input.checkpointId),
     schemaHash: sha(input.schemaHash),
+    authorizedScopeHash: sha(input.authorizedScopeHash),
     selectedRecordIds: sortedUniqueIds(input.selectedRecordIds),
     selectedFieldIds: sortedUniqueIds(input.selectedFieldIds),
     liveRecords,
+    targetRecords,
     liveLinks,
     revertWriteByRecordId,
     deleteRecordIds,
@@ -548,7 +585,7 @@ function parsePlanPayload(bytes: Uint8Array): RecoveryArchiveAsyncPlanPayload {
   const value = parseCanonicalJson(bytes)
   const row = exactRecord(value, [
     'actorId', 'anchorOperationId', 'anchorSeq', 'archiveGenerationId', 'archiveRootHash',
-    'baseId', 'checkpointId', 'chunks', 'finalLiveSetHash', 'format', 'initialLiveSetHash',
+    'authorizedScopeHash', 'baseId', 'checkpointId', 'chunks', 'finalLiveSetHash', 'format', 'initialLiveSetHash',
     'keyId', 'recoveryMode', 'schemaHash', 'scopeHash', 'scopeKind', 'selectedFieldIds',
     'selectedRecordIds', 'sheetId', 'sourceVectorHash', 'workspaceId',
   ])
@@ -573,6 +610,7 @@ function parsePlanPayload(bytes: Uint8Array): RecoveryArchiveAsyncPlanPayload {
     anchorSeq: objectDecimal(row.anchorSeq),
     checkpointId: objectOpaque(row.checkpointId),
     schemaHash: objectSha(row.schemaHash),
+    authorizedScopeHash: objectSha(row.authorizedScopeHash),
     initialLiveSetHash: objectSha(row.initialLiveSetHash),
     finalLiveSetHash: objectSha(row.finalLiveSetHash),
     selectedRecordIds: Object.freeze(objectIdArray(row.selectedRecordIds)),
@@ -583,7 +621,10 @@ function parsePlanPayload(bytes: Uint8Array): RecoveryArchiveAsyncPlanPayload {
 
 function parseChunkPayload(bytes: Uint8Array): RecoveryArchiveAsyncChunkPayload {
   const value = parseCanonicalJson(bytes)
-  const row = exactRecord(value, ['chunkIndex', 'expectedLiveSetHash', 'format', 'operations', 'schemaHash'])
+  const row = exactRecord(value, [
+    'chunkIndex', 'expectedAnchorScopeHash', 'expectedFinalLiveSetHash', 'expectedLiveSetHash',
+    'format', 'operations', 'schemaHash',
+  ])
   if (
     row.format !== CHUNK_FORMAT ||
     !Number.isSafeInteger(row.chunkIndex) ||
@@ -601,7 +642,9 @@ function parseChunkPayload(bytes: Uint8Array): RecoveryArchiveAsyncChunkPayload 
   return Object.freeze({
     format: CHUNK_FORMAT,
     chunkIndex: row.chunkIndex as number,
+    expectedAnchorScopeHash: objectSha(row.expectedAnchorScopeHash),
     expectedLiveSetHash: objectSha(row.expectedLiveSetHash),
+    expectedFinalLiveSetHash: objectSha(row.expectedFinalLiveSetHash),
     schemaHash: objectSha(row.schemaHash),
     operations: Object.freeze(operations),
   })

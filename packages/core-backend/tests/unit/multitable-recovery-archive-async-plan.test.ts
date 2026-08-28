@@ -36,10 +36,12 @@ afterEach(async () => {
 
 function input() {
   const liveRecords = new Map<string, { version: number }>()
+  const targetRecords = new Map<string, { recordId: string; exists: boolean; version: number | null }>()
   const revertWrites = []
   for (let index = 0; index < 5000; index++) {
     const recordId = `record-${String(index).padStart(5, '0')}`
     liveRecords.set(recordId, { version: 7 })
+    targetRecords.set(recordId, { recordId, exists: true, version: 3 })
     revertWrites.push({
       recordId,
       liveVersion: 7,
@@ -52,6 +54,7 @@ function input() {
     })
   }
   liveRecords.set('record-05000', { version: 4 })
+  targetRecords.set('record-05000', { recordId: 'record-05000', exists: false, version: null })
   return {
     workspaceId: 'workspace-async',
     baseId: 'base-async',
@@ -68,9 +71,11 @@ function input() {
     anchorSeq: '9007199254740993',
     checkpointId: 'checkpoint-async',
     schemaHash: SCHEMA_HASH,
+    authorizedScopeHash: 'e'.repeat(64),
     selectedRecordIds: [],
     selectedFieldIds: [],
     liveRecords,
+    targetRecords,
     liveLinks: [
       { fieldId: 'field-link', recordId: 'record-00000', foreignRecordId: 'foreign-old' },
       { fieldId: 'field-link', recordId: 'record-00001', foreignRecordId: 'record-05000' },
@@ -120,10 +125,15 @@ describe('Time Machine async archive restore frozen plan', () => {
     expect(bundle.chunkObjects.map((object) => object.payload.operations.length)).toEqual([5000, 1])
     expect(bundle.chunkObjects[0].payload.expectedLiveSetHash)
       .not.toBe(bundle.chunkObjects[1].payload.expectedLiveSetHash)
+    expect(bundle.chunkObjects[0].payload.expectedFinalLiveSetHash)
+      .toBe(bundle.chunkObjects[1].payload.expectedLiveSetHash)
+    expect(bundle.chunkObjects[0].payload.expectedAnchorScopeHash)
+      .not.toBe(bundle.chunkObjects[1].payload.expectedAnchorScopeHash)
     expect(bundle.planObject.payload.initialLiveSetHash)
       .toBe(bundle.chunkObjects[0].payload.expectedLiveSetHash)
+    expect(bundle.planObject.payload.authorizedScopeHash).toBe('e'.repeat(64))
     expect(bundle.planObject.payload.finalLiveSetHash)
-      .not.toBe(bundle.planObject.payload.initialLiveSetHash)
+      .toBe(bundle.chunkObjects[1].payload.expectedFinalLiveSetHash)
     expect(bundle.planObject.descriptor.objectId).toBe(bundle.planObject.descriptor.sha256)
     expect(bundle.chunkObjects.every((object) => object.descriptor.objectId === object.descriptor.sha256))
       .toBe(true)

@@ -1291,14 +1291,17 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
   test('loads one frozen async plan outside the transaction before accepting its durable job', async () => {
     const fixture = await seedVerifiedArchive('frozen_async_accept')
     const liveRecords = new Map<string, { version: number }>()
+    const targetRecords = new Map<string, { recordId: string; exists: boolean; version: number | null }>()
     const deleteRecordIds: string[] = []
     for (let index = 0; index < 5001; index += 1) {
       const recordId = `${fixture.sheetId}_record_${String(index).padStart(5, '0')}`
       liveRecords.set(recordId, { version: 1 })
+      targetRecords.set(recordId, { recordId, exists: false, version: null })
       deleteRecordIds.push(recordId)
     }
     const schemaHash = sha(`${fixture.sheetId}|frozen|schema`)
     const scopeHash = sha(`${fixture.sheetId}|frozen|scope`)
+    const authorizedScopeHash = sha(`${fixture.sheetId}|frozen|authorized`)
     const bundle = buildRecoveryArchiveAsyncPlan({
       workspaceId: fixture.workspaceId,
       baseId: fixture.baseId,
@@ -1315,9 +1318,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       anchorSeq: fixture.anchorSeq,
       checkpointId: fixture.checkpointId,
       schemaHash,
+      authorizedScopeHash,
       selectedRecordIds: [],
       selectedFieldIds: [],
       liveRecords,
+      targetRecords,
       liveLinks: [],
       revertWrites: [],
       deleteRecordIds,
@@ -1344,7 +1349,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         schemaHash,
         actorId: fixture.actorId,
         mode: 'reset',
-        authorizedScopeHash: sha(`${fixture.sheetId}|frozen|authorized`),
+        authorizedScopeHash,
         archiveGenerationId: fixture.generationId,
         archiveRootHash: fixture.rootHash,
         archiveSourceVectorHash: fixture.sourceVectorHash,
