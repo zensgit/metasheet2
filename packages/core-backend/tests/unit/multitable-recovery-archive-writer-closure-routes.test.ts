@@ -12,12 +12,14 @@
  * proceeds into existing (non-RECOVERY_IN_PROGRESS) semantics.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import express from 'express'
 import request from 'supertest'
 import { usePinnedServer } from '../utils/pinned-server'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 
 const FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
+const ARCHIVE_FLAG = 'MULTITABLE_RECOVERY_ARCHIVE_ENABLED'
 const SHEET = 'sheet_dh1_src'
 const DECOY = 'sheet_dh1_decoy'
 const VIEW = 'view_dh1_src'
@@ -32,6 +34,10 @@ type LogEntry = {
   sql: string
   sheetId?: string
   key?: string
+}
+type SqlTraceEntry = {
+  sql: string
+  params: unknown[]
 }
 
 const SOURCE_TABLES = [
@@ -99,6 +105,7 @@ function assertNoSourceWrite(log: LogEntry[]): void {
 
 type Store = {
   log: LogEntry[]
+  trace: SqlTraceEntry[]
   blocked: Set<string>
   views: Array<{
     id: string
@@ -118,6 +125,7 @@ type Store = {
 
 function createStore(opts?: { emptyViews?: boolean }): Store {
   const log: LogEntry[] = []
+  const trace: SqlTraceEntry[] = []
   const blocked = new Set<string>()
   const views = opts?.emptyViews
     ? []
@@ -141,6 +149,10 @@ function createStore(opts?: { emptyViews?: boolean }): Store {
   ]
 
   const handler = (sql: string, params?: unknown[]): QueryResult => {
+    trace.push({
+      sql: sql.replace(/\s+/g, ' ').trim(),
+      params: params ? [...params] : [],
+    })
     const classified = classifySql(sql, params)
     if (classified) log.push(classified)
 
@@ -277,7 +289,7 @@ function createStore(opts?: { emptyViews?: boolean }): Store {
     return { rows: [], rowCount: 0 }
   }
 
-  return { log, blocked, views, sheets, fields, handler }
+  return { log, trace, blocked, views, sheets, fields, handler }
 }
 
 function createMockPool(handler: (sql: string, params?: unknown[]) => QueryResult) {
@@ -328,8 +340,55 @@ const recoveryBody = {
 
 afterEach(() => {
   delete process.env[FLAG]
+  delete process.env[ARCHIVE_FLAG]
+  delete process.env.MULTITABLE_ENABLE_SHEET_REVERT
+  delete process.env.MULTITABLE_ENABLE_PIT_RESET
+  delete process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED
   vi.restoreAllMocks()
   vi.resetModules()
+})
+
+describe('D7 flag-off HTTP parity', () => {
+  const HISTORICAL_FLAG_OFF_SHA256 = 'd44200359ffcbed8462e9655944244dbfd6933e11351e5b687b31b82e83876f6'
+
+  it('keeps existing recovery responses and SQL byte-identical for every non-exact archive flag value', async () => {
+    const probe = async (archiveFlag: string | undefined) => {
+      delete process.env[FLAG]
+      process.env.MULTITABLE_ENABLE_SHEET_REVERT = 'false'
+      process.env.MULTITABLE_ENABLE_PIT_RESET = 'false'
+      process.env.MULTITABLE_META_REVISION_RETENTION_ENABLED = '0'
+      if (archiveFlag === undefined) delete process.env[ARCHIVE_FLAG]
+      else process.env[ARCHIVE_FLAG] = archiveFlag
+
+      const store = createStore()
+      const app = await createApp(store.handler)
+      pinned.setApp(app)
+      const configRestore = await request(pinned.url())
+        .post(`/api/multitable/sheets/${SHEET}/config-restore-execute`)
+        .send({ revisionId: REVISION, previewToken: 'dummy-token' })
+      const revert = await request(pinned.url())
+        .post(`/api/multitable/sheets/${SHEET}/revert-execute`)
+        .send({ previewIdentity: 'dummy-token' })
+      const reset = await request(pinned.url())
+        .post(`/api/multitable/sheets/${SHEET}/reset-preview`)
+        .send({ anchorOperationId: 'dummy-anchor' })
+
+      return {
+        responses: [configRestore, revert, reset].map((response) => ({
+          status: response.status,
+          text: response.text,
+        })),
+        sql: store.trace,
+      }
+    }
+
+    const baseline = await probe(undefined)
+    expect(createHash('sha256').update(JSON.stringify(baseline)).digest('hex'))
+      .toBe(HISTORICAL_FLAG_OFF_SHA256)
+    for (const value of ['false', 'TRUE', ' true ', '1']) {
+      expect(await probe(value)).toEqual(baseline)
+    }
+  })
 })
 
 describe('D-H1 univer-meta writer closure — view writes', () => {

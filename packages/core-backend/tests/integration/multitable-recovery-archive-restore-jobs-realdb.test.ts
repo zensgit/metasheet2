@@ -1673,10 +1673,19 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
   })
 
   test.each([
-    { label: 'revert', recoveryMode: 'revert' as const },
-    { label: 'reset post-anchor create', recoveryMode: 'reset' as const },
-  ])('opens one real encrypted archive and commits its first async $label chunk through the production facade', async ({
+    {
+      label: 'revert end to end after a committed-chunk worker disappearance',
+      recoveryMode: 'revert' as const,
+      resumeAfterCrash: true,
+    },
+    {
+      label: 'reset through its first post-anchor-delete chunk',
+      recoveryMode: 'reset' as const,
+      resumeAfterCrash: false,
+    },
+  ])('runs one real encrypted archive $label through the production facade', async ({
     recoveryMode,
+    resumeAfterCrash,
   }) => {
     const expiresAt = '2099-12-31T00:00:00.000Z'
     const root = await mkdtemp(join(tmpdir(), `tm-composed-async-${recoveryMode}-`))
@@ -1836,28 +1845,30 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       )
       const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
       expect(candidate?.jobId).toBe(accepted.id)
-      const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+      const firstClaim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
         workerOwnerId: `${PREFIX}_composed_async_worker`,
         leaseUntil: future(240_000),
       })
+      const executeChunk = (claim: RecoveryArchiveRestoreJobWorkerClaim) =>
+        executeRecoveryArchiveAsyncRestoreChunk({
+          transaction,
+          query: q,
+          runtime: {
+            keyCustody: durable!.keyCustody,
+            objectStore: provider,
+            transactionDepth: depthProbe,
+          },
+          claim,
+          recheckAuthority: async () => true,
+          apply: {
+            preliminaryFullRead: async () => true,
+            stabilizeAuthorization: async () => 'ready',
+            finalLockedFullRead: async () => true,
+            evaluatePlanAuthorization: async () => true,
+          },
+        })
 
-      const result = await executeRecoveryArchiveAsyncRestoreChunk({
-        transaction,
-        query: q,
-        runtime: {
-          keyCustody: durable.keyCustody,
-          objectStore: provider,
-          transactionDepth: depthProbe,
-        },
-        claim,
-        recheckAuthority: async () => true,
-        apply: {
-          preliminaryFullRead: async () => true,
-          stabilizeAuthorization: async () => 'ready',
-          finalLockedFullRead: async () => true,
-          evaluatePlanAuthorization: async () => true,
-        },
-      })
+      const result = await executeChunk(firstClaim)
       expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
       expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
 
@@ -1900,6 +1911,130 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         completedCount: '1',
         totalCount: '5001',
       })
+      if (!resumeAfterCrash) return
+
+      // The first worker has durably committed chunk 0, renews once, and then disappears without
+      // pause/finalize. Only lease expiry may make the same block owner reclaimable.
+      const crashedClaim = await renewRecoveryArchiveRestoreJobLease(transaction, firstClaim, {
+        leaseUntil: await databaseFuture(1_000),
+      })
+      expect(crashedClaim.blockFence).toBe(firstClaim.blockFence)
+      expect(crashedClaim.workerFence).toBe(firstClaim.workerFence)
+      await waitUntil(crashedClaim.leaseUntil)
+
+      const resumedCandidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+      expect(resumedCandidate).toMatchObject({
+        jobId: accepted.id,
+        blockFence: crashedClaim.blockFence,
+      })
+      const resumedClaim = await claimRecoveryArchiveRestoreJob(transaction, resumedCandidate!, {
+        workerOwnerId: `${PREFIX}_composed_async_worker_reclaimer`,
+        leaseUntil: future(240_000),
+      })
+      expect(resumedClaim.blockFence).toBe(crashedClaim.blockFence)
+      expect(resumedClaim.workerFence).toBe((BigInt(crashedClaim.workerFence) + 1n).toString())
+      await expect(readRecoveryArchiveRestoreWorkerBinding(q, crashedClaim)).rejects.toEqual(
+        new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
+      )
+      await expect(executeChunk(crashedClaim)).rejects.toEqual(
+        new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
+      )
+      const staleAttemptEvidence = await q(
+        `SELECT job.completed_count::text AS completed_count,
+                (SELECT count(*)::int
+                   FROM public.meta_recovery_archive_job_chunks chunk_row
+                  WHERE chunk_row.job_id=job.id AND chunk_row.state='committed') AS committed_chunks,
+                (SELECT count(*)::int
+                   FROM public.meta_record_revisions revision_row
+                  WHERE revision_row.sheet_id=job.sheet_id AND revision_row.source='restore') AS restore_events
+           FROM public.meta_recovery_archive_jobs job
+          WHERE job.id=$1::uuid`,
+        [accepted.id],
+      )
+      expect(staleAttemptEvidence.rows).toEqual([{
+        completed_count: '1',
+        committed_chunks: 1,
+        restore_events: 1,
+      }])
+
+      await expect(executeChunk(resumedClaim)).resolves.toEqual({
+        kind: 'committed',
+        chunkIndex: 1,
+        completedCount: '5001',
+      })
+      await expect(executeChunk(resumedClaim)).resolves.toEqual({ kind: 'no_pending_chunk' })
+      const terminal = await finalizeRecoveryArchiveRestoreJob(transaction, resumedClaim, {
+        replayHorizonMs: 0,
+      })
+      expect(terminal).toMatchObject({ state: 'done', completedCount: '5001' })
+
+      const terminalEvidence = await q(
+        `SELECT job.state, job.completed_count::text AS completed_count,
+                sheet.recovery_writer_state,
+                terminal.operation_kind, terminal.component_count,
+                (SELECT count(*)::int
+                   FROM public.meta_recovery_archive_job_chunks chunk_row
+                  WHERE chunk_row.job_id=job.id AND chunk_row.state='committed') AS committed_chunks,
+                (SELECT coalesce(sum(chunk_row.committed_count), 0)::text
+                   FROM public.meta_recovery_archive_job_chunks chunk_row
+                  WHERE chunk_row.job_id=job.id) AS committed_total
+           FROM public.meta_recovery_archive_jobs job
+           JOIN public.meta_sheets sheet ON sheet.id=job.sheet_id
+           JOIN public.meta_record_history_operations terminal
+             ON terminal.sheet_id=job.sheet_id
+            AND terminal.operation_id=job.terminal_operation_id
+          WHERE job.id=$1::uuid`,
+        [accepted.id],
+      )
+      expect(terminalEvidence.rows).toEqual([{
+        state: 'done',
+        completed_count: '5001',
+        recovery_writer_state: null,
+        operation_kind: 'restore_aggregate',
+        component_count: 2,
+        committed_chunks: 2,
+        committed_total: '5001',
+      }])
+
+      const exactOnce = await q(
+        `WITH expected(record_id) AS (
+           SELECT unnest($2::text[])
+         ), restore_counts AS (
+           SELECT expected.record_id, count(revision_row.id)::int AS restore_events
+             FROM expected
+             LEFT JOIN public.meta_record_revisions revision_row
+               ON revision_row.sheet_id=$1
+              AND revision_row.record_id=expected.record_id
+              AND revision_row.source='restore'
+            GROUP BY expected.record_id
+         )
+         SELECT count(*)::int AS expected_records,
+                count(*) FILTER (WHERE restore_events=1)::int AS exactly_once_records,
+                min(restore_events)::int AS min_restore_events,
+                max(restore_events)::int AS max_restore_events,
+                (SELECT count(*)::int
+                   FROM public.meta_record_revisions revision_row
+                  WHERE revision_row.sheet_id=$1 AND revision_row.source='restore') AS total_restore_events
+           FROM restore_counts`,
+        [fixture.sheetId, recordIds],
+      )
+      expect(exactOnce.rows).toEqual([{
+        expected_records: 5001,
+        exactly_once_records: 5001,
+        min_restore_events: 1,
+        max_restore_events: 1,
+        total_restore_events: 5001,
+      }])
+      const lastRecord = await q(
+        `SELECT data, version
+           FROM public.meta_records
+          WHERE sheet_id=$1 AND id=$2`,
+        [fixture.sheetId, recordIds[5000]],
+      )
+      expect(lastRecord.rows).toEqual([{
+        data: { [fieldId]: 'archived-05000' },
+        version: 3,
+      }])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
