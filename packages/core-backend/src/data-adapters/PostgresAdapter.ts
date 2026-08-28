@@ -201,6 +201,8 @@ export class PostgresAdapter extends BaseDataAdapter {
     // positive integer, so the interpolation is injection-safe.
     sql += ` LIMIT ${this.resolveEffectiveLimit(options.limit)}`
     if (options.offset) {
+      // Ordering boundary: an OFFSET page without a deterministic ORDER BY silently duplicates/skips.
+      this.assertDeterministicOffsetOrdering(options.offset, options.orderBy)
       sql += ` OFFSET ${options.offset}`
     }
 
