@@ -77,6 +77,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             FROM unnest(ARRAY[
               'public.meta_recovery_archive_jobs',
               'public.meta_recovery_archive_job_chunks',
+              'public.meta_recovery_archive_restore_plans',
               'public.meta_recovery_archive_sync_receipts',
               'public.meta_recovery_token_burn_delete_requests',
               'public.idx_meta_recovery_archive_jobs_claimable',
@@ -95,6 +96,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND procedure_row.proname IN (
              'meta_recovery_archive_job_guard_row',
              'meta_recovery_archive_job_chunk_guard_row',
+             'meta_recovery_archive_restore_plan_guard_row',
              'meta_recovery_archive_job_consistency_guard',
              'meta_recovery_archive_nonterminal_job_guard_row',
              'meta_recovery_archive_sync_receipt_guard_row',
@@ -116,6 +118,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            AND trigger_row.tgname IN (
              'trg_meta_recovery_archive_jobs_guard_row',
              'trg_meta_recovery_archive_job_chunks_guard_row',
+             'trg_meta_recovery_archive_restore_plans_guard_row',
              'trg_meta_recovery_archive_jobs_consistency',
              'trg_meta_recovery_archive_job_chunks_consistency',
              'trg_meta_recovery_archive_jobs_burn_consistency',
@@ -127,6 +130,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
              'trg_meta_recovery_token_burn_delete_request_row',
              'trg_meta_recovery_archive_jobs_reject_truncate',
              'trg_meta_recovery_archive_job_chunks_reject_truncate',
+             'trg_meta_recovery_archive_restore_plans_reject_truncate',
              'trg_meta_recovery_archive_sync_receipts_reject_truncate'
            )
       );
@@ -320,6 +324,74 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         (state = 'committed' AND operation_id IS NOT NULL AND endpoint_seq >= 1 AND
           committed_count = record_count AND committed_at IS NOT NULL)
       )
+    )
+  `.execute(db)
+
+  await sql`
+    CREATE TABLE public.meta_recovery_archive_restore_plans (
+      token_sha256 text NOT NULL,
+      workspace_id text NOT NULL,
+      base_id text NOT NULL,
+      sheet_id text NOT NULL,
+      actor_id text NOT NULL,
+      archive_generation_id uuid NOT NULL,
+      archive_root_hash text NOT NULL,
+      source_vector_hash text NOT NULL,
+      key_id text COLLATE "C" NOT NULL,
+      plan_hash text NOT NULL,
+      plan_object_id text NOT NULL,
+      plan_object_version text NOT NULL,
+      plan_object_sha256 text NOT NULL,
+      plan_object_size bigint NOT NULL,
+      plan_object_expires_at timestamptz NOT NULL,
+      token_expires_at timestamptz NOT NULL,
+      state text NOT NULL DEFAULT 'prepared',
+      accepted_job_id uuid,
+      row_version bigint NOT NULL DEFAULT 1,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      accepted_at timestamptz,
+      CONSTRAINT pk_meta_recovery_archive_restore_plans PRIMARY KEY (token_sha256),
+      CONSTRAINT uq_meta_recovery_archive_restore_plans_job UNIQUE (accepted_job_id),
+      CONSTRAINT fk_meta_recovery_archive_restore_plans_base
+        FOREIGN KEY (base_id) REFERENCES public.meta_bases(id) ON DELETE RESTRICT,
+      CONSTRAINT fk_meta_recovery_archive_restore_plans_sheet
+        FOREIGN KEY (sheet_id) REFERENCES public.meta_sheets(id) ON DELETE RESTRICT,
+      CONSTRAINT fk_meta_recovery_archive_restore_plans_generation
+        FOREIGN KEY (archive_generation_id)
+        REFERENCES public.meta_recovery_archives(generation_id) ON DELETE RESTRICT,
+      CONSTRAINT fk_meta_recovery_archive_restore_plans_key
+        FOREIGN KEY (key_id)
+        REFERENCES public.meta_recovery_archive_keys(key_id) ON DELETE RESTRICT,
+      CONSTRAINT fk_meta_recovery_archive_restore_plans_job
+        FOREIGN KEY (accepted_job_id)
+        REFERENCES public.meta_recovery_archive_jobs(id) ON DELETE RESTRICT,
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_hashes CHECK (
+        token_sha256 ~ '^[0-9a-f]{64}$' AND
+        archive_root_hash ~ '^[0-9a-f]{64}$' AND
+        source_vector_hash ~ '^[0-9a-f]{64}$' AND
+        plan_hash ~ '^[0-9a-f]{64}$' AND
+        plan_object_id ~ '^[0-9a-f]{64}$' AND
+        plan_object_sha256 ~ '^[0-9a-f]{64}$'
+      ),
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_opaque CHECK (
+        length(btrim(workspace_id)) > 0 AND
+        length(btrim(actor_id)) > 0 AND
+        length(btrim(plan_object_version)) > 0
+      ),
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_object CHECK (
+        plan_object_size > 0 AND
+        plan_object_expires_at >= token_expires_at AND
+        token_expires_at > created_at
+      ),
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_state CHECK (
+        state IN ('prepared', 'accepted', 'expired')
+      ),
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_shape CHECK (
+        (state = 'prepared' AND accepted_job_id IS NULL AND accepted_at IS NULL) OR
+        (state = 'accepted' AND accepted_job_id IS NOT NULL AND accepted_at IS NOT NULL) OR
+        (state = 'expired' AND accepted_job_id IS NULL AND accepted_at IS NULL)
+      ),
+      CONSTRAINT chk_meta_recovery_archive_restore_plans_row_version CHECK (row_version >= 1)
     )
   `.execute(db)
 
@@ -589,6 +661,140 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   await sql`
+    CREATE FUNCTION public.meta_recovery_archive_restore_plan_guard_row()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path = pg_catalog, public
+    AS $fn$
+    DECLARE
+      archive_match_count integer;
+      job_match_count integer;
+    BEGIN
+      IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_delete_not_authorized';
+      END IF;
+
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.state <> 'prepared' OR NEW.accepted_job_id IS NOT NULL OR
+           NEW.accepted_at IS NOT NULL OR NEW.row_version <> 1 OR
+           NEW.token_expires_at <= clock_timestamp() THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_initial_posture_invalid';
+        END IF;
+        SELECT count(*)::integer
+          INTO archive_match_count
+          FROM public.meta_recovery_archives archive_row
+          JOIN public.meta_recovery_archive_keys key_row ON key_row.key_id = archive_row.key_id
+         WHERE archive_row.generation_id = NEW.archive_generation_id
+           AND archive_row.workspace_id = NEW.workspace_id
+           AND archive_row.base_id = NEW.base_id
+           AND archive_row.sheet_id = NEW.sheet_id
+           AND archive_row.state = 'verified'
+           AND archive_row.build_status = 'finalized'
+           AND archive_row.coverage_status = 'complete'
+           AND archive_row.root_hash = NEW.archive_root_hash
+           AND archive_row.source_vector_hash = NEW.source_vector_hash
+           AND archive_row.key_id = NEW.key_id
+           AND archive_row.expires_at >= NEW.plan_object_expires_at
+           AND NOT EXISTS (
+             SELECT 1
+               FROM public.meta_recovery_archive_legal_holds hold_row
+              WHERE hold_row.generation_id = archive_row.generation_id
+                AND hold_row.state = 'active'
+           )
+           AND key_row.state = 'active';
+        IF archive_match_count <> 1 THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_archive_binding_invalid';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF NEW.token_sha256 IS DISTINCT FROM OLD.token_sha256 OR
+         NEW.workspace_id IS DISTINCT FROM OLD.workspace_id OR
+         NEW.base_id IS DISTINCT FROM OLD.base_id OR
+         NEW.sheet_id IS DISTINCT FROM OLD.sheet_id OR
+         NEW.actor_id IS DISTINCT FROM OLD.actor_id OR
+         NEW.archive_generation_id IS DISTINCT FROM OLD.archive_generation_id OR
+         NEW.archive_root_hash IS DISTINCT FROM OLD.archive_root_hash OR
+         NEW.source_vector_hash IS DISTINCT FROM OLD.source_vector_hash OR
+         NEW.key_id IS DISTINCT FROM OLD.key_id OR
+         NEW.plan_hash IS DISTINCT FROM OLD.plan_hash OR
+         NEW.plan_object_id IS DISTINCT FROM OLD.plan_object_id OR
+         NEW.plan_object_version IS DISTINCT FROM OLD.plan_object_version OR
+         NEW.plan_object_sha256 IS DISTINCT FROM OLD.plan_object_sha256 OR
+         NEW.plan_object_size IS DISTINCT FROM OLD.plan_object_size OR
+         NEW.plan_object_expires_at IS DISTINCT FROM OLD.plan_object_expires_at OR
+         NEW.token_expires_at IS DISTINCT FROM OLD.token_expires_at OR
+         NEW.created_at IS DISTINCT FROM OLD.created_at OR
+         NEW.row_version <> OLD.row_version + 1 THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_immutable_or_cas_invalid';
+      END IF;
+
+      IF OLD.state = 'prepared' AND NEW.state = 'accepted' THEN
+        IF OLD.token_expires_at <= clock_timestamp() THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_expired';
+        END IF;
+        SELECT count(*)::integer
+          INTO archive_match_count
+          FROM public.meta_recovery_archives archive_row
+          JOIN public.meta_recovery_archive_keys key_row ON key_row.key_id = archive_row.key_id
+         WHERE archive_row.generation_id = NEW.archive_generation_id
+           AND archive_row.workspace_id = NEW.workspace_id
+           AND archive_row.base_id = NEW.base_id
+           AND archive_row.sheet_id = NEW.sheet_id
+           AND archive_row.state = 'verified'
+           AND archive_row.build_status = 'finalized'
+           AND archive_row.coverage_status = 'complete'
+           AND archive_row.root_hash = NEW.archive_root_hash
+           AND archive_row.source_vector_hash = NEW.source_vector_hash
+           AND archive_row.key_id = NEW.key_id
+           AND archive_row.expires_at >= NEW.plan_object_expires_at
+           AND NOT EXISTS (
+             SELECT 1
+               FROM public.meta_recovery_archive_legal_holds hold_row
+              WHERE hold_row.generation_id = archive_row.generation_id
+                AND hold_row.state = 'active'
+           )
+           AND key_row.state IN ('active', 'retiring');
+        IF archive_match_count <> 1 THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_archive_binding_invalid';
+        END IF;
+        SELECT count(*)::integer
+          INTO job_match_count
+          FROM public.meta_recovery_archive_jobs job_row
+         WHERE job_row.id = NEW.accepted_job_id
+           AND job_row.token_sha256 = NEW.token_sha256
+           AND job_row.workspace_id = NEW.workspace_id
+           AND job_row.base_id = NEW.base_id
+           AND job_row.sheet_id = NEW.sheet_id
+           AND job_row.actor_id = NEW.actor_id
+           AND job_row.archive_generation_id = NEW.archive_generation_id
+           AND job_row.archive_root_hash = NEW.archive_root_hash
+           AND job_row.source_vector_hash = NEW.source_vector_hash
+           AND job_row.key_id = NEW.key_id
+           AND job_row.plan_hash = NEW.plan_hash
+           AND job_row.plan_object_id = NEW.plan_object_id
+           AND job_row.plan_object_version = NEW.plan_object_version
+           AND job_row.plan_object_sha256 = NEW.plan_object_sha256
+           AND job_row.plan_object_size = NEW.plan_object_size
+           AND job_row.plan_object_expires_at = NEW.plan_object_expires_at;
+        IF job_match_count <> 1 OR NEW.accepted_at IS NULL THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_job_binding_invalid';
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF OLD.state = 'prepared' AND NEW.state = 'expired' AND
+         OLD.token_expires_at <= clock_timestamp() AND
+         NEW.accepted_job_id IS NULL AND NEW.accepted_at IS NULL THEN
+        RETURN NEW;
+      END IF;
+
+      RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_plan_transition_invalid';
+    END
+    $fn$
+  `.execute(db)
+
+  await sql`
     CREATE FUNCTION public.meta_recovery_archive_nonterminal_job_guard_row()
     RETURNS trigger
     LANGUAGE plpgsql
@@ -604,6 +810,15 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         ) THEN
           RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_nonterminal_restore_job';
         END IF;
+        IF EXISTS (
+          SELECT 1
+            FROM public.meta_recovery_archive_restore_plans plan_row
+           WHERE plan_row.archive_generation_id = OLD.generation_id
+             AND plan_row.state = 'prepared'
+             AND plan_row.token_expires_at > clock_timestamp()
+        ) THEN
+          RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_prepared_restore_plan';
+        END IF;
         RETURN OLD;
       END IF;
 
@@ -618,6 +833,19 @@ export async function up(db: Kysely<unknown>): Promise<void> {
            )
       ) THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_nonterminal_restore_job';
+      END IF;
+      IF EXISTS (
+        SELECT 1
+          FROM public.meta_recovery_archive_restore_plans plan_row
+         WHERE plan_row.archive_generation_id = OLD.generation_id
+           AND plan_row.state = 'prepared'
+           AND plan_row.token_expires_at > clock_timestamp()
+           AND (
+             NEW.state IS DISTINCT FROM 'verified' OR
+             NEW.expires_at < plan_row.plan_object_expires_at
+           )
+      ) THEN
+        RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_prepared_restore_plan';
       END IF;
       RETURN NEW;
     END
@@ -1016,6 +1244,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_job_chunk_guard_row()
   `.execute(db)
   await sql`
+    CREATE TRIGGER trg_meta_recovery_archive_restore_plans_guard_row
+      BEFORE INSERT OR UPDATE OR DELETE ON public.meta_recovery_archive_restore_plans
+      FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_restore_plan_guard_row()
+  `.execute(db)
+  await sql`
     CREATE TRIGGER trg_meta_recovery_token_burn_delete_request_row
       INSTEAD OF INSERT ON public.meta_recovery_token_burn_delete_requests
       FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_token_burn_delete_request_row()
@@ -1074,6 +1307,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       FOR EACH STATEMENT EXECUTE FUNCTION public.meta_recovery_archive_d5_reject_truncate()
   `.execute(db)
   await sql`
+    CREATE TRIGGER trg_meta_recovery_archive_restore_plans_reject_truncate
+      BEFORE TRUNCATE ON public.meta_recovery_archive_restore_plans
+      FOR EACH STATEMENT EXECUTE FUNCTION public.meta_recovery_archive_d5_reject_truncate()
+  `.execute(db)
+  await sql`
     CREATE TRIGGER trg_meta_recovery_archive_sync_receipts_reject_truncate
       BEFORE TRUNCATE ON public.meta_recovery_archive_sync_receipts
       FOR EACH STATEMENT EXECUTE FUNCTION public.meta_recovery_archive_d5_reject_truncate()
@@ -1086,12 +1324,14 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     BEGIN
       IF pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NULL OR
          pg_catalog.to_regclass('public.meta_recovery_archive_job_chunks') IS NULL OR
+         pg_catalog.to_regclass('public.meta_recovery_archive_restore_plans') IS NULL OR
          pg_catalog.to_regclass('public.meta_recovery_archive_sync_receipts') IS NULL THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_restore_job_schema_missing';
       END IF;
 
       LOCK TABLE public.meta_recovery_archive_jobs,
                  public.meta_recovery_archive_job_chunks,
+                 public.meta_recovery_archive_restore_plans,
                  public.meta_recovery_archive_sync_receipts,
                  public.meta_recovery_token_burns,
                  public.meta_recovery_archives,
@@ -1102,6 +1342,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
 
       IF EXISTS (SELECT 1 FROM public.meta_recovery_archive_jobs LIMIT 1) OR
          EXISTS (SELECT 1 FROM public.meta_recovery_archive_job_chunks LIMIT 1) OR
+         EXISTS (SELECT 1 FROM public.meta_recovery_archive_restore_plans LIMIT 1) OR
          EXISTS (SELECT 1 FROM public.meta_recovery_archive_sync_receipts LIMIT 1) OR
          EXISTS (SELECT 1 FROM public.meta_recovery_token_burns WHERE burn_kind IS NOT NULL LIMIT 1) OR
          EXISTS (
@@ -1117,6 +1358,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 
   await sql`DROP TRIGGER trg_meta_recovery_archive_sync_receipts_reject_truncate ON public.meta_recovery_archive_sync_receipts`.execute(db)
+  await sql`DROP TRIGGER trg_meta_recovery_archive_restore_plans_reject_truncate ON public.meta_recovery_archive_restore_plans`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archive_job_chunks_reject_truncate ON public.meta_recovery_archive_job_chunks`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archive_jobs_reject_truncate ON public.meta_recovery_archive_jobs`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archive_sync_receipts_consistency ON public.meta_recovery_archive_sync_receipts`.execute(db)
@@ -1128,6 +1370,7 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP TRIGGER trg_meta_recovery_token_burns_d5_guard_row ON public.meta_recovery_token_burns`.execute(db)
   await sql`DROP INDEX public.idx_meta_recovery_token_burns_d5_prunable`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archive_job_chunks_guard_row ON public.meta_recovery_archive_job_chunks`.execute(db)
+  await sql`DROP TRIGGER trg_meta_recovery_archive_restore_plans_guard_row ON public.meta_recovery_archive_restore_plans`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archive_jobs_guard_row ON public.meta_recovery_archive_jobs`.execute(db)
   await sql`DROP TRIGGER trg_meta_recovery_archives_nonterminal_job_guard_row ON public.meta_recovery_archives`.execute(db)
 
@@ -1139,12 +1382,14 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP FUNCTION public.meta_recovery_token_burn_d5_consistency_guard()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_token_burn_d5_guard_row()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_archive_sync_receipt_guard_row()`.execute(db)
+  await sql`DROP FUNCTION public.meta_recovery_archive_restore_plan_guard_row()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_archive_nonterminal_job_guard_row()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_archive_job_consistency_guard()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_archive_job_chunk_guard_row()`.execute(db)
   await sql`DROP FUNCTION public.meta_recovery_archive_job_guard_row()`.execute(db)
 
   await sql`DROP TABLE public.meta_recovery_archive_sync_receipts`.execute(db)
+  await sql`DROP TABLE public.meta_recovery_archive_restore_plans`.execute(db)
   await sql`
     ALTER TABLE public.meta_recovery_token_burns
       DROP CONSTRAINT chk_meta_recovery_token_burns_d5_retention,

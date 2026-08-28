@@ -754,7 +754,16 @@ export interface ExactArchiveRecoveryIdentityClaims extends ExactAnchorRecoveryI
   archiveSourceVectorHash: string
   archiveKeyId: string
   archivePlanHash: string
+  archivePlanObject?: ExactArchiveRecoveryPlanObjectClaims
   scopeKind: ExactArchiveRecoveryScopeKind
+}
+
+export interface ExactArchiveRecoveryPlanObjectClaims {
+  objectId: string
+  version: string
+  sha256: string
+  size: string
+  expiresAt: string
 }
 
 export function mintExactArchiveRecoveryIdentity(
@@ -827,6 +836,12 @@ export function verifyExactArchiveRecoveryIdentity(
     payload.archiveSourceVectorHash,
     payload.archivePlanHash,
   ]
+  let archivePlanObject: ExactArchiveRecoveryPlanObjectClaims | undefined
+  try {
+    archivePlanObject = admitArchivePlanObjectClaims(payload.archivePlanObject)
+  } catch {
+    return { valid: false, reason: 'malformed_archive_claims' }
+  }
   if (
     archiveIds.some((value) => typeof value !== 'string' || value.length === 0) ||
     archiveHashes.some((value) => typeof value !== 'string' || !/^[0-9a-f]{64}$/.test(value)) ||
@@ -852,10 +867,44 @@ export function verifyExactArchiveRecoveryIdentity(
       archiveSourceVectorHash: payload.archiveSourceVectorHash as string,
       archiveKeyId: payload.archiveKeyId as string,
       archivePlanHash: payload.archivePlanHash as string,
+      ...(archivePlanObject ? { archivePlanObject } : {}),
       scopeKind: payload.scopeKind,
     },
     expiresAt: new Date(payload.exp * 1000).toISOString(),
   }
+}
+
+function admitArchivePlanObjectClaims(
+  value: unknown,
+): ExactArchiveRecoveryPlanObjectClaims | undefined {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('malformed archive plan object')
+  }
+  const row = value as Record<string, unknown>
+  const keys = Object.keys(row).sort()
+  const expected = ['expiresAt', 'objectId', 'sha256', 'size', 'version']
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError('malformed archive plan object')
+  }
+  if (
+    typeof row.objectId !== 'string' || !/^[0-9a-f]{64}$/.test(row.objectId) ||
+    typeof row.version !== 'string' || row.version.trim().length === 0 || row.version !== row.version.trim() ||
+    typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256) ||
+    typeof row.size !== 'string' || !/^[1-9][0-9]*$/.test(row.size) ||
+    typeof row.expiresAt !== 'string' ||
+    Number.isNaN(new Date(row.expiresAt).getTime()) ||
+    new Date(row.expiresAt).toISOString() !== row.expiresAt
+  ) {
+    throw new TypeError('malformed archive plan object')
+  }
+  return Object.freeze({
+    objectId: row.objectId,
+    version: row.version,
+    sha256: row.sha256,
+    size: row.size,
+    expiresAt: row.expiresAt,
+  })
 }
 
 export function mintExactAnchorRecoveryIdentity(claims: ExactAnchorRecoveryIdentityClaims, expiresIn: SignOptions['expiresIn'] = DEFAULT_TTL): string {

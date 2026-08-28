@@ -122,7 +122,17 @@ export function assertRecoveryArchiveRestorePlanMatchesClaims(
     plan.archiveRootHash !== claims.archiveRootHash ||
     plan.sourceVectorHash !== claims.archiveSourceVectorHash ||
     plan.keyId !== claims.archiveKeyId ||
-    plan.planHash !== claims.archivePlanHash
+    plan.planHash !== claims.archivePlanHash ||
+    (
+      claims.archivePlanObject !== undefined &&
+      (
+        plan.planObjectId !== claims.archivePlanObject.objectId ||
+        plan.planObjectVersion !== claims.archivePlanObject.version ||
+        plan.planObjectSha256 !== claims.archivePlanObject.sha256 ||
+        plan.planObjectSize !== claims.archivePlanObject.size ||
+        plan.planObjectExpiresAt !== claims.archivePlanObject.expiresAt
+      )
+    )
   ) {
     fail('RECOVERY_ARCHIVE_RESTORE_PLAN_HASH_MISMATCH')
   }

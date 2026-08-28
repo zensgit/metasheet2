@@ -199,6 +199,44 @@ describe('D5 archive restore identity and frozen plan', () => {
     })).toMatchObject({ valid: false, reason: 'wrong_type' })
   })
 
+  test('async archive token binds the exact plan object read descriptor', () => {
+    const plan = compileRecoveryArchiveRestorePlan(planInput())
+    const boundClaims = {
+      ...claims(plan.planHash),
+      archivePlanObject: {
+        objectId: SHA('8'),
+        version: plan.planObjectVersion,
+        sha256: plan.planObjectSha256,
+        size: plan.planObjectSize,
+        expiresAt: plan.planObjectExpiresAt,
+      },
+    }
+    const descriptorPlan = compileRecoveryArchiveRestorePlan({
+      ...planInput(),
+      planObjectId: boundClaims.archivePlanObject.objectId,
+    })
+    const token = mintExactArchiveRecoveryIdentity({
+      ...boundClaims,
+      archivePlanHash: descriptorPlan.planHash,
+    })
+    const verified = verifyExactArchiveRecoveryIdentity(token, {
+      sheetId: boundClaims.sheetId,
+      actorId: boundClaims.actorId,
+    })
+    expect(verified.valid).toBe(true)
+    expect(() => assertRecoveryArchiveRestorePlanMatchesClaims(
+      descriptorPlan,
+      verified.claims!,
+    )).not.toThrow()
+    expect(() => assertRecoveryArchiveRestorePlanMatchesClaims(
+      compileRecoveryArchiveRestorePlan({
+        ...planInput(),
+        planObjectVersion: 'substituted_version',
+      }),
+      verified.claims!,
+    )).toThrowError(new RecoveryArchiveRestorePlanError('RECOVERY_ARCHIVE_RESTORE_PLAN_HASH_MISMATCH'))
+  })
+
   test('a token-bound plan cannot be swapped across actor, scope, generation, or chunk plan', () => {
     const plan = compileRecoveryArchiveRestorePlan(planInput())
     for (const mismatch of [
@@ -224,5 +262,20 @@ describe('D5 archive restore identity and frozen plan', () => {
     })
     expect(result).toEqual({ valid: false, reason: 'malformed_archive_claims' })
     expect(JSON.stringify(result)).not.toContain('not-a-hash')
+
+    const malformedObjectToken = mintExactArchiveRecoveryIdentity({
+      ...claims(plan.planHash),
+      archivePlanObject: {
+        objectId: SHA('8'),
+        version: 'version',
+        sha256: SHA('7'),
+        size: '01',
+        expiresAt: '2026-09-05T00:00:00.000Z',
+      },
+    })
+    expect(verifyExactArchiveRecoveryIdentity(malformedObjectToken, {
+      sheetId: 'sheet_d5_unit',
+      actorId: 'actor_d5_unit',
+    })).toEqual({ valid: false, reason: 'malformed_archive_claims' })
   })
 })

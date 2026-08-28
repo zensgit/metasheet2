@@ -12,11 +12,13 @@ import {
   claimRecoveryArchiveRestoreJob,
   finalizeRecoveryArchiveRestoreJob,
   pauseRecoveryArchiveRestoreJob,
+  prepareRecoveryArchiveRestorePlan,
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
   RecoveryArchiveRestoreJobError,
   resumeRecoveryArchiveRestoreJob,
   runRecoveryArchiveRestoreChunk,
+  sweepExpiredRecoveryArchiveRestorePlans,
   selectRecoveryArchiveRestoreJobCandidate,
   sweepExpiredRecoveryArchiveRestoreJobs,
   type RecoveryArchiveRestoreJobQuery,
@@ -303,7 +305,10 @@ async function seedVerifiedArchive(
   return fixture
 }
 
-function compilePlan(fixture: Fixture): RecoveryArchiveRestorePlan {
+function compilePlan(
+  fixture: Fixture,
+  objectExpiresAt = '2099-12-31T00:00:00.000Z',
+): RecoveryArchiveRestorePlan {
   return compileRecoveryArchiveRestorePlan({
     workspaceId: fixture.workspaceId,
     baseId: fixture.baseId,
@@ -316,11 +321,11 @@ function compilePlan(fixture: Fixture): RecoveryArchiveRestorePlan {
     archiveRootHash: fixture.rootHash,
     sourceVectorHash: fixture.sourceVectorHash,
     keyId: fixture.keyId,
-    planObjectId: `${PREFIX}_plan_object`,
+    planObjectId: sha(`${fixture.sheetId}|plan_object_id`),
     planObjectVersion: `${PREFIX}_plan_version`,
     planObjectSha256: sha(`${fixture.sheetId}|plan_object`),
     planObjectSize: '2048',
-    planObjectExpiresAt: '2100-01-02T00:00:00.000Z',
+    planObjectExpiresAt: objectExpiresAt,
     chunks: [
       {
         chunkIndex: 0,
@@ -329,7 +334,7 @@ function compilePlan(fixture: Fixture): RecoveryArchiveRestorePlan {
         chunkObjectVersion: `${PREFIX}_chunk_version_0`,
         chunkObjectSha256: sha(`${fixture.sheetId}|chunk_object|0`),
         chunkObjectSize: '1024',
-        chunkObjectExpiresAt: '2100-01-02T00:00:00.000Z',
+        chunkObjectExpiresAt: objectExpiresAt,
         recordCount: '5000',
       },
       {
@@ -339,7 +344,7 @@ function compilePlan(fixture: Fixture): RecoveryArchiveRestorePlan {
         chunkObjectVersion: `${PREFIX}_chunk_version_1`,
         chunkObjectSha256: sha(`${fixture.sheetId}|chunk_object|1`),
         chunkObjectSize: '512',
-        chunkObjectExpiresAt: '2100-01-02T00:00:00.000Z',
+        chunkObjectExpiresAt: objectExpiresAt,
         recordCount: '1',
       },
     ],
@@ -367,9 +372,37 @@ function mintToken(
     archiveSourceVectorHash: fixture.sourceVectorHash,
     archiveKeyId: fixture.keyId,
     archivePlanHash: plan.planHash,
+    archivePlanObject: {
+      objectId: plan.planObjectId,
+      version: plan.planObjectVersion,
+      sha256: plan.planObjectSha256,
+      size: plan.planObjectSize,
+      expiresAt: plan.planObjectExpiresAt,
+    },
     scopeKind: plan.scopeKind,
   }
   return mintExactArchiveRecoveryIdentity(claims, expiresIn)
+}
+
+function restoreRequestIdentity(fixture: Fixture) {
+  return {
+    workspaceId: fixture.workspaceId,
+    baseId: fixture.baseId,
+    sheetId: fixture.sheetId,
+    actorId: fixture.actorId,
+  }
+}
+
+async function preparePlan(
+  fixture: Fixture,
+  plan: RecoveryArchiveRestorePlan,
+  token: string,
+): Promise<void> {
+  await prepareRecoveryArchiveRestorePlan(transaction, {
+    token,
+    plan,
+    identity: restoreRequestIdentity(fixture),
+  })
 }
 
 async function seedSyncApplyWorld(label: string) {
@@ -633,6 +666,7 @@ async function cleanupFixtures(): Promise<void> {
     if (sheetIds.length > 0) {
       await client.query(`DELETE FROM public.meta_recovery_token_burns WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(`DELETE FROM public.meta_recovery_archive_sync_receipts WHERE sheet_id=ANY($1::text[])`, [sheetIds])
+      await client.query(`DELETE FROM public.meta_recovery_archive_restore_plans WHERE sheet_id=ANY($1::text[])`, [sheetIds])
       await client.query(
         `DELETE FROM public.meta_recovery_archive_job_chunks
           WHERE job_id IN (SELECT id FROM public.meta_recovery_archive_jobs WHERE sheet_id=ANY($1::text[]))`,
@@ -1182,13 +1216,75 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     })
   })
 
+  test('requires one exact prepared plan and expires unused tokens without reopening archive binding', async () => {
+    const fixture = await seedVerifiedArchive('prepared_plan')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+
+    await expect(acceptRecoveryArchiveRestoreJob(transaction, {
+      token,
+      plan,
+      identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(60_000),
+      recheckAuthority: async () => true,
+    })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
+      'RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID',
+    ))
+
+    await preparePlan(fixture, plan, token)
+    await preparePlan(fixture, plan, token)
+    await expect(q(
+      `UPDATE public.meta_recovery_archive_restore_plans
+          SET plan_object_sha256=$2, row_version=row_version+1
+        WHERE token_sha256=$1`,
+      [sha(token), sha(`${fixture.sheetId}|substituted_plan_object`)],
+    )).rejects.toMatchObject({
+      code: '55000',
+      message: 'recovery_archive_restore_plan_immutable_or_cas_invalid',
+    })
+    const prepared = await q(
+      `SELECT state, row_version::text AS row_version,
+              accepted_job_id::text AS accepted_job_id
+         FROM public.meta_recovery_archive_restore_plans
+        WHERE token_sha256=$1`,
+      [sha(token)],
+    )
+    expect(prepared.rows[0]).toEqual({
+      state: 'prepared',
+      row_version: '1',
+      accepted_job_id: null,
+    })
+
+    const expiringFixture = await seedVerifiedArchive('prepared_plan_expiry')
+    const expiringPlan = compilePlan(expiringFixture)
+    const expiringToken = mintToken(expiringFixture, expiringPlan, '1s')
+    await preparePlan(expiringFixture, expiringPlan, expiringToken)
+    const expiry = await q(
+      `SELECT token_expires_at::text AS token_expires_at
+         FROM public.meta_recovery_archive_restore_plans
+        WHERE token_sha256=$1`,
+      [sha(expiringToken)],
+    )
+    await waitUntil(String((expiry.rows[0] as Record<string, unknown>).token_expires_at))
+    expect(await sweepExpiredRecoveryArchiveRestorePlans(transaction)).toBe(1)
+    const expired = await q(
+      `SELECT state, row_version::text AS row_version
+         FROM public.meta_recovery_archive_restore_plans
+        WHERE token_sha256=$1`,
+      [sha(expiringToken)],
+    )
+    expect(expired.rows[0]).toEqual({ state: 'expired', row_version: '2' })
+  })
+
   test('accepts, applies two chunks, seals one exact aggregate, and releases the writer block', async () => {
     const fixture = await seedVerifiedArchive('complete')
     const plan = compilePlan(fixture)
     const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
     const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: future(60_000),
       recheckAuthority: async () => true,
     })
@@ -1286,13 +1382,17 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
                 WHERE member_row.sheet_id=job.sheet_id
                   AND member_row.parent_operation_id=job.terminal_operation_id) AS member_count,
               sheet.recovery_writer_state,
-              burn.burn_kind, burn.terminal_at IS NOT NULL AS burn_terminal
+              burn.burn_kind, burn.terminal_at IS NOT NULL AS burn_terminal,
+              prepared.state AS prepared_state,
+              prepared.accepted_job_id = job.id AS prepared_job_bound
          FROM public.meta_recovery_archive_jobs job
          JOIN public.meta_record_history_operations operation_row
            ON operation_row.sheet_id=job.sheet_id
           AND operation_row.operation_id=job.terminal_operation_id
          JOIN public.meta_sheets sheet ON sheet.id=job.sheet_id
          JOIN public.meta_recovery_token_burns burn ON burn.job_id=job.id
+         JOIN public.meta_recovery_archive_restore_plans prepared
+           ON prepared.token_sha256=job.token_sha256
         WHERE job.id=$1::uuid`,
       [accepted.id],
     )
@@ -1307,11 +1407,14 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       recovery_writer_state: null,
       burn_kind: 'async',
       burn_terminal: true,
+      prepared_state: 'accepted',
+      prepared_job_bound: true,
     })
 
     await expect(acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: future(60_000),
       recheckAuthority: async () => true,
     })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
@@ -1323,6 +1426,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const fixture = await seedVerifiedArchive('admission')
     const plan = compilePlan(fixture)
     const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
     const tamperedPlan = {
       ...plan,
       chunks: [
@@ -1334,6 +1438,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     await expect(acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan: tamperedPlan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: await databaseFuture(60_000),
       recheckAuthority: async () => true,
     })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
@@ -1342,6 +1447,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     await expect(acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: '2100-01-01T00:00:00.000Z',
       recheckAuthority: async () => true,
     })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
@@ -1411,6 +1517,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: await databaseFuture(60_000),
       recheckAuthority: async () => true,
     })
@@ -1551,10 +1658,12 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const fixture = await seedVerifiedArchive('resume')
     const plan = compilePlan(fixture)
     const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
 
     await expect(acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: future(60_000),
       recheckAuthority: async () => false,
     })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
@@ -1572,6 +1681,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline: future(60_000),
       recheckAuthority: async () => true,
     })
@@ -1717,9 +1827,12 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const partialFixture = await seedVerifiedArchive('sweep_partial')
     const partialPlan = compilePlan(partialFixture)
     const partialDeadline = await databaseFuture(2_500)
+    const partialToken = mintToken(partialFixture, partialPlan)
+    await preparePlan(partialFixture, partialPlan, partialToken)
     const partial = await acceptRecoveryArchiveRestoreJob(transaction, {
-      token: mintToken(partialFixture, partialPlan),
+      token: partialToken,
       plan: partialPlan,
+      identity: restoreRequestIdentity(partialFixture),
       resumeDeadline: partialDeadline,
       recheckAuthority: async () => true,
     })
@@ -1733,10 +1846,13 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
 
     const archiveExpiry = await databaseFuture(4_000)
     const zeroFixture = await seedVerifiedArchive('sweep_zero', archiveExpiry)
-    const zeroPlan = compilePlan(zeroFixture)
+    const zeroPlan = compilePlan(zeroFixture, new Date(archiveExpiry).toISOString())
+    const zeroToken = mintToken(zeroFixture, zeroPlan, '1s')
+    await preparePlan(zeroFixture, zeroPlan, zeroToken)
     const zero = await acceptRecoveryArchiveRestoreJob(transaction, {
-      token: mintToken(zeroFixture, zeroPlan),
+      token: zeroToken,
       plan: zeroPlan,
+      identity: restoreRequestIdentity(zeroFixture),
       resumeDeadline: await databaseFuture(2_500),
       recheckAuthority: async () => true,
     })
@@ -1787,6 +1903,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         recovery_writer_state: null,
       }),
     ]))
+    expect(await pruneEligibleRecoveryTokenBurns(transaction)).toBe(1)
   })
 
   test('keeps legacy and held burns, then prunes only a terminal provenance-complete burn', async () => {
@@ -1794,9 +1911,11 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     const plan = compilePlan(fixture)
     const token = mintToken(fixture, plan, '1s')
     const resumeDeadline = future(1_500)
+    await preparePlan(fixture, plan, token)
     const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
       token,
       plan,
+      identity: restoreRequestIdentity(fixture),
       resumeDeadline,
       recheckAuthority: async () => true,
     })

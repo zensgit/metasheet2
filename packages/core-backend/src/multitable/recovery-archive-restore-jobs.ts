@@ -90,9 +90,23 @@ export interface RecoveryArchiveRestoreAcceptContext {
   readonly plan: RecoveryArchiveRestorePlan
 }
 
+export interface RecoveryArchiveRestoreRequestIdentity {
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly sheetId: string
+  readonly actorId: string
+}
+
+export interface PrepareRecoveryArchiveRestorePlanInput {
+  readonly token: string
+  readonly plan: RecoveryArchiveRestorePlan
+  readonly identity: RecoveryArchiveRestoreRequestIdentity
+}
+
 export interface AcceptRecoveryArchiveRestoreJobInput {
   readonly token: string
   readonly plan: RecoveryArchiveRestorePlan
+  readonly identity: RecoveryArchiveRestoreRequestIdentity
   readonly resumeDeadline: Date | string
   readonly recheckAuthority: (
     query: RecoveryArchiveRestoreJobQuery,
@@ -259,6 +273,203 @@ type ChunkRow = {
   committed_count?: unknown
 }
 
+type AdmittedPreparedRestorePlan = {
+  tokenSha256: string
+  tokenExpiresAt: string
+  identity: RecoveryArchiveRestoreRequestIdentity
+  claims: ExactArchiveRecoveryIdentityClaims
+  plan: RecoveryArchiveRestorePlan
+}
+
+function admitPreparedRestorePlan(
+  input: PrepareRecoveryArchiveRestorePlanInput | AcceptRecoveryArchiveRestoreJobInput,
+): AdmittedPreparedRestorePlan {
+  if (!input || typeof input !== 'object') invalidInput()
+  const identity = Object.freeze({
+    workspaceId: opaque(input.identity?.workspaceId),
+    baseId: opaque(input.identity?.baseId),
+    sheetId: opaque(input.identity?.sheetId),
+    actorId: opaque(input.identity?.actorId),
+  })
+  const token = opaque(input.token)
+  const verified = verifyExactArchiveRecoveryIdentity(token, {
+    sheetId: identity.sheetId,
+    actorId: identity.actorId,
+  })
+  if (
+    !verified.valid || !verified.claims || !verified.expiresAt ||
+    !verified.claims.archivePlanObject
+  ) {
+    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
+  }
+  try {
+    const suppliedPlan = input.plan
+    const plan = compileRecoveryArchiveRestorePlan(suppliedPlan)
+    if (
+      plan.planHash !== suppliedPlan.planHash ||
+      plan.totalCount !== suppliedPlan.totalCount ||
+      plan.workspaceId !== identity.workspaceId ||
+      plan.baseId !== identity.baseId ||
+      plan.sheetId !== identity.sheetId ||
+      plan.actorId !== identity.actorId
+    ) {
+      throw new Error('noncanonical plan')
+    }
+    assertRecoveryArchiveRestorePlanMatchesClaims(plan, verified.claims)
+    const tokenExpiresAt = timestamp(verified.expiresAt)
+    if (new Date(plan.planObjectExpiresAt).getTime() < new Date(tokenExpiresAt).getTime()) {
+      throw new Error('plan object expires before token')
+    }
+    return {
+      tokenSha256: createHash('sha256').update(token).digest('hex'),
+      tokenExpiresAt,
+      identity,
+      claims: verified.claims,
+      plan,
+    }
+  } catch (error) {
+    if (error instanceof RecoveryArchiveRestoreJobError) throw error
+    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
+  }
+}
+
+async function lockPreparedRestorePlan(
+  query: RecoveryArchiveRestoreJobQuery,
+  admitted: AdmittedPreparedRestorePlan,
+): Promise<'prepared' | 'accepted' | 'invalid'> {
+  const result = await query(
+    `SELECT state,
+            (
+              workspace_id=$2 AND base_id=$3 AND sheet_id=$4 AND actor_id=$5 AND
+              archive_generation_id=$6::uuid AND archive_root_hash=$7 AND
+              source_vector_hash=$8 AND key_id=$9 AND plan_hash=$10 AND
+              plan_object_id=$11 AND plan_object_version=$12 AND
+              plan_object_sha256=$13 AND plan_object_size=$14::bigint AND
+              plan_object_expires_at=$15::timestamptz AND
+              token_expires_at=$16::timestamptz
+            ) AS exact_binding,
+            token_expires_at > clock_timestamp() AS token_live,
+            row_version::text AS row_version
+       FROM public.meta_recovery_archive_restore_plans
+      WHERE token_sha256=$1
+      FOR UPDATE`,
+    [
+      admitted.tokenSha256,
+      admitted.identity.workspaceId,
+      admitted.identity.baseId,
+      admitted.identity.sheetId,
+      admitted.identity.actorId,
+      admitted.plan.archiveGenerationId,
+      admitted.plan.archiveRootHash,
+      admitted.plan.sourceVectorHash,
+      admitted.plan.keyId,
+      admitted.plan.planHash,
+      admitted.plan.planObjectId,
+      admitted.plan.planObjectVersion,
+      admitted.plan.planObjectSha256,
+      admitted.plan.planObjectSize,
+      admitted.plan.planObjectExpiresAt,
+      admitted.tokenExpiresAt,
+    ],
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row || row.exact_binding !== true) return 'invalid'
+  if (row.state === 'prepared' && row.token_live === true && row.row_version === '1') {
+    return 'prepared'
+  }
+  if (row.state === 'accepted' && row.row_version === '2') return 'accepted'
+  return 'invalid'
+}
+
+/**
+ * Persist the exact server-frozen plan identity before it is returned to the caller. The raw token
+ * and recovered values are not stored. Repeating the same prepared token is idempotent; an accepted
+ * or differently-bound token is refused.
+ */
+export async function prepareRecoveryArchiveRestorePlan(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  input: PrepareRecoveryArchiveRestorePlanInput,
+): Promise<void> {
+  const admitted = admitPreparedRestorePlan(input)
+  await transaction(async (query) => {
+    await acquireCanonicalSheetFence(query, admitted.plan.sheetId)
+    await lockRecoveryArchiveKey(query, admitted.plan.keyId, true)
+    await lockRecoveryArchiveBinding(
+      query,
+      admitted.plan,
+      true,
+      admitted.plan.planObjectExpiresAt,
+    )
+    await query(
+      `INSERT INTO public.meta_recovery_archive_restore_plans (
+         token_sha256, workspace_id, base_id, sheet_id, actor_id,
+         archive_generation_id, archive_root_hash, source_vector_hash, key_id,
+         plan_hash, plan_object_id, plan_object_version, plan_object_sha256,
+         plan_object_size, plan_object_expires_at, token_expires_at
+       ) VALUES (
+         $1, $2, $3, $4, $5,
+         $6::uuid, $7, $8, $9,
+         $10, $11, $12, $13,
+         $14::bigint, $15::timestamptz, $16::timestamptz
+       )
+       ON CONFLICT (token_sha256) DO NOTHING`,
+      [
+        admitted.tokenSha256,
+        admitted.identity.workspaceId,
+        admitted.identity.baseId,
+        admitted.identity.sheetId,
+        admitted.identity.actorId,
+        admitted.plan.archiveGenerationId,
+        admitted.plan.archiveRootHash,
+        admitted.plan.sourceVectorHash,
+        admitted.plan.keyId,
+        admitted.plan.planHash,
+        admitted.plan.planObjectId,
+        admitted.plan.planObjectVersion,
+        admitted.plan.planObjectSha256,
+        admitted.plan.planObjectSize,
+        admitted.plan.planObjectExpiresAt,
+        admitted.tokenExpiresAt,
+      ],
+    )
+    const exact = await lockPreparedRestorePlan(query, admitted)
+    if (exact === 'accepted') {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_TOKEN_REPLAYED')
+    }
+    if (exact !== 'prepared') {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
+    }
+  })
+}
+
+export async function sweepExpiredRecoveryArchiveRestorePlans(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  limitInput = 100,
+): Promise<number> {
+  const limit = Math.min(1000, safePositiveInteger(limitInput))
+  return transaction(async (query) => {
+    const result = await query(
+      `WITH candidates AS (
+         SELECT token_sha256
+           FROM public.meta_recovery_archive_restore_plans
+          WHERE state='prepared' AND token_expires_at <= clock_timestamp()
+          ORDER BY token_expires_at, token_sha256
+          FOR UPDATE SKIP LOCKED
+          LIMIT $1::int
+       )
+       UPDATE public.meta_recovery_archive_restore_plans plan_row
+          SET state='expired', row_version=plan_row.row_version+1
+         FROM candidates
+        WHERE plan_row.token_sha256=candidates.token_sha256
+          AND plan_row.state='prepared'
+          AND plan_row.token_expires_at <= clock_timestamp()
+       RETURNING plan_row.token_sha256`,
+      [limit],
+    )
+    return result.rows.length
+  })
+}
+
 /**
  * Accept one >5000 frozen plan. The canonical fence, active key, verified archive,
  * DB-fresh authority, durable block, immutable job/chunks, and one async burn all
@@ -269,32 +480,10 @@ export async function acceptRecoveryArchiveRestoreJob(
   input: AcceptRecoveryArchiveRestoreJobInput,
 ): Promise<RecoveryArchiveRestoreJobSnapshot> {
   if (!input || typeof input.recheckAuthority !== 'function') invalidInput()
-  const token = opaque(input.token)
-  const suppliedPlan = input.plan
-  const verified = verifyExactArchiveRecoveryIdentity(token, {
-    sheetId: suppliedPlan?.sheetId,
-    actorId: suppliedPlan?.actorId,
-  })
-  if (!verified.valid || !verified.claims || !verified.expiresAt) {
-    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
-  }
-  let plan: RecoveryArchiveRestorePlan
-  try {
-    plan = compileRecoveryArchiveRestorePlan(suppliedPlan)
-    if (
-      plan.planHash !== suppliedPlan.planHash ||
-      plan.totalCount !== suppliedPlan.totalCount
-    ) {
-      throw new Error('noncanonical plan')
-    }
-    assertRecoveryArchiveRestorePlanMatchesClaims(plan, verified.claims)
-  } catch {
-    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
-  }
+  const admitted = admitPreparedRestorePlan(input)
+  const { claims, identity, plan, tokenExpiresAt, tokenSha256 } = admitted
   const resumeDeadline = futureTimestamp(input.resumeDeadline)
-  const tokenExpiresAt = timestamp(verified.expiresAt)
   const retainUntil = laterTimestamp(tokenExpiresAt, resumeDeadline)
-  const tokenSha256 = createHash('sha256').update(token).digest('hex')
   const jobId = randomUUID()
 
   try {
@@ -302,7 +491,14 @@ export async function acceptRecoveryArchiveRestoreJob(
       const prepared = await prepareArchiveWriterBlockTransaction(query, plan.sheetId)
       await lockRecoveryArchiveKey(query, plan.keyId, true)
       await lockRecoveryArchiveBinding(query, plan, true, resumeDeadline)
-      if (!(await input.recheckAuthority(query, { claims: verified.claims!, plan }))) {
+      const preparedState = await lockPreparedRestorePlan(query, admitted)
+      if (preparedState === 'accepted') {
+        throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_TOKEN_REPLAYED')
+      }
+      if (preparedState !== 'prepared') {
+        throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID')
+      }
+      if (!(await input.recheckAuthority(query, { claims, plan }))) {
         throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED')
       }
       const block = await claimArchiveWriterBlockPrepared(prepared, {
@@ -328,10 +524,10 @@ export async function acceptRecoveryArchiveRestoreJob(
          )`,
         [
           jobId,
-          plan.workspaceId,
-          plan.baseId,
-          plan.sheetId,
-          plan.actorId,
+          identity.workspaceId,
+          identity.baseId,
+          identity.sheetId,
+          identity.actorId,
           tokenSha256,
           plan.recoveryMode,
           plan.scopeKind,
@@ -397,6 +593,17 @@ export async function acceptRecoveryArchiveRestoreJob(
           retainUntil,
         ],
       )
+      const acceptedPlan = await query(
+        `UPDATE public.meta_recovery_archive_restore_plans
+            SET state='accepted', accepted_job_id=$2::uuid,
+                accepted_at=clock_timestamp(), row_version=row_version+1
+          WHERE token_sha256=$1 AND state='prepared' AND row_version=1
+          RETURNING token_sha256`,
+        [tokenSha256, jobId],
+      )
+      if (acceptedPlan.rows.length !== 1) {
+        throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID')
+      }
       return readJobSnapshotInTransaction(query, jobId)
     })
   } catch (error) {
