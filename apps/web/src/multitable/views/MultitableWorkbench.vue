@@ -581,11 +581,18 @@
       :visible="showRecoveryArchive"
       :sheet-id="workbench.activeSheetId.value"
       :is-zh="isZh"
+      :fields="scopedGridFields"
+      :selected-record-ids="[...exportSelectedRecordIds]"
       :list-catalog="recoveryArchiveCatalogWire"
       :preview-archive="recoveryArchivePreviewWire"
       :execute-archive="recoveryArchiveExecuteWire"
+      :accept-job="recoveryArchiveAcceptJobWire"
+      :read-job="recoveryArchiveReadJobWire"
+      :resume-job="recoveryArchiveResumeJobWire"
+      :cancel-job="recoveryArchiveCancelJobWire"
       @close="showRecoveryArchive = false"
       @executed="onRecoveryArchiveExecuted"
+      @refresh="onRecoveryArchiveChanged"
     />
   </div>
 </template>
@@ -678,6 +685,7 @@ import type {
   ConfigRestoreExecuteConfirm,
   ExactAnchorRequest,
   RecoveryArchiveExecuteResult,
+  RecoveryArchiveJobSnapshot,
   RecoveryArchivePreview,
   RecoveryArchiveScope,
   RestoreBatchExecuteRecord,
@@ -844,7 +852,7 @@ const revertExecuteWire = (sid: string, previewIdentity: string) => workbench.cl
 const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage() }
 
 // D6 archive recovery is a server-led sheet surface. There is no local flag or capability inference:
-// catalog, preview, and execute render the server's current decision, while async jobs remain unavailable here.
+// catalog, preview, sync execute, and durable job actions render only the server's current decision.
 const showRecoveryArchive = ref(false)
 const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
   workbench.client.listRecoveryArchiveCatalog(sheetId, params)
@@ -856,9 +864,28 @@ const recoveryArchiveExecuteWire = (
   sheetId: string,
   input: { previewIdentity: string; scope: RecoveryArchiveScope },
 ): Promise<RecoveryArchiveExecuteResult> => workbench.client.executeRecoveryArchive(sheetId, input)
+const recoveryArchiveAcceptJobWire = (
+  sheetId: string,
+  previewIdentity: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.acceptRecoveryArchiveJob(sheetId, previewIdentity)
+const recoveryArchiveReadJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.readRecoveryArchiveJob(sheetId, jobId)
+const recoveryArchiveResumeJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.resumeRecoveryArchiveJob(sheetId, jobId)
+const recoveryArchiveCancelJobWire = (
+  sheetId: string,
+  jobId: string,
+): Promise<RecoveryArchiveJobSnapshot> => workbench.client.cancelRecoveryArchiveJob(sheetId, jobId)
 async function onRecoveryArchiveExecuted(): Promise<void> {
   await grid.reloadCurrentPage()
   showSuccess(isZh.value ? '归档恢复已完成。' : 'Archive recovery completed.')
+}
+async function onRecoveryArchiveChanged(): Promise<void> {
+  await grid.reloadCurrentPage()
 }
 
 // Slice 3: per-view personal-toggle click + "reset to shared". Reset deletes the actor's own personal-config

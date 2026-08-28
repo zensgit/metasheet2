@@ -47,10 +47,37 @@ describe('MultitableApiClient recovery archive routes', () => {
     ])
   })
 
-  it('does not expose the caller-planned async job accept endpoint', () => {
-    const client = new MultitableApiClient({ fetchFn: vi.fn() }) as unknown as Record<string, unknown>
+  it('accepts, reads, resumes, and cancels an async job without sending plan or worker fields', async () => {
+    const planned = {
+      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
+      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
+    } as const
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce(response({ ok: true, data: planned }, 202))
+      .mockResolvedValueOnce(response({ ok: true, data: { ...planned, state: 'applying', completedCount: '2500', rowVersion: '2' } }))
+      .mockResolvedValueOnce(response({ ok: true, data: { ...planned, rowVersion: '3' } }))
+      .mockResolvedValueOnce(response({ ok: true, data: { ...planned, state: 'cancelled_zero_write', terminalAt: '2026-08-29T01:00:00.000Z', rowVersion: '4' } }))
+    const client = new MultitableApiClient({ fetchFn })
 
-    expect(client.acceptRecoveryArchiveJob).toBeUndefined()
-    expect(client.resumeRecoveryArchiveJob).toBeUndefined()
+    const accepted = await client.acceptRecoveryArchiveJob('sheet/a', 'server-preview-identity')
+    await client.readRecoveryArchiveJob('sheet/a', accepted.jobId)
+    await client.resumeRecoveryArchiveJob('sheet/a', accepted.jobId)
+    const cancelled = await client.cancelRecoveryArchiveJob('sheet/a', accepted.jobId)
+
+    expect(cancelled).toMatchObject({ state: 'cancelled_zero_write', rowVersion: '4' })
+    expect(fetchFn.mock.calls).toEqual([
+      ['/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs/accept', expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ previewIdentity: 'server-preview-identity' }),
+      })],
+      ['/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs/55555555-5555-4555-8555-555555555555'],
+      ['/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs/55555555-5555-4555-8555-555555555555/resume', expect.objectContaining({
+        method: 'POST', body: JSON.stringify({}),
+      })],
+      ['/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs/55555555-5555-4555-8555-555555555555/cancel', expect.objectContaining({
+        method: 'POST', body: JSON.stringify({}),
+      })],
+    ])
+    expect(JSON.stringify(fetchFn.mock.calls)).not.toContain('workerFence')
+    expect(JSON.stringify(fetchFn.mock.calls)).not.toContain('plan')
   })
 })

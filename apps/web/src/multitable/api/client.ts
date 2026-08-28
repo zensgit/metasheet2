@@ -1008,6 +1008,24 @@ export interface RecoveryArchiveExecuteResult {
   keptCreatedAfterAnchor: number
 }
 
+export type RecoveryArchiveJobState =
+  | 'planned'
+  | 'applying'
+  | 'paused_retryable'
+  | 'done'
+  | 'abandoned_partial'
+  | 'cancelled_zero_write'
+
+export interface RecoveryArchiveJobSnapshot {
+  jobId: string
+  state: RecoveryArchiveJobState
+  totalCount: string
+  completedCount: string
+  resumeDeadline: string
+  terminalAt: string | null
+  rowVersion: string
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -2257,9 +2275,9 @@ export class MultitableApiClient implements CommentsApiClient {
   }
 
   // Archive recovery stays server-led: catalog metadata is read-only, the preview
-  // binds a generation and scope, and execute accepts only that server identity.
-  // Async job acceptance deliberately has no client method until its server-owned
-  // planner replaces the caller-supplied plan endpoint.
+  // binds a generation and scope, and both sync execute and async accept consume
+  // only that server identity. Job state and owner actions never accept a plan,
+  // worker fence, or caller-provided progress.
   async listRecoveryArchiveCatalog(
     sheetId: string,
     params?: { cursor?: string; limit?: number },
@@ -2296,6 +2314,58 @@ export class MultitableApiClient implements CommentsApiClient {
       body: JSON.stringify(input),
     })
     return this.parseJson<RecoveryArchiveExecuteResult>(res)
+  }
+
+  async acceptRecoveryArchiveJob(
+    sheetId: string,
+    previewIdentity: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ previewIdentity }),
+    })
+    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+  }
+
+  async readRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}`,
+    )
+    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+  }
+
+  async resumeRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}/resume`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    )
+    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+  }
+
+  async cancelRecoveryArchiveJob(
+    sheetId: string,
+    jobId: string,
+  ): Promise<RecoveryArchiveJobSnapshot> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}/cancel`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      },
+    )
+    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---
