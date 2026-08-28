@@ -127,6 +127,7 @@ import {
   type RecoveryArchivePreviewRuntime,
 } from '../multitable/recovery-archive-preview'
 import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
+import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
 import {
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
@@ -6919,6 +6920,7 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
 export interface UniverMetaRouterOptions {
   readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
   readonly recoveryArchiveAuditedReplayHorizonMs?: number
+  readonly recoveryArchiveAsyncResumeHorizonMs?: number
 }
 
 export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
@@ -11387,6 +11389,29 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           generationId,
         },
       ),
+      accept:
+        options.recoveryArchiveRuntime &&
+        Number.isSafeInteger(options.recoveryArchiveAsyncResumeHorizonMs) &&
+        (options.recoveryArchiveAsyncResumeHorizonMs ?? -1) > 0
+          ? (context, input) => acceptFrozenRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              options.recoveryArchiveRuntime!.objectStore,
+              options.recoveryArchiveRuntime!.transactionDepth,
+              {
+                identity: {
+                  workspaceId: context.workspaceId,
+                  baseId: context.baseId,
+                  sheetId: context.sheetId,
+                  actorId: context.actorId,
+                },
+                token: input.token,
+                resumeDeadline: new Date(
+                  Date.now() + options.recoveryArchiveAsyncResumeHorizonMs!,
+                ),
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
       read: (context, jobId) => readRecoveryArchiveRestoreJobStatus(
         recoveryArchiveRestoreTransaction,
         {
@@ -11401,9 +11426,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           jobId,
         },
       ),
-      // No production KMS/object-store runtime or owner-ratified replay horizon is configured yet.
-      // Omitting `accept` and `cancel` makes those endpoints return a fixed 503 after authorization;
-      // read/resume remain available without silently choosing either unresolved owner policy.
+      // Cancel remains unavailable until the durable worker owns partial-job terminalization.
     },
   })
 

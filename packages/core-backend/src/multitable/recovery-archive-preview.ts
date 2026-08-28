@@ -23,12 +23,21 @@ import {
   isMultitableRecoveryArchiveEnabled,
 } from './recovery-archive-contract'
 import type { RecoveryArchiveKeyCustodyAdapter, RecoveryArchiveTransactionDepthProbe } from './recovery-archive-crypto'
-import type { RecoveryArchiveObjectExpectedBinding, RecoveryArchiveObjectStoreProvider } from './recovery-archive-object-store'
+import {
+  createTransactionGuardedRecoveryArchiveObjectStore,
+  type RecoveryArchiveObjectExpectedBinding,
+  type RecoveryArchiveObjectStoreProvider,
+} from './recovery-archive-object-store'
 import {
   readRecoveryArchiveCompleteSectionState,
   RecoveryArchiveReaderError,
   type RecoveryArchiveSelectedBinding,
 } from './recovery-archive-reader'
+import {
+  buildRecoveryArchiveAsyncPlan,
+  persistRecoveryArchiveAsyncPlan,
+} from './recovery-archive-async-plan'
+import { prepareRecoveryArchiveRestorePlan } from './recovery-archive-restore-jobs'
 import { materializeRecoveryArchiveLinksForSync, RecoveryArchiveSyncRestoreError } from './recovery-archive-sync-restore'
 import { compileRecoveryArchiveSyncPlan } from './recovery-archive-sync-plan'
 import {
@@ -37,6 +46,7 @@ import {
   hashExactAnchorSchema,
   hashRecoveryAuthorizationScope,
   mintExactArchiveRecoveryIdentity,
+  verifyExactArchiveRecoveryIdentity,
   type ExactArchiveRecoveryScopeKind,
   type ExactAnchorRecoveryMode,
 } from './restore-preview-identity'
@@ -269,11 +279,6 @@ export async function previewRecoveryArchive(
     return blockedResult(admitted, 'no_changes', details.summary)
   }
 
-  const scopedRecordCount = BigInt(prepared.anchorTarget.size)
-  if (scopedRecordCount > RECOVERY_ARCHIVE_ASYNC_THRESHOLD) {
-    return blockedResult(admitted, 'async_plan_required', details.summary, 'async')
-  }
-
   const scopeHash = hashAnchorRecoveryScope(
     [...prepared.anchorTarget.values()].map((state) => ({
       recordId: state.recordId,
@@ -285,18 +290,112 @@ export async function previewRecoveryArchive(
     'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [admitted.sheetId],
   )).rows as Array<{ id?: unknown; type?: unknown; property?: unknown }>
+  const liveLinks = await loadAuthoritativeLiveLinkEdgesForSheet(query, admitted.sheetId)
   const liveSetHash = hashExactAnchorLiveSet(
     [...liveLoaded.liveById.entries()].map(([recordId, live]) => ({
       recordId,
       version: live.version,
     })),
-    await loadAuthoritativeLiveLinkEdgesForSheet(query, admitted.sheetId),
+    liveLinks,
   )
   const schemaHash = hashExactAnchorSchema(schemaRows.map((row) => ({
     id: String(row.id),
     type: String(row.type ?? ''),
     property: row.property,
   })))
+  const authorizedScopeHash = hashRecoveryAuthorizationScope({
+    sheetId: admitted.sheetId,
+    actorId: admitted.actorId,
+  })
+  if (BigInt(details.summary.effectiveWriteCount) > RECOVERY_ARCHIVE_ASYNC_THRESHOLD) {
+    const bundle = buildRecoveryArchiveAsyncPlan({
+      workspaceId: admitted.workspaceId,
+      baseId: admitted.baseId,
+      sheetId: admitted.sheetId,
+      actorId: admitted.actorId,
+      recoveryMode: admitted.mode,
+      scopeKind: admitted.scope.kind,
+      scopeHash,
+      archiveGenerationId: archive.selectedBinding.generationId,
+      archiveRootHash: archive.selectedBinding.rootHash,
+      sourceVectorHash: archive.selectedBinding.sourceVectorHash,
+      keyId: archive.keyId,
+      anchorOperationId: archive.selectedBinding.anchorOperationId,
+      anchorSeq: archive.selectedBinding.anchorSeq,
+      checkpointId: archive.selectedBinding.checkpointId,
+      schemaHash,
+      selectedRecordIds,
+      selectedFieldIds,
+      liveRecords: liveLoaded.liveById,
+      liveLinks,
+      revertWrites: details.revertWrites,
+      deleteRecordIds: details.deleteRecordIds,
+      expiresAt: archive.manifestObject.expectedExpiresAt,
+    })
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(
+      runtime.objectStore,
+      runtime.transactionDepth,
+    )
+    await persistRecoveryArchiveAsyncPlan(store, bundle)
+    const identityTtlSeconds = asyncIdentityTtlSeconds(bundle.planObject.descriptor.expiresAt)
+    const previewIdentity = mintExactArchiveRecoveryIdentity({
+      sheetId: admitted.sheetId,
+      anchorOperationId: archive.selectedBinding.anchorOperationId,
+      anchorSeq: archive.selectedBinding.anchorSeq,
+      checkpointId: archive.selectedBinding.checkpointId,
+      scopeHash,
+      liveSetHash,
+      schemaHash,
+      actorId: admitted.actorId,
+      mode: admitted.mode,
+      authorizedScopeHash,
+      archiveGenerationId: archive.selectedBinding.generationId,
+      archiveRootHash: archive.selectedBinding.rootHash,
+      archiveSourceVectorHash: archive.selectedBinding.sourceVectorHash,
+      archiveKeyId: archive.keyId,
+      archivePlanHash: bundle.plan.planHash,
+      archivePlanObject: {
+        objectId: bundle.planObject.descriptor.objectId,
+        version: bundle.planObject.descriptor.version,
+        sha256: bundle.planObject.descriptor.sha256,
+        size: bundle.planObject.descriptor.size,
+        expiresAt: bundle.planObject.descriptor.expiresAt,
+      },
+      scopeKind: admitted.scope.kind,
+    }, identityTtlSeconds)
+    const verified = verifyExactArchiveRecoveryIdentity(previewIdentity, {
+      sheetId: admitted.sheetId,
+      actorId: admitted.actorId,
+    })
+    if (
+      !verified.valid ||
+      !verified.expiresAt ||
+      verified.expiresAt > bundle.planObject.descriptor.expiresAt
+    ) {
+      fail('RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID')
+    }
+    await prepareRecoveryArchiveRestorePlan(transaction, {
+      token: previewIdentity,
+      plan: bundle.plan,
+      identity: {
+        workspaceId: admitted.workspaceId,
+        baseId: admitted.baseId,
+        sheetId: admitted.sheetId,
+        actorId: admitted.actorId,
+      },
+    })
+    return Object.freeze({
+      generationId: archive.selectedBinding.generationId,
+      mode: admitted.mode,
+      scopeKind: admitted.scope.kind,
+      executionKind: 'async',
+      executable: true,
+      blockedReason: null,
+      previewIdentity,
+      summary: details.summary,
+    })
+  }
+
   const plan = compileRecoveryArchiveSyncPlan({
     workspaceId: admitted.workspaceId,
     baseId: admitted.baseId,
@@ -322,10 +421,7 @@ export async function previewRecoveryArchive(
     schemaHash,
     actorId: admitted.actorId,
     mode: admitted.mode,
-    authorizedScopeHash: hashRecoveryAuthorizationScope({
-      sheetId: admitted.sheetId,
-      actorId: admitted.actorId,
-    }),
+    authorizedScopeHash,
     archiveGenerationId: archive.selectedBinding.generationId,
     archiveRootHash: archive.selectedBinding.rootHash,
     archiveSourceVectorHash: archive.selectedBinding.sourceVectorHash,
@@ -343,6 +439,14 @@ export async function previewRecoveryArchive(
     previewIdentity,
     summary: details.summary,
   })
+}
+
+function asyncIdentityTtlSeconds(expiresAt: string): number {
+  const remainingSeconds = Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000) - 1
+  if (!Number.isSafeInteger(remainingSeconds) || remainingSeconds < 1) {
+    fail('RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND')
+  }
+  return Math.min(600, remainingSeconds)
 }
 
 function normalizeInput(input: RecoveryArchivePreviewInput): RecoveryArchivePreviewInput {

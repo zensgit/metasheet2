@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
@@ -28,6 +31,15 @@ import {
   compileRecoveryArchiveRestorePlan,
   type RecoveryArchiveRestorePlan,
 } from '../../src/multitable/recovery-archive-restore-plan'
+import {
+  acceptFrozenRecoveryArchiveRestoreJob,
+  buildRecoveryArchiveAsyncPlan,
+  persistRecoveryArchiveAsyncPlan,
+} from '../../src/multitable/recovery-archive-async-plan'
+import {
+  createLocalRecoveryArchiveObjectStoreProvider,
+  createTransactionGuardedRecoveryArchiveObjectStore,
+} from '../../src/multitable/recovery-archive-object-store'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import {
   expireRecoveryArchiveAfterLegalHoldCheck,
@@ -1274,6 +1286,116 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       [sha(expiringToken)],
     )
     expect(expired.rows[0]).toEqual({ state: 'expired', row_version: '2' })
+  })
+
+  test('loads one frozen async plan outside the transaction before accepting its durable job', async () => {
+    const fixture = await seedVerifiedArchive('frozen_async_accept')
+    const liveRecords = new Map<string, { version: number }>()
+    const deleteRecordIds: string[] = []
+    for (let index = 0; index < 5001; index += 1) {
+      const recordId = `${fixture.sheetId}_record_${String(index).padStart(5, '0')}`
+      liveRecords.set(recordId, { version: 1 })
+      deleteRecordIds.push(recordId)
+    }
+    const schemaHash = sha(`${fixture.sheetId}|frozen|schema`)
+    const scopeHash = sha(`${fixture.sheetId}|frozen|scope`)
+    const bundle = buildRecoveryArchiveAsyncPlan({
+      workspaceId: fixture.workspaceId,
+      baseId: fixture.baseId,
+      sheetId: fixture.sheetId,
+      actorId: fixture.actorId,
+      recoveryMode: 'reset',
+      scopeKind: 'whole_sheet',
+      scopeHash,
+      archiveGenerationId: fixture.generationId,
+      archiveRootHash: fixture.rootHash,
+      sourceVectorHash: fixture.sourceVectorHash,
+      keyId: fixture.keyId,
+      anchorOperationId: fixture.anchorOperationId,
+      anchorSeq: fixture.anchorSeq,
+      checkpointId: fixture.checkpointId,
+      schemaHash,
+      selectedRecordIds: [],
+      selectedFieldIds: [],
+      liveRecords,
+      liveLinks: [],
+      revertWrites: [],
+      deleteRecordIds,
+      expiresAt: '2099-12-31T00:00:00.000Z',
+    })
+    const root = await mkdtemp(join(tmpdir(), 'tm-frozen-async-plan-'))
+    const provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
+    const depthProbe = { currentTransactionDepth: () => transactionDepth }
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe)
+
+    try {
+      expect(transactionDepth).toBe(0)
+      await persistRecoveryArchiveAsyncPlan(store, bundle)
+      expect(transactionDepth).toBe(0)
+      const payload = bundle.planObject.payload
+      const descriptor = bundle.planObject.descriptor
+      const token = mintExactArchiveRecoveryIdentity({
+        sheetId: fixture.sheetId,
+        anchorOperationId: fixture.anchorOperationId,
+        anchorSeq: fixture.anchorSeq,
+        checkpointId: fixture.checkpointId,
+        scopeHash,
+        liveSetHash: payload.initialLiveSetHash,
+        schemaHash,
+        actorId: fixture.actorId,
+        mode: 'reset',
+        authorizedScopeHash: sha(`${fixture.sheetId}|frozen|authorized`),
+        archiveGenerationId: fixture.generationId,
+        archiveRootHash: fixture.rootHash,
+        archiveSourceVectorHash: fixture.sourceVectorHash,
+        archiveKeyId: fixture.keyId,
+        archivePlanHash: bundle.plan.planHash,
+        archivePlanObject: {
+          objectId: descriptor.objectId,
+          version: descriptor.version,
+          sha256: descriptor.sha256,
+          size: descriptor.size,
+          expiresAt: descriptor.expiresAt,
+        },
+        scopeKind: 'whole_sheet',
+      }, '10m')
+      await preparePlan(fixture, bundle.plan, token)
+
+      const accepted = await acceptFrozenRecoveryArchiveRestoreJob(
+        transaction,
+        provider,
+        depthProbe,
+        {
+          identity: restoreRequestIdentity(fixture),
+          token,
+          resumeDeadline: future(300_000),
+          recheckAuthority: async () => true,
+        },
+      )
+
+      expect(transactionDepth).toBe(0)
+      expect(accepted).toMatchObject({ state: 'planned', totalCount: '5001', completedCount: '0' })
+      const registry = await q(
+        `SELECT state, plan_hash, plan_object_id, plan_object_version
+           FROM public.meta_recovery_archive_restore_plans
+          WHERE token_sha256 = $1`,
+        [sha(token)],
+      )
+      expect(registry.rows).toEqual([expect.objectContaining({
+        state: 'accepted',
+        plan_hash: bundle.plan.planHash,
+        plan_object_id: descriptor.objectId,
+        plan_object_version: descriptor.version,
+      })])
+      await expect(cancelRecoveryArchiveRestoreJob(transaction, {
+        ...restoreRequestIdentity(fixture),
+        jobId: accepted.id,
+        replayHorizonMs: 0,
+        recheckAuthority: async () => true,
+      })).resolves.toMatchObject({ state: 'cancelled_zero_write' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   test('accepts, applies two chunks, seals one exact aggregate, and releases the writer block', async () => {

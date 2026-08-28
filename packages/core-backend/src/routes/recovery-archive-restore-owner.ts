@@ -22,12 +22,10 @@ import {
   type RecoveryArchiveRestoreJobQuery,
   type RecoveryArchiveRestoreJobSnapshot,
 } from '../multitable/recovery-archive-restore-jobs'
-import type { RecoveryArchiveRestorePlan } from '../multitable/recovery-archive-restore-plan'
 
 const EMPTY_BODY_SCHEMA = z.object({}).strict()
 const ACCEPT_BODY_SCHEMA = z.object({
   previewIdentity: z.string().trim().min(1),
-  plan: z.record(z.unknown()),
 }).strict()
 const PREVIEW_SCOPE_SCHEMA = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('whole_sheet') }).strict(),
@@ -114,7 +112,7 @@ export interface RecoveryArchiveRestoreOwnerService {
   ) => Promise<RecoveryArchiveCatalogEntry>
   readonly accept?: (
     context: RecoveryArchiveRestoreOwnerContext,
-    input: { readonly token: string; readonly plan: RecoveryArchiveRestorePlan },
+    input: { readonly token: string },
   ) => Promise<RecoveryArchiveRestoreJobSnapshot>
   readonly read: (
     context: RecoveryArchiveRestoreOwnerContext,
@@ -242,7 +240,6 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
     try {
       const snapshot = await dependencies.service.accept(context, {
         token: parsed.data.previewIdentity,
-        plan: parsed.data.plan as unknown as RecoveryArchiveRestorePlan,
       })
       return res.status(202).json({ ok: true, data: projectSnapshot(snapshot) })
     } catch (error) {

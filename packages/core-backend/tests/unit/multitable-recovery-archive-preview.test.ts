@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const dependencies = vi.hoisted(() => ({
+  buildRecoveryArchiveAsyncPlan: vi.fn(),
   buildPreviewPlanDetails: vi.fn(),
   hydrateLiveLinkProjection: vi.fn(),
   loadAuthoritativeLiveLinkEdgesForSheet: vi.fn(),
@@ -8,8 +9,31 @@ const dependencies = vi.hoisted(() => ({
   loadLiveByIdForPreview: vi.fn(),
   materializeRecoveryArchiveLinksForSync: vi.fn(),
   prepareMaterializedArchiveRecoveryPreviewScopeInternal: vi.fn(),
+  prepareRecoveryArchiveRestorePlan: vi.fn(),
+  persistRecoveryArchiveAsyncPlan: vi.fn(),
   readRecoveryArchiveCompleteSectionState: vi.fn(),
 }))
+
+vi.mock('../../src/multitable/recovery-archive-async-plan', async () => {
+  const actual = await vi.importActual<typeof import('../../src/multitable/recovery-archive-async-plan')>(
+    '../../src/multitable/recovery-archive-async-plan',
+  )
+  return {
+    ...actual,
+    buildRecoveryArchiveAsyncPlan: dependencies.buildRecoveryArchiveAsyncPlan,
+    persistRecoveryArchiveAsyncPlan: dependencies.persistRecoveryArchiveAsyncPlan,
+  }
+})
+
+vi.mock('../../src/multitable/recovery-archive-restore-jobs', async () => {
+  const actual = await vi.importActual<typeof import('../../src/multitable/recovery-archive-restore-jobs')>(
+    '../../src/multitable/recovery-archive-restore-jobs',
+  )
+  return {
+    ...actual,
+    prepareRecoveryArchiveRestorePlan: dependencies.prepareRecoveryArchiveRestorePlan,
+  }
+})
 
 vi.mock('../../src/multitable/exact-anchor-recovery-route', async () => {
   const actual = await vi.importActual<typeof import('../../src/multitable/exact-anchor-recovery-route')>(
@@ -264,6 +288,23 @@ describe('Time Machine recovery archive preview authority', () => {
       revertWrites: [],
       deleteRecordIds: [],
     })
+    dependencies.buildRecoveryArchiveAsyncPlan.mockReturnValue({
+      plan: { planHash: 'f'.repeat(64) },
+      planObject: {
+        descriptor: {
+          generationId: GENERATION_ID,
+          objectId: '9'.repeat(64),
+          version: 'restore-plan-v1',
+          sha256: '9'.repeat(64),
+          size: '123',
+          expiresAt: EXPIRES_AT,
+          pinned: false,
+        },
+      },
+      chunkObjects: [],
+    })
+    dependencies.persistRecoveryArchiveAsyncPlan.mockResolvedValue(undefined)
+    dependencies.prepareRecoveryArchiveRestorePlan.mockResolvedValue(undefined)
   })
 
   afterEach(() => {
@@ -422,7 +463,74 @@ describe('Time Machine recovery archive preview authority', () => {
     )).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED' })
   })
 
-  it('classifies over-threshold scope as async without minting a sync token', async () => {
+  it('freezes and registers over-threshold effective writes before returning an executable async token', async () => {
+    const largeTarget = new Map(
+      Array.from({ length: 5001 }, (_, index) => [
+        `record-${index}`,
+        { recordId: `record-${index}`, exists: true, data: {}, version: 1 },
+      ]),
+    )
+    dependencies.prepareMaterializedArchiveRecoveryPreviewScopeInternal.mockReturnValueOnce({
+      ok: true,
+      anchorTarget: largeTarget,
+      targetRecords,
+      liveById,
+    })
+    dependencies.buildPreviewPlanDetails.mockReturnValueOnce({
+      summary: summary({ effectiveWriteCount: 5001 }),
+      plan: { reverts: [], resurrects: [], createdAfterAnchor: [], deletedAtAnchorLiveNow: [] },
+      revertWrites: [],
+      deleteRecordIds: [],
+    })
+    const fixture = queryFixture()
+
+    const result = await previewRecoveryArchive(
+      makeTransaction(fixture.query, { inTransaction: false }),
+      fixture.query,
+      runtime,
+      makeInput(),
+    )
+
+    expect(result).toMatchObject({
+      executionKind: 'async',
+      executable: true,
+      blockedReason: null,
+    })
+    expect(result.previewIdentity).toEqual(expect.any(String))
+    const verified = verifyExactArchiveRecoveryIdentity(result.previewIdentity!, {
+      sheetId: SHEET_ID,
+      actorId: ACTOR_ID,
+    })
+    expect(verified).toMatchObject({
+      valid: true,
+      claims: {
+        archivePlanHash: 'f'.repeat(64),
+        archivePlanObject: {
+          objectId: '9'.repeat(64),
+          version: 'restore-plan-v1',
+          sha256: '9'.repeat(64),
+          size: '123',
+          expiresAt: EXPIRES_AT,
+        },
+      },
+    })
+    expect(dependencies.buildRecoveryArchiveAsyncPlan).toHaveBeenCalledTimes(1)
+    expect(dependencies.persistRecoveryArchiveAsyncPlan).toHaveBeenCalledTimes(1)
+    expect(dependencies.prepareRecoveryArchiveRestorePlan).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({
+        token: result.previewIdentity,
+        identity: {
+          workspaceId: WORKSPACE_ID,
+          baseId: BASE_ID,
+          sheetId: SHEET_ID,
+          actorId: ACTOR_ID,
+        },
+      }),
+    )
+  })
+
+  it('keeps a 5001-record scope on sync when only one record is an effective write', async () => {
     const largeTarget = new Map(
       Array.from({ length: 5001 }, (_, index) => [
         `record-${index}`,
@@ -436,7 +544,6 @@ describe('Time Machine recovery archive preview authority', () => {
       liveById,
     })
     const fixture = queryFixture()
-
     const result = await previewRecoveryArchive(
       makeTransaction(fixture.query, { inTransaction: false }),
       fixture.query,
@@ -444,11 +551,7 @@ describe('Time Machine recovery archive preview authority', () => {
       makeInput(),
     )
 
-    expect(result).toMatchObject({
-      executionKind: 'async',
-      executable: false,
-      blockedReason: 'async_plan_required',
-      previewIdentity: null,
-    })
+    expect(result).toMatchObject({ executionKind: 'sync', executable: true })
+    expect(dependencies.buildRecoveryArchiveAsyncPlan).not.toHaveBeenCalled()
   })
 })

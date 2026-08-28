@@ -40,6 +40,7 @@ const preview = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['preview']>
 const executeSync = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['executeSync']>>()
 const listCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listCatalog']>>()
 const readCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readCatalog']>>()
+const accept = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['accept']>>()
 const read = vi.fn<RecoveryArchiveRestoreOwnerService['read']>()
 const resume = vi.fn<RecoveryArchiveRestoreOwnerService['resume']>()
 const cancel = vi.fn<RecoveryArchiveRestoreOwnerService['cancel']>()
@@ -78,6 +79,7 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
       executeSync,
       listCatalog,
       readCatalog,
+      accept,
       read,
       resume,
       cancel,
@@ -133,6 +135,7 @@ describe('Time Machine D5 owner routes', () => {
     executeSync.mockReset()
     listCatalog.mockReset()
     readCatalog.mockReset()
+    accept.mockReset()
     read.mockReset()
     resume.mockReset()
     cancel.mockReset()
@@ -148,6 +151,7 @@ describe('Time Machine D5 owner routes', () => {
     })
     listCatalog.mockResolvedValue({ entries: [catalogEntry()], nextCursor: 'opaque-cursor' })
     readCatalog.mockResolvedValue(catalogEntry())
+    accept.mockResolvedValue(snapshot({ state: 'planned', completedCount: '0' }))
     read.mockResolvedValue(snapshot())
     resume.mockResolvedValue(snapshot({ state: 'planned' }))
     cancel.mockResolvedValue(snapshot({ state: 'abandoned_partial' }))
@@ -423,11 +427,33 @@ describe('Time Machine D5 owner routes', () => {
     expect(resume).not.toHaveBeenCalled()
   })
 
+  it('accepts only the signed preview identity and never a caller-supplied plan', async () => {
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs/accept`)
+      .send({ previewIdentity: 'opaque-token' })
+
+    expect(result.status).toBe(202)
+    expect(accept).toHaveBeenCalledWith(context, { token: 'opaque-token' })
+    expect(result.body).toEqual({
+      ok: true,
+      data: {
+        jobId: JOB_ID,
+        state: 'planned',
+        totalCount: '6001',
+        completedCount: '0',
+        resumeDeadline: '2026-08-29T00:00:00.000Z',
+        terminalAt: null,
+        rowVersion: '9',
+      },
+    })
+    expect(result.text).not.toContain('planHash')
+  })
+
   it('fails closed after authorization when owner policy or archive runtime is not configured', async () => {
-    makeApp({ cancel: undefined })
+    makeApp({ accept: undefined, cancel: undefined })
     const acceptResult = await request(pinned.url())
       .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs/accept`)
-      .send({ previewIdentity: 'opaque-token', plan: {} })
+      .send({ previewIdentity: 'opaque-token' })
     const cancelResult = await request(pinned.url())
       .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/jobs/${JOB_ID}/cancel`)
       .send({})
@@ -445,6 +471,7 @@ describe('Time Machine D5 owner routes', () => {
     expect(resolveContext).toHaveBeenCalledTimes(2)
     expect(read).not.toHaveBeenCalled()
     expect(resume).not.toHaveBeenCalled()
+    expect(accept).not.toHaveBeenCalled()
     expect(cancel).not.toHaveBeenCalled()
   })
 
