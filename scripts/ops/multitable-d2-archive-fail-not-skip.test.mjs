@@ -33,6 +33,10 @@ const files = [
     sentinel: 'recovery_archive_key_registry_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts',
+    sentinel: 'recovery_archive_claim_anchor_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
     sentinel: 'recovery_archive_source_pin_realdb_harness_missing_database_url',
   },

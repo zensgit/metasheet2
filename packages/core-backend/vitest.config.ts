@@ -1345,6 +1345,7 @@ export default defineConfig({
       'tests/integration/multitable-recovery-archive-operation-binding-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-coverage-binding-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-key-registry-realdb.test.ts',
+      'tests/integration/multitable-recovery-archive-claim-anchor-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-source-pin-authority-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-object-receipt-authority-realdb.test.ts',
       'tests/integration/multitable-recovery-archive-crypto-registry-realdb.test.ts',
