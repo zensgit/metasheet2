@@ -263,7 +263,7 @@ function nowIso(now: () => Date): string {
   return value.toISOString()
 }
 
-function snapshotFromEvaluation(
+export function createElearningDocumentProgressSnapshotFromEvaluation(
   evaluation: ElearningDocumentCompletionEvaluation,
 ): ElearningDocumentProgressSnapshot {
   if (evaluation.completed) fail('unavailable')
@@ -301,7 +301,9 @@ function requireStoreUuid(value: unknown): string {
   return value.toLowerCase()
 }
 
-function requireAccessBasis(value: unknown): ElearningDocumentAccessBasis {
+export function normalizeElearningDocumentAccessBasis(
+  value: unknown,
+): ElearningDocumentAccessBasis {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     fail('unavailable')
   }
@@ -347,14 +349,14 @@ function requireAuthority(
   const sessionId = requireStoreUuid(authority.sessionId)
   if (sessionId !== input.sessionId) fail('unavailable')
   return {
-    accessBasis: requireAccessBasis(authority.accessBasis),
+    accessBasis: normalizeElearningDocumentAccessBasis(authority.accessBasis),
     courseVersionId: requireStoreUuid(authority.courseVersionId),
     documentMediaId: requireStoreUuid(authority.documentMediaId),
     sessionId,
   }
 }
 
-function requireStoredSnapshot(
+export function normalizeElearningDocumentProgressSnapshot(
   snapshot: ElearningDocumentProgressSnapshot,
 ): ElearningDocumentProgressSnapshot {
   if (
@@ -443,11 +445,11 @@ function requireStoredRanges(
   return Object.freeze(ranges)
 }
 
-function requireSnapshotForPolicy(
+export function normalizeElearningDocumentProgressSnapshotForPolicy(
   snapshot: ElearningDocumentProgressSnapshot,
   policy: ElearningDocumentCompletionPolicy,
 ): ElearningDocumentProgressSnapshot {
-  const normalized = requireStoredSnapshot(snapshot)
+  const normalized = normalizeElearningDocumentProgressSnapshot(snapshot)
   if (
     normalized.serverPageCount !== policy.serverPageCount
     || normalized.thresholdBps !== policy.thresholdBps
@@ -496,11 +498,17 @@ export async function recordElearningDocumentPageView(
       })
       if (claim.kind === 'existing') {
         if (claim.requestHash !== hash) fail('conflict')
-        return publicResult(requireSnapshotForPolicy(claim.result, policy), true)
+        return publicResult(
+          normalizeElearningDocumentProgressSnapshotForPolicy(claim.result, policy),
+          true,
+        )
       }
 
       if (authority.completion) {
-        const existing = requireSnapshotForPolicy(authority.completion, policy)
+        const existing = normalizeElearningDocumentProgressSnapshotForPolicy(
+          authority.completion,
+          policy,
+        )
         if (existing.status !== 'completed') fail('unavailable')
         await tx.storePageViewRequestResult({
           courseVersionItemId: input.courseVersionItemId,
@@ -536,7 +544,8 @@ export async function recordElearningDocumentPageView(
       })
 
       const snapshot = evaluation.completed
-        ? requireSnapshotForPolicy(await tx.appendCompletionEvidenceIfAbsent({
+        ? normalizeElearningDocumentProgressSnapshotForPolicy(
+          await tx.appendCompletionEvidenceIfAbsent({
           accessBasis: normalizedAuthority.accessBasis,
           completedAt: receivedAt,
           courseVersionId: normalizedAuthority.courseVersionId,
@@ -545,8 +554,10 @@ export async function recordElearningDocumentPageView(
           evaluation,
           orgId: input.orgId,
           userId: input.userId,
-        }), policy)
-        : snapshotFromEvaluation(evaluation)
+          }),
+          policy,
+        )
+        : createElearningDocumentProgressSnapshotFromEvaluation(evaluation)
       if (evaluation.completed && snapshot.status !== 'completed') fail('unavailable')
 
       await tx.upsertProgress({
