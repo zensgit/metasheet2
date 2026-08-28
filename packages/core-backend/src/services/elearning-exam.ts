@@ -10,6 +10,10 @@ import {
   resolveElearningCourseAccess,
 } from './elearning-course-access'
 import {
+  awardElearningPassExamCreditInTransaction,
+  type ElearningPassExamAwardOptions,
+} from './elearning-credit-postgres'
+import {
   ELEARNING_EXAM_AUTO_GRADER,
   ELEARNING_EXAM_GRADE_KIND,
   UUID_RE,
@@ -482,7 +486,7 @@ async function lockUserAttempts(
 ): Promise<AttemptRow[]> {
   const result = await tx.query(
     `/* elearning-exam:load-attempts */
-     SELECT id, attempt_no, status, paper_snapshot, answers, auto_score, total_score, passed,
+     SELECT id, user_id, attempt_no, status, paper_snapshot, answers, auto_score, total_score, passed,
             deadline_at, expired_at
        FROM elearning_exam_attempts
       WHERE org_id = $1
@@ -495,11 +499,13 @@ async function lockUserAttempts(
   )
   return result.rows.map((row) => {
     const id = asText(row.id)
+    const lockedUserId = asText(row.user_id)
     const status = asText(row.status)
-    if (!id || !status) fail('unavailable')
+    if (!id || lockedUserId !== userId || !status) fail('unavailable')
     const passed = row.passed
     return {
       id,
+      userId: lockedUserId,
       attemptNo: requireRowInt(row.attempt_no),
       status,
       paperSnapshot: row.paper_snapshot,
@@ -730,7 +736,8 @@ async function peekAttemptLockTarget(
   )
   const row = result.rows[0]
   if (!row) fail('not_found')
-  if (asText(row.user_id) !== userId) fail('not_found')
+  const lockedUserId = asText(row.user_id)
+  if (lockedUserId !== userId) fail('not_found')
   return {
     examId: requireStoredUuid(row.exam_id),
     itemId: requireStoredUuid(row.course_version_item_id),
@@ -792,7 +799,8 @@ async function lockAttempt(
   )
   const row = result.rows[0]
   if (!row) fail('not_found')
-  if (asText(row.user_id) !== userId) fail('not_found')
+  const lockedUserId = asText(row.user_id)
+  if (lockedUserId !== userId) fail('not_found')
   if (asText(row.course_status) === 'withdrawn') fail('course_withdrawn')
   const versionStatus = asText(row.version_status)
   const examStatus = asText(row.exam_status)
@@ -805,6 +813,7 @@ async function lockAttempt(
   const passed = row.passed
   return {
     id,
+    userId: lockedUserId,
     attemptNo: requireRowInt(row.attempt_no),
     status,
     versionId,
@@ -843,6 +852,7 @@ function gradeFromStored(attempt: LockedAttempt, snapshot: ElearningPaperSnapsho
 export async function submitElearningExam(
   db: ElearningExamDb,
   input: SubmitElearningExamInput,
+  options: ElearningPassExamAwardOptions = {},
 ): Promise<ElearningExamSubmitResult> {
   const orgId = requireActor(input.orgId)
   const userId = requireActor(input.userId)
@@ -859,7 +869,7 @@ export async function submitElearningExam(
 
       if (attempt.expiredAt !== null) {
         if (attempt.status === 'expired') {
-          await settleExpiredElearningExamAttemptInTransaction(tx, orgId, attempt)
+          await settleExpiredElearningExamAttemptInTransaction(tx, orgId, attempt, options)
         }
         return { kind: 'expired' as const }
       }
@@ -928,6 +938,7 @@ export async function submitElearningExam(
           tx,
           orgId,
           attempt,
+          options,
         )
         if (settled === 'settled') return { kind: 'expired' as const }
         fail('unavailable')
@@ -967,10 +978,19 @@ export async function submitElearningExam(
                   total_score = $2,
                   passed = $3,
                   graded_at = clock_timestamp()
-            WHERE org_id = $4 AND id = $5 AND status = 'submitted'`,
+            WHERE org_id = $4 AND id = $5 AND status = 'submitted'
+           RETURNING graded_at`,
           [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
         )
         if (graded.rowCount !== 1) fail('unavailable')
+        const gradedAt = requireStoredDate(graded.rows[0]?.graded_at)
+        if (grade.passed) {
+          await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
+            tx,
+            { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
+            options.env ?? process.env,
+          )
+        }
       }
       return {
         kind: 'result' as const,

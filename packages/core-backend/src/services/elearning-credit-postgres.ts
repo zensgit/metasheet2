@@ -1,10 +1,14 @@
-import type {
-  ElearningCreditDecisionRow,
-  ElearningCreditEffectClaimInput,
-  ElearningCreditEffectClaimResult,
-  ElearningCreditExistingEffect,
-  ElearningCreditLedgerStore,
-  ElearningCreditLedgerTx,
+import {
+  claimElearningCreditInTransaction,
+  ElearningCreditLedgerError,
+  isElearningCreditSurfaceEnabled,
+  type ElearningCreditClaimResult,
+  type ElearningCreditDecisionRow,
+  type ElearningCreditEffectClaimInput,
+  type ElearningCreditEffectClaimResult,
+  type ElearningCreditExistingEffect,
+  type ElearningCreditLedgerStore,
+  type ElearningCreditLedgerTx,
 } from './elearning-credit-ledger'
 import type {
   ElearningCreditBehavior,
@@ -24,6 +28,31 @@ export type ElearningCreditPgQuery = <Row extends Record<string, unknown>>(
 export type ElearningCreditPgTransactionRunner = <T>(
   handler: (query: ElearningCreditPgQuery) => Promise<T>,
 ) => Promise<T>
+
+export interface ElearningCreditTransactionQuery {
+  query(
+    text: string,
+    values?: unknown[],
+  ): Promise<ElearningCreditPgResult<Record<string, unknown>>>
+}
+
+export interface ElearningPassExamCreditInput {
+  attemptId: string
+  gradedAt: Date
+  orgId: string
+  userId: string
+}
+
+export type ElearningPassExamCreditAward = (
+  tx: ElearningCreditTransactionQuery,
+  input: ElearningPassExamCreditInput,
+  env?: NodeJS.ProcessEnv,
+) => Promise<ElearningCreditClaimResult | null>
+
+export interface ElearningPassExamAwardOptions {
+  awardPassExam?: ElearningPassExamCreditAward
+  env?: NodeJS.ProcessEnv
+}
 
 function unavailable(): never {
   throw new Error('ELEARNING_CREDIT_STORE_UNAVAILABLE')
@@ -237,6 +266,56 @@ class PostgresElearningCreditLedgerTx implements ElearningCreditLedgerTx {
       [input.orgId, input.userId, input.delta],
     )
     if (result.rows.length !== 1 || integer(result.rows[0]?.balance_points) < 0) unavailable()
+  }
+}
+
+function creditQuery(tx: ElearningCreditTransactionQuery): ElearningCreditPgQuery {
+  return async <Row extends Record<string, unknown>>(textValue: string, values?: unknown[]) => {
+    const result = await tx.query(textValue, values)
+    return {
+      rowCount: result.rowCount,
+      rows: result.rows as Row[],
+    }
+  }
+}
+
+export const awardElearningPassExamCreditInTransaction: ElearningPassExamCreditAward = async (
+  tx,
+  input,
+  env = process.env,
+) => {
+  if (!isElearningCreditSurfaceEnabled(env)) return null
+
+  try {
+    if (!(input.gradedAt instanceof Date) || !Number.isFinite(input.gradedAt.getTime())) {
+      throw new ElearningCreditLedgerError('unavailable')
+    }
+    const isolation = await tx.query(
+      `/* elearning-credit:assert-transaction-isolation */
+       SELECT current_setting('transaction_isolation') AS transaction_isolation`,
+    )
+    if (
+      isolation.rows.length !== 1
+      || isolation.rows[0]?.transaction_isolation !== 'read committed'
+    ) {
+      throw new ElearningCreditLedgerError('unavailable')
+    }
+
+    return await claimElearningCreditInTransaction(
+      new PostgresElearningCreditLedgerTx(creditQuery(tx)),
+      {
+        behavior: 'pass_exam',
+        effectKey: `attempt:${input.attemptId}`,
+        occurredAt: input.gradedAt.toISOString(),
+        orgId: input.orgId,
+        reference: { attemptId: input.attemptId },
+        userId: input.userId,
+      },
+      env,
+    )
+  } catch (error) {
+    if (error instanceof ElearningCreditLedgerError) throw error
+    throw new ElearningCreditLedgerError('unavailable')
   }
 }
 

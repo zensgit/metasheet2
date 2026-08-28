@@ -27,6 +27,7 @@ import {
   type ElearningExamQueryable,
   type ElearningPaperSnapshot,
 } from '../../src/services/elearning-exam'
+import { settleExpiredElearningExamAttempt } from '../../src/services/elearning-exam-expiry'
 
 const ORG = 'org-exam-1'
 const USER = 'user-exam-1'
@@ -47,6 +48,11 @@ const COURSE = '66666666-6666-4666-8666-666666666666'
 const SCOPE = '77777777-7777-4777-8777-777777777777'
 const SCOPE_REVISION = '88888888-8888-4888-8888-888888888888'
 const SCOPE_RULE = '99999999-9999-4999-8999-999999999999'
+const GRADED_AT = new Date('2026-08-29T01:02:03.000Z')
+const INCENTIVE_ON: NodeJS.ProcessEnv = {
+  ELEARNING_ENABLED: 'true',
+  ELEARNING_INCENTIVE_ENABLED: 'true',
+}
 
 const PUBLIC_START_KEYS = [
   'attemptId',
@@ -442,7 +448,7 @@ function createSubmitMemoryDb(
       attempt.totalScore = params[1] as number
       attempt.passed = params[2] as boolean
       attempt.status = 'graded'
-      return { rows: [], rowCount: 1 }
+      return { rows: [{ graded_at: GRADED_AT }], rowCount: 1 }
     }
     throw new Error(`unexpected exam query: ${tag ?? sql}`)
   }
@@ -887,6 +893,72 @@ describe('elearning exam service input closure', () => {
 })
 
 describe('elearning exam public submit result', () => {
+  it('awards pass_exam exactly once from the locked learner and DB graded time', async () => {
+    const { db } = createSubmitMemoryDb()
+    const awards: unknown[] = []
+    const awardPassExam = async (_tx: unknown, input: unknown, env: NodeJS.ProcessEnv | undefined) => {
+      awards.push({ input, env })
+      return null
+    }
+
+    await submitElearningExam(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam,
+    })
+    await expect(submitElearningExam(db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }, { env: INCENTIVE_ON, awardPassExam })).resolves.toMatchObject({ duplicate: true })
+
+    expect(awards).toEqual([{
+      input: {
+        attemptId: ATTEMPT,
+        gradedAt: GRADED_AT,
+        orgId: ORG,
+        userId: USER,
+      },
+      env: INCENTIVE_ON,
+    }])
+  })
+
+  it('does not award a failed objective attempt and fails closed on award errors', async () => {
+    const failed = createSubmitMemoryDb()
+    let calls = 0
+    await expect(submitElearningExam(failed.db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: emptyAnswers(),
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam: async () => {
+        calls += 1
+        return null
+      },
+    })).resolves.toMatchObject({ passed: false })
+    expect(calls).toBe(0)
+
+    const broken = createSubmitMemoryDb()
+    await expectAsyncCode(() => submitElearningExam(broken.db, {
+      orgId: ORG,
+      userId: USER,
+      attemptId: ATTEMPT,
+      answers: perfectAnswers(),
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam: async () => {
+        throw new Error('credit authority failed')
+      },
+    }), 'unavailable')
+  })
+
   it('returns aggregate-only JSON on initial submit and keeps details on the ledger', async () => {
     const { db, mem } = createSubmitMemoryDb()
     const submitted = await submitElearningExam(db, {
@@ -1013,6 +1085,113 @@ describe('elearning exam public submit result', () => {
   })
 })
 
+describe('elearning expired-attempt credit award', () => {
+  it('awards only a passing timeout settlement from the locked attempt identity', async () => {
+    const awards: unknown[] = []
+    let answers: unknown = perfectAnswers()
+    const query: ElearningExamQueryable['query'] = async (sql) => {
+      const tag = examQueryTag(sql)
+      if (tag === 'elearning-exam:lock-expiry-attempt') {
+        return {
+          rows: [{
+            id: ATTEMPT,
+            user_id: USER,
+            status: 'expired',
+            paper_snapshot: samplePaper(),
+            answers,
+            deadline_at: new Date('2026-08-29T01:00:00.000Z'),
+            expired_at: new Date('2026-08-29T01:00:01.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (tag === 'elearning-exam:insert-expiry-grade') {
+        return { rows: [], rowCount: 1 }
+      }
+      if (tag === 'elearning-exam:grade-expired-attempt') {
+        return { rows: [{ graded_at: GRADED_AT }], rowCount: 1 }
+      }
+      throw new Error(`unexpected exam query: ${tag ?? sql}`)
+    }
+    const db = {
+      query,
+      transaction: async <T>(handler: (tx: ElearningExamQueryable) => Promise<T>) => handler({ query }),
+    }
+
+    await expect(settleExpiredElearningExamAttempt(db, {
+      orgId: ORG,
+      attemptId: ATTEMPT,
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam: async (_tx, input, env) => {
+        awards.push({ input, env })
+        return null
+      },
+    })).resolves.toEqual({ outcome: 'settled' })
+    expect(awards).toEqual([{
+      input: {
+        attemptId: ATTEMPT,
+        gradedAt: GRADED_AT,
+        orgId: ORG,
+        userId: USER,
+      },
+      env: INCENTIVE_ON,
+    }])
+
+    answers = emptyAnswers()
+    awards.length = 0
+    await expect(settleExpiredElearningExamAttempt(db, {
+      orgId: ORG,
+      attemptId: ATTEMPT,
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam: async (_tx, input, env) => {
+        awards.push({ input, env })
+        return null
+      },
+    })).resolves.toEqual({ outcome: 'settled' })
+    expect(awards).toEqual([])
+  })
+
+  it('fails closed when timeout credit authority fails', async () => {
+    const query: ElearningExamQueryable['query'] = async (sql) => {
+      const tag = examQueryTag(sql)
+      if (tag === 'elearning-exam:lock-expiry-attempt') {
+        return {
+          rows: [{
+            id: ATTEMPT,
+            user_id: USER,
+            status: 'expired',
+            paper_snapshot: samplePaper(),
+            answers: perfectAnswers(),
+            deadline_at: new Date('2026-08-29T01:00:00.000Z'),
+            expired_at: new Date('2026-08-29T01:00:01.000Z'),
+          }],
+          rowCount: 1,
+        }
+      }
+      if (tag === 'elearning-exam:insert-expiry-grade') return { rows: [], rowCount: 1 }
+      if (tag === 'elearning-exam:grade-expired-attempt') {
+        return { rows: [{ graded_at: GRADED_AT }], rowCount: 1 }
+      }
+      throw new Error(`unexpected exam query: ${tag ?? sql}`)
+    }
+    const db = {
+      query,
+      transaction: async <T>(handler: (tx: ElearningExamQueryable) => Promise<T>) => handler({ query }),
+    }
+    await expectAsyncCode(() => settleExpiredElearningExamAttempt(db, {
+      orgId: ORG,
+      attemptId: ATTEMPT,
+    }, {
+      env: INCENTIVE_ON,
+      awardPassExam: async () => {
+        throw new Error('credit authority failed')
+      },
+    }), 'unavailable')
+  })
+})
+
 function emptyAnswers() {
   return { [Q1]: [] as string[], [Q2]: [] as string[], [Q3]: [] as string[] }
 }
@@ -1109,6 +1288,7 @@ function createStartMemoryDb(
       return {
         rows: mem.attempts.map((attempt) => ({
           id: attempt.id,
+          user_id: attempt.userId,
           attempt_no: attempt.attemptNo,
           status: attempt.status,
           paper_snapshot: attempt.paperSnapshot,

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   claimElearningCredit,
+  claimElearningCreditInTransaction,
   ElearningCreditLedgerError,
   type ClaimElearningCreditInput,
   type ElearningCreditDecisionRow,
@@ -278,6 +279,25 @@ async function expectThrown(
 }
 
 describe('elearning credit ledger', () => {
+  it('reuses a caller-owned transaction without opening a nested transaction', async () => {
+    const tx = new FakeLedger({
+      rules: [{ behavior: 'pass_exam', orgId: ORG_A, rule: baseRule() }],
+    })
+
+    const result = await claimElearningCreditInTransaction(tx, baseInput(), ENABLED)
+
+    expect(result).toMatchObject({ awardedPoints: 10, duplicate: false, status: 'awarded' })
+    expect(tx.transactionCount).toBe(0)
+    expect(tx.calls).toEqual([
+      'claimEffect',
+      'resolveActiveRule',
+      'lockBucket',
+      'sumPositiveAwards',
+      'appendDecision',
+      'applyBalanceDelta',
+    ])
+  })
+
   it('fails closed with zero writes unless both flags are exact literal true', async () => {
     const input = baseInput()
     const cases: NodeJS.ProcessEnv[] = [

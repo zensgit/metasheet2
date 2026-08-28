@@ -127,7 +127,7 @@ function fail(code: ElearningCreditLedgerErrorCode): never {
   throw new ElearningCreditLedgerError(code)
 }
 
-function isIncentiveSurfaceEnabled(env: NodeJS.ProcessEnv): boolean {
+export function isElearningCreditSurfaceEnabled(env: NodeJS.ProcessEnv): boolean {
   return isElearningEnabled(env) && isElearningFlagEnabled(ELEARNING_INCENTIVE_ENABLED, env)
 }
 
@@ -175,11 +175,16 @@ function wrapPolicy(error: unknown, onPolicy: ElearningCreditLedgerErrorCode): n
   fail('unavailable')
 }
 
-export async function claimElearningCredit(
-  store: ElearningCreditLedgerStore,
-  input: ClaimElearningCreditInput,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<ElearningCreditClaimResult> {
+interface PreparedElearningCreditClaim {
+  behavior: ElearningCreditBehavior
+  effectKey: string
+  occurredAt: string
+  orgId: string
+  requestHash: string
+  userId: string
+}
+
+function prepareClaim(input: ClaimElearningCreditInput): PreparedElearningCreditClaim {
   let behavior: ElearningCreditBehavior
   try {
     behavior = normalizeElearningCreditBehavior(input.behavior)
@@ -188,92 +193,118 @@ export async function claimElearningCredit(
   }
   if (behavior === 'manual_adjust') fail('unsupported_behavior')
 
-  let orgId: string
-  let userId: string
-  let effectKey: string
-  let occurredAt: string
-  let requestHash: string
   try {
-    requestHash = hashElearningCreditEffect(input)
-    orgId = input.orgId.trim()
-    userId = input.userId.trim()
-    effectKey = input.effectKey.trim()
-    occurredAt = normalizeElearningCreditOccurredAt(input.occurredAt)
+    return {
+      behavior,
+      effectKey: input.effectKey.trim(),
+      occurredAt: normalizeElearningCreditOccurredAt(input.occurredAt),
+      orgId: input.orgId.trim(),
+      requestHash: hashElearningCreditEffect(input),
+      userId: input.userId.trim(),
+    }
   } catch (error) {
     wrapPolicy(error, 'invalid_input')
   }
+}
 
-  if (!isIncentiveSurfaceEnabled(env)) fail('disabled')
-
+async function claimPreparedElearningCredit(
+  tx: ElearningCreditLedgerTx,
+  claimInput: PreparedElearningCreditClaim,
+): Promise<ElearningCreditClaimResult> {
+  const { behavior, effectKey, occurredAt, orgId, requestHash, userId } = claimInput
   const identity: ElearningCreditEffectIdentity = { behavior, effectKey, orgId, userId }
   const decisionId = randomUUID()
 
+  const claim = await tx.claimEffect({
+    ...identity,
+    decisionId,
+    requestHash,
+    requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
+  })
+  if (claim.kind === 'existing') return closeExisting(claim.effect, requestHash)
+
+  const rawRule = await tx.resolveActiveRule({ behavior, orgId })
+  if (!rawRule) fail('rule_unavailable')
+
+  let rule: ElearningCreditRuleSnapshot
   try {
-    return await store.transaction(async (tx) => {
-      const claim = await tx.claimEffect({
-        ...identity,
-        decisionId,
-        requestHash,
-        requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
-      })
-      if (claim.kind === 'existing') return closeExisting(claim.effect, requestHash)
+    rule = normalizeElearningCreditRuleSnapshot(behavior, rawRule)
+  } catch (error) {
+    wrapPolicy(error, 'rule_unavailable')
+  }
 
-      const rawRule = await tx.resolveActiveRule({ behavior, orgId })
-      if (!rawRule) fail('rule_unavailable')
+  const localDay = elearningCreditDay(occurredAt, rule.timeZone)
+  await tx.lockBucket({ behavior, localDay, orgId, userId })
 
-      let rule: ElearningCreditRuleSnapshot
-      try {
-        rule = normalizeElearningCreditRuleSnapshot(behavior, rawRule)
-      } catch (error) {
-        wrapPolicy(error, 'rule_unavailable')
-      }
+  const awardedToday = await tx.sumPositiveAwards({
+    behavior,
+    localDay,
+    orgId,
+    userId,
+  })
+  if (!Number.isSafeInteger(awardedToday) || awardedToday < 0) fail('unavailable')
 
-      const localDay = elearningCreditDay(occurredAt, rule.timeZone)
-      await tx.lockBucket({ behavior, localDay, orgId, userId })
+  const award = computeElearningCreditAward({
+    awardedToday,
+    behavior,
+    dailyCap: rule.dailyCap,
+    requestedPoints: rule.points,
+  })
+  const status = asDecisionStatus(award.status)
+  if (!status) fail('unavailable')
 
-      const awardedToday = await tx.sumPositiveAwards({
-        behavior,
-        localDay,
-        orgId,
-        userId,
-      })
-      if (!Number.isSafeInteger(awardedToday) || awardedToday < 0) fail('unavailable')
+  await tx.appendDecision({
+    awardedPoints: award.awardedPoints,
+    behavior,
+    effectKey,
+    id: decisionId,
+    localDay,
+    occurredAt,
+    orgId,
+    remainingDailyCap: award.remainingDailyCap,
+    requestHash,
+    requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
+    requestedPoints: award.requestedPoints,
+    rule,
+    status,
+    userId,
+  })
+  if (award.awardedPoints !== 0) {
+    await tx.applyBalanceDelta({ delta: award.awardedPoints, orgId, userId })
+  }
+  return {
+    awardedPoints: award.awardedPoints,
+    decisionId,
+    duplicate: false,
+    status,
+  }
+}
 
-      const award = computeElearningCreditAward({
-        awardedToday,
-        behavior,
-        dailyCap: rule.dailyCap,
-        requestedPoints: rule.points,
-      })
-      const status = asDecisionStatus(award.status)
-      if (!status) fail('unavailable')
+export async function claimElearningCreditInTransaction(
+  tx: ElearningCreditLedgerTx,
+  input: ClaimElearningCreditInput,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ElearningCreditClaimResult> {
+  const prepared = prepareClaim(input)
+  if (!isElearningCreditSurfaceEnabled(env)) fail('disabled')
+  try {
+    return await claimPreparedElearningCredit(tx, prepared)
+  } catch (error) {
+    if (error instanceof ElearningCreditLedgerError) throw error
+    fail('unavailable')
+  }
+}
 
-      await tx.appendDecision({
-        awardedPoints: award.awardedPoints,
-        behavior,
-        effectKey,
-        id: decisionId,
-        localDay,
-        occurredAt,
-        orgId,
-        remainingDailyCap: award.remainingDailyCap,
-        requestHash,
-        requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
-        requestedPoints: award.requestedPoints,
-        rule,
-        status,
-        userId,
-      })
-      if (award.awardedPoints !== 0) {
-        await tx.applyBalanceDelta({ delta: award.awardedPoints, orgId, userId })
-      }
-      return {
-        awardedPoints: award.awardedPoints,
-        decisionId,
-        duplicate: false,
-        status,
-      }
-    })
+export async function claimElearningCredit(
+  store: ElearningCreditLedgerStore,
+  input: ClaimElearningCreditInput,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<ElearningCreditClaimResult> {
+  const prepared = prepareClaim(input)
+  if (!isElearningCreditSurfaceEnabled(env)) fail('disabled')
+
+  try {
+    return await store.transaction((tx) => claimPreparedElearningCredit(tx, prepared))
   } catch (error) {
     if (error instanceof ElearningCreditLedgerError) throw error
     fail('unavailable')
