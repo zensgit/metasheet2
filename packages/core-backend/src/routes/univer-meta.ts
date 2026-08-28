@@ -116,6 +116,12 @@ import {
   type ExactAnchorPlanAuthContext,
 } from '../multitable/exact-anchor-recovery-execute'
 import {
+  listRecoveryArchiveCatalog,
+  readRecoveryArchiveCatalogEntry,
+  type RecoveryArchiveCatalogQuery,
+  type RecoveryArchiveCatalogTransaction,
+} from '../multitable/recovery-archive-catalog'
+import {
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
   resumeRecoveryArchiveRestoreJob,
@@ -10594,6 +10600,12 @@ export function univerMetaRouter(): Router {
       work(query as unknown as RecoveryArchiveRestoreJobQuery)
     ))
   }
+  const recoveryArchiveCatalogTransaction: RecoveryArchiveCatalogTransaction = async (work) => {
+    const pool = poolManager.get()
+    return pool.transaction(async ({ query }) => (
+      work(query as unknown as RecoveryArchiveCatalogQuery)
+    ))
+  }
 
   const makeAuthorizationStabilizer = () =>
     async (
@@ -11255,6 +11267,20 @@ export function univerMetaRouter(): Router {
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
     service: {
+      listCatalog: (context, input) => listRecoveryArchiveCatalog(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          ...input,
+        },
+      ),
+      readCatalog: (context, generationId) => readRecoveryArchiveCatalogEntry(
+        recoveryArchiveCatalogTransaction,
+        {
+          ...context,
+          generationId,
+        },
+      ),
       read: (context, jobId) => readRecoveryArchiveRestoreJobStatus(
         recoveryArchiveRestoreTransaction,
         {

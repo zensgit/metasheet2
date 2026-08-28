@@ -3,6 +3,10 @@ import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  RecoveryArchiveCatalogError,
+  type RecoveryArchiveCatalogEntry,
+} from '../../src/multitable/recovery-archive-catalog'
+import {
   RecoveryArchiveRestoreJobError,
   type RecoveryArchiveRestoreJobSnapshot,
 } from '../../src/multitable/recovery-archive-restore-jobs'
@@ -27,6 +31,8 @@ const context: RecoveryArchiveRestoreOwnerContext = {
 }
 
 const resolveContext = vi.fn<RecoveryArchiveRestoreOwnerRouteDependencies['resolveContext']>()
+const listCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listCatalog']>>()
+const readCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readCatalog']>>()
 const read = vi.fn<RecoveryArchiveRestoreOwnerService['read']>()
 const resume = vi.fn<RecoveryArchiveRestoreOwnerService['resume']>()
 const cancel = vi.fn<RecoveryArchiveRestoreOwnerService['cancel']>()
@@ -61,6 +67,8 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext,
     service: {
+      listCatalog,
+      readCatalog,
       read,
       resume,
       cancel,
@@ -71,17 +79,108 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
   pinned.setApp(app)
 }
 
+function catalogEntry(
+  overrides: Partial<RecoveryArchiveCatalogEntry> = {},
+): RecoveryArchiveCatalogEntry {
+  return {
+    generationId: '33333333-3333-4333-8333-333333333333',
+    recoveryPointAt: '2026-08-28T09:00:00.000Z',
+    archivedAt: '2026-08-28T10:00:00.000Z',
+    expiresAt: '2026-09-28T10:00:00.000Z',
+    anchorSeq: '9007199254740993',
+    coverageRowCount: '77',
+    superseded: false,
+    ...overrides,
+  }
+}
+
 describe('Time Machine D5 owner routes', () => {
   beforeEach(() => {
     resolveContext.mockReset()
+    listCatalog.mockReset()
+    readCatalog.mockReset()
     read.mockReset()
     resume.mockReset()
     cancel.mockReset()
     resolveContext.mockResolvedValue({ ok: true, context })
+    listCatalog.mockResolvedValue({ entries: [catalogEntry()], nextCursor: 'opaque-cursor' })
+    readCatalog.mockResolvedValue(catalogEntry())
     read.mockResolvedValue(snapshot())
     resume.mockResolvedValue(snapshot({ state: 'planned' }))
     cancel.mockResolvedValue(snapshot({ state: 'abandoned_partial' }))
     makeApp()
+  })
+
+  it('rejects additive catalog query keys before resolving authority', async () => {
+    const result = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/catalog?limit=10&workerFence=99`)
+
+    expect(result.status).toBe(400)
+    expect(result.body).toEqual({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Request shape is invalid.' },
+    })
+    expect(resolveContext).not.toHaveBeenCalled()
+    expect(listCatalog).not.toHaveBeenCalled()
+  })
+
+  it('projects bounded catalog pages without hashes, key identity, or owner fields', async () => {
+    const listResult = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/catalog?limit=25&cursor=opaque`)
+    const getResult = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/catalog/33333333-3333-4333-8333-333333333333`)
+
+    expect(listResult.status).toBe(200)
+    expect(listResult.body).toEqual({
+      ok: true,
+      data: {
+        entries: [catalogEntry()],
+        nextCursor: 'opaque-cursor',
+      },
+    })
+    expect(getResult.status).toBe(200)
+    expect(getResult.body).toEqual({ ok: true, data: catalogEntry() })
+    expect(listCatalog).toHaveBeenCalledWith(context, { limit: 25, cursor: 'opaque' })
+    expect(readCatalog).toHaveBeenCalledWith(
+      context,
+      '33333333-3333-4333-8333-333333333333',
+    )
+    for (const forbidden of ['rootHash', 'sourceVectorHash', 'keyId', 'ownerId', 'ownerFence']) {
+      expect(listResult.text).not.toContain(forbidden)
+      expect(getResult.text).not.toContain(forbidden)
+    }
+  })
+
+  it('maps disabled and cross-scope catalog reads to fixed values-free responses', async () => {
+    listCatalog.mockRejectedValueOnce(new RecoveryArchiveCatalogError(
+      'RECOVERY_ARCHIVE_CATALOG_DISABLED',
+    ))
+    readCatalog.mockRejectedValueOnce(new RecoveryArchiveCatalogError(
+      'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND',
+    ))
+
+    const disabled = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/catalog`)
+    const hidden = await request(pinned.url())
+      .get(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/catalog/33333333-3333-4333-8333-333333333333`)
+
+    expect(disabled.status).toBe(503)
+    expect(disabled.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_ARCHIVE_CATALOG_DISABLED',
+        message: 'Archive recovery is disabled.',
+      },
+    })
+    expect(hidden.status).toBe(404)
+    expect(hidden.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND',
+        message: 'Recovery point not found.',
+      },
+    })
+    expect(hidden.text).not.toContain(SHEET_ID)
   })
 
   it('rejects caller fences and every additive request key before resolving authority', async () => {

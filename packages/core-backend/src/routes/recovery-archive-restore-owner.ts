@@ -2,6 +2,11 @@ import type { Request, Response, Router } from 'express'
 import { z } from 'zod'
 
 import {
+  RecoveryArchiveCatalogError,
+  type RecoveryArchiveCatalogEntry,
+  type RecoveryArchiveCatalogPage,
+} from '../multitable/recovery-archive-catalog'
+import {
   RecoveryArchiveRestoreJobError,
   type RecoveryArchiveRestoreJobQuery,
   type RecoveryArchiveRestoreJobSnapshot,
@@ -14,6 +19,11 @@ const ACCEPT_BODY_SCHEMA = z.object({
   plan: z.record(z.unknown()),
 }).strict()
 const JOB_ID_SCHEMA = z.string().uuid()
+const GENERATION_ID_SCHEMA = z.string().uuid()
+const CATALOG_QUERY_SCHEMA = z.object({
+  cursor: z.string().min(1).max(512).optional(),
+  limit: z.string().regex(/^[1-9][0-9]{0,2}$/).optional(),
+}).strict()
 
 export interface RecoveryArchiveRestoreOwnerContext {
   readonly workspaceId: string
@@ -36,6 +46,14 @@ export type RecoveryArchiveRestoreOwnerContextResolution =
     }
 
 export interface RecoveryArchiveRestoreOwnerService {
+  readonly listCatalog?: (
+    context: RecoveryArchiveRestoreOwnerContext,
+    input: { readonly cursor?: string; readonly limit?: number },
+  ) => Promise<RecoveryArchiveCatalogPage>
+  readonly readCatalog?: (
+    context: RecoveryArchiveRestoreOwnerContext,
+    generationId: string,
+  ) => Promise<RecoveryArchiveCatalogEntry>
   readonly accept?: (
     context: RecoveryArchiveRestoreOwnerContext,
     input: { readonly token: string; readonly plan: RecoveryArchiveRestorePlan },
@@ -66,6 +84,49 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
   router: Router,
   dependencies: RecoveryArchiveRestoreOwnerRouteDependencies,
 ): void {
+  router.get('/sheets/:sheetId/recovery-archive/catalog', async (req, res) => {
+    const parsed = CATALOG_QUERY_SCHEMA.safeParse(req.query)
+    if (!parsed.success) return sendValidationError(res)
+    const limit = parsed.data.limit === undefined ? undefined : Number(parsed.data.limit)
+    if (limit !== undefined && limit > 100) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!dependencies.service.listCatalog) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE')
+    }
+    try {
+      const page = await dependencies.service.listCatalog(context, {
+        ...(parsed.data.cursor === undefined ? {} : { cursor: parsed.data.cursor }),
+        ...(limit === undefined ? {} : { limit }),
+      })
+      return res.json({
+        ok: true,
+        data: {
+          entries: page.entries.map(projectCatalogEntry),
+          nextCursor: page.nextCursor,
+        },
+      })
+    } catch (error) {
+      return sendServiceError(res, error)
+    }
+  })
+
+  router.get('/sheets/:sheetId/recovery-archive/catalog/:generationId', async (req, res) => {
+    const generationId = parseGenerationId(req)
+    if (!generationId || !hasNoQuery(req)) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!dependencies.service.readCatalog) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE')
+    }
+    try {
+      const entry = await dependencies.service.readCatalog(context, generationId)
+      return res.json({ ok: true, data: projectCatalogEntry(entry) })
+    } catch (error) {
+      return sendServiceError(res, error)
+    }
+  })
+
   router.post('/sheets/:sheetId/recovery-archive/jobs/accept', async (req, res) => {
     const parsed = ACCEPT_BODY_SCHEMA.safeParse(req.body ?? {})
     if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
@@ -137,6 +198,11 @@ function parseJobId(req: Request): string | null {
   return parsed.success ? parsed.data : null
 }
 
+function parseGenerationId(req: Request): string | null {
+  const parsed = GENERATION_ID_SCHEMA.safeParse(req.params.generationId)
+  return parsed.success ? parsed.data : null
+}
+
 function hasNoQuery(req: Request): boolean {
   return Object.keys(req.query).length === 0
 }
@@ -174,11 +240,36 @@ function projectSnapshot(snapshot: RecoveryArchiveRestoreJobSnapshot) {
   }
 }
 
+function projectCatalogEntry(entry: RecoveryArchiveCatalogEntry) {
+  return {
+    generationId: entry.generationId,
+    recoveryPointAt: entry.recoveryPointAt,
+    archivedAt: entry.archivedAt,
+    expiresAt: entry.expiresAt,
+    anchorSeq: entry.anchorSeq,
+    coverageRowCount: entry.coverageRowCount,
+    superseded: entry.superseded,
+  }
+}
+
 function sendValidationError(res: Response) {
   return sendError(res, 400, 'VALIDATION_ERROR')
 }
 
 function sendServiceError(res: Response, error: unknown) {
+  if (error instanceof RecoveryArchiveCatalogError) {
+    switch (error.code) {
+      case 'RECOVERY_ARCHIVE_CATALOG_INVALID_INPUT':
+        return sendValidationError(res)
+      case 'RECOVERY_ARCHIVE_CATALOG_AUTHORITY_DENIED':
+        return sendError(res, 403, error.code)
+      case 'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND':
+        return sendError(res, 404, error.code)
+      case 'RECOVERY_ARCHIVE_CATALOG_DISABLED':
+      case 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID':
+        return sendError(res, 503, error.code)
+    }
+  }
   if (!(error instanceof RecoveryArchiveRestoreJobError)) {
     return sendError(res, 500, 'INTERNAL_ERROR')
   }
@@ -197,20 +288,36 @@ function sendServiceError(res: Response, error: unknown) {
 }
 
 function sendError(res: Response, status: number, code: string) {
-  const message = code === 'VALIDATION_ERROR'
-    ? 'Request shape is invalid.'
-    : code === 'UNAUTHENTICATED'
-      ? 'Authentication required.'
-      : code === 'FORBIDDEN' || code === 'RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED'
-        ? 'Insufficient permissions.'
-        : code === 'NOT_FOUND' || code === 'RECOVERY_ARCHIVE_RESTORE_JOB_NOT_FOUND'
-          ? 'Recovery job not found.'
-          : code === 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE'
-            ? 'Archive recovery runtime is unavailable.'
-            : code === 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE'
-              ? 'Archive recovery scope is unavailable.'
-              : code === 'INTERNAL_ERROR'
-                ? 'Archive recovery request failed.'
-                : 'Recovery job state no longer permits this operation.'
+  const message = messageForErrorCode(code)
   return res.status(status).json({ ok: false, error: { code, message } })
+}
+
+function messageForErrorCode(code: string): string {
+  switch (code) {
+    case 'VALIDATION_ERROR':
+      return 'Request shape is invalid.'
+    case 'UNAUTHENTICATED':
+      return 'Authentication required.'
+    case 'FORBIDDEN':
+    case 'RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED':
+    case 'RECOVERY_ARCHIVE_CATALOG_AUTHORITY_DENIED':
+      return 'Insufficient permissions.'
+    case 'NOT_FOUND':
+    case 'RECOVERY_ARCHIVE_RESTORE_JOB_NOT_FOUND':
+      return 'Recovery job not found.'
+    case 'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND':
+      return 'Recovery point not found.'
+    case 'RECOVERY_ARCHIVE_CATALOG_DISABLED':
+      return 'Archive recovery is disabled.'
+    case 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID':
+      return 'Archive recovery catalog is unavailable.'
+    case 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE':
+      return 'Archive recovery runtime is unavailable.'
+    case 'RECOVERY_ARCHIVE_SCOPE_UNAVAILABLE':
+      return 'Archive recovery scope is unavailable.'
+    case 'INTERNAL_ERROR':
+      return 'Archive recovery request failed.'
+    default:
+      return 'Recovery job state no longer permits this operation.'
+  }
 }

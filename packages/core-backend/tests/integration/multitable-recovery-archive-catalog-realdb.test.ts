@@ -13,12 +13,17 @@ import * as legalHoldMigration from '../../src/db/migrations/zzzz20260828130000_
 import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import * as objectReceiptAuthorityMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
 import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
+import * as restoreJobsMigration from '../../src/db/migrations/zzzz20260828131000_create_recovery_archive_restore_jobs'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
 } from '../../src/multitable/recovery-archive-contract'
+import {
+  listRecoveryArchiveCatalog,
+  readRecoveryArchiveCatalogEntry,
+} from '../../src/multitable/recovery-archive-catalog'
 import { expireRecoveryArchiveAfterLegalHoldCheck } from '../../src/multitable/recovery-archive-legal-holds'
 import {
   consumeRecoveryArchiveV2ClaimFixture,
@@ -593,12 +598,22 @@ async function truncateCatalog(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const restoreJobsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
+  )
+  const restoreJobTargets = restoreJobsTable.rows[0]?.present
+    ? `meta_recovery_archive_job_chunks,
+         meta_recovery_archive_sync_receipts,
+         meta_recovery_archive_jobs,
+         meta_recovery_token_burns,`
+    : ''
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
     await client.query('SET LOCAL session_replication_role = replica')
     await client.query(
       `TRUNCATE TABLE
+         ${restoreJobTargets}
          ${objectTarget}
          ${reservationTarget}
          ${markerTarget}
@@ -797,9 +812,16 @@ interface CatalogStackRestore {
   claimAnchor: boolean
   legalHoldAuthority: boolean
   objectAuthority: boolean
+  restoreJobs: boolean
 }
 
 async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRestore> {
+  const restoreJobs = await sql<{ present: boolean }>`
+    SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present
+  `.execute(target)
+  const restoreRestoreJobs = restoreJobs.rows[0]?.present === true
+  if (restoreRestoreJobs) await restoreJobsMigration.down(target)
+
   const legalHoldAuthority = await sql<{ present: boolean }>`
     SELECT pg_catalog.to_regclass('public.meta_recovery_archive_legal_holds') IS NOT NULL AS present
   `.execute(target)
@@ -828,6 +850,7 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRe
     claimAnchor: restoreClaimAnchor,
     legalHoldAuthority: restoreLegalHoldAuthority,
     objectAuthority: restoreObjectAuthority,
+    restoreJobs: restoreRestoreJobs,
   }
 }
 
@@ -837,6 +860,7 @@ async function upCatalogStack(
     claimAnchor: false,
     legalHoldAuthority: false,
     objectAuthority: false,
+    restoreJobs: false,
   },
 ): Promise<void> {
   await archiveCatalogMigration.up(target)
@@ -847,6 +871,7 @@ async function upCatalogStack(
   if (restore.objectAuthority) await objectReceiptAuthorityMigration.up(target)
   if (restore.claimAnchor) await claimAnchorMigration.up(target)
   if (restore.legalHoldAuthority) await legalHoldMigration.up(target)
+  if (restore.restoreJobs) await restoreJobsMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
@@ -1015,6 +1040,43 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('the exact real-DB allowlist marker and database are active', () => {
     expect(process.env.METASHEET_REAL_DB_TEST_STEP).toBe('1')
     expect(process.env.DATABASE_URL).toBeTruthy()
+  })
+
+  test('catalog read authority lists and reads only an exact available sheet scope', async () => {
+    const archive = await insertFinalizableArchive()
+    await finalizeArchive(archive.generationId)
+    const context = {
+      workspaceId: WORKSPACE,
+      baseId: BASE,
+      sheetId: SHEET,
+      recheckAuthority: async () => true,
+      env: { MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true' },
+    }
+
+    const page = await listRecoveryArchiveCatalog(withArchiveTransaction, {
+      ...context,
+      limit: 10,
+    })
+    expect(page.entries).toEqual([
+      expect.objectContaining({
+        generationId: archive.generationId,
+        anchorSeq: archive.anchorSeq,
+        coverageRowCount: '0',
+        superseded: false,
+      }),
+    ])
+    expect(page.nextCursor).toBeNull()
+    await expect(readRecoveryArchiveCatalogEntry(withArchiveTransaction, {
+      ...context,
+      generationId: archive.generationId,
+    })).resolves.toEqual(page.entries[0])
+
+    await expect(readRecoveryArchiveCatalogEntry(withArchiveTransaction, {
+      ...context,
+      workspaceId: OTHER_WORKSPACE,
+      baseId: OTHER_BASE,
+      generationId: archive.generationId,
+    })).rejects.toMatchObject({ code: 'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND' })
   })
 
   afterEach(async () => {
