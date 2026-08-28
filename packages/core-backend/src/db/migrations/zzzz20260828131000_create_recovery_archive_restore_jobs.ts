@@ -176,7 +176,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       key_id text COLLATE "C" NOT NULL,
       plan_hash text NOT NULL,
       plan_object_id text NOT NULL,
+      plan_object_version text NOT NULL,
       plan_object_sha256 text NOT NULL,
+      plan_object_size bigint NOT NULL,
+      plan_object_expires_at timestamptz NOT NULL,
       state text NOT NULL DEFAULT 'planned',
       total_count bigint NOT NULL,
       completed_count bigint NOT NULL DEFAULT 0,
@@ -223,7 +226,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       CONSTRAINT chk_meta_recovery_archive_jobs_opaque_ids CHECK (
         length(btrim(workspace_id)) > 0 AND
         length(btrim(actor_id)) > 0 AND
-        length(btrim(plan_object_id)) > 0
+        length(btrim(plan_object_id)) > 0 AND
+        length(btrim(plan_object_version)) > 0
+      ),
+      CONSTRAINT chk_meta_recovery_archive_jobs_plan_object CHECK (
+        plan_object_size > 0 AND plan_object_expires_at >= resume_deadline
       ),
       CONSTRAINT chk_meta_recovery_archive_jobs_state CHECK (
         state IN (
@@ -272,7 +279,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       chunk_index integer NOT NULL,
       chunk_hash text NOT NULL,
       chunk_object_id text NOT NULL,
+      chunk_object_version text NOT NULL,
       chunk_object_sha256 text NOT NULL,
+      chunk_object_size bigint NOT NULL,
+      chunk_object_expires_at timestamptz NOT NULL,
       record_count bigint NOT NULL,
       state text NOT NULL DEFAULT 'pending',
       operation_id uuid,
@@ -294,8 +304,12 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         chunk_hash ~ '^[0-9a-f]{64}$' AND
         chunk_object_sha256 ~ '^[0-9a-f]{64}$'
       ),
-      CONSTRAINT chk_meta_recovery_archive_job_chunks_object_id
-        CHECK (length(btrim(chunk_object_id)) > 0),
+      CONSTRAINT chk_meta_recovery_archive_job_chunks_object CHECK (
+        length(btrim(chunk_object_id)) > 0 AND
+        length(btrim(chunk_object_version)) > 0 AND
+        chunk_object_size > 0 AND
+        chunk_object_expires_at > created_at
+      ),
       CONSTRAINT chk_meta_recovery_archive_job_chunks_record_count
         CHECK (record_count BETWEEN 1 AND 5000),
       CONSTRAINT chk_meta_recovery_archive_job_chunks_state
@@ -503,7 +517,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          NEW.key_id IS DISTINCT FROM OLD.key_id OR
          NEW.plan_hash IS DISTINCT FROM OLD.plan_hash OR
          NEW.plan_object_id IS DISTINCT FROM OLD.plan_object_id OR
+         NEW.plan_object_version IS DISTINCT FROM OLD.plan_object_version OR
          NEW.plan_object_sha256 IS DISTINCT FROM OLD.plan_object_sha256 OR
+         NEW.plan_object_size IS DISTINCT FROM OLD.plan_object_size OR
+         NEW.plan_object_expires_at IS DISTINCT FROM OLD.plan_object_expires_at OR
          NEW.total_count IS DISTINCT FROM OLD.total_count OR
          NEW.block_fence IS DISTINCT FROM OLD.block_fence OR
          NEW.resume_deadline IS DISTINCT FROM OLD.resume_deadline OR
@@ -629,12 +646,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     DECLARE
       operation_match_count integer;
       job_state text;
+      job_resume_deadline timestamptz;
     BEGIN
       IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_job_chunk_delete_not_authorized';
       END IF;
 
-      SELECT state INTO job_state
+      SELECT state, resume_deadline INTO job_state, job_resume_deadline
         FROM public.meta_recovery_archive_jobs
        WHERE id = NEW.job_id AND sheet_id = NEW.sheet_id;
       IF job_state IS NULL OR job_state IN ('done', 'abandoned_partial', 'cancelled_zero_write') THEN
@@ -643,7 +661,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
       IF TG_OP = 'INSERT' THEN
         IF NEW.state <> 'pending' OR NEW.operation_id IS NOT NULL OR NEW.endpoint_seq IS NOT NULL OR
-           NEW.committed_count IS NOT NULL OR NEW.committed_at IS NOT NULL THEN
+           NEW.committed_count IS NOT NULL OR NEW.committed_at IS NOT NULL OR
+           NEW.chunk_object_expires_at < job_resume_deadline THEN
           RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'recovery_archive_job_chunk_initial_posture_invalid';
         END IF;
         RETURN NEW;
@@ -655,7 +674,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
          NEW.chunk_index IS DISTINCT FROM OLD.chunk_index OR
          NEW.chunk_hash IS DISTINCT FROM OLD.chunk_hash OR
          NEW.chunk_object_id IS DISTINCT FROM OLD.chunk_object_id OR
+         NEW.chunk_object_version IS DISTINCT FROM OLD.chunk_object_version OR
          NEW.chunk_object_sha256 IS DISTINCT FROM OLD.chunk_object_sha256 OR
+         NEW.chunk_object_size IS DISTINCT FROM OLD.chunk_object_size OR
+         NEW.chunk_object_expires_at IS DISTINCT FROM OLD.chunk_object_expires_at OR
          NEW.record_count IS DISTINCT FROM OLD.record_count OR
          NEW.created_at IS DISTINCT FROM OLD.created_at OR
          job_state <> 'applying' THEN

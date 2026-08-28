@@ -28,7 +28,10 @@ export interface RecoveryArchiveRestoreChunkIdentityInput {
   chunkIndex: number
   chunkHash: string
   chunkObjectId: string
+  chunkObjectVersion: string
   chunkObjectSha256: string
+  chunkObjectSize: string
+  chunkObjectExpiresAt: string
   recordCount: string
 }
 
@@ -45,7 +48,10 @@ export interface RecoveryArchiveRestorePlanInput {
   sourceVectorHash: string
   keyId: string
   planObjectId: string
+  planObjectVersion: string
   planObjectSha256: string
+  planObjectSize: string
+  planObjectExpiresAt: string
   chunks: readonly RecoveryArchiveRestoreChunkIdentityInput[]
 }
 
@@ -53,7 +59,10 @@ export interface RecoveryArchiveRestoreChunkIdentity {
   readonly chunkIndex: number
   readonly chunkHash: string
   readonly chunkObjectId: string
+  readonly chunkObjectVersion: string
   readonly chunkObjectSha256: string
+  readonly chunkObjectSize: string
+  readonly chunkObjectExpiresAt: string
   readonly recordCount: string
 }
 
@@ -71,7 +80,10 @@ export interface RecoveryArchiveRestorePlan {
   readonly keyId: string
   readonly planHash: string
   readonly planObjectId: string
+  readonly planObjectVersion: string
   readonly planObjectSha256: string
+  readonly planObjectSize: string
+  readonly planObjectExpiresAt: string
   readonly totalCount: string
   readonly chunks: readonly RecoveryArchiveRestoreChunkIdentity[]
 }
@@ -133,12 +145,18 @@ export function hashRecoveryArchiveRestorePlan(
     input.sourceVectorHash,
     input.keyId,
     input.planObjectId,
+    input.planObjectVersion,
     input.planObjectSha256,
+    input.planObjectSize,
+    input.planObjectExpiresAt,
     input.chunks.map((chunk) => [
       chunk.chunkIndex,
       chunk.chunkHash,
       chunk.chunkObjectId,
+      chunk.chunkObjectVersion,
       chunk.chunkObjectSha256,
+      chunk.chunkObjectSize,
+      chunk.chunkObjectExpiresAt,
       chunk.recordCount,
     ]),
   ]
@@ -157,6 +175,7 @@ function admitPlanInput(input: RecoveryArchiveRestorePlanInput): Omit<
   const archiveGenerationId = opaque(input.archiveGenerationId)
   const keyId = opaque(input.keyId)
   const planObjectId = opaque(input.planObjectId)
+  const planObjectVersion = opaque(input.planObjectVersion)
   if (input.recoveryMode !== 'revert' && input.recoveryMode !== 'reset') {
     fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
   }
@@ -171,6 +190,8 @@ function admitPlanInput(input: RecoveryArchiveRestorePlanInput): Omit<
   const archiveRootHash = sha(input.archiveRootHash)
   const sourceVectorHash = sha(input.sourceVectorHash)
   const planObjectSha256 = sha(input.planObjectSha256)
+  const planObjectSize = positiveDecimal(input.planObjectSize)
+  const planObjectExpiresAt = timestamp(input.planObjectExpiresAt)
   if (!Array.isArray(input.chunks) || input.chunks.length < 2) {
     fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
   }
@@ -186,7 +207,10 @@ function admitPlanInput(input: RecoveryArchiveRestorePlanInput): Omit<
       chunkIndex: index,
       chunkHash: sha(chunk.chunkHash),
       chunkObjectId: opaque(chunk.chunkObjectId),
+      chunkObjectVersion: opaque(chunk.chunkObjectVersion),
       chunkObjectSha256: sha(chunk.chunkObjectSha256),
+      chunkObjectSize: positiveDecimal(chunk.chunkObjectSize),
+      chunkObjectExpiresAt: timestamp(chunk.chunkObjectExpiresAt),
       recordCount: count.toString(),
     }
   })
@@ -212,7 +236,10 @@ function admitPlanInput(input: RecoveryArchiveRestorePlanInput): Omit<
     sourceVectorHash,
     keyId,
     planObjectId,
+    planObjectVersion,
     planObjectSha256,
+    planObjectSize,
+    planObjectExpiresAt,
     chunks,
   }
 }
@@ -236,6 +263,23 @@ function decimal(value: unknown): bigint {
     fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
   }
   return BigInt(value)
+}
+
+function positiveDecimal(value: unknown): string {
+  const parsed = decimal(value)
+  if (parsed < 1n) fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
+  return parsed.toString()
+}
+
+function timestamp(value: unknown): string {
+  if (typeof value !== 'string' || value.trim() !== value) {
+    fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
+  }
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== value) {
+    fail('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID')
+  }
+  return value
 }
 
 function fail(code: RecoveryArchiveRestorePlanErrorCode): never {

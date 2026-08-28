@@ -29,20 +29,29 @@ function planInput() {
     sourceVectorHash: SHA('c'),
     keyId: 'key_d5_unit',
     planObjectId: 'plan_object_d5_unit',
+    planObjectVersion: 'plan_version_d5_unit',
     planObjectSha256: SHA('d'),
+    planObjectSize: '2048',
+    planObjectExpiresAt: '2026-09-05T00:00:00.000Z',
     chunks: [
       {
         chunkIndex: 0,
         chunkHash: SHA('e'),
         chunkObjectId: 'chunk_object_0',
+        chunkObjectVersion: 'chunk_version_0',
         chunkObjectSha256: SHA('f'),
+        chunkObjectSize: '1024',
+        chunkObjectExpiresAt: '2026-09-05T00:00:00.000Z',
         recordCount: '5000',
       },
       {
         chunkIndex: 1,
         chunkHash: SHA('1'),
         chunkObjectId: 'chunk_object_1',
+        chunkObjectVersion: 'chunk_version_1',
         chunkObjectSha256: SHA('2'),
+        chunkObjectSize: '512',
+        chunkObjectExpiresAt: '2026-09-05T00:00:00.000Z',
         recordCount: '1',
       },
     ],
@@ -85,6 +94,34 @@ describe('D5 archive restore identity and frozen plan', () => {
       ],
     })
     expect(changed.planHash).not.toBe(plan.planHash)
+
+    const changedVersion = compileRecoveryArchiveRestorePlan({
+      ...planInput(),
+      chunks: [
+        planInput().chunks[0],
+        { ...planInput().chunks[1], chunkObjectVersion: 'changed_version' },
+      ],
+    })
+    expect(changedVersion.planHash).not.toBe(plan.planHash)
+  })
+
+  test('rejects noncanonical object sizes and timestamps', () => {
+    for (const invalid of [
+      { planObjectSize: '01' },
+      { planObjectSize: '0' },
+      { planObjectExpiresAt: '2026-09-05T00:00:00Z' },
+      {
+        chunks: [
+          { ...planInput().chunks[0], chunkObjectSize: '-1' },
+          planInput().chunks[1],
+        ],
+      },
+    ]) {
+      expect(() => compileRecoveryArchiveRestorePlan({
+        ...planInput(),
+        ...invalid,
+      })).toThrowError(new RecoveryArchiveRestorePlanError('RECOVERY_ARCHIVE_RESTORE_PLAN_INVALID'))
+    }
   })
 
   test('scope kind is separate from reset/revert semantics and malformed combinations fail closed', () => {

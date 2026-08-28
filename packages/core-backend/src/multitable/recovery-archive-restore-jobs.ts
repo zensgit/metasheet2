@@ -134,7 +134,10 @@ export interface RecoveryArchiveRestoreChunkMaterialized {
   readonly chunkIndex: number
   readonly chunkHash: string
   readonly chunkObjectId: string
+  readonly chunkObjectVersion: string
   readonly chunkObjectSha256: string
+  readonly chunkObjectSize: string
+  readonly chunkObjectExpiresAt: string
   readonly recordCount: string
   /** Opaque, already authenticated payload. The D5 host never logs or serializes it. */
   readonly payload: unknown
@@ -245,7 +248,10 @@ type ChunkRow = {
   chunk_index: unknown
   chunk_hash: unknown
   chunk_object_id: unknown
+  chunk_object_version: unknown
   chunk_object_sha256: unknown
+  chunk_object_size: unknown
+  chunk_object_expires_at: unknown
   record_count: unknown
   state: unknown
   operation_id?: unknown
@@ -309,14 +315,16 @@ export async function acceptRecoveryArchiveRestoreJob(
            id, workspace_id, base_id, sheet_id, actor_id, token_sha256,
            recovery_mode, scope_kind, scope_hash,
            archive_generation_id, archive_root_hash, source_vector_hash, key_id,
-           plan_hash, plan_object_id, plan_object_sha256,
+           plan_hash, plan_object_id, plan_object_version, plan_object_sha256,
+           plan_object_size, plan_object_expires_at,
            total_count, block_fence, resume_deadline
          ) VALUES (
            $1::uuid, $2, $3, $4, $5, $6,
            $7, $8, $9,
            $10::uuid, $11, $12, $13,
-           $14, $15, $16,
-           $17::bigint, $18::bigint, $19::timestamptz
+           $14, $15, $16, $17,
+           $18::bigint, $19::timestamptz,
+           $20::bigint, $21::bigint, $22::timestamptz
          )`,
         [
           jobId,
@@ -334,7 +342,10 @@ export async function acceptRecoveryArchiveRestoreJob(
           plan.keyId,
           plan.planHash,
           plan.planObjectId,
+          plan.planObjectVersion,
           plan.planObjectSha256,
+          plan.planObjectSize,
+          plan.planObjectExpiresAt,
           plan.totalCount,
           block.fence,
           resumeDeadline,
@@ -344,15 +355,22 @@ export async function acceptRecoveryArchiveRestoreJob(
         await query(
           `INSERT INTO public.meta_recovery_archive_job_chunks (
              job_id, sheet_id, chunk_index, chunk_hash,
-             chunk_object_id, chunk_object_sha256, record_count
-           ) VALUES ($1::uuid, $2, $3::int, $4, $5, $6, $7::bigint)`,
+             chunk_object_id, chunk_object_version, chunk_object_sha256,
+             chunk_object_size, chunk_object_expires_at, record_count
+           ) VALUES (
+             $1::uuid, $2, $3::int, $4, $5, $6, $7,
+             $8::bigint, $9::timestamptz, $10::bigint
+           )`,
           [
             jobId,
             plan.sheetId,
             chunk.chunkIndex,
             chunk.chunkHash,
             chunk.chunkObjectId,
+            chunk.chunkObjectVersion,
             chunk.chunkObjectSha256,
+            chunk.chunkObjectSize,
+            chunk.chunkObjectExpiresAt,
             chunk.recordCount,
           ],
         )
@@ -1091,7 +1109,9 @@ async function lockChunkRow(
   chunkIndex: number,
 ): Promise<ChunkRow> {
   const result = await query(
-    `SELECT chunk_index, chunk_hash, chunk_object_id, chunk_object_sha256,
+    `SELECT chunk_index, chunk_hash, chunk_object_id, chunk_object_version,
+            chunk_object_sha256, chunk_object_size::text AS chunk_object_size,
+            chunk_object_expires_at::text AS chunk_object_expires_at,
             record_count::text AS record_count, state,
             operation_id::text AS operation_id,
             endpoint_seq::text AS endpoint_seq,
@@ -1113,7 +1133,9 @@ async function readNextPendingChunk(
   jobId: string,
 ): Promise<Omit<RecoveryArchiveRestoreChunkMaterialized, 'payload'> | null> {
   const result = await query(
-    `SELECT chunk_index, chunk_hash, chunk_object_id, chunk_object_sha256,
+    `SELECT chunk_index, chunk_hash, chunk_object_id, chunk_object_version,
+            chunk_object_sha256, chunk_object_size::text AS chunk_object_size,
+            chunk_object_expires_at::text AS chunk_object_expires_at,
             record_count::text AS record_count
        FROM public.meta_recovery_archive_job_chunks
       WHERE job_id = $1::uuid AND state = 'pending'
@@ -1127,7 +1149,10 @@ async function readNextPendingChunk(
     chunkIndex: nonnegativeInteger(row.chunk_index),
     chunkHash: sha(row.chunk_hash),
     chunkObjectId: opaque(row.chunk_object_id),
+    chunkObjectVersion: opaque(row.chunk_object_version),
     chunkObjectSha256: sha(row.chunk_object_sha256),
+    chunkObjectSize: positiveDecimal(row.chunk_object_size),
+    chunkObjectExpiresAt: timestamp(row.chunk_object_expires_at),
     recordCount: positiveDecimal(row.record_count),
   })
 }
@@ -1291,7 +1316,10 @@ function admitMaterializedChunk(value: unknown): RecoveryArchiveRestoreChunkMate
     chunkIndex: nonnegativeInteger(row.chunkIndex),
     chunkHash: sha(row.chunkHash),
     chunkObjectId: opaque(row.chunkObjectId),
+    chunkObjectVersion: opaque(row.chunkObjectVersion),
     chunkObjectSha256: sha(row.chunkObjectSha256),
+    chunkObjectSize: positiveDecimal(row.chunkObjectSize),
+    chunkObjectExpiresAt: timestamp(row.chunkObjectExpiresAt),
     recordCount: positiveDecimal(row.recordCount),
     payload: row.payload,
   })
@@ -1304,7 +1332,11 @@ function assertMaterializedMatches(
   if (
     expected.chunkIndex !== actual.chunkIndex || expected.chunkHash !== actual.chunkHash ||
     expected.chunkObjectId !== actual.chunkObjectId ||
-    expected.chunkObjectSha256 !== actual.chunkObjectSha256 || expected.recordCount !== actual.recordCount
+    expected.chunkObjectVersion !== actual.chunkObjectVersion ||
+    expected.chunkObjectSha256 !== actual.chunkObjectSha256 ||
+    expected.chunkObjectSize !== actual.chunkObjectSize ||
+    expected.chunkObjectExpiresAt !== actual.chunkObjectExpiresAt ||
+    expected.recordCount !== actual.recordCount
   ) {
     throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID')
   }
@@ -1314,7 +1346,10 @@ function assertChunkMatches(row: ChunkRow, actual: RecoveryArchiveRestoreChunkMa
   if (
     row.chunk_index !== actual.chunkIndex || row.chunk_hash !== actual.chunkHash ||
     row.chunk_object_id !== actual.chunkObjectId ||
+    row.chunk_object_version !== actual.chunkObjectVersion ||
     row.chunk_object_sha256 !== actual.chunkObjectSha256 ||
+    decimal(row.chunk_object_size) !== actual.chunkObjectSize ||
+    timestamp(row.chunk_object_expires_at) !== actual.chunkObjectExpiresAt ||
     decimal(row.record_count) !== actual.recordCount || row.state !== 'pending'
   ) {
     throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID')
