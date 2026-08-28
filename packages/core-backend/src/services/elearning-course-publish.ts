@@ -4,6 +4,11 @@
  * Public results and errors are values-free.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import {
+  planElearningCourseDraftPointers,
+  planElearningCoursePublishPointers,
+  validateElearningCourseVersionTransition,
+} from './elearning-course-lifecycle-policy'
 import { assertElearningCoursePublishReadiness } from './elearning-course-publish-readiness-policy'
 import { normalizeElearningCourseVersionItems } from './elearning-course-version-items-policy'
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
@@ -519,6 +524,30 @@ export async function publishElearningCourse(
          VALUES ($1, $2, $3, 1, 'draft', $4, $5)`,
         [courseVersionId, canonical.orgId, courseId, canonical.title, canonical.actorId],
       )
+      let draftPointers: ReturnType<typeof planElearningCourseDraftPointers>
+      try {
+        draftPointers = planElearningCourseDraftPointers({
+          activeVersionId: null,
+          courseId,
+          draftVersionId: courseVersionId,
+          latestVersionId: null,
+        })
+      } catch {
+        fail('unavailable')
+      }
+      const drafted = await tx.query(
+        `/* elearning-publish:set-draft-pointer */
+         UPDATE elearning_courses
+            SET latest_version_id = $1,
+                updated_at = now()
+          WHERE org_id = $2
+            AND id = $3
+            AND active_version_id IS NULL
+            AND latest_version_id IS NULL`,
+        [draftPointers.latestVersionId, canonical.orgId, draftPointers.courseId],
+      )
+      if ((drafted.rowCount ?? 0) !== 1) fail('unavailable')
+
       await tx.query(
         `/* elearning-publish:insert-exam */
          INSERT INTO elearning_exams
@@ -630,12 +659,31 @@ export async function publishElearningCourse(
         fail('unavailable')
       }
 
+      let publishPointers: ReturnType<typeof planElearningCoursePublishPointers>
+      try {
+        validateElearningCourseVersionTransition({
+          fromStatus: 'draft',
+          isActiveVersion: false,
+          toStatus: 'published',
+        })
+        publishPointers = planElearningCoursePublishPointers({
+          activeVersionId: draftPointers.activeVersionId,
+          courseId,
+          draftVersionId: courseVersionId,
+          draftVersionStatus: 'draft',
+          latestVersionId: draftPointers.latestVersionId,
+          previousActiveVersionStatus: null,
+        })
+      } catch {
+        fail('unavailable')
+      }
+
       const publishedVersion = await tx.query(
         `/* elearning-publish:publish-version */
          UPDATE elearning_course_versions
             SET status = 'published', updated_at = now()
           WHERE org_id = $1 AND id = $2 AND status = 'draft'`,
-        [canonical.orgId, courseVersionId],
+        [canonical.orgId, publishPointers.publishVersionId],
       )
       if ((publishedVersion.rowCount ?? 0) !== 1) fail('unavailable')
 
@@ -643,13 +691,19 @@ export async function publishElearningCourse(
         `/* elearning-publish:set-pointers */
          UPDATE elearning_courses
             SET active_version_id = $1,
-                latest_version_id = $1,
+                latest_version_id = $2,
                 updated_at = now()
-          WHERE org_id = $2
-            AND id = $3
+          WHERE org_id = $3
+            AND id = $4
             AND active_version_id IS NULL
-            AND latest_version_id IS NULL`,
-        [courseVersionId, canonical.orgId, courseId],
+            AND latest_version_id = $5`,
+        [
+          publishPointers.nextActiveVersionId,
+          publishPointers.nextLatestVersionId,
+          canonical.orgId,
+          publishPointers.courseId,
+          draftPointers.latestVersionId,
+        ],
       )
       if ((pointers.rowCount ?? 0) !== 1) fail('unavailable')
 

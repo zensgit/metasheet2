@@ -55,6 +55,7 @@ const EXPECTED_TAG_ORDER = [
   'elearning-publish:load-media',
   'elearning-publish:insert-course',
   'elearning-publish:insert-version',
+  'elearning-publish:set-draft-pointer',
   'elearning-publish:insert-exam',
   'elearning-publish:insert-question',
   'elearning-publish:insert-revision',
@@ -124,8 +125,10 @@ interface PublishRequestRow {
 }
 
 interface Mem {
+  draftPointerUpdated: boolean
   media: boolean
   mediaDurationMs: unknown
+  publishPointersUpdated: boolean
   queries: string[]
   params: unknown[][]
   lockKeys: string[]
@@ -134,8 +137,10 @@ interface Mem {
 
 function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb; mem: Mem } {
   const mem: Mem = {
+    draftPointerUpdated: true,
     media: true,
     mediaDurationMs: String(MEDIA_DURATION_MS),
+    publishPointersUpdated: true,
     queries: [],
     params: [],
     lockKeys: [],
@@ -197,6 +202,13 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
       expect(sql).toMatch(/1, 'draft'/)
       return { rows: [], rowCount: 1 }
     }
+    if (tag === 'elearning-publish:set-draft-pointer') {
+      expect(sql).toContain('SET latest_version_id = $1')
+      expect(sql).toContain('active_version_id IS NULL')
+      expect(sql).toContain('latest_version_id IS NULL')
+      expect([ORG, ORG_B]).toContain(params[1])
+      return { rows: [], rowCount: mem.draftPointerUpdated ? 1 : 0 }
+    }
     if (tag === 'elearning-publish:insert-exam') {
       expect(sql).toMatch(/'draft'/)
       return { rows: [], rowCount: 1 }
@@ -226,10 +238,14 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
       return { rows: [], rowCount: 1 }
     }
     if (tag === 'elearning-publish:set-pointers') {
-      expect(sql).toContain('active_version_id')
-      expect(sql).toContain('latest_version_id')
-      expect(sql).toContain('IS NULL')
-      return { rows: [], rowCount: 1 }
+      expect(sql).toContain('SET active_version_id = $1')
+      expect(sql).toContain('latest_version_id = $2')
+      expect(sql).toContain('active_version_id IS NULL')
+      expect(sql).toContain('latest_version_id = $5')
+      expect(params[0]).toBe(params[1])
+      expect(params[1]).toBe(params[4])
+      expect([ORG, ORG_B]).toContain(params[2])
+      return { rows: [], rowCount: mem.publishPointersUpdated ? 1 : 0 }
     }
     if (tag === 'elearning-publish:insert-request') {
       expect(sql).toContain('elearning_course_publish_requests')
@@ -322,7 +338,7 @@ function assertPublicShape(payload: unknown): Record<string, unknown> {
 }
 
 describe('elearning course publish source SQL order', () => {
-  it('pins lock → media → draft inserts → exam publish → version publish → pointers, and the ready-mp4 media check', async () => {
+  it('pins draft/latest/active lifecycle order and the ready-mp4 authority check', async () => {
     const source = await fs.readFile(SERVICE_SOURCE, 'utf8')
     const tags = [...source.matchAll(/elearning-publish:[a-z-]+/g)].map((match) => match[0])
     const unique: string[] = []
@@ -334,17 +350,27 @@ describe('elearning course publish source SQL order', () => {
     const lockAt = source.indexOf('elearning-publish:lock')
     const loadRequestAt = source.indexOf('elearning-publish:load-request')
     const mediaAt = source.indexOf('elearning-publish:load-media')
+    const insertVersionAt = source.indexOf('elearning-publish:insert-version')
+    const draftPointerPlanAt = source.indexOf('planElearningCourseDraftPointers({')
+    const draftPointerAt = source.indexOf('elearning-publish:set-draft-pointer')
     const examAt = source.indexOf('elearning-publish:publish-exam')
     const readinessAt = source.indexOf('assertElearningCoursePublishReadiness({')
+    const versionTransitionAt = source.indexOf('validateElearningCourseVersionTransition({')
+    const publishPointerPlanAt = source.indexOf('planElearningCoursePublishPointers({')
     const versionAt = source.indexOf('elearning-publish:publish-version')
     const pointersAt = source.indexOf('elearning-publish:set-pointers')
     const insertRequestAt = source.indexOf('elearning-publish:insert-request')
     expect(lockAt).toBeGreaterThan(-1)
     expect(loadRequestAt).toBeGreaterThan(lockAt)
     expect(mediaAt).toBeGreaterThan(loadRequestAt)
-    expect(examAt).toBeGreaterThan(mediaAt)
+    expect(insertVersionAt).toBeGreaterThan(mediaAt)
+    expect(draftPointerPlanAt).toBeGreaterThan(insertVersionAt)
+    expect(draftPointerAt).toBeGreaterThan(draftPointerPlanAt)
+    expect(examAt).toBeGreaterThan(draftPointerAt)
     expect(readinessAt).toBeGreaterThan(examAt)
-    expect(versionAt).toBeGreaterThan(readinessAt)
+    expect(versionTransitionAt).toBeGreaterThan(readinessAt)
+    expect(publishPointerPlanAt).toBeGreaterThan(versionTransitionAt)
+    expect(versionAt).toBeGreaterThan(publishPointerPlanAt)
     expect(pointersAt).toBeGreaterThan(versionAt)
     expect(insertRequestAt).toBeGreaterThan(pointersAt)
     expect(source).toContain('elearning_course_publish_requests')
@@ -944,6 +970,7 @@ describe('publishElearningCourse', () => {
       'elearning-publish:load-media',
       'elearning-publish:insert-course',
       'elearning-publish:insert-version',
+      'elearning-publish:set-draft-pointer',
       'elearning-publish:insert-exam',
       'elearning-publish:insert-question',
       'elearning-publish:insert-revision',
@@ -966,6 +993,19 @@ describe('publishElearningCourse', () => {
       createMemoryDb({ mediaDurationMs: 'not-a-safe-integer' }).db,
       baseInput(),
       'media_unavailable',
+    )
+  })
+
+  it('fails closed when either lifecycle pointer compare-and-set loses authority', async () => {
+    await expectAsyncCode(
+      createMemoryDb({ draftPointerUpdated: false }).db,
+      baseInput(),
+      'unavailable',
+    )
+    await expectAsyncCode(
+      createMemoryDb({ publishPointersUpdated: false }).db,
+      baseInput(),
+      'unavailable',
     )
   })
 
