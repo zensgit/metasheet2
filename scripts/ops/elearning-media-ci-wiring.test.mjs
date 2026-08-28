@@ -42,6 +42,9 @@ const DB_SUITES = readdirSync(INTEGRATION_DIR)
 
 const WEB_SPECS = [
   'tests/elearning-client.spec.ts',
+  'tests/elearning-credit-admin.spec.ts',
+  'tests/elearning-credit-client.spec.ts',
+  'tests/elearning-credit-wallet.spec.ts',
   'tests/elearning-learner-view.spec.ts',
   'tests/elearning-admin-view.spec.ts',
   'tests/elearning-routes.spec.ts',
@@ -51,8 +54,11 @@ const WEB_SPECS = [
 
 const WEB_GUARD_PATHS = [
   'apps/web/src/services/elearning.ts',
+  'apps/web/src/services/elearningCredit.ts',
   'apps/web/src/services/elearningManualGrading.ts',
   'apps/web/src/views/ElearningAdminView.vue',
+  'apps/web/src/views/ElearningCreditAdminSection.vue',
+  'apps/web/src/views/ElearningCreditWalletSection.vue',
   'apps/web/src/views/ElearningLearnerView.vue',
   'apps/web/src/views/ElearningManualGradingView.vue',
   'apps/web/src/views/ElearningManualGradingAttempt.vue',
@@ -63,6 +69,9 @@ const WEB_GUARD_PATHS = [
   'apps/web/src/stores/featureFlags.ts',
   'plugins/plugin-elearning/app.manifest.json',
   'apps/web/tests/elearning-client.spec.ts',
+  'apps/web/tests/elearning-credit-admin.spec.ts',
+  'apps/web/tests/elearning-credit-client.spec.ts',
+  'apps/web/tests/elearning-credit-wallet.spec.ts',
   'apps/web/tests/elearning-learner-view.spec.ts',
   'apps/web/tests/elearning-admin-view.spec.ts',
   'apps/web/tests/elearning-routes.spec.ts',
@@ -650,7 +659,7 @@ test('media upload OpenAPI and generated SDK keep the ready/rejected discriminat
   assert.match(sdk, /ElearningMediaUploadRejectedResult:[\s\S]*?status: "rejected";[\s\S]*?durationMs: null;/)
 })
 
-test('elearning-web-guard.yml parses, installs frozen deps, and runs the six whole spec files', () => {
+test('elearning-web-guard.yml parses, installs frozen deps, and runs the nine whole spec files', () => {
   assert.ok(existsSync(WEB_GUARD), 'elearning-web-guard.yml must exist')
   const yaml = readFileSync(WEB_GUARD, 'utf8')
   const doc = parseYaml(yaml)
@@ -662,7 +671,7 @@ test('elearning-web-guard.yml parses, installs frozen deps, and runs the six who
   }
   refusesSkipShapedGreen(yaml, 'elearning-web-guard.yml')
   assert.match(yaml, /pnpm install --frozen-lockfile/)
-  const runStepAt = yaml.indexOf('Run elearning V0.1 + L3 web guard specs (targeted)')
+  const runStepAt = yaml.indexOf('Run elearning V0.1 + L3 + L4 web guard specs (targeted)')
   assert.ok(runStepAt >= 0, 'web guard must have a targeted spec step')
   const runStep = namedStepContaining(yaml, runStepAt)
   const runAt = runStep.search(/^\s+run:/m)
@@ -678,7 +687,7 @@ test('elearning-web-guard.yml parses, installs frozen deps, and runs the six who
   assert.deepEqual(invocationFileArgs(invocations[0]).sort(), [...WEB_SPECS].sort())
 })
 
-test('run-required-web-tests.sh keeps existing tokens and adds a distinct six-file elearning invocation', () => {
+test('run-required-web-tests.sh keeps existing tokens and adds a distinct nine-file elearning invocation', () => {
   assert.ok(existsSync(REQUIRED_WEB), 'run-required-web-tests.sh must exist')
   const src = readFileSync(REQUIRED_WEB, 'utf8')
   for (const token of EXISTING_REQUIRED_WEB_TOKENS) {
@@ -690,12 +699,12 @@ test('run-required-web-tests.sh keeps existing tokens and adds a distinct six-fi
   assert.equal(
     targeted.length,
     1,
-    'run-required-web-tests.sh must have exactly one distinct invocation that names all six elearning specs',
+    'run-required-web-tests.sh must have exactly one distinct invocation that names all nine elearning specs',
   )
   assert.deepEqual(
     invocationFileArgs(targeted[0]).sort(),
     [...WEB_SPECS].sort(),
-    'the targeted elearning invocation must run exactly the six whole spec files',
+    'the targeted elearning invocation must run exactly the nine whole spec files',
   )
   assert.equal(targeted[0].includes('exec '), false, 'the targeted elearning invocation must not be the final exec batch')
 })

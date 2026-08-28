@@ -4,7 +4,7 @@
 # core-backend tests and only `pnpm --filter @metasheet/web build` for the web
 # app — it NEVER runs apps/web vitest specs. The always-on `web-tests` job
 # runs apps/web/scripts/run-required-web-tests.sh; this guard is the domain
-# path-filtered sibling. Both lanes must name the six V0.1/L3 specs as whole
+# path-filtered sibling. Both lanes must name the nine V0.1/L3/L4 specs as whole
 # files. A name filter matching zero tests is skip-shaped green.
 #
 # Scope: deliberately TARGETED (same convention as plm-embed/approval/multitable
@@ -20,8 +20,11 @@ on:
   pull_request:
     paths:
       - 'apps/web/src/services/elearning.ts'
+      - 'apps/web/src/services/elearningCredit.ts'
       - 'apps/web/src/services/elearningManualGrading.ts'
       - 'apps/web/src/views/ElearningAdminView.vue'
+      - 'apps/web/src/views/ElearningCreditAdminSection.vue'
+      - 'apps/web/src/views/ElearningCreditWalletSection.vue'
       - 'apps/web/src/views/ElearningLearnerView.vue'
       - 'apps/web/src/views/ElearningManualGradingView.vue'
       - 'apps/web/src/views/ElearningManualGradingAttempt.vue'
@@ -32,6 +35,9 @@ on:
       - 'apps/web/src/stores/featureFlags.ts'
       - 'plugins/plugin-elearning/app.manifest.json'
       - 'apps/web/tests/elearning-client.spec.ts'
+      - 'apps/web/tests/elearning-credit-admin.spec.ts'
+      - 'apps/web/tests/elearning-credit-client.spec.ts'
+      - 'apps/web/tests/elearning-credit-wallet.spec.ts'
       - 'apps/web/tests/elearning-learner-view.spec.ts'
       - 'apps/web/tests/elearning-admin-view.spec.ts'
       - 'apps/web/tests/elearning-routes.spec.ts'
@@ -78,12 +84,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Run elearning V0.1 + L3 web guard specs (targeted)
-        # Six whole-file args. Do not replace with a name filter, glob, skip,
+      - name: Run elearning V0.1 + L3 + L4 web guard specs (targeted)
+        # Nine whole-file args. Do not replace with a name filter, glob, skip,
         # or continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
             tests/elearning-client.spec.ts \
+            tests/elearning-credit-admin.spec.ts \
+            tests/elearning-credit-client.spec.ts \
+            tests/elearning-credit-wallet.spec.ts \
             tests/elearning-learner-view.spec.ts \
             tests/elearning-admin-view.spec.ts \
             tests/elearning-routes.spec.ts \
