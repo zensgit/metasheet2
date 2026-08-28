@@ -35,6 +35,7 @@ const ORG_B = 'org-publish-2'
 const ACTOR = 'actor-publish-1'
 const REQUEST = '11111111-1111-4111-8111-111111111111'
 const MEDIA = '22222222-2222-4222-8222-222222222222'
+const MEDIA_DURATION_MS = 60_000
 const TITLE = 'Pilot composite course'
 
 const PUBLIC_KEYS = [
@@ -124,6 +125,7 @@ interface PublishRequestRow {
 
 interface Mem {
   media: boolean
+  mediaDurationMs: unknown
   queries: string[]
   params: unknown[][]
   lockKeys: string[]
@@ -133,6 +135,7 @@ interface Mem {
 function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb; mem: Mem } {
   const mem: Mem = {
     media: true,
+    mediaDurationMs: String(MEDIA_DURATION_MS),
     queries: [],
     params: [],
     lockKeys: [],
@@ -174,12 +177,15 @@ function createMemoryDb(seed: Partial<Mem> = {}): { db: ElearningCoursePublishDb
     }
     if (tag === 'elearning-publish:load-media') {
       expect(sql).toContain("status = 'ready'")
+      expect(sql).toContain('SELECT id, duration_ms')
       expect(sql).toContain('mime_type = $3')
       expect(sql).toContain('magic_mime_type = $3')
       expect(sql).toContain('duration_ms > 0')
       expect(sql).toContain('FOR SHARE')
       expect(params[2]).toBe(ELEARNING_MEDIA_MIME)
-      return mem.media ? { rows: [{ id: MEDIA }], rowCount: 1 } : { rows: [], rowCount: 0 }
+      return mem.media
+        ? { rows: [{ id: MEDIA, duration_ms: mem.mediaDurationMs }], rowCount: 1 }
+        : { rows: [], rowCount: 0 }
     }
     if (tag === 'elearning-publish:insert-course') {
       expect(sql).toContain('status')
@@ -329,6 +335,7 @@ describe('elearning course publish source SQL order', () => {
     const loadRequestAt = source.indexOf('elearning-publish:load-request')
     const mediaAt = source.indexOf('elearning-publish:load-media')
     const examAt = source.indexOf('elearning-publish:publish-exam')
+    const readinessAt = source.indexOf('assertElearningCoursePublishReadiness({')
     const versionAt = source.indexOf('elearning-publish:publish-version')
     const pointersAt = source.indexOf('elearning-publish:set-pointers')
     const insertRequestAt = source.indexOf('elearning-publish:insert-request')
@@ -336,7 +343,8 @@ describe('elearning course publish source SQL order', () => {
     expect(loadRequestAt).toBeGreaterThan(lockAt)
     expect(mediaAt).toBeGreaterThan(loadRequestAt)
     expect(examAt).toBeGreaterThan(mediaAt)
-    expect(versionAt).toBeGreaterThan(examAt)
+    expect(readinessAt).toBeGreaterThan(examAt)
+    expect(versionAt).toBeGreaterThan(readinessAt)
     expect(pointersAt).toBeGreaterThan(versionAt)
     expect(insertRequestAt).toBeGreaterThan(pointersAt)
     expect(source).toContain('elearning_course_publish_requests')
@@ -346,6 +354,7 @@ describe('elearning course publish source SQL order', () => {
     const mediaSqlEnd = source.indexOf('elearning-publish:insert-course')
     const mediaSql = source.slice(mediaSqlStart, mediaSqlEnd)
     expect(mediaSql).toContain("status = 'ready'")
+    expect(mediaSql).toContain('SELECT id, duration_ms')
     expect(mediaSql).toContain('mime_type = $3')
     expect(mediaSql).toContain('magic_mime_type = $3')
     expect(mediaSql).toContain('duration_ms IS NOT NULL')
@@ -953,6 +962,11 @@ describe('publishElearningCourse', () => {
 
   it('fails closed on missing, not-ready, or cross-org media without leaking values', async () => {
     await expectAsyncCode(createMemoryDb({ media: false }).db, baseInput(), 'media_unavailable')
+    await expectAsyncCode(
+      createMemoryDb({ mediaDurationMs: 'not-a-safe-integer' }).db,
+      baseInput(),
+      'media_unavailable',
+    )
   })
 
   it('replays the original result for the same org+key+hash and conflicts on a different hash', async () => {
@@ -988,7 +1002,12 @@ describe('publishElearningCourse', () => {
             error.constraint = 'elearning_course_publish_requests_org_source_key_uniq'
             throw error
           }
-          return { rows: tagOf(sql) === 'elearning-publish:load-media' ? [{ id: MEDIA }] : [], rowCount: 1 }
+          return {
+            rows: tagOf(sql) === 'elearning-publish:load-media'
+              ? [{ id: MEDIA, duration_ms: String(MEDIA_DURATION_MS) }]
+              : [],
+            rowCount: 1,
+          }
         },
       }),
     }
@@ -1003,7 +1022,12 @@ describe('publishElearningCourse', () => {
             error.constraint = 'elearning_courses_pkey'
             throw error
           }
-          return { rows: tagOf(sql) === 'elearning-publish:load-media' ? [{ id: MEDIA }] : [], rowCount: 1 }
+          return {
+            rows: tagOf(sql) === 'elearning-publish:load-media'
+              ? [{ id: MEDIA, duration_ms: String(MEDIA_DURATION_MS) }]
+              : [],
+            rowCount: 1,
+          }
         },
       }),
     }
@@ -1017,7 +1041,12 @@ describe('publishElearningCourse', () => {
             error.code = '23505'
             throw error
           }
-          return { rows: tagOf(sql) === 'elearning-publish:load-media' ? [{ id: MEDIA }] : [], rowCount: 1 }
+          return {
+            rows: tagOf(sql) === 'elearning-publish:load-media'
+              ? [{ id: MEDIA, duration_ms: String(MEDIA_DURATION_MS) }]
+              : [],
+            rowCount: 1,
+          }
         },
       }),
     }

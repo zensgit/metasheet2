@@ -4,6 +4,7 @@
  * Public results and errors are values-free.
  */
 import { createHash, randomUUID } from 'node:crypto'
+import { assertElearningCoursePublishReadiness } from './elearning-course-publish-readiness-policy'
 import { normalizeElearningCourseVersionItems } from './elearning-course-version-items-policy'
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
 import {
@@ -455,7 +456,7 @@ export async function publishElearningCourse(
 
       const media = await tx.query(
         `/* elearning-publish:load-media */
-         SELECT id
+         SELECT id, duration_ms
            FROM elearning_media
           WHERE org_id = $1
             AND id = $2
@@ -467,7 +468,10 @@ export async function publishElearningCourse(
           FOR SHARE`,
         [canonical.orgId, canonical.mediaId, ELEARNING_MEDIA_MIME],
       )
-      if (!media.rows[0]) fail('media_unavailable')
+      const mediaDurationMs = asSafeInt(media.rows[0]?.duration_ms)
+      if (!media.rows[0] || mediaDurationMs === null || mediaDurationMs < 1) {
+        fail('media_unavailable')
+      }
 
       const [videoItem, examItem] = normalizeElearningCourseVersionItems([
         {
@@ -597,6 +601,34 @@ export async function publishElearningCourse(
         [canonical.orgId, examId],
       )
       if ((publishedExam.rowCount ?? 0) !== 1) fail('unavailable')
+
+      try {
+        assertElearningCoursePublishReadiness({
+          authorities: [
+            {
+              itemId: videoItem.itemId,
+              itemType: 'video',
+              measurementAuthority: 'server_probe',
+              referenceId: videoItem.mediaId,
+              referenceState: 'ready',
+              serverDurationMs: mediaDurationMs,
+              serverPageCount: null,
+            },
+            {
+              itemId: examItem.itemId,
+              itemType: 'exam',
+              measurementAuthority: null,
+              referenceId: examItem.examId,
+              referenceState: 'published',
+              serverDurationMs: null,
+              serverPageCount: null,
+            },
+          ],
+          items: [videoItem, examItem],
+        })
+      } catch {
+        fail('unavailable')
+      }
 
       const publishedVersion = await tx.query(
         `/* elearning-publish:publish-version */
