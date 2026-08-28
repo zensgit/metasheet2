@@ -5,6 +5,7 @@ import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as objectReceiptMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
+import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
 import {
   claimRecoveryArchiveSourcePinIntent,
@@ -17,8 +18,13 @@ import {
   type RecoveryArchiveObjectReceiptEvidence,
   type RecoveryArchiveObjectReceiptQuery,
 } from '../../src/multitable/recovery-archive-object-receipts'
+import {
+  consumeRecoveryArchiveV2ClaimFixture,
+  persistRecoveryArchiveV2ClaimFixture,
+} from '../utils/recovery-archive-v2-claim-fixture'
 
-const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+const runRealDb =
+  Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
 
 test('sentinel: the D2 object-receipt real-DB step must provide DATABASE_URL', () => {
@@ -36,9 +42,6 @@ const CHECKPOINT = `${PREFIX}_checkpoint`
 const OWNER_KIND = 'archive_builder'
 const OWNER_ID = `${PREFIX}_owner`
 const KEY_ID = `${PREFIX}_key`
-const ANCHOR_OPERATION = randomUUID()
-const ANCHOR_SEQ = '9007199254751001'
-const SOURCE_VECTOR_HASH = '1'.repeat(64)
 const ROOT_HASH = '2'.repeat(64)
 const COVERAGE_HASH = '3'.repeat(64)
 const ATTACHMENT_HASH = '4'.repeat(64)
@@ -52,11 +55,15 @@ type DatabaseError = Error & { code?: string; detail?: string; where?: string }
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = true
+let objectAuthorityIsUp = true
+let claimAnchorIsUp = true
 let initialFingerprint = ''
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
 
-async function transaction<T>(work: (query: RecoveryArchiveObjectReceiptQuery) => Promise<T>): Promise<T> {
+async function transaction<T>(
+  work: (query: RecoveryArchiveObjectReceiptQuery) => Promise<T>,
+): Promise<T> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -110,36 +117,18 @@ function expectValuesFree(error: DatabaseError, values: readonly string[]): void
   for (const value of values) expect(rendered).not.toContain(value)
 }
 
-async function seedSealedOperation(): Promise<void> {
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(
-      `INSERT INTO meta_record_revisions (
-         id, sheet_id, record_id, version, action, source,
-         changed_field_ids, patch, snapshot, seq, operation_id
-       ) VALUES ($1::uuid, $2, $3, 1, 'create', 'rest', ARRAY[]::text[], '{}'::jsonb,
-                 '{}'::jsonb, $4::bigint, $5::uuid)`,
-      [randomUUID(), SHEET, `${PREFIX}_anchor_record`, ANCHOR_SEQ, ANCHOR_OPERATION],
-    )
-    await client.query(
-      `INSERT INTO meta_record_history_operations (
-         sheet_id, operation_id, endpoint_seq, event_count
-       ) VALUES ($1, $2::uuid, $3::bigint, 1)`,
-      [SHEET, ANCHOR_OPERATION, ANCHOR_SEQ],
-    )
-    await client.query('COMMIT')
-  } catch (error) {
-    await client.query('ROLLBACK')
-    throw error
-  } finally {
-    client.release()
-  }
-}
-
-async function insertArchive(overrides: Partial<{ leaseExpiresAt: string; ownerFence: string }> = {}): Promise<string> {
-  const generationId = randomUUID()
-  await q(
+async function insertArchiveRow(
+  query: RecoveryArchiveObjectReceiptQuery,
+  input: {
+    generationId: string
+    anchorOperationId: string
+    anchorSeq: string
+    sourceVectorHash: string
+    leaseExpiresAt: string
+    ownerFence: string
+  },
+): Promise<void> {
+  await query(
     `INSERT INTO meta_recovery_archives (
        generation_id, workspace_id, base_id, sheet_id, anchor_operation_id, anchor_seq,
        checkpoint_id, format_version, state, build_status, coverage_status,
@@ -152,22 +141,58 @@ async function insertArchive(overrides: Partial<{ leaseExpiresAt: string; ownerF
        $13::timestamptz, $14::timestamptz
      )`,
     [
-      generationId,
+      input.generationId,
       WORKSPACE,
       BASE,
       SHEET,
-      ANCHOR_OPERATION,
-      ANCHOR_SEQ,
+      input.anchorOperationId,
+      input.anchorSeq,
       CHECKPOINT,
-      SOURCE_VECTOR_HASH,
+      input.sourceVectorHash,
       KEY_ID,
       OWNER_KIND,
       OWNER_ID,
-      overrides.ownerFence ?? '1',
-      overrides.leaseExpiresAt ?? LEASE_EXPIRES_AT,
+      input.ownerFence,
+      input.leaseExpiresAt,
       EXPIRES_AT,
     ],
   )
+}
+
+async function insertArchive(
+  overrides: Partial<{ leaseExpiresAt: string; ownerFence: string }> = {},
+): Promise<string> {
+  const generationId = randomUUID()
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const query: RecoveryArchiveObjectReceiptQuery = (text, values) => client.query(text, values)
+    await persistRecoveryArchiveV2ClaimFixture(
+      query,
+      {
+        generationId,
+        sheetId: SHEET,
+        ownerKind: OWNER_KIND,
+        ownerId: OWNER_ID,
+        ownerFence: overrides.ownerFence ?? '1',
+      },
+      async (identity) =>
+        insertArchiveRow(query, {
+          generationId,
+          anchorOperationId: identity.anchorOperationId,
+          anchorSeq: identity.anchorSeq,
+          sourceVectorHash: identity.sourceVectorHash,
+          leaseExpiresAt: overrides.leaseExpiresAt ?? LEASE_EXPIRES_AT,
+          ownerFence: overrides.ownerFence ?? '1',
+        }),
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
   return generationId
 }
 
@@ -176,16 +201,26 @@ function evidence(
   slot: { sectionName: string } | { attachmentId: string } | { manifest: true },
   suffix = '',
 ): RecoveryArchiveObjectReceiptEvidence {
-  const slotName = 'sectionName' in slot ? slot.sectionName : 'attachmentId' in slot ? slot.attachmentId : 'manifest'
+  const slotName =
+    'sectionName' in slot
+      ? slot.sectionName
+      : 'attachmentId' in slot
+        ? slot.attachmentId
+        : 'manifest'
   return {
     generationId,
     objectId: sha(`${generationId}:${slotName}:${suffix}:object`),
-    objectClass: 'sectionName' in slot ? 'section' : 'attachmentId' in slot ? 'attachment' : 'manifest',
-    sectionName: 'sectionName' in slot ? (slot.sectionName as RecoveryArchiveObjectReceiptEvidence['sectionName']) : null,
+    objectClass:
+      'sectionName' in slot ? 'section' : 'attachmentId' in slot ? 'attachment' : 'manifest',
+    sectionName:
+      'sectionName' in slot
+        ? (slot.sectionName as RecoveryArchiveObjectReceiptEvidence['sectionName'])
+        : null,
     attachmentId: 'attachmentId' in slot ? slot.attachmentId : null,
     keyId: KEY_ID,
     providerVersion: `version-${sha(`${slotName}:${suffix}`).slice(0, 24)}`,
-    plaintextSha256: 'attachmentId' in slot ? ATTACHMENT_HASH : sha(`${slotName}:${suffix}:plaintext`),
+    plaintextSha256:
+      'attachmentId' in slot ? ATTACHMENT_HASH : sha(`${slotName}:${suffix}:plaintext`),
     ciphertextSha256: sha(`${slotName}:${suffix}:ciphertext`),
     sizeBytes: '1',
     idempotencyKey: sha(`${generationId}:${slotName}:${suffix}:idempotency`),
@@ -202,12 +237,20 @@ async function recordUploaded(
   query: RecoveryArchiveObjectReceiptQuery = q,
 ): Promise<void> {
   const result = await recordRecoveryArchiveObjectUploaded(query, input)
-  expect(result).toMatchObject({ generationId: input.generationId, objectId: input.objectId, state: 'uploaded' })
+  expect(result).toMatchObject({
+    generationId: input.generationId,
+    objectId: input.objectId,
+    state: 'uploaded',
+  })
 }
 
 async function recordUploadedRoster(
   generationId: string,
-  options: { sectionCount?: number; excludeSectionNames?: readonly string[]; includeManifest?: boolean } = {},
+  options: {
+    sectionCount?: number
+    excludeSectionNames?: readonly string[]
+    includeManifest?: boolean
+  } = {},
 ): Promise<RecoveryArchiveObjectReceiptEvidence[]> {
   const sectionCount = options.sectionCount ?? RECOVERY_ARCHIVE_V1_SECTION_NAMES.length
   const objects: RecoveryArchiveObjectReceiptEvidence[] = []
@@ -225,7 +268,10 @@ async function recordUploadedRoster(
   return objects
 }
 
-async function setArchiveVerified(query: RecoveryArchiveObjectReceiptQuery, generationId: string): Promise<void> {
+async function setArchiveVerified(
+  query: RecoveryArchiveObjectReceiptQuery,
+  generationId: string,
+): Promise<void> {
   await query(
     `UPDATE meta_recovery_archives
         SET state='verified',
@@ -246,7 +292,8 @@ async function finalizeArchiveWithVerifiedObjects(
   beforeFinalize?: (query: RecoveryArchiveObjectReceiptQuery) => Promise<void>,
 ): Promise<void> {
   const client = await pool.connect()
-  const transactionQuery: RecoveryArchiveObjectReceiptQuery = (text, values) => client.query(text, values)
+  const transactionQuery: RecoveryArchiveObjectReceiptQuery = (text, values) =>
+    client.query(text, values)
   try {
     await client.query('BEGIN')
     for (const object of objects) {
@@ -258,6 +305,21 @@ async function finalizeArchiveWithVerifiedObjects(
       })
     }
     await beforeFinalize?.(transactionQuery)
+    const parent = await transactionQuery(
+      `SELECT sheet_id, source_vector_hash, owner_kind, owner_id, owner_fence::text
+         FROM meta_recovery_archives
+        WHERE generation_id=$1::uuid`,
+      [generationId],
+    )
+    if (!parent.rows[0]) throw new Error('recovery_archive_object_parent_missing')
+    await consumeRecoveryArchiveV2ClaimFixture(transactionQuery, {
+      generationId,
+      sheetId: String(parent.rows[0].sheet_id),
+      sourceVectorHash: String(parent.rows[0].source_vector_hash),
+      ownerKind: String(parent.rows[0].owner_kind),
+      ownerId: String(parent.rows[0].owner_id),
+      ownerFence: String(parent.rows[0].owner_fence),
+    })
     await setArchiveVerified(transactionQuery, generationId)
     await client.query('COMMIT')
   } catch (error) {
@@ -276,15 +338,33 @@ async function truncateArchiveState(): Promise<void> {
   const reservationTarget = reservationTable.rows[0]?.present
     ? 'meta_recovery_archive_snapshot_reservations,'
     : ''
-  await q(
-    `TRUNCATE TABLE
-       meta_recovery_archive_objects,
-       ${reservationTarget}
-       meta_recovery_archive_staging_objects,
-       meta_recovery_archive_attachment_refs,
-       meta_recovery_archive_coverage_items,
-       meta_recovery_archives`,
+  const markerTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_section_bootstrap_markers') IS NOT NULL AS present`,
   )
+  const markerTarget = markerTable.rows[0]?.present
+    ? 'meta_recovery_archive_section_bootstrap_markers,'
+    : ''
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SET LOCAL session_replication_role = replica')
+    await client.query(
+      `TRUNCATE TABLE
+         meta_recovery_archive_objects,
+         ${reservationTarget}
+         ${markerTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         meta_recovery_archives`,
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function authorityFingerprint(): Promise<string> {
@@ -330,6 +410,18 @@ async function authorityFingerprint(): Promise<string> {
   return String(result.rows[0]?.fingerprint ?? '')
 }
 
+async function restoreFinalSchema(): Promise<void> {
+  if (!objectAuthorityIsUp) {
+    await objectReceiptMigration.up(db)
+    objectAuthorityIsUp = true
+  }
+  if (!claimAnchorIsUp) {
+    await claimAnchorMigration.up(db)
+    claimAnchorIsUp = true
+  }
+  schemaIsUp = true
+}
+
 describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real DB)', () => {
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
@@ -338,36 +430,55 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
     )
     if (!present.rows[0]?.present) await objectReceiptMigration.up(db)
+    objectAuthorityIsUp = true
+    const claimAnchorPresent = await q(
+      `SELECT EXISTS (
+         SELECT 1
+           FROM pg_catalog.pg_trigger trigger_row
+          WHERE trigger_row.tgname='trg_meta_recovery_archives_claim_anchor_guard_row'
+            AND trigger_row.tgrelid='public.meta_recovery_archives'::regclass
+            AND NOT trigger_row.tgisinternal
+       ) AS present`,
+    )
+    if (!claimAnchorPresent.rows[0]?.present) await claimAnchorMigration.up(db)
+    claimAnchorIsUp = true
     schemaIsUp = true
     initialFingerprint = await authorityFingerprint()
 
     await q('INSERT INTO meta_recovery_archive_keys (key_id) VALUES ($1)', [KEY_ID])
-    await q(`INSERT INTO meta_bases (id, name, workspace_id) VALUES ($1, $2, $3)`, [BASE, `${PREFIX} Base`, WORKSPACE])
+    await q(`INSERT INTO meta_bases (id, name, workspace_id) VALUES ($1, $2, $3)`, [
+      BASE,
+      `${PREFIX} Base`,
+      WORKSPACE,
+    ])
     await q(`INSERT INTO meta_sheets (id, base_id, name, system_kind) VALUES ($1, $2, $3, NULL)`, [
       SHEET,
       BASE,
       `${PREFIX} Sheet`,
     ])
-    await seedSealedOperation()
     await q(
       `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
        VALUES ($1, $2, 'active', $3::bigint)`,
-      [CHECKPOINT, SHEET, ANCHOR_SEQ],
+      [CHECKPOINT, SHEET, '1'],
     )
   })
 
   afterEach(async () => {
+    await restoreFinalSchema()
     await truncateArchiveState()
   })
 
   afterAll(async () => {
     try {
-      if (!schemaIsUp) {
-        await objectReceiptMigration.up(db)
-        schemaIsUp = true
-      }
+      await restoreFinalSchema()
       await truncateArchiveState()
-      await q('SELECT meta_record_history_operations_prune($1, $2::uuid)', [SHEET, ANCHOR_OPERATION])
+      await transaction(async (query) => {
+        await query('SET LOCAL session_replication_role = replica')
+        await query('DELETE FROM meta_record_history_snapshot_members WHERE sheet_id=$1', [SHEET])
+        await query('DELETE FROM meta_sheet_section_revisions WHERE sheet_id=$1', [SHEET])
+        await query('DELETE FROM meta_record_revisions WHERE sheet_id=$1', [SHEET])
+        await query('DELETE FROM meta_record_history_operations WHERE sheet_id=$1', [SHEET])
+      })
       await q(`DELETE FROM meta_history_trust_checkpoints WHERE id=$1`, [CHECKPOINT])
       await q(`DELETE FROM meta_sheets WHERE id=$1`, [SHEET])
       await q(`DELETE FROM meta_bases WHERE id=$1`, [BASE])
@@ -386,7 +497,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
            (SELECT count(*)::int FROM meta_bases WHERE id=$2) AS bases`,
         [SHEET, BASE],
       )
-      expect(residue.rows).toEqual([{ objects: 0, archives: 0, operations: 0, sheets: 0, bases: 0 }])
+      expect(residue.rows).toEqual([
+        { objects: 0, archives: 0, operations: 0, sheets: 0, bases: 0 },
+      ])
     } finally {
       await db.destroy()
     }
@@ -453,7 +566,10 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     expect(replay).toEqual(first)
 
     const mismatched = await errorOf(
-      recordRecoveryArchiveObjectUploaded(q, { ...input, providerVersion: 'different-version' }),
+      recordRecoveryArchiveObjectUploaded(q, {
+        ...input,
+        providerVersion: 'different-version',
+      }),
     )
     expect(mismatched).toBeInstanceOf(RecoveryArchiveObjectReceiptError)
     expect((mismatched as RecoveryArchiveObjectReceiptError).code).toBe(
@@ -482,33 +598,37 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     )
     expectValuesFree(invalid, [sentinel])
 
-    const hostileRejection = new Proxy({}, {
-      get() {
-        throw new Error(sentinel)
+    const hostileRejection = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(sentinel)
+        },
+        getPrototypeOf() {
+          throw new Error(sentinel)
+        },
       },
-      getPrototypeOf() {
-        throw new Error(sentinel)
-      },
-    })
-    const rejected = await errorOf(recordRecoveryArchiveObjectUploaded(
-      async () => Promise.reject(hostileRejection),
-      valid,
-    ))
+    )
+    const rejected = await errorOf(
+      recordRecoveryArchiveObjectUploaded(async () => Promise.reject(hostileRejection), valid),
+    )
     expect(rejected).toBeInstanceOf(RecoveryArchiveObjectReceiptError)
     expect((rejected as RecoveryArchiveObjectReceiptError).code).toBe(
       'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
     )
     expectValuesFree(rejected, [sentinel])
 
-    const hostileRow = new Proxy({}, {
-      get() {
-        throw new Error(sentinel)
+    const hostileRow = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error(sentinel)
+        },
       },
-    })
-    const malformed = await errorOf(recordRecoveryArchiveObjectUploaded(
-      async () => ({ rows: [hostileRow], rowCount: 1 }),
-      valid,
-    ))
+    )
+    const malformed = await errorOf(
+      recordRecoveryArchiveObjectUploaded(async () => ({ rows: [hostileRow], rowCount: 1 }), valid),
+    )
     expect(malformed).toBeInstanceOf(RecoveryArchiveObjectReceiptError)
     expect((malformed as RecoveryArchiveObjectReceiptError).code).toBe(
       'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
@@ -518,20 +638,28 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
 
   test('owner, fence, and live lease are exact and stale writes leave zero rows', async () => {
     const generationId = await insertArchive()
-    for (const override of [
-      { ownerId: `${OWNER_ID}_stale` },
-      { ownerFence: '2' },
-    ]) {
-      const stale = await errorOf(recordRecoveryArchiveObjectUploaded(q, { ...evidence(generationId, { manifest: true }), ...override }))
+    for (const override of [{ ownerId: `${OWNER_ID}_stale` }, { ownerFence: '2' }]) {
+      const stale = await errorOf(
+        recordRecoveryArchiveObjectUploaded(q, {
+          ...evidence(generationId, { manifest: true }),
+          ...override,
+        }),
+      )
       expect(stale).toBeInstanceOf(RecoveryArchiveObjectReceiptError)
-      expect((stale as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED')
+      expect((stale as RecoveryArchiveObjectReceiptError).code).toBe(
+        'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
+      )
       expectValuesFree(stale, [generationId, OWNER_ID, PREFIX])
     }
-    const expiredGeneration = await insertArchive({ leaseExpiresAt: '2000-01-01T00:00:00.000Z' })
+    const expiredGeneration = await insertArchive({
+      leaseExpiresAt: '2000-01-01T00:00:00.000Z',
+    })
     const expired = await errorOf(
       recordRecoveryArchiveObjectUploaded(q, evidence(expiredGeneration, { manifest: true })),
     )
-    expect((expired as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED')
+    expect((expired as RecoveryArchiveObjectReceiptError).code).toBe(
+      'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
+    )
     const remaining = await q(`SELECT count(*)::int AS count FROM meta_recovery_archive_objects`)
     expect(remaining.rows).toEqual([{ count: 0 }])
   })
@@ -541,9 +669,13 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     const section = evidence(generationId, { sectionName: 'records' })
     await recordUploaded(section)
     const duplicate = await errorOf(
-      recordRecoveryArchiveObjectUploaded(q, { ...evidence(generationId, { sectionName: 'records' }, 'duplicate') }),
+      recordRecoveryArchiveObjectUploaded(q, {
+        ...evidence(generationId, { sectionName: 'records' }, 'duplicate'),
+      }),
     )
-    expect((duplicate as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED')
+    expect((duplicate as RecoveryArchiveObjectReceiptError).code).toBe(
+      'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
+    )
 
     const unknown = await errorOf(
       recordRecoveryArchiveObjectUploaded(q, {
@@ -551,7 +683,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
         sectionName: 'unknown' as RecoveryArchiveObjectReceiptEvidence['sectionName'],
       }),
     )
-    expect((unknown as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_INVALID_INPUT')
+    expect((unknown as RecoveryArchiveObjectReceiptError).code).toBe(
+      'RECOVERY_ARCHIVE_OBJECT_RECEIPT_INVALID_INPUT',
+    )
 
     const secondManifest = evidence(generationId, { manifest: true }, 'second')
     await recordUploaded(evidence(generationId, { manifest: true }))
@@ -626,11 +760,21 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       'headReceiptSha256',
     ]
     for (const field of fields) {
-      const changed = { ...uploaded, [field]: field === 'sizeBytes' ? '2' : field === 'providerVersion' ? 'other-version' : 'f'.repeat(64) }
+      const changed = {
+        ...uploaded,
+        [field]:
+          field === 'sizeBytes'
+            ? '2'
+            : field === 'providerVersion'
+              ? 'other-version'
+              : 'f'.repeat(64),
+      }
       const refusal = await errorOf(
         transaction((query) => verifyRecoveryArchiveObjectReceipt(query, changed)),
       )
-      expect((refusal as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_STALE')
+      expect((refusal as RecoveryArchiveObjectReceiptError).code).toBe(
+        'RECOVERY_ARCHIVE_OBJECT_RECEIPT_STALE',
+      )
     }
 
     const direct = await errorOf(
@@ -691,8 +835,18 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     )
     expect(postures.rows).toEqual(
       expect.arrayContaining([
-        { generation_id: incomplete, state: 'building', build_status: 'active', coverage_status: 'incomplete' },
-        { generation_id: uploaded, state: 'building', build_status: 'active', coverage_status: 'incomplete' },
+        {
+          generation_id: incomplete,
+          state: 'building',
+          build_status: 'active',
+          coverage_status: 'incomplete',
+        },
+        {
+          generation_id: uploaded,
+          state: 'building',
+          build_status: 'active',
+          coverage_status: 'incomplete',
+        },
       ]),
     )
   })
@@ -705,7 +859,13 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       `SELECT state, build_status, coverage_status FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
       [generationId],
     )
-    expect(parent.rows).toEqual([{ state: 'verified', build_status: 'finalized', coverage_status: 'complete' }])
+    expect(parent.rows).toEqual([
+      {
+        state: 'verified',
+        build_status: 'finalized',
+        coverage_status: 'complete',
+      },
+    ])
   })
 
   test('attachment receipts require an available source pin and survive source-pin release', async () => {
@@ -713,7 +873,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     const attachmentId = `${PREFIX}_attachment`
     const attachment = evidence(generationId, { attachmentId })
     const noPin = await errorOf(recordRecoveryArchiveObjectUploaded(q, attachment))
-    expect((noPin as RecoveryArchiveObjectReceiptError).code).toBe('RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED')
+    expect((noPin as RecoveryArchiveObjectReceiptError).code).toBe(
+      'RECOVERY_ARCHIVE_OBJECT_RECEIPT_WRITE_REFUSED',
+    )
 
     const sourceOwner = {
       generationId,
@@ -725,12 +887,14 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       leaseUntil: LEASE_EXPIRES_AT,
     }
     await transaction((query) => claimRecoveryArchiveSourcePinIntent(query, sourceOwner))
-    await transaction((query) => verifyRecoveryArchiveSourcePin(query, {
-      ...sourceOwner,
-      immutableVersion: ATTACHMENT_SOURCE_VERSION,
-      contentSha256: ATTACHMENT_HASH,
-      contentSizeBytes: ATTACHMENT_SIZE,
-    }))
+    await transaction((query) =>
+      verifyRecoveryArchiveSourcePin(query, {
+        ...sourceOwner,
+        immutableVersion: ATTACHMENT_SOURCE_VERSION,
+        contentSha256: ATTACHMENT_HASH,
+        contentSizeBytes: ATTACHMENT_SIZE,
+      }),
+    )
     await recordUploaded(attachment)
     const roster = await recordUploadedRoster(generationId)
 
@@ -757,7 +921,13 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
         WHERE generation_id=$1::uuid AND attachment_id=$2`,
       [generationId, attachmentId],
     )
-    expect(genericStillPresent.rows).toEqual([{ object_class: 'attachment', attachment_id: attachmentId, state: 'verified' }])
+    expect(genericStillPresent.rows).toEqual([
+      {
+        object_class: 'attachment',
+        attachment_id: attachmentId,
+        state: 'verified',
+      },
+    ])
   })
 
   test('attachment receipts reject a source pin whose content hash differs', async () => {
@@ -773,12 +943,14 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       leaseUntil: LEASE_EXPIRES_AT,
     }
     await transaction((query) => claimRecoveryArchiveSourcePinIntent(query, sourceOwner))
-    await transaction((query) => verifyRecoveryArchiveSourcePin(query, {
-      ...sourceOwner,
-      immutableVersion: ATTACHMENT_SOURCE_VERSION,
-      contentSha256: '5'.repeat(64),
-      contentSizeBytes: ATTACHMENT_SIZE,
-    }))
+    await transaction((query) =>
+      verifyRecoveryArchiveSourcePin(query, {
+        ...sourceOwner,
+        immutableVersion: ATTACHMENT_SOURCE_VERSION,
+        contentSha256: '5'.repeat(64),
+        contentSizeBytes: ATTACHMENT_SIZE,
+      }),
+    )
 
     const refusal = await errorOf(
       recordRecoveryArchiveObjectUploaded(q, evidence(generationId, { attachmentId })),
@@ -801,12 +973,14 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       leaseUntil: LEASE_EXPIRES_AT,
     }
     await transaction((query) => claimRecoveryArchiveSourcePinIntent(query, sourceOwner))
-    await transaction((query) => verifyRecoveryArchiveSourcePin(query, {
-      ...sourceOwner,
-      immutableVersion: ATTACHMENT_SOURCE_VERSION,
-      contentSha256: ATTACHMENT_HASH,
-      contentSizeBytes: ATTACHMENT_SIZE,
-    }))
+    await transaction((query) =>
+      verifyRecoveryArchiveSourcePin(query, {
+        ...sourceOwner,
+        immutableVersion: ATTACHMENT_SOURCE_VERSION,
+        contentSha256: ATTACHMENT_HASH,
+        contentSizeBytes: ATTACHMENT_SIZE,
+      }),
+    )
     const sourcePin = await q(
       `SELECT reference_state, availability, content_sha256, immutable_version,
               content_size_bytes::text AS content_size_bytes
@@ -814,19 +988,19 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
       [generationId, attachmentId],
     )
-    expect(sourcePin.rows).toEqual([{
-      reference_state: 'building',
-      availability: 'available',
-      content_sha256: ATTACHMENT_HASH,
-      immutable_version: ATTACHMENT_SOURCE_VERSION,
-      content_size_bytes: ATTACHMENT_SIZE,
-    }])
+    expect(sourcePin.rows).toEqual([
+      {
+        reference_state: 'building',
+        availability: 'available',
+        content_sha256: ATTACHMENT_HASH,
+        immutable_version: ATTACHMENT_SOURCE_VERSION,
+        content_size_bytes: ATTACHMENT_SIZE,
+      },
+    ])
     const roster = await recordUploadedRoster(generationId)
 
-    const refusal = await errorOf(finalizeArchiveWithVerifiedObjects(
-      generationId,
-      roster,
-      async (query) => {
+    const refusal = await errorOf(
+      finalizeArchiveWithVerifiedObjects(generationId, roster, async (query) => {
         await query(
           `INSERT INTO meta_recovery_archive_attachment_refs (
              generation_id, attachment_id, reference_class, reference_state, availability,
@@ -839,8 +1013,8 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
             WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
           [generationId, attachmentId],
         )
-      },
-    ))
+      }),
+    )
     expect(refusal.message).toBe('recovery_archive_object_attachment_roster_invalid')
   })
 
@@ -857,12 +1031,14 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       leaseUntil: LEASE_EXPIRES_AT,
     }
     await transaction((query) => claimRecoveryArchiveSourcePinIntent(query, sourceOwner))
-    await transaction((query) => verifyRecoveryArchiveSourcePin(query, {
-      ...sourceOwner,
-      immutableVersion: ATTACHMENT_SOURCE_VERSION,
-      contentSha256: ATTACHMENT_HASH,
-      contentSizeBytes: ATTACHMENT_SIZE,
-    }))
+    await transaction((query) =>
+      verifyRecoveryArchiveSourcePin(query, {
+        ...sourceOwner,
+        immutableVersion: ATTACHMENT_SOURCE_VERSION,
+        contentSha256: ATTACHMENT_HASH,
+        contentSizeBytes: ATTACHMENT_SIZE,
+      }),
+    )
     const attachment = evidence(generationId, { attachmentId })
     await recordUploaded(attachment)
 
@@ -873,10 +1049,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     try {
       await keyHolder.query('BEGIN')
       const keyHolderPid = await backendPid(keyHolder)
-      await keyHolder.query(
-        `SELECT 1 FROM meta_recovery_archive_keys WHERE key_id=$1 FOR UPDATE`,
-        [KEY_ID],
-      )
+      await keyHolder.query(`SELECT 1 FROM meta_recovery_archive_keys WHERE key_id=$1 FOR UPDATE`, [
+        KEY_ID,
+      ])
 
       await verifier.query('BEGIN')
       const verifierPid = await backendPid(verifier)
@@ -927,13 +1102,17 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
       leaseUntil: LEASE_EXPIRES_AT,
     }
     await transaction((query) => claimRecoveryArchiveSourcePinIntent(query, sourceOwner))
-    await transaction((query) => verifyRecoveryArchiveSourcePin(query, {
-      ...sourceOwner,
-      immutableVersion: ATTACHMENT_SOURCE_VERSION,
-      contentSha256: ATTACHMENT_HASH,
-      contentSizeBytes: ATTACHMENT_SIZE,
-    }))
-    const attachment = evidence(generationId, { attachmentId: verifiedAttachmentId })
+    await transaction((query) =>
+      verifyRecoveryArchiveSourcePin(query, {
+        ...sourceOwner,
+        immutableVersion: ATTACHMENT_SOURCE_VERSION,
+        contentSha256: ATTACHMENT_HASH,
+        contentSizeBytes: ATTACHMENT_SIZE,
+      }),
+    )
+    const attachment = evidence(generationId, {
+      attachmentId: verifiedAttachmentId,
+    })
     await recordUploaded(attachment)
 
     const verifier = await pool.connect()
@@ -941,7 +1120,10 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     let waiterPromise: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined
     try {
       await verifier.query('BEGIN')
-      await verifyRecoveryArchiveObjectReceipt((text, values) => verifier.query(text, values), attachment)
+      await verifyRecoveryArchiveObjectReceipt(
+        (text, values) => verifier.query(text, values),
+        attachment,
+      )
       const verifierPid = await backendPid(verifier)
 
       await waiter.query('BEGIN')
@@ -960,7 +1142,13 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
            generation_id, attachment_id, reference_class, reference_state, availability,
            content_sha256, immutable_version, content_size_bytes
          ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, $5::bigint)`,
-        [generationId, verifiedAttachmentId, ATTACHMENT_HASH, ATTACHMENT_SOURCE_VERSION, ATTACHMENT_SIZE],
+        [
+          generationId,
+          verifiedAttachmentId,
+          ATTACHMENT_HASH,
+          ATTACHMENT_SOURCE_VERSION,
+          ATTACHMENT_SIZE,
+        ],
       )
       await verifier.query('ROLLBACK')
       const waiterOutcome = await waiterPromise
@@ -982,10 +1170,10 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     const roster = await recordUploadedRoster(generationId)
     await finalizeArchiveWithVerifiedObjects(generationId, roster)
     const update = await errorOf(
-      q(`UPDATE meta_recovery_archive_objects SET head_receipt_sha256=$2 WHERE generation_id=$1::uuid`, [
-        generationId,
-        'f'.repeat(64),
-      ]),
+      q(
+        `UPDATE meta_recovery_archive_objects SET head_receipt_sha256=$2 WHERE generation_id=$1::uuid`,
+        [generationId, 'f'.repeat(64)],
+      ),
     )
     expect(update.message).toBe('recovery_archive_object_immutable')
     const deletion = await errorOf(
@@ -1030,7 +1218,10 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     expect(await authorityFingerprint()).toBe(initialFingerprint)
 
     await truncateArchiveState()
+    await claimAnchorMigration.down(db)
+    claimAnchorIsUp = false
     await objectReceiptMigration.down(db)
+    objectAuthorityIsUp = false
     schemaIsUp = false
 
     await q(
@@ -1038,7 +1229,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
          DISABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row`,
     )
     const weakSourceAuthority = await errorOf(objectReceiptMigration.up(db))
-    expect(weakSourceAuthority.message).toBe('recovery_archive_object_receipt_source_schema_mismatch')
+    expect(weakSourceAuthority.message).toBe(
+      'recovery_archive_object_receipt_source_schema_mismatch',
+    )
     await q(
       `ALTER TABLE public.meta_recovery_archive_attachment_refs
          ENABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row`,
@@ -1114,7 +1307,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
 
     const wrongShape = await errorOf(
       db.transaction().execute(async (trx) => {
-        await sql`CREATE TABLE public.meta_recovery_archive_objects (wrong_shape integer)`.execute(trx)
+        await sql`CREATE TABLE public.meta_recovery_archive_objects (wrong_shape integer)`.execute(
+          trx,
+        )
         await objectReceiptMigration.up(trx)
       }),
     )
@@ -1122,6 +1317,9 @@ describeIfRealDbStep('Phase D2 generic object PUT+HEAD receipt authority (real D
     expectValuesFree(wrongShape, [generationId, OWNER_ID, PREFIX])
 
     await objectReceiptMigration.up(db)
+    objectAuthorityIsUp = true
+    await claimAnchorMigration.up(db)
+    claimAnchorIsUp = true
     schemaIsUp = true
     expect(await authorityFingerprint()).toBe(initialFingerprint)
   })

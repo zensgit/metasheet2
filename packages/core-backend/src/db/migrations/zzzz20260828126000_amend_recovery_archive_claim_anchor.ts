@@ -183,6 +183,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       member_count integer;
       matched_count integer;
       reservation_match_count integer;
+      reservation_count integer;
+      reservation_parent_match_count integer;
+      reservation_authority_generation_id uuid;
     BEGIN
       IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION USING
@@ -412,6 +415,70 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             MESSAGE = 'recovery_archive_attachment_posture_invalid';
         END IF;
 
+        SELECT count(*)::integer
+          INTO reservation_count
+          FROM public.meta_recovery_archive_snapshot_reservations reservation
+         WHERE reservation.generation_id = NEW.generation_id;
+
+        IF reservation_count = 10 THEN
+          reservation_authority_generation_id := NEW.generation_id;
+        ELSIF reservation_count = 0 THEN
+          SELECT reservation.generation_id
+            INTO reservation_authority_generation_id
+            FROM public.meta_recovery_archive_snapshot_reservations reservation
+            JOIN public.meta_recovery_archives authority
+              ON authority.generation_id = reservation.generation_id
+           WHERE reservation.sheet_id = NEW.sheet_id
+             AND reservation.source_vector_hash = NEW.source_vector_hash
+             AND reservation.ordinal = 10
+             AND reservation.reservation_kind = 'archive_snapshot'
+             AND reservation.section_kind IS NULL
+             AND reservation.operation_id = NEW.anchor_operation_id
+             AND reservation.endpoint_seq = NEW.anchor_seq
+             AND authority.generation_id <> NEW.generation_id
+             AND authority.workspace_id = NEW.workspace_id
+             AND authority.base_id = NEW.base_id
+             AND authority.sheet_id = NEW.sheet_id
+             AND authority.anchor_operation_id = NEW.anchor_operation_id
+             AND authority.anchor_seq = NEW.anchor_seq
+             AND authority.checkpoint_id = NEW.checkpoint_id
+             AND authority.format_version = NEW.format_version
+             AND authority.source_vector_hash = NEW.source_vector_hash
+             AND authority.state IN ('verified', 'expired')
+             AND authority.build_status = 'finalized'
+             AND authority.coverage_status = 'complete';
+
+          IF NOT FOUND THEN
+            RAISE EXCEPTION USING
+              ERRCODE = '23514',
+              MESSAGE = 'recovery_archive_claim_anchor_parent_unsealed';
+          END IF;
+        ELSE
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'recovery_archive_claim_anchor_parent_unsealed';
+        END IF;
+
+        SELECT count(*)::integer,
+               count(*) FILTER (
+                 WHERE reservation.ordinal = 10
+                   AND reservation.reservation_kind = 'archive_snapshot'
+                   AND reservation.section_kind IS NULL
+                   AND reservation.sheet_id = NEW.sheet_id
+                   AND reservation.source_vector_hash = NEW.source_vector_hash
+                   AND reservation.operation_id = NEW.anchor_operation_id
+                   AND reservation.endpoint_seq = NEW.anchor_seq
+               )::integer
+          INTO reservation_count, reservation_parent_match_count
+          FROM public.meta_recovery_archive_snapshot_reservations reservation
+         WHERE reservation.generation_id = reservation_authority_generation_id;
+
+        IF reservation_count <> 10 OR reservation_parent_match_count <> 1 THEN
+          RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'recovery_archive_claim_anchor_parent_unsealed';
+        END IF;
+
         SELECT operation.operation_kind,
                operation.event_contract_version,
                operation.event_count,
@@ -467,8 +534,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             ON expected.ordinal = member_row.ordinal
            AND expected.section_kind = member_row.section_kind
           LEFT JOIN public.meta_recovery_archive_snapshot_reservations reservation
-            ON reservation.generation_id = NEW.generation_id
+            ON reservation.generation_id = reservation_authority_generation_id
            AND reservation.ordinal = member_row.ordinal
+           AND reservation.sheet_id = NEW.sheet_id
+           AND reservation.source_vector_hash = NEW.source_vector_hash
          WHERE member_row.sheet_id = NEW.sheet_id
            AND member_row.parent_operation_id = NEW.anchor_operation_id;
 
@@ -633,9 +702,15 @@ export async function down(db: Kysely<unknown>): Promise<void> {
     END $$;
   `.execute(db)
 
-  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_operation_delete_guard()`.execute(db)
-  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_reservation_guard()`.execute(db)
-  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_guard_row()`.execute(db)
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_operation_delete_guard()`.execute(
+    db,
+  )
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_reservation_guard()`.execute(
+    db,
+  )
+  await sql`DROP FUNCTION IF EXISTS public.meta_recovery_archives_claim_anchor_guard_row()`.execute(
+    db,
+  )
 
   await sql`
     DO $$

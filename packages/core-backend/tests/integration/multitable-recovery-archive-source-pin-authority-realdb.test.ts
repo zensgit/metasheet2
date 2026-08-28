@@ -12,8 +12,14 @@ import {
   RecoveryArchiveSourcePinError,
   verifyRecoveryArchiveSourcePin,
 } from '../../src/multitable/recovery-archive-source-pin'
+import {
+  consumeRecoveryArchiveV2ClaimFixture,
+  persistRecoveryArchiveV2ClaimFixture,
+  type RecoveryArchiveV2ClaimFixtureIdentity,
+} from '../utils/recovery-archive-v2-claim-fixture'
 
-const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+const runRealDb =
+  Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
 
 test('sentinel: source-pin authority real-DB step must provide DATABASE_URL', () => {
@@ -33,6 +39,7 @@ const OWNER_ID = `${PREFIX}_owner`
 const KEY_ID = `${PREFIX}_key`
 const ANCHOR_OPERATION = randomUUID()
 const ANCHOR_SEQ = '9007199254747993'
+const CHECKPOINT_TRUSTED_SINCE_SEQ = '1'
 const SOURCE_VECTOR_HASH = '1'.repeat(64)
 const CONTENT_HASH = '2'.repeat(64)
 const ROOT_HASH = '3'.repeat(64)
@@ -100,15 +107,26 @@ async function truncateCatalog(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
   )
   const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
-  await q(
-    `TRUNCATE TABLE
-       ${objectTarget}
-       meta_recovery_archive_snapshot_reservations,
-       meta_recovery_archive_staging_objects,
-       meta_recovery_archive_attachment_refs,
-       meta_recovery_archive_coverage_items,
-       meta_recovery_archives`,
-  )
+  await transaction(async ({ query }) => {
+    await query('SET LOCAL session_replication_role = replica')
+    await query(
+      `TRUNCATE TABLE
+         ${objectTarget}
+         meta_recovery_archive_section_bootstrap_markers,
+         meta_recovery_archive_snapshot_reservations,
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         meta_recovery_archives`,
+    )
+    await query(`DELETE FROM meta_record_history_snapshot_members WHERE sheet_id=$1`, [SHEET])
+    await query(`DELETE FROM meta_sheet_section_revisions WHERE sheet_id=$1`, [SHEET])
+    await query(
+      `DELETE FROM meta_record_history_operations
+        WHERE sheet_id=$1 AND operation_id<>$2::uuid`,
+      [SHEET, ANCHOR_OPERATION],
+    )
+  })
 }
 
 async function seedSealedOperation(): Promise<void> {
@@ -130,9 +148,13 @@ async function seedSealedOperation(): Promise<void> {
   })
 }
 
-async function insertArchive(leaseUntil = FUTURE_LEASE): Promise<string> {
-  const generationId = randomUUID()
-  await q(
+async function insertArchiveRow(
+  query: Query,
+  generationId: string,
+  identity: RecoveryArchiveV2ClaimFixtureIdentity,
+  leaseUntil: string,
+): Promise<void> {
+  await query(
     `INSERT INTO meta_recovery_archives (
        generation_id, workspace_id, base_id, sheet_id, anchor_operation_id, anchor_seq,
        checkpoint_id, format_version, state, build_status, coverage_status,
@@ -149,16 +171,48 @@ async function insertArchive(leaseUntil = FUTURE_LEASE): Promise<string> {
       WORKSPACE,
       BASE,
       SHEET,
-      ANCHOR_OPERATION,
-      ANCHOR_SEQ,
+      identity.anchorOperationId,
+      identity.anchorSeq,
       CHECKPOINT,
-      SOURCE_VECTOR_HASH,
+      identity.sourceVectorHash,
       KEY_ID,
       OWNER_KIND,
       OWNER_ID,
       leaseUntil,
     ],
   )
+}
+
+async function insertArchive(leaseUntil = FUTURE_LEASE): Promise<string> {
+  const generationId = randomUUID()
+  await insertArchiveRow(
+    q,
+    generationId,
+    {
+      anchorOperationId: ANCHOR_OPERATION,
+      anchorSeq: ANCHOR_SEQ,
+      sourceVectorHash: SOURCE_VECTOR_HASH,
+    },
+    leaseUntil,
+  )
+  return generationId
+}
+
+async function insertFinalizableArchive(): Promise<string> {
+  const generationId = randomUUID()
+  await transaction(async ({ query }) => {
+    await persistRecoveryArchiveV2ClaimFixture(
+      query,
+      {
+        generationId,
+        sheetId: SHEET,
+        ownerKind: OWNER_KIND,
+        ownerId: OWNER_ID,
+        ownerFence: '1',
+      },
+      (identity) => insertArchiveRow(query, generationId, identity, FUTURE_LEASE),
+    )
+  })
   return generationId
 }
 
@@ -174,24 +228,21 @@ function owner(generationId: string, attachmentId: string, leaseUntil = FUTURE_L
   }
 }
 
-async function claimIntent(
-  generationId: string,
-  attachmentId: string,
-  leaseUntil = FUTURE_LEASE,
-) {
-  return transaction(({ query }) => claimRecoveryArchiveSourcePinIntent(
-    query,
-    owner(generationId, attachmentId, leaseUntil),
-  ))
+async function claimIntent(generationId: string, attachmentId: string, leaseUntil = FUTURE_LEASE) {
+  return transaction(({ query }) =>
+    claimRecoveryArchiveSourcePinIntent(query, owner(generationId, attachmentId, leaseUntil)),
+  )
 }
 
 async function verifyIntent(generationId: string, attachmentId: string) {
-  return transaction(({ query }) => verifyRecoveryArchiveSourcePin(query, {
-    ...owner(generationId, attachmentId),
-    immutableVersion: SOURCE_VERSION,
-    contentSha256: CONTENT_HASH,
-    contentSizeBytes: CONTENT_SIZE,
-  }))
+  return transaction(({ query }) =>
+    verifyRecoveryArchiveSourcePin(query, {
+      ...owner(generationId, attachmentId),
+      immutableVersion: SOURCE_VERSION,
+      contentSha256: CONTENT_HASH,
+      contentSizeBytes: CONTENT_SIZE,
+    }),
+  )
 }
 
 async function insertMutableIntentForExpiredGeneration(
@@ -228,10 +279,7 @@ async function insertAttachment(attachmentId: string): Promise<void> {
 async function waitForLeaseExpiry(leaseUntil: string): Promise<void> {
   const deadline = Date.now() + 5_000
   while (Date.now() < deadline) {
-    const result = await q(
-      `SELECT clock_timestamp() >= $1::timestamptz AS expired`,
-      [leaseUntil],
-    )
+    const result = await q(`SELECT clock_timestamp() >= $1::timestamptz AS expired`, [leaseUntil])
     if (result.rows[0]?.expired === true) return
     await new Promise((resolve) => setTimeout(resolve, 25))
   }
@@ -316,7 +364,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     await q(
       `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
        VALUES ($1, $2, 'active', $3::bigint)`,
-      [CHECKPOINT, SHEET, ANCHOR_SEQ],
+      [CHECKPOINT, SHEET, CHECKPOINT_TRUSTED_SINCE_SEQ],
     )
   })
 
@@ -329,7 +377,9 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     try {
       await installIfAbsent()
       await truncateCatalog()
-      await q('DELETE FROM meta_history_trust_checkpoints WHERE id=$1', [CHECKPOINT]).catch(() => {})
+      await q('DELETE FROM meta_history_trust_checkpoints WHERE id=$1', [CHECKPOINT]).catch(
+        () => {},
+      )
       await q('SELECT meta_record_history_operations_prune($1, $2::uuid)', [
         SHEET,
         ANCHOR_OPERATION,
@@ -417,22 +467,23 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       contentSizeBytes: CONTENT_SIZE,
     })
 
-    const immutable = await errorOf(q(
-      `UPDATE meta_recovery_archive_attachment_refs
+    const immutable = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_attachment_refs
           SET immutable_version=$3
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
-      [generationId, attachmentId, `${SOURCE_VERSION}_changed`],
-    ))
+        [generationId, attachmentId, `${SOURCE_VERSION}_changed`],
+      ),
+    )
     expect(immutable.message).toBe('recovery_archive_source_pin_verified_immutable')
   })
 
   test('helpers reject autocommit before claim or verification can persist', async () => {
     const generationId = await insertArchive()
     const attachmentId = `${PREFIX}_autocommit`
-    const refusal = await errorOf(claimRecoveryArchiveSourcePinIntent(
-      q,
-      owner(generationId, attachmentId),
-    ))
+    const refusal = await errorOf(
+      claimRecoveryArchiveSourcePinIntent(q, owner(generationId, attachmentId)),
+    )
     expect(refusal).toBeInstanceOf(RecoveryArchiveSourcePinError)
     expect(refusal.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_NOT_IN_TRANSACTION')
     expectValuesFree(refusal, [generationId, attachmentId, OWNER_ID])
@@ -447,12 +498,14 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
 
     const verificationAttachmentId = `${attachmentId}_verify`
     await claimIntent(generationId, verificationAttachmentId)
-    const verificationRefusal = await errorOf(verifyRecoveryArchiveSourcePin(q, {
-      ...owner(generationId, verificationAttachmentId),
-      immutableVersion: SOURCE_VERSION,
-      contentSha256: CONTENT_HASH,
-      contentSizeBytes: CONTENT_SIZE,
-    }))
+    const verificationRefusal = await errorOf(
+      verifyRecoveryArchiveSourcePin(q, {
+        ...owner(generationId, verificationAttachmentId),
+        immutableVersion: SOURCE_VERSION,
+        contentSha256: CONTENT_HASH,
+        contentSizeBytes: CONTENT_SIZE,
+      }),
+    )
     expect(verificationRefusal).toBeInstanceOf(RecoveryArchiveSourcePinError)
     expect(verificationRefusal.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_NOT_IN_TRANSACTION')
     const stillMutable = await q(
@@ -473,10 +526,11 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
           WHERE key_id=$1`,
         [KEY_ID],
       )
-      const refusal = await errorOf(transaction(({ query }) => claimRecoveryArchiveSourcePinIntent(
-        query,
-        owner(generationId, attachmentId),
-      )))
+      const refusal = await errorOf(
+        transaction(({ query }) =>
+          claimRecoveryArchiveSourcePinIntent(query, owner(generationId, attachmentId)),
+        ),
+      )
       expect(refusal).toBeInstanceOf(RecoveryArchiveSourcePinError)
       expect(refusal.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED')
       const residue = await q(
@@ -514,12 +568,14 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
 
       await retirementClient.query('BEGIN')
       await retirementClient.query(`SET LOCAL lock_timeout = '100ms'`)
-      const blocked = await errorOf(retirementClient.query(
-        `UPDATE meta_recovery_archive_keys
+      const blocked = await errorOf(
+        retirementClient.query(
+          `UPDATE meta_recovery_archive_keys
             SET state='retiring', row_version=row_version + 1
           WHERE key_id=$1`,
-        [KEY_ID],
-      ))
+          [KEY_ID],
+        ),
+      )
       expect(blocked.code).toBe('55P03')
       await retirementClient.query('ROLLBACK')
       await pinClient.query('COMMIT')
@@ -559,23 +615,27 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
         [KEY_ID],
       )
 
-      const insertRefusal = await errorOf(q(
-        `INSERT INTO meta_recovery_archive_attachment_refs (
+      const insertRefusal = await errorOf(
+        q(
+          `INSERT INTO meta_recovery_archive_attachment_refs (
            generation_id, attachment_id, reference_class, reference_state, availability,
            source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
          ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 1, $5::timestamptz)`,
-        [generationId, `${PREFIX}_raw_retiring_insert`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
-      ))
+          [generationId, `${PREFIX}_raw_retiring_insert`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+        ),
+      )
       expect(insertRefusal.message).toBe('recovery_archive_source_pin_key_unavailable')
 
-      const verifyRefusal = await errorOf(q(
-        `UPDATE meta_recovery_archive_attachment_refs
+      const verifyRefusal = await errorOf(
+        q(
+          `UPDATE meta_recovery_archive_attachment_refs
             SET availability='available', immutable_version=$3,
                 content_sha256=$4, content_size_bytes=$5::bigint
           WHERE generation_id=$1::uuid AND attachment_id=$2
             AND reference_class='source' AND reference_state='building'`,
-        [generationId, mutableAttachmentId, SOURCE_VERSION, CONTENT_HASH, CONTENT_SIZE],
-      ))
+          [generationId, mutableAttachmentId, SOURCE_VERSION, CONTENT_HASH, CONTENT_SIZE],
+        ),
+      )
       expect(verifyRefusal.message).toBe('recovery_archive_source_pin_key_unavailable')
       expectValuesFree(insertRefusal, [generationId, OWNER_ID, PREFIX])
       expectValuesFree(verifyRefusal, [generationId, mutableAttachmentId, OWNER_ID])
@@ -622,28 +682,31 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
 
         await pinClient.query('BEGIN')
         const pinPid = await backendPid(pinClient)
-        pinPromise = path === 'helper'
-          ? claimRecoveryArchiveSourcePinIntent(
-            (text, values) => pinClient.query(text, values),
-            owner(generationId, attachmentId),
-          )
-          : pinClient.query(
-            `INSERT INTO meta_recovery_archive_attachment_refs (
+        pinPromise =
+          path === 'helper'
+            ? claimRecoveryArchiveSourcePinIntent(
+                (text, values) => pinClient.query(text, values),
+                owner(generationId, attachmentId),
+              )
+            : pinClient.query(
+                `INSERT INTO meta_recovery_archive_attachment_refs (
                generation_id, attachment_id, reference_class, reference_state, availability,
                source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
              ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 1, $5::timestamptz)`,
-            [generationId, attachmentId, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
-          )
+                [generationId, attachmentId, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+              )
         await waitForBlockedBy(pinPid, generationPid)
 
         await retirementClient.query('BEGIN')
         await retirementClient.query(`SET LOCAL lock_timeout = '100ms'`)
-        const retirement = await errorOf(retirementClient.query(
-          `UPDATE meta_recovery_archive_keys
+        const retirement = await errorOf(
+          retirementClient.query(
+            `UPDATE meta_recovery_archive_keys
               SET state='retiring', row_version=row_version + 1
             WHERE key_id=$1`,
-          [KEY_ID],
-        ))
+            [KEY_ID],
+          ),
+        )
         expect(retirement.code).toBe('55P03')
         await retirementClient.query('ROLLBACK')
 
@@ -670,19 +733,24 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const attachmentId = `${PREFIX}_duplicate`
     await claimIntent(generationId, attachmentId)
 
-    const duplicate = await errorOf(transaction(({ query }) => claimRecoveryArchiveSourcePinIntent(
-      query,
-      owner(generationId, attachmentId),
-    )))
+    const duplicate = await errorOf(
+      transaction(({ query }) =>
+        claimRecoveryArchiveSourcePinIntent(query, owner(generationId, attachmentId)),
+      ),
+    )
     expect(duplicate).toBeInstanceOf(RecoveryArchiveSourcePinError)
     expect(duplicate.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED')
     expectValuesFree(duplicate, [generationId, attachmentId, OWNER_ID])
 
     const malformedGenerationId = `${PREFIX}_not_a_uuid`
-    const malformed = await errorOf(transaction(({ query }) => claimRecoveryArchiveSourcePinIntent(
-      query,
-      owner(malformedGenerationId, `${PREFIX}_malformed`),
-    )))
+    const malformed = await errorOf(
+      transaction(({ query }) =>
+        claimRecoveryArchiveSourcePinIntent(
+          query,
+          owner(malformedGenerationId, `${PREFIX}_malformed`),
+        ),
+      ),
+    )
     expect(malformed).toBeInstanceOf(RecoveryArchiveSourcePinError)
     expect(malformed.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_CLAIM_REFUSED')
     expectValuesFree(malformed, [malformedGenerationId, OWNER_ID])
@@ -699,42 +767,51 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       { ownerFence: '2' },
       { leaseUntil: '2098-01-01T00:00:00.000Z' },
     ]) {
-      const error = await errorOf(transaction(({ query }) => verifyRecoveryArchiveSourcePin(query, {
-        ...owner(generationId, attachmentId),
-        ...stale,
-        immutableVersion: SOURCE_VERSION,
-        contentSha256: CONTENT_HASH,
-        contentSizeBytes: CONTENT_SIZE,
-      })))
+      const error = await errorOf(
+        transaction(({ query }) =>
+          verifyRecoveryArchiveSourcePin(query, {
+            ...owner(generationId, attachmentId),
+            ...stale,
+            immutableVersion: SOURCE_VERSION,
+            contentSha256: CONTENT_HASH,
+            contentSizeBytes: CONTENT_SIZE,
+          }),
+        ),
+      )
       expect(error).toBeInstanceOf(RecoveryArchiveSourcePinError)
       expect(error.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_VERIFICATION_REFUSED')
       expectValuesFree(error, [generationId, attachmentId, OWNER_ID])
     }
 
-    const staleRaw = await errorOf(q(
-      `INSERT INTO meta_recovery_archive_attachment_refs (
+    const staleRaw = await errorOf(
+      q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
          generation_id, attachment_id, reference_class, reference_state, availability,
          source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
        ) VALUES ($1::uuid, $2, 'source', 'building', 'mutable', $3, $4, 2, $5::timestamptz)`,
-      [generationId, `${attachmentId}_raw`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
-    ))
+        [generationId, `${attachmentId}_raw`, OWNER_KIND, OWNER_ID, FUTURE_LEASE],
+      ),
+    )
     expect(staleRaw.message).toBe('recovery_archive_source_pin_owner_invalid')
 
     const rawUpdateAttachmentId = `${attachmentId}_raw_update`
     await claimIntent(generationId, rawUpdateAttachmentId)
-    const staleRawUpdate = await errorOf(q(
-      `UPDATE meta_recovery_archive_attachment_refs
+    const staleRawUpdate = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_attachment_refs
           SET source_lease_until='2098-01-01T00:00:00.000Z'::timestamptz
         WHERE generation_id=$1::uuid
           AND attachment_id=$2
           AND reference_class='source'`,
-      [generationId, rawUpdateAttachmentId],
-    ))
+        [generationId, rawUpdateAttachmentId],
+      ),
+    )
     expect(staleRawUpdate.message).toBe('recovery_archive_source_pin_owner_invalid')
 
     const expiredGenerationId = await insertArchive(EXPIRED_LEASE)
-    const expiredRaw = await errorOf(q(
-      `INSERT INTO meta_recovery_archive_attachment_refs (
+    const expiredRaw = await errorOf(
+      q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
          generation_id, attachment_id, reference_class, reference_state, availability,
          source_owner_kind, source_owner_id, source_owner_fence, source_lease_until
        )
@@ -742,8 +819,9 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
               archive.owner_kind, archive.owner_id, archive.owner_fence, archive.lease_expires_at
          FROM meta_recovery_archives archive
         WHERE archive.generation_id=$1::uuid`,
-      [expiredGenerationId, `${attachmentId}_expired_raw`],
-    ))
+        [expiredGenerationId, `${attachmentId}_expired_raw`],
+      ),
+    )
     expect(expiredRaw.message).toBe('recovery_archive_source_pin_lease_expired')
     expectValuesFree(expiredRaw, [expiredGenerationId, attachmentId, OWNER_ID])
   })
@@ -752,23 +830,29 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const generationId = await insertArchive()
     const attachmentId = `${PREFIX}_shape`
     await claimIntent(generationId, attachmentId)
-    const refusal = await errorOf(q(
-      `UPDATE meta_recovery_archive_attachment_refs
+    const refusal = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_attachment_refs
           SET availability='available', content_sha256=$3
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
-      [generationId, attachmentId, CONTENT_HASH],
-    ))
+        [generationId, attachmentId, CONTENT_HASH],
+      ),
+    )
     expect(refusal.code).toBe('23514')
     expect(refusal.message).toBe('recovery_archive_source_pin_shape_invalid')
     expectValuesFree(refusal, [generationId, attachmentId, CONTENT_HASH, OWNER_ID])
 
     await claimIntent(generationId, `${attachmentId}_helper`)
-    const invalidHash = await errorOf(transaction(({ query }) => verifyRecoveryArchiveSourcePin(query, {
-      ...owner(generationId, `${attachmentId}_helper`),
-      immutableVersion: SOURCE_VERSION,
-      contentSha256: 'A'.repeat(64),
-      contentSizeBytes: CONTENT_SIZE,
-    })))
+    const invalidHash = await errorOf(
+      transaction(({ query }) =>
+        verifyRecoveryArchiveSourcePin(query, {
+          ...owner(generationId, `${attachmentId}_helper`),
+          immutableVersion: SOURCE_VERSION,
+          contentSha256: 'A'.repeat(64),
+          contentSizeBytes: CONTENT_SIZE,
+        }),
+      ),
+    )
     expect(invalidHash.message).toBe('RECOVERY_ARCHIVE_SOURCE_PIN_INVALID_INPUT')
   })
 
@@ -778,14 +862,16 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const invalidAvailability = `${PREFIX}_invalid_availability`
     await claimIntent(generationId, sourceAttachmentId)
 
-    const invalidSource = await errorOf(q(
-      `UPDATE meta_recovery_archive_attachment_refs
+    const invalidSource = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_attachment_refs
           SET availability=$3
         WHERE generation_id=$1::uuid
           AND attachment_id=$2
           AND reference_class='source'`,
-      [generationId, sourceAttachmentId, invalidAvailability],
-    ))
+        [generationId, sourceAttachmentId, invalidAvailability],
+      ),
+    )
     expect(invalidSource.code).toBe('23514')
     expect(invalidSource.message).toBe('recovery_archive_source_pin_shape_invalid')
     expectValuesFree(invalidSource, [
@@ -795,14 +881,16 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       OWNER_ID,
     ])
 
-    const nullSource = await errorOf(q(
-      `UPDATE meta_recovery_archive_attachment_refs
+    const nullSource = await errorOf(
+      q(
+        `UPDATE meta_recovery_archive_attachment_refs
           SET availability=NULL
         WHERE generation_id=$1::uuid
           AND attachment_id=$2
           AND reference_class='source'`,
-      [generationId, sourceAttachmentId],
-    ))
+        [generationId, sourceAttachmentId],
+      ),
+    )
     expect(nullSource.code).toBe('23514')
     expect(nullSource.message).toBe('recovery_archive_source_pin_shape_invalid')
     expectValuesFree(nullSource, [generationId, sourceAttachmentId, OWNER_ID])
@@ -810,13 +898,15 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const archiveAttachmentId = `${PREFIX}_raw_archive_shape`
     await claimIntent(generationId, archiveAttachmentId)
     await verifyIntent(generationId, archiveAttachmentId)
-    const invalidArchiveObject = await errorOf(q(
-      `INSERT INTO meta_recovery_archive_attachment_refs (
+    const invalidArchiveObject = await errorOf(
+      q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
          generation_id, attachment_id, reference_class, reference_state, availability,
          content_sha256, immutable_version, content_size_bytes
        ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'missing', $3, $4, $5::bigint)`,
-      [generationId, archiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
-    ))
+        [generationId, archiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
+      ),
+    )
     expect(invalidArchiveObject.code).toBe('23514')
     expect(invalidArchiveObject.message).toBe('recovery_archive_archive_object_shape_invalid')
     expectValuesFree(invalidArchiveObject, [
@@ -830,13 +920,15 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
     const nullArchiveAttachmentId = `${PREFIX}_raw_archive_null`
     await claimIntent(generationId, nullArchiveAttachmentId)
     await verifyIntent(generationId, nullArchiveAttachmentId)
-    const nullArchiveObject = await errorOf(q(
-      `INSERT INTO meta_recovery_archive_attachment_refs (
+    const nullArchiveObject = await errorOf(
+      q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
          generation_id, attachment_id, reference_class, reference_state, availability,
          content_sha256, immutable_version, content_size_bytes
        ) VALUES ($1::uuid, $2, 'archive_object', 'verified', NULL, $3, $4, $5::bigint)`,
-      [generationId, nullArchiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
-    ))
+        [generationId, nullArchiveAttachmentId, CONTENT_HASH, ARCHIVE_VERSION, CONTENT_SIZE],
+      ),
+    )
     expect(nullArchiveObject.code).toBe('23514')
     expect(nullArchiveObject.message).toBe('recovery_archive_archive_object_shape_invalid')
     expectValuesFree(nullArchiveObject, [
@@ -849,7 +941,7 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
   })
 
   test('archive-object authority is distinct, immutable, and source release cannot remove it', async () => {
-    const generationId = await insertArchive()
+    const generationId = await insertFinalizableArchive()
     const attachmentId = `${PREFIX}_archive_object`
     await claimIntent(generationId, attachmentId)
     await verifyIntent(generationId, attachmentId)
@@ -941,6 +1033,21 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
           WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
         [generationId, attachmentId],
       )
+      await consumeRecoveryArchiveV2ClaimFixture(client.query.bind(client), {
+        generationId,
+        sheetId: SHEET,
+        sourceVectorHash: (
+          await client.query(
+            `SELECT source_vector_hash
+               FROM meta_recovery_archives
+              WHERE generation_id=$1::uuid`,
+            [generationId],
+          )
+        ).rows[0]?.source_vector_hash,
+        ownerKind: OWNER_KIND,
+        ownerId: OWNER_ID,
+        ownerFence: '1',
+      })
       await client.query(
         `UPDATE meta_recovery_archives
             SET state='verified', build_status='finalized', coverage_status='complete',
@@ -957,19 +1064,23 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       client.release()
     }
 
-    const deleteRefusal = await errorOf(q(
-      `DELETE FROM meta_recovery_archive_attachment_refs
+    const deleteRefusal = await errorOf(
+      q(
+        `DELETE FROM meta_recovery_archive_attachment_refs
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='archive_object'`,
-      [generationId, attachmentId],
-    ))
+        [generationId, attachmentId],
+      ),
+    )
     expect(deleteRefusal.message).toBe('recovery_archive_attachment_ref_immutable')
 
-    const sourceRelease = await errorOf(q(
-      `SELECT meta_recovery_archive_release_abandoned_source_pin(
+    const sourceRelease = await errorOf(
+      q(
+        `SELECT meta_recovery_archive_release_abandoned_source_pin(
          $1::uuid, $2, 'archive_cleanup', $3, 2
        )`,
-      [generationId, attachmentId, `${PREFIX}_cleanup`],
-    ))
+        [generationId, attachmentId, `${PREFIX}_cleanup`],
+      ),
+    )
     expect(sourceRelease.message).toBe('recovery_archive_attachment_cleanup_release_refused')
     const retained = await q(
       `SELECT immutable_version, content_sha256, content_size_bytes::text
@@ -977,11 +1088,13 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
         WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='archive_object'`,
       [generationId, attachmentId],
     )
-    expect(retained.rows).toEqual([{
-      immutable_version: ARCHIVE_VERSION,
-      content_sha256: CONTENT_HASH,
-      content_size_bytes: CONTENT_SIZE,
-    }])
+    expect(retained.rows).toEqual([
+      {
+        immutable_version: ARCHIVE_VERSION,
+        content_sha256: CONTENT_HASH,
+        content_size_bytes: CONTENT_SIZE,
+      },
+    ])
   })
 
   test('expired mutable pin still blocks physical deletion until owner-safe cleanup consumes it', async () => {
@@ -1008,16 +1121,22 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
       const blocked = await cleanupOrphanMultitableAttachments({
         queryFn: q,
         transactionFn: transaction,
-        storage: { delete: async () => { storageCalls += 1 } },
+        storage: {
+          delete: async () => {
+            storageCalls += 1
+          },
+        },
       })
       expect(blocked).toEqual({ inspected: 1, deleted: 0, skipped: 1 })
       expect(storageCalls).toBe(0)
 
-      const blindDelete = await errorOf(q(
-        `DELETE FROM meta_recovery_archive_attachment_refs
+      const blindDelete = await errorOf(
+        q(
+          `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2 AND reference_class='source'`,
-        [generationId, attachmentId],
-      ))
+          [generationId, attachmentId],
+        ),
+      )
       expect(blindDelete.message).toBe('recovery_archive_source_pin_owner_invalid')
 
       await q(
@@ -1038,12 +1157,14 @@ describeIfRealDbStep('D2 attachment source-pin authority (real DB)', () => {
           WHERE generation_id=$1::uuid AND staging_object_id=$2::uuid`,
         [generationId, stagingObjectId, RECEIPT_HASH, `${PREFIX}_cleanup`],
       )
-      await transaction(({ query }) => query(
-        `SELECT meta_recovery_archive_release_abandoned_source_pin(
+      await transaction(({ query }) =>
+        query(
+          `SELECT meta_recovery_archive_release_abandoned_source_pin(
            $1::uuid, $2, 'archive_cleanup', $3, 2
          )`,
-        [generationId, attachmentId, `${PREFIX}_cleanup`],
-      ))
+          [generationId, attachmentId, `${PREFIX}_cleanup`],
+        ),
+      )
 
       const released = await q(
         `SELECT count(*)::int AS count

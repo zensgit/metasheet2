@@ -14,7 +14,8 @@ import {
   type SealQuery,
 } from '../../src/multitable/recovery-archive-seals'
 
-const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+const runRealDb =
+  Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
 
 test('sentinel: the D2 claim-anchor real-DB allowlist step must provide DATABASE_URL', () => {
@@ -105,6 +106,20 @@ async function errorOf(promise: Promise<unknown>): Promise<DatabaseError> {
   throw new Error('expected_database_rejection')
 }
 
+async function settleTransaction(
+  client: PoolClient,
+  statement: Promise<unknown>,
+): Promise<DatabaseError | null> {
+  try {
+    await statement
+    await client.query('COMMIT')
+    return null
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    return error as DatabaseError
+  }
+}
+
 function expectValuesFree(error: DatabaseError, forbiddenValues: readonly string[]): void {
   const rendered = [error.message, error.detail, error.where, error.hint].filter(Boolean).join(' ')
   for (const value of forbiddenValues) expect(rendered).not.toContain(value)
@@ -173,7 +188,10 @@ async function insertOrdinarySealedOperation(
   )
 }
 
-async function seedOrdinarySealedOperation(operationId: string, endpointSeq: string): Promise<void> {
+async function seedOrdinarySealedOperation(
+  operationId: string,
+  endpointSeq: string,
+): Promise<void> {
   await withTxn(async (client) => {
     await insertOrdinarySealedOperation(client, operationId, endpointSeq)
   })
@@ -182,9 +200,15 @@ async function seedOrdinarySealedOperation(operationId: string, endpointSeq: str
 async function deleteSealedOperation(client: PoolClient, operationId: string): Promise<void> {
   await client.query(`SELECT set_config('metasheet.mrho_retention', 'on', true)`)
   await client.query(`DELETE FROM meta_record_revisions WHERE operation_id=$1::uuid`, [operationId])
-  await client.query(`DELETE FROM meta_record_version_markers WHERE operation_id=$1::uuid`, [operationId])
-  await client.query(`DELETE FROM meta_sheet_section_revisions WHERE operation_id=$1::uuid`, [operationId])
-  await client.query(`DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`, [operationId])
+  await client.query(`DELETE FROM meta_record_version_markers WHERE operation_id=$1::uuid`, [
+    operationId,
+  ])
+  await client.query(`DELETE FROM meta_sheet_section_revisions WHERE operation_id=$1::uuid`, [
+    operationId,
+  ])
+  await client.query(`DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`, [
+    operationId,
+  ])
 }
 
 async function countAnchorsTo(operationId: string): Promise<number> {
@@ -649,7 +673,16 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
          ($1, $2, $3, NULL),
          ($4, $5, $6, NULL),
          ($7, $2, $8, 'people_directory')`,
-      [SHEET, BASE, `${PREFIX} Sheet`, OTHER_SHEET, OTHER_BASE, `${PREFIX} Other Sheet`, SYSTEM_SHEET, `${PREFIX} System`],
+      [
+        SHEET,
+        BASE,
+        `${PREFIX} Sheet`,
+        OTHER_SHEET,
+        OTHER_BASE,
+        `${PREFIX} Other Sheet`,
+        SYSTEM_SHEET,
+        `${PREFIX} System`,
+      ],
     )
     await q(
       `INSERT INTO meta_history_trust_checkpoints (id, sheet_id, state, trusted_since_seq)
@@ -679,18 +712,21 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       try {
         await client.query('BEGIN')
         await client.query(`SELECT set_config('metasheet.mrho_retention', 'on', true)`)
-        await client.query(`DELETE FROM meta_record_history_snapshot_members WHERE sheet_id = ANY($1::text[])`, [
-          [SHEET, OTHER_SHEET, SYSTEM_SHEET],
-        ])
-        await client.query(`DELETE FROM meta_sheet_section_revisions WHERE sheet_id = ANY($1::text[])`, [
-          [SHEET, OTHER_SHEET, SYSTEM_SHEET],
-        ])
+        await client.query(
+          `DELETE FROM meta_record_history_snapshot_members WHERE sheet_id = ANY($1::text[])`,
+          [[SHEET, OTHER_SHEET, SYSTEM_SHEET]],
+        )
+        await client.query(
+          `DELETE FROM meta_sheet_section_revisions WHERE sheet_id = ANY($1::text[])`,
+          [[SHEET, OTHER_SHEET, SYSTEM_SHEET]],
+        )
         await client.query(`DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])`, [
           [SHEET, OTHER_SHEET, SYSTEM_SHEET],
         ])
-        await client.query(`DELETE FROM meta_record_history_operations WHERE sheet_id = ANY($1::text[])`, [
-          [SHEET, OTHER_SHEET, SYSTEM_SHEET],
-        ])
+        await client.query(
+          `DELETE FROM meta_record_history_operations WHERE sheet_id = ANY($1::text[])`,
+          [[SHEET, OTHER_SHEET, SYSTEM_SHEET]],
+        )
         await client.query('COMMIT')
       } catch (error) {
         await client.query('ROLLBACK').catch(() => {})
@@ -701,7 +737,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       await q(`DELETE FROM meta_history_trust_checkpoints WHERE id = ANY($1::text[])`, [
         [CHECKPOINT, OTHER_CHECKPOINT, SYSTEM_CHECKPOINT],
       ])
-      await q(`DELETE FROM meta_sheets WHERE id = ANY($1::text[])`, [[SHEET, OTHER_SHEET, SYSTEM_SHEET]])
+      await q(`DELETE FROM meta_sheets WHERE id = ANY($1::text[])`, [
+        [SHEET, OTHER_SHEET, SYSTEM_SHEET],
+      ])
       await q(`DELETE FROM meta_bases WHERE id = ANY($1::text[])`, [[BASE, OTHER_BASE]])
       const keyClient = await pool.connect()
       try {
@@ -732,7 +770,11 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
         ORDER BY column_name`,
     )
     expect(columns.rows).toEqual([
-      { column_name: 'anchor_operation_id', is_nullable: 'NO', udt_name: 'uuid' },
+      {
+        column_name: 'anchor_operation_id',
+        is_nullable: 'NO',
+        udt_name: 'uuid',
+      },
       { column_name: 'anchor_seq', is_nullable: 'NO', udt_name: 'int8' },
     ])
 
@@ -800,7 +842,10 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     expect(['recovery_archive_binding_invalid', '23503']).toContain(
       oldError.message === 'recovery_archive_binding_invalid' ? oldError.message : oldError.code,
     )
-    expectValuesFree(oldError, forbiddenIdentities([oldIds.generationId, oldIds.snapshotOperationId]))
+    expectValuesFree(
+      oldError,
+      forbiddenIdentities([oldIds.generationId, oldIds.snapshotOperationId]),
+    )
 
     const fk = await q(
       `SELECT constraint_row.condeferrable, constraint_row.confdeltype,
@@ -856,22 +901,32 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
         await insertReservationSet(client, omitted, { omitOrdinal10: true })
       }),
     )
-    expect(['recovery_archive_binding_invalid', 'recovery_archive_snapshot_reservation_set_invalid']).toContain(
-      omitError.message,
+    expect([
+      'recovery_archive_binding_invalid',
+      'recovery_archive_snapshot_reservation_set_invalid',
+    ]).toContain(omitError.message)
+    expectValuesFree(
+      omitError,
+      forbiddenIdentities([omitted.generationId, omitted.snapshotOperationId]),
     )
-    expectValuesFree(omitError, forbiddenIdentities([omitted.generationId, omitted.snapshotOperationId]))
 
     const altered = allocateClaimIds()
     const alterError = await errorOf(
       withTxn(async (client) => {
         await insertBuildingGeneration(client, altered)
         await insertReservationSet(client, altered, {
-          alterOrdinal10: { operationId: randomUUID(), endpointSeq: nextSeq() },
+          alterOrdinal10: {
+            operationId: randomUUID(),
+            endpointSeq: nextSeq(),
+          },
         })
       }),
     )
     expect(alterError.message).toBe('recovery_archive_binding_invalid')
-    expectValuesFree(alterError, forbiddenIdentities([altered.generationId, altered.snapshotOperationId]))
+    expectValuesFree(
+      alterError,
+      forbiddenIdentities([altered.generationId, altered.snapshotOperationId]),
+    )
   })
 
   test('wrong generation, sheet, source-vector, owner, op, or seq fails', async () => {
@@ -889,7 +944,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const vectorError = await errorOf(
       withTxn(async (client) => {
         await insertBuildingGeneration(client, vectorIds)
-        await insertReservationSet(client, vectorIds, { sourceVectorHash: OTHER_SOURCE_VECTOR_HASH })
+        await insertReservationSet(client, vectorIds, {
+          sourceVectorHash: OTHER_SOURCE_VECTOR_HASH,
+        })
       }),
     )
     expect(vectorError.message).toBe('recovery_archive_snapshot_reservation_parent_invalid')
@@ -898,7 +955,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const ownerError = await errorOf(
       withTxn(async (client) => {
         await insertBuildingGeneration(client, ownerIds)
-        await insertReservationSet(client, ownerIds, { ownerId: `${PREFIX}_other_owner` })
+        await insertReservationSet(client, ownerIds, {
+          ownerId: `${PREFIX}_other_owner`,
+        })
       }),
     )
     expect(ownerError.message).toBe('recovery_archive_snapshot_reservation_parent_invalid')
@@ -906,7 +965,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const opIds = allocateClaimIds()
     const opError = await errorOf(
       withTxn(async (client) => {
-        await insertBuildingGeneration(client, opIds, { anchorOperationId: randomUUID() })
+        await insertBuildingGeneration(client, opIds, {
+          anchorOperationId: randomUUID(),
+        })
         await insertReservationSet(client, opIds)
       }),
     )
@@ -915,7 +976,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const seqIds = allocateClaimIds()
     const seqError = await errorOf(
       withTxn(async (client) => {
-        await insertBuildingGeneration(client, seqIds, { anchorSeq: nextSeq() })
+        await insertBuildingGeneration(client, seqIds, {
+          anchorSeq: nextSeq(),
+        })
         await insertReservationSet(client, seqIds)
       }),
     )
@@ -948,7 +1011,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
 
     const checkpointError = await errorOf(
       withTxn(async (client) => {
-        await insertBuildingGeneration(client, ids, { checkpointId: OTHER_CHECKPOINT })
+        await insertBuildingGeneration(client, ids, {
+          checkpointId: OTHER_CHECKPOINT,
+        })
       }),
     )
     expect(checkpointError.message).toBe('recovery_archive_binding_invalid')
@@ -1009,6 +1074,83 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     ])
   })
 
+  test('a corrective generation reuses one verified sealed anchor without duplicating reservations', async () => {
+    const authority = allocateClaimIds()
+    await claimOnPool(authority)
+    await withTxn(async (client) => {
+      await sealReservedParent(client, authority)
+      await transitionVerified(client, authority.generationId)
+    })
+
+    const replacement: ClaimIds = {
+      ...authority,
+      generationId: randomUUID(),
+    }
+    await withTxn(async (client) => {
+      await insertBuildingGeneration(client, replacement)
+      await transitionVerified(client, replacement.generationId)
+    })
+    const reused = await q(
+      `SELECT state,
+              (SELECT count(*)::int
+                 FROM meta_recovery_archive_snapshot_reservations reservation
+                WHERE reservation.generation_id=archive.generation_id) AS own_reservations
+         FROM meta_recovery_archives archive
+        WHERE generation_id=$1::uuid`,
+      [replacement.generationId],
+    )
+    expect(reused.rows).toEqual([{ state: 'verified', own_reservations: 0 }])
+
+    const wrongVector: ClaimIds = {
+      ...authority,
+      generationId: randomUUID(),
+    }
+    const vectorError = await errorOf(
+      withTxn(async (client) => {
+        await insertBuildingGeneration(client, wrongVector, {
+          sourceVectorHash: 'f'.repeat(64),
+        })
+        await transitionVerified(client, wrongVector.generationId)
+      }),
+    )
+    expect(vectorError.message).toBe('recovery_archive_claim_anchor_parent_unsealed')
+    expectValuesFree(
+      vectorError,
+      forbiddenIdentities([wrongVector.generationId, authority.snapshotOperationId]),
+    )
+
+    const partial: ClaimIds = { ...authority, generationId: randomUUID() }
+    const partialError = await errorOf(
+      withTxn(async (client) => {
+        await insertBuildingGeneration(client, partial)
+        await client.query(
+          `INSERT INTO meta_recovery_archive_snapshot_reservations (
+             generation_id, sheet_id, source_vector_hash, owner_kind, owner_id, owner_fence,
+             ordinal, reservation_kind, section_kind, operation_id, endpoint_seq
+           ) VALUES (
+             $1::uuid, $2, $3, $4, $5, 1,
+             1, 'section_bootstrap', 'schema', $6::uuid, $7::bigint
+           )`,
+          [
+            partial.generationId,
+            SHEET,
+            SOURCE_VECTOR_HASH,
+            OWNER_KIND,
+            OWNER_ID,
+            randomUUID(),
+            nextSeq(),
+          ],
+        )
+        await transitionVerified(client, partial.generationId)
+      }),
+    )
+    expect(partialError.message).toBe('recovery_archive_claim_anchor_parent_unsealed')
+    expectValuesFree(
+      partialError,
+      forbiddenIdentities([partial.generationId, authority.snapshotOperationId]),
+    )
+  })
+
   test('verify refuses a sealed parent whose members do not match the reserved source identities', async () => {
     const foreignSections = SECTION_KINDS.map((sectionKind) => ({
       sectionKind,
@@ -1025,11 +1167,14 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const error = await errorOf(withTxn((client) => transitionVerified(client, ids.generationId)))
     expect(error.code).toBe('23514')
     expect(error.message).toBe('recovery_archive_claim_anchor_parent_unsealed')
-    expectValuesFree(error, forbiddenIdentities([
-      ids.generationId,
-      ids.snapshotOperationId,
-      ...foreignSections.map((section) => section.operationId),
-    ]))
+    expectValuesFree(
+      error,
+      forbiddenIdentities([
+        ids.generationId,
+        ids.snapshotOperationId,
+        ...foreignSections.map((section) => section.operationId),
+      ]),
+    )
   })
 
   test('deleting a referenced parent fails for every archive state', async () => {
@@ -1042,13 +1187,17 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const buildingDelete = await errorOf(
       withTxn(async (client) => {
         await client.query(`SELECT set_config('metasheet.mrho_retention', 'on', true)`)
-        await client.query(`DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`, [
-          ids.snapshotOperationId,
-        ])
+        await client.query(
+          `DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`,
+          [ids.snapshotOperationId],
+        )
       }),
     )
     expect(buildingDelete.message).toBe('recovery_archive_anchor_operation_referenced')
-    expectValuesFree(buildingDelete, forbiddenIdentities([ids.generationId, ids.snapshotOperationId]))
+    expectValuesFree(
+      buildingDelete,
+      forbiddenIdentities([ids.generationId, ids.snapshotOperationId]),
+    )
 
     await withTxn(async (client) => {
       await transitionVerified(client, ids.generationId)
@@ -1057,9 +1206,10 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
     const verifiedDelete = await errorOf(
       withTxn(async (client) => {
         await client.query(`SELECT set_config('metasheet.mrho_retention', 'on', true)`)
-        await client.query(`DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`, [
-          ids.snapshotOperationId,
-        ])
+        await client.query(
+          `DELETE FROM meta_record_history_operations WHERE operation_id=$1::uuid`,
+          [ids.snapshotOperationId],
+        )
       }),
     )
     expect(verifiedDelete.message).toBe('recovery_archive_anchor_operation_referenced')
@@ -1227,7 +1377,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       deleterOpen = false
       const insertError = await errorOf(insertWait.then(() => inserter.query('COMMIT')))
       expect(['recovery_archive_binding_invalid', '40001', '55P03']).toContain(
-        insertError.message === 'recovery_archive_binding_invalid' ? insertError.message : insertError.code,
+        insertError.message === 'recovery_archive_binding_invalid'
+          ? insertError.message
+          : insertError.code,
       )
       expect(await countAnchorsTo(ordinaryOp)).toBe(0)
       expect(await operationExists(ordinaryOp)).toBe(false)
@@ -1318,7 +1470,9 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
       deleterOpen = false
       const commitError = await errorOf(commitWait)
       expect(['recovery_archive_binding_invalid', '40001', '55P03']).toContain(
-        commitError.message === 'recovery_archive_binding_invalid' ? commitError.message : commitError.code,
+        commitError.message === 'recovery_archive_binding_invalid'
+          ? commitError.message
+          : commitError.code,
       )
       expect(await countAnchorsTo(ordinaryOp)).toBe(0)
       expect(await operationExists(ordinaryOp)).toBe(false)
@@ -1394,42 +1548,31 @@ describeIfRealDbStep('Phase D2 recovery archive claim-anchor amendment (real DB)
           })
         }
       }
-      if (blockedPair === null) {
-        // One statement may already have finished fail-closed. Drain both.
-        const verifyError = await errorOf(verifyWait.then(() => verifier.query('COMMIT')))
-        verifierOpen = false
-        const deleteError = await errorOf(deleteWait.then(() => deleter.query('COMMIT')))
-        deleterOpen = false
-        const dangling = (await countAnchorsTo(ids.snapshotOperationId)) > 0 && !(await operationExists(ids.snapshotOperationId))
-        expect(dangling).toBe(false)
-        expect(
-          [verifyError.message, deleteError.message].some(
-            (message) =>
-              message === 'recovery_archive_anchor_operation_referenced' ||
-              message === 'recovery_archive_claim_anchor_parent_unsealed' ||
-              message === 'expected_database_rejection',
-          ),
-        ).toBe(true)
-        return
-      }
-
-      if (blockedPair === 'verify-waits') {
-        await deleter.query('COMMIT')
-        deleterOpen = false
-        const verifyError = await errorOf(verifyWait.then(() => verifier.query('COMMIT')))
-        verifierOpen = false
-        expect(['recovery_archive_claim_anchor_parent_unsealed', 'recovery_archive_anchor_operation_referenced']).toContain(
-          verifyError.message,
-        )
-      } else {
-        await verifier.query('COMMIT')
-        verifierOpen = false
-        const deleteError = await errorOf(deleteWait.then(() => deleter.query('COMMIT')))
-        deleterOpen = false
-        expect(deleteError.message).toBe('recovery_archive_anchor_operation_referenced')
-      }
+      // A sampled waiter does not predict the winner: the deleting statement may hit a later
+      // NOWAIT guard after briefly holding an earlier lock. Settle both transactions concurrently
+      // and assert the durable invariant instead of inferring the outcome from one lock sample.
+      const [verifyError, deleteError] = await Promise.all([
+        settleTransaction(verifier, verifyWait),
+        settleTransaction(deleter, deleteWait),
+      ])
+      verifierOpen = false
+      deleterOpen = false
+      const errors = [verifyError, deleteError].filter(
+        (error): error is DatabaseError => error !== null,
+      )
+      expect(errors.length).toBeGreaterThan(0)
       expect(
-        (await countAnchorsTo(ids.snapshotOperationId)) > 0 && !(await operationExists(ids.snapshotOperationId)),
+        errors.every(
+          (error) =>
+            error.message === 'recovery_archive_anchor_operation_referenced' ||
+            error.message === 'recovery_archive_claim_anchor_parent_unsealed' ||
+            error.message === 'recovery_archive_claim_anchor_busy' ||
+            error.code === '55P03',
+        ),
+      ).toBe(true)
+      expect(
+        (await countAnchorsTo(ids.snapshotOperationId)) > 0 &&
+          !(await operationExists(ids.snapshotOperationId)),
       ).toBe(false)
     } finally {
       if (verifierOpen) await verifier.query('ROLLBACK').catch(() => {})

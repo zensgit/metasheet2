@@ -11,14 +11,20 @@ import * as snapshotReservationMigration from '../../src/db/migrations/zzzz20260
 import * as keyRegistryMigration from '../../src/db/migrations/zzzz20260828121000_add_recovery_archive_key_registry'
 import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import * as objectReceiptAuthorityMigration from '../../src/db/migrations/zzzz20260828125000_add_recovery_archive_object_receipt_authority'
+import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import {
   RECOVERY_ARCHIVE_ATTACHMENT_AVAILABILITY,
   RECOVERY_ARCHIVE_COVERAGE_KIND_BINDING_TARGETS,
   RECOVERY_ARCHIVE_COVERAGE_SOURCE_KINDS,
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
 } from '../../src/multitable/recovery-archive-contract'
+import {
+  consumeRecoveryArchiveV2ClaimFixture,
+  persistRecoveryArchiveV2ClaimFixture,
+} from '../utils/recovery-archive-v2-claim-fixture'
 
-const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+const runRealDb =
+  Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
 
 test('sentinel: the D2a real-DB allowlist step must provide DATABASE_URL', () => {
@@ -49,6 +55,7 @@ const OTHER_ANCHOR_OPERATION = randomUUID()
 const NULL_WORKSPACE_OPERATION = randomUUID()
 const SYSTEM_ANCHOR_OPERATION = randomUUID()
 const ANCHOR_SEQ = '9007199254741993'
+const CHECKPOINT_TRUSTED_SINCE_SEQ = '1'
 const OTHER_ANCHOR_SEQ = '9007199254742993'
 const NULL_WORKSPACE_ANCHOR_SEQ = '9007199254743993'
 const SYSTEM_ANCHOR_SEQ = '9007199254744993'
@@ -276,9 +283,8 @@ function archiveInput(overrides: Partial<ArchiveInput> = {}): ArchiveInput {
   }
 }
 
-async function insertArchive(overrides: Partial<ArchiveInput> = {}): Promise<ArchiveInput> {
-  const input = archiveInput(overrides)
-  await q(
+async function insertArchiveRow(query: ArchiveQuery, input: ArchiveInput): Promise<void> {
+  await query(
     `INSERT INTO meta_recovery_archives (
        generation_id, workspace_id, base_id, sheet_id, anchor_operation_id, anchor_seq,
        checkpoint_id, format_version, state, build_status, coverage_status,
@@ -317,7 +323,69 @@ async function insertArchive(overrides: Partial<ArchiveInput> = {}): Promise<Arc
       input.manifestMac,
     ],
   )
+}
+
+async function insertArchive(overrides: Partial<ArchiveInput> = {}): Promise<ArchiveInput> {
+  const input = archiveInput(overrides)
+  await insertArchiveRow(q, input)
   return input
+}
+
+async function insertFinalizableArchive(
+  overrides: Partial<ArchiveInput> = {},
+): Promise<ArchiveInput> {
+  const generationId = overrides.generationId ?? randomUUID()
+  const client = await pool.connect()
+  let input: ArchiveInput | undefined
+  try {
+    await client.query('BEGIN')
+    const query: ArchiveQuery = (text, values) => client.query(text, values)
+    await persistRecoveryArchiveV2ClaimFixture(
+      query,
+      {
+        generationId,
+        sheetId: overrides.sheetId ?? SHEET,
+        ownerKind: overrides.ownerKind ?? 'archive_builder',
+        ownerId: overrides.ownerId ?? OWNER,
+        ownerFence: overrides.ownerFence ?? '1',
+      },
+      async (identity) => {
+        input = archiveInput({
+          ...overrides,
+          generationId,
+          anchorOperationId: identity.anchorOperationId,
+          anchorSeq: identity.anchorSeq,
+          sourceVectorHash: identity.sourceVectorHash,
+        })
+        await insertArchiveRow(query, input)
+      },
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
+  if (!input) throw new Error('recovery_archive_v2_claim_fixture_not_inserted')
+  return input
+}
+
+async function insertSealedAnchorReuseArchive(
+  authority: ArchiveInput,
+  overrides: Partial<ArchiveInput> = {},
+): Promise<ArchiveInput> {
+  return insertArchive({
+    workspaceId: authority.workspaceId,
+    baseId: authority.baseId,
+    sheetId: authority.sheetId,
+    anchorOperationId: authority.anchorOperationId,
+    anchorSeq: authority.anchorSeq,
+    checkpointId: authority.checkpointId,
+    formatVersion: authority.formatVersion,
+    sourceVectorHash: authority.sourceVectorHash,
+    ...overrides,
+  })
 }
 
 async function finalizeArchive(generationId: string, coverageRowCount = '0'): Promise<void> {
@@ -326,6 +394,28 @@ async function finalizeArchive(generationId: string, coverageRowCount = '0'): Pr
     await client.query('BEGIN')
     const query: ArchiveQuery = (text, values) => client.query(text, values)
     await seedVerifiedObjectRosterIfPresent(query, generationId)
+    const parent = await query(
+      `SELECT sheet_id, source_vector_hash, owner_kind, owner_id, owner_fence::text
+         FROM meta_recovery_archives
+        WHERE generation_id=$1::uuid`,
+      [generationId],
+    )
+    const reservationCount = await query(
+      `SELECT count(*)::int AS count
+         FROM meta_recovery_archive_snapshot_reservations
+        WHERE generation_id=$1::uuid`,
+      [generationId],
+    )
+    if (reservationCount.rows[0]?.count === 10 && parent.rows[0]) {
+      await consumeRecoveryArchiveV2ClaimFixture(query, {
+        generationId,
+        sheetId: String(parent.rows[0].sheet_id),
+        sourceVectorHash: String(parent.rows[0].source_vector_hash),
+        ownerKind: String(parent.rows[0].owner_kind),
+        ownerId: String(parent.rows[0].owner_id),
+        ownerFence: String(parent.rows[0].owner_fence),
+      })
+    }
     await query(
       `UPDATE meta_recovery_archives
           SET state = 'verified',
@@ -388,9 +478,8 @@ async function insertAttachmentRef(
   const referenceClass = overrides.referenceClass ?? 'source'
   const referenceState = overrides.referenceState ?? 'building'
   const availability = overrides.availability ?? 'available'
-  const contentSha256 = overrides.contentSha256 === undefined
-    ? ATTACHMENT_HASH
-    : overrides.contentSha256
+  const contentSha256 =
+    overrides.contentSha256 === undefined ? ATTACHMENT_HASH : overrides.contentSha256
 
   if (referenceClass === 'source') {
     await q(
@@ -463,15 +552,33 @@ async function truncateCatalog(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present`,
   )
   const objectTarget = objectTable.rows[0]?.present ? 'meta_recovery_archive_objects,' : ''
-  await q(
-    `TRUNCATE TABLE
-       ${objectTarget}
-       ${reservationTarget}
-       meta_recovery_archive_staging_objects,
-       meta_recovery_archive_attachment_refs,
-       meta_recovery_archive_coverage_items,
-       meta_recovery_archives`,
+  const markerTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_section_bootstrap_markers') IS NOT NULL AS present`,
   )
+  const markerTarget = markerTable.rows[0]?.present
+    ? 'meta_recovery_archive_section_bootstrap_markers,'
+    : ''
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SET LOCAL session_replication_role = replica')
+    await client.query(
+      `TRUNCATE TABLE
+         ${objectTarget}
+         ${reservationTarget}
+         ${markerTarget}
+         meta_recovery_archive_staging_objects,
+         meta_recovery_archive_attachment_refs,
+         meta_recovery_archive_coverage_items,
+         meta_recovery_archives`,
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
+  }
 }
 
 async function seedSealedOperation(
@@ -650,7 +757,20 @@ async function installCatalogIfAbsent(): Promise<void> {
   schemaIsUp = true
 }
 
-async function downCatalogStack(target: Kysely<unknown>): Promise<boolean> {
+interface CatalogStackRestore {
+  claimAnchor: boolean
+  objectAuthority: boolean
+}
+
+async function downCatalogStack(target: Kysely<unknown>): Promise<CatalogStackRestore> {
+  const claimAnchor = await sql<{ present: boolean }>`
+    SELECT pg_catalog.to_regprocedure(
+      'public.meta_recovery_archives_claim_anchor_guard_row()'
+    ) IS NOT NULL AS present
+  `.execute(target)
+  const restoreClaimAnchor = claimAnchor.rows[0]?.present === true
+  if (restoreClaimAnchor) await claimAnchorMigration.down(target)
+
   const objectAuthority = await sql<{ present: boolean }>`
     SELECT pg_catalog.to_regclass('public.meta_recovery_archive_objects') IS NOT NULL AS present
   `.execute(target)
@@ -661,32 +781,52 @@ async function downCatalogStack(target: Kysely<unknown>): Promise<boolean> {
   await coverageBindingMigration.down(target)
   await stagingCleanupMigration.down(target)
   await archiveCatalogMigration.down(target)
-  return restoreObjectAuthority
+  return {
+    claimAnchor: restoreClaimAnchor,
+    objectAuthority: restoreObjectAuthority,
+  }
 }
 
 async function upCatalogStack(
   target: Kysely<unknown>,
-  restoreObjectAuthority = false,
+  restore: CatalogStackRestore = { claimAnchor: false, objectAuthority: false },
 ): Promise<void> {
   await archiveCatalogMigration.up(target)
   await stagingCleanupMigration.up(target)
   await coverageBindingMigration.up(target)
   await snapshotReservationMigration.up(target)
   await sourcePinAuthorityMigration.up(target)
-  if (restoreObjectAuthority) await objectReceiptAuthorityMigration.up(target)
+  if (restore.objectAuthority) await objectReceiptAuthorityMigration.up(target)
+  if (restore.claimAnchor) await claimAnchorMigration.up(target)
 }
 
 async function cleanupSourceFixtures(): Promise<void> {
-  const operations: Array<[string, string]> = [
-    [SHEET, ANCHOR_OPERATION],
-    [OTHER_SHEET, OTHER_ANCHOR_OPERATION],
-    [NULL_WORKSPACE_SHEET, NULL_WORKSPACE_OPERATION],
-    [SYSTEM_SHEET, SYSTEM_ANCHOR_OPERATION],
-  ]
-  for (const [sheetId, operationId] of operations) {
-    await q('SELECT meta_record_history_operations_prune($1, $2::uuid)', [sheetId, operationId]).catch(
-      () => {},
+  const sheetIds = [SHEET, OTHER_SHEET, NULL_WORKSPACE_SHEET, SYSTEM_SHEET]
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SET LOCAL session_replication_role = replica')
+    await client.query(
+      `DELETE FROM meta_record_history_snapshot_members WHERE sheet_id = ANY($1::text[])`,
+      [sheetIds],
     )
+    await client.query(
+      `DELETE FROM meta_sheet_section_revisions WHERE sheet_id = ANY($1::text[])`,
+      [sheetIds],
+    )
+    await client.query(`DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])`, [
+      sheetIds,
+    ])
+    await client.query(
+      `DELETE FROM meta_record_history_operations WHERE sheet_id = ANY($1::text[])`,
+      [sheetIds],
+    )
+    await client.query('COMMIT')
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw error
+  } finally {
+    client.release()
   }
   await q(
     `DELETE FROM meta_history_trust_checkpoints
@@ -809,7 +949,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [
         CHECKPOINT,
         SHEET,
-        ANCHOR_SEQ,
+        CHECKPOINT_TRUSTED_SINCE_SEQ,
         OTHER_CHECKPOINT,
         OTHER_SHEET,
         OTHER_ANCHOR_SEQ,
@@ -901,9 +1041,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('cross-base sheet binding refuses', async () => {
-    const error = await errorOf(
-      insertArchive({ workspaceId: OTHER_WORKSPACE, baseId: OTHER_BASE }),
-    )
+    const error = await errorOf(insertArchive({ workspaceId: OTHER_WORKSPACE, baseId: OTHER_BASE }))
     expect(error.message).toBe('recovery_archive_binding_invalid')
     expectValuesFree(error, [OTHER_WORKSPACE, OTHER_BASE, SHEET, OWNER])
   })
@@ -962,7 +1100,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [CHECKPOINT],
     )
     expect(restored.rows).toEqual([
-      { state: 'active', pruned_at: null, trusted_since_seq: ANCHOR_SEQ },
+      {
+        state: 'active',
+        pruned_at: null,
+        trusted_since_seq: CHECKPOINT_TRUSTED_SINCE_SEQ,
+      },
     ])
   })
 
@@ -984,7 +1126,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [CHECKPOINT],
     )
     expect(restored.rows).toEqual([
-      { state: 'active', pruned_at: null, trusted_since_seq: ANCHOR_SEQ },
+      {
+        state: 'active',
+        pruned_at: null,
+        trusted_since_seq: CHECKPOINT_TRUSTED_SINCE_SEQ,
+      },
     ])
   })
 
@@ -1002,7 +1148,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     } finally {
       await q(
         `UPDATE meta_history_trust_checkpoints SET trusted_since_seq=$2::bigint WHERE id=$1`,
-        [CHECKPOINT, ANCHOR_SEQ],
+        [CHECKPOINT, CHECKPOINT_TRUSTED_SINCE_SEQ],
       )
     }
 
@@ -1012,7 +1158,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [CHECKPOINT],
     )
     expect(restored.rows).toEqual([
-      { state: 'active', pruned_at: null, trusted_since_seq: ANCHOR_SEQ },
+      {
+        state: 'active',
+        pruned_at: null,
+        trusted_since_seq: CHECKPOINT_TRUSTED_SINCE_SEQ,
+      },
     ])
   })
 
@@ -1052,7 +1202,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('verified transition requires every finalized field and exact coverage count', async () => {
-    const archive = await insertArchive()
+    const archive = await insertFinalizableArchive()
     const finalizedFields = {
       rootHash: ROOT_HASH,
       coverageHash: COVERAGE_HASH,
@@ -1066,7 +1216,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
             SET state='verified', build_status='finalized', coverage_status='complete',
                 coverage_section_hash=$2, coverage_row_count=$3::bigint, manifest_mac=$4::bytea
           WHERE generation_id=$1::uuid`,
-        [archive.generationId, finalizedFields.coverageHash, finalizedFields.coverageCount, finalizedFields.manifestMac],
+        [
+          archive.generationId,
+          finalizedFields.coverageHash,
+          finalizedFields.coverageCount,
+          finalizedFields.manifestMac,
+        ],
       ),
     )
     expect(missingRoot.message).toBe('recovery_archive_finalized_fields_missing')
@@ -1077,7 +1232,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
             SET state='verified', build_status='finalized', coverage_status='complete',
                 root_hash=$2, coverage_row_count=$3::bigint, manifest_mac=$4::bytea
           WHERE generation_id=$1::uuid`,
-        [archive.generationId, finalizedFields.rootHash, finalizedFields.coverageCount, finalizedFields.manifestMac],
+        [
+          archive.generationId,
+          finalizedFields.rootHash,
+          finalizedFields.coverageCount,
+          finalizedFields.manifestMac,
+        ],
       ),
     )
     expect(missingCoverageHash.message).toBe('recovery_archive_finalized_fields_missing')
@@ -1088,7 +1248,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
             SET state='verified', build_status='finalized', coverage_status='complete',
                 root_hash=$2, coverage_section_hash=$3, manifest_mac=$4::bytea
           WHERE generation_id=$1::uuid`,
-        [archive.generationId, finalizedFields.rootHash, finalizedFields.coverageHash, finalizedFields.manifestMac],
+        [
+          archive.generationId,
+          finalizedFields.rootHash,
+          finalizedFields.coverageHash,
+          finalizedFields.manifestMac,
+        ],
       ),
     )
     expect(missingCoverageCount.message).toBe('recovery_archive_finalized_fields_missing')
@@ -1099,12 +1264,19 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
             SET state='verified', build_status='finalized', coverage_status='complete',
                 root_hash=$2, coverage_section_hash=$3, coverage_row_count=$4::bigint
           WHERE generation_id=$1::uuid`,
-        [archive.generationId, finalizedFields.rootHash, finalizedFields.coverageHash, finalizedFields.coverageCount],
+        [
+          archive.generationId,
+          finalizedFields.rootHash,
+          finalizedFields.coverageHash,
+          finalizedFields.coverageCount,
+        ],
       ),
     )
     expect(missingMac.message).toBe('recovery_archive_finalized_fields_missing')
 
-    await insertCoverage(archive.generationId)
+    await insertCoverage(archive.generationId, {
+      sourceSeq: archive.anchorSeq,
+    })
     const wrongCount = await errorOf(finalizeArchive(archive.generationId, '0'))
     expect(wrongCount.message).toBe('recovery_archive_coverage_count_mismatch')
 
@@ -1148,7 +1320,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('verified can only advance to expired and never rolls back', async () => {
-    const archive = await insertArchive()
+    const archive = await insertFinalizableArchive()
     await finalizeArchive(archive.generationId)
 
     const toBuilding = await errorOf(
@@ -1171,30 +1343,32 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(toAbandoned.message).toBe('recovery_archive_transition_invalid')
 
-    await q(
-      `UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`,
-      [archive.generationId],
-    )
+    await q(`UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`, [
+      archive.generationId,
+    ])
     const expired = await q(
       `SELECT state, build_status, coverage_status
          FROM meta_recovery_archives WHERE generation_id=$1::uuid`,
       [archive.generationId],
     )
     expect(expired.rows).toEqual([
-      { state: 'expired', build_status: 'finalized', coverage_status: 'complete' },
+      {
+        state: 'expired',
+        build_status: 'finalized',
+        coverage_status: 'complete',
+      },
     ])
 
     const rollback = await errorOf(
-      q(
-        `UPDATE meta_recovery_archives SET state='verified' WHERE generation_id=$1::uuid`,
-        [archive.generationId],
-      ),
+      q(`UPDATE meta_recovery_archives SET state='verified' WHERE generation_id=$1::uuid`, [
+        archive.generationId,
+      ]),
     )
     expect(rollback.message).toBe('recovery_archive_transition_invalid')
   })
 
   test('binding identity is immutable and verified payload fields cannot be rewritten', async () => {
-    const archive = await insertArchive()
+    const archive = await insertFinalizableArchive()
     const mutations: Array<[string, string]> = [
       ['workspace_id', OTHER_WORKSPACE],
       ['base_id', OTHER_BASE],
@@ -1261,9 +1435,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('verified catalog row may set one safe same-anchor superseded_by reference only once', async () => {
-    const original = await insertArchive()
-    const replacement = await insertArchive()
+    const original = await insertFinalizableArchive()
     await finalizeArchive(original.generationId)
+    const replacement = await insertSealedAnchorReuseArchive(original)
     await finalizeArchive(replacement.generationId)
 
     await q(
@@ -1296,9 +1470,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('verified catalog supersession remains updateable after its hot checkpoint is pruned', async () => {
-    const original = await insertArchive()
-    const replacement = await insertArchive()
+    const original = await insertFinalizableArchive()
     await finalizeArchive(original.generationId)
+    const replacement = await insertSealedAnchorReuseArchive(original)
     await finalizeArchive(replacement.generationId)
 
     await q(`UPDATE meta_history_trust_checkpoints SET pruned_at=clock_timestamp() WHERE id=$1`, [
@@ -1334,7 +1508,11 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [CHECKPOINT],
     )
     expect(restored.rows).toEqual([
-      { state: 'active', pruned_at: null, trusted_since_seq: ANCHOR_SEQ },
+      {
+        state: 'active',
+        pruned_at: null,
+        trusted_since_seq: CHECKPOINT_TRUSTED_SINCE_SEQ,
+      },
     ])
   })
 
@@ -1369,7 +1547,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
 
     const selfCoverage = await errorOf(
-      insertCoverage(archive.generationId, { boundSection: 'coverage_index' }),
+      insertCoverage(archive.generationId, {
+        boundSection: 'coverage_index',
+      }),
     )
     expect(selfCoverage.message).toContain('chk_meta_recovery_archive_coverage_bound_section')
   })
@@ -1436,7 +1616,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     const abandonedInsert = await errorOf(insertCoverage(abandoned.generationId))
     expect(abandonedInsert.message).toBe('recovery_archive_coverage_parent_posture_invalid')
 
-    const verified = await insertArchive()
+    const verified = await insertFinalizableArchive()
     await finalizeArchive(verified.generationId)
     const verifiedInsert = await errorOf(insertCoverage(verified.generationId))
     expect(verifiedInsert.message).toBe('recovery_archive_coverage_parent_posture_invalid')
@@ -1506,9 +1686,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(crossStateMutation.message).toBe('recovery_archive_attachment_ref_immutable')
 
-    const duplicate = await errorOf(
-      insertAttachmentRef(archive.generationId, { attachmentId }),
-    )
+    const duplicate = await errorOf(insertAttachmentRef(archive.generationId, { attachmentId }))
     expect(duplicate.code).toBe('23505')
 
     const archiveObjectWithoutMatchingSource = await errorOf(
@@ -1518,7 +1696,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         referenceState: 'verified',
       }),
     )
-    expect(archiveObjectWithoutMatchingSource.message).toBe('recovery_archive_attachment_posture_invalid')
+    expect(archiveObjectWithoutMatchingSource.message).toBe(
+      'recovery_archive_attachment_posture_invalid',
+    )
 
     const releaseBeforeArchiveObject = await errorOf(
       q(
@@ -1535,7 +1715,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   })
 
   test('attachment finalize hands off source protection atomically before parent verification', async () => {
-    const archive = await insertArchive()
+    const archive = await insertFinalizableArchive()
     const attachmentId = await insertAttachmentRef(archive.generationId)
     const client = await pool.connect()
     try {
@@ -1552,6 +1732,14 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         archive.generationId,
         [attachmentId],
       )
+      await consumeRecoveryArchiveV2ClaimFixture((text, values) => client.query(text, values), {
+        generationId: archive.generationId,
+        sheetId: archive.sheetId,
+        sourceVectorHash: archive.sourceVectorHash,
+        ownerKind: archive.ownerKind,
+        ownerId: archive.ownerId,
+        ownerFence: archive.ownerFence,
+      })
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2
@@ -1615,7 +1803,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     )
     expect(archiveObjectTooLate.message).toBe('recovery_archive_attachment_posture_invalid')
 
-    await q(`UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`, [archive.generationId])
+    await q(`UPDATE meta_recovery_archives SET state='expired' WHERE generation_id=$1::uuid`, [
+      archive.generationId,
+    ])
     const retained = await q(
       `SELECT count(*)::int AS count
          FROM meta_recovery_archive_attachment_refs
@@ -1798,17 +1988,23 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('attachment enums, verified shape, immutable archive refs, and no URI column are enforced', async () => {
     const building = await insertArchive()
     const invalidClass = await errorOf(
-      insertAttachmentRef(building.generationId, { referenceClass: 'generic_pin' }),
+      insertAttachmentRef(building.generationId, {
+        referenceClass: 'generic_pin',
+      }),
     )
     expect(invalidClass.message).toBe('recovery_archive_attachment_posture_invalid')
 
     const invalidState = await errorOf(
-      insertAttachmentRef(building.generationId, { referenceState: 'staging' }),
+      insertAttachmentRef(building.generationId, {
+        referenceState: 'staging',
+      }),
     )
     expect(invalidState.message).toBe('recovery_archive_attachment_posture_invalid')
 
     const oldSourceCompoundClass = await errorOf(
-      insertAttachmentRef(building.generationId, { referenceClass: 'source_building' }),
+      insertAttachmentRef(building.generationId, {
+        referenceClass: 'source_building',
+      }),
     )
     expect(oldSourceCompoundClass.message).toBe('recovery_archive_attachment_posture_invalid')
 
@@ -1872,7 +2068,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       'mutable',
     ])
 
-    const verified = await insertArchive()
+    const verified = await insertFinalizableArchive()
     const attachmentId = await insertAttachmentRef(verified.generationId)
     const missingArchiveHash = await errorOf(
       insertAttachmentRef(verified.generationId, {
@@ -1899,6 +2095,14 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
         verified.generationId,
         [attachmentId],
       )
+      await consumeRecoveryArchiveV2ClaimFixture((text, values) => client.query(text, values), {
+        generationId: verified.generationId,
+        sheetId: verified.sheetId,
+        sourceVectorHash: verified.sourceVectorHash,
+        ownerKind: verified.ownerKind,
+        ownerId: verified.ownerId,
+        ownerFence: verified.ownerFence,
+      })
       await client.query(
         `DELETE FROM meta_recovery_archive_attachment_refs
           WHERE generation_id=$1::uuid AND attachment_id=$2
@@ -1977,14 +2181,21 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
       [INDEXES],
     )
     expect(indexes.rows.map((row) => row.indexname)).toEqual([...INDEXES].sort())
-    expect(indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archives_sheet_state')?.indexdef)
-      .toContain('(sheet_id, state, coverage_status, expires_at)')
-    expect(indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archives_anchor')?.indexdef)
-      .toContain('(sheet_id, anchor_operation_id, anchor_seq)')
-    expect(indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archive_coverage_source')?.indexdef)
-      .toContain('(source_kind, source_id, generation_id)')
-    expect(indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archive_attachment_lookup')?.indexdef)
-      .toContain('(attachment_id, reference_class, reference_state, generation_id)')
+    expect(
+      indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archives_sheet_state')
+        ?.indexdef,
+    ).toContain('(sheet_id, state, coverage_status, expires_at)')
+    expect(
+      indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archives_anchor')?.indexdef,
+    ).toContain('(sheet_id, anchor_operation_id, anchor_seq)')
+    expect(
+      indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archive_coverage_source')
+        ?.indexdef,
+    ).toContain('(source_kind, source_id, generation_id)')
+    expect(
+      indexes.rows.find((row) => row.indexname === 'idx_meta_recovery_archive_attachment_lookup')
+        ?.indexdef,
+    ).toContain('(attachment_id, reference_class, reference_state, generation_id)')
 
     const deleteActions = await q(
       `SELECT constraint_row.conname, constraint_row.confdeltype
@@ -2006,9 +2217,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
     await insertCoverage(archive.generationId)
     await insertAttachmentRef(archive.generationId)
 
-    const refusal = await errorOf(
-      db.transaction().execute(async (trx) => downCatalogStack(trx)),
-    )
+    const refusal = await errorOf(db.transaction().execute(async (trx) => downCatalogStack(trx)))
     expect(refusal.message).toBe('recovery_archive_source_pin_authority_nonempty')
     expectValuesFree(refusal, [WORKSPACE, BASE, SHEET, OWNER])
     expect(await catalogSurface()).toEqual({
@@ -2029,7 +2238,7 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           ALTER TABLE public.meta_recovery_archives
             DROP CONSTRAINT fk_meta_recovery_archives_key
         `.execute(trx)
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restore = await downCatalogStack(trx)
         await upCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_recovery_archives
@@ -2045,7 +2254,8 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
           BEFORE INSERT ON public.meta_recovery_archives
           FOR EACH ROW EXECUTE FUNCTION public.meta_recovery_archive_key_reference_guard_row()
         `.execute(trx)
-        if (restoreObjectAuthority) await objectReceiptAuthorityMigration.up(trx)
+        if (restore.objectAuthority) await objectReceiptAuthorityMigration.up(trx)
+        if (restore.claimAnchor) await claimAnchorMigration.up(trx)
         throw new Error('recovery_archive_catalog_replay_rollback')
       }),
     )
@@ -2056,12 +2266,12 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on source-schema drift and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restore = await downCatalogStack(trx)
         await sql`
           ALTER TABLE public.meta_sheets
           RENAME COLUMN system_kind TO system_kind_d2a_drift
         `.execute(trx)
-        await upCatalogStack(trx, restoreObjectAuthority)
+        await upCatalogStack(trx, restore)
         throw new Error('recovery_archive_source_schema_guard_missing')
       }),
     )
@@ -2073,9 +2283,9 @@ describeIfRealDbStep('Phase D2a recovery archive catalog schema (real DB)', () =
   test('up fails loud on an owned-name collision and rolls the attempted down back atomically', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
-        const restoreObjectAuthority = await downCatalogStack(trx)
+        const restore = await downCatalogStack(trx)
         await sql`CREATE TABLE public.meta_recovery_archives (drifted text)`.execute(trx)
-        await upCatalogStack(trx, restoreObjectAuthority)
+        await upCatalogStack(trx, restore)
         throw new Error('recovery_archive_owned_object_guard_missing')
       }),
     )

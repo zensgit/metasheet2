@@ -25,6 +25,29 @@ D2a provides only the additive catalog and closed TypeScript contract needed by 
 No archive bytes, staging objects, provider adapter, KMS call, retention/prune caller, physical
 deleter, route, or scheduler is implemented here.
 
+## Implementation clarification: same-anchor replacement authority
+
+D1 remains authoritative that every correction is a **new archive generation** and that a verified
+payload is never edited in place. A replacement generation for the exact same recovery point does
+not, however, mint a second D-I0 operation history or a second reservation map for that point. The
+claim-anchor guard therefore accepts only these two closed shapes:
+
+1. the first generation owns exactly the ten D-I0 reservations, including the ordinal-10 parent
+   snapshot reservation; or
+2. a later generation owns zero reservations and reuses the exact ten-row authority of a different,
+   finalized `verified` or `expired` generation whose workspace/base/sheet, anchor operation/seq,
+   checkpoint, format version, and source-vector hash all match.
+
+A replacement that owns a partial or new reservation set, points at a mismatched source vector or
+recovery identity, or cannot resolve one exact finalized authority generation fails closed. This is
+an implementation clarification of immutable-generation replacement, not permission to mutate a
+payload, relax source binding, or reuse an operation identity for another recovery point.
+
+The D2 source/claim closeout proves this shape with production v2 claims on a freshly migrated
+PostgreSQL database. Its cumulative real-DB roster is 11 files, 235 tests, zero skips; mutations that
+remove same-anchor authority reuse or omit the claim-anchor predecessor during migration replay both
+turn the corresponding proof red.
+
 ## Explicit HOLD: abandoned source pins
 
 D1 D-G step 7 and the D2 fault-path pin-release requirement are **not delivered by D2a**. A committed
@@ -57,4 +80,3 @@ D2a may be reviewed as a Draft/HOLD substrate only when its exact head has:
   behavior;
 - an independent review that treats the abandoned-pin work above as a blocking dependency of full
   D2 rather than silently crediting it to this sub-slice.
-

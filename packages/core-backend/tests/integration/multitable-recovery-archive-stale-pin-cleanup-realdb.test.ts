@@ -13,7 +13,8 @@ import {
 } from '../../src/multitable/attachment-orphan-retention'
 import { canonicalSheetFenceKey } from '../../src/multitable/canonical-sheet-fence'
 
-const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
+const runRealDb =
+  Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
 
 test('sentinel: the D2b real-DB allowlist step must provide DATABASE_URL', () => {
@@ -41,9 +42,14 @@ const RECEIPT_HASH = '3'.repeat(64)
 const EXPIRED_LEASE = '2000-01-01T00:00:00.000Z'
 const FUTURE_LEASE = '2099-01-01T00:00:00.000Z'
 
-type TransactionQuery = (text: string, values?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+type TransactionQuery = (
+  text: string,
+  values?: unknown[],
+) => Promise<{ rows: unknown[]; rowCount?: number | null }>
 
-async function transaction<T>(work: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> {
+async function transaction<T>(
+  work: (client: { query: TransactionQuery }) => Promise<T>,
+): Promise<T> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -101,7 +107,8 @@ async function installCleanupProtocolIfAbsent(): Promise<void> {
   )
   const row = surface.rows[0] as { staging: boolean; cleanup_column: boolean }
   if (!row.staging && !row.cleanup_column) await stagingCleanupMigration.up(db)
-  else if (!row.staging || !row.cleanup_column) throw new Error('recovery_archive_stale_pin_partial_schema')
+  else if (!row.staging || !row.cleanup_column)
+    throw new Error('recovery_archive_stale_pin_partial_schema')
   schemaIsUp = true
 }
 
@@ -222,7 +229,14 @@ async function insertAttachment(
        $5, 'local', '{}'::jsonb, '2000-01-01T00:00:00.000Z'::timestamptz,
        '2000-01-01T00:00:00.000Z'::timestamptz, $6::timestamptz
      )`,
-    [attachmentId, SHEET, input.recordId, `${attachmentId}_file`, `${attachmentId}/blob`, input.deletedAt],
+    [
+      attachmentId,
+      SHEET,
+      input.recordId,
+      `${attachmentId}_file`,
+      `${attachmentId}/blob`,
+      input.deletedAt,
+    ],
   )
 }
 
@@ -413,10 +427,9 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     try {
       await restoreFinalSchema()
       await truncateCatalog()
-      await q(
-        `DELETE FROM meta_history_trust_checkpoints WHERE id=$1`,
-        [CHECKPOINT],
-      ).catch(() => {})
+      await q(`DELETE FROM meta_history_trust_checkpoints WHERE id=$1`, [CHECKPOINT]).catch(
+        () => {},
+      )
       await q('SELECT meta_record_history_operations_prune($1, $2::uuid)', [
         SHEET,
         ANCHOR_OPERATION,
@@ -473,8 +486,14 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       const generationId = await insertArchive()
       const orphanAttachmentId = `${PREFIX}_orphan_pinned`
       const deletedAttachmentId = `${PREFIX}_deleted_pinned`
-      await insertAttachment(orphanAttachmentId, { recordId: null, deletedAt: null })
-      await insertAttachment(deletedAttachmentId, { recordId: null, deletedAt: EXPIRED_LEASE })
+      await insertAttachment(orphanAttachmentId, {
+        recordId: null,
+        deletedAt: null,
+      })
+      await insertAttachment(deletedAttachmentId, {
+        recordId: null,
+        deletedAt: EXPIRED_LEASE,
+      })
       await insertSourcePin(generationId, orphanAttachmentId)
       await insertSourcePin(generationId, deletedAttachmentId)
 
@@ -528,7 +547,10 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED = 'true'
     process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
     const attachmentId = `${PREFIX}_blob_fresh_redelete`
-    await insertAttachment(attachmentId, { recordId: null, deletedAt: EXPIRED_LEASE })
+    await insertAttachment(attachmentId, {
+      recordId: null,
+      deletedAt: EXPIRED_LEASE,
+    })
 
     let candidateObserved = false
     const redeleteAfterCandidate = async (text: string, values?: unknown[]) => {
@@ -589,7 +611,9 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       signalFence = resolve
     })
     let firstFence = true
-    const gatedTransaction = async <T>(work: (client: { query: TransactionQuery }) => Promise<T>): Promise<T> => {
+    const gatedTransaction = async <T>(
+      work: (client: { query: TransactionQuery }) => Promise<T>,
+    ): Promise<T> => {
       const client = await pool.connect()
       try {
         await client.query('BEGIN')
@@ -621,7 +645,10 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
         transactionFn: gatedTransaction,
         storage: {
           delete: async () => {
-            const state = await q('SELECT deleted_at IS NOT NULL AS tombstoned FROM multitable_attachments WHERE id=$1', [attachmentId])
+            const state = await q(
+              'SELECT deleted_at IS NOT NULL AS tombstoned FROM multitable_attachments WHERE id=$1',
+              [attachmentId],
+            )
             expect(state.rows).toEqual([{ tombstoned: true }])
             storageCalls += 1
           },
@@ -632,10 +659,9 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       const claimant = await pool.connect()
       try {
         await claimant.query('BEGIN')
-        const lock = claimant.query(
-          'SELECT pg_advisory_xact_lock(hashtext($1))',
-          [canonicalSheetFenceKey(SHEET)],
-        )
+        const lock = claimant.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          canonicalSheetFenceKey(SHEET),
+        ])
         releaseFence?.()
         await lock
         const source = await claimant.query(
@@ -647,7 +673,11 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       } finally {
         claimant.release()
       }
-      await expect(sweep).resolves.toEqual({ inspected: 1, deleted: 1, skipped: 0 })
+      await expect(sweep).resolves.toEqual({
+        inspected: 1,
+        deleted: 1,
+        skipped: 0,
+      })
       expect(storageCalls).toBe(1)
     } finally {
       if (previousArchiveFlag === undefined) delete process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
@@ -669,15 +699,11 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
 
     const expired = await insertArchive(EXPIRED_LEASE)
     await abandon(expired)
-    const staleRefusal = await errorOf(
-      claimCleanup(expired, { expectedOwnerId: `${OWNER}_stale` }),
-    )
+    const staleRefusal = await errorOf(claimCleanup(expired, { expectedOwnerId: `${OWNER}_stale` }))
     expect(staleRefusal.message).toBe('recovery_archive_abandoned_cleanup_claim_refused')
     expectValuesFree(staleRefusal, [expired, OWNER, `${OWNER}_stale`])
 
-    const staleFenceRefusal = await errorOf(
-      claimCleanup(expired, { expectedFence: '2' }),
-    )
+    const staleFenceRefusal = await errorOf(claimCleanup(expired, { expectedFence: '2' }))
     expect(staleFenceRefusal.message).toBe('recovery_archive_abandoned_cleanup_claim_refused')
 
     const wrongOwnerKindRefusal = await errorOf(
@@ -695,7 +721,12 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
       [expired],
     )
     expect(claimed.rows).toEqual([
-      { owner_kind: CLEANER, owner_id: CLEANER_ID, owner_fence: '2', live: true },
+      {
+        owner_kind: CLEANER,
+        owner_id: CLEANER_ID,
+        owner_fence: '2',
+        live: true,
+      },
     ])
 
     const replayRefusal = await errorOf(claimCleanup(expired))
@@ -786,11 +817,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     const generationId = await insertArchive(EXPIRED_LEASE)
     const attachmentId = `${PREFIX}_attachment_owner`
     const pendingId = await insertStagingAttachment(generationId, attachmentId)
-    const sealedId = await insertStagingAttachment(
-      generationId,
-      `${attachmentId}_sealed`,
-      'sealed',
-    )
+    const sealedId = await insertStagingAttachment(generationId, `${attachmentId}_sealed`, 'sealed')
     await abandon(generationId)
     await claimCleanup(generationId)
 
@@ -855,16 +882,15 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
         [missingGenerationId, missingAttachmentId, CLEANER, CLEANER_ID],
       ),
     )
-    expect(missingInventory.message).toBe('recovery_archive_attachment_cleanup_authorization_invalid')
+    expect(missingInventory.message).toBe(
+      'recovery_archive_attachment_cleanup_authorization_invalid',
+    )
 
     const generationId = await insertExpiringArchive()
     const attachmentId = `${PREFIX}_attachment_inventory_nonterminal`
     await insertSourcePin(generationId, attachmentId)
     const attachmentStaging = await insertStagingAttachment(generationId, attachmentId)
-    const siblingStaging = await insertStagingAttachment(
-      generationId,
-      `${attachmentId}_sibling`,
-    )
+    const siblingStaging = await insertStagingAttachment(generationId, `${attachmentId}_sibling`)
     await abandon(generationId)
     await waitForArchiveLeaseExpiry(generationId)
     await claimCleanup(generationId)
@@ -990,31 +1016,31 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     const attachmentId = `${PREFIX}_attachment_archive_ref`
     await insertSourcePin(generationId, attachmentId)
     const stagingObjectId = await insertStagingAttachment(generationId, attachmentId)
-      await q(
-        `ALTER TABLE meta_recovery_archive_attachment_refs
+    await q(
+      `ALTER TABLE meta_recovery_archive_attachment_refs
            DISABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row;
          ALTER TABLE meta_recovery_archive_attachment_refs
            DISABLE TRIGGER trg_meta_recovery_archive_attachment_ref_guard_row;
          ALTER TABLE meta_recovery_archive_attachment_refs
            DISABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row`,
-      )
-      try {
-        await q(
-          `INSERT INTO meta_recovery_archive_attachment_refs (
+    )
+    try {
+      await q(
+        `INSERT INTO meta_recovery_archive_attachment_refs (
              generation_id, attachment_id, reference_class, reference_state,
              availability, content_sha256, immutable_version, content_size_bytes
            ) VALUES ($1::uuid, $2, 'archive_object', 'verified', 'available', $3, $4, 1)`,
-          [generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
-        )
-      } finally {
-        await q(
-          `ALTER TABLE meta_recovery_archive_attachment_refs
+        [generationId, attachmentId, ATTACHMENT_HASH, `${PREFIX}_archive_version`],
+      )
+    } finally {
+      await q(
+        `ALTER TABLE meta_recovery_archive_attachment_refs
              ENABLE TRIGGER trg_meta_recovery_archive_attachment_authority_guard_row;
            ALTER TABLE meta_recovery_archive_attachment_refs
              ENABLE TRIGGER trg_meta_recovery_archive_attachment_ref_guard_row;
            ALTER TABLE meta_recovery_archive_attachment_refs
              ENABLE TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row`,
-        )
+      )
     }
     await abandon(generationId)
     await waitForArchiveLeaseExpiry(generationId)
