@@ -250,6 +250,15 @@ export function createElearningPilotRuntime(
         jwtSecret: env.JWT_SECRET,
       }))
 
+  const submitExam =
+    opts.submitElearningExam
+    ?? ((db: ElearningExamDb, input: SubmitElearningExamInput) =>
+      submitElearningExam(db, input, { env }))
+  const submitManualGrade =
+    opts.submitElearningManualGrade
+    ?? ((db: ElearningManualGradingDb, input: ElearningManualGradeInput) =>
+      submitElearningManualGrade(db, input, { env }))
+
   const inner = createElearningPilotRouter({
     db: opts.db,
     viewerId: opts.viewerId ?? viewerId,
@@ -266,11 +275,10 @@ export function createElearningPilotRuntime(
     recordElearningHeartbeat: opts.recordElearningHeartbeat,
     issueElearningMediaPlaybackTicket: issuePlayback,
     startElearningExam: opts.startElearningExam ?? startElearningExam,
-    submitElearningExam: opts.submitElearningExam ?? submitElearningExam,
+    submitElearningExam: submitExam,
     getElearningExamReview:
       opts.getElearningExamReview ?? getElearningExamReview,
-    submitElearningManualGrade:
-      opts.submitElearningManualGrade ?? submitElearningManualGrade,
+    submitElearningManualGrade: submitManualGrade,
     listElearningManualGradingQueue:
       opts.listElearningManualGradingQueue ?? listElearningManualGradingQueue,
     getElearningManualGradingDetail:

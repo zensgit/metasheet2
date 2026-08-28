@@ -556,5 +556,27 @@ describe('ElearningManualGradingView + ElearningManualGradingAttempt', () => {
       expect(q('elearning-grading-error')?.textContent).toMatch(/temporarily unavailable/)
       expect(q('elearning-grading-complete')).toBeFalsy()
     })
+
+    it('does not report a reconciled 409 when detail refresh fails but the queue refresh succeeds', async () => {
+      await openAttempt({ manualQuestions: 1, gradedQuestions: 0, questions: [questionDetail()] })
+      h.submitGrade.mockRejectedValueOnce(new ElearningApiError('conflict', 409))
+      h.getDetail.mockRejectedValueOnce(new ElearningApiError('unavailable', 503))
+      h.listQueue.mockResolvedValueOnce({
+        items: [queueItem({ attemptId: ATTEMPT_2 })],
+        page: 1,
+        pageSize: 20,
+        hasMore: false,
+      })
+
+      fillInput(q(`elearning-grading-score-${Q1}`) as HTMLInputElement, '5')
+      ;(q(`elearning-grading-submit-${Q1}`) as HTMLButtonElement).click()
+      await flushUi()
+
+      expect(h.getDetail).toHaveBeenCalledTimes(2)
+      expect(h.listQueue).toHaveBeenCalledTimes(2)
+      expect(q('elearning-grading-reconciled')).toBeFalsy()
+      expect(q('elearning-grading-error')?.textContent).toMatch(/temporarily unavailable/)
+      expect(q('elearning-grading-complete')).toBeFalsy()
+    })
   })
 })

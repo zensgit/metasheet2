@@ -15,6 +15,11 @@ import {
   type ElearningExamAnswers,
   type ElearningPaperSnapshot,
 } from './elearning-exam-domain'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
+import {
+  awardElearningPassExamCreditInTransaction,
+  type ElearningPassExamAwardOptions,
+} from './elearning-credit-postgres'
 
 export const ELEARNING_EXAM_EXPIRY_JOB_KIND = 'exam_attempt_expiry' as const
 export const ELEARNING_EXAM_GRACE_SECONDS = 0 as const
@@ -40,6 +45,7 @@ export interface TimedElearningExamRules {
 
 export interface ExpirableElearningExamAttempt {
   id: string
+  userId: string
   status: string
   paperSnapshot: unknown
   answers: unknown
@@ -233,6 +239,7 @@ export async function settleExpiredElearningExamAttemptInTransaction(
   tx: ElearningExamExpiryQueryable,
   orgId: string,
   attempt: ExpirableElearningExamAttempt,
+  options: ElearningPassExamAwardOptions = {},
 ): Promise<'settled' | 'duplicate' | 'not_due'> {
   if (attempt.status === 'graded' || attempt.status === 'awaiting_manual') {
     return 'duplicate'
@@ -301,10 +308,20 @@ export async function settleExpiredElearningExamAttemptInTransaction(
               total_score = $2,
               passed = $3,
               graded_at = clock_timestamp()
-        WHERE org_id = $4 AND id = $5 AND status = 'expired'`,
+        WHERE org_id = $4 AND id = $5 AND status = 'expired'
+       RETURNING graded_at`,
       [grade.autoScore, grade.totalScore, grade.passed, orgId, attempt.id],
     )
     if (graded.rowCount !== 1) fail('unavailable')
+    const gradedAt = requireStoredDate(graded.rows[0]?.graded_at)
+    const env = options.env ?? process.env
+    if (grade.passed && isElearningCreditSurfaceEnabled(env)) {
+      await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
+        tx,
+        { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
+        env,
+      )
+    }
   }
   return 'settled'
 }
@@ -316,7 +333,7 @@ async function lockAttemptForExpirySettlement(
 ): Promise<ExpirableElearningExamAttempt> {
   const result = await tx.query(
     `/* elearning-exam:lock-expiry-attempt */
-     SELECT id, status, paper_snapshot, answers, deadline_at, expired_at
+     SELECT id, user_id, status, paper_snapshot, answers, deadline_at, expired_at
        FROM elearning_exam_attempts
       WHERE org_id = $1 AND id = $2
       FOR UPDATE`,
@@ -325,10 +342,12 @@ async function lockAttemptForExpirySettlement(
   const row = result.rows[0]
   if (!row) fail('not_found')
   const id = asText(row.id)
+  const userId = asText(row.user_id)
   const status = asText(row.status)
-  if (!id || !status || !UUID_RE.test(id)) fail('unavailable')
+  if (!id || !userId || !status || !UUID_RE.test(id)) fail('unavailable')
   return {
     id: id.toLowerCase(),
+    userId,
     status,
     paperSnapshot: row.paper_snapshot,
     answers: row.answers,
@@ -344,6 +363,7 @@ async function lockAttemptForExpirySettlement(
 export async function settleExpiredElearningExamAttempt(
   db: ElearningExamExpiryDb,
   input: SettleExpiredElearningExamAttemptInput,
+  options: ElearningPassExamAwardOptions = {},
 ): Promise<SettleExpiredElearningExamAttemptResult> {
   const orgId = requireActor(input.orgId)
   const attemptId = requireUuid(input.attemptId)
@@ -356,6 +376,7 @@ export async function settleExpiredElearningExamAttempt(
           tx,
           orgId,
           attempt,
+          options,
         ),
       }
     } catch (error) {

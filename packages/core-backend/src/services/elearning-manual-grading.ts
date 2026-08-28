@@ -15,6 +15,11 @@ import {
   type ElearningPaperSnapshot,
   type ElearningShortAnswerQuestion,
 } from './elearning-exam-domain'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
+import {
+  awardElearningPassExamCreditInTransaction,
+  type ElearningPassExamAwardOptions,
+} from './elearning-credit-postgres'
 
 export const ELEARNING_MANUAL_GRADE_DETAILS_DOMAIN =
   'elearning.manual-grade.v1' as const
@@ -167,6 +172,17 @@ function storedInt(value: unknown): number {
 function storedBooleanOrNull(value: unknown): boolean | null {
   if (value === null) return null
   if (typeof value === 'boolean') return value
+  fail('unavailable')
+}
+
+function storedDate(value: unknown): Date {
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return new Date(value.getTime())
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value)
+    if (Number.isFinite(parsed.getTime())) return parsed
+  }
   fail('unavailable')
 }
 
@@ -420,6 +436,7 @@ function resultFromState(input: {
 export async function submitElearningManualGrade(
   db: ElearningManualGradingDb,
   input: ElearningManualGradeInput,
+  options: ElearningPassExamAwardOptions = {},
 ): Promise<ElearningManualGradeResult> {
   const orgId = requireText(input.orgId)
   const actorId = requireText(input.actorId)
@@ -429,6 +446,7 @@ export async function submitElearningManualGrade(
   const requestId = requireUuid(input.requestId)
   const score = requireScore(input.score)
   const details = manualGradeDetails(requireComment(input.comment))
+  const env = options.env ?? process.env
 
   return db.transaction(async (tx) => {
     try {
@@ -527,10 +545,19 @@ export async function submitElearningManualGrade(
                   passed = $3,
                   graded_at = clock_timestamp()
             WHERE org_id = $4 AND id = $5
-              AND status = 'awaiting_manual' AND manual_score = $6`,
+              AND status = 'awaiting_manual' AND manual_score = $6
+           RETURNING graded_at`,
           [manualScore, maximum, passed, orgId, attempt.id, attempt.manualScore],
         )
         if (finalized.rowCount !== 1) fail('unavailable')
+        const gradedAt = storedDate(finalized.rows[0]?.graded_at)
+        if (passed && isElearningCreditSurfaceEnabled(env)) {
+          await (options.awardPassExam ?? awardElearningPassExamCreditInTransaction)(
+            tx,
+            { attemptId: attempt.id, gradedAt, orgId, userId: attempt.userId },
+            env,
+          )
+        }
         attempt.status = 'graded'
         attempt.manualScore = manualScore
         attempt.totalScore = maximum
