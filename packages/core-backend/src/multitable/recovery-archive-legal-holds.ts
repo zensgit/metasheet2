@@ -697,7 +697,7 @@ export async function releaseRecoveryArchiveLegalHold(
   }
 
   let authorizationAttempted = false
-  let operationFailed = false
+  let resetAttempted = false
   try {
     authorizationAttempted = true
     await authorizeRelease(query, archive, normalized, xid)
@@ -718,18 +718,18 @@ export async function releaseRecoveryArchiveLegalHold(
     const row = oneRow(result)
     const snapshot = row === null ? null : snapshotFromRow(row, xid)
     if (snapshot === null) fail('RECOVERY_ARCHIVE_LEGAL_HOLD_RELEASE_STALE')
+    resetAttempted = true
+    await resetReleaseAuthorization(query, xid)
     return snapshot
   } catch (error) {
-    operationFailed = true
-    throw error
-  } finally {
-    if (authorizationAttempted) {
+    if (authorizationAttempted && !resetAttempted) {
       try {
         await resetReleaseAuthorization(query, xid)
-      } catch (resetError) {
-        if (!operationFailed) throw resetError
+      } catch {
+        // Preserve the operation refusal; an aborted transaction cannot retain the local guard.
       }
     }
+    throw error
   }
 }
 
@@ -750,7 +750,7 @@ export async function expireRecoveryArchiveAfterLegalHoldCheck(
   await lockNoActiveHoldForExpiry(query, archive, xid)
 
   let authorizationAttempted = false
-  let operationFailed = false
+  let resetAttempted = false
   try {
     authorizationAttempted = true
     await authorizeExpiry(query, archive, xid)
@@ -769,17 +769,17 @@ export async function expireRecoveryArchiveAfterLegalHoldCheck(
     const row = oneRow(result)
     const snapshot = row === null ? null : expirySnapshotFromRow(row, archive, xid)
     if (snapshot === null) fail('RECOVERY_ARCHIVE_LEGAL_HOLD_EXPIRY_RESULT_INVALID')
+    resetAttempted = true
+    await resetExpiryAuthorization(query, xid)
     return snapshot
   } catch (error) {
-    operationFailed = true
-    throw error
-  } finally {
-    if (authorizationAttempted) {
+    if (authorizationAttempted && !resetAttempted) {
       try {
         await resetExpiryAuthorization(query, xid)
-      } catch (resetError) {
-        if (!operationFailed) throw resetError
+      } catch {
+        // Preserve the operation refusal; an aborted transaction cannot retain the local guard.
       }
     }
+    throw error
   }
 }

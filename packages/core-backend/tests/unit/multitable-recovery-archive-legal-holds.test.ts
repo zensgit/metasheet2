@@ -260,6 +260,24 @@ describe('recovery archive legal-hold storage authority', () => {
     )).toBe(true)
   })
 
+  it('does not report release success when its guard reset fails', async () => {
+    const sentinel = 'untrusted_release_reset_failure'
+    const query = authorityQuery('release') as ReturnType<typeof vi.fn> & RecoveryArchiveLegalHoldQuery
+    query.mockImplementation(async (sqlText: string) => {
+      if (sqlText === RESET_RECOVERY_ARCHIVE_LEGAL_HOLD_RELEASE_AUTHORIZATION_SQL) {
+        throw new Error(sentinel)
+      }
+      return authorityQuery('release')(sqlText)
+    })
+
+    const refusal = await errorOf(releaseRecoveryArchiveLegalHold(query, releaseInput))
+    expect(refusal.code).toBe('RECOVERY_ARCHIVE_LEGAL_HOLD_NOT_IN_TRANSACTION')
+    expect(refusal.message).not.toContain(sentinel)
+    expect(query.mock.calls.filter(
+      ([sqlText]) => sqlText === RESET_RECOVERY_ARCHIVE_LEGAL_HOLD_RELEASE_AUTHORIZATION_SQL,
+    )).toHaveLength(1)
+  })
+
   it('expires only through the stable ordered authority and always clears its exact guard', async () => {
     const query = authorityQuery('expiry') as ReturnType<typeof vi.fn> & RecoveryArchiveLegalHoldQuery
     const snapshot = await expireRecoveryArchiveAfterLegalHoldCheck(query, {
@@ -354,6 +372,27 @@ describe('recovery archive legal-hold storage authority', () => {
     expect(query.mock.calls.some(
       ([sqlText]) => sqlText === RESET_RECOVERY_ARCHIVE_EXPIRY_AUTHORIZATION_SQL,
     )).toBe(true)
+  })
+
+  it('does not report expiry success when its guard reset fails', async () => {
+    const sentinel = 'untrusted_expiry_reset_failure'
+    const query = authorityQuery('expiry') as ReturnType<typeof vi.fn> & RecoveryArchiveLegalHoldQuery
+    query.mockImplementation(async (sqlText: string) => {
+      if (sqlText === RESET_RECOVERY_ARCHIVE_EXPIRY_AUTHORIZATION_SQL) throw new Error(sentinel)
+      return authorityQuery('expiry')(sqlText)
+    })
+
+    const refusal = await errorOf(expireRecoveryArchiveAfterLegalHoldCheck(query, {
+      workspaceId: 'workspace-a',
+      baseId: 'base-a',
+      sheetId: 'sheet-a',
+      generationId: GENERATION_ID,
+    }))
+    expect(refusal.code).toBe('RECOVERY_ARCHIVE_LEGAL_HOLD_NOT_IN_TRANSACTION')
+    expect(refusal.message).not.toContain(sentinel)
+    expect(query.mock.calls.filter(
+      ([sqlText]) => sqlText === RESET_RECOVERY_ARCHIVE_EXPIRY_AUTHORIZATION_SQL,
+    )).toHaveLength(1)
   })
 
   it('refuses mismatched catalog binding before acquiring any lock', async () => {
