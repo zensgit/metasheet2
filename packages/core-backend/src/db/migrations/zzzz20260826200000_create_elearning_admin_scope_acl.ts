@@ -1,6 +1,8 @@
 import type { Kysely } from 'kysely'
 import { sql } from 'kysely'
 
+import { ensureCanonicalUserOrgsTable } from './_ensure-user-orgs'
+
 /**
  * E-learning L2 delegated administration foundation.
  *
@@ -24,6 +26,7 @@ export const ELEARNING_ADMIN_SCOPE_ACL_DOWN_IN_USE =
   'ELEARNING_ADMIN_SCOPE_ACL_DOWN_IN_USE'
 
 export async function up(db: Kysely<unknown>): Promise<void> {
+  await ensureCanonicalUserOrgsTable(db)
   await sql`CREATE EXTENSION IF NOT EXISTS pgcrypto`.execute(db)
 
   await sql`
