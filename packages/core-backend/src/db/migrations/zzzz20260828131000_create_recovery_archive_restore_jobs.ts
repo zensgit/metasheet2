@@ -604,7 +604,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       IF NOT (
-        (OLD.state = 'planned' AND NEW.state IN ('applying', 'cancelled_zero_write')) OR
+        (OLD.state = 'planned' AND NEW.state IN (
+          'applying', 'abandoned_partial', 'cancelled_zero_write'
+        )) OR
         (OLD.state = 'applying' AND NEW.state IN (
           'applying', 'paused_retryable', 'done', 'abandoned_partial', 'cancelled_zero_write'
         )) OR

@@ -132,6 +132,7 @@ export interface RecoveryArchiveRestoreJobCandidate {
   readonly keyId: string
   readonly archiveGenerationId: string
   readonly blockFence: string
+  readonly resumeDeadline: string
 }
 
 const workerClaimBrand: unique symbol = Symbol('RecoveryArchiveRestoreJobWorkerClaim')
@@ -147,6 +148,7 @@ export interface RecoveryArchiveRestoreJobWorkerClaim {
   readonly workerOwnerId: string
   readonly workerFence: string
   readonly leaseUntil: string
+  readonly resumeDeadline: string
 }
 
 const chunkExecutionLeaseBrand: unique symbol = Symbol(
@@ -233,6 +235,10 @@ export interface RecoveryArchiveRestoreWorkerBinding {
 
 export interface ClaimRecoveryArchiveRestoreJobInput {
   readonly workerOwnerId: string
+  readonly leaseUntil: Date | string
+}
+
+export interface RenewRecoveryArchiveRestoreJobLeaseInput {
   readonly leaseUntil: Date | string
 }
 
@@ -747,7 +753,8 @@ export async function selectRecoveryArchiveRestoreJobCandidate(
     const result = await query(
       `SELECT id::text AS id, sheet_id, key_id,
               archive_generation_id::text AS archive_generation_id,
-              block_fence::text AS block_fence
+              block_fence::text AS block_fence,
+              resume_deadline::text AS resume_deadline
          FROM public.meta_recovery_archive_jobs
         WHERE resume_deadline > clock_timestamp()
           AND (
@@ -767,6 +774,7 @@ export async function selectRecoveryArchiveRestoreJobCandidate(
       keyId: opaque(row.key_id),
       archiveGenerationId: opaque(row.archive_generation_id),
       blockFence: positiveDecimal(row.block_fence),
+      resumeDeadline: timestamp(row.resume_deadline),
     }
     candidates.add(candidate)
     return Object.freeze(candidate)
@@ -797,6 +805,7 @@ export async function claimRecoveryArchiveRestoreJob(
       row.key_id !== candidate.keyId ||
       opaque(row.archive_generation_id) !== candidate.archiveGenerationId ||
       decimal(row.block_fence) !== candidate.blockFence ||
+      timestamp(row.resume_deadline) !== candidate.resumeDeadline ||
       !isClaimableJobRow(row)
     ) {
       throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_NOT_CLAIMABLE')
@@ -834,10 +843,73 @@ export async function claimRecoveryArchiveRestoreJob(
       workerOwnerId,
       workerFence: positiveDecimal(claimRow.worker_fence),
       leaseUntil: timestamp(claimRow.lease_until),
+      resumeDeadline: candidate.resumeDeadline,
     }
     workerClaims.add(claim)
     return Object.freeze(claim)
   })
+}
+
+/** Extend the current worker lease without changing its fence. The old branded claim becomes invalid. */
+export async function renewRecoveryArchiveRestoreJobLease(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  claimInput: RecoveryArchiveRestoreJobWorkerClaim,
+  input: RenewRecoveryArchiveRestoreJobLeaseInput,
+): Promise<RecoveryArchiveRestoreJobWorkerClaim> {
+  const claim = requireWorkerClaim(claimInput)
+  const leaseUntil = timestamp(input?.leaseUntil)
+  const renewedLeaseUntil = await transaction(async (query) => {
+    await prepareArchiveWriterBlockTransaction(query, claim.sheetId)
+    await lockRecoveryArchiveKey(query, claim.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      claim.archiveGenerationId,
+      claim.sheetId,
+      claim.keyId,
+    )
+    await lockRestoreJobBlock(query, claim)
+    const job = await lockClaimedJob(query, claim)
+    if (
+      timestamp(job.resume_deadline) !== claim.resumeDeadline ||
+      new Date(leaseUntil).getTime() > new Date(claim.resumeDeadline).getTime()
+    ) {
+      invalidInput()
+    }
+    const renewed = await query(
+      `UPDATE public.meta_recovery_archive_jobs
+          SET lease_until = $2::timestamptz,
+              row_version = row_version + 1
+        WHERE id = $1::uuid
+          AND row_version = $3::bigint
+          AND worker_owner_id = $4
+          AND worker_fence = $5::bigint
+          AND lease_until = $6::timestamptz
+          AND $2::timestamptz > clock_timestamp()
+          AND $2::timestamptz <= resume_deadline
+          AND resume_deadline > clock_timestamp()
+        RETURNING lease_until::text AS lease_until`,
+      [
+        claim.jobId,
+        leaseUntil,
+        decimal(job.row_version),
+        claim.workerOwnerId,
+        claim.workerFence,
+        claim.leaseUntil,
+      ],
+    )
+    const row = renewed.rows[0] as Record<string, unknown> | undefined
+    if (!row) {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST')
+    }
+    return timestamp(row.lease_until)
+  })
+  workerClaims.delete(claim)
+  const renewedClaim: RecoveryArchiveRestoreJobWorkerClaim = Object.freeze({
+    ...claim,
+    leaseUntil: renewedLeaseUntil,
+  })
+  workerClaims.add(renewedClaim)
+  return renewedClaim
 }
 
 /**
@@ -1259,12 +1331,9 @@ export async function abandonRecoveryArchiveRestoreJob(
     )
     await lockRestoreJobBlock(query, claim)
     const job = await lockClaimedJob(query, claim)
-    const state = BigInt(decimal(job.completed_count)) === 0n
-      ? 'cancelled_zero_write'
-      : 'abandoned_partial'
     const terminal = await terminalizeJobAndBurn(query, {
       job,
-      state,
+      state: 'abandoned_partial',
       terminalOperationId: null,
       replayHorizonMs: horizonMs,
     })
@@ -1363,12 +1432,9 @@ export async function sweepExpiredRecoveryArchiveRestoreJobs(
       ) {
         throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_PERSISTENCE_INVALID')
       }
-      const state = BigInt(decimal(job.completed_count)) === 0n
-        ? 'cancelled_zero_write'
-        : 'abandoned_partial'
       await terminalizeJobAndBurn(query, {
         job,
-        state,
+        state: 'abandoned_partial',
         terminalOperationId: null,
         replayHorizonMs: horizonMs,
       })
@@ -1797,7 +1863,8 @@ async function readCandidateIdentity(
   const result = await query(
     `SELECT id::text AS id, sheet_id, key_id,
             archive_generation_id::text AS archive_generation_id,
-            block_fence::text AS block_fence
+            block_fence::text AS block_fence,
+            resume_deadline::text AS resume_deadline
        FROM public.meta_recovery_archive_jobs
       WHERE id = $1::uuid AND workspace_id = $2 AND base_id = $3 AND sheet_id = $4 AND actor_id = $5`,
     [identity.jobId, identity.workspaceId, identity.baseId, identity.sheetId, identity.actorId],
@@ -1811,6 +1878,7 @@ async function readCandidateIdentity(
     keyId: opaque(row.key_id),
     archiveGenerationId: opaque(row.archive_generation_id),
     blockFence: positiveDecimal(row.block_fence),
+    resumeDeadline: timestamp(row.resume_deadline),
   }
 }
 

@@ -21,6 +21,7 @@ import {
   readRecoveryArchiveRestoreJobStatus,
   recoveryArchiveRestoreJobTestHooks,
   RecoveryArchiveRestoreJobError,
+  renewRecoveryArchiveRestoreJobLease,
   resumeRecoveryArchiveRestoreJob,
   runRecoveryArchiveRestoreChunk,
   sweepExpiredRecoveryArchiveRestorePlans,
@@ -29,7 +30,9 @@ import {
   type RecoveryArchiveRestoreJobQuery,
   type RecoveryArchiveRestoreJobTransaction,
   type RecoveryArchiveRestoreChunkExecutionLease,
+  type RecoveryArchiveRestoreJobWorkerClaim,
 } from '../../src/multitable/recovery-archive-restore-jobs'
+import { createRecoveryArchiveRestoreWorkerFromOperations } from '../../src/multitable/recovery-archive-restore-worker'
 import {
   compileRecoveryArchiveRestorePlan,
   type RecoveryArchiveRestorePlan,
@@ -2286,6 +2289,142 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     }])
   })
 
+  test('bounds renewal by the immutable deadline and lets only one concurrent lease CAS win', async () => {
+    const fixture = await seedVerifiedArchive('lease_renewal')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
+    const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+      token,
+      plan,
+      identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(120_000),
+      recheckAuthority: async () => true,
+    })
+    const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+    const firstClaim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+      workerOwnerId: `${PREFIX}_renewal_worker`,
+      leaseUntil: future(30_000),
+    })
+    await expect(renewRecoveryArchiveRestoreJobLease(transaction, firstClaim, {
+      leaseUntil: new Date(Date.parse(firstClaim.resumeDeadline) + 1_000).toISOString(),
+    })).rejects.toEqual(
+      new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT'),
+    )
+
+    const renewals = await Promise.allSettled([
+      renewRecoveryArchiveRestoreJobLease(transaction, firstClaim, {
+        leaseUntil: future(60_000),
+      }),
+      renewRecoveryArchiveRestoreJobLease(transaction, firstClaim, {
+        leaseUntil: future(70_000),
+      }),
+    ])
+    const fulfilled = renewals.filter(
+      (result): result is PromiseFulfilledResult<RecoveryArchiveRestoreJobWorkerClaim> =>
+        result.status === 'fulfilled',
+    )
+    const rejected = renewals.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    )
+    expect(fulfilled).toHaveLength(1)
+    expect(rejected).toHaveLength(1)
+    expect(rejected[0]?.reason).toEqual(
+      new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST'),
+    )
+    const renewedClaim = fulfilled[0]!.value
+
+    expect(renewedClaim).toMatchObject({
+      jobId: accepted.id,
+      workerOwnerId: `${PREFIX}_renewal_worker`,
+      workerFence: firstClaim.workerFence,
+      resumeDeadline: firstClaim.resumeDeadline,
+    })
+    expect(renewedClaim.leaseUntil).not.toBe(firstClaim.leaseUntil)
+    await expect(readRecoveryArchiveRestoreWorkerBinding(q, firstClaim)).rejects.toEqual(
+      new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT'),
+    )
+    await expect(readRecoveryArchiveRestoreWorkerBinding(q, renewedClaim)).resolves.toMatchObject({
+      jobId: accepted.id,
+      sheetId: fixture.sheetId,
+    })
+    await expect(abandonRecoveryArchiveRestoreJob(transaction, renewedClaim, {
+      replayHorizonMs: 0,
+    })).resolves.toMatchObject({
+      state: 'abandoned_partial',
+      completedCount: '0',
+    })
+  })
+
+  test('drives a real durable job through two chunk receipts and aggregate finalization', async () => {
+    const fixture = await seedVerifiedArchive('worker_loop')
+    const plan = compilePlan(fixture)
+    const token = mintToken(fixture, plan)
+    await preparePlan(fixture, plan, token)
+    const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+      token,
+      plan,
+      identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(120_000),
+      recheckAuthority: async () => true,
+    })
+    const applied: number[] = []
+    const worker = createRecoveryArchiveRestoreWorkerFromOperations({
+      sweepExpired: () => sweepExpiredRecoveryArchiveRestoreJobs(transaction, {
+        replayHorizonMs: 0,
+        limit: 10,
+      }),
+      select: () => selectRecoveryArchiveRestoreJobCandidate(transaction),
+      claim: (selected, leaseUntil) => claimRecoveryArchiveRestoreJob(transaction, selected, {
+        workerOwnerId: `${PREFIX}_loop_worker`,
+        leaseUntil,
+      }),
+      renew: (workerClaim, leaseUntil) => renewRecoveryArchiveRestoreJobLease(
+        transaction,
+        workerClaim,
+        { leaseUntil },
+      ),
+      executeChunk: (workerClaim) => runOneChunk(workerClaim, applied),
+      finalize: (workerClaim) => finalizeRecoveryArchiveRestoreJob(transaction, workerClaim, {
+        replayHorizonMs: 0,
+      }),
+      pause: (workerClaim) => pauseRecoveryArchiveRestoreJob(transaction, workerClaim),
+      abandon: (workerClaim) => abandonRecoveryArchiveRestoreJob(transaction, workerClaim, {
+        replayHorizonMs: 0,
+      }),
+    }, {
+      leaseMs: 60_000,
+      maxChunksPerRun: 10,
+    })
+
+    await expect(worker.runOnce()).resolves.toEqual({
+      kind: 'completed',
+      swept: 0,
+      chunks: 2,
+    })
+    expect(applied).toEqual([0, 1])
+    await expect(readRecoveryArchiveRestoreJobStatus(transaction, {
+      ...restoreRequestIdentity(fixture),
+      jobId: accepted.id,
+      recheckAuthority: async () => true,
+    })).resolves.toMatchObject({
+      state: 'done',
+      completedCount: '5001',
+      totalCount: '5001',
+      terminalOperationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    })
+    const writer = await q(
+      `SELECT recovery_writer_state, recovery_writer_owner_kind
+         FROM public.meta_sheets
+        WHERE id=$1`,
+      [fixture.sheetId],
+    )
+    expect(writer.rows).toEqual([{
+      recovery_writer_state: null,
+      recovery_writer_owner_kind: null,
+    }])
+  })
+
   test('accepts, applies two chunks, seals one exact aggregate, and releases the writer block', async () => {
     const fixture = await seedVerifiedArchive('complete')
     const plan = compilePlan(fixture)
@@ -2908,7 +3047,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       }),
       expect.objectContaining({
         id: zero.id,
-        state: 'cancelled_zero_write',
+        state: 'abandoned_partial',
         completed_count: '0',
         burn_terminal: true,
         recovery_writer_state: null,
