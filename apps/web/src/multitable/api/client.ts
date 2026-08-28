@@ -958,6 +958,56 @@ export interface ResetResult {
   deletedRecordIds?: string[]
 }
 
+// D6 archive recovery is sheet-scoped. The client keeps the server's preview
+// identity opaque and only exposes the values-free plan counts to callers.
+export type RecoveryArchiveScope =
+  | { kind: 'whole_sheet' }
+  | { kind: 'selected_records'; recordIds: string[] }
+  | { kind: 'selected_fields'; recordIds: string[]; fieldIds: string[] }
+
+export interface RecoveryArchiveCatalogEntry {
+  generationId: string
+  recoveryPointAt: string
+  archivedAt: string
+  expiresAt: string
+  anchorSeq: string
+  coverageRowCount: string
+  superseded: boolean
+}
+
+export interface RecoveryArchiveCatalogPage {
+  entries: RecoveryArchiveCatalogEntry[]
+  nextCursor: string | null
+}
+
+export interface RecoveryArchivePreview {
+  generationId: string
+  mode: 'revert' | 'reset'
+  scopeKind: RecoveryArchiveScope['kind']
+  executionKind: 'sync' | 'async'
+  executable: boolean
+  blockedReason: 'no_changes' | 'schema_drift' | 'inbound_unprovable' | 'async_plan_required' | null
+  previewIdentity: string | null
+  summary: {
+    reverts: Array<{ recordId: string; fieldIds: string[] }>
+    resurrectIds: string[]
+    deleteIds: string[]
+    effectiveWriteCount: number
+    keptCreatedAfterAnchorCount: number
+    driftCount: number
+  }
+}
+
+export interface RecoveryArchiveExecuteResult {
+  mode: 'revert' | 'reset'
+  anchorSeq: string
+  checkpointId: string
+  revertedCount: number
+  resurrectedCount: number
+  deletedCount: number
+  keptCreatedAfterAnchor: number
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -2204,6 +2254,48 @@ export class MultitableApiClient implements CommentsApiClient {
       body: JSON.stringify({ previewIdentity }),
     })
     return this.parseJson<ResetResult>(res)
+  }
+
+  // Archive recovery stays server-led: catalog metadata is read-only, the preview
+  // binds a generation and scope, and execute accepts only that server identity.
+  // Async job acceptance deliberately has no client method until its server-owned
+  // planner replaces the caller-supplied plan endpoint.
+  async listRecoveryArchiveCatalog(
+    sheetId: string,
+    params?: { cursor?: string; limit?: number },
+  ): Promise<RecoveryArchiveCatalogPage> {
+    const res = await this.fetch(
+      `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/catalog${qs(params ?? {})}`,
+    )
+    const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
+    return {
+      entries: Array.isArray(data.entries) ? data.entries : [],
+      nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+    }
+  }
+
+  async previewRecoveryArchive(
+    sheetId: string,
+    input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope },
+  ): Promise<RecoveryArchivePreview> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson<RecoveryArchivePreview>(res)
+  }
+
+  async executeRecoveryArchive(
+    sheetId: string,
+    input: { previewIdentity: string; scope: RecoveryArchiveScope },
+  ): Promise<RecoveryArchiveExecuteResult> {
+    const res = await this.fetch(`/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    return this.parseJson<RecoveryArchiveExecuteResult>(res)
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---

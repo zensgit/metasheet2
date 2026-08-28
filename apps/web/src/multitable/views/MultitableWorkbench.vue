@@ -53,6 +53,7 @@
       <button v-if="caps.canDeleteRecord.value" class="mt-workbench__mgr-btn" data-action="open-trash" @click="showTrash = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.trash" /></el-icon> {{ wb('toolbar.trash', isZh) }}</button>
       <button v-if="activeBaseId" class="mt-workbench__mgr-btn" data-action="open-history" @click="historyDeepLinkBatchId = null; showHistory = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.history" /></el-icon> {{ isZh ? '历史' : 'History' }}</button>
       <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-config-history" @click="openConfigHistory"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.configHistory" /></el-icon> {{ isZh ? '配置历史' : 'Config history' }}</button>
+      <button v-if="workbench.activeSheetId.value" class="mt-workbench__mgr-btn" data-action="open-archive-recovery" @click="showRecoveryArchive = true"><el-icon class="mt-workbench__mgr-btn-icon"><component :is="ICON.archiveRecovery" /></el-icon> {{ isZh ? '归档恢复' : 'Archive recovery' }}</button>
     </div>
     <ResetToPointPicker
       v-if="workbench.activeSheetId.value"
@@ -576,6 +577,16 @@
       @filter-change="onConfigHistoryFilter"
       @reverted="onConfigReverted"
     />
+    <RecoveryArchiveModal
+      :visible="showRecoveryArchive"
+      :sheet-id="workbench.activeSheetId.value"
+      :is-zh="isZh"
+      :list-catalog="recoveryArchiveCatalogWire"
+      :preview-archive="recoveryArchivePreviewWire"
+      :execute-archive="recoveryArchiveExecuteWire"
+      @close="showRecoveryArchive = false"
+      @executed="onRecoveryArchiveExecuted"
+    />
   </div>
 </template>
 
@@ -663,7 +674,16 @@ import MetaGridTable from '../components/MetaGridTable.vue'
 import MetaExportDialog, { type ExportConfirmPayload } from '../components/MetaExportDialog.vue'
 import RestorePreviewDialog from '../components/RestorePreviewDialog.vue'
 import RestoreBatchDialog from '../components/RestoreBatchDialog.vue'
-import type { ConfigRestoreExecuteConfirm, RestorePreviewChange, RestoreBatchPreviewRecord, RestoreBatchExecuteRecord, ExactAnchorRequest } from '../api/client'
+import type {
+  ConfigRestoreExecuteConfirm,
+  ExactAnchorRequest,
+  RecoveryArchiveExecuteResult,
+  RecoveryArchivePreview,
+  RecoveryArchiveScope,
+  RestoreBatchExecuteRecord,
+  RestoreBatchPreviewRecord,
+  RestorePreviewChange,
+} from '../api/client'
 import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-versions'
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
@@ -678,6 +698,7 @@ import MetaViewManager from '../components/MetaViewManager.vue'
 import TrashModal from '../components/TrashModal.vue'
 import HistoryCenterModal from '../components/HistoryCenterModal.vue'
 import MetaConfigHistoryModal from '../components/MetaConfigHistoryModal.vue'
+import RecoveryArchiveModal from '../components/RecoveryArchiveModal.vue'
 import ResetToPointPicker from '../components/ResetToPointPicker.vue'
 import { refreshAfterConfigRevert } from './config-revert-refresh'
 import type { MetaConfigRevision } from '../api/client'
@@ -745,6 +766,7 @@ import {
   Delete as IconTrash,
   Clock as IconHistory,
   Setting as IconConfigHistory,
+  FolderOpened as IconArchiveRecovery,
 } from '@element-plus/icons-vue'
 
 // Feature-row chrome icon map (UI-P1b). Same idiom as MetaToolbar's ICON map (UI-P1 slice-1): keyed by
@@ -766,6 +788,7 @@ const ICON = {
   trash: IconTrash,
   history: IconHistory,
   configHistory: IconConfigHistory,
+  archiveRecovery: IconArchiveRecovery,
 } as const
 
 const props = defineProps<{ sheetId?: string; viewId?: string; baseId?: string; recordId?: string; commentId?: string; fieldId?: string; openComments?: boolean; mode?: string; role?: MultitableRole }>()
@@ -819,6 +842,24 @@ const resetExecuteWire = (sid: string, previewIdentity: string) => workbench.cli
 const revertPreviewWire = (sid: string, anchor: ExactAnchorRequest) => workbench.client.revertPreview(sid, anchor)
 const revertExecuteWire = (sid: string, previewIdentity: string) => workbench.client.revertExecute(sid, previewIdentity)
 const onRecoveryDone = async (): Promise<void> => { await grid.reloadCurrentPage() }
+
+// D6 archive recovery is a server-led sheet surface. There is no local flag or capability inference:
+// catalog, preview, and execute render the server's current decision, while async jobs remain unavailable here.
+const showRecoveryArchive = ref(false)
+const recoveryArchiveCatalogWire = (sheetId: string, params?: { cursor?: string; limit?: number }) =>
+  workbench.client.listRecoveryArchiveCatalog(sheetId, params)
+const recoveryArchivePreviewWire = (
+  sheetId: string,
+  input: { generationId: string; mode: 'revert' | 'reset'; scope: RecoveryArchiveScope },
+): Promise<RecoveryArchivePreview> => workbench.client.previewRecoveryArchive(sheetId, input)
+const recoveryArchiveExecuteWire = (
+  sheetId: string,
+  input: { previewIdentity: string; scope: RecoveryArchiveScope },
+): Promise<RecoveryArchiveExecuteResult> => workbench.client.executeRecoveryArchive(sheetId, input)
+async function onRecoveryArchiveExecuted(): Promise<void> {
+  await grid.reloadCurrentPage()
+  showSuccess(isZh.value ? '归档恢复已完成。' : 'Archive recovery completed.')
+}
 
 // Slice 3: per-view personal-toggle click + "reset to shared". Reset deletes the actor's own personal-config
 // row then re-fetches via loadSheetMeta so the rendered config becomes whatever the server now resolves
