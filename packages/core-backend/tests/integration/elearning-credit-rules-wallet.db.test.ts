@@ -300,9 +300,9 @@ describe('e-learning credit rules and wallet PostgreSQL authority', () => {
       [orgId, userId],
     )
     const decisions = [
-      { id: randomUUID(), at: '2026-08-29T03:00:00.000Z' },
-      { id: randomUUID(), at: '2026-08-29T02:00:00.000Z' },
-      { id: randomUUID(), at: '2026-08-29T01:00:00.000Z' },
+      { id: randomUUID(), at: '2026-08-29T03:00:00.123900Z' },
+      { id: randomUUID(), at: '2026-08-29T03:00:00.123500Z' },
+      { id: randomUUID(), at: '2026-08-29T03:00:00.123100Z' },
     ]
     for (const [index, decision] of decisions.entries()) {
       await firstPool.query(

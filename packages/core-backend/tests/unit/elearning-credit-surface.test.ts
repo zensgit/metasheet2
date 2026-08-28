@@ -209,6 +209,7 @@ describe('e-learning credit rules and wallet surface', () => {
         status: 'awarded',
         occurred_at: '2026-08-29T03:00:00.000Z',
         created_at: '2026-08-29T03:00:01.000Z',
+        cursor_created_at: '2026-08-29T03:00:01.000999Z',
         request_hash: 'secret-hash',
         effect_key: 'secret-effect',
       },
@@ -219,6 +220,7 @@ describe('e-learning credit rules and wallet surface', () => {
         status: 'capped',
         occurred_at: '2026-08-29T02:00:00.000Z',
         created_at: '2026-08-29T02:00:01.000Z',
+        cursor_created_at: '2026-08-29T02:00:01.000456Z',
       },
       {
         id: DECISION_3,
@@ -227,6 +229,7 @@ describe('e-learning credit rules and wallet surface', () => {
         status: 'awarded',
         occurred_at: '2026-08-29T01:00:00.000Z',
         created_at: '2026-08-29T01:00:01.000Z',
+        cursor_created_at: '2026-08-29T01:00:01.000123Z',
       },
     ]
     const db = dbWith(async (sql, params) => {
@@ -276,10 +279,11 @@ describe('e-learning credit rules and wallet surface', () => {
     expect(historyParams[1]).toEqual([
       ORG,
       USER,
-      '2026-08-29T02:00:01.000Z',
+      '2026-08-29T02:00:01.000456Z',
       DECISION_2,
       3,
     ])
+    expect(historyParams[0]).toEqual([ORG, USER, 3])
   })
 
   it('fails closed for malformed cursors and users outside the authenticated org', async () => {

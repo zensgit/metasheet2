@@ -14,6 +14,8 @@ export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const POSTGRES_CURSOR_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/
 const AUTOMATIC_BEHAVIORS = new Set<ElearningCreditBehavior>([
   'login',
   'complete_course',
@@ -193,6 +195,15 @@ function storedDate(value: unknown): string | null {
       ? new Date(value)
       : null
   return date && Number.isFinite(date.getTime()) ? date.toISOString() : null
+}
+
+function storedCursorDate(value: unknown): string | null {
+  if (typeof value !== 'string' || !POSTGRES_CURSOR_TIMESTAMP_RE.test(value)) return null
+  const millisecondIso = value.replace(/(\.\d{3})\d{3}Z$/, '$1Z')
+  const date = new Date(millisecondIso)
+  return Number.isFinite(date.getTime()) && date.toISOString() === millisecondIso
+    ? value
+    : null
 }
 
 function storedRule(row: Record<string, unknown>): ElearningCreditRule {
@@ -382,15 +393,12 @@ function decodeCursor(value: unknown): WalletCursor | null {
     const object = parsed as Record<string, unknown>
     if (
       Object.keys(object).sort().join(',') !== 'createdAt,decisionId'
-      || typeof object.createdAt !== 'string'
       || !UUID_RE.test(String(object.decisionId))
     ) fail('invalid_input')
-    const date = new Date(object.createdAt)
-    if (!Number.isFinite(date.getTime()) || date.toISOString() !== object.createdAt) {
-      fail('invalid_input')
-    }
+    const createdAt = storedCursorDate(object.createdAt)
+    if (!createdAt) fail('invalid_input')
     return {
-      createdAt: object.createdAt,
+      createdAt,
       decisionId: String(object.decisionId).toLowerCase(),
     }
   } catch (error) {
@@ -488,7 +496,11 @@ export async function getElearningCreditWallet(
       params.push(limit + 1)
       const result = await tx.query(
         `/* elearning-credit-wallet:history */
-         SELECT id::text, behavior, awarded_points, status, occurred_at, created_at
+         SELECT id::text, behavior, awarded_points, status, occurred_at, created_at,
+                to_char(
+                  created_at AT TIME ZONE 'UTC',
+                  'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
+                ) AS cursor_created_at
          FROM elearning_credit_decisions
          WHERE org_id = $1 AND user_id = $2
          ${after}
@@ -496,16 +508,23 @@ export async function getElearningCreditWallet(
          LIMIT $${params.length}`,
         params,
       )
-      const rows = result.rows.map(storedWalletItem)
+      const rows = result.rows.map((row) => {
+        const cursorCreatedAt = storedCursorDate(row.cursor_created_at)
+        if (!cursorCreatedAt) fail('unavailable')
+        return { item: storedWalletItem(row), cursorCreatedAt }
+      })
       const hasMore = rows.length > limit
-      const items = hasMore ? rows.slice(0, limit) : rows
-      const last = items.at(-1)
+      const entries = hasMore ? rows.slice(0, limit) : rows
+      const last = entries.at(-1)
       return {
         userId,
         balancePoints,
-        items,
+        items: entries.map(({ item }) => item),
         nextCursor: hasMore && last
-          ? encodeCursor({ createdAt: last.createdAt, decisionId: last.decisionId })
+          ? encodeCursor({
+            createdAt: last.cursorCreatedAt,
+            decisionId: last.item.decisionId,
+          })
           : null,
       }
     })
