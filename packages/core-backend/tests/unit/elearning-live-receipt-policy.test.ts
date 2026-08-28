@@ -2,11 +2,21 @@ import { describe, expect, it } from 'vitest'
 import {
   ElearningLiveReceiptPolicyError,
   evaluateElearningLiveReceiptCompletion,
-  normalizeElearningAdapterVerifiedLiveReceipt,
   normalizeElearningLiveReceiptPolicy,
+  type ElearningLiveProviderReceiptVerifier,
 } from '../../src/services/elearning-live-receipt-policy'
 
 const SENTINEL = 'secret-live-receipt-value'
+const VERIFIED_RECEIPTS = new WeakSet<object>()
+const VERIFIER: ElearningLiveProviderReceiptVerifier = Object.freeze({
+  verify(input: unknown): unknown | null {
+    return input !== null
+      && typeof input === 'object'
+      && VERIFIED_RECEIPTS.has(input)
+      ? input
+      : null
+  },
+})
 
 function policy(overrides: Record<string, unknown> = {}) {
   return {
@@ -32,6 +42,19 @@ function context(overrides: Record<string, unknown> = {}) {
 }
 
 function receipt(overrides: Record<string, unknown> = {}) {
+  const value = {
+    ...context(),
+    measuredSeconds: 60,
+    observedAt: '2026-08-28T00:00:00.000Z',
+    providerReceiptKey: 'receipt-1',
+    source: 'live',
+    ...overrides,
+  }
+  VERIFIED_RECEIPTS.add(value)
+  return value
+}
+
+function unverifiedReceipt(overrides: Record<string, unknown> = {}) {
   return {
     ...context(),
     measuredSeconds: 60,
@@ -50,6 +73,7 @@ function evaluate(
   return evaluateElearningLiveReceiptCompletion(
     policy(policyOverrides),
     { expectedContext: context(contextOverrides), receipts },
+    VERIFIER,
   )
 }
 
@@ -121,10 +145,11 @@ describe('elearning live receipt policy', () => {
     })
     expect(evaluate([replay], { completionMode: 'live_only' })).toMatchObject({
       completed: false,
-      measuredSeconds: 0,
-      providerReceiptKey: null,
-      reason: 'no_receipt',
-      source: null,
+      measuredSeconds: 120,
+      providerReceiptKey: 'replay-receipt',
+      reason: 'source_not_enabled',
+      requiredSeconds: 120,
+      source: 'replay',
     })
     expect(evaluate([replay])).toMatchObject({
       completed: true,
@@ -227,6 +252,21 @@ describe('elearning live receipt policy', () => {
       expectCode(() => evaluate([mismatched]), 'receipt_context_mismatch')
     }
     expectCode(() => evaluate([receipt()], {}, { policyRevision: 'live-v2' }), 'policy_mismatch')
+    expectCode(() => evaluate([receipt({ orgId: ' org-1 ' })]), 'invalid_receipt')
+    expectCode(() => evaluate([receipt()], {}, { orgId: ' org-1 ' }), 'invalid_context')
+  })
+
+  it('requires an authenticated provider verifier before parsing receipt shape', () => {
+    expectCode(() => evaluateElearningLiveReceiptCompletion(
+      policy(),
+      { expectedContext: context(), receipts: [unverifiedReceipt()] },
+      VERIFIER,
+    ), 'provider_receipt_unverified')
+    expectCode(() => evaluateElearningLiveReceiptCompletion(
+      policy(),
+      { expectedContext: context(), receipts: [unverifiedReceipt()] },
+      { verify(): never { throw new Error(SENTINEL) } },
+    ), 'provider_receipt_unverified')
   })
 
   it('rejects malformed policy, context, receipt, and extra input shapes', () => {
@@ -239,51 +279,45 @@ describe('elearning live receipt policy', () => {
       ...policy(), replayRequiredSeconds: 1.5,
     }), 'invalid_policy')
     expectCode(() => evaluate([receipt()], {}, { extra: SENTINEL }), 'invalid_context')
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({ ...receipt(), extra: SENTINEL }), 'invalid_receipt')
-    expectCode(() => evaluate([receipt(), undefined]), 'invalid_receipt')
+    expectCode(() => evaluate([receipt({ extra: SENTINEL })]), 'invalid_receipt')
+    expectCode(() => evaluate([receipt(), undefined]), 'provider_receipt_unverified')
     expectCode(() => evaluate(new Array(1)), 'invalid_input')
     expectCode(() => evaluate([receipt()], { completionMode: 'permissive' }), 'invalid_policy')
   })
 
   it('requires canonical UTC instants without offset normalization', () => {
-    expect(normalizeElearningAdapterVerifiedLiveReceipt(receipt()).observedAt).toBe(
-      '2026-08-28T00:00:00.000Z',
-    )
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({
-      ...receipt(), observedAt: '2026-08-28T08:00:00.000+08:00',
-    }), 'invalid_receipt')
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({
-      ...receipt(), observedAt: '2026-08-28T08:00:00',
-    }), 'invalid_receipt')
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({
-      ...receipt(), observedAt: '2026-02-30T00:00:00Z',
-    }), 'invalid_receipt')
+    expect(evaluate([receipt()]).completed).toBe(true)
+    for (const observedAt of [
+      '2026-08-28T08:00:00.000+08:00',
+      '2026-08-28T08:00:00',
+      '2026-02-30T00:00:00Z',
+    ]) {
+      expectCode(() => evaluate([receipt({ observedAt })]), 'invalid_receipt')
+    }
   })
 
   it('requires bounded keys and safe nonnegative measured seconds', () => {
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({
-      ...receipt(), providerReceiptKey: '   ',
-    }), 'invalid_receipt')
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({
-      ...receipt(), providerReceiptKey: `key-${'x'.repeat(512)}`,
-    }), 'invalid_receipt')
+    expectCode(() => evaluate([receipt({ providerReceiptKey: '   ' })]), 'invalid_receipt')
+    expectCode(() => evaluate([receipt({
+      providerReceiptKey: `key-${'x'.repeat(512)}`,
+    })]), 'invalid_receipt')
     for (const measuredSeconds of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '60']) {
-      expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt({ ...receipt(), measuredSeconds }), 'invalid_receipt')
+      expectCode(() => evaluate([receipt({ measuredSeconds })]), 'invalid_receipt')
     }
-    expect(normalizeElearningAdapterVerifiedLiveReceipt({ ...receipt(), measuredSeconds: 0 }).measuredSeconds).toBe(0)
+    expect(evaluate([receipt({ measuredSeconds: 0 })]).measuredSeconds).toBe(0)
   })
 
-  it('deeply freezes normalized policy and receipt without retaining caller objects', () => {
+  it('freezes normalized policy and decisions without retaining caller values', () => {
     const input = receipt()
     const normalizedPolicy = normalizeElearningLiveReceiptPolicy(policy())
-    const normalizedReceipt = normalizeElearningAdapterVerifiedLiveReceipt(input)
+    const decision = evaluate([input])
     expect(Object.isFrozen(normalizedPolicy)).toBe(true)
-    expect(Object.isFrozen(normalizedReceipt)).toBe(true)
+    expect(Object.isFrozen(decision)).toBe(true)
     expect(() => {
-      ;(normalizedReceipt as { measuredSeconds: number }).measuredSeconds = 99
+      ;(decision as { measuredSeconds: number }).measuredSeconds = 99
     }).toThrow(TypeError)
     input.measuredSeconds = 99
-    expect(normalizedReceipt.measuredSeconds).toBe(60)
+    expect(decision.measuredSeconds).toBe(60)
     expect(normalizedPolicy.policyRevision).toBe('live-v1')
   })
 
@@ -293,7 +327,7 @@ describe('elearning live receipt policy', () => {
       enumerable: true,
       get() { throw new Error(SENTINEL) },
     })
-    expectCode(() => normalizeElearningAdapterVerifiedLiveReceipt(input), 'invalid_receipt')
+    expectCode(() => evaluate([input]), 'invalid_receipt')
     expectCode(() => evaluate(new Proxy([receipt()], {
       ownKeys() { throw new Error(SENTINEL) },
     })), 'invalid_input')

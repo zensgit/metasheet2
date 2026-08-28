@@ -2,7 +2,13 @@
  * Pure L6 live-provider receipt policy. Receipts are adapter-verified,
  * internally normalized provider evidence, never raw client claims. This
  * module performs no provider I/O and is intentionally unreachable from HTTP.
- * Persistence, adapters, and routes stay outside this policy boundary.
+ * Persistence, adapters, and routes stay outside this policy boundary. A
+ * trusted provider-specific verifier must authenticate every receipt before
+ * this policy will parse or evaluate it.
+ *
+ * The in-call duplicate Set is not durable idempotency. A future adapter and
+ * ledger must claim `UNIQUE(org_id, provider_key, provider_receipt_key)` and
+ * persist that claim with its completion effect in one transaction.
  */
 
 const MAX_KEY_LENGTH = 512
@@ -50,6 +56,7 @@ export type ElearningLiveReceiptPolicyErrorCode =
   | 'invalid_policy'
   | 'invalid_receipt'
   | 'policy_mismatch'
+  | 'provider_receipt_unverified'
   | 'receipt_context_mismatch'
 
 export class ElearningLiveReceiptPolicyError extends Error {
@@ -77,7 +84,7 @@ export interface ElearningLiveReceiptContext {
 }
 
 /** Normalized evidence produced by a trusted external-provider adapter. */
-export interface ElearningAdapterVerifiedLiveReceipt extends ElearningLiveReceiptContext {
+interface ElearningAdapterVerifiedLiveReceipt extends ElearningLiveReceiptContext {
   readonly measuredSeconds: number
   readonly observedAt: string
   readonly providerReceiptKey: string
@@ -88,6 +95,7 @@ export type ElearningLiveReceiptCompletionReason =
   | 'below_threshold'
   | 'completed'
   | 'no_receipt'
+  | 'source_not_enabled'
 
 export interface ElearningLiveReceiptCompletionDecision {
   readonly completed: boolean
@@ -97,6 +105,15 @@ export interface ElearningLiveReceiptCompletionDecision {
   readonly reason: ElearningLiveReceiptCompletionReason
   readonly requiredSeconds: number
   readonly source: ElearningLiveReceiptSource | null
+}
+
+/**
+ * Trusted adapter port. Implementations authenticate provider signatures or
+ * authoritative API responses and return their canonical payload. This port
+ * is a service dependency and must never be created from request input.
+ */
+export interface ElearningLiveProviderReceiptVerifier {
+  verify(input: unknown): unknown | null
 }
 
 function fail(code: ElearningLiveReceiptPolicyErrorCode): never {
@@ -171,7 +188,8 @@ function assertSupportedText(value: string, code: ElearningLiveReceiptPolicyErro
 
 function requireKey(value: unknown, code: 'invalid_context' | 'invalid_policy' | 'invalid_receipt'): string {
   if (typeof value !== 'string') fail(code)
-  const key = value.trim()
+  const key = value
+  if (key !== key.trim()) fail(code)
   if (key === '' || key.length > MAX_KEY_LENGTH) fail(code)
   assertSupportedText(key, code)
   return key
@@ -232,12 +250,7 @@ function normalizeContext(input: unknown): ElearningLiveReceiptContext {
   })
 }
 
-/**
- * Adapter trust-boundary normalizer. It validates the closed internal row but
- * does not verify a provider signature or API response. Call it only after a
- * provider-specific adapter has authenticated the receipt; never on client JSON.
- */
-export function normalizeElearningAdapterVerifiedLiveReceipt(
+function normalizeAdapterVerifiedReceipt(
   input: unknown,
 ): ElearningAdapterVerifiedLiveReceipt {
   const values = readExactObject(input, RECEIPT_KEYS, 'invalid_receipt')
@@ -255,6 +268,25 @@ export function normalizeElearningAdapterVerifiedLiveReceipt(
     source: values.source,
     userId: requireKey(values.userId, 'invalid_receipt'),
   })
+}
+
+function verifyProviderReceipt(
+  input: unknown,
+  verifier: ElearningLiveProviderReceiptVerifier,
+): unknown {
+  try {
+    if (
+      verifier === null
+      || typeof verifier !== 'object'
+      || typeof verifier.verify !== 'function'
+    ) fail('invalid_input')
+    const verified = verifier.verify(input)
+    if (verified === null) fail('provider_receipt_unverified')
+    return verified
+  } catch (error) {
+    if (error instanceof ElearningLiveReceiptPolicyError) throw error
+    fail('provider_receipt_unverified')
+  }
 }
 
 export function normalizeElearningLiveReceiptPolicy(
@@ -298,6 +330,7 @@ function maximumReceipt(
 }
 
 interface SelectedReceipt {
+  readonly reason: 'below_threshold' | 'source_not_enabled'
   readonly receipt: ElearningAdapterVerifiedLiveReceipt
   readonly requiredSeconds: number
   readonly source: ElearningLiveReceiptSource
@@ -309,22 +342,58 @@ function selectIncompleteReceipt(
   replay: ElearningAdapterVerifiedLiveReceipt | null,
 ): SelectedReceipt | null {
   if (live === null && replay === null) return null
+  if (policy.completionMode === 'live_only') {
+    return live === null
+      ? {
+        reason: 'source_not_enabled',
+        receipt: replay as ElearningAdapterVerifiedLiveReceipt,
+        requiredSeconds: policy.replayRequiredSeconds,
+        source: 'replay',
+      }
+      : {
+        reason: 'below_threshold',
+        receipt: live,
+        requiredSeconds: policy.liveRequiredSeconds,
+        source: 'live',
+      }
+  }
   if (replay === null) {
-    return { receipt: live as ElearningAdapterVerifiedLiveReceipt, requiredSeconds: policy.liveRequiredSeconds, source: 'live' }
+    return {
+      reason: 'below_threshold',
+      receipt: live as ElearningAdapterVerifiedLiveReceipt,
+      requiredSeconds: policy.liveRequiredSeconds,
+      source: 'live',
+    }
   }
   if (live === null) {
-    return { receipt: replay, requiredSeconds: policy.replayRequiredSeconds, source: 'replay' }
+    return {
+      reason: 'below_threshold',
+      receipt: replay,
+      requiredSeconds: policy.replayRequiredSeconds,
+      source: 'replay',
+    }
   }
   const liveRatio = BigInt(live.measuredSeconds) * BigInt(policy.replayRequiredSeconds)
   const replayRatio = BigInt(replay.measuredSeconds) * BigInt(policy.liveRequiredSeconds)
   return liveRatio >= replayRatio
-    ? { receipt: live, requiredSeconds: policy.liveRequiredSeconds, source: 'live' }
-    : { receipt: replay, requiredSeconds: policy.replayRequiredSeconds, source: 'replay' }
+    ? {
+      reason: 'below_threshold',
+      receipt: live,
+      requiredSeconds: policy.liveRequiredSeconds,
+      source: 'live',
+    }
+    : {
+      reason: 'below_threshold',
+      receipt: replay,
+      requiredSeconds: policy.replayRequiredSeconds,
+      source: 'replay',
+    }
 }
 
 export function evaluateElearningLiveReceiptCompletion(
   policyInput: unknown,
   input: unknown,
+  verifier: ElearningLiveProviderReceiptVerifier,
 ): ElearningLiveReceiptCompletionDecision {
   const policy = normalizePolicy(policyInput)
   const values = readExactObject(input, EVALUATION_KEYS, 'invalid_input')
@@ -332,7 +401,7 @@ export function evaluateElearningLiveReceiptCompletion(
   if (context.policyRevision !== policy.policyRevision) fail('policy_mismatch')
   const receiptInputs = readDenseArray(values.receipts)
   const receipts = receiptInputs.map((receiptInput) => (
-    normalizeElearningAdapterVerifiedLiveReceipt(receiptInput)
+    normalizeAdapterVerifiedReceipt(verifyProviderReceipt(receiptInput, verifier))
   ))
   const receiptKeys = new Set<string>()
   for (const receipt of receipts) {
@@ -342,11 +411,11 @@ export function evaluateElearningLiveReceiptCompletion(
   }
 
   const live = maximumReceipt(receipts, 'live')
-  const replay = policy.completionMode === 'live_or_replay'
-    ? maximumReceipt(receipts, 'replay')
-    : null
+  const replay = maximumReceipt(receipts, 'replay')
   const liveComplete = live !== null && live.measuredSeconds >= policy.liveRequiredSeconds
-  const replayComplete = replay !== null && replay.measuredSeconds >= policy.replayRequiredSeconds
+  const replayComplete = policy.completionMode === 'live_or_replay'
+    && replay !== null
+    && replay.measuredSeconds >= policy.replayRequiredSeconds
   const selected = liveComplete
     ? { receipt: live as ElearningAdapterVerifiedLiveReceipt, source: 'live' as const }
     : replayComplete
@@ -373,7 +442,7 @@ export function evaluateElearningLiveReceiptCompletion(
     measuredSeconds: selectedIncomplete?.receipt.measuredSeconds ?? 0,
     policyRevision: policy.policyRevision,
     providerReceiptKey: selectedIncomplete?.receipt.providerReceiptKey ?? null,
-    reason: selectedIncomplete === null ? 'no_receipt' as const : 'below_threshold' as const,
+    reason: selectedIncomplete?.reason ?? 'no_receipt',
     requiredSeconds: selectedIncomplete?.requiredSeconds ?? policy.liveRequiredSeconds,
     source: selectedIncomplete?.source ?? null,
   })
