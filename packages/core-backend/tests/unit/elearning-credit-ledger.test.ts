@@ -5,6 +5,7 @@ import {
   ElearningCreditLedgerError,
   type ClaimElearningCreditInput,
   type ElearningCreditDecisionRow,
+  type ElearningCreditEffectClaimInput,
   type ElearningCreditExistingEffect,
   type ElearningCreditLedgerStore,
   type ElearningCreditLedgerTx,
@@ -79,6 +80,11 @@ function balanceKeyOf(orgId: string, userId: string): string {
 
 interface FakeState {
   balances: Map<string, number>
+  claims: Map<string, {
+    decisionId: string
+    requestHash: string
+    requestHashVersion: number
+  }>
   decisions: ElearningCreditDecisionRow[]
   effects: Map<string, ElearningCreditExistingEffect>
   rules: Map<string, ElearningCreditRuleSnapshotInput>
@@ -87,17 +93,20 @@ interface FakeState {
 class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx {
   balances = new Map<string, number>()
   calls: string[] = []
+  claims = new Map<string, {
+    decisionId: string
+    requestHash: string
+    requestHashVersion: number
+  }>()
   decisions: ElearningCreditDecisionRow[] = []
   effects = new Map<string, ElearningCreditExistingEffect>()
   failOn: 'append' | 'balance' | null = null
-  onLock: (() => void) | null = null
   rules = new Map<string, ElearningCreditRuleSnapshotInput>()
   transactionCount = 0
 
   constructor(seed: {
     balances?: Array<{ orgId: string; userId: string; points: number }>
     decisions?: ElearningCreditDecisionRow[]
-    effects?: ElearningCreditExistingEffect[]
     rules?: Array<{ orgId: string; behavior: string; rule: ElearningCreditRuleSnapshotInput }>
   } = {}) {
     for (const row of seed.rules ?? []) {
@@ -105,9 +114,6 @@ class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx 
     }
     for (const row of seed.decisions ?? []) {
       this.decisions.push({ ...row, rule: { ...row.rule } })
-    }
-    for (const row of seed.effects ?? []) {
-      this.effects.set(row.id, row)
     }
     for (const row of seed.balances ?? []) {
       this.balances.set(balanceKeyOf(row.orgId, row.userId), row.points)
@@ -121,6 +127,9 @@ class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx 
   private snapshot(): FakeState {
     return {
       balances: new Map(this.balances),
+      claims: new Map(
+        [...this.claims.entries()].map(([key, value]) => [key, { ...value }]),
+      ),
       decisions: this.decisions.map((row) => ({ ...row, rule: { ...row.rule } })),
       effects: new Map(
         [...this.effects.entries()].map(([key, value]) => [key, { ...value }]),
@@ -133,6 +142,7 @@ class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx 
 
   private restore(state: FakeState): void {
     this.balances = state.balances
+    this.claims = state.claims
     this.decisions = state.decisions
     this.effects = state.effects
     this.rules = state.rules
@@ -149,14 +159,18 @@ class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx 
     }
   }
 
-  async findExistingEffect(identity: {
-    orgId: string
-    userId: string
-    behavior: string
-    effectKey: string
-  }): Promise<ElearningCreditExistingEffect | null> {
-    this.calls.push('findExistingEffect')
-    return this.effects.get(effectKeyOf(identity)) ?? null
+  async claimEffect(input: ElearningCreditEffectClaimInput) {
+    this.calls.push('claimEffect')
+    const key = effectKeyOf(input)
+    const existing = this.effects.get(key)
+    if (existing) return { effect: existing, kind: 'existing' as const }
+    if (this.claims.has(key)) throw new Error('fake incomplete claim')
+    this.claims.set(key, {
+      decisionId: input.decisionId,
+      requestHash: input.requestHash,
+      requestHashVersion: input.requestHashVersion,
+    })
+    return { kind: 'claimed' as const }
   }
 
   async resolveActiveRule(input: {
@@ -170,7 +184,6 @@ class FakeLedger implements ElearningCreditLedgerStore, ElearningCreditLedgerTx 
 
   async lockBucket(): Promise<void> {
     this.calls.push('lockBucket')
-    this.onLock?.()
   }
 
   async sumPositiveAwards(input: {
@@ -305,10 +318,9 @@ describe('elearning credit ledger', () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     )
     expect(store.calls).toEqual([
-      'findExistingEffect',
+      'claimEffect',
       'resolveActiveRule',
       'lockBucket',
-      'findExistingEffect',
       'sumPositiveAwards',
       'appendDecision',
       'applyBalanceDelta',
@@ -455,43 +467,27 @@ describe('elearning credit ledger', () => {
     expect(replay.awardedPoints).toBe(10)
     expect(store.decisions).toHaveLength(1)
     expect(store.balances.get(balanceKeyOf(ORG_A, USER))).toBe(10)
-    expect(store.calls).toEqual(['findExistingEffect'])
+    expect(store.calls).toEqual(['claimEffect'])
     expect(store.calls.includes('resolveActiveRule')).toBe(false)
   })
 
-  it('rechecks the effect after locking the daily bucket', async () => {
+  it('claims the global effect identity before resolving a rule or locking a day bucket', async () => {
     const input = baseInput()
-    const requestHash = hashElearningCreditEffect(input)
-    const concurrentId = '22222222-2222-4222-8222-222222222222'
     const store = new FakeLedger({
       rules: [{ behavior: 'pass_exam', orgId: ORG_A, rule: baseRule() }],
     })
-    store.onLock = () => {
-      store.effects.set(effectKeyOf(input), {
-        awardedPoints: 6,
-        id: concurrentId,
-        requestHash,
-        requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
-        status: 'capped',
-      })
-    }
-
     const result = await claimElearningCredit(store, input, ENABLED)
 
-    expect(result).toEqual({
-      awardedPoints: 6,
-      decisionId: concurrentId,
-      duplicate: true,
-      status: 'capped',
-    })
+    expect(result.duplicate).toBe(false)
     expect(store.calls).toEqual([
-      'findExistingEffect',
+      'claimEffect',
       'resolveActiveRule',
       'lockBucket',
-      'findExistingEffect',
+      'sumPositiveAwards',
+      'appendDecision',
+      'applyBalanceDelta',
     ])
-    expect(store.decisions).toEqual([])
-    expect(store.balances.size).toBe(0)
+    expect(store.claims.get(effectKeyOf(input))?.decisionId).toBe(result.decisionId)
   })
 
   it('conflicts when the same effect key arrives with a different payload', async () => {
@@ -515,7 +511,7 @@ describe('elearning credit ledger', () => {
     )
     expect(store.decisions).toHaveLength(1)
     expect(store.balances.get(balanceKeyOf(ORG_A, USER))).toBe(10)
-    expect(store.calls).toEqual(['findExistingEffect', 'findExistingEffect'])
+    expect(store.calls).toEqual(['claimEffect', 'claimEffect'])
   })
 
   it('fails closed when a persisted automatic decision has impossible points', async () => {
@@ -537,7 +533,7 @@ describe('elearning credit ledger', () => {
       })
 
       await expectThrown(() => claimElearningCredit(store, input, ENABLED), 'unavailable')
-      expect(store.calls).toEqual(['findExistingEffect'])
+      expect(store.calls).toEqual(['claimEffect'])
       expect(store.decisions).toEqual([])
       expect(store.balances.size).toBe(0)
     }
@@ -574,6 +570,7 @@ describe('elearning credit ledger', () => {
     )
     expect(appendStore.decisions).toEqual([])
     expect(appendStore.effects.size).toBe(0)
+    expect(appendStore.claims.size).toBe(0)
     expect(appendStore.balances.size).toBe(0)
 
     const balanceStore = new FakeLedger({
@@ -586,6 +583,7 @@ describe('elearning credit ledger', () => {
     )
     expect(balanceStore.decisions).toEqual([])
     expect(balanceStore.effects.size).toBe(0)
+    expect(balanceStore.claims.size).toBe(0)
     expect(balanceStore.balances.size).toBe(0)
   })
 

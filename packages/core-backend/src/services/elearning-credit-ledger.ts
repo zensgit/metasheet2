@@ -66,6 +66,16 @@ export interface ElearningCreditExistingEffect {
   status: ElearningCreditDecisionStatus
 }
 
+export interface ElearningCreditEffectClaimInput extends ElearningCreditEffectIdentity {
+  decisionId: string
+  requestHash: string
+  requestHashVersion: number
+}
+
+export type ElearningCreditEffectClaimResult =
+  | { kind: 'claimed' }
+  | { kind: 'existing'; effect: ElearningCreditExistingEffect }
+
 export interface ElearningCreditDecisionRow {
   id: string
   orgId: string
@@ -84,9 +94,7 @@ export interface ElearningCreditDecisionRow {
 }
 
 export interface ElearningCreditLedgerTx {
-  findExistingEffect(
-    identity: ElearningCreditEffectIdentity,
-  ): Promise<ElearningCreditExistingEffect | null>
+  claimEffect(input: ElearningCreditEffectClaimInput): Promise<ElearningCreditEffectClaimResult>
   resolveActiveRule(input: {
     orgId: string
     behavior: ElearningCreditBehavior
@@ -198,11 +206,17 @@ export async function claimElearningCredit(
   if (!isIncentiveSurfaceEnabled(env)) fail('disabled')
 
   const identity: ElearningCreditEffectIdentity = { behavior, effectKey, orgId, userId }
+  const decisionId = randomUUID()
 
   try {
     return await store.transaction(async (tx) => {
-      const existing = await tx.findExistingEffect(identity)
-      if (existing) return closeExisting(existing, requestHash)
+      const claim = await tx.claimEffect({
+        ...identity,
+        decisionId,
+        requestHash,
+        requestHashVersion: ELEARNING_CREDIT_EFFECT_HASH_VERSION,
+      })
+      if (claim.kind === 'existing') return closeExisting(claim.effect, requestHash)
 
       const rawRule = await tx.resolveActiveRule({ behavior, orgId })
       if (!rawRule) fail('rule_unavailable')
@@ -216,9 +230,6 @@ export async function claimElearningCredit(
 
       const localDay = elearningCreditDay(occurredAt, rule.timeZone)
       await tx.lockBucket({ behavior, localDay, orgId, userId })
-
-      const existingAfterLock = await tx.findExistingEffect(identity)
-      if (existingAfterLock) return closeExisting(existingAfterLock, requestHash)
 
       const awardedToday = await tx.sumPositiveAwards({
         behavior,
@@ -237,7 +248,6 @@ export async function claimElearningCredit(
       const status = asDecisionStatus(award.status)
       if (!status) fail('unavailable')
 
-      const decisionId = randomUUID()
       await tx.appendDecision({
         awardedPoints: award.awardedPoints,
         behavior,

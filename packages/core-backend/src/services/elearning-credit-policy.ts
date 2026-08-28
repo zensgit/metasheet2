@@ -244,7 +244,8 @@ export function normalizeElearningCreditRuleSnapshot(
 
 function canonicalizeJson(value: unknown, depth = 0): JsonValue {
   if (depth > ELEARNING_CREDIT_REFERENCE_MAX_DEPTH) fail('invalid_input')
-  if (value === null || typeof value === 'boolean') return value
+  if (value === null) return null
+  if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
     assertSupportedText(value)
     return value
