@@ -41,7 +41,9 @@ export function minutesFromDateTimeRange(
 export function hoursFromLeaveMinutes(
   minutes: number | string | null | undefined,
 ): number | null {
-  const value = typeof minutes === 'number' ? minutes : Number(String(minutes ?? '').trim())
+  const text = typeof minutes === 'number' ? String(minutes) : String(minutes ?? '').trim()
+  if (text.length === 0) return null
+  const value = Number(text)
   if (!Number.isFinite(value) || value < 0) return null
   return Math.round(value / LEAVE_DURATION_HALF_HOUR_MINUTES) / 2
 }
