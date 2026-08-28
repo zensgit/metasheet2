@@ -291,6 +291,12 @@ import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
 import { univerMockRouter } from './routes/univer-mock'
 import { univerMetaRouter } from './routes/univer-meta'
+import {
+  createRecoveryArchiveApplication,
+  type RecoveryArchiveApplication,
+  type RecoveryArchiveApplicationCompositionFactory,
+  type RecoveryArchiveApplicationDatabaseRuntime,
+} from './multitable/recovery-archive-application'
 import { isOapiAllowlistRequest } from './multitable/oapi-read-allowlist'
 import { dashboardRouter } from './routes/dashboard'
 import { automationWebhookJsonParser, createAutomationRoutes } from './routes/automation'
@@ -349,6 +355,26 @@ function disabledFeatureHandler(message: string): RequestHandler {
   }
 }
 
+export interface MetaSheetServerOptions {
+  readonly port?: number
+  readonly host?: string
+  readonly pluginDirs?: string[]
+  readonly createRecoveryArchiveComposition?: RecoveryArchiveApplicationCompositionFactory
+}
+
+function resolveRecoveryArchiveMainPoolRuntime(): RecoveryArchiveApplicationDatabaseRuntime {
+  const pool = poolManager.get()
+  const query = pool.query.bind(pool) as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']
+  const transaction: RecoveryArchiveApplicationDatabaseRuntime['transaction'] = async (work) =>
+    pool.transaction(async ({ query: transactionQuery }) =>
+      work(transactionQuery as unknown as RecoveryArchiveApplicationDatabaseRuntime['query']))
+  return Object.freeze({
+    transaction,
+    query,
+    transactionDepthProbe: pool.transactionDepthProbe,
+  })
+}
+
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
@@ -402,6 +428,7 @@ export class MetaSheetServer {
   // P2 durable-delivery S5: the outbox dispatch loop handle. null unless AUTOMATION_DURABLE_DELIVERY_ENABLED
   // is ON (bootDurableDelivery returns null when the flag is off → no loop, no reads, byte-identical startup).
   private durableDeliveryLoop: import('./multitable/automation-durable-dispatch-loop').DispatchLoopHandle | null = null
+  private readonly recoveryArchiveApplication: RecoveryArchiveApplication
 
   // IoC Container
   private injector: Injector
@@ -411,7 +438,7 @@ export class MetaSheetServer {
     return this.injector.get(IPluginLoader)
   }
 
-  constructor(options: { port?: number; host?: string; pluginDirs?: string[] } = {}) {
+  constructor(options: MetaSheetServerOptions = {}) {
     // Initialize IoC Container
     this.injector = createContainer({ pluginDirs: options.pluginDirs })
     
@@ -422,6 +449,10 @@ export class MetaSheetServer {
     this.portLocked = typeof options.port === 'number'
     this.port = options.port ?? parseInt(process.env.PORT || '7778')
     this.host = options.host ?? process.env.HOST
+    this.recoveryArchiveApplication = createRecoveryArchiveApplication(
+      options.createRecoveryArchiveComposition,
+      resolveRecoveryArchiveMainPoolRuntime,
+    )
 
     // 创建核心API
     const coreAPI = this.createCoreAPI()
@@ -1517,7 +1548,13 @@ export class MetaSheetServer {
     }
 
     // Canonical multitable API used by the frontend and OpenAPI contracts.
-    this.app.use('/api/multitable', univerMetaRouter())
+    const recoveryArchiveRouterOptions = this.recoveryArchiveApplication.routerOptions
+    this.app.use(
+      '/api/multitable',
+      recoveryArchiveRouterOptions
+        ? univerMetaRouter(recoveryArchiveRouterOptions)
+        : univerMetaRouter(),
+    )
     // Chart / Dashboard CRUD (paths: /sheets/:sheetId/charts, /sheets/:sheetId/dashboards).
     // Mounted separately from univerMetaRouter because it lives in its own
     // module with a dedicated DashboardService.
@@ -1540,7 +1577,12 @@ export class MetaSheetServer {
     this.app.use(apiTokensRouter())
     // Keep the legacy dev alias while existing tools/worktrees still reference it.
     if (process.env.NODE_ENV !== 'production') {
-      this.app.use('/api/univer-meta', univerMetaRouter())
+      this.app.use(
+        '/api/univer-meta',
+        recoveryArchiveRouterOptions
+          ? univerMetaRouter(recoveryArchiveRouterOptions)
+          : univerMetaRouter(),
+      )
     }
 
     // 路由：事件总线
@@ -2711,6 +2753,14 @@ export class MetaSheetServer {
     this.shuttingDown = true
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
+    try {
+      // This must finish before the pool-close task is even created: an in-flight chunk may still
+      // be completing its transaction while the worker loop drains.
+      await this.recoveryArchiveApplication.stopWorker()
+    } catch {
+      this.logger.warn('Recovery archive restore worker stop failed')
+    }
+
     const shutdownTasks: Promise<void>[] = []
 
     // 0. Stop background tasks
@@ -3879,6 +3929,14 @@ export class MetaSheetServer {
       }
     })
 
+    try {
+      // The injected worker is deliberately activated only after the HTTP listener is live.
+      this.recoveryArchiveApplication.startWorker()
+    } catch (error) {
+      await this.stop('RECOVERY_ARCHIVE_RESTORE_WORKER_BOOT_FAILED')
+      throw error
+    }
+
     // Background tasks (after server starts listening)
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
       this.stopOperationAuditRetention = startOperationAuditRetention({ logger: this.logger })
@@ -3896,10 +3954,22 @@ export class MetaSheetServer {
   }
 }
 
-// 启动 - 仅在直接运行时启动服务器，测试导入时不启动
-if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-  const server = new MetaSheetServer()
-  server.start().catch((err) => {
+export function isCoreBackendDirectEntry(mainModule: unknown, currentModule: unknown): boolean {
+  return mainModule === currentModule
+}
+
+export const coreBackendIsDirectEntry = isCoreBackendDirectEntry(require.main, module)
+
+// 启动 - 仅在直接运行时启动服务器，测试或注入式 launcher 导入时不启动
+if (
+  coreBackendIsDirectEntry &&
+  process.env.NODE_ENV !== 'test' &&
+  !process.env.VITEST
+) {
+  Promise.resolve().then(async () => {
+    const server = new MetaSheetServer()
+    await server.start()
+  }).catch((err) => {
     // eslint-disable-next-line no-console
     console.error('Failed to start MetaSheet v2 core:', err)
     process.exit(1)

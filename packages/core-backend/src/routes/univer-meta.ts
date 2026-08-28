@@ -6921,12 +6921,31 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
 
 export interface UniverMetaRouterOptions {
   readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
+  readonly recoveryArchiveDatabaseRuntime?: RecoveryArchiveRouterDatabaseRuntime
   readonly recoveryArchiveAuditedReplayHorizonMs?: number
   readonly recoveryArchiveAsyncResumeHorizonMs?: number
 }
 
+export interface RecoveryArchiveRouterDatabaseRuntime {
+  readonly transaction: RecoveryArchiveRestoreJobTransaction
+  readonly query: RecoveryArchiveRestoreJobQuery
+  readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
+}
+
 export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
   const router = Router()
+  const injectedRecoveryArchiveDatabase = options.recoveryArchiveDatabaseRuntime
+  if (
+    (options.recoveryArchiveRuntime || injectedRecoveryArchiveDatabase) &&
+    (
+      !options.recoveryArchiveRuntime ||
+      !injectedRecoveryArchiveDatabase ||
+      options.recoveryArchiveRuntime.transactionDepth !==
+        injectedRecoveryArchiveDatabase.transactionDepthProbe
+    )
+  ) {
+    throw new Error('RECOVERY_ARCHIVE_ROUTER_DATABASE_RUNTIME_MISMATCH')
+  }
 
   router.get('/bases', async (req: Request, res: Response) => {
     try {
@@ -10533,12 +10552,46 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       return hasFullTableReadAccess(req, query, sheetId, access, capabilities)
     }
 
+  type RecoveryArchiveRouteDatabase = Pick<
+    RecoveryArchiveRouterDatabaseRuntime,
+    'transaction' | 'query'
+  >
+  const recoveryArchiveRestoreTransaction: RecoveryArchiveRestoreJobTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      ))
+    })
+  const recoveryArchiveCatalogTransaction: RecoveryArchiveCatalogTransaction =
+    injectedRecoveryArchiveDatabase?.transaction ?? (async (work) => {
+      const pool = poolManager.get()
+      return pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveCatalogQuery)
+      ))
+    })
+  const resolveRecoveryArchiveAutocommitQuery = (): RecoveryArchiveRestoreJobQuery => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase.query
+    const pool = poolManager.get()
+    return pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery
+  }
+  const resolveRecoveryArchiveContextDatabase = (): RecoveryArchiveRouteDatabase => {
+    if (injectedRecoveryArchiveDatabase) return injectedRecoveryArchiveDatabase
+    const pool = poolManager.get()
+    return {
+      query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+      transaction: async (work) => pool.transaction(async ({ query }) => (
+        work(query as unknown as RecoveryArchiveRestoreJobQuery)
+      )),
+    }
+  }
+
   const resolveRecoveryArchiveRestoreOwnerContext = async (
     req: Request,
     sheetId: string,
   ): Promise<RecoveryArchiveRestoreOwnerContextResolution> => {
-    const pool = poolManager.get()
-    const query = pool.query.bind(pool) as unknown as TrustCheckpointQueryFn
+    const database = resolveRecoveryArchiveContextDatabase()
+    const query = database.query as TrustCheckpointQueryFn
     const { access, capabilities } = await resolveRecoverySheetAuthority(req, query, sheetId)
     if (!access.userId) return { ok: false, status: 401, code: 'UNAUTHENTICATED' }
     if (!capabilities.canManageSheetAccess) return { ok: false, status: 403, code: 'FORBIDDEN' }
@@ -10566,7 +10619,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     }
     const actorId = access.userId
     const evaluatePlanAuthorization = makePlanAuthorization(req, sheetId)
-    const mutationObserver = createRecoveryMutationObserver(req, pool, sheetId, actorId)
+    const mutationObserver = createRecoveryMutationObserver(req, database, sheetId, actorId)
     return {
       ok: true,
       context: {
@@ -10618,19 +10671,6 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         },
       },
     }
-  }
-
-  const recoveryArchiveRestoreTransaction: RecoveryArchiveRestoreJobTransaction = async (work) => {
-    const pool = poolManager.get()
-    return pool.transaction(async ({ query }) => (
-      work(query as unknown as RecoveryArchiveRestoreJobQuery)
-    ))
-  }
-  const recoveryArchiveCatalogTransaction: RecoveryArchiveCatalogTransaction = async (work) => {
-    const pool = poolManager.get()
-    return pool.transaction(async ({ query }) => (
-      work(query as unknown as RecoveryArchiveCatalogQuery)
-    ))
   }
 
   const makeAuthorizationStabilizer = () =>
@@ -10822,11 +10862,11 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
   }
 
   /** Best-effort provenance-aware retention sweep — ambiguous/legacy burns are never eligible. */
-  const bestEffortPruneRecoveryBurns = async (pool: ReturnType<typeof poolManager.get>) => {
+  const bestEffortPruneRecoveryBurns = async (
+    transaction: RecoveryArchiveRestoreJobTransaction,
+  ) => {
     try {
-      await pruneEligibleRecoveryTokenBurns((work) => pool.transaction(async ({ query }) => (
-        work(query as unknown as RecoveryArchiveRestoreJobQuery)
-      )))
+      await pruneEligibleRecoveryTokenBurns(transaction)
     } catch (err) {
       console.warn('[univer-meta] recovery token burn prune failed (non-fatal):', err)
     }
@@ -10856,7 +10896,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
    */
   const runRecoveryPostCommitSideEffects = async (
     req: Request,
-    pool: ReturnType<typeof poolManager.get>,
+    query: QueryFn,
     sheetId: string,
     actorId: string,
     appliedReverts: AppliedRevertFact[],
@@ -10865,8 +10905,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     const formulaByRecord = new Map<string, Record<string, unknown>>()
     let relatedRecords: RelatedComputedRecord[] = []
     try {
-      const helpers = createRecordWriteHelpers(req, pool)
-      const query = pool.query.bind(pool) as QueryFn
+      const helpers = createRecordWriteHelpers(req, { query })
       const fields = (await loadFieldsForSheet(query, sheetId)) as UniverMetaField[]
       const recordIds = appliedReverts.map((r) => r.recordId)
       const changedFieldIds = [...new Set(appliedReverts.flatMap((r) => r.fieldIds))]
@@ -10928,7 +10967,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     for (const r of appliedReverts) {
       await notifyRecordSubscribersBestEffort(
-        pool.query.bind(pool) as QueryFn,
+        query,
         { sheetId, recordId: r.recordId, eventType: 'record.updated', actorId, revisionId: r.revisionId },
         'exact-anchor-recovery',
       )
@@ -10988,7 +11027,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
   const createRecoveryMutationObserver = (
     req: Request,
-    pool: ReturnType<typeof poolManager.get>,
+    database: RecoveryArchiveRouteDatabase,
     sheetId: string,
     actorId: string,
   ) => {
@@ -11039,7 +11078,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       try {
         const side = await runRecoveryPostCommitSideEffects(
           req,
-          pool,
+          database.query,
           sheetId,
           actorId,
           appliedReverts,
@@ -11061,7 +11100,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           }
         }
         await bestEffortYjsInvalidate([...new Set([...side.yjsRecordIds, ...appliedDeleteIds])])
-        void bestEffortPruneRecoveryBurns(pool)
+        void bestEffortPruneRecoveryBurns(database.transaction)
       } catch (error) {
         console.warn('[univer-meta] exact-anchor recovery post-commit side effects failed (non-fatal):', error)
       }
@@ -11261,7 +11300,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
 
       const actorId = access.userId
-      const mutationObserver = createRecoveryMutationObserver(req, pool, sheetId, actorId)
+      const mutationObserver = createRecoveryMutationObserver(req, {
+        query: pool.query.bind(pool) as unknown as RecoveryArchiveRestoreJobQuery,
+        transaction: async (work) => pool.transaction(async ({ query }) => (
+          work(query as unknown as RecoveryArchiveRestoreJobQuery)
+        )),
+      }, sheetId, actorId)
       const result = await executeExactAnchorRecoveryApply(
         (fn) => pool.transaction(async ({ query }) => fn(query as unknown as TrustCheckpointQueryFn)),
         {
@@ -11327,18 +11371,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
     service: {
       preview: options.recoveryArchiveRuntime
-        ? (context, input) => {
-            const pool = poolManager.get()
-            return previewRecoveryArchive(
-              recoveryArchiveCatalogTransaction,
-              pool.query.bind(pool) as unknown as RecoveryArchiveCatalogQuery,
-              options.recoveryArchiveRuntime,
-              {
-                ...context,
-                ...input,
-              },
-            )
-          }
+        ? (context, input) => previewRecoveryArchive(
+            recoveryArchiveCatalogTransaction,
+            resolveRecoveryArchiveAutocommitQuery(),
+            options.recoveryArchiveRuntime,
+            {
+              ...context,
+              ...input,
+            },
+          )
         : undefined,
       executeSync:
         options.recoveryArchiveRuntime &&
@@ -11350,10 +11391,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
                   'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE',
                 )
               }
-              const pool = poolManager.get()
               const result = await executeRecoveryArchiveSync(
                 recoveryArchiveRestoreTransaction,
-                pool.query.bind(pool) as unknown as RecoveryArchiveCatalogQuery,
+                resolveRecoveryArchiveAutocommitQuery(),
                 options.recoveryArchiveRuntime,
                 {
                   workspaceId: context.workspaceId,
