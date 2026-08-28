@@ -1091,6 +1091,7 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
   const state = snapshot.state as RecoveryArchiveJobState
   const isTerminal = state === 'done' || state === 'abandoned_partial' || state === 'cancelled_zero_write'
   return (isTerminal ? snapshot.terminalAt !== null : snapshot.terminalAt === null)
+    && BigInt(snapshot.totalCount) > 5000n
     && BigInt(snapshot.completedCount) <= BigInt(snapshot.totalCount)
     && (state !== 'done' || snapshot.completedCount === snapshot.totalCount)
     && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
