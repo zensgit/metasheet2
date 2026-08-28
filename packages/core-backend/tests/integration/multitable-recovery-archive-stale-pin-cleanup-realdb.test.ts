@@ -4,6 +4,7 @@ import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
+import * as claimAnchorMigration from '../../src/db/migrations/zzzz20260828126000_amend_recovery_archive_claim_anchor'
 import * as stagingCleanupMigration from '../../src/db/migrations/zzzz20260826121000_add_recovery_archive_staging_cleanup_protocol'
 import * as sourcePinAuthorityMigration from '../../src/db/migrations/zzzz20260828124000_add_recovery_archive_source_pin_authority'
 import {
@@ -66,6 +67,8 @@ type DatabaseError = Error & {
 let pool: Pool
 let db: Kysely<unknown>
 let schemaIsUp = false
+let sourcePinIsUp = true
+let claimAnchorIsUp = true
 let keyRegistryIsUp = false
 
 const q = (text: string, values?: unknown[]) => pool.query(text, values)
@@ -328,6 +331,21 @@ async function truncateCatalog(): Promise<void> {
   )
 }
 
+async function restoreFinalSchema(): Promise<void> {
+  if (!schemaIsUp) {
+    await stagingCleanupMigration.up(db)
+    schemaIsUp = true
+  }
+  if (!sourcePinIsUp) {
+    await sourcePinAuthorityMigration.up(db)
+    sourcePinIsUp = true
+  }
+  if (!claimAnchorIsUp) {
+    await claimAnchorMigration.up(db)
+    claimAnchorIsUp = true
+  }
+}
+
 async function provisionFixtureKeyIfRequired(): Promise<void> {
   const surface = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_keys') IS NOT NULL AS present`,
@@ -363,6 +381,8 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     await installCleanupProtocolIfAbsent()
     await truncateCatalog()
     await provisionFixtureKeyIfRequired()
+    sourcePinIsUp = true
+    claimAnchorIsUp = true
 
     await q(
       `INSERT INTO meta_bases (id, name, workspace_id)
@@ -384,13 +404,14 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   afterEach(async () => {
+    await restoreFinalSchema()
     await q('DELETE FROM multitable_attachments WHERE sheet_id=$1', [SHEET])
     await truncateCatalog()
   })
 
   afterAll(async () => {
     try {
-      if (!schemaIsUp) await stagingCleanupMigration.up(db)
+      await restoreFinalSchema()
       await truncateCatalog()
       await q(
         `DELETE FROM meta_history_trust_checkpoints WHERE id=$1`,
@@ -1020,7 +1041,10 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     expect(refusal.message).toBe('recovery_archive_staging_cleanup_nonempty')
 
     await truncateCatalog()
+    await claimAnchorMigration.down(db)
+    claimAnchorIsUp = false
     await sourcePinAuthorityMigration.down(db)
+    sourcePinIsUp = false
     await stagingCleanupMigration.down(db)
     schemaIsUp = false
     const absent = await q(
@@ -1036,8 +1060,11 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
     expect(absent.rows).toEqual([{ staging_absent: true, cleanup_column_absent: true }])
 
     await stagingCleanupMigration.up(db)
-    await sourcePinAuthorityMigration.up(db)
     schemaIsUp = true
+    await sourcePinAuthorityMigration.up(db)
+    sourcePinIsUp = true
+    await claimAnchorMigration.up(db)
+    claimAnchorIsUp = true
     const restored = await q(
       `SELECT
          pg_catalog.to_regclass('public.meta_recovery_archive_staging_objects') IS NOT NULL AS staging_present,
@@ -1062,6 +1089,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   test('up fails loud when the exact D2a attachment guard source drifts', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
+        await claimAnchorMigration.down(trx)
         await stagingCleanupMigration.down(trx)
         await sql`
           CREATE OR REPLACE FUNCTION public.meta_recovery_archive_attachment_ref_guard_row()
@@ -1096,6 +1124,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   test('up fails loud when the load-bearing D2a archive guard source drifts', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
+        await claimAnchorMigration.down(trx)
         await stagingCleanupMigration.down(trx)
         await sql`
           CREATE OR REPLACE FUNCTION public.meta_recovery_archives_guard_row()
@@ -1117,6 +1146,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   test('up fails loud when the D2a attachment finalize trigger is missing', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
+        await claimAnchorMigration.down(trx)
         await stagingCleanupMigration.down(trx)
         await sql`
           DROP TRIGGER trg_meta_recovery_archive_attachment_finalize_guard_row
@@ -1132,6 +1162,7 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   test('up fails loud when a load-bearing D2a posture constraint drifts', async () => {
     const refusal = await errorOf(
       db.transaction().execute(async (trx) => {
+        await claimAnchorMigration.down(trx)
         await stagingCleanupMigration.down(trx)
         await sql`
           ALTER TABLE public.meta_recovery_archives
