@@ -369,6 +369,10 @@ function requireXid(result: QueryResult, xid: string): Record<string, unknown> {
 }
 
 function boundArchiveFromRow(row: Record<string, unknown>): BoundArchive | null {
+  let expiresAt: string | null
+  if (row.expires_at === null) expiresAt = null
+  else if (typeof row.expires_at === 'string') expiresAt = row.expires_at
+  else return null
   if (
     typeof row.workspace_id !== 'string'
     || typeof row.base_id !== 'string'
@@ -376,7 +380,6 @@ function boundArchiveFromRow(row: Record<string, unknown>): BoundArchive | null 
     || typeof row.generation_id !== 'string'
     || typeof row.key_id !== 'string'
     || (row.state !== 'verified' && row.state !== 'expired')
-    || (row.expires_at !== null && typeof row.expires_at !== 'string')
   ) {
     return null
   }
@@ -387,7 +390,7 @@ function boundArchiveFromRow(row: Record<string, unknown>): BoundArchive | null 
     generationId: row.generation_id,
     keyId: row.key_id,
     state: row.state,
-    expiresAt: row.expires_at,
+    expiresAt,
   }
 }
 
