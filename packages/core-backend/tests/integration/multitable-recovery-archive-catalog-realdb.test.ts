@@ -602,7 +602,8 @@ async function truncateCatalog(): Promise<void> {
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
   )
   const restoreJobTargets = restoreJobsTable.rows[0]?.present
-    ? `meta_recovery_archive_job_chunks,
+    ? `meta_recovery_archive_restore_plans,
+         meta_recovery_archive_job_chunks,
          meta_recovery_archive_sync_receipts,
          meta_recovery_archive_jobs,
          meta_recovery_token_burns,`

@@ -113,10 +113,21 @@ async function truncateCatalog(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const restoreJobsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
+  )
+  const restoreJobTargets = restoreJobsTable.rows[0]?.present
+    ? `meta_recovery_archive_restore_plans,
+         meta_recovery_archive_job_chunks,
+         meta_recovery_archive_sync_receipts,
+         meta_recovery_token_burns,
+         meta_recovery_archive_jobs,`
+    : ''
   await transaction(async ({ query }) => {
     await query('SET LOCAL session_replication_role = replica')
     await query(
       `TRUNCATE TABLE
+         ${restoreJobTargets}
          ${objectTarget}
          meta_recovery_archive_section_bootstrap_markers,
          meta_recovery_archive_snapshot_reservations,

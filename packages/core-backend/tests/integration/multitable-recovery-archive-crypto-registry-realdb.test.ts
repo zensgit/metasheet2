@@ -13,6 +13,12 @@ import {
   toRecoveryArchiveNonceHex,
 } from '../../src/multitable/recovery-archive-crypto'
 import { RECOVERY_ARCHIVE_V1_SECTION_NAMES } from '../../src/multitable/recovery-archive-contract'
+import {
+  attachOwnedPoolTerminationHandler,
+  dropScratchDatabase,
+  formatScratchDropOutcome,
+  type OwnedPoolTerminationHandler,
+} from '../helpers/scratch-database'
 
 const runRealDb = Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
 const describeIfRealDbStep = runRealDb ? describe : describe.skip
@@ -46,7 +52,12 @@ type DatabaseError = Error & { code?: string; detail?: string; where?: string; h
  * makes both the lifecycle and the drift arms deterministic instead of dependent on what the
  * shared CI database happens to already contain.
  */
-type Scratch = { pool: Pool; db: Kysely<unknown>; name: string }
+type Scratch = {
+  pool: Pool
+  db: Kysely<unknown>
+  name: string
+  terminationHandler: OwnedPoolTerminationHandler
+}
 
 let adminPool: Pool
 const scratches: Scratch[] = []
@@ -62,22 +73,24 @@ async function createScratch(label: string): Promise<Scratch> {
   await adminPool.query(`CREATE DATABASE "${name}"`)
   const pool = new Pool({ connectionString: databaseUrlFor(name), max: 4 })
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-  const scratch = { pool, db, name }
+  const scratch = {
+    pool,
+    db,
+    name,
+    terminationHandler: attachOwnedPoolTerminationHandler(pool),
+  }
   scratches.push(scratch)
   return scratch
 }
 
 async function dropScratch(scratch: Scratch): Promise<void> {
-  await scratch.db.destroy().catch(() => {})
-  await scratch.pool.end().catch(() => {})
-  await adminPool
-    .query(
-      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-        WHERE datname = $1 AND pid <> pg_backend_pid()`,
-      [scratch.name],
-    )
-    .catch(() => {})
-  await adminPool.query(`DROP DATABASE IF EXISTS "${scratch.name}"`).catch(() => {})
+  try {
+    await scratch.db.destroy().catch(() => {})
+    const outcome = await dropScratchDatabase(adminPool, scratch.name)
+    console.log(formatScratchDropOutcome('recovery-archive-crypto-registry', outcome))
+  } finally {
+    scratch.terminationHandler.detach()
+  }
 }
 
 async function errorOf(promise: Promise<unknown>): Promise<DatabaseError> {

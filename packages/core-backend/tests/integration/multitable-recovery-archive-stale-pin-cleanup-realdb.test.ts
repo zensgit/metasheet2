@@ -340,9 +340,20 @@ async function truncateCatalog(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const restoreJobsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
+  )
+  const restoreJobTargets = restoreJobsTable.rows[0]?.present
+    ? `meta_recovery_archive_restore_plans,
+         meta_recovery_archive_job_chunks,
+         meta_recovery_archive_sync_receipts,
+         meta_recovery_token_burns,
+         meta_recovery_archive_jobs,`
+    : ''
   if (!legalHoldTarget) {
     await q(
       `TRUNCATE TABLE
+         ${restoreJobTargets}
          ${objectTarget}
          ${reservationTarget}
          meta_recovery_archive_staging_objects,
@@ -356,10 +367,10 @@ async function truncateCatalog(): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query('LOCK TABLE meta_recovery_archive_legal_holds IN ACCESS EXCLUSIVE MODE')
-    await client.query('ALTER TABLE meta_recovery_archive_legal_holds DISABLE TRIGGER USER')
+    await client.query('SET LOCAL session_replication_role = replica')
     await client.query(
       `TRUNCATE TABLE
+         ${restoreJobTargets}
          ${objectTarget}
          ${reservationTarget}
          meta_recovery_archive_staging_objects,
@@ -368,7 +379,6 @@ async function truncateCatalog(): Promise<void> {
          ${legalHoldTarget}
          meta_recovery_archives`,
     )
-    await client.query('ALTER TABLE meta_recovery_archive_legal_holds ENABLE TRIGGER USER')
     await client.query('COMMIT')
   } catch (error) {
     await client.query('ROLLBACK')
