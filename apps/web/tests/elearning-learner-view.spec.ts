@@ -37,6 +37,7 @@ import {
 import ElearningLearnerView from '../src/views/ElearningLearnerView.vue'
 import {
   elearningExamAnswerProgress,
+  elearningExamCountdown,
   elearningLabel,
   elearningLearnerVideoProgressLabel,
   elearningVideoStatusLabel,
@@ -218,6 +219,33 @@ function watchState(over: Record<string, unknown> = {}) {
   }
 }
 
+function examStartResult(over: Record<string, unknown> = {}) {
+  return {
+    attemptId: ATTEMPT,
+    attemptNo: 1,
+    status: 'started',
+    duplicate: false,
+    deadlineAt: null,
+    paper: {
+      domain: 'elearning.exam.paper.v1',
+      version: 1,
+      questions: [{
+        position: 1,
+        questionRevisionId: Q1,
+        questionType: 'single_choice',
+        prompt: 'Pick one',
+        options: [
+          { id: 'a', text: 'alpha' },
+          { id: 'b', text: 'beta' },
+        ],
+        points: 10,
+      }],
+    },
+    answers: { [Q1]: [] },
+    ...over,
+  }
+}
+
 function v01Capabilities(over: Record<string, unknown> = {}, flags: Record<string, unknown> = {}) {
   return {
     enabled: true,
@@ -266,50 +294,10 @@ describe('ElearningLearnerView', () => {
       lastClientPositionMs: body.positionMs,
       status: 'in_progress',
     }))
-    h.startExam.mockResolvedValue({
-      attemptId: ATTEMPT,
-      attemptNo: 1,
-      status: 'started',
-      duplicate: false,
-      paper: {
-        domain: 'elearning.exam.paper.v1',
-        version: 1,
-        questions: [{
-          position: 1,
-          questionRevisionId: Q1,
-          questionType: 'single_choice',
-          prompt: 'Pick one',
-          options: [
-            { id: 'a', text: 'alpha' },
-            { id: 'b', text: 'beta' },
-          ],
-          points: 10,
-        }],
-      },
-      answers: { [Q1]: [] },
-    })
-    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => ({
-      attemptId: ATTEMPT,
-      attemptNo: 1,
-      status: 'started',
-      duplicate: false,
-      paper: {
-        domain: 'elearning.exam.paper.v1',
-        version: 1,
-        questions: [{
-          position: 1,
-          questionRevisionId: Q1,
-          questionType: 'single_choice',
-          prompt: 'Pick one',
-          options: [
-            { id: 'a', text: 'alpha' },
-            { id: 'b', text: 'beta' },
-          ],
-          points: 10,
-        }],
-      },
-      answers,
-    }))
+    h.startExam.mockResolvedValue(examStartResult())
+    h.saveExam.mockImplementation(async (_attemptId: string, answers: Record<string, string[]>) => (
+      examStartResult({ answers })
+    ))
     h.submitExam.mockResolvedValue({
       attemptId: ATTEMPT,
       attemptNo: 1,
@@ -1307,6 +1295,235 @@ describe('ElearningLearnerView', () => {
     expect((root.querySelector('input[value="a"]') as HTMLInputElement).checked).toBe(true)
     expect((root.querySelector('input[value="c"]') as HTMLInputElement).checked).toBe(true)
     expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('renders an accessible countdown while keeping local zero display-only', async () => {
+    const now = new Date('2026-08-26T09:00:00.000Z')
+    const deadlineAt = new Date(now.getTime() + 65_000).toISOString()
+    vi.setSystemTime(now)
+    expect(elearningExamCountdown(65_000, false)).toBe('Time remaining 00:01:05')
+    expect(elearningExamCountdown(-1, true)).toBe('剩余时间 00:00:00')
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockResolvedValue(examStartResult({ deadlineAt }))
+    h.saveExam.mockImplementation(async (_attempt: string, savedAnswers: Record<string, string[]>) => (
+      examStartResult({ deadlineAt, answers: savedAnswers })
+    ))
+
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+
+    const countdown = () => root.querySelector('[data-testid="elearning-exam-countdown"]') as HTMLElement | null
+    expect(countdown()?.textContent).toBe('剩余时间 00:01:05')
+    expect(countdown()?.getAttribute('role')).toBe('timer')
+    expect(countdown()?.getAttribute('aria-live')).toBe('polite')
+    expect(countdown()?.getAttribute('aria-label')).toBe('剩余时间 00:01:05')
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushUi()
+    expect(countdown()?.textContent).toBe('剩余时间 00:01:04')
+    await vi.advanceTimersByTimeAsync(64_000)
+    await flushUi()
+    expect(countdown()?.textContent).toBe('剩余时间 00:00:00')
+    expect(h.submitExam).not.toHaveBeenCalled()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(false)
+
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    const submit = root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+    expect(h.submitExam).not.toHaveBeenCalled()
+    submit.click()
+    await flushUntil(() => h.submitExam.mock.calls.length === 1)
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-result"]')).not.toBeNull()
+  })
+
+  it('does not render or schedule a countdown for an untimed attempt', async () => {
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')).toBeNull()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('replaces the prior exam timer and clears it on unmount', async () => {
+    const now = new Date('2026-08-26T09:00:00.000Z')
+    vi.setSystemTime(now)
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam
+      .mockResolvedValueOnce(examStartResult({
+        deadlineAt: new Date(now.getTime() + 60_000).toISOString(),
+      }))
+      .mockResolvedValueOnce(examStartResult({
+        attemptId: ATTEMPT_B,
+        deadlineAt: new Date(now.getTime() + 120_000).toISOString(),
+      }))
+    const root = mountView()
+    await flushUi()
+    const start = courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam')
+    start.click()
+    await flushUi()
+    expect(vi.getTimerCount()).toBe(1)
+    start.click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(1)
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')?.textContent)
+      .toBe('剩余时间 00:02:00')
+
+    app?.unmount()
+    app = null
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('locks the attempt, drops a queued draft, and preserves the server-expiry message', async () => {
+    let rejectSave!: (error: unknown) => void
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockResolvedValue(examStartResult({
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }))
+    h.saveExam.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectSave = reject
+    }))
+
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    selectOption(root, 'b')
+    await flushUi()
+    expect(h.saveExam).toHaveBeenCalledTimes(1)
+
+    rejectSave(new ElearningApiError('attempt_expired', 409))
+    await flushUntil(() => (
+      root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? ''
+    ).includes('服务端已结束本次限时考试'))
+    await flushUi()
+    expect(h.saveExam).toHaveBeenCalledTimes(1)
+    expect(h.list).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toBe('服务端已结束本次限时考试，答卷已锁定。')
+    expect((root.querySelector('input[value="b"]') as HTMLInputElement).disabled).toBe(true)
+    expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(true)
+
+    h.startExam.mockResolvedValueOnce(examStartResult({
+      attemptId: ATTEMPT_B,
+      attemptNo: 2,
+    }))
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUntil(() => h.startExam.mock.calls.length === 2)
+    await flushUi()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(false)
+    expect((root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('aborts switching exams when the drained draft expires on the server', async () => {
+    const examItemB = '45454545-4545-4454-8454-454545454545'
+    let rejectSave!: (error: unknown) => void
+    h.list.mockResolvedValue({
+      courses: [
+        completedVideoCourse(),
+        completedVideoCourse({
+          courseId: COURSE_DONE,
+          exam: { itemId: examItemB, latestAttempt: null },
+        }),
+      ],
+    })
+    h.startExam.mockResolvedValue(examStartResult({
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    }))
+    h.saveExam.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectSave = reject
+    }))
+
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    courseQuery<HTMLButtonElement>(root, COURSE_DONE, 'elearning-start-exam').click()
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+
+    rejectSave(new ElearningApiError('attempt_expired', 409))
+    await flushUntil(() => h.list.mock.calls.length === 2)
+    await flushUi()
+    expect(h.startExam).toHaveBeenCalledTimes(1)
+    expect(courseEl(root, COURSE).querySelector('[data-testid="elearning-exam-form"]')).not.toBeNull()
+    expect(courseEl(root, COURSE_DONE).querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(true)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toBe('服务端已结束本次限时考试，答卷已锁定。')
+  })
+
+  it('treats submit expiry as authoritative and refreshes without exposing raw error data', async () => {
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString()
+    h.list.mockResolvedValue({ courses: [completedVideoCourse()] })
+    h.startExam.mockResolvedValue(examStartResult({ deadlineAt }))
+    h.saveExam.mockImplementation(async (_attempt: string, savedAnswers: Record<string, string[]>) => (
+      examStartResult({ deadlineAt, answers: savedAnswers })
+    ))
+    h.submitExam.mockRejectedValue(new ElearningApiError('attempt_expired', 409))
+
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUi()
+    selectOption(root, 'a')
+    await flushUntil(() => h.saveExam.mock.calls.length === 1)
+    const submit = root.querySelector('[data-testid="elearning-submit-exam"]') as HTMLButtonElement
+    submit.click()
+    await flushUntil(() => h.submitExam.mock.calls.length === 1)
+    await flushUi()
+
+    expect(h.list).toHaveBeenCalledTimes(2)
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toBe('服务端已结束本次限时考试，答卷已锁定。')
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .not.toContain('attempt_expired')
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')).toBeNull()
+    expect((root.querySelector('input[value="a"]') as HTMLInputElement).disabled).toBe(true)
+    expect(submit.disabled).toBe(true)
+  })
+
+  it('shows a localized expiry from start and refreshes only when a listed attempt exists', async () => {
+    h.list.mockResolvedValue({
+      courses: [completedVideoCourse({
+        exam: {
+          itemId: EXAM_ITEM,
+          latestAttempt: {
+            attemptId: ATTEMPT,
+            attemptNo: 1,
+            status: 'started',
+            autoScore: null,
+            totalScore: null,
+            passed: null,
+            startedAt: '2026-08-26T09:00:00.000Z',
+            submittedAt: null,
+            gradedAt: null,
+          },
+        },
+      })],
+    })
+    h.startExam.mockRejectedValue(new ElearningApiError('attempt_expired', 409))
+    const root = mountView()
+    await flushUi()
+    courseQuery<HTMLButtonElement>(root, COURSE, 'elearning-start-exam').click()
+    await flushUntil(() => h.list.mock.calls.length === 2)
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent)
+      .toBe('服务端已结束本次限时考试，答卷已锁定。')
+    expect(root.querySelector('[data-testid="elearning-exam-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-exam-countdown"]')).toBeNull()
   })
 
   it('serializes slow draft saves so an older request cannot overwrite a newer change', async () => {
