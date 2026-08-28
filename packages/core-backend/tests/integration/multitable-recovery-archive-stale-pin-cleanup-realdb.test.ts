@@ -1061,6 +1061,21 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
   })
 
   test('down refuses durable cleanup state and an empty down/up replay restores the protocol', async () => {
+    const claimAnchorBefore = await q(
+      `SELECT
+         trigger_row.tgname AS trigger_name,
+         trigger_row.tgenabled AS trigger_enabled,
+         procedure_row.proname AS procedure_name,
+         pg_catalog.md5(procedure_row.prosrc) AS procedure_md5
+       FROM pg_catalog.pg_trigger trigger_row
+       JOIN pg_catalog.pg_class relation ON relation.oid=trigger_row.tgrelid
+       JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid=trigger_row.tgfoid
+      WHERE relation.oid='public.meta_recovery_archives'::pg_catalog.regclass
+        AND trigger_row.tgname='trg_meta_recovery_archives_claim_anchor_guard_row'
+        AND NOT trigger_row.tgisinternal`,
+    )
+    expect(claimAnchorBefore.rows).toHaveLength(1)
+
     const generationId = await insertArchive()
     await insertStagingAttachment(generationId, `${PREFIX}_attachment_down`)
     const refusal = await errorOf(stagingCleanupMigration.down(db))
@@ -1110,6 +1125,21 @@ describeIfRealDbStep('Phase D2b abandoned source-pin cleanup protocol (real DB)'
         attachment_guard: 'meta_recovery_archive_attachment_ref_cleanup_guard_row',
       },
     ])
+
+    const claimAnchorAfter = await q(
+      `SELECT
+         trigger_row.tgname AS trigger_name,
+         trigger_row.tgenabled AS trigger_enabled,
+         procedure_row.proname AS procedure_name,
+         pg_catalog.md5(procedure_row.prosrc) AS procedure_md5
+       FROM pg_catalog.pg_trigger trigger_row
+       JOIN pg_catalog.pg_class relation ON relation.oid=trigger_row.tgrelid
+       JOIN pg_catalog.pg_proc procedure_row ON procedure_row.oid=trigger_row.tgfoid
+      WHERE relation.oid='public.meta_recovery_archives'::pg_catalog.regclass
+        AND trigger_row.tgname='trg_meta_recovery_archives_claim_anchor_guard_row'
+        AND NOT trigger_row.tgisinternal`,
+    )
+    expect(claimAnchorAfter.rows).toEqual(claimAnchorBefore.rows)
   })
 
   test('up fails loud when the exact D2a attachment guard source drifts', async () => {
