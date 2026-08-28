@@ -456,12 +456,14 @@ async function withArchiveTransaction<T>(work: (query: ArchiveQuery) => Promise<
 }
 
 async function expireArchiveWithLegalHoldAuthority(generationId: string) {
-  return withArchiveTransaction((query) => expireRecoveryArchiveAfterLegalHoldCheck(query, {
-    workspaceId: WORKSPACE,
-    baseId: BASE,
-    sheetId: SHEET,
-    generationId,
-  }))
+  return withArchiveTransaction((query) =>
+    expireRecoveryArchiveAfterLegalHoldCheck(query, {
+      workspaceId: WORKSPACE,
+      baseId: BASE,
+      sheetId: SHEET,
+      generationId,
+    }),
+  )
 }
 
 async function insertCoverage(
