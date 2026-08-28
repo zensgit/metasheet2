@@ -1,9 +1,11 @@
 # Time Machine Phase D2-D7 development report
 
-**Status:** DRAFT / HOLD. Published for review as Draft PR #5305. The final
-code-bearing exact head passed its remote matrix; the report-only refresh still
-requires its own exact-head checks. The PR is not merge-ready, not deployed, no
-flag is enabled, and production was not accessed.
+**Status:** DRAFT / HOLD. Published for review as Draft PR #5305. The product
+code head passed its remote matrix. A later report-only matrix exposed an
+unhandled scratch-database teardown race in one D2 real-DB test; the test harness
+has been moved to the shared drain/drop authority and the refreshed report
+carrier still requires its own exact-head checks. The PR is not merge-ready, not
+deployed, no flag is enabled, and production was not accessed.
 
 **Design authority:**
 `multitable-timemachine-phase-d1-durable-archive-design-lock-20260826.md`.
@@ -29,9 +31,11 @@ flag is enabled, and production was not accessed.
 | backend-aligned job-list scalar semantics | `6e4a0ee4e7` |
 | final job-list wire semantics | `6beed608f3` |
 | timestamp-type mutation discrimination | `73d3187c8b` |
-| final code-bearing head before report refresh | `73d3187c8b6be375c710ce38a92c42468c74c458` |
-| final code-bearing tree | `eb16faa33b49bcb4e7727bc5917a24a726d43254` |
-| code-head remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
+| final product-code head | `73d3187c8b6be375c710ce38a92c42468c74c458` |
+| final product-code tree | `eb16faa33b49bcb4e7727bc5917a24a726d43254` |
+| product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
+| key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
+| final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
 
 The integration merge is a true two-parent merge of the final source evidence
 head and refreshed `origin/main`; both are ancestors. Later commits close durable
@@ -170,6 +174,14 @@ not reveal. They were fixed on the same branch before closeout:
    boundary `totalCount > 5000` and rejects numeric JSON primitives instead of
    coercing them. `73d3187c8b` makes both numeric timestamp negatives independently
    mutation-discriminating. Malformed entries can no longer become false absence.
+4. The first report-only matrix ran all 2,679 multitable tests successfully but
+   exited non-zero on one unhandled PostgreSQL `57P01` during scratch teardown.
+   The error was traced to the D2 key-registry test's ad hoc immediate backend
+   termination, not a failed product assertion. `e19b65041d` moves that suite to
+   the existing owned-pool termination handler and fail-closed scratch drain/drop
+   helper. The exact file then passed four consecutive real-DB runs at **10/10**,
+   every drop reported `scratchDrain=CLEAN residualBackends=0`, and the final
+   database-prefix residue was zero.
 
 ## 3. Architecture boundaries preserved
 
@@ -197,7 +209,7 @@ These are real residuals, not documentation polish:
 | worker-stop rejection branch is not exercised by the canonical loop | the loop contains tick failures; bounding a genuinely stuck in-flight stop remains a disclosed follow-up |
 | catalog-list malformed `2xx` still maps to an empty read-only catalog | unlike durable job discovery, this older display path remains fail-open and must not be cited as absence evidence |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| Draft PR code-head remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure`; report-only head still requires its own checks |
+| Draft PR product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure`; the post-cleanup report carrier still requires its own checks |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.

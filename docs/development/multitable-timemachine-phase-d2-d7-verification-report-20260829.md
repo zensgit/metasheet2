@@ -18,9 +18,11 @@ merge, staging, flag, deployment, or production acceptance claim.
 | current-main integration merge | `023f5e793305401fbfdbe05d81ac9db90b1b2838` |
 | durable job rediscovery | `05d176c21d` |
 | runtime implementation before first reports | `bb12c9264ab9948312826fdb56ffb30abbad8a9c` |
-| final code-bearing head before report refresh | `73d3187c8b6be375c710ce38a92c42468c74c458` |
-| final code-bearing tree | `eb16faa33b49bcb4e7727bc5917a24a726d43254` |
-| code-head remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
+| final product-code head | `73d3187c8b6be375c710ce38a92c42468c74c458` |
+| final product-code tree | `eb16faa33b49bcb4e7727bc5917a24a726d43254` |
+| product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
+| key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
+| final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
 | flags | unchanged and OFF |
 | production | not accessed |
 
@@ -77,6 +79,14 @@ Remote verification was treated as evidence, not ceremony:
 4. The final code-head remote matrix reached **48 SUCCESS / 1 intentional
    SKIPPED / 0 failure**. Node 20's full multitable step executed all 14 archive
    files and 279 tests with **0 skipped** in that archive roster.
+5. A later report-only matrix passed all **259 files / 2,679 tests** in the same
+   full multitable step, then failed on one unhandled `57P01` while the D2
+   key-registry scratch database was being dropped. The suite still used an ad
+   hoc terminate-and-drop path that could kill a pool connection during its
+   close event. `e19b65041d` adopts the shared owned-pool termination handler and
+   fail-closed drain/drop helper. Four consecutive targeted real-DB runs passed
+   **10/10** each, every scratch drop was `CLEAN` with zero residual backends,
+   and the final `tm_d2key_%` residue count was zero.
 
 ## 2. D7 local commands and results
 
@@ -342,9 +352,9 @@ owner/provider or staging/production proof:
 - staging fault/storage/KMS runbook execution: not performed;
 - true OS-process restart: not performed;
 - current-main local integration and exact-worktree gates: passed;
-- Draft PR #5305 code-head matrix: `48 SUCCESS / 1 intentional SKIPPED /
+- Draft PR #5305 product-code matrix: `48 SUCCESS / 1 intentional SKIPPED /
   0 failure` at `73d3187c8b`;
-- the report-only carrier commit must independently pass its exact-head checks
+- the post-cleanup report carrier must independently pass its exact-head checks
   before owner review;
 - flags: OFF;
 - production: untouched.
