@@ -1789,6 +1789,46 @@ describe("Phase D2h reservation before encryption and upload", () => {
     expect(Object.isFrozen(result.binding)).toBe(true);
   });
 
+  test("retains wrappedDek through a defensive-copy getter while scrubbing the raw DEK", async () => {
+    let issuedWrapped: Uint8Array | undefined;
+    const custody = createTestCustody({
+      dekResult: (issued) => {
+        issuedWrapped = Buffer.from(issued.wrappedDek);
+        return issued;
+      },
+    });
+    const result = await reserveThenSealRecoveryArchiveSections({
+      binding: generationBinding(),
+      keyCustody: custody,
+      transactionDepth: depthProbe(0),
+      dekSource: { kind: "produce" },
+      sections: fullSnapshotSections(),
+      reserveNonces: async () => {},
+    });
+
+    const descriptor = Object.getOwnPropertyDescriptor(result, "wrappedDek");
+    expect(descriptor?.enumerable).toBe(true);
+    expect(typeof descriptor?.get).toBe("function");
+    expect(descriptor && "value" in descriptor).toBe(false);
+    expect(issuedWrapped).toBeDefined();
+    expect(Uint8Array.from(result.wrappedDek)).toEqual(
+      Uint8Array.from(issuedWrapped ?? new Uint8Array()),
+    );
+    expect(result.wrappedDek).not.toBe(issuedWrapped);
+    const firstRead = result.wrappedDek;
+    firstRead.fill(0);
+    expect(Uint8Array.from(result.wrappedDek)).toEqual(
+      Uint8Array.from(issuedWrapped ?? new Uint8Array()),
+    );
+    expect(custody.issued).toHaveLength(1);
+    expect(
+      Buffer.from(custody.issued[0] ?? []).equals(
+        Buffer.alloc(RECOVERY_ARCHIVE_AEAD_KEY_BYTES),
+      ),
+    ).toBe(true);
+    expect(result).not.toHaveProperty("dek");
+  });
+
   test("snapshots one stable binding before any async adapter call", async () => {
     const mutableBinding = generationBinding();
     const expectedBinding = { ...mutableBinding };

@@ -12,7 +12,6 @@ import { createHash } from 'node:crypto'
 import {
   RECOVERY_ARCHIVE_FORMAT_VERSION,
   RECOVERY_ARCHIVE_V1_SECTION_NAMES,
-  type RecoveryArchiveSectionName,
 } from './recovery-archive-contract'
 import {
   buildRecoveryArchiveManifestMacPreimage,
@@ -29,6 +28,7 @@ import {
   type RecoveryArchiveManifest,
   type RecoveryArchiveManifestBody,
 } from './recovery-archive-manifest'
+import { buildRecoveryArchiveManifestObjectEnvelope } from './recovery-archive-manifest-object-envelope'
 import type {
   RecoveryArchiveSealedSnapshotManifestResult,
   RecoveryArchiveSealedSnapshotSection,
@@ -41,6 +41,7 @@ const SEALED_MANIFEST_KEYS = [
   'manifest',
   'manifestJson',
   'sealedSections',
+  'wrappedDek',
 ] as const
 const SEALED_SECTION_KEYS = [
   'aeadAlgorithm',
@@ -83,6 +84,10 @@ export interface RecoveryArchiveAuthenticatedManifestResult {
   readonly manifestMacBytes: Uint8Array
   readonly macPreimage: Uint8Array
   readonly sealedSections: readonly RecoveryArchiveSealedSnapshotSection[]
+  /** Canonical v1 envelope bytes. Emitted only after the manifest/root MAC is attached. */
+  readonly envelopeBytes: Uint8Array
+  /** Lowercase SHA-256 of `envelopeBytes`, suitable for the existing manifest object descriptor. */
+  readonly envelopeSha256: string
 }
 
 type SnapshotBundle = {
@@ -91,6 +96,7 @@ type SnapshotBundle = {
   readonly manifestJson: string
   readonly macPreimage: Uint8Array
   readonly sealedSections: readonly RecoveryArchiveSealedSnapshotSection[]
+  readonly wrappedDek: Uint8Array
   readonly keyId: string
 }
 
@@ -154,6 +160,15 @@ export async function authenticateRecoveryArchiveSealedSnapshotManifest(
     fail('RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_BINDING_MISMATCH')
   }
 
+  const envelope = callClosed(
+    'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_BINDING_MISMATCH',
+    () =>
+      buildRecoveryArchiveManifestObjectEnvelope({
+        manifestJson,
+        wrappedDek: snapshot.wrappedDek,
+      }),
+  )
+
   return createResult({
     manifest: signedManifest,
     bodyJson: snapshot.bodyJson,
@@ -161,6 +176,8 @@ export async function authenticateRecoveryArchiveSealedSnapshotManifest(
     manifestMacBytes: manifestMac,
     macPreimage: snapshot.macPreimage,
     sealedSections: snapshot.sealedSections,
+    envelopeBytes: envelope.envelopeBytes,
+    envelopeSha256: envelope.envelopeSha256,
   })
 }
 
@@ -169,7 +186,7 @@ function snapshotUnsignedBundle(value: unknown): SnapshotBundle {
     value,
     SEALED_MANIFEST_KEYS,
     'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_INVALID_UNSIGNED_MANIFEST',
-    new Set(['macPreimage']),
+    new Set(['macPreimage', 'wrappedDek']),
   )
   const manifest = callClosed(
     'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_INVALID_UNSIGNED_MANIFEST',
@@ -247,6 +264,11 @@ function snapshotUnsignedBundle(value: unknown): SnapshotBundle {
   if (!bytesEqual(suppliedPreimage, expectedPreimage)) {
     fail('RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_BINDING_MISMATCH')
   }
+  const wrappedDek = snapshotBytes(
+    admitted.wrappedDek,
+    undefined,
+    'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_INVALID_UNSIGNED_MANIFEST',
+  )
 
   return Object.freeze({
     manifest: freezeManifest(manifest),
@@ -254,6 +276,7 @@ function snapshotUnsignedBundle(value: unknown): SnapshotBundle {
     manifestJson,
     macPreimage: expectedPreimage,
     sealedSections: sections,
+    wrappedDek,
     keyId: first.key_id,
   })
 }
@@ -353,9 +376,12 @@ function createResult(input: {
   manifestMacBytes: Uint8Array
   macPreimage: Uint8Array
   sealedSections: readonly RecoveryArchiveSealedSnapshotSection[]
+  envelopeBytes: Uint8Array
+  envelopeSha256: string
 }): RecoveryArchiveAuthenticatedManifestResult {
   const manifestMacBytes = new Uint8Array(input.manifestMacBytes)
   const macPreimage = new Uint8Array(input.macPreimage)
+  const envelopeBytes = new Uint8Array(input.envelopeBytes)
   return Object.freeze({
     manifest: freezeManifest(input.manifest),
     bodyJson: input.bodyJson,
@@ -367,6 +393,10 @@ function createResult(input: {
       return new Uint8Array(macPreimage)
     },
     sealedSections: Object.freeze([...input.sealedSections]),
+    get envelopeBytes() {
+      return new Uint8Array(envelopeBytes)
+    },
+    envelopeSha256: input.envelopeSha256,
   })
 }
 

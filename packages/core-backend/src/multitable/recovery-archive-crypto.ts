@@ -1133,6 +1133,11 @@ export interface RecoveryArchiveReserveThenSealResult {
   binding: Readonly<RecoveryArchiveCryptoBinding>;
   dekFingerprint: string;
   wrappedDekId: string;
+  /**
+   * Opaque wrapped-DEK blob required by later `unwrapGenerationDek`. Exposed only through a
+   * defensive-copy getter; the raw DEK is never retained on this result.
+   */
+  readonly wrappedDek: Uint8Array;
   reservations: readonly RecoveryArchiveNonceReservation[];
   sealedSections: readonly RecoveryArchiveSealedSection[];
 }
@@ -1299,13 +1304,22 @@ export async function reserveThenSealRecoveryArchiveSections(
       }
     }
 
-    return {
+    const issuedDek = generationDek as RecoveryArchiveGenerationDek;
+    const wrappedDek = new Uint8Array(issuedDek.wrappedDek);
+    if (wrappedDek.byteLength === 0) {
+      fail("RECOVERY_ARCHIVE_CRYPTO_KEY_CUSTODY_RESULT_INVALID");
+    }
+
+    return Object.freeze({
       binding: sealedBinding,
       dekFingerprint: sealedBinding.dekFingerprint,
       wrappedDekId: sealedBinding.wrappedDekId,
+      get wrappedDek() {
+        return new Uint8Array(wrappedDek);
+      },
       reservations,
       sealedSections,
-    };
+    });
   } finally {
     // Every exit - success, refusal, adapter throw, reservation refusal, seal or provider failure.
     scrubRecoveryArchiveDek(generationDek?.dek);

@@ -50,6 +50,7 @@ const BINDING_KEYS = [
 const SEAL_RESULT_KEYS = [
   'binding',
   'dekFingerprint',
+  'wrappedDek',
   'wrappedDekId',
   'reservations',
   'sealedSections',
@@ -130,6 +131,8 @@ export interface RecoveryArchiveSealedSnapshotManifestResult {
   readonly manifestJson: string
   readonly macPreimage: Uint8Array
   readonly sealedSections: readonly RecoveryArchiveSealedSnapshotSection[]
+  /** Opaque wrapped-DEK bytes snapshotted from the seal result. Never added to the v1 manifest. */
+  readonly wrappedDek: Uint8Array
 }
 
 type NormalizedPlanSection = {
@@ -144,6 +147,7 @@ type NormalizedSealResult = {
   readonly binding: RecoveryArchiveCryptoBinding
   readonly dekFingerprint: string
   readonly wrappedDekId: string
+  readonly wrappedDek: Uint8Array
   readonly reservations: readonly Record<string, unknown>[]
   readonly sealedSections: readonly Record<string, unknown>[]
 }
@@ -208,6 +212,7 @@ export function buildRecoveryArchiveSealedSnapshotManifest(
     bodyJson: built.bodyJson,
     manifestJson: built.manifestJson,
     macPreimage,
+    wrappedDek: sealResult.wrappedDek,
     sealedSections: plan.map((section, index) => {
       const sealed = sealResult.sealedSections[index]
       if (sealed === undefined) {
@@ -303,6 +308,7 @@ function normalizeSealResult(value: unknown): NormalizedSealResult {
     value,
     SEAL_RESULT_KEYS,
     'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
+    new Set(['wrappedDek']),
   )
   const binding = snapshotExactRecord(
     result.binding,
@@ -310,6 +316,14 @@ function normalizeSealResult(value: unknown): NormalizedSealResult {
     'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
   ) as unknown as RecoveryArchiveCryptoBinding
   if (typeof result.dekFingerprint !== 'string' || typeof result.wrappedDekId !== 'string') {
+    fail('RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT')
+  }
+  const wrappedDek = snapshotBytes(
+    result.wrappedDek,
+    undefined,
+    'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
+  )
+  if (wrappedDek.byteLength === 0) {
     fail('RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT')
   }
   const reservations = snapshotDenseArray(
@@ -342,6 +356,7 @@ function normalizeSealResult(value: unknown): NormalizedSealResult {
     binding: Object.freeze(binding),
     dekFingerprint: result.dekFingerprint,
     wrappedDekId: result.wrappedDekId,
+    wrappedDek,
     reservations: Object.freeze(reservations),
     sealedSections: Object.freeze(sealedSections),
   })
@@ -490,9 +505,11 @@ function createResult(input: {
   bodyJson: string
   manifestJson: string
   macPreimage: Uint8Array
+  wrappedDek: Uint8Array
   sealedSections: readonly RecoveryArchiveSealedSnapshotSection[]
 }): RecoveryArchiveSealedSnapshotManifestResult {
   const macPreimage = new Uint8Array(input.macPreimage)
+  const wrappedDek = new Uint8Array(input.wrappedDek)
   const manifest = Object.freeze({
     ...input.manifest,
     sections: Object.freeze(input.manifest.sections.map((section) => Object.freeze({ ...section }))),
@@ -503,6 +520,9 @@ function createResult(input: {
     manifestJson: input.manifestJson,
     get macPreimage() {
       return new Uint8Array(macPreimage)
+    },
+    get wrappedDek() {
+      return new Uint8Array(wrappedDek)
     },
     sealedSections: Object.freeze([...input.sealedSections]),
   })

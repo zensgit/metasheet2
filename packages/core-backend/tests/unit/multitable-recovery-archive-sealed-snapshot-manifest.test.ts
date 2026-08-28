@@ -27,6 +27,7 @@ const KEY_ID = 'kms-key-0001'
 const WRAPPED_DEK_ID = 'wrapped-dek-0001'
 const DEK_FINGERPRINT = 'a'.repeat(64)
 const DEK = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
+const WRAPPED_DEK = Uint8Array.from({ length: 48 }, (_, index) => 200 - index)
 
 const BINDING: RecoveryArchiveManifestBinding = {
   archive_generation_id: 'generation-0001',
@@ -107,6 +108,7 @@ function makeSealResult(
     binding: cryptoBinding,
     dekFingerprint,
     wrappedDekId,
+    wrappedDek: new Uint8Array(WRAPPED_DEK),
     reservations: plan.map((section) => ({
       dekFingerprint,
       nonceHex: toRecoveryArchiveNonceHex(section.nonce),
@@ -216,6 +218,13 @@ describe('buildRecoveryArchiveSealedSnapshotManifest', () => {
     expect(compiled.macPreimage).not.toEqual(firstMacPreimage)
     expect(first.ciphertextSha256).toBe(createHash('sha256').update(expected.ciphertext).digest('hex'))
     expect(first.ciphertextSizeBytes).toBe(String(expected.ciphertext.byteLength))
+
+    const expectedWrappedDek = Uint8Array.from(compiled.wrappedDek)
+    input.sealResult.wrappedDek.fill(0)
+    compiled.wrappedDek.fill(0)
+    expect(compiled.wrappedDek).toEqual(expectedWrappedDek)
+    expect(compiled.wrappedDek).toEqual(WRAPPED_DEK)
+    expect(Object.prototype.hasOwnProperty.call(compiled.manifest, 'wrapped_dek')).toBe(false)
   })
 
   test('refuses a plan whose plaintext hash or bytes are not canonical for its section', () => {
@@ -402,6 +411,22 @@ describe('buildRecoveryArchiveSealedSnapshotManifest', () => {
     const malformed = makeInput()
     expectManifestError(
       () => buildRecoveryArchiveSealedSnapshotManifest({ ...malformed, sealResult: { ...malformed.sealResult, sealedSections: [] } }),
+      'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
+    )
+  })
+
+  test('refuses a missing or empty wrapped-DEK carrier on the seal result', () => {
+    const input = makeInput()
+    const { wrappedDek: _dropped, ...withoutWrappedDek } = input.sealResult as Record<string, unknown>
+    expectManifestError(
+      () => buildRecoveryArchiveSealedSnapshotManifest({ ...input, sealResult: withoutWrappedDek }),
+      'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
+    )
+    expectManifestError(
+      () => buildRecoveryArchiveSealedSnapshotManifest({
+        ...input,
+        sealResult: { ...input.sealResult, wrappedDek: new Uint8Array() },
+      }),
       'RECOVERY_ARCHIVE_SEALED_SNAPSHOT_MANIFEST_INVALID_SEAL_RESULT',
     )
   })

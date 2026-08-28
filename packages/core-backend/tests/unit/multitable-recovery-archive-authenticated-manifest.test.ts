@@ -27,6 +27,10 @@ import {
   type RecoveryArchiveManifestBinding,
 } from '../../src/multitable/recovery-archive-manifest'
 import {
+  parseRecoveryArchiveManifestObjectEnvelope,
+  RECOVERY_ARCHIVE_MANIFEST_OBJECT_ENVELOPE_VERSION,
+} from '../../src/multitable/recovery-archive-manifest-object-envelope'
+import {
   buildRecoveryArchiveSealedSnapshotManifest,
   type RecoveryArchiveSealedSnapshotManifestResult,
 } from '../../src/multitable/recovery-archive-sealed-snapshot-manifest'
@@ -37,6 +41,7 @@ const KEY_ID = 'kms-key-0001'
 const WRAPPED_DEK_ID = 'wrapped-dek-0001'
 const DEK_FINGERPRINT = 'a'.repeat(64)
 const DEK = Uint8Array.from({ length: 32 }, (_, index) => index + 1)
+const WRAPPED_DEK = Uint8Array.from({ length: 48 }, (_, index) => 200 - index)
 const MAC = Uint8Array.from([0, 1, 15, 16, 255])
 
 const BINDING: RecoveryArchiveManifestBinding = {
@@ -111,6 +116,7 @@ function makeUnsigned(): RecoveryArchiveSealedSnapshotManifestResult {
     binding: cryptoBinding,
     dekFingerprint: DEK_FINGERPRINT,
     wrappedDekId: WRAPPED_DEK_ID,
+    wrappedDek: new Uint8Array(WRAPPED_DEK),
     reservations: plan.map((section) => ({
       dekFingerprint: DEK_FINGERPRINT,
       nonceHex: toRecoveryArchiveNonceHex(section.nonce),
@@ -156,6 +162,7 @@ function mutableBundle(unsigned = makeUnsigned()) {
       ciphertext: section.ciphertext,
       authTag: section.authTag,
     })),
+    wrappedDek: unsigned.wrappedDek,
   }
 }
 
@@ -263,6 +270,27 @@ describe('authenticateRecoveryArchiveSealedSnapshotManifest', () => {
     expect(
       validateRecoveryArchiveManifest(JSON.parse(authenticated.manifestJson)),
     ).toEqual(authenticated.manifest)
+
+    const parsedEnvelope = parseRecoveryArchiveManifestObjectEnvelope(
+      authenticated.envelopeBytes,
+    )
+    expect(parsedEnvelope.envelopeVersion).toBe(
+      RECOVERY_ARCHIVE_MANIFEST_OBJECT_ENVELOPE_VERSION,
+    )
+    expect(parsedEnvelope.manifestJson).toBe(authenticated.manifestJson)
+    expect(parsedEnvelope.manifest).toEqual(authenticated.manifest)
+    expect(parsedEnvelope.wrappedDek).toEqual(WRAPPED_DEK)
+    expect(parsedEnvelope.envelopeSha256).toBe(authenticated.envelopeSha256)
+    expect(authenticated.envelopeSha256).toBe(
+      createHash('sha256').update(authenticated.envelopeBytes).digest('hex'),
+    )
+    expect(authenticated.manifest).not.toHaveProperty('wrapped_dek')
+    expect(JSON.parse(authenticated.manifestJson)).not.toHaveProperty(
+      'wrapped_dek',
+    )
+    expect(
+      Object.prototype.hasOwnProperty.call(unsigned, 'envelopeBytes'),
+    ).toBe(false)
   })
 
   test('snapshots identities and sealed bytes before awaiting KMS and returns fresh byte copies', async () => {
@@ -294,6 +322,7 @@ describe('authenticateRecoveryArchiveSealedSnapshotManifest', () => {
     bundle.manifest.workspace_id = 'mutated-after-admission'
     bundle.macPreimage.fill(0)
     bundle.sealedSections[0]?.ciphertext.fill(0)
+    bundle.wrappedDek.fill(0)
     release()
     const authenticated = await pending
 
@@ -302,6 +331,8 @@ describe('authenticateRecoveryArchiveSealedSnapshotManifest', () => {
     firstMacRead.fill(8)
     const firstCiphertextRead = authenticated.sealedSections[0]?.ciphertext
     firstCiphertextRead?.fill(7)
+    const firstEnvelopeRead = authenticated.envelopeBytes
+    firstEnvelopeRead.fill(6)
     expect(authenticated.manifest.workspace_id).toBe(BINDING.workspace_id)
     expect(authenticated.manifestMacBytes).toEqual(MAC)
     expect(authenticated.sealedSections[0]?.ciphertextSha256).toBe(
@@ -309,6 +340,11 @@ describe('authenticateRecoveryArchiveSealedSnapshotManifest', () => {
         .update(authenticated.sealedSections[0]?.ciphertext ?? new Uint8Array())
         .digest('hex'),
     )
+    expect(authenticated.envelopeBytes).not.toEqual(firstEnvelopeRead)
+    expect(
+      parseRecoveryArchiveManifestObjectEnvelope(authenticated.envelopeBytes)
+        .wrappedDek,
+    ).toEqual(WRAPPED_DEK)
   })
 
   test('refuses a signed input and every cached identity, root, preimage, or section substitution', async () => {
@@ -515,6 +551,20 @@ describe('authenticateRecoveryArchiveSealedSnapshotManifest', () => {
         'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_KEY_CUSTODY_FAILED',
       )
     }
+  })
+
+  test('refuses an empty wrapped-DEK carrier before KMS', async () => {
+    const keyCustody = custody()
+    await expectAuthError(
+      () =>
+        authenticateRecoveryArchiveSealedSnapshotManifest({
+          sealedManifest: { ...mutableBundle(), wrappedDek: new Uint8Array() },
+          keyCustody,
+          transactionDepth: depthProbe(0),
+        }),
+      'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_INVALID_UNSIGNED_MANIFEST',
+    )
+    expect(keyCustody.calls).toEqual([])
   })
 
   test('rejects additive outer and section keys before KMS', async () => {
