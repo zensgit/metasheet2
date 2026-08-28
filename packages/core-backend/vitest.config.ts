@@ -1105,6 +1105,10 @@ export default defineConfig({
       // skip-green it, and whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       // Two-point wiring: BOTH points or the file silently never runs.
       'tests/integration/multitable-history-contiguity-realdb.test.ts',
+      // W0 target-generation/floor strict comparator: DATABASE_URL-gated. Keep it out of the no-DB
+      // default lane and pin its existing whole-file multitable real-DB invocation in the shared
+      // exact-anchor wiring contract, so this suite cannot collect-and-skip-green.
+      'tests/integration/multitable-history-contiguity-strict-seq-realdb.test.ts',
       // W0 L6-b exact-anchor authority goldens: DATABASE_URL-gated and meaningful only against real
       // Postgres. Exclude from the no-DB default lane so it cannot skip-green, and keep the whole file
       // wired into `Run multitable real-DB integration` in plugin-tests.yml. The no-DB wiring contract
@@ -1338,6 +1342,10 @@ export default defineConfig({
       // whole-file wired into `Run multitable real-DB integration` in plugin-tests.yml.
       'tests/integration/multitable-undelete-inbound-resurrect-realdb.test.ts',
       'tests/integration/multitable-reset-pit-inbound-capture-realdb.test.ts',
+      // T8-1 Revert-to-T real-DB goldens, including the retention compatibility/no-oracle contract.
+      // Whole-file wired into `Run multitable real-DB integration`; exclude here so DATABASE_URL
+      // gating cannot report skip-shaped green in the default no-DB lane.
+      'tests/integration/multitable-revert-pit-realdb.test.ts',
       // T8-2 Reset-to-T goldens (flag-off/on, PIT-2 all-or-nothing, delete-set divergence including the
       // docket #46 capture-complete deleteScopeHash-mismatch golden, single-txn atomicity, D2 gate): real
       // Postgres only. Was ALREADY whole-file wired into `Run multitable real-DB integration` in

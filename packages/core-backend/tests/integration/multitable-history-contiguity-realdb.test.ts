@@ -5,8 +5,9 @@
  * comparator. Design lock: multitable-global-history-w0-1-...-design-lock-20260713.md (§6 owner ruling).
  *
  * Goldens (owner rubric; each mutation-proven — see the PR for the mutation matrix):
- *   HEALED-GAP (fail-first, #4252 §6.1)  v3 record, revisions {v1,v3}, live==v3 → revert/reset preview AND
- *       execute ALL 409, zero writes. A live-vs-latest comparator PASSES this; contiguity refuses it.
+ *   HEALED-GAP (fail-first, #4252 §6.1)  v3 record, target-window revisions {v1,v3}, live==v3 →
+ *       revert/reset preview AND execute ALL 409, zero writes. A live-vs-latest comparator PASSES this;
+ *       target-generation contiguity refuses it.
  *   LOCK-MARKERS (positive control)      a healthy record version-bumped by EACH of the FOUR lock/unlock
  *       sites (HTTP lock, HTTP unlock, automation lock, automation unlock) writes a marker → precheck PASSES.
  *       Without this leg a refuse-everything impl would pass HEALED-GAP.
@@ -14,9 +15,10 @@
  *       people-directory sheet is NOT refused (isSystemSheet skip).
  *   DELETE-REUSE                         a record created→updated→deleted (delete revision REUSES the last live
  *       version) leaves a healthy sibling revert/reset-able (delete-reuse is not a false hole).
- *   PHANTOM-INSERT RACE (C4/C8)          a constructed two-connection race: a phantom uncaptured record inserted
- *       while reset-execute is blocked on the per-sheet advisory fence is caught by the in-txn re-check → 409,
- *       zero destructive writes. Proves the advisory lock is on the destructive path AND the check/write are atomic.
+ *   PHANTOM-INSERT RACE (C4/C8)          a constructed two-connection race: a post-anchor phantom inserted
+ *       while reset-execute is blocked on the per-sheet advisory fence invalidates the token-bound live-set hash
+ *       in the transaction → 409, zero destructive writes. Proves the fence is on the destructive path and
+ *       preview/apply drift checking is atomic without treating post-anchor history as target history.
  *   POSITIVE CONTROL                     a full healthy chain reverts/executes at any T.
  *
  * Two-point wiring: plugin-tests.yml real-DB run list + vitest.integration.config.ts. Runs only with DATABASE_URL.
@@ -59,6 +61,14 @@ const HISTORY_INCOMPLETE_BODY = {
   error: {
     code: 'HISTORY_INCOMPLETE',
     message: 'Record history for this sheet is incomplete or inconsistent with its live data; destructive recovery is refused and nothing was written. History must be trustworthy before revert/reset can run.',
+  },
+}
+
+const PREVIEW_IDENTITY_INVALID_BODY = {
+  ok: false,
+  error: {
+    code: 'PREVIEW_IDENTITY_INVALID',
+    message: 'The sheet changed since preview; nothing written — re-preview.',
   },
 }
 
@@ -213,12 +223,21 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
 
   // ── HEALED-GAP (fail-first, ported verbatim from #4252 §6.1) ──────────────────────────────────────────────
-  test('HEALED-GAP: v3 record with revisions {v1,v3} (v2 uncaptured) → all four surfaces refuse, zero writes', async () => {
+  test('HEALED-GAP inside the target window: v3 record with revisions {v1,v3} (v2 uncaptured) → all four surfaces refuse, zero writes', async () => {
     const HG = `rec_hi_healedgap_${TS}`
     await expectAllFourRefuseWithZeroWrites(SHEET, async () => {
       await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [HG, SHEET, JSON.stringify({ [NAME]: 'hg-v3-healed', [SALARY]: 300 })])
       await rev(SHEET, HG, 1, 'create', { [NAME]: 'hg-v1', [SALARY]: 100 }, T0)
-      await rev(SHEET, HG, 3, 'update', { [NAME]: 'hg-v3-healed', [SALARY]: 300 }, T2) // NO v2 — uncaptured mid-chain write
+      // Both occupants are causally before the sealed anchor. The missing v2 is therefore inside the trusted
+      // target window, not merely a post-anchor current-state gap that exact-anchor reconstruction need not replay.
+      await fixtureFor(SHEET).insertRevision({
+        recordId: HG,
+        version: 3,
+        action: 'update',
+        snapshot: { [NAME]: 'hg-v3-healed', [SALARY]: 300 },
+        createdAt: T2,
+        phase: 'before',
+      }) // NO v2 — uncaptured target-window write
       expect((await recordRow(HG))?.version).toBe(3)
       expect(Number(((await q('SELECT count(*)::int c FROM meta_record_revisions WHERE record_id=$1', [HG])).rows[0] as { c: number }).c)).toBe(2)
     })
@@ -306,7 +325,7 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
   })
 
   // ── PHANTOM-INSERT RACE (C4/C8, constructed two-connection race) ─────────────────────────────────────────
-  test('PHANTOM-INSERT RACE: a phantom uncaptured record landing while reset-execute holds the fence is caught in-txn → 409, zero destructive writes', async () => {
+  test('PHANTOM-INSERT RACE: a post-anchor phantom landing while reset-execute holds the fence invalidates the preview → 409, zero destructive writes', async () => {
     // A healthy delete-candidate D (created AFTER T1 ⇒ reset-to-T1 would DELETE it). History complete at preview.
     const D = `rec_hc_delcand_${TS}`
     await insertLive(SHEET, D, { [NAME]: 'delme' }, 1)
@@ -321,6 +340,7 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
     const livePool = poolManager.get().getInternalPool()
     expect(livePool).toBeTruthy()
     const holder = await livePool!.connect()
+    const PH = `rec_hc_phantom_${TS}`
     let res: request.Response | undefined
     try {
       await holder.query('BEGIN')
@@ -360,19 +380,32 @@ describeIfDatabase('W0-1 generation-aware history contiguity (real DB)', () => {
       const pending = await Promise.race([resetP.then(() => 'done'), sleep(150).then(() => 'pending')])
       expect(pending).toBe('pending')
       // The phantom uncaptured write lands NOW (after the outer precheck already passed) and commits.
-      const PH = `rec_hc_phantom_${TS}`
       await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,3)', [PH, SHEET, JSON.stringify({ [NAME]: 'phantom' })])
-      await rev(SHEET, PH, 1, 'create', { [NAME]: 'ph1' }, T0)
+      await rev(SHEET, PH, 1, 'create', { [NAME]: 'ph1' }, T2)
       await rev(SHEET, PH, 3, 'update', { [NAME]: 'phantom' }, T2) // hole at v2
-      await holder.query('COMMIT') // reset acquires the fence → runs the in-txn re-check → sees the phantom → refuses
+      const phantomSeqs = (await q(
+        `SELECT r.seq::text AS seq, anchor.endpoint_seq::text AS anchor_seq
+           FROM meta_record_revisions r
+           CROSS JOIN meta_record_history_operations anchor
+          WHERE r.sheet_id = $1
+            AND r.record_id = $2
+            AND anchor.sheet_id = $1
+            AND anchor.operation_id = $3::uuid
+          ORDER BY r.seq`,
+        [SHEET, PH, fixtureFor(SHEET).anchorOperationId()],
+      )).rows as Array<{ seq: string; anchor_seq: string }>
+      expect(phantomSeqs).toHaveLength(2)
+      expect(phantomSeqs.every((row) => BigInt(row.seq) > BigInt(row.anchor_seq))).toBe(true)
+      await holder.query('COMMIT') // reset acquires the fence → recomputes the live-set hash → sees drift → refuses
       res = await resetP
     } finally {
       await holder.query('ROLLBACK').catch(() => {})
       holder.release()
     }
     expect(res!.status).toBe(409)
-    expect(res!.body).toEqual(HISTORY_INCOMPLETE_BODY)
-    expect(await recordRow(D)).toBeTruthy() // D was NOT deleted — the in-txn re-check rolled the whole reset back
+    expect(res!.body).toEqual(PREVIEW_IDENTITY_INVALID_BODY)
+    expect(await recordRow(D)).toBeTruthy() // D was NOT deleted — the in-txn drift check rolled the whole reset back
+    expect(await recordRow(PH)).toBeTruthy() // the direct-SQL phantom itself is not a recovery write
   })
 
   // ── GLOBAL POSITIVE CONTROL ──────────────────────────────────────────────────────────────────────────────

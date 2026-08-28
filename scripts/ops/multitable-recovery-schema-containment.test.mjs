@@ -191,11 +191,11 @@ test('workflow FLAGS pins exactly the six observed vars (five ladder rung flags 
   // the same classifier with that set. Pin the EXACT set so a silently dropped flag (e.g. deleting
   // MULTITABLE_ENABLE_WRITER_FENCE) cannot pass green — it must red this required (test 20.x) contract.
   // MULTITABLE_META_REVISION_RETENTION_ENABLED is the sixth OBSERVED var and NOT a rung flag: it is
-  // never expected active, and it is required-inactive only at the postures that presuppose PIT reset
+  // never expected active, and it is required-inactive only at the postures that presuppose destructive recovery
   // (see the per-posture behavior tests below). It MUST still be observed everywhere, because
-  // PIT_RESET_RETENTION_BLOCKED() (packages/core-backend/src/routes/univer-meta.ts) refuses both
-  // reset-preview and reset-execute with 409 RESET_RETENTION_CONFLICT while it is exactly '1'. Drop it
-  // from FLAGS and `posture=l5-reset` can report PASS on an environment where reset cannot run at all.
+  // isMetaRevisionRetentionEnabled() (packages/core-backend/src/routes/univer-meta.ts) refuses both
+  // preview and execute for either destructive mode while it is exactly '1'. Drop it from FLAGS and a
+  // destructive recovery posture can report PASS on an environment where its recovery cannot run at all.
   const flagsDecl = workflow.match(/^\s*FLAGS="([^"]+)"$/m)
   assert.ok(flagsDecl, 'workflow must declare FLAGS')
   const flags = flagsDecl[1].trim().split(/\s+/).sort()
@@ -209,7 +209,7 @@ test('workflow FLAGS pins exactly the six observed vars (five ladder rung flags 
       'MULTITABLE_HISTORY_CONTIGUITY_STRICT',
       'MULTITABLE_META_REVISION_RETENTION_ENABLED',
     ],
-    'the witness must observe exactly the five ladder rung flags (including transient trust-checkpoint activation) plus MULTITABLE_META_REVISION_RETENTION_ENABLED, the PIT-reset conflict var',
+    'the witness must observe exactly the five ladder rung flags (including transient trust-checkpoint activation) plus MULTITABLE_META_REVISION_RETENTION_ENABLED, the destructive-recovery conflict var',
   )
   // RUNG_FLAGS is the closed-world set: a rung flag outside the posture's active set is required OFF.
   // Pin it by name too, and pin its relationship to FLAGS. Dropping a name from RUNG_FLAGS while
@@ -463,7 +463,7 @@ assert.ok(flagClassifierScript, 'workflow must define FLAG_CLASSIFIER_JS')
 // Every var the witness observes: the five ladder rung flags + the retention conflict var. Only the
 // first five ever appear in a posture's expected-active set (ladder §E1.2), and only those five are
 // closed-world required-inactive when absent from it. The sixth is required inactive at the postures
-// that presuppose PIT reset (today: l5-reset alone) and UNCONSTRAINED at the rest.
+// that presuppose destructive recovery (today: l4-revert and l5-reset) and UNCONSTRAINED at the rest.
 const RETENTION_CONFLICT_VAR = 'MULTITABLE_META_REVISION_RETENTION_ENABLED'
 const ALL_OBSERVED_VARS = [
   'MULTITABLE_ENABLE_SHEET_REVERT',
@@ -620,7 +620,7 @@ function parseFlagSnapshot(output) {
   )
 }
 
-test('embedded flag classifier uses application-equivalent trim semantics for running and Compose values', () => {
+test('embedded flag classifier preserves rung normalization but uses raw exact retention semantics', () => {
   const activeFlag = 'MULTITABLE_ENABLE_PIT_RESET'
   const running = spawnSync(
     process.execPath,
@@ -636,11 +636,8 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
         ...process.env,
         [activeFlag]: '\nTrUe\t',
         MULTITABLE_ENABLE_WRITER_FENCE: ' 1 ',
-        // The retention var's activation literal is EXACTLY '1' (global-history-flag-manifest.mjs:
-        // activationValue '1', not 'true'), and '1' is precisely what PIT_RESET_RETENTION_BLOCKED()
-        // refuses reset on. The classifier must therefore surface it as its own `one` state — never
-        // fold it into `true` (which would make the retention breach unnameable) and never into
-        // `inactive` (which would make it invisible).
+        // Retention must not inherit the rung flags' trim/lower normalization. Runtime compares raw
+        // bytes with === '1', so this whitespace spelling is inactive.
         [RETENTION_CONFLICT_VAR]: ' 1 ',
       },
       encoding: 'utf8',
@@ -653,7 +650,7 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
     MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'unset',
     MULTITABLE_ENABLE_WRITER_FENCE: 'one',
     MULTITABLE_ENABLE_TRUST_CHECKPOINT_ACTIVATION: 'unset',
-    [RETENTION_CONFLICT_VAR]: 'one',
+    [RETENTION_CONFLICT_VAR]: 'inactive',
   })
 
   const compose = spawnSync(
@@ -673,6 +670,7 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
             environment: {
               [activeFlag]: '\nTrUe\t',
               MULTITABLE_ENABLE_WRITER_FENCE: false,
+              [RETENTION_CONFLICT_VAR]: '1',
             },
           },
         },
@@ -684,6 +682,42 @@ test('embedded flag classifier uses application-equivalent trim semantics for ru
   assert.equal(parseFlagSnapshot(compose.stdout)[activeFlag], 'true')
   assert.equal(
     parseFlagSnapshot(compose.stdout).MULTITABLE_ENABLE_WRITER_FENCE,
+    'inactive',
+  )
+  assert.equal(parseFlagSnapshot(compose.stdout)[RETENTION_CONFLICT_VAR], 'one')
+
+  const composeWhitespace = spawnSync(
+    process.execPath,
+    ['-e', flagClassifierScript[1], 'compose', 'metasheet-backend', RETENTION_CONFLICT_VAR],
+    {
+      input: JSON.stringify({
+        services: {
+          backend: {
+            container_name: 'metasheet-backend',
+            environment: { [RETENTION_CONFLICT_VAR]: '1 ' },
+          },
+        },
+      }),
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(composeWhitespace.status, 0, composeWhitespace.stderr)
+  assert.equal(
+    parseFlagSnapshot(composeWhitespace.stdout)[RETENTION_CONFLICT_VAR],
+    'inactive',
+  )
+
+  const runningUppercase = spawnSync(
+    process.execPath,
+    ['-e', flagClassifierScript[1], 'running', '_', RETENTION_CONFLICT_VAR],
+    {
+      env: { ...process.env, [RETENTION_CONFLICT_VAR]: 'TRUE' },
+      encoding: 'utf8',
+    },
+  )
+  assert.equal(runningUppercase.status, 0, runningUppercase.stderr)
+  assert.equal(
+    parseFlagSnapshot(runningUppercase.stdout)[RETENTION_CONFLICT_VAR],
     'inactive',
   )
 
@@ -1132,11 +1166,11 @@ test('rung witness: representative missing and extra flags fail each ladder boun
 })
 
 // ── The sixth observed var: MULTITABLE_META_REVISION_RETENTION_ENABLED ────────────────────────────
-// packages/core-backend/src/routes/univer-meta.ts#PIT_RESET_RETENTION_BLOCKED refuses BOTH
-// reset-preview and reset-execute with 409 RESET_RETENTION_CONFLICT while this var is exactly '1' —
+// packages/core-backend/src/routes/univer-meta.ts#isMetaRevisionRetentionEnabled refuses BOTH preview
+// and execute for Revert and Reset with named 409 conflicts while this var is exactly '1' —
 // unconditionally, before any anchor/trust/authority check. A witness that does not observe it can
-// report `posture=l5-reset` PASS on an environment where Reset-to-T cannot run at all: a vacuous
-// green on the exact rung that posture exists to witness.
+// report `posture=l4-revert` or `posture=l5-reset` PASS on an environment where destructive recovery
+// cannot run at all: a vacuous green on the exact rung that posture exists to witness.
 //
 // But the expectation is POSTURE-SCOPED, not blanket. The ladder
 // (docs/development/multitable-timemachine-o2-enablement-ladder-20260819.md) defines exactly FIVE
@@ -1144,15 +1178,15 @@ test('rung witness: representative missing and extra flags fail each ladder boun
 // appears in NO row. §4 registers retention-era recovery as DECOUPLED from this ladder
 // ("retention 后恢复 … 与本阶梯无耦合，另立设计锁") — a separate owner line with its own design lock.
 // So:
-//   • l5-reset is the ONLY posture that presupposes PIT reset actually working (the only §E1.2 row
-//     with MULTITABLE_ENABLE_PIT_RESET ON; §E1.1 step 5 defines the rung as a reset canary drill).
-//     There, retention='1' makes the drill structurally impossible ⇒ required INACTIVE.
+//   • l4-revert and l5-reset presuppose destructive recovery actually working. There, retention='1'
+//     makes the drill structurally impossible ⇒ required INACTIVE.
 //   • Everywhere else retention is UNCONSTRAINED: observed and printed, never verdicted. Requiring it
 //     OFF at inert/l1…l4 would fail an independent, legitimate retention deployment for a breach of
 //     nothing — a posture witness reporting a breach that isn't one.
-// The flag manifest models the same reset-scoped coupling: `conflictsWith:
-// ['MULTITABLE_META_REVISION_RETENTION_ENABLED']` sits on the MULTITABLE_ENABLE_PIT_RESET key, rule
-// id `pit-reset-intent-with-retention-on` (scripts/ops/global-history-flag-manifest.mjs).
+// The flag manifest models the same recovery-scoped coupling: `conflictsWith:
+// ['MULTITABLE_META_REVISION_RETENTION_ENABLED']` sits on both the Revert and Reset keys, with
+// rule ids `sheet-revert-intent-with-retention-on` and `pit-reset-intent-with-retention-on`
+// (scripts/ops/global-history-flag-manifest.mjs).
 //
 // The tests below never hand-build the observation. They ask the workflow's OWN `FLAGS=` declaration
 // which vars it observes and run the workflow's OWN embedded classifier over a real environment. A
@@ -1187,7 +1221,7 @@ const RETENTION_EXPECTATION = {
   'l2-fence': 'unconstrained',
   'l2-checkpoint': 'unconstrained',
   'l3-strict': 'unconstrained',
-  'l4-revert': 'unconstrained',
+  'l4-revert': 'required-inactive',
   'l5-reset': 'required-inactive',
 }
 
@@ -1197,9 +1231,15 @@ assert.deepEqual(
   'the retention expectation table must cover every posture the witness accepts — a new rung must not default into either verdict silently',
 )
 
-// The l5-reset rung's exact active set (ladder §E1.2) PLUS retention at its activation literal '1'.
-// This is a state an operator can reach by following the ladder while a separate owner line has
-// retention on: every rung flag is correct, and reset is still structurally impossible.
+// The destructive-rung exact active sets PLUS retention at its activation literal '1'. This is a
+// state an operator can reach while a separate owner line has retention on: every rung flag is
+// correct, and recovery is still structurally impossible.
+const L4_REVERT_ENV_WITH_RETENTION = {
+  MULTITABLE_ENABLE_WRITER_FENCE: 'true',
+  MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
+  MULTITABLE_ENABLE_SHEET_REVERT: 'true',
+  [RETENTION_CONFLICT_VAR]: '1',
+}
 const L5_RESET_ENV_WITH_RETENTION = {
   MULTITABLE_ENABLE_WRITER_FENCE: 'true',
   MULTITABLE_HISTORY_CONTIGUITY_STRICT: 'true',
@@ -1248,6 +1288,23 @@ test("rung witness: posture=l5-reset with retention='1' is a FAIL, not a PASS (t
   assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
 })
 
+test("rung witness: posture=l4-revert with retention='1' is a FAIL, not a PASS (the same vacuous-green counterexample)", () => {
+  const snapshot = classifyRealEnv(L4_REVERT_ENV_WITH_RETENTION)
+  const result = runRemote({
+    target: 'production',
+    mode: 'postdeploy-full',
+    posture: 'l4-revert',
+    stub: {
+      STUB_RUNNING_FLAG_SNAPSHOT: snapshot,
+      STUB_COMPOSE_FLAG_SNAPSHOT: snapshot,
+    },
+  })
+  assert.equal(result.status, 1, `l4-revert with retention active must FAIL; Revert refuses 409 REVERT_RETENTION_CONFLICT:\n${result.stdout}`)
+  assert.match(result.stdout, new RegExp(`\\[running\\] ${RETENTION_CONFLICT_VAR}=one — UNEXPECTED ACTIVE`))
+  assert.match(result.stdout, new RegExp(`\\[next-restart\\] ${RETENTION_CONFLICT_VAR}=one — UNEXPECTED ACTIVE`))
+  assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
+})
+
 test("rung witness (anti-overreach): an active-retention host still PASSES posture=l1-armed, with the var observed", () => {
   // The ladder decouples retention (§4); l1-armed presupposes nothing about reset. An org running a
   // legitimate, separately-owned retention deployment must be able to witness this rung. A blanket
@@ -1272,7 +1329,7 @@ test("rung witness (anti-overreach): an active-retention host still PASSES postu
   assert.equal(
     result.status,
     0,
-    `l1-armed does not presuppose PIT reset, so an active retention deployment must not fail it:\n${result.stdout}`,
+    `l1-armed does not presuppose destructive recovery, so an active retention deployment must not fail it:\n${result.stdout}`,
   )
   // Positive assertion, not merely "did not fail": the exact PASS sentinel must be present…
   assert.match(
@@ -1333,7 +1390,7 @@ test("rung witness: at l5-reset retention='true' reds too — the documented ope
   )
   assert.doesNotMatch(result.stdout, NO_CONTAINMENT_PASS)
 
-  // Symmetric anti-overreach: the same 'true' must NOT fail a posture that does not presuppose reset.
+  // Symmetric anti-overreach: the same 'true' must NOT fail a posture that does not presuppose destructive recovery.
   const unconstrained = runRemote({
     target: 'production',
     mode: 'postdeploy-full',
@@ -1353,7 +1410,7 @@ test("rung witness: at l5-reset retention='true' reds too — the documented ope
   )
 })
 
-test('rung witness: retention is asserted-inactive ONLY at reset-presupposing postures, on both legs', () => {
+test('rung witness: retention is asserted-inactive ONLY at destructive-recovery postures, on both legs', () => {
   for (const [posture, activeFlags] of Object.entries(POSTURE_FLAGS)) {
     const expectation = RETENTION_EXPECTATION[posture]
     const breachedSnapshot = classifyRealEnv({
@@ -1362,11 +1419,11 @@ test('rung witness: retention is asserted-inactive ONLY at reset-presupposing po
     })
     const cleanSnapshot = flagSnapshot(activeFlags)
 
-    // Table integrity: `required-inactive` is claimed exactly where the rung turns PIT reset ON.
+    // Table integrity: `required-inactive` is claimed exactly where the posture can execute destructive recovery.
     assert.equal(
       expectation === 'required-inactive',
-      activeFlags.includes('MULTITABLE_ENABLE_PIT_RESET'),
-      `${posture}: retention may be asserted only where the ladder presupposes PIT reset (§E1.2 row) — expectation table and rung matrix disagree`,
+      posture === 'l4-revert' || posture === 'l5-reset',
+      `${posture}: retention may be asserted only where the posture presupposes destructive recovery — expectation table and route contract disagree`,
     )
 
     for (const leg of ['STUB_RUNNING_FLAG_SNAPSHOT', 'STUB_COMPOSE_FLAG_SNAPSHOT']) {
@@ -1386,7 +1443,7 @@ test('rung witness: retention is asserted-inactive ONLY at reset-presupposing po
         assert.equal(
           result.status,
           1,
-          `${posture}/${context}: retention='1' must fail a rung that presupposes reset:\n${result.stdout}`,
+          `${posture}/${context}: retention='1' must fail a rung that presupposes destructive recovery:\n${result.stdout}`,
         )
         assert.match(
           result.stdout,
@@ -1398,7 +1455,7 @@ test('rung witness: retention is asserted-inactive ONLY at reset-presupposing po
         assert.equal(
           result.status,
           0,
-          `${posture}/${context}: the ladder decouples retention (§4) and this rung does not presuppose reset, so retention='1' must NOT fail it:\n${result.stdout}`,
+          `${posture}/${context}: the ladder decouples retention (§4) and this rung does not presuppose destructive recovery, so retention='1' must NOT fail it:\n${result.stdout}`,
         )
         assert.match(
           result.stdout,
@@ -1466,9 +1523,9 @@ test('rung witness: retention is asserted-inactive ONLY at reset-presupposing po
     'the retention guard must be Leg 1/3 — it cannot depend on the schema helper running',
   )
 
-  // Mirror image in predeploy-flags mode: the anti-overreach case must PASS there too, with its own
-  // distinct sentinel, so the decoupling is not accidentally mode-specific.
-  const predeployUnconstrained = runRemote({
+  // The l4-revert posture also presupposes destructive recovery working. Its predeploy-only leg
+  // therefore fails on the same retention conflict without invoking the schema helper.
+  const predeployRevertConflict = runRemote({
     target: 'production',
     mode: 'predeploy-flags',
     posture: 'l4-revert',
@@ -1482,11 +1539,12 @@ test('rung witness: retention is asserted-inactive ONLY at reset-presupposing po
       STUB_COMPOSE_FLAG_SNAPSHOT: flagSnapshot(POSTURE_FLAGS['l4-revert']),
     },
   })
-  assert.equal(predeployUnconstrained.status, 0, predeployUnconstrained.stdout)
+  assert.equal(predeployRevertConflict.status, 1, predeployRevertConflict.stdout)
   assert.match(
-    predeployUnconstrained.stdout,
-    /VERDICT: PASS \(predeploy-flags\) — exact ladder posture 'l4-revert'/,
+    predeployRevertConflict.stdout,
+    new RegExp(`\\[running\\] ${RETENTION_CONFLICT_VAR}=one — UNEXPECTED ACTIVE`),
   )
+  assert.ok(!predeployRevertConflict.log.includes(HELPER_CALL))
 })
 
 test('rung witness: the five rung flags stay closed-world — unconstrained never reaches them', () => {
