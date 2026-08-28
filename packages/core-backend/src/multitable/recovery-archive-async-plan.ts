@@ -128,6 +128,26 @@ export interface RecoveryArchiveAsyncPlanBundle {
   readonly chunkObjects: readonly RecoveryArchiveAsyncPlanObject<RecoveryArchiveAsyncChunkPayload>[]
 }
 
+export interface RecoveryArchiveAsyncPlanPersistedBinding {
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly sheetId: string
+  readonly actorId: string
+  readonly recoveryMode: ExactAnchorRecoveryMode
+  readonly scopeKind: ExactArchiveRecoveryScopeKind
+  readonly scopeHash: string
+  readonly archiveGenerationId: string
+  readonly archiveRootHash: string
+  readonly sourceVectorHash: string
+  readonly keyId: string
+  readonly planHash: string
+  readonly planObjectId: string
+  readonly planObjectVersion: string
+  readonly planObjectSha256: string
+  readonly planObjectSize: string
+  readonly planObjectExpiresAt: string
+}
+
 export interface BuildRecoveryArchiveAsyncPlanInput {
   readonly workspaceId: string
   readonly baseId: string
@@ -283,27 +303,27 @@ export async function loadRecoveryArchiveAsyncPlan(
 }> {
   const binding = claims.archivePlanObject
   if (!binding) fail('RECOVERY_ARCHIVE_ASYNC_PLAN_OBJECT_INVALID')
-  const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, transactionDepth)
-  const expected: RecoveryArchiveObjectExpectedBinding = {
-    generationId: claims.archiveGenerationId,
-    objectId: binding.objectId,
-    expectedVersion: binding.version,
-    expectedSha256: binding.sha256,
-    expectedSize: binding.size,
-    expectedExpiresAt: binding.expiresAt,
-  }
-  const read = await store.get(expected)
-  const payload = parsePlanPayload(read.bytes)
+  const loaded = await loadRecoveryArchiveAsyncPlanObject(provider, transactionDepth, {
+    workspaceId: '',
+    baseId: '',
+    sheetId: claims.sheetId,
+    actorId: claims.actorId,
+    recoveryMode: claims.mode,
+    scopeKind: claims.scopeKind,
+    scopeHash: claims.scopeHash,
+    archiveGenerationId: claims.archiveGenerationId,
+    archiveRootHash: claims.archiveRootHash,
+    sourceVectorHash: claims.archiveSourceVectorHash,
+    keyId: claims.archiveKeyId,
+    planHash: claims.archivePlanHash,
+    planObjectId: binding.objectId,
+    planObjectVersion: binding.version,
+    planObjectSha256: binding.sha256,
+    planObjectSize: binding.size,
+    planObjectExpiresAt: binding.expiresAt,
+  }, false)
+  const { payload } = loaded
   if (
-    payload.sheetId !== claims.sheetId ||
-    payload.actorId !== claims.actorId ||
-    payload.recoveryMode !== claims.mode ||
-    payload.scopeKind !== claims.scopeKind ||
-    payload.scopeHash !== claims.scopeHash ||
-    payload.archiveGenerationId !== claims.archiveGenerationId ||
-    payload.archiveRootHash !== claims.archiveRootHash ||
-    payload.sourceVectorHash !== claims.archiveSourceVectorHash ||
-    payload.keyId !== claims.archiveKeyId ||
     payload.anchorOperationId !== claims.anchorOperationId ||
     payload.anchorSeq !== claims.anchorSeq ||
     payload.checkpointId !== claims.checkpointId ||
@@ -313,11 +333,60 @@ export async function loadRecoveryArchiveAsyncPlan(
   ) {
     fail('RECOVERY_ARCHIVE_ASYNC_PLAN_OBJECT_MISMATCH')
   }
-  const descriptor = descriptorFromRead(read)
-  const plan = compileRecoveryArchiveRestorePlan(planInputFromPayload(payload, descriptor))
-  if (plan.planHash !== claims.archivePlanHash) {
+  return loaded
+}
+
+/** Load one immutable plan from the accepted job binding; no raw JWT is required by the worker. */
+export async function loadRecoveryArchiveAsyncPlanByBinding(
+  provider: RecoveryArchiveObjectStoreProvider,
+  transactionDepth: RecoveryArchiveTransactionDepthProbe,
+  binding: RecoveryArchiveAsyncPlanPersistedBinding,
+): Promise<{
+  readonly plan: RecoveryArchiveRestorePlan
+  readonly payload: RecoveryArchiveAsyncPlanPayload
+}> {
+  return loadRecoveryArchiveAsyncPlanObject(provider, transactionDepth, binding, true)
+}
+
+async function loadRecoveryArchiveAsyncPlanObject(
+  provider: RecoveryArchiveObjectStoreProvider,
+  transactionDepth: RecoveryArchiveTransactionDepthProbe,
+  binding: RecoveryArchiveAsyncPlanPersistedBinding,
+  verifyWorkspaceAndBase: boolean,
+): Promise<{
+  readonly plan: RecoveryArchiveRestorePlan
+  readonly payload: RecoveryArchiveAsyncPlanPayload
+}> {
+  const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, transactionDepth)
+  const expected: RecoveryArchiveObjectExpectedBinding = {
+    generationId: binding.archiveGenerationId,
+    objectId: binding.planObjectId,
+    expectedVersion: binding.planObjectVersion,
+    expectedSha256: binding.planObjectSha256,
+    expectedSize: binding.planObjectSize,
+    expectedExpiresAt: binding.planObjectExpiresAt,
+  }
+  const read = await store.get(expected)
+  const payload = parsePlanPayload(read.bytes)
+  if (
+    (verifyWorkspaceAndBase && (
+      payload.workspaceId !== binding.workspaceId || payload.baseId !== binding.baseId
+    )) ||
+    payload.sheetId !== binding.sheetId ||
+    payload.actorId !== binding.actorId ||
+    payload.recoveryMode !== binding.recoveryMode ||
+    payload.scopeKind !== binding.scopeKind ||
+    payload.scopeHash !== binding.scopeHash ||
+    payload.archiveGenerationId !== binding.archiveGenerationId ||
+    payload.archiveRootHash !== binding.archiveRootHash ||
+    payload.sourceVectorHash !== binding.sourceVectorHash ||
+    payload.keyId !== binding.keyId
+  ) {
     fail('RECOVERY_ARCHIVE_ASYNC_PLAN_OBJECT_MISMATCH')
   }
+  const descriptor = descriptorFromRead(read)
+  const plan = compileRecoveryArchiveRestorePlan(planInputFromPayload(payload, descriptor))
+  if (plan.planHash !== binding.planHash) fail('RECOVERY_ARCHIVE_ASYNC_PLAN_OBJECT_MISMATCH')
   return Object.freeze({ plan, payload })
 }
 
@@ -456,6 +525,13 @@ function admitBuildInput(input: BuildRecoveryArchiveAsyncPlanInput) {
   const deleteRecordIds = sortedUniqueIds(input.deleteRecordIds)
   if (deleteRecordIds.some((recordId) => !liveRecords.has(recordId) || revertWriteByRecordId.has(recordId))) {
     fail('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID')
+  }
+  if (recoveryMode === 'reset') {
+    for (const recordId of deleteRecordIds) {
+      if (!targetRecords.has(recordId)) {
+        targetRecords.set(recordId, { recordId, exists: false, version: null })
+      }
+    }
   }
   if (
     [...revertWriteByRecordId.keys()].some((recordId) => targetRecords.get(recordId)?.exists !== true) ||

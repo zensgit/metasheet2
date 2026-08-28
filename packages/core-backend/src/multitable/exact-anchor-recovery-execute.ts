@@ -66,6 +66,10 @@ import {
   LiveLinkProjectionDataError,
   loadAuthoritativeLiveLinkEdgesForSheet,
 } from './live-link-projection-integrity'
+import {
+  consumeRecoveryArchiveRestoreChunkExecutionLeaseInternal,
+  type RecoveryArchiveRestoreChunkExecutionLease,
+} from './recovery-archive-restore-jobs'
 
 /** Normalize a link-field cell (array | single | null) to a string[] of foreign record ids. */
 function normalizeLinkIds(value: unknown): string[] {
@@ -852,6 +856,163 @@ export interface MaterializedArchiveLink {
   readonly foreignRecordId: string
 }
 
+const materializedArchiveAsyncFenceLeaseBrand: unique symbol = Symbol(
+  'MaterializedArchiveAsyncFenceLease',
+)
+const materializedArchiveAsyncFenceLeases = new WeakMap<
+  object,
+  { readonly query: QueryFn; readonly sheetId: string }
+>()
+const materializedArchiveAsyncChunkReceiptBrand: unique symbol = Symbol(
+  'MaterializedArchiveAsyncChunkReceipt',
+)
+const materializedArchiveAsyncChunkReceipts = new WeakMap<
+  object,
+  {
+    readonly query: QueryFn
+    readonly sheetId: string
+    readonly jobId: string
+    readonly chunkIndex: number
+  }
+>()
+
+/**
+ * Runtime proof that the async restore transaction acquired its complete canonical-fence set before the
+ * durable job/key/block rows. The object is minted only by
+ * {@link acquireMaterializedArchiveAsyncFencesInternal} and is bound to the exact query function for that
+ * transaction, so a caller cannot carry it across connections or transactions.
+ */
+export interface MaterializedArchiveAsyncFenceLease {
+  readonly [materializedArchiveAsyncFenceLeaseBrand]: typeof materializedArchiveAsyncFenceLeaseBrand
+}
+
+/** @internal D5 worker prelock. Call before any job/key/block row lock. */
+export async function acquireMaterializedArchiveAsyncFencesInternal(
+  query: QueryFn,
+  sheetId: string,
+): Promise<MaterializedArchiveAsyncFenceLease> {
+  const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, sheetId)
+  await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
+  const lease = Object.freeze({
+    [materializedArchiveAsyncFenceLeaseBrand]: materializedArchiveAsyncFenceLeaseBrand,
+  }) as MaterializedArchiveAsyncFenceLease
+  materializedArchiveAsyncFenceLeases.set(lease, { query, sheetId })
+  return lease
+}
+
+export type MaterializedArchiveAsyncChunkOperation =
+  | {
+      readonly kind: 'revert'
+      readonly recordId: string
+      readonly expectedVersion: number
+      readonly changedFieldIds: readonly string[]
+    }
+  | {
+      readonly kind: 'delete'
+      readonly recordId: string
+      readonly expectedVersion: number
+    }
+
+export interface MaterializedArchiveAsyncChunkApplyOptions {
+  readonly fenceLease: MaterializedArchiveAsyncFenceLease
+  readonly executionLease: RecoveryArchiveRestoreChunkExecutionLease
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly jobId: string
+  readonly blockFence: string
+  readonly workerOwnerId: string
+  readonly workerFence: string
+  readonly leaseUntil: string
+  readonly recoveryMode: ExactAnchorRecoveryMode
+  readonly scopeKind: ExactArchiveRecoveryIdentityClaims['scopeKind']
+  readonly planScopeHash: string
+  readonly planHash: string
+  readonly archiveGenerationId: string
+  readonly archiveRootHash: string
+  readonly archiveSourceVectorHash: string
+  readonly archiveKeyId: string
+  readonly anchorOperationId: string
+  readonly anchorSeq: string
+  readonly checkpointId: string
+  readonly authorizedScopeHash: string
+  readonly targetRecords: ReadonlyMap<string, RecordStateAtT>
+  readonly targetLinks: readonly MaterializedArchiveLink[]
+  readonly selectedFieldIds: readonly string[]
+  readonly chunk: {
+    readonly chunkIndex: number
+    readonly expectedAnchorScopeHash: string
+    readonly expectedLiveSetHash: string
+    readonly expectedFinalLiveSetHash: string
+    readonly schemaHash: string
+    readonly operations: readonly MaterializedArchiveAsyncChunkOperation[]
+  }
+}
+
+export interface MaterializedArchiveAsyncChunkReceipt {
+  readonly [materializedArchiveAsyncChunkReceiptBrand]: typeof materializedArchiveAsyncChunkReceiptBrand
+  readonly operationId: string
+  readonly endpointSeq: string
+  readonly eventCount: number
+  readonly committedCount: string
+}
+
+/**
+ * @internal Consume one receipt minted by the L8 kernel on this exact transaction/query and job chunk.
+ * The one-shot WeakMap binding makes a structurally similar plain object unusable by the durable runner.
+ */
+export function consumeMaterializedArchiveAsyncChunkReceiptInternal(
+  query: QueryFn,
+  receipt: MaterializedArchiveAsyncChunkReceipt,
+  expected: {
+    readonly sheetId: string
+    readonly jobId: string
+    readonly chunkIndex: number
+  },
+): MaterializedArchiveAsyncChunkReceipt | null {
+  const binding = materializedArchiveAsyncChunkReceipts.get(receipt)
+  if (
+    !binding ||
+    binding.query !== query ||
+    binding.sheetId !== expected.sheetId ||
+    binding.jobId !== expected.jobId ||
+    binding.chunkIndex !== expected.chunkIndex
+  ) {
+    return null
+  }
+  materializedArchiveAsyncChunkReceipts.delete(receipt)
+  return receipt
+}
+
+function mintMaterializedArchiveAsyncChunkReceipt(
+  query: QueryFn,
+  binding: {
+    readonly sheetId: string
+    readonly jobId: string
+    readonly chunkIndex: number
+  },
+  value: Omit<MaterializedArchiveAsyncChunkReceipt, typeof materializedArchiveAsyncChunkReceiptBrand>,
+): MaterializedArchiveAsyncChunkReceipt {
+  const receipt = Object.freeze({
+    [materializedArchiveAsyncChunkReceiptBrand]: materializedArchiveAsyncChunkReceiptBrand,
+    ...value,
+  }) as MaterializedArchiveAsyncChunkReceipt
+  materializedArchiveAsyncChunkReceipts.set(receipt, { query, ...binding })
+  return receipt
+}
+
+export type MaterializedArchiveAsyncChunkApplyInput = Omit<
+  ExactAnchorApplyInput,
+  'token' | 'leaseBackoff'
+>
+
+export type MaterializedArchiveAsyncChunkApplyResult =
+  | {
+      readonly ok: true
+      readonly receipt: MaterializedArchiveAsyncChunkReceipt
+      readonly applied: ExactAnchorApplySuccess['applied']
+    }
+  | { readonly ok: false; readonly reason: ExactAnchorApplyRefusal }
+
 type ExactAnchorApplyExecution =
   | { readonly kind: 'hot' }
   | {
@@ -866,6 +1027,31 @@ type ExactAnchorApplyExecution =
       readonly planHash: string
       readonly tokenExpiresAt: string
       readonly auditedReplayHorizonMs: number
+    }
+  | {
+      readonly kind: 'archive_async_chunk'
+      readonly fenceLease: MaterializedArchiveAsyncFenceLease
+      readonly workspaceId: string
+      readonly baseId: string
+      readonly jobId: string
+      readonly blockFence: string
+      readonly workerOwnerId: string
+      readonly workerFence: string
+      readonly leaseUntil: string
+      readonly planScopeKind: ExactArchiveRecoveryIdentityClaims['scopeKind']
+      readonly planScopeHash: string
+      readonly planHash: string
+      readonly archiveGenerationId: string
+      readonly archiveRootHash: string
+      readonly archiveSourceVectorHash: string
+      readonly archiveKeyId: string
+      readonly chunkIndex: number
+      readonly targetRecords: ReadonlyMap<string, RecordStateAtT>
+      readonly targetLinks: readonly MaterializedArchiveLink[]
+      readonly selectedRecordIds: readonly string[]
+      readonly selectedFieldIds: readonly string[]
+      readonly expectedFinalLiveSetHash: string
+      readonly operations: readonly MaterializedArchiveAsyncChunkOperation[]
     }
 
 export type ExactAnchorLiveRecord = {
@@ -969,6 +1155,77 @@ function snapshotMaterializedLinks(value: unknown): readonly MaterializedArchive
   )
 }
 
+function isSha256(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
+}
+
+function isPositiveDecimal(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value)
+}
+
+function snapshotAsyncChunkOperations(
+  value: unknown,
+): readonly MaterializedArchiveAsyncChunkOperation[] | null {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 5000) return null
+  const result: MaterializedArchiveAsyncChunkOperation[] = []
+  const recordIds = new Set<string>()
+  for (const raw of value) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+    const operation = raw as Record<string, unknown>
+    if (
+      !isOpaqueId(operation.recordId) ||
+      recordIds.has(operation.recordId) ||
+      !Number.isSafeInteger(operation.expectedVersion) ||
+      (operation.expectedVersion as number) < 0
+    ) {
+      return null
+    }
+    recordIds.add(operation.recordId)
+    if (operation.kind === 'delete') {
+      if (Reflect.ownKeys(operation).length !== 3) return null
+      result.push({
+        kind: 'delete',
+        recordId: operation.recordId,
+        expectedVersion: operation.expectedVersion as number,
+      })
+      continue
+    }
+    if (operation.kind !== 'revert' || Reflect.ownKeys(operation).length !== 4) return null
+    if (!Array.isArray(operation.changedFieldIds) || operation.changedFieldIds.length === 0) return null
+    const changedFieldIds = operation.changedFieldIds.map((fieldId) =>
+      isOpaqueId(fieldId) ? fieldId : null,
+    )
+    if (
+      changedFieldIds.some((fieldId) => fieldId === null) ||
+      new Set(changedFieldIds).size !== changedFieldIds.length
+    ) {
+      return null
+    }
+    const sortedFieldIds = [...changedFieldIds as string[]].sort()
+    if (JSON.stringify(sortedFieldIds) !== JSON.stringify(changedFieldIds)) return null
+    result.push({
+      kind: 'revert',
+      recordId: operation.recordId,
+      expectedVersion: operation.expectedVersion as number,
+      changedFieldIds: Object.freeze(sortedFieldIds),
+    })
+  }
+  const sorted = [...result].sort((left, right) => left.recordId.localeCompare(right.recordId))
+  if (JSON.stringify(sorted) !== JSON.stringify(result)) return null
+  return Object.freeze(sorted.map((operation) => Object.freeze(operation)))
+}
+
+function requireMaterializedArchiveAsyncFenceLease(
+  lease: MaterializedArchiveAsyncFenceLease,
+  query: QueryFn,
+  sheetId: string,
+): void {
+  const binding = materializedArchiveAsyncFenceLeases.get(lease)
+  if (!binding || binding.query !== query || binding.sheetId !== sheetId) {
+    throw new ApplyRefusalError('recovery-trust-required')
+  }
+}
+
 async function lockArchiveSyncBinding(
   query: QueryFn,
   input: ExactAnchorApplyInput,
@@ -1023,6 +1280,107 @@ async function lockArchiveSyncBinding(
   if (archive.rows.length !== 1) throw new ApplyRefusalError('recovery-trust-required')
 }
 
+async function assertArchiveAsyncChunkBinding(
+  query: QueryFn,
+  input: ExactAnchorApplyInput,
+  claims: ExactAnchorRecoveryIdentityClaims,
+  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_async_chunk' }>,
+): Promise<void> {
+  const result = await query(
+    `SELECT job_row.id
+       FROM public.meta_recovery_archive_jobs job_row
+       JOIN public.meta_recovery_token_burns burn_row
+         ON burn_row.job_id = job_row.id AND burn_row.burn_kind = 'async'
+       JOIN public.meta_recovery_archives archive_row
+         ON archive_row.generation_id = job_row.archive_generation_id
+       JOIN public.meta_recovery_archive_keys key_row
+         ON key_row.key_id = job_row.key_id
+       JOIN public.meta_recovery_archive_job_chunks chunk_row
+         ON chunk_row.job_id = job_row.id AND chunk_row.sheet_id = job_row.sheet_id
+       JOIN public.meta_sheets sheet_row
+         ON sheet_row.id = job_row.sheet_id
+      WHERE job_row.id = $1::uuid
+        AND job_row.workspace_id = $2
+        AND job_row.base_id = $3
+        AND job_row.sheet_id = $4
+        AND job_row.actor_id = $5
+        AND job_row.recovery_mode = $6
+        AND job_row.scope_kind = $7
+        AND job_row.scope_hash = $8
+        AND job_row.plan_hash = $9
+        AND job_row.archive_generation_id = $10::uuid
+        AND job_row.archive_root_hash = $11
+        AND job_row.source_vector_hash = $12
+        AND job_row.key_id = $13
+        AND job_row.block_fence = $14::bigint
+        AND job_row.state = 'applying'
+        AND job_row.worker_owner_id = $15
+        AND job_row.worker_fence = $16::bigint
+        AND job_row.lease_until = $17::timestamptz
+        AND job_row.lease_until > clock_timestamp()
+        AND job_row.resume_deadline > clock_timestamp()
+        AND chunk_row.chunk_index = $21::int
+        AND chunk_row.record_count = $22::bigint
+        AND chunk_row.state = 'pending'
+        AND burn_row.sheet_id = job_row.sheet_id
+        AND burn_row.actor_id = job_row.actor_id
+        AND burn_row.archive_generation_id = job_row.archive_generation_id
+        AND burn_row.archive_root_hash = job_row.archive_root_hash
+        AND burn_row.source_vector_hash = job_row.source_vector_hash
+        AND archive_row.workspace_id = job_row.workspace_id
+        AND archive_row.base_id = job_row.base_id
+        AND archive_row.sheet_id = job_row.sheet_id
+        AND archive_row.anchor_operation_id::text = $18
+        AND archive_row.anchor_seq::text = $19
+        AND archive_row.checkpoint_id = $20
+        AND archive_row.root_hash = job_row.archive_root_hash
+        AND archive_row.source_vector_hash = job_row.source_vector_hash
+        AND archive_row.key_id = job_row.key_id
+        AND archive_row.state = 'verified'
+        AND archive_row.build_status = 'finalized'
+        AND archive_row.coverage_status = 'complete'
+        AND archive_row.expires_at > clock_timestamp()
+        AND key_row.state IN ('active', 'retiring')
+        AND sheet_row.recovery_writer_state = 'archiving'
+        AND sheet_row.recovery_writer_owner_kind = 'restore_job'
+        AND sheet_row.recovery_writer_owner_id = job_row.id::text
+        AND sheet_row.recovery_writer_owner_fence = job_row.block_fence
+        AND sheet_row.recovery_writer_lease_until > clock_timestamp()
+        AND NOT EXISTS (
+          SELECT 1
+            FROM public.meta_recovery_archive_legal_holds hold_row
+           WHERE hold_row.generation_id = archive_row.generation_id
+             AND hold_row.state = 'active'
+        )
+      `,
+    [
+      execution.jobId,
+      execution.workspaceId,
+      execution.baseId,
+      input.sheetId,
+      input.actorId,
+      claims.mode,
+      execution.planScopeKind,
+      execution.planScopeHash,
+      execution.planHash,
+      execution.archiveGenerationId,
+      execution.archiveRootHash,
+      execution.archiveSourceVectorHash,
+      execution.archiveKeyId,
+      execution.blockFence,
+      execution.workerOwnerId,
+      execution.workerFence,
+      execution.leaseUntil,
+      claims.anchorOperationId,
+      claims.anchorSeq,
+      claims.checkpointId,
+      execution.chunkIndex,
+      String(execution.operations.length),
+    ],
+  )
+  if (result.rows.length !== 1) throw new ApplyRefusalError('recovery-trust-required')
+}
+
 function archiveTargetForAnchor(
   execution: ArchiveScopeExecution,
 ): Map<string, RecordStateAtT> {
@@ -1036,6 +1394,50 @@ function archiveTargetForAnchor(
     result.set(recordId, state)
   }
   return result
+}
+
+function archiveScopeForExecution(
+  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' | 'archive_async_chunk' }>,
+): ArchiveScopeExecution {
+  if (execution.kind === 'archive_sync') return execution
+  return {
+    claims: {
+      scopeKind: execution.planScopeKind === 'selected_fields'
+        ? 'selected_fields'
+        : 'selected_records',
+    },
+    targetRecords: execution.targetRecords,
+    selectedRecordIds: execution.selectedRecordIds,
+    selectedFieldIds: execution.selectedFieldIds,
+  }
+}
+
+function assertAsyncChunkOperationsMatch(
+  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_async_chunk' }>,
+  revertWrites: readonly ExactAnchorRevertWriteIntent[],
+  deleteRecordIds: readonly string[],
+  liveById: ReadonlyMap<string, ExactAnchorLiveRecord>,
+): void {
+  const actual: MaterializedArchiveAsyncChunkOperation[] = [
+    ...revertWrites.map((write) => ({
+      kind: 'revert' as const,
+      recordId: write.recordId,
+      expectedVersion: write.liveVersion,
+      changedFieldIds: [...write.changedFieldIds].sort(),
+    })),
+    ...deleteRecordIds.map((recordId) => {
+      const live = liveById.get(recordId)
+      if (!live) throw new ApplyRefusalError('preview-drift')
+      return {
+        kind: 'delete' as const,
+        recordId,
+        expectedVersion: live.version,
+      }
+    }),
+  ].sort((left, right) => left.recordId.localeCompare(right.recordId))
+  if (JSON.stringify(actual) !== JSON.stringify(execution.operations)) {
+    throw new ApplyRefusalError('preview-drift')
+  }
 }
 
 function hydrateArchiveTargetLinks(
@@ -1254,6 +1656,121 @@ export async function applyMaterializedExactArchiveRecoverySyncInternal(
   })
 }
 
+/**
+ * @internal D5 async worker entry. The caller must already be inside the job transaction and must pass the
+ * fence lease minted before any job/key/block row lock. This entry does not verify or reburn a JWT: the
+ * immutable async burn, accepted job, archive, block, worker lease, and frozen plan/chunk bindings are
+ * re-established from the database and authenticated materialized objects instead.
+ */
+export async function applyMaterializedExactArchiveRecoveryAsyncChunkInternal(
+  query: QueryFn,
+  input: MaterializedArchiveAsyncChunkApplyInput,
+  options: MaterializedArchiveAsyncChunkApplyOptions,
+): Promise<MaterializedArchiveAsyncChunkApplyResult> {
+  const targetRecords = snapshotMaterializedTarget(options?.targetRecords)
+  const targetLinks = snapshotMaterializedLinks(options?.targetLinks)
+  const operations = snapshotAsyncChunkOperations(options?.chunk?.operations)
+  const selectedFieldIds = Array.isArray(options?.selectedFieldIds)
+    ? options.selectedFieldIds.map((fieldId) => isOpaqueId(fieldId) ? fieldId : null)
+    : []
+  const scopeKind = options?.scopeKind
+  const timestampMs = Date.parse(options?.leaseUntil ?? '')
+  if (
+    !input || typeof input !== 'object' ||
+    !isOpaqueId(input.sheetId) || !isOpaqueId(input.actorId) ||
+    !options || typeof options !== 'object' ||
+    !isOpaqueId(options.workspaceId) || !isOpaqueId(options.baseId) ||
+    !isOpaqueId(options.jobId) || !isPositiveDecimal(options.blockFence) ||
+    !isOpaqueId(options.workerOwnerId) || !isPositiveDecimal(options.workerFence) ||
+    !Number.isFinite(timestampMs) ||
+    (options.recoveryMode !== 'revert' && options.recoveryMode !== 'reset') ||
+    (scopeKind !== 'whole_sheet' && scopeKind !== 'selected_records' && scopeKind !== 'selected_fields') ||
+    !isSha256(options.planScopeHash) || !isSha256(options.planHash) ||
+    !isOpaqueId(options.archiveGenerationId) || !isSha256(options.archiveRootHash) ||
+    !isSha256(options.archiveSourceVectorHash) || !isOpaqueId(options.archiveKeyId) ||
+    !isOpaqueId(options.anchorOperationId) || !isPositiveDecimal(options.anchorSeq) ||
+    !isOpaqueId(options.checkpointId) || !isSha256(options.authorizedScopeHash) ||
+    !targetRecords || !targetLinks || !operations ||
+    !Number.isSafeInteger(options.chunk.chunkIndex) || options.chunk.chunkIndex < 0 ||
+    !isSha256(options.chunk.expectedAnchorScopeHash) ||
+    !isSha256(options.chunk.expectedLiveSetHash) ||
+    !isSha256(options.chunk.expectedFinalLiveSetHash) ||
+    !isSha256(options.chunk.schemaHash) ||
+    selectedFieldIds.some((fieldId) => fieldId === null) ||
+    new Set(selectedFieldIds).size !== selectedFieldIds.length ||
+    JSON.stringify([...selectedFieldIds].sort()) !== JSON.stringify(selectedFieldIds)
+  ) {
+    return { ok: false, reason: 'identity-invalid' }
+  }
+
+  const selectedRecordIds = operations.map((operation) => operation.recordId)
+  if (selectedRecordIds.some((recordId) => !targetRecords.has(recordId))) {
+    return { ok: false, reason: 'identity-invalid' }
+  }
+  if (!consumeRecoveryArchiveRestoreChunkExecutionLeaseInternal(
+    query,
+    options.executionLease,
+    {
+      jobId: options.jobId,
+      sheetId: input.sheetId,
+      archiveGenerationId: options.archiveGenerationId,
+      chunkIndex: options.chunk.chunkIndex,
+    },
+  )) {
+    return { ok: false, reason: 'recovery-trust-required' }
+  }
+  const claims: ExactAnchorRecoveryIdentityClaims = {
+    sheetId: input.sheetId,
+    anchorOperationId: options.anchorOperationId,
+    anchorSeq: options.anchorSeq,
+    checkpointId: options.checkpointId,
+    scopeHash: options.chunk.expectedAnchorScopeHash,
+    liveSetHash: options.chunk.expectedLiveSetHash,
+    schemaHash: options.chunk.schemaHash,
+    actorId: input.actorId,
+    mode: options.recoveryMode,
+    authorizedScopeHash: options.authorizedScopeHash,
+  }
+  const execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_async_chunk' }> = {
+    kind: 'archive_async_chunk',
+    fenceLease: options.fenceLease,
+    workspaceId: options.workspaceId,
+    baseId: options.baseId,
+    jobId: options.jobId,
+    blockFence: options.blockFence,
+    workerOwnerId: options.workerOwnerId,
+    workerFence: options.workerFence,
+    leaseUntil: options.leaseUntil,
+    planScopeKind: scopeKind,
+    planScopeHash: options.planScopeHash,
+    planHash: options.planHash,
+    archiveGenerationId: options.archiveGenerationId,
+    archiveRootHash: options.archiveRootHash,
+    archiveSourceVectorHash: options.archiveSourceVectorHash,
+    archiveKeyId: options.archiveKeyId,
+    chunkIndex: options.chunk.chunkIndex,
+    targetRecords,
+    targetLinks,
+    selectedRecordIds,
+    selectedFieldIds: selectedFieldIds as string[],
+    expectedFinalLiveSetHash: options.chunk.expectedFinalLiveSetHash,
+    operations,
+  }
+  const attempt = await applyExactAnchorRecoveryAttempt(
+    async (work) => work(query),
+    { ...input, token: '' },
+    claims,
+    execution,
+  )
+  if ('reason' in attempt.result) return { ok: false, reason: attempt.result.reason }
+  if (!attempt.asyncReceipt) return { ok: false, reason: 'recovery-trust-required' }
+  return {
+    ok: true,
+    receipt: attempt.asyncReceipt,
+    applied: attempt.result.applied,
+  }
+}
+
 async function applyExactAnchorRecoveryWithExecution(
   transaction: <T>(fn: (query: QueryFn) => Promise<T>) => Promise<T>,
   input: ExactAnchorApplyInput,
@@ -1292,8 +1809,13 @@ async function applyExactAnchorRecoveryAttempt(
   input: ExactAnchorApplyInput,
   claims: ExactAnchorRecoveryIdentityClaims,
   execution: ExactAnchorApplyExecution,
-): Promise<{ result: ExactAnchorApplyResult; leaseBusy: boolean }> {
+): Promise<{
+  result: ExactAnchorApplyResult
+  leaseBusy: boolean
+  asyncReceipt?: MaterializedArchiveAsyncChunkReceipt
+}> {
   const { anchorSeq, checkpointId, scopeHash, liveSetHash, schemaHash, mode, authorizedScopeHash } = claims
+  let asyncReceipt: MaterializedArchiveAsyncChunkReceipt | undefined
 
   try {
     const success = await transaction(async (query) => {
@@ -1328,15 +1850,22 @@ async function applyExactAnchorRecoveryAttempt(
       //    when the flag is OFF (recovery refuses at the ENV-trust gate below regardless). The durable
       //    writer-block check is kept SOURCE-only (fence-before-check), exactly as `fenceWriterEntry` did.
       if (isWriterFenceEnabled()) {
-        const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, input.sheetId)
-        await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
-        await assertNoActiveWriterBlock(query, input.sheetId)
+        if (execution.kind === 'archive_async_chunk') {
+          requireMaterializedArchiveAsyncFenceLease(execution.fenceLease, query, input.sheetId)
+        } else {
+          const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, input.sheetId)
+          await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
+          await assertNoActiveWriterBlock(query, input.sheetId)
+        }
       }
 
       // 2. ENV-ONLY TRUST FLAGS — before any sheet-state adjudication, burn, or write. Fence alone is
       //    a flag-off no-op; refuse unless the trusted recovery substrate is actually armed.
       if (!isWriterFenceEnabled() || !isContiguityStrictMode()) {
         throw new ApplyRefusalError('recovery-trust-required')
+      }
+      if (execution.kind === 'archive_async_chunk') {
+        await assertArchiveAsyncChunkBinding(query, input, claims, execution)
       }
 
       // 3. PRELIMINARY in-fence full-read + authorizedScopeHash (P1-2), FIRST among sheet-state checks.
@@ -1348,9 +1877,10 @@ async function applyExactAnchorRecoveryAttempt(
         throw new ApplyRefusalError('forbidden')
       }
 
-      const tokenSha = createHash('sha256').update(input.token).digest('hex')
       let composed: Map<string, RecordStateAtT>
+      let tokenSha: string | null = null
       if (execution.kind === 'hot') {
+        tokenSha = createHash('sha256').update(input.token).digest('hex')
         // Hot recovery re-selects and validates the retained history window. Archive recovery consumes the
         // already-authenticated D4 complete-section state instead of forking or rerunning reconstruction here.
         const checkpoint = await selectCheckpointByAnchorSeq(query, input.sheetId, anchorSeq)
@@ -1389,7 +1919,8 @@ async function applyExactAnchorRecoveryAttempt(
           if (error instanceof ExactAnchorHistoryDataError) throw new ApplyRefusalError('history-incomplete')
           throw error
         }
-      } else {
+      } else if (execution.kind === 'archive_sync') {
+        tokenSha = createHash('sha256').update(input.token).digest('hex')
         const priorBurn = await query(
           'SELECT 1 FROM public.meta_recovery_token_burns WHERE token_sha256 = $1',
           [tokenSha],
@@ -1397,6 +1928,8 @@ async function applyExactAnchorRecoveryAttempt(
         if (priorBurn.rows.length > 0) throw new ApplyRefusalError('token-replayed')
         await lockArchiveSyncBinding(query, input, execution)
         composed = archiveTargetForAnchor(execution)
+      } else {
+        composed = archiveTargetForAnchor(archiveScopeForExecution(execution))
       }
       const anchorHash = hashAnchorRecoveryScope(
         [...composed.values()].map((s) => ({ recordId: s.recordId, exists: s.exists, version: s.version })),
@@ -1417,10 +1950,10 @@ async function applyExactAnchorRecoveryAttempt(
         created_at?: unknown
         updated_at?: unknown
       }>()
-      const archiveLockLinks = execution.kind === 'archive_sync'
+      const archiveLockLinks = execution.kind !== 'hot'
         ? execution.targetLinks.filter((edge) =>
             composed.has(edge.recordId) &&
-            (execution.claims.scopeKind !== 'selected_fields' ||
+            (archiveScopeForExecution(execution).claims.scopeKind !== 'selected_fields' ||
               execution.selectedFieldIds.includes(edge.fieldId)),
           )
         : undefined
@@ -1520,14 +2053,14 @@ async function applyExactAnchorRecoveryAttempt(
         writableLinkFieldIds,
       )
 
-      if (execution.kind === 'archive_sync') {
+      if (execution.kind !== 'hot') {
         const archiveTarget = hydrateArchiveTargetLinks(
           execution.targetRecords,
           execution.targetLinks,
           writableLinkFieldIds,
         )
         const scoped = scopeArchiveRecoveryPlan(
-          execution,
+          archiveScopeForExecution(execution),
           archiveTarget,
           liveById,
           new Set(projectionFieldById.keys()),
@@ -1588,6 +2121,8 @@ async function applyExactAnchorRecoveryAttempt(
         // A sync burn must bind a real sealed operation. A zero-write preview is stale/invalid rather than
         // an excuse to create an unsealed success receipt that could later be mistaken for an applied restore.
         if (affectedCount === 0) throw new ApplyRefusalError('preview-drift')
+      } else if (execution.kind === 'archive_async_chunk') {
+        assertAsyncChunkOperationsMatch(execution, revertWrites, deleteRecordIds, liveById)
       }
 
       // Row locks were taken over the FULL live set (ORDER BY id FOR UPDATE NOWAIT) before the liveSetHash check,
@@ -1805,6 +2340,7 @@ async function applyExactAnchorRecoveryAttempt(
 
       if (execution.kind === 'archive_sync') {
         if (op.operationId === null) throw new ApplyRefusalError('recovery-trust-required')
+        if (tokenSha === null) throw new ApplyRefusalError('recovery-trust-required')
         try {
           const burn = await query(
             `WITH terminal AS (
@@ -2026,6 +2562,7 @@ async function applyExactAnchorRecoveryAttempt(
         if (op.operationId === null || op.maxSeq === null || op.eventCount === 0) {
           throw new ApplyRefusalError('recovery-trust-required')
         }
+        if (tokenSha === null) throw new ApplyRefusalError('recovery-trust-required')
         await sealDirectEventOperation(query, {
           sheetId: input.sheetId,
           operationId: op.operationId,
@@ -2049,6 +2586,47 @@ async function applyExactAnchorRecoveryAttempt(
             revertsApplied + deletes,
           ],
         )
+      } else if (execution.kind === 'archive_async_chunk') {
+        if (op.operationId === null || op.maxSeq === null || op.eventCount === 0) {
+          throw new ApplyRefusalError('recovery-trust-required')
+        }
+        const committedCount = revertsApplied + deletes
+        if (committedCount !== execution.operations.length) {
+          throw new ApplyRefusalError('preview-drift')
+        }
+        const finalLiveHash = hashExactAnchorLiveSet(
+          ((await query('SELECT id, version FROM meta_records WHERE sheet_id = $1', [input.sheetId]))
+            .rows as Array<{ id: unknown; version: unknown }>)
+            .map((row) => ({
+              recordId: String(row.id),
+              version: requireLiveVersion(row.version),
+            })),
+          await loadAuthoritativeLiveLinkEdgesForSheet(query, input.sheetId),
+        )
+        if (finalLiveHash !== execution.expectedFinalLiveSetHash) {
+          throw new ApplyRefusalError('preview-drift')
+        }
+        await sealDirectEventOperation(query, {
+          sheetId: input.sheetId,
+          operationId: op.operationId,
+          endpointSeq: op.maxSeq,
+          eventCount: op.eventCount,
+          operationKind: 'restore_chunk',
+        })
+        asyncReceipt = mintMaterializedArchiveAsyncChunkReceipt(
+          query,
+          {
+            sheetId: input.sheetId,
+            jobId: execution.jobId,
+            chunkIndex: execution.chunkIndex,
+          },
+          {
+            operationId: op.operationId,
+            endpointSeq: op.maxSeq,
+            eventCount: op.eventCount,
+            committedCount: String(committedCount),
+          },
+        )
       } else {
         await sealOperation(query, op)
       }
@@ -2063,7 +2641,7 @@ async function applyExactAnchorRecoveryAttempt(
           mode === 'revert' ? plan.createdAfterAnchor.length + plan.deletedAtAnchorLiveNow.length : 0,
       }
     })
-    return { result: success, leaseBusy: false }
+    return { result: success, leaseBusy: false, ...(asyncReceipt ? { asyncReceipt } : {}) }
   } catch (e) {
     if (e instanceof ApplyRefusalError) {
       return { result: { ok: false, reason: e.reason }, leaseBusy: e.leaseBusy }

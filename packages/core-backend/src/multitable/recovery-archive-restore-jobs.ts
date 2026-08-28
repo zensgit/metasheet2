@@ -19,6 +19,14 @@ import {
   verifyExactArchiveRecoveryIdentity,
   type ExactArchiveRecoveryIdentityClaims,
 } from './restore-preview-identity'
+import {
+  consumeMaterializedArchiveAsyncChunkReceiptInternal,
+  type MaterializedArchiveAsyncChunkReceipt,
+} from './exact-anchor-recovery-execute'
+import {
+  consumeRecoveryArchiveAsyncRestoreFacadeLeaseInternal,
+  type RecoveryArchiveAsyncRestoreFacadeLease,
+} from './recovery-archive-async-restore'
 
 export type RecoveryArchiveRestoreJobQuery = (
   sql: string,
@@ -122,6 +130,7 @@ export interface RecoveryArchiveRestoreJobCandidate {
   readonly jobId: string
   readonly sheetId: string
   readonly keyId: string
+  readonly archiveGenerationId: string
   readonly blockFence: string
 }
 
@@ -133,10 +142,93 @@ export interface RecoveryArchiveRestoreJobWorkerClaim {
   readonly jobId: string
   readonly sheetId: string
   readonly keyId: string
+  readonly archiveGenerationId: string
   readonly blockFence: string
   readonly workerOwnerId: string
   readonly workerFence: string
   readonly leaseUntil: string
+}
+
+const chunkExecutionLeaseBrand: unique symbol = Symbol(
+  'RecoveryArchiveRestoreChunkExecutionLease',
+)
+const chunkExecutionLeases = new WeakMap<
+  object,
+  {
+    readonly query: RecoveryArchiveRestoreJobQuery
+    readonly jobId: string
+    readonly sheetId: string
+    readonly archiveGenerationId: string
+    readonly chunkIndex: number
+  }
+>()
+
+export interface RecoveryArchiveRestoreChunkExecutionLease {
+  readonly [chunkExecutionLeaseBrand]: typeof chunkExecutionLeaseBrand
+}
+
+/**
+ * One-shot proof that L8 is executing inside the durable runner after the exact generation, job, and chunk
+ * rows were locked. The runner is the only minting site; direct imports of the L8 kernel cannot forge it.
+ */
+export function consumeRecoveryArchiveRestoreChunkExecutionLeaseInternal(
+  query: RecoveryArchiveRestoreJobQuery,
+  lease: RecoveryArchiveRestoreChunkExecutionLease,
+  expected: {
+    readonly jobId: string
+    readonly sheetId: string
+    readonly archiveGenerationId: string
+    readonly chunkIndex: number
+  },
+): boolean {
+  const binding = chunkExecutionLeases.get(lease)
+  if (
+    !binding || binding.query !== query || binding.jobId !== expected.jobId ||
+    binding.sheetId !== expected.sheetId ||
+    binding.archiveGenerationId !== expected.archiveGenerationId ||
+    binding.chunkIndex !== expected.chunkIndex
+  ) {
+    return false
+  }
+  chunkExecutionLeases.delete(lease)
+  return true
+}
+
+function mintRecoveryArchiveRestoreChunkExecutionLease(
+  query: RecoveryArchiveRestoreJobQuery,
+  binding: {
+    readonly jobId: string
+    readonly sheetId: string
+    readonly archiveGenerationId: string
+    readonly chunkIndex: number
+  },
+): RecoveryArchiveRestoreChunkExecutionLease {
+  const lease = Object.freeze({
+    [chunkExecutionLeaseBrand]: chunkExecutionLeaseBrand,
+  }) as RecoveryArchiveRestoreChunkExecutionLease
+  chunkExecutionLeases.set(lease, { query, ...binding })
+  return lease
+}
+
+export interface RecoveryArchiveRestoreWorkerBinding {
+  readonly jobId: string
+  readonly workspaceId: string
+  readonly baseId: string
+  readonly sheetId: string
+  readonly actorId: string
+  readonly recoveryMode: 'revert' | 'reset'
+  readonly scopeKind: 'whole_sheet' | 'selected_records' | 'selected_fields'
+  readonly scopeHash: string
+  readonly archiveGenerationId: string
+  readonly archiveRootHash: string
+  readonly sourceVectorHash: string
+  readonly keyId: string
+  readonly planHash: string
+  readonly planObjectId: string
+  readonly planObjectVersion: string
+  readonly planObjectSha256: string
+  readonly planObjectSize: string
+  readonly planObjectExpiresAt: string
 }
 
 export interface ClaimRecoveryArchiveRestoreJobInput {
@@ -166,27 +258,60 @@ export interface RecoveryArchiveRestoreChunkApplyContext {
   readonly chunkIndex: number
   readonly operationId: string
   readonly payload: unknown
+  readonly executionLease: RecoveryArchiveRestoreChunkExecutionLease
 }
 
-export interface RecoveryArchiveRestoreChunkApplyReceipt {
+interface RecoveryArchiveRestoreChunkApplyReceiptTestOnly {
+  readonly operationId?: string
   readonly endpointSeq: string
   readonly eventCount: number
   readonly committedCount: string
 }
 
 export interface RunRecoveryArchiveRestoreChunkInput {
+  readonly facadeLease: RecoveryArchiveAsyncRestoreFacadeLease
   readonly read: RecoveryArchiveRestoreJobQuery
   readonly materialize: (
     expected: Omit<RecoveryArchiveRestoreChunkMaterialized, 'payload'>,
   ) => Promise<RecoveryArchiveRestoreChunkMaterialized>
   readonly recheckAuthority: (
     query: RecoveryArchiveRestoreJobQuery,
-    context: Omit<RecoveryArchiveRestoreChunkApplyContext, 'operationId' | 'payload'>,
+    context: Omit<
+      RecoveryArchiveRestoreChunkApplyContext,
+      'operationId' | 'payload' | 'executionLease'
+    >,
   ) => Promise<boolean>
+  /** The FIRST statement group in the apply transaction. */
+  readonly prelock: (
+    query: RecoveryArchiveRestoreJobQuery,
+    context: { readonly jobId: string; readonly sheetId: string },
+  ) => Promise<void>
   readonly apply: (
     query: RecoveryArchiveRestoreJobQuery,
     context: RecoveryArchiveRestoreChunkApplyContext,
-  ) => Promise<RecoveryArchiveRestoreChunkApplyReceipt>
+  ) => Promise<MaterializedArchiveAsyncChunkReceipt>
+}
+
+interface RunRecoveryArchiveRestoreChunkTestInput {
+  readonly read: RecoveryArchiveRestoreJobQuery
+  readonly materialize: RunRecoveryArchiveRestoreChunkInput['materialize']
+  readonly recheckAuthority: RunRecoveryArchiveRestoreChunkInput['recheckAuthority']
+  readonly prelock?: RunRecoveryArchiveRestoreChunkInput['prelock']
+  readonly apply: (
+    query: RecoveryArchiveRestoreJobQuery,
+    context: RecoveryArchiveRestoreChunkApplyContext,
+  ) => Promise<RecoveryArchiveRestoreChunkApplyReceiptTestOnly>
+}
+
+type RunRecoveryArchiveRestoreChunkCoreInput = Omit<
+  RunRecoveryArchiveRestoreChunkInput,
+  'apply' | 'prelock' | 'facadeLease'
+> & {
+  readonly prelock?: RunRecoveryArchiveRestoreChunkInput['prelock']
+  readonly apply: (
+    query: RecoveryArchiveRestoreJobQuery,
+    context: RecoveryArchiveRestoreChunkApplyContext,
+  ) => Promise<unknown>
 }
 
 export interface RecoveryArchiveRestoreChunkResult {
@@ -620,7 +745,9 @@ export async function selectRecoveryArchiveRestoreJobCandidate(
 ): Promise<RecoveryArchiveRestoreJobCandidate | null> {
   return transaction(async (query) => {
     const result = await query(
-      `SELECT id::text AS id, sheet_id, key_id, block_fence::text AS block_fence
+      `SELECT id::text AS id, sheet_id, key_id,
+              archive_generation_id::text AS archive_generation_id,
+              block_fence::text AS block_fence
          FROM public.meta_recovery_archive_jobs
         WHERE resume_deadline > clock_timestamp()
           AND (
@@ -638,6 +765,7 @@ export async function selectRecoveryArchiveRestoreJobCandidate(
       jobId: opaque(row.id),
       sheetId: opaque(row.sheet_id),
       keyId: opaque(row.key_id),
+      archiveGenerationId: opaque(row.archive_generation_id),
       blockFence: positiveDecimal(row.block_fence),
     }
     candidates.add(candidate)
@@ -657,10 +785,17 @@ export async function claimRecoveryArchiveRestoreJob(
   return transaction(async (query) => {
     await prepareArchiveWriterBlockTransaction(query, candidate.sheetId)
     await lockRecoveryArchiveKey(query, candidate.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      candidate.archiveGenerationId,
+      candidate.sheetId,
+      candidate.keyId,
+    )
     await lockRestoreJobBlock(query, candidate)
     const row = await lockJobRow(query, candidate.jobId, candidate.sheetId)
     if (
       row.key_id !== candidate.keyId ||
+      opaque(row.archive_generation_id) !== candidate.archiveGenerationId ||
       decimal(row.block_fence) !== candidate.blockFence ||
       !isClaimableJobRow(row)
     ) {
@@ -694,6 +829,7 @@ export async function claimRecoveryArchiveRestoreJob(
       jobId: candidate.jobId,
       sheetId: candidate.sheetId,
       keyId: candidate.keyId,
+      archiveGenerationId: candidate.archiveGenerationId,
       blockFence: candidate.blockFence,
       workerOwnerId,
       workerFence: positiveDecimal(claimRow.worker_fence),
@@ -701,6 +837,79 @@ export async function claimRecoveryArchiveRestoreJob(
     }
     workerClaims.add(claim)
     return Object.freeze(claim)
+  })
+}
+
+/**
+ * Read the immutable worker/plan object binding outside the destructive transaction. Every mutable lease and
+ * durable block field is rebound to the branded claim; the later apply transaction checks the same tuple again.
+ */
+export async function readRecoveryArchiveRestoreWorkerBinding(
+  query: RecoveryArchiveRestoreJobQuery,
+  claimInput: RecoveryArchiveRestoreJobWorkerClaim,
+): Promise<RecoveryArchiveRestoreWorkerBinding> {
+  const claim = requireWorkerClaim(claimInput)
+  const result = await query(
+    `SELECT job_row.workspace_id, job_row.base_id, job_row.sheet_id, job_row.actor_id,
+            job_row.recovery_mode, job_row.scope_kind, job_row.scope_hash,
+            job_row.archive_generation_id::text AS archive_generation_id,
+            job_row.archive_root_hash, job_row.source_vector_hash, job_row.key_id,
+            job_row.plan_hash, job_row.plan_object_id, job_row.plan_object_version,
+            job_row.plan_object_sha256,
+            job_row.plan_object_size::text AS plan_object_size,
+            job_row.plan_object_expires_at::text AS plan_object_expires_at
+       FROM public.meta_recovery_archive_jobs job_row
+       JOIN public.meta_sheets sheet_row ON sheet_row.id=job_row.sheet_id
+      WHERE job_row.id=$1::uuid
+        AND job_row.sheet_id=$2
+        AND job_row.key_id=$3
+        AND job_row.block_fence=$4::bigint
+        AND job_row.state='applying'
+        AND job_row.worker_owner_id=$5
+        AND job_row.worker_fence=$6::bigint
+        AND job_row.lease_until=$7::timestamptz
+        AND job_row.archive_generation_id=$8::uuid
+        AND job_row.lease_until > clock_timestamp()
+        AND job_row.resume_deadline > clock_timestamp()
+        AND sheet_row.recovery_writer_state='archiving'
+        AND sheet_row.recovery_writer_owner_kind='restore_job'
+        AND sheet_row.recovery_writer_owner_id=job_row.id::text
+        AND sheet_row.recovery_writer_owner_fence=job_row.block_fence
+        AND sheet_row.recovery_writer_lease_until > clock_timestamp()`,
+    [
+      claim.jobId,
+      claim.sheetId,
+      claim.keyId,
+      claim.blockFence,
+      claim.workerOwnerId,
+      claim.workerFence,
+      claim.leaseUntil,
+      claim.archiveGenerationId,
+    ],
+  )
+  const row = result.rows[0] as Record<string, unknown> | undefined
+  if (!row || result.rows.length !== 1) {
+    throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_LEASE_LOST')
+  }
+  return Object.freeze({
+    jobId: claim.jobId,
+    workspaceId: opaque(row.workspace_id),
+    baseId: opaque(row.base_id),
+    sheetId: opaque(row.sheet_id),
+    actorId: opaque(row.actor_id),
+    recoveryMode: recoveryMode(row.recovery_mode),
+    scopeKind: scopeKind(row.scope_kind),
+    scopeHash: sha(row.scope_hash),
+    archiveGenerationId: opaque(row.archive_generation_id),
+    archiveRootHash: sha(row.archive_root_hash),
+    sourceVectorHash: sha(row.source_vector_hash),
+    keyId: opaque(row.key_id),
+    planHash: sha(row.plan_hash),
+    planObjectId: opaque(row.plan_object_id),
+    planObjectVersion: opaque(row.plan_object_version),
+    planObjectSha256: sha(row.plan_object_sha256),
+    planObjectSize: positiveDecimal(row.plan_object_size),
+    planObjectExpiresAt: canonicalTimestamp(row.plan_object_expires_at),
   })
 }
 
@@ -713,6 +922,18 @@ export async function runRecoveryArchiveRestoreChunk(
   transaction: RecoveryArchiveRestoreJobTransaction,
   claimInput: RecoveryArchiveRestoreJobWorkerClaim,
   input: RunRecoveryArchiveRestoreChunkInput,
+): Promise<RecoveryArchiveRestoreChunkResult> {
+  if (!input || typeof input.prelock !== 'function') invalidInput()
+  const claim = requireWorkerClaim(claimInput)
+  if (!consumeRecoveryArchiveAsyncRestoreFacadeLeaseInternal(input.facadeLease, claim)) invalidInput()
+  return runRecoveryArchiveRestoreChunkCore(transaction, claim, input, 'l8')
+}
+
+async function runRecoveryArchiveRestoreChunkCore(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  claimInput: RecoveryArchiveRestoreJobWorkerClaim,
+  input: RunRecoveryArchiveRestoreChunkCoreInput,
+  receiptMode: 'l8' | 'test',
 ): Promise<RecoveryArchiveRestoreChunkResult> {
   const claim = requireWorkerClaim(claimInput)
   if (
@@ -730,8 +951,17 @@ export async function runRecoveryArchiveRestoreChunk(
   assertMaterializedMatches(expected, materialized)
 
   return transaction(async (query) => {
+    if (input.prelock) {
+      await input.prelock(query, { jobId: claim.jobId, sheetId: claim.sheetId })
+    }
     await prepareArchiveWriterBlockTransaction(query, claim.sheetId)
     await lockRecoveryArchiveKey(query, claim.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      claim.archiveGenerationId,
+      claim.sheetId,
+      claim.keyId,
+    )
     await lockRestoreJobBlock(query, claim)
     const job = await lockClaimedJob(query, claim)
     const chunk = await lockChunkRow(query, claim.jobId, expected.chunkIndex)
@@ -750,24 +980,46 @@ export async function runRecoveryArchiveRestoreChunk(
     if (!(await input.recheckAuthority(query, contextBase))) {
       throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED')
     }
-    const operationId = randomUUID()
-    const receipt = admitApplyReceipt(
-      await input.apply(query, {
-        ...contextBase,
-        operationId,
-        payload: materialized.payload,
-      }),
-    )
+    const provisionalOperationId = randomUUID()
+    const executionLease = mintRecoveryArchiveRestoreChunkExecutionLease(query, {
+      jobId: claim.jobId,
+      sheetId: claim.sheetId,
+      archiveGenerationId: claim.archiveGenerationId,
+      chunkIndex: expected.chunkIndex,
+    })
+    const rawReceipt = await input.apply(query, {
+      ...contextBase,
+      operationId: provisionalOperationId,
+      payload: materialized.payload,
+      executionLease,
+    })
+    const receipt = receiptMode === 'l8'
+      ? consumeMaterializedArchiveAsyncChunkReceiptInternal(
+          query,
+          rawReceipt as MaterializedArchiveAsyncChunkReceipt,
+          {
+            jobId: claim.jobId,
+            sheetId: claim.sheetId,
+            chunkIndex: expected.chunkIndex,
+          },
+        )
+      : admitApplyReceiptTestOnly(rawReceipt)
+    if (!receipt) {
+      throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_APPLY_INVALID')
+    }
     if (receipt.committedCount !== decimal(chunk.record_count)) {
       throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_APPLY_INVALID')
     }
-    await sealDirectEventOperation(query, {
-      sheetId: claim.sheetId,
-      operationId,
-      endpointSeq: receipt.endpointSeq,
-      eventCount: receipt.eventCount,
-      operationKind: 'restore_chunk',
-    })
+    const operationId = receipt.operationId ?? provisionalOperationId
+    if (receipt.operationId === undefined) {
+      await sealDirectEventOperation(query, {
+        sheetId: claim.sheetId,
+        operationId,
+        endpointSeq: receipt.endpointSeq,
+        eventCount: receipt.eventCount,
+        operationKind: 'restore_chunk',
+      })
+    }
     const committed = await query(
       `UPDATE public.meta_recovery_archive_job_chunks
           SET state = 'committed',
@@ -790,6 +1042,8 @@ export async function runRecoveryArchiveRestoreChunk(
           AND worker_owner_id = $3
           AND worker_fence = $4::bigint
           AND lease_until = $5::timestamptz
+          AND lease_until > clock_timestamp()
+          AND resume_deadline > clock_timestamp()
         RETURNING completed_count::text AS completed_count`,
       [claim.jobId, receipt.committedCount, claim.workerOwnerId, claim.workerFence, claim.leaseUntil],
     )
@@ -805,6 +1059,30 @@ export async function runRecoveryArchiveRestoreChunk(
   })
 }
 
+async function runRecoveryArchiveRestoreChunkTestOnly(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  claimInput: RecoveryArchiveRestoreJobWorkerClaim,
+  input: RunRecoveryArchiveRestoreChunkTestInput,
+): Promise<RecoveryArchiveRestoreChunkResult> {
+  return runRecoveryArchiveRestoreChunkCore(transaction, claimInput, input, 'test')
+}
+
+async function runRecoveryArchiveRestoreL8ChunkTestOnly(
+  transaction: RecoveryArchiveRestoreJobTransaction,
+  claimInput: RecoveryArchiveRestoreJobWorkerClaim,
+  input: Omit<RunRecoveryArchiveRestoreChunkInput, 'facadeLease'>,
+): Promise<RecoveryArchiveRestoreChunkResult> {
+  return runRecoveryArchiveRestoreChunkCore(transaction, claimInput, input, 'l8')
+}
+
+/** Test-only compatibility seam for state-machine fixtures. It is absent from production module instances. */
+export const recoveryArchiveRestoreJobTestHooks = process.env.NODE_ENV === 'test'
+  ? Object.freeze({
+      runChunk: runRecoveryArchiveRestoreChunkTestOnly,
+      runL8Chunk: runRecoveryArchiveRestoreL8ChunkTestOnly,
+    })
+  : undefined
+
 export async function pauseRecoveryArchiveRestoreJob(
   transaction: RecoveryArchiveRestoreJobTransaction,
   claimInput: RecoveryArchiveRestoreJobWorkerClaim,
@@ -813,6 +1091,12 @@ export async function pauseRecoveryArchiveRestoreJob(
   return transaction(async (query) => {
     await prepareArchiveWriterBlockTransaction(query, claim.sheetId)
     await lockRecoveryArchiveKey(query, claim.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      claim.archiveGenerationId,
+      claim.sheetId,
+      claim.keyId,
+    )
     await lockRestoreJobBlock(query, claim)
     const job = await lockClaimedJob(query, claim)
     const paused = await query(
@@ -846,6 +1130,12 @@ export async function resumeRecoveryArchiveRestoreJob(
     const candidate = await readCandidateIdentity(query, identity)
     await prepareArchiveWriterBlockTransaction(query, identity.sheetId)
     await lockRecoveryArchiveKey(query, candidate.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      candidate.archiveGenerationId,
+      candidate.sheetId,
+      candidate.keyId,
+    )
     await lockRestoreJobBlock(query, candidate)
     const job = await lockJobRow(query, identity.jobId, identity.sheetId)
     if (!jobIdentityMatches(job, identity)) notFound()
@@ -887,6 +1177,12 @@ export async function finalizeRecoveryArchiveRestoreJob(
   return transaction(async (query) => {
     await prepareArchiveWriterBlockTransaction(query, claim.sheetId)
     await lockRecoveryArchiveKey(query, claim.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      claim.archiveGenerationId,
+      claim.sheetId,
+      claim.keyId,
+    )
     await lockRestoreJobBlock(query, claim)
     const job = await lockClaimedJob(query, claim)
     const chunksResult = await query(
@@ -955,6 +1251,12 @@ export async function abandonRecoveryArchiveRestoreJob(
   return transaction(async (query) => {
     await prepareArchiveWriterBlockTransaction(query, claim.sheetId)
     await lockRecoveryArchiveKey(query, claim.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      claim.archiveGenerationId,
+      claim.sheetId,
+      claim.keyId,
+    )
     await lockRestoreJobBlock(query, claim)
     const job = await lockClaimedJob(query, claim)
     const state = BigInt(decimal(job.completed_count)) === 0n
@@ -982,6 +1284,12 @@ export async function cancelRecoveryArchiveRestoreJob(
     const candidate = await readCandidateIdentity(query, identity)
     await prepareArchiveWriterBlockCleanupTransaction(query, identity.sheetId)
     await lockRecoveryArchiveKey(query, candidate.keyId, false)
+    await lockRecoveryArchiveGenerationRow(
+      query,
+      candidate.archiveGenerationId,
+      candidate.sheetId,
+      candidate.keyId,
+    )
     await lockRestoreJobBlock(query, candidate)
     const job = await lockJobRow(query, identity.jobId, identity.sheetId)
     if (!jobIdentityMatches(job, identity)) notFound()
@@ -1299,6 +1607,7 @@ async function lockClaimedJob(
   if (
     row.state !== 'applying' ||
     row.key_id !== claim.keyId ||
+    opaque(row.archive_generation_id) !== claim.archiveGenerationId ||
     decimal(row.block_fence) !== claim.blockFence ||
     row.worker_owner_id !== claim.workerOwnerId ||
     decimal(row.worker_fence) !== claim.workerFence ||
@@ -1359,7 +1668,7 @@ async function readNextPendingChunk(
     chunkObjectVersion: opaque(row.chunk_object_version),
     chunkObjectSha256: sha(row.chunk_object_sha256),
     chunkObjectSize: positiveDecimal(row.chunk_object_size),
-    chunkObjectExpiresAt: timestamp(row.chunk_object_expires_at),
+    chunkObjectExpiresAt: canonicalTimestamp(row.chunk_object_expires_at),
     recordCount: positiveDecimal(row.record_count),
   })
 }
@@ -1486,7 +1795,9 @@ async function readCandidateIdentity(
   identity: { workspaceId: string; baseId: string; sheetId: string; actorId: string; jobId: string },
 ): Promise<RecoveryArchiveRestoreJobCandidate> {
   const result = await query(
-    `SELECT id::text AS id, sheet_id, key_id, block_fence::text AS block_fence
+    `SELECT id::text AS id, sheet_id, key_id,
+            archive_generation_id::text AS archive_generation_id,
+            block_fence::text AS block_fence
        FROM public.meta_recovery_archive_jobs
       WHERE id = $1::uuid AND workspace_id = $2 AND base_id = $3 AND sheet_id = $4 AND actor_id = $5`,
     [identity.jobId, identity.workspaceId, identity.baseId, identity.sheetId, identity.actorId],
@@ -1498,6 +1809,7 @@ async function readCandidateIdentity(
     jobId: opaque(row.id),
     sheetId: opaque(row.sheet_id),
     keyId: opaque(row.key_id),
+    archiveGenerationId: opaque(row.archive_generation_id),
     blockFence: positiveDecimal(row.block_fence),
   }
 }
@@ -1526,7 +1838,7 @@ function admitMaterializedChunk(value: unknown): RecoveryArchiveRestoreChunkMate
     chunkObjectVersion: opaque(row.chunkObjectVersion),
     chunkObjectSha256: sha(row.chunkObjectSha256),
     chunkObjectSize: positiveDecimal(row.chunkObjectSize),
-    chunkObjectExpiresAt: timestamp(row.chunkObjectExpiresAt),
+    chunkObjectExpiresAt: canonicalTimestamp(row.chunkObjectExpiresAt),
     recordCount: positiveDecimal(row.recordCount),
     payload: row.payload,
   })
@@ -1556,23 +1868,34 @@ function assertChunkMatches(row: ChunkRow, actual: RecoveryArchiveRestoreChunkMa
     row.chunk_object_version !== actual.chunkObjectVersion ||
     row.chunk_object_sha256 !== actual.chunkObjectSha256 ||
     decimal(row.chunk_object_size) !== actual.chunkObjectSize ||
-    timestamp(row.chunk_object_expires_at) !== actual.chunkObjectExpiresAt ||
+    canonicalTimestamp(row.chunk_object_expires_at) !== actual.chunkObjectExpiresAt ||
     decimal(row.record_count) !== actual.recordCount || row.state !== 'pending'
   ) {
     throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_INVALID')
   }
 }
 
-function admitApplyReceipt(value: unknown): RecoveryArchiveRestoreChunkApplyReceipt {
+function admitApplyReceiptTestOnly(value: unknown): RecoveryArchiveRestoreChunkApplyReceiptTestOnly {
   if (!value || typeof value !== 'object') {
     throw new RecoveryArchiveRestoreJobError('RECOVERY_ARCHIVE_RESTORE_JOB_CHUNK_APPLY_INVALID')
   }
   const row = value as Record<string, unknown>
   return {
+    ...(row.operationId === undefined ? {} : { operationId: uuid(row.operationId) }),
     endpointSeq: positiveDecimal(row.endpointSeq),
     eventCount: safePositiveInteger(row.eventCount),
     committedCount: positiveDecimal(row.committedCount),
   }
+}
+
+function uuid(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+  ) {
+    invalidInput()
+  }
+  return value
 }
 
 function isJobState(value: unknown): value is RecoveryArchiveRestoreJobState {
@@ -1630,6 +1953,10 @@ function timestamp(value: unknown): string {
   const parsed = value instanceof Date ? value : new Date(value)
   if (Number.isNaN(parsed.getTime())) invalidInput()
   return value instanceof Date ? value.toISOString() : value
+}
+
+function canonicalTimestamp(value: unknown): string {
+  return new Date(timestamp(value)).toISOString()
 }
 
 function futureTimestamp(value: unknown): string {

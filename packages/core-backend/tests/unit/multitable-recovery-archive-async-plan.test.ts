@@ -54,7 +54,6 @@ function input() {
     })
   }
   liveRecords.set('record-05000', { version: 4 })
-  targetRecords.set('record-05000', { recordId: 'record-05000', exists: false, version: null })
   return {
     workspaceId: 'workspace-async',
     baseId: 'base-async',
@@ -184,6 +183,14 @@ describe('Time Machine async archive restore frozen plan', () => {
     const candidate = input()
     candidate.revertWrites.splice(1)
     candidate.deleteRecordIds.splice(0)
+    expect(() => buildRecoveryArchiveAsyncPlan(candidate)).toThrowError(
+      new RecoveryArchiveAsyncPlanError('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID'),
+    )
+  })
+
+  it('only synthesizes an absent target for reset deletes missing from the archive', () => {
+    const candidate = input()
+    candidate.recoveryMode = 'revert'
     expect(() => buildRecoveryArchiveAsyncPlan(candidate)).toThrowError(
       new RecoveryArchiveAsyncPlanError('RECOVERY_ARCHIVE_ASYNC_PLAN_INVALID'),
     )

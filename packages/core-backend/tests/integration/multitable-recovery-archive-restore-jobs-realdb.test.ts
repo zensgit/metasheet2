@@ -17,7 +17,9 @@ import {
   pauseRecoveryArchiveRestoreJob,
   prepareRecoveryArchiveRestorePlan,
   pruneEligibleRecoveryTokenBurns,
+  readRecoveryArchiveRestoreWorkerBinding,
   readRecoveryArchiveRestoreJobStatus,
+  recoveryArchiveRestoreJobTestHooks,
   RecoveryArchiveRestoreJobError,
   resumeRecoveryArchiveRestoreJob,
   runRecoveryArchiveRestoreChunk,
@@ -26,6 +28,7 @@ import {
   sweepExpiredRecoveryArchiveRestoreJobs,
   type RecoveryArchiveRestoreJobQuery,
   type RecoveryArchiveRestoreJobTransaction,
+  type RecoveryArchiveRestoreChunkExecutionLease,
 } from '../../src/multitable/recovery-archive-restore-jobs'
 import {
   compileRecoveryArchiveRestorePlan,
@@ -35,7 +38,12 @@ import {
   acceptFrozenRecoveryArchiveRestoreJob,
   buildRecoveryArchiveAsyncPlan,
   persistRecoveryArchiveAsyncPlan,
+  type RecoveryArchiveAsyncChunkPayload,
+  type RecoveryArchiveAsyncPlanBundle,
+  type RecoveryArchiveAsyncPlanObject,
+  type RecoveryArchiveAsyncPlanPayload,
 } from '../../src/multitable/recovery-archive-async-plan'
+import { executeRecoveryArchiveAsyncRestoreChunk } from '../../src/multitable/recovery-archive-async-restore'
 import {
   createLocalRecoveryArchiveObjectStoreProvider,
   createTransactionGuardedRecoveryArchiveObjectStore,
@@ -56,8 +64,12 @@ import {
   prepareArchiveWriterBlockTransaction,
 } from '../../src/multitable/recovery-archive-writer-block'
 import {
+  acquireMaterializedArchiveAsyncFencesInternal,
+  applyMaterializedExactArchiveRecoveryAsyncChunkInternal,
   applyMaterializedExactArchiveRecoverySyncInternal,
   type ExactAnchorApplyInput,
+  type MaterializedArchiveAsyncChunkReceipt,
+  type MaterializedArchiveAsyncFenceLease,
 } from '../../src/multitable/exact-anchor-recovery-execute'
 import {
   hashAnchorRecoveryScope,
@@ -68,11 +80,17 @@ import {
   type ExactArchiveRecoveryIdentityClaims,
 } from '../../src/multitable/restore-preview-identity'
 import { compileRecoveryArchiveSyncPlan } from '../../src/multitable/recovery-archive-sync-plan'
+import { canonicalizeRecoveryArchiveJson } from '../../src/multitable/recovery-archive-manifest'
 import {
   consumeRecoveryArchiveV2ClaimFixture,
   persistRecoveryArchiveV2ClaimFixture,
   type RecoveryArchiveV2ClaimFixtureIdentity,
 } from '../utils/recovery-archive-v2-claim-fixture'
+import {
+  createRecoveryArchiveDurableFixture,
+  type RecoveryArchiveDurableFixture,
+  type RecoveryArchiveDurableFixtureObject,
+} from '../utils/recovery-archive-durable-fixture'
 
 const runRealDb =
   Boolean(process.env.DATABASE_URL) && process.env.METASHEET_REAL_DB_TEST_STEP === '1'
@@ -102,6 +120,12 @@ type Fixture = {
   sourceVectorHash: string
   anchorOperationId: string
   anchorSeq: string
+}
+
+type MaterializedArchiveObjects = {
+  readonly rootHash: string
+  readonly manifestMac: Uint8Array
+  readonly objects: readonly RecoveryArchiveDurableFixtureObject[]
 }
 
 let pool: Pool
@@ -169,6 +193,7 @@ async function databaseError(promise: Promise<unknown>): Promise<Error & { code?
 async function seedVerifiedArchive(
   label: string,
   expiresAt = '2099-12-31T00:00:00.000Z',
+  materialize?: (fixture: Fixture) => Promise<MaterializedArchiveObjects>,
 ): Promise<Fixture> {
   const suffix = `${label}_${randomUUID().replaceAll('-', '').slice(0, 8)}`
   const fixture = {
@@ -247,17 +272,31 @@ async function seedVerifiedArchive(
     )
   })
 
+  const materialized = materialize ? await materialize(fixture) : undefined
+  if (materialized) fixture.rootHash = materialized.rootHash
+
   await withClientTransaction(async (_client, query) => {
-    const slots = [
+    const slots: readonly RecoveryArchiveDurableFixtureObject[] = materialized?.objects ?? [
       ...RECOVERY_ARCHIVE_V1_SECTION_NAMES.map((sectionName) => ({
-        objectClass: 'section',
+        objectClass: 'section' as const,
         sectionName,
-        slot: `section:${sectionName}`,
+        objectId: sha(`${fixture.generationId}|section:${sectionName}|object`),
+        providerVersion: `${PREFIX}_provider_v1`,
+        plaintextSha256: sha(`${fixture.generationId}|section:${sectionName}|plaintext`),
+        ciphertextSha256: sha(`${fixture.generationId}|section:${sectionName}|ciphertext`),
+        sizeBytes: '1',
       })),
-      { objectClass: 'manifest', sectionName: null, slot: 'manifest' },
+      {
+        objectClass: 'manifest' as const,
+        sectionName: null,
+        objectId: sha(`${fixture.generationId}|manifest|object`),
+        providerVersion: `${PREFIX}_provider_v1`,
+        plaintextSha256: sha(`${fixture.generationId}|manifest|plaintext`),
+        ciphertextSha256: sha(`${fixture.generationId}|manifest|ciphertext`),
+        sizeBytes: '1',
+      },
     ]
     for (const slot of slots) {
-      const objectId = sha(`${fixture.generationId}|${slot.slot}|object`)
       await query(
         `INSERT INTO public.meta_recovery_archive_objects (
            generation_id, object_id, object_class, section_name, attachment_id,
@@ -266,21 +305,22 @@ async function seedVerifiedArchive(
            owner_kind, owner_id, owner_fence
          ) VALUES (
            $1::uuid, $2, $3, $4, NULL,
-           $5, $6, $7, $8, 1,
-           $2, $9, $10,
-           'archive_builder', $11, 1
+           $5, $6, $7, $8, $9::bigint,
+           $2, $10, $11,
+           'archive_builder', $12, 1
          )`,
         [
           fixture.generationId,
-          objectId,
+          slot.objectId,
           slot.objectClass,
           slot.sectionName,
           fixture.keyId,
-          `${PREFIX}_provider_v1`,
-          sha(`${fixture.generationId}|${slot.slot}|plaintext`),
-          sha(`${fixture.generationId}|${slot.slot}|ciphertext`),
-          sha(`${fixture.generationId}|${slot.slot}|put`),
-          sha(`${fixture.generationId}|${slot.slot}|head`),
+          slot.providerVersion,
+          slot.plaintextSha256,
+          slot.ciphertextSha256,
+          slot.sizeBytes,
+          sha(`${fixture.generationId}|${slot.objectId}|put`),
+          sha(`${fixture.generationId}|${slot.objectId}|head`),
           `${PREFIX}_builder`,
         ],
       )
@@ -309,7 +349,7 @@ async function seedVerifiedArchive(
         fixture.generationId,
         fixture.rootHash,
         sha(`${fixture.generationId}|coverage`),
-        Buffer.from(`${PREFIX}|manifest`),
+        materialized?.manifestMac ?? Buffer.from(`${PREFIX}|manifest`),
       ],
     )
   })
@@ -360,6 +400,231 @@ function compilePlan(
         recordCount: '1',
       },
     ],
+  })
+}
+
+function compileAsyncL8Plan(
+  fixture: Fixture,
+  scopeHash: string,
+  scopeKind: RecoveryArchiveRestorePlan['scopeKind'] = 'selected_records',
+  objectExpiresAt = '2099-12-31T00:00:00.000Z',
+): RecoveryArchiveRestorePlan {
+  return compileRecoveryArchiveRestorePlan({
+    workspaceId: fixture.workspaceId,
+    baseId: fixture.baseId,
+    sheetId: fixture.sheetId,
+    actorId: fixture.actorId,
+    recoveryMode: 'revert',
+    scopeKind,
+    scopeHash,
+    archiveGenerationId: fixture.generationId,
+    archiveRootHash: fixture.rootHash,
+    sourceVectorHash: fixture.sourceVectorHash,
+    keyId: fixture.keyId,
+    planObjectId: sha(`${fixture.sheetId}|l8|plan_object_id`),
+    planObjectVersion: `${PREFIX}_l8_plan_version`,
+    planObjectSha256: sha(`${fixture.sheetId}|l8|plan_object`),
+    planObjectSize: '2048',
+    planObjectExpiresAt: objectExpiresAt,
+    chunks: [
+      {
+        chunkIndex: 0,
+        chunkHash: sha(`${fixture.sheetId}|l8|chunk|0`),
+        chunkObjectId: `${PREFIX}_l8_chunk_0`,
+        chunkObjectVersion: `${PREFIX}_l8_chunk_version_0`,
+        chunkObjectSha256: sha(`${fixture.sheetId}|l8|chunk_object|0`),
+        chunkObjectSize: '1024',
+        chunkObjectExpiresAt: objectExpiresAt,
+        recordCount: '1',
+      },
+      {
+        chunkIndex: 1,
+        chunkHash: sha(`${fixture.sheetId}|l8|chunk|1`),
+        chunkObjectId: `${PREFIX}_l8_chunk_1`,
+        chunkObjectVersion: `${PREFIX}_l8_chunk_version_1`,
+        chunkObjectSha256: sha(`${fixture.sheetId}|l8|chunk_object|1`),
+        chunkObjectSize: '2048',
+        chunkObjectExpiresAt: objectExpiresAt,
+        recordCount: '5000',
+      },
+    ],
+  })
+}
+
+function buildComposedAsyncPlanFixture(input: {
+  readonly fixture: Fixture
+  readonly fieldId: string
+  readonly recordIds: readonly string[]
+  readonly expiresAt: string
+  readonly recoveryMode?: 'revert' | 'reset'
+}): RecoveryArchiveAsyncPlanBundle {
+  const [firstRecordId, ...futureRecordIds] = input.recordIds
+  if (!firstRecordId || futureRecordIds.length !== 5000) {
+    throw new Error('recovery_archive_composed_async_plan_fixture_invalid')
+  }
+  const recoveryMode = input.recoveryMode ?? 'revert'
+  const targetStates = input.recordIds.map((recordId, index) => index === 0 && recoveryMode === 'reset'
+    ? { recordId, exists: false as const, version: null }
+    : { recordId, exists: true as const, version: 1 })
+  const archiveTargetStates = recoveryMode === 'reset' ? targetStates.slice(1) : targetStates
+  const initialLiveSetHash = hashExactAnchorLiveSet(
+    input.recordIds.map((recordId) => ({ recordId, version: 2 })),
+    [],
+  )
+  const afterFirstLiveSetHash = hashExactAnchorLiveSet(
+    (recoveryMode === 'reset' ? futureRecordIds : input.recordIds).map((recordId) => ({
+      recordId,
+      version: recoveryMode === 'revert' && recordId === firstRecordId ? 3 : 2,
+    })),
+    [],
+  )
+  const finalLiveSetHash = hashExactAnchorLiveSet(
+    (recoveryMode === 'reset' ? futureRecordIds : input.recordIds)
+      .map((recordId) => ({ recordId, version: 3 })),
+    [],
+  )
+  const schemaHash = hashExactAnchorSchema([{ id: input.fieldId, type: 'string', property: {} }])
+  const authorizedScopeHash = hashRecoveryAuthorizationScope({
+    sheetId: input.fixture.sheetId,
+    actorId: input.fixture.actorId,
+  })
+  const chunkObjects = [
+    asyncPlanObject<RecoveryArchiveAsyncChunkPayload>(
+      input.fixture.generationId,
+      'recovery-archive-restore-chunk-v1',
+      input.expiresAt,
+      {
+        format: 'metasheet.recovery-archive.restore-chunk.v1',
+        chunkIndex: 0,
+        expectedAnchorScopeHash: hashAnchorRecoveryScope([targetStates[0]!]),
+        expectedLiveSetHash: initialLiveSetHash,
+        expectedFinalLiveSetHash: afterFirstLiveSetHash,
+        schemaHash,
+        operations: recoveryMode === 'reset'
+          ? [{ kind: 'delete' as const, recordId: firstRecordId, expectedVersion: 2 }]
+          : [{
+              kind: 'revert' as const,
+              recordId: firstRecordId,
+              expectedVersion: 2,
+              changedFieldIds: [input.fieldId],
+            }],
+      },
+    ),
+    asyncPlanObject<RecoveryArchiveAsyncChunkPayload>(
+      input.fixture.generationId,
+      'recovery-archive-restore-chunk-v1',
+      input.expiresAt,
+      {
+        format: 'metasheet.recovery-archive.restore-chunk.v1',
+        chunkIndex: 1,
+        expectedAnchorScopeHash: hashAnchorRecoveryScope(targetStates.slice(1)),
+        expectedLiveSetHash: afterFirstLiveSetHash,
+        expectedFinalLiveSetHash: finalLiveSetHash,
+        schemaHash,
+        operations: futureRecordIds.map((recordId) => ({
+          kind: 'revert' as const,
+          recordId,
+          expectedVersion: 2,
+          changedFieldIds: [input.fieldId],
+        })),
+      },
+    ),
+  ] as const
+  const chunks = chunkObjects.map((object, chunkIndex) => ({
+    chunkIndex,
+    chunkHash: object.descriptor.sha256,
+    objectId: object.descriptor.objectId,
+    version: object.descriptor.version,
+    sha256: object.descriptor.sha256,
+    size: object.descriptor.size,
+    expiresAt: object.descriptor.expiresAt,
+    recordCount: String(object.payload.operations.length),
+  }))
+  const payload: RecoveryArchiveAsyncPlanPayload = {
+    format: 'metasheet.recovery-archive.restore-plan.v1',
+    workspaceId: input.fixture.workspaceId,
+    baseId: input.fixture.baseId,
+    sheetId: input.fixture.sheetId,
+    actorId: input.fixture.actorId,
+    recoveryMode,
+    scopeKind: 'whole_sheet',
+    scopeHash: hashAnchorRecoveryScope(archiveTargetStates),
+    archiveGenerationId: input.fixture.generationId,
+    archiveRootHash: input.fixture.rootHash,
+    sourceVectorHash: input.fixture.sourceVectorHash,
+    keyId: input.fixture.keyId,
+    anchorOperationId: input.fixture.anchorOperationId,
+    anchorSeq: input.fixture.anchorSeq,
+    checkpointId: input.fixture.checkpointId,
+    schemaHash,
+    authorizedScopeHash,
+    initialLiveSetHash,
+    finalLiveSetHash,
+    selectedRecordIds: [],
+    selectedFieldIds: [],
+    chunks,
+  }
+  const planObject = asyncPlanObject(
+    input.fixture.generationId,
+    'recovery-archive-restore-plan-v1',
+    input.expiresAt,
+    payload,
+  )
+  const plan = compileRecoveryArchiveRestorePlan({
+    workspaceId: payload.workspaceId,
+    baseId: payload.baseId,
+    sheetId: payload.sheetId,
+    actorId: payload.actorId,
+    recoveryMode: payload.recoveryMode,
+    scopeKind: payload.scopeKind,
+    scopeHash: payload.scopeHash,
+    archiveGenerationId: payload.archiveGenerationId,
+    archiveRootHash: payload.archiveRootHash,
+    sourceVectorHash: payload.sourceVectorHash,
+    keyId: payload.keyId,
+    planObjectId: planObject.descriptor.objectId,
+    planObjectVersion: planObject.descriptor.version,
+    planObjectSha256: planObject.descriptor.sha256,
+    planObjectSize: planObject.descriptor.size,
+    planObjectExpiresAt: planObject.descriptor.expiresAt,
+    chunks: chunks.map((chunk) => ({
+      chunkIndex: chunk.chunkIndex,
+      chunkHash: chunk.chunkHash,
+      chunkObjectId: chunk.objectId,
+      chunkObjectVersion: chunk.version,
+      chunkObjectSha256: chunk.sha256,
+      chunkObjectSize: chunk.size,
+      chunkObjectExpiresAt: chunk.expiresAt,
+      recordCount: chunk.recordCount,
+    })),
+  })
+  return Object.freeze({
+    plan,
+    planObject,
+    chunkObjects: Object.freeze(chunkObjects),
+  })
+}
+
+function asyncPlanObject<T>(
+  generationId: string,
+  version: string,
+  expiresAt: string,
+  payload: T,
+): RecoveryArchiveAsyncPlanObject<T> {
+  const bytes = new TextEncoder().encode(canonicalizeRecoveryArchiveJson(payload))
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  return Object.freeze({
+    payload: Object.freeze(payload),
+    bytes,
+    descriptor: Object.freeze({
+      generationId,
+      objectId: sha256,
+      version,
+      sha256,
+      size: String(bytes.byteLength),
+      expiresAt,
+      pinned: false,
+    }),
   })
 }
 
@@ -584,7 +849,8 @@ async function runOneChunk(
   claim: Parameters<typeof runRecoveryArchiveRestoreChunk>[1],
   applied: number[],
 ) {
-  return runRecoveryArchiveRestoreChunk(transaction, claim, {
+  if (!recoveryArchiveRestoreJobTestHooks) throw new Error('recovery_archive_restore_test_hooks_missing')
+  return recoveryArchiveRestoreJobTestHooks.runChunk(transaction, claim, {
     read: q,
     materialize: async (expected) => {
       expect(transactionDepth).toBe(0)
@@ -1403,6 +1669,623 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     }
   })
 
+  test.each([
+    { label: 'revert', recoveryMode: 'revert' as const },
+    { label: 'reset post-anchor create', recoveryMode: 'reset' as const },
+  ])('opens one real encrypted archive and commits its first async $label chunk through the production facade', async ({
+    recoveryMode,
+  }) => {
+    const expiresAt = '2099-12-31T00:00:00.000Z'
+    const root = await mkdtemp(join(tmpdir(), `tm-composed-async-${recoveryMode}-`))
+    const provider = createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: root })
+    const depthProbe = { currentTransactionDepth: () => transactionDepth }
+    let durable: RecoveryArchiveDurableFixture | undefined
+    let fieldId = ''
+    let recordIds: string[] = []
+
+    try {
+      const fixture = await seedVerifiedArchive(
+        `composed_async_facade_${recoveryMode}`,
+        expiresAt,
+        async (candidate) => {
+          fieldId = `${candidate.sheetId}_field`
+          recordIds = Array.from({ length: 5001 }, (_, index) =>
+            `${candidate.sheetId}_record_${String(index).padStart(5, '0')}`,
+          )
+          const archiveRow = await q(
+            `SELECT created_at, expires_at
+               FROM public.meta_recovery_archives
+              WHERE generation_id=$1::uuid`,
+            [candidate.generationId],
+          )
+          const row = archiveRow.rows[0] as {
+            created_at?: unknown
+            expires_at?: unknown
+          } | undefined
+          const createdAt = row?.created_at instanceof Date
+            ? row.created_at.toISOString()
+            : new Date(String(row?.created_at)).toISOString()
+          const archiveExpiresAt = row?.expires_at instanceof Date
+            ? row.expires_at.toISOString()
+            : new Date(String(row?.expires_at)).toISOString()
+          durable = await createRecoveryArchiveDurableFixture({
+            binding: {
+              archive_generation_id: candidate.generationId,
+              workspace_id: candidate.workspaceId,
+              base_id: candidate.baseId,
+              sheet_id: candidate.sheetId,
+              anchor_operation_id: candidate.anchorOperationId,
+              anchor_seq: candidate.anchorSeq,
+              checkpoint_id: candidate.checkpointId,
+              created_at: createdAt,
+              expires_at: archiveExpiresAt,
+              source_vector_hash: candidate.sourceVectorHash,
+            },
+            keyId: candidate.keyId,
+            sectionRows: {
+              schema: [{
+                field_id: fieldId,
+                name: 'Value',
+                type: 'string',
+                property: {},
+                order: 1,
+              }],
+              records: recordIds.flatMap((recordId, index) =>
+                recoveryMode === 'reset' && index === 0
+                  ? []
+                  : [{
+                      record_id: recordId,
+                      exists: true,
+                      version: 1,
+                      data: { [fieldId]: `archived-${String(index).padStart(5, '0')}` },
+                    }],
+              ),
+              links: [],
+              field_value_tombstones: [],
+              link_tombstones: [],
+              auto_number: [],
+              attachments_index: [],
+              permission_evidence: [],
+              views_config: [],
+            },
+            objectStore: provider,
+            transactionDepth: depthProbe,
+            objectExpiresAt: archiveExpiresAt,
+          })
+          return durable
+        },
+      )
+      if (!durable || !fieldId || recordIds.length !== 5001) {
+        throw new Error('recovery_archive_composed_fixture_not_materialized')
+      }
+      await q(
+        `INSERT INTO public.meta_fields (id, sheet_id, name, type, property, "order")
+         VALUES ($1, $2, 'Value', 'string', '{}'::jsonb, 1)`,
+        [fieldId, fixture.sheetId],
+      )
+      await q(
+        `INSERT INTO public.meta_records (
+           id, sheet_id, data, version, created_by, modified_by
+         )
+         SELECT
+           $1::text || pg_catalog.lpad(candidate.index::text, 5, '0'),
+           $2::text,
+           pg_catalog.jsonb_build_object(
+             $3::text,
+             'live-' || pg_catalog.lpad(candidate.index::text, 5, '0')
+           ),
+           2,
+           $4::text,
+           $4::text
+         FROM pg_catalog.generate_series(0, 5000) AS candidate(index)`,
+        [`${fixture.sheetId}_record_`, fixture.sheetId, fieldId, fixture.actorId],
+      )
+
+      const bundle = buildComposedAsyncPlanFixture({
+        fixture,
+        fieldId,
+        recordIds,
+        expiresAt,
+        recoveryMode,
+      })
+      await persistRecoveryArchiveAsyncPlan(
+        createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe),
+        bundle,
+      )
+      const payload = bundle.planObject.payload
+      const descriptor = bundle.planObject.descriptor
+      const token = mintExactArchiveRecoveryIdentity({
+        sheetId: fixture.sheetId,
+        anchorOperationId: fixture.anchorOperationId,
+        anchorSeq: fixture.anchorSeq,
+        checkpointId: fixture.checkpointId,
+        scopeHash: payload.scopeHash,
+        liveSetHash: payload.initialLiveSetHash,
+        schemaHash: payload.schemaHash,
+        actorId: fixture.actorId,
+        mode: recoveryMode,
+        authorizedScopeHash: payload.authorizedScopeHash,
+        archiveGenerationId: fixture.generationId,
+        archiveRootHash: fixture.rootHash,
+        archiveSourceVectorHash: fixture.sourceVectorHash,
+        archiveKeyId: fixture.keyId,
+        archivePlanHash: bundle.plan.planHash,
+        archivePlanObject: {
+          objectId: descriptor.objectId,
+          version: descriptor.version,
+          sha256: descriptor.sha256,
+          size: descriptor.size,
+          expiresAt: descriptor.expiresAt,
+        },
+        scopeKind: 'whole_sheet',
+      }, '10m')
+      await preparePlan(fixture, bundle.plan, token)
+      const accepted = await acceptFrozenRecoveryArchiveRestoreJob(
+        transaction,
+        provider,
+        depthProbe,
+        {
+          identity: restoreRequestIdentity(fixture),
+          token,
+          resumeDeadline: future(300_000),
+          recheckAuthority: async () => true,
+        },
+      )
+      const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+      expect(candidate?.jobId).toBe(accepted.id)
+      const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+        workerOwnerId: `${PREFIX}_composed_async_worker`,
+        leaseUntil: future(240_000),
+      })
+
+      const result = await executeRecoveryArchiveAsyncRestoreChunk({
+        transaction,
+        query: q,
+        runtime: {
+          keyCustody: durable.keyCustody,
+          objectStore: provider,
+          transactionDepth: depthProbe,
+        },
+        claim,
+        recheckAuthority: async () => true,
+        apply: {
+          preliminaryFullRead: async () => true,
+          stabilizeAuthorization: async () => 'ready',
+          finalLockedFullRead: async () => true,
+          evaluatePlanAuthorization: async () => true,
+        },
+      })
+      expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
+      expect(durable.custodyCalls).toEqual(expect.arrayContaining(['verify', 'unwrap']))
+
+      const firstRecord = await q(
+        `SELECT data, version
+           FROM public.meta_records
+          WHERE sheet_id=$1 AND id=$2`,
+        [fixture.sheetId, recordIds[0]],
+      )
+      expect(firstRecord.rows).toEqual(recoveryMode === 'reset'
+        ? []
+        : [{
+            data: { [fieldId]: 'archived-00000' },
+            version: 3,
+          }])
+      const futureRecord = await q(
+        `SELECT record_row.data, record_row.version,
+                count(revision_row.id)::int AS restore_events
+           FROM public.meta_records record_row
+           LEFT JOIN public.meta_record_revisions revision_row
+             ON revision_row.sheet_id=record_row.sheet_id
+            AND revision_row.record_id=record_row.id
+            AND revision_row.source='restore'
+          WHERE record_row.sheet_id=$1 AND record_row.id=$2
+          GROUP BY record_row.data, record_row.version`,
+        [fixture.sheetId, recordIds[5000]],
+      )
+      expect(futureRecord.rows).toEqual([{
+        data: { [fieldId]: 'live-05000' },
+        version: 2,
+        restore_events: 0,
+      }])
+      const job = await readRecoveryArchiveRestoreJobStatus(transaction, {
+        ...restoreRequestIdentity(fixture),
+        jobId: accepted.id,
+        recheckAuthority: async () => true,
+      })
+      expect(job).toMatchObject({
+        state: 'applying',
+        completedCount: '1',
+        totalCount: '5001',
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('applies only one frozen whole-sheet chunk through the real L8 kernel after canonical prelocks', async () => {
+    const fixture = await seedVerifiedArchive('async_l8_chunk')
+    const fieldId = `${fixture.sheetId}_field`
+    const recordId = `${fixture.sheetId}_record`
+    const futureChunkRecordId = `${fixture.sheetId}_future_chunk_record`
+    const liveData = { [fieldId]: 'live' }
+    const targetData = { [fieldId]: 'archived' }
+    const futureChunkLiveData = { [fieldId]: 'future_live' }
+    const futureChunkTargetData = { [fieldId]: 'future_archived' }
+    await q(
+      `INSERT INTO public.meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, 'Value', 'string', '{}'::jsonb, 1)`,
+      [fieldId, fixture.sheetId],
+    )
+    await q(
+      `INSERT INTO public.meta_records (id, sheet_id, data, version, created_by, modified_by)
+       VALUES
+         ($1, $3, $4::jsonb, 2, $6, $6),
+         ($2, $3, $5::jsonb, 2, $6, $6)`,
+      [
+        recordId,
+        futureChunkRecordId,
+        fixture.sheetId,
+        JSON.stringify(liveData),
+        JSON.stringify(futureChunkLiveData),
+        fixture.actorId,
+      ],
+    )
+
+    const chunkAnchorHash = hashAnchorRecoveryScope([
+      { recordId, exists: true, version: 1 },
+    ])
+    const planScopeHash = hashAnchorRecoveryScope([
+      { recordId, exists: true, version: 1 },
+      { recordId: futureChunkRecordId, exists: true, version: 1 },
+    ])
+    const initialLiveSetHash = hashExactAnchorLiveSet([
+      { recordId, version: 2 },
+      { recordId: futureChunkRecordId, version: 2 },
+    ], [])
+    const finalLiveSetHash = hashExactAnchorLiveSet([
+      { recordId, version: 3 },
+      { recordId: futureChunkRecordId, version: 2 },
+    ], [])
+    const schemaHash = hashExactAnchorSchema([{ id: fieldId, type: 'string', property: {} }])
+    const authorizedScopeHash = hashRecoveryAuthorizationScope({
+      sheetId: fixture.sheetId,
+      actorId: fixture.actorId,
+    })
+    const plan = compileAsyncL8Plan(fixture, planScopeHash, 'whole_sheet')
+    const token = mintExactArchiveRecoveryIdentity({
+      sheetId: fixture.sheetId,
+      anchorOperationId: fixture.anchorOperationId,
+      anchorSeq: fixture.anchorSeq,
+      checkpointId: fixture.checkpointId,
+      scopeHash: planScopeHash,
+      liveSetHash: initialLiveSetHash,
+      schemaHash,
+      actorId: fixture.actorId,
+      mode: 'revert',
+      authorizedScopeHash,
+      archiveGenerationId: fixture.generationId,
+      archiveRootHash: fixture.rootHash,
+      archiveSourceVectorHash: fixture.sourceVectorHash,
+      archiveKeyId: fixture.keyId,
+      archivePlanHash: plan.planHash,
+      archivePlanObject: {
+        objectId: plan.planObjectId,
+        version: plan.planObjectVersion,
+        sha256: plan.planObjectSha256,
+        size: plan.planObjectSize,
+        expiresAt: plan.planObjectExpiresAt,
+      },
+      scopeKind: 'whole_sheet',
+    }, '10m')
+    await preparePlan(fixture, plan, token)
+    const accepted = await acceptRecoveryArchiveRestoreJob(transaction, {
+      token,
+      plan,
+      identity: restoreRequestIdentity(fixture),
+      resumeDeadline: future(120_000),
+      recheckAuthority: async () => true,
+    })
+    const candidate = await selectRecoveryArchiveRestoreJobCandidate(transaction)
+    expect(candidate?.jobId).toBe(accepted.id)
+    const claim = await claimRecoveryArchiveRestoreJob(transaction, candidate!, {
+      workerOwnerId: `${PREFIX}_async_l8_worker`,
+      leaseUntil: future(90_000),
+    })
+    await expect(readRecoveryArchiveRestoreWorkerBinding(q, claim)).resolves.toEqual({
+      jobId: accepted.id,
+      workspaceId: fixture.workspaceId,
+      baseId: fixture.baseId,
+      sheetId: fixture.sheetId,
+      actorId: fixture.actorId,
+      recoveryMode: 'revert',
+      scopeKind: 'whole_sheet',
+      scopeHash: plan.scopeHash,
+      archiveGenerationId: fixture.generationId,
+      archiveRootHash: fixture.rootHash,
+      sourceVectorHash: fixture.sourceVectorHash,
+      keyId: fixture.keyId,
+      planHash: plan.planHash,
+      planObjectId: plan.planObjectId,
+      planObjectVersion: plan.planObjectVersion,
+      planObjectSha256: plan.planObjectSha256,
+      planObjectSize: plan.planObjectSize,
+      planObjectExpiresAt: plan.planObjectExpiresAt,
+    })
+    await expect(runRecoveryArchiveRestoreChunk(transaction, claim, {
+      facadeLease: {} as never,
+      read: q,
+      materialize: async (expected) => ({
+        ...expected,
+        payload: Object.freeze({ authenticated: false }),
+      }),
+      prelock: async () => undefined,
+      recheckAuthority: async () => true,
+      apply: async () => ({
+        operationId: randomUUID(),
+        endpointSeq: '1',
+        eventCount: 1,
+        committedCount: '1',
+      }) as unknown as MaterializedArchiveAsyncChunkReceipt,
+    })).rejects.toEqual(new RecoveryArchiveRestoreJobError(
+      'RECOVERY_ARCHIVE_RESTORE_JOB_INVALID_INPUT',
+    ))
+    const targetRecords = new Map([
+      [recordId, { recordId, exists: true, data: targetData, version: 1 }],
+      [futureChunkRecordId, {
+        recordId: futureChunkRecordId,
+        exists: true,
+        data: futureChunkTargetData,
+        version: 1,
+      }],
+    ])
+    const applyKernel = async (
+      query: RecoveryArchiveRestoreJobQuery,
+      fenceLease: MaterializedArchiveAsyncFenceLease,
+      executionLease: RecoveryArchiveRestoreChunkExecutionLease,
+      chunkIndex: number,
+      override?: {
+        expectedVersion?: number
+        expectedFinalLiveSetHash?: string
+        probeExecutionLeaseReuse?: boolean
+      },
+    ) => applyMaterializedExactArchiveRecoveryAsyncChunkInternal(
+      query,
+      {
+        sheetId: fixture.sheetId,
+        actorId: fixture.actorId,
+        preliminaryFullRead: async () => true,
+        stabilizeAuthorization: async () => 'ready',
+        finalLockedFullRead: async () => true,
+        evaluatePlanAuthorization: async () => true,
+      },
+      {
+        fenceLease,
+        executionLease,
+        workspaceId: fixture.workspaceId,
+        baseId: fixture.baseId,
+        jobId: accepted.id,
+        blockFence: claim.blockFence,
+        workerOwnerId: claim.workerOwnerId,
+        workerFence: claim.workerFence,
+        leaseUntil: claim.leaseUntil,
+        recoveryMode: 'revert',
+        scopeKind: 'whole_sheet',
+        planScopeHash: plan.scopeHash,
+        planHash: plan.planHash,
+        archiveGenerationId: fixture.generationId,
+        archiveRootHash: fixture.rootHash,
+        archiveSourceVectorHash: fixture.sourceVectorHash,
+        archiveKeyId: fixture.keyId,
+        anchorOperationId: fixture.anchorOperationId,
+        anchorSeq: fixture.anchorSeq,
+        checkpointId: fixture.checkpointId,
+        authorizedScopeHash,
+        targetRecords,
+        targetLinks: [],
+        selectedFieldIds: [],
+        chunk: {
+          chunkIndex,
+          expectedAnchorScopeHash: chunkAnchorHash,
+          expectedLiveSetHash: initialLiveSetHash,
+          expectedFinalLiveSetHash: override?.expectedFinalLiveSetHash ?? finalLiveSetHash,
+          schemaHash,
+          operations: [{
+            kind: 'revert',
+            recordId,
+            expectedVersion: override?.expectedVersion ?? 2,
+            changedFieldIds: [fieldId],
+          }],
+        },
+      },
+    )
+    const directCall = await transaction(async (query) => applyKernel(
+      query,
+      await acquireMaterializedArchiveAsyncFencesInternal(query, fixture.sheetId),
+      {} as RecoveryArchiveRestoreChunkExecutionLease,
+      0,
+    ))
+    expect(directCall).toEqual({ ok: false, reason: 'recovery-trust-required' })
+    const executeChunk = async (override?: {
+      expectedVersion?: number
+      expectedFinalLiveSetHash?: string
+      probeExecutionLeaseReuse?: boolean
+    }, chunkTransaction: RecoveryArchiveRestoreJobTransaction = transaction) => {
+      let fenceLease: MaterializedArchiveAsyncFenceLease | undefined
+      const runL8Chunk = recoveryArchiveRestoreJobTestHooks?.runL8Chunk
+      if (!runL8Chunk) throw new Error('recovery_archive_restore_l8_test_hook_missing')
+      return runL8Chunk(chunkTransaction, claim, {
+        read: q,
+        materialize: async (expected) => ({
+          ...expected,
+          payload: Object.freeze({ authenticated: true }),
+        }),
+        prelock: async (query) => {
+          fenceLease = await acquireMaterializedArchiveAsyncFencesInternal(query, fixture.sheetId)
+        },
+        recheckAuthority: async () => true,
+        apply: async (query, context) => {
+          if (!fenceLease) throw new Error('async_l8_fence_lease_missing')
+          const applied = await applyKernel(
+            query,
+            fenceLease,
+            context.executionLease,
+            context.chunkIndex,
+            override,
+          )
+          if (!applied.ok) throw new Error(applied.reason)
+          if (override?.probeExecutionLeaseReuse) {
+            await expect(applyKernel(
+              query,
+              fenceLease,
+              context.executionLease,
+              context.chunkIndex,
+              override,
+            )).resolves.toEqual({ ok: false, reason: 'recovery-trust-required' })
+          }
+          return applied.receipt
+        },
+      })
+    }
+
+    await expect(executeChunk({ expectedVersion: 3 })).rejects.toThrow('preview-drift')
+    await expect(executeChunk({
+      expectedFinalLiveSetHash: sha(`${fixture.sheetId}|wrong_final_live_set`),
+    })).rejects.toThrow('preview-drift')
+    const rolledBack = await q(
+      `SELECT record_row.data, record_row.version,
+              chunk_row.state, job_row.completed_count::text AS completed_count,
+              (SELECT count(*)::int
+                 FROM public.meta_record_revisions revision_row
+                WHERE revision_row.sheet_id=$2 AND revision_row.source='restore') AS restore_events
+         FROM public.meta_records record_row
+         JOIN public.meta_recovery_archive_job_chunks chunk_row
+           ON chunk_row.job_id=$3::uuid AND chunk_row.chunk_index=0
+         JOIN public.meta_recovery_archive_jobs job_row ON job_row.id=chunk_row.job_id
+        WHERE record_row.id=$1 AND record_row.sheet_id=$2`,
+      [recordId, fixture.sheetId, accepted.id],
+    )
+    expect(rolledBack.rows).toEqual([{
+      data: liveData,
+      version: 2,
+      state: 'pending',
+      completed_count: '0',
+      restore_events: 0,
+    }])
+
+    const sqlOrder: string[] = []
+    const tracedTransaction: RecoveryArchiveRestoreJobTransaction = async (work) => {
+      const client = await pool.connect()
+      try {
+        await client.query('BEGIN')
+        const result = await work(async (text, values) => {
+          sqlOrder.push(text.replace(/\s+/g, ' ').trim())
+          const queryResult = await client.query(text, values)
+          return queryResult as QueryResult
+        })
+        await client.query('COMMIT')
+        return result
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        throw error
+      } finally {
+        client.release()
+      }
+    }
+    const result = await executeChunk({ probeExecutionLeaseReuse: true }, tracedTransaction)
+    expect(result).toEqual({ kind: 'committed', chunkIndex: 0, completedCount: '1' })
+
+    const canonicalFenceIndex = sqlOrder.findIndex(
+      (statement) => statement === 'SELECT pg_advisory_xact_lock(hashtext($1))',
+    )
+    const writerBlockPreludeIndex = sqlOrder.findIndex(
+      (statement) => statement.includes("current_setting('transaction_isolation') AS isolation"),
+    )
+    const archiveKeyLockIndex = sqlOrder.findIndex(
+      (statement) => statement.includes('FROM public.meta_recovery_archive_keys') &&
+        statement.includes('FOR UPDATE'),
+    )
+    const archiveGenerationLockIndexes = sqlOrder.flatMap((statement, index) =>
+      statement.includes('public.meta_recovery_archives') && statement.includes('FOR UPDATE')
+        ? [index]
+        : [],
+    )
+    const archiveGenerationLockIndex = archiveGenerationLockIndexes[0] ?? -1
+    const jobLockIndex = sqlOrder.findIndex(
+      (statement) => statement.includes('FROM public.meta_recovery_archive_jobs') &&
+        statement.includes('FOR UPDATE'),
+    )
+    const chunkLockIndex = sqlOrder.findIndex(
+      (statement) => statement.includes('FROM public.meta_recovery_archive_job_chunks') &&
+        statement.includes('FOR UPDATE'),
+    )
+    expect([
+      canonicalFenceIndex,
+      writerBlockPreludeIndex,
+      archiveKeyLockIndex,
+      archiveGenerationLockIndex,
+      jobLockIndex,
+      chunkLockIndex,
+    ].every((index) => index >= 0)).toBe(true)
+    expect(canonicalFenceIndex).toBeLessThan(writerBlockPreludeIndex)
+    expect(writerBlockPreludeIndex).toBeLessThan(archiveKeyLockIndex)
+    expect(archiveKeyLockIndex).toBeLessThan(archiveGenerationLockIndex)
+    expect(archiveGenerationLockIndex).toBeLessThan(jobLockIndex)
+    expect(jobLockIndex).toBeLessThan(chunkLockIndex)
+    expect(archiveGenerationLockIndexes).toEqual([archiveGenerationLockIndex])
+
+    const evidence = await q(
+      `SELECT record_row.data, record_row.version,
+              chunk_row.operation_id::text AS chunk_operation_id,
+              chunk_row.endpoint_seq::text AS chunk_endpoint_seq,
+              operation_row.operation_kind,
+              operation_row.event_count,
+              count(revision_row.id)::int AS revision_count
+         FROM public.meta_records record_row
+         JOIN public.meta_recovery_archive_job_chunks chunk_row
+           ON chunk_row.job_id=$3::uuid AND chunk_row.chunk_index=0
+         JOIN public.meta_record_history_operations operation_row
+           ON operation_row.sheet_id=chunk_row.sheet_id
+          AND operation_row.operation_id=chunk_row.operation_id
+         JOIN public.meta_record_revisions revision_row
+           ON revision_row.sheet_id=operation_row.sheet_id
+          AND revision_row.operation_id=operation_row.operation_id
+        WHERE record_row.id=$1 AND record_row.sheet_id=$2
+        GROUP BY record_row.data, record_row.version,
+                 chunk_row.operation_id, chunk_row.endpoint_seq,
+                 operation_row.operation_kind, operation_row.event_count`,
+      [recordId, fixture.sheetId, accepted.id],
+    )
+    expect(evidence.rows).toEqual([expect.objectContaining({
+      data: targetData,
+      version: 3,
+      operation_kind: 'restore_chunk',
+      event_count: 1,
+      revision_count: 1,
+    })])
+    expect((evidence.rows[0] as Record<string, unknown>).chunk_operation_id).toMatch(
+      /^[0-9a-f-]{36}$/,
+    )
+    expect((evidence.rows[0] as Record<string, unknown>).chunk_endpoint_seq).toMatch(/^[1-9][0-9]*$/)
+
+    const futureChunkEvidence = await q(
+      `SELECT record_row.data, record_row.version,
+              count(revision_row.id)::int AS restore_events
+         FROM public.meta_records record_row
+         LEFT JOIN public.meta_record_revisions revision_row
+           ON revision_row.sheet_id=record_row.sheet_id
+          AND revision_row.record_id=record_row.id
+          AND revision_row.source='restore'
+        WHERE record_row.id=$1 AND record_row.sheet_id=$2
+        GROUP BY record_row.data, record_row.version`,
+      [futureChunkRecordId, fixture.sheetId],
+    )
+    expect(futureChunkEvidence.rows).toEqual([{
+      data: futureChunkLiveData,
+      version: 2,
+      restore_events: 0,
+    }])
+  })
+
   test('accepts, applies two chunks, seals one exact aggregate, and releases the writer block', async () => {
     const fixture = await seedVerifiedArchive('complete')
     const plan = compilePlan(fixture)
@@ -1819,7 +2702,8 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
       leaseUntil: future(45_000),
     })
 
-    await expect(runRecoveryArchiveRestoreChunk(transaction, firstClaim, {
+    if (!recoveryArchiveRestoreJobTestHooks) throw new Error('recovery_archive_restore_test_hooks_missing')
+    await expect(recoveryArchiveRestoreJobTestHooks.runChunk(transaction, firstClaim, {
       read: q,
       materialize: async () => {
         expect(transactionDepth).toBe(0)
@@ -1830,7 +2714,7 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
         throw new Error('unreachable_apply')
       },
     })).rejects.toThrow('fixture_object_read_failed')
-    await expect(runRecoveryArchiveRestoreChunk(transaction, firstClaim, {
+    await expect(recoveryArchiveRestoreJobTestHooks.runChunk(transaction, firstClaim, {
       read: q,
       materialize: async (expected) => ({ ...expected, payload: null }),
       recheckAuthority: async () => true,
