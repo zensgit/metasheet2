@@ -4,6 +4,11 @@
  * Deadline expiry is not revoke. Progress, evidence, attempts, and the
  * parent assignment are never deleted or reset. Errors are values-free.
  */
+import {
+  ELEARNING_COURSE_PROGRESS_POLICY_VERSION,
+  evaluateElearningCourseProgress,
+} from './elearning-course-progress-policy'
+
 export const ELEARNING_ASSIGNMENT_PROGRESS_LIMIT = 100 as const
 export const ELEARNING_REVOCATION_REASON_MAX = 500 as const
 
@@ -361,9 +366,15 @@ export function deriveElearningAssignmentCourseStatus(
   examStatus: ElearningAssignmentExamStatus,
   passed: boolean,
 ): ElearningAssignmentCourseStatus {
-  if (videoStatus === 'completed' && passed) return 'completed'
-  if (videoStatus === 'not_started' && examStatus === 'not_started') return 'not_started'
-  return 'in_progress'
+  const examProgress = passed
+    ? 'completed'
+    : examStatus === 'not_started'
+      ? 'not_started'
+      : 'in_progress'
+  return evaluateElearningCourseProgress({
+    itemStates: [videoStatus, examProgress],
+    policyVersion: ELEARNING_COURSE_PROGRESS_POLICY_VERSION,
+  }).status
 }
 
 function mapMember(row: Record<string, unknown>): ElearningAssignmentProgressMember {
