@@ -500,6 +500,21 @@ describe('Phase D2e RecoveryArchiveObjectStore', () => {
     }))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
   })
 
+  test('rejects a provider that reports deleting a pinned object', async () => {
+    const request = putRequest(identity(), { expiresAt: BEFORE_EXPIRY })
+    const provider = createCountingProvider(request)
+    provider.deleteExpired = async () => ({
+      outcome: 'deleted',
+      object: { ...descriptorFrom(request), pinned: true },
+    })
+    const store = createTransactionGuardedRecoveryArchiveObjectStore(provider, depthProbe(0))
+
+    await expect(asyncCodeOf(() => store.deleteExpired({
+      ...readRequest(request),
+      now: AFTER_EXPIRY,
+    }))).resolves.toBe('RECOVERY_ARCHIVE_OBJECT_STORE_IMMUTABLE_BINDING_MISMATCH')
+  })
+
   test('requires a requested put pin and serializes local pin before conditional deletion', async () => {
     const pinnedRequest = putRequest(identity(), { pinned: true })
     const unpinnedProvider = createCountingProvider(pinnedRequest)
