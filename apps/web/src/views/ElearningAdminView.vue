@@ -236,6 +236,8 @@
       {{ status }}
     </p>
 
+    <ElearningCreditAdminSection v-if="incentiveEnabled" />
+
     <div class="elearning-admin__assessment-toggle">
       <button
         type="button"
@@ -266,6 +268,7 @@ import {
   type ElearningQuestionType,
 } from '../services/elearning'
 import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.vue'
+import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import {
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
@@ -308,6 +311,7 @@ const frozenAssignment = ref<ElearningDirectAssignmentRequest | null>(null)
 const assigned = ref(false)
 const busy = ref(false)
 const ready = ref(false)
+const incentiveEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -500,6 +504,8 @@ function buildAssignmentPayload(courseVersionId: string): ElearningDirectAssignm
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  incentiveEnabled.value = capabilities.enabled === true
+    && capabilities.capabilities.incentive === true
   if (!isElearningV01Ready(capabilities)) {
     throw new ElearningApiError('feature_disabled', 404)
   }

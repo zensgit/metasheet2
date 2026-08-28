@@ -1,8 +1,8 @@
 /**
  * E-learning runtime: flag-gated scope + assignment + watch + exam + publish
  * + learner-list HTTP mount.
- * Synchronous. Zero routes unless master+CONTENT are exact 'true'; each route
- * rechecks its independent capability gate.
+ * Synchronous. Zero routes unless master plus CONTENT or INCENTIVE are exact
+ * 'true'; each route rechecks its independent capability gate.
  * JWT identity wraps /api/elearning; inner full-path router then applies
  * authoritative org, RBAC, JSON, service. No startup DB I/O.
  * Playback tickets use dedicated ELEARNING_MEDIA_PLAYBACK_SIGNING_SECRET.
@@ -13,6 +13,7 @@ import { Router, type Router as ExpressRouter } from 'express'
 import { isElearningContentSurfaceEnabled } from '../elearning/feature-flags'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard, rbacGuardAny } from '../rbac/rbac'
+import { createElearningCreditRouter } from '../routes/elearning-credit'
 import { createElearningPilotRouter } from '../routes/elearning-pilot'
 import { isElearningGlobalAdminRequest } from '../routes/elearning-admin-access'
 import type { ElearningAdminAccessDb } from './elearning-admin-access'
@@ -27,6 +28,13 @@ import {
   type ElearningCoursePublishResult,
   type PublishElearningCourseInput,
 } from './elearning-course-publish'
+import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
+import type {
+  getElearningCreditWallet,
+  listElearningCreditRules,
+  publishElearningCreditRule,
+  ElearningCreditSurfaceDb,
+} from './elearning-credit-surface'
 import type {
   ElearningDirectAssignmentDb,
   ElearningDirectAssignmentResult,
@@ -134,7 +142,8 @@ export interface ElearningPilotRuntimeOptions {
     ElearningAssessmentCatalogDb &
     ElearningPaperExamDb &
     ElearningManualGradingDb &
-    ElearningManualGradingReadDb
+    ElearningManualGradingReadDb &
+    ElearningCreditSurfaceDb
   env?: NodeJS.ProcessEnv
   authenticate?: RequestHandler
   adminGuard?: RequestHandler
@@ -216,6 +225,9 @@ export interface ElearningPilotRuntimeOptions {
     db: ElearningTrainingPlanRevocationDb,
     input: RevokeElearningTrainingPlanAssignmentAuthorizedInput,
   ) => Promise<ElearningTrainingPlanRevocationResult>
+  publishElearningCreditRule?: typeof publishElearningCreditRule
+  listElearningCreditRules?: typeof listElearningCreditRules
+  getElearningCreditWallet?: typeof getElearningCreditWallet
 }
 
 function viewerId(req: Request): string | null {
@@ -237,7 +249,9 @@ export function createElearningPilotRuntime(
   opts: ElearningPilotRuntimeOptions,
 ): ElearningPilotRuntime | null {
   const env = opts.env ?? process.env
-  if (!isElearningContentSurfaceEnabled(env)) return null
+  const contentEnabled = isElearningContentSurfaceEnabled(env)
+  const creditEnabled = isElearningCreditSurfaceEnabled(env)
+  if (!contentEnabled && !creditEnabled) return null
 
   const issuePlayback =
     opts.issueElearningMediaPlaybackTicket ??
@@ -259,7 +273,7 @@ export function createElearningPilotRuntime(
     ?? ((db: ElearningManualGradingDb, input: ElearningManualGradeInput) =>
       submitElearningManualGrade(db, input, { env }))
 
-  const inner = createElearningPilotRouter({
+  const inner = contentEnabled ? createElearningPilotRouter({
     db: opts.db,
     viewerId: opts.viewerId ?? viewerId,
     orgId: opts.orgId ?? orgId,
@@ -298,11 +312,24 @@ export function createElearningPilotRuntime(
     revokeElearningTrainingPlanAssignment:
       opts.revokeElearningTrainingPlanAssignment
       ?? revokeElearningTrainingPlanAssignmentAuthorized,
-  })
-  if (!inner) return null
+  }) : null
+  const credit = creditEnabled ? createElearningCreditRouter({
+    db: opts.db,
+    env,
+    viewerId: opts.viewerId ?? viewerId,
+    orgId: opts.orgId ?? orgId,
+    readGuard: opts.readGuard
+      ?? rbacGuardAny(['elearning:read', 'elearning:write', 'elearning:admin']),
+    adminGuard: opts.adminGuard ?? rbacGuard('elearning', 'admin'),
+    publishElearningCreditRule: opts.publishElearningCreditRule,
+    listElearningCreditRules: opts.listElearningCreditRules,
+    getElearningCreditWallet: opts.getElearningCreditWallet,
+  }) : null
+  if (!inner && !credit) return null
 
   const router = Router()
   router.use('/api/elearning', opts.authenticate ?? authenticate)
-  router.use(inner)
+  if (inner) router.use(inner)
+  if (credit) router.use(credit)
   return { router }
 }

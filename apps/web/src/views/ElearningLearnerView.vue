@@ -5,6 +5,8 @@
       <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
     </header>
 
+    <ElearningCreditWalletSection v-if="incentiveEnabled" />
+
     <p
       v-if="status"
       class="elearning-status"
@@ -214,6 +216,7 @@ import {
   type ElearningExamQuestionType,
   type ElearningWatchState,
 } from '../services/elearning'
+import ElearningCreditWalletSection from './ElearningCreditWalletSection.vue'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -231,6 +234,7 @@ const courses = ref<ElearningLearnerCourse[]>([])
 const loading = ref(false)
 const busy = ref(false)
 const ready = ref(false)
+const incentiveEnabled = ref(false)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const activeCourseVersionId = ref<string | null>(null)
@@ -581,6 +585,8 @@ function isNaturalVideoEnd(video: HTMLVideoElement | null): boolean {
 
 async function ensureV01Ready(): Promise<void> {
   const capabilities = await getElearningCapabilities()
+  incentiveEnabled.value = capabilities.enabled === true
+    && capabilities.capabilities.incentive === true
   if (!isElearningLearnerReady(capabilities)) {
     throw new ElearningApiError('feature_disabled', 404)
   }

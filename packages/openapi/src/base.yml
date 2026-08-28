@@ -4642,7 +4642,7 @@ components:
         assessment: { type: boolean }
         incentive:
           type: boolean
-          description: Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness.
+          description: Reported from ELEARNING_INCENTIVE_ENABLED. Gates L4 incentive routes; not part of V0.1 readiness.
         analytics:
           type: boolean
           description: Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness.
@@ -4659,6 +4659,118 @@ components:
         enabled: { type: boolean }
         capabilities:
           $ref: '#/components/schemas/ElearningCapabilityFlags'
+    ElearningCreditAutomaticBehavior:
+      type: string
+      enum:
+        - login
+        - complete_course
+        - complete_plan
+        - pass_exam
+        - submit_survey
+        - complete_map
+        - complete_offline
+    ElearningCreditRulePublishRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, behavior, points, dailyCap, timeZone]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        behavior:
+          $ref: '#/components/schemas/ElearningCreditAutomaticBehavior'
+        points:
+          type: integer
+          minimum: 1
+        dailyCap:
+          oneOf:
+            - type: integer
+              minimum: 1
+            - type: 'null'
+        timeZone:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: IANA time-zone name canonicalized by the server.
+    ElearningCreditRule:
+      type: object
+      additionalProperties: false
+      required: [behavior, ruleId, version, points, dailyCap, timeZone, createdAt]
+      properties:
+        behavior:
+          $ref: '#/components/schemas/ElearningCreditAutomaticBehavior'
+        ruleId:
+          type: string
+          minLength: 1
+        version:
+          type: integer
+          minimum: 1
+        points:
+          type: integer
+          minimum: 1
+        dailyCap:
+          oneOf:
+            - type: integer
+              minimum: 1
+            - type: 'null'
+        timeZone:
+          type: string
+          minLength: 1
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditRuleList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningCreditRule'
+    ElearningCreditWalletItem:
+      type: object
+      additionalProperties: false
+      required: [decisionId, behavior, awardedPoints, status, occurredAt, createdAt]
+      properties:
+        decisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        behavior:
+          $ref: '#/components/schemas/ElearningCreditAutomaticBehavior'
+        awardedPoints:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          enum: [awarded, capped, exhausted]
+        occurredAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditWallet:
+      type: object
+      additionalProperties: false
+      required: [userId, balancePoints, items, nextCursor]
+      properties:
+        userId:
+          type: string
+          minLength: 1
+        balancePoints:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ElearningCreditWalletItem'
+        nextCursor:
+          oneOf:
+            - type: string
+              minLength: 1
+              maxLength: 512
+            - type: 'null'
     ElearningMediaRejectCode:
       type: string
       enum:

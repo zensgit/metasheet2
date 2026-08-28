@@ -8375,6 +8375,78 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/credit-rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List active organization credit rules
+         * @description Global `elearning:admin` only. Requires master and incentive flags to
+         *     be exact `true`. Organization comes only from the JWT-bound session.
+         */
+        get: operations["listElearningCreditRules"];
+        put?: never;
+        /**
+         * Publish a new active credit-rule version
+         * @description Global `elearning:admin` only. Actor and organization are server
+         *     derived. Publishing atomically retires the prior active version.
+         *     `requestId` is organization-scoped: same normalized payload replays
+         *     the same closed response; a changed payload returns values-free 409.
+         */
+        post: operations["publishElearningCreditRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/credits/wallet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated learner credit wallet
+         * @description RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+         *     User and organization come only from the authenticated session. The
+         *     closed DTO excludes request hashes, effect keys, and raw references.
+         */
+        get: operations["getMyElearningCreditWallet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/elearning/admin/credits/wallet": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read one same-organization learner wallet as global admin
+         * @description Global `elearning:admin` only. `userId` must resolve to an active user
+         *     in the authenticated organization. Department-scoped statistics are
+         *     not part of this L4 endpoint.
+         */
+        get: operations["getAdminElearningCreditWallet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/media": {
         parameters: {
             query?: never;
@@ -17946,7 +18018,7 @@ export interface components {
             content: boolean;
             assignment: boolean;
             assessment: boolean;
-            /** @description Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness. */
+            /** @description Reported from ELEARNING_INCENTIVE_ENABLED. Gates L4 incentive routes; not part of V0.1 readiness. */
             incentive: boolean;
             /** @description Reported from ELEARNING_ANALYTICS_ENABLED. Parked for V0.1; not part of readiness. */
             analytics: boolean;
@@ -17960,6 +18032,46 @@ export interface components {
         ElearningCapabilities: {
             enabled: boolean;
             capabilities: components["schemas"]["ElearningCapabilityFlags"];
+        };
+        /** @enum {string} */
+        ElearningCreditAutomaticBehavior: "login" | "complete_course" | "complete_plan" | "pass_exam" | "submit_survey" | "complete_map" | "complete_offline";
+        ElearningCreditRulePublishRequest: {
+            requestId: string;
+            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            points: number;
+            dailyCap: number | null;
+            /** @description IANA time-zone name canonicalized by the server. */
+            timeZone: string;
+        };
+        ElearningCreditRule: {
+            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            ruleId: string;
+            version: number;
+            points: number;
+            dailyCap: number | null;
+            timeZone: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCreditRuleList: {
+            items: components["schemas"]["ElearningCreditRule"][];
+        };
+        ElearningCreditWalletItem: {
+            decisionId: components["schemas"]["ElearningUuid"];
+            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            awardedPoints: number;
+            /** @enum {string} */
+            status: "awarded" | "capped" | "exhausted";
+            /** Format: date-time */
+            occurredAt: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCreditWallet: {
+            userId: string;
+            balancePoints: number;
+            items: components["schemas"]["ElearningCreditWalletItem"][];
+            nextCursor: string | null;
         };
         /** @enum {string} */
         ElearningMediaRejectCode: "file_too_large" | "too_many_files" | "mime_not_allowed" | "extension_not_allowed" | "extension_mime_mismatch" | "content_mime_mismatch" | "invalid_size" | "org_quota_exceeded" | "upload_rejected";
@@ -19786,6 +19898,133 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    listElearningCreditRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Active automatic-behavior rules ordered by behavior. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditRuleList"];
+                };
+            };
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    publishElearningCreditRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCreditRulePublishRequest"];
+            };
+        };
+        responses: {
+            /** @description Published rule or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditRule"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Incentive surface flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getMyElearningCreditWallet: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Own balance and stable keyset-paginated history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditWallet"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient read permission */
+            403: components["responses"]["ElearningError"];
+            /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    getAdminElearningCreditWallet: {
+        parameters: {
+            query: {
+                userId: string;
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Same-organization target balance and history. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditWallet"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description User not active in the organization or flags off */
+            404: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
         };
     };
     uploadElearningMedia: {

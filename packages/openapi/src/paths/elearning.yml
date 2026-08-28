@@ -1,7 +1,8 @@
 # E-learning named-pilot and L3 assessment HTTP surface.
 # Live routes: content/video, assignment/watch, objective assessment authoring,
 # learner exams, auto grading, and policy-controlled review.
-# Incentive/analytics APIs are parked and must not appear here.
+# L4 incentive rules and wallet reads are present behind master+INCENTIVE.
+# Analytics and remaining incentive surfaces stay parked.
 
 paths:
   /api/elearning/capabilities:
@@ -38,6 +39,173 @@ paths:
                 error:
                   code: FEATURE_DISABLED
                   message: Feature is disabled
+
+  /api/elearning/admin/credit-rules:
+    get:
+      operationId: listElearningCreditRules
+      summary: List active organization credit rules
+      description: |
+        Global `elearning:admin` only. Requires master and incentive flags to
+        be exact `true`. Organization comes only from the JWT-bound session.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: Active automatic-behavior rules ordered by behavior.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditRuleList'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+    post:
+      operationId: publishElearningCreditRule
+      summary: Publish a new active credit-rule version
+      description: |
+        Global `elearning:admin` only. Actor and organization are server
+        derived. Publishing atomically retires the prior active version.
+        `requestId` is organization-scoped: same normalized payload replays
+        the same closed response; a changed payload returns values-free 409.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCreditRulePublishRequest'
+      responses:
+        '200':
+          description: Published rule or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditRule'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: Incentive surface flags off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/credits/wallet:
+    get:
+      operationId: getMyElearningCreditWallet
+      summary: Read the authenticated learner credit wallet
+      description: |
+        RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.
+        User and organization come only from the authenticated session. The
+        closed DTO excludes request hashes, effect keys, and raw references.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Own balance and stable keyset-paginated history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditWallet'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient read permission
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+
+  /api/elearning/admin/credits/wallet:
+    get:
+      operationId: getAdminElearningCreditWallet
+      summary: Read one same-organization learner wallet as global admin
+      description: |
+        Global `elearning:admin` only. `userId` must resolve to an active user
+        in the authenticated organization. Department-scoped statistics are
+        not part of this L4 endpoint.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Same-organization target balance and history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditWallet'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: User not active in the organization or flags off
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
 
   /api/elearning/media:
     post:

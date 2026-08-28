@@ -7466,7 +7466,7 @@
           },
           "incentive": {
             "type": "boolean",
-            "description": "Reported from ELEARNING_INCENTIVE_ENABLED. Parked for V0.1; not part of readiness."
+            "description": "Reported from ELEARNING_INCENTIVE_ENABLED. Gates L4 incentive routes; not part of V0.1 readiness."
           },
           "analytics": {
             "type": "boolean",
@@ -7491,6 +7491,202 @@
           },
           "capabilities": {
             "$ref": "#/components/schemas/ElearningCapabilityFlags"
+          }
+        }
+      },
+      "ElearningCreditAutomaticBehavior": {
+        "type": "string",
+        "enum": [
+          "login",
+          "complete_course",
+          "complete_plan",
+          "pass_exam",
+          "submit_survey",
+          "complete_map",
+          "complete_offline"
+        ]
+      },
+      "ElearningCreditRulePublishRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "requestId",
+          "behavior",
+          "points",
+          "dailyCap",
+          "timeZone"
+        ],
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "behavior": {
+            "$ref": "#/components/schemas/ElearningCreditAutomaticBehavior"
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "dailyCap": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeZone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "IANA time-zone name canonicalized by the server."
+          }
+        }
+      },
+      "ElearningCreditRule": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "behavior",
+          "ruleId",
+          "version",
+          "points",
+          "dailyCap",
+          "timeZone",
+          "createdAt"
+        ],
+        "properties": {
+          "behavior": {
+            "$ref": "#/components/schemas/ElearningCreditAutomaticBehavior"
+          },
+          "ruleId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "points": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "dailyCap": {
+            "oneOf": [
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "timeZone": {
+            "type": "string",
+            "minLength": 1
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCreditRuleList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningCreditRule"
+            }
+          }
+        }
+      },
+      "ElearningCreditWalletItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "decisionId",
+          "behavior",
+          "awardedPoints",
+          "status",
+          "occurredAt",
+          "createdAt"
+        ],
+        "properties": {
+          "decisionId": {
+            "$ref": "#/components/schemas/ElearningUuid"
+          },
+          "behavior": {
+            "$ref": "#/components/schemas/ElearningCreditAutomaticBehavior"
+          },
+          "awardedPoints": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "awarded",
+              "capped",
+              "exhausted"
+            ]
+          },
+          "occurredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ElearningCreditWallet": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "userId",
+          "balancePoints",
+          "items",
+          "nextCursor"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "balancePoints": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ElearningCreditWalletItem"
+            }
+          },
+          "nextCursor": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -24660,6 +24856,242 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/credit-rules": {
+      "get": {
+        "operationId": "listElearningCreditRules",
+        "summary": "List active organization credit rules",
+        "description": "Global `elearning:admin` only. Requires master and incentive flags to\nbe exact `true`. Organization comes only from the JWT-bound session.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active automatic-behavior rules ordered by behavior.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCreditRuleList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      },
+      "post": {
+        "operationId": "publishElearningCreditRule",
+        "summary": "Publish a new active credit-rule version",
+        "description": "Global `elearning:admin` only. Actor and organization are server\nderived. Publishing atomically retires the prior active version.\n`requestId` is organization-scoped: same normalized payload replays\nthe same closed response; a changed payload returns values-free 409.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ElearningCreditRulePublishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Published rule or exact idempotent replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCreditRule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "Incentive surface flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "409": {
+            "description": "requestId reused with a different normalized payload",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/credits/wallet": {
+      "get": {
+        "operationId": "getMyElearningCreditWallet",
+        "summary": "Read the authenticated learner credit wallet",
+        "description": "RBAC any of `elearning:read`, `elearning:write`, `elearning:admin`.\nUser and organization come only from the authenticated session. The\nclosed DTO excludes request hashes, effect keys, and raw references.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Own balance and stable keyset-paginated history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCreditWallet"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient read permission",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "User not active in the organization or flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
+    "/api/elearning/admin/credits/wallet": {
+      "get": {
+        "operationId": "getAdminElearningCreditWallet",
+        "summary": "Read one same-organization learner wallet as global admin",
+        "description": "Global `elearning:admin` only. `userId` must resolve to an active user\nin the authenticated organization. Department-scoped statistics are\nnot part of this L4 endpoint.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Same-organization target balance and history.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningCreditWallet"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_input",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "description": "ORG_CONTEXT_REQUIRED or insufficient elearning:admin",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "404": {
+            "description": "User not active in the organization or flags off",
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "503": {
+            "description": "unavailable",
+            "$ref": "#/components/responses/ElearningError"
           }
         }
       }
