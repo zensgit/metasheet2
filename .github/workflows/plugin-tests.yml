@@ -899,6 +899,10 @@ jobs:
             tests/unit/elearning-flags.test.ts \
             tests/unit/elearning-learner-courses.test.ts \
             tests/unit/elearning-manual-grading-migration-contract.test.ts \
+            tests/unit/elearning-manual-grading-read-routes.test.ts \
+            tests/unit/elearning-manual-grading-read.test.ts \
+            tests/unit/elearning-manual-grading-routes.test.ts \
+            tests/unit/elearning-manual-grading.test.ts \
             tests/unit/elearning-media-ingest.test.ts \
             tests/unit/elearning-media-playback-routes.test.ts \
             tests/unit/elearning-media-playback-runtime.test.ts \
