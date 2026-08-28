@@ -4,6 +4,10 @@
  */
 import { ELEARNING_MEDIA_MIME } from './elearning-media-validation'
 import {
+  ELEARNING_COURSE_PROGRESS_POLICY_VERSION,
+  evaluateElearningCourseProgress,
+} from './elearning-course-progress-policy'
+import {
   ELEARNING_WATCH_POLICY_VERSION,
   ELEARNING_WATCH_THRESHOLD_BPS,
 } from './elearning-watch-progress'
@@ -505,6 +509,13 @@ function mapCourse(
   const video = mapVideo(row)
   const latestAttempt = mapLatestAttempt(row)
   const anyPassed = requireBoolean(row.any_passed)
+  const courseProgress = evaluateElearningCourseProgress({
+    itemStates: [
+      video.status,
+      anyPassed ? 'completed' : latestAttempt === null ? 'not_started' : 'in_progress',
+    ],
+    policyVersion: ELEARNING_COURSE_PROGRESS_POLICY_VERSION,
+  })
   const assignment = candidate.basis.kind === 'assignment'
     ? {
         deadline: candidate.assignmentDeadline,
@@ -525,8 +536,8 @@ function mapCourse(
       itemId: requireUuid(row.exam_item_id),
       latestAttempt,
     },
-    // Monotonic: video completed AND any graded pass for this org/user/exam item.
-    completed: video.status === 'completed' && anyPassed,
+    // Monotonic: any historic graded pass keeps the exam item completed.
+    completed: courseProgress.status === 'completed',
   }
 }
 
