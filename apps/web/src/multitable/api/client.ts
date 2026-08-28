@@ -1031,6 +1031,44 @@ export interface RecoveryArchiveJobPage {
   nextCursor: string | null
 }
 
+const RECOVERY_ARCHIVE_JOB_STATES: ReadonlySet<unknown> = new Set([
+  'planned',
+  'applying',
+  'paused_retryable',
+  'done',
+  'abandoned_partial',
+  'cancelled_zero_write',
+])
+
+const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
+  'completedCount',
+  'jobId',
+  'resumeDeadline',
+  'rowVersion',
+  'state',
+  'terminalAt',
+  'totalCount',
+] as const
+
+function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJobSnapshot {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS.length
+    || keys.some((key, index) => key !== RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS[index])
+  ) {
+    return false
+  }
+  const snapshot = value as Record<string, unknown>
+  return typeof snapshot.jobId === 'string'
+    && RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
+    && typeof snapshot.totalCount === 'string'
+    && typeof snapshot.completedCount === 'string'
+    && typeof snapshot.resumeDeadline === 'string'
+    && (snapshot.terminalAt === null || typeof snapshot.terminalAt === 'string')
+    && typeof snapshot.rowVersion === 'string'
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -2343,6 +2381,7 @@ export class MultitableApiClient implements CommentsApiClient {
     const data = await this.parseJson<Partial<RecoveryArchiveJobPage>>(res)
     if (
       !Array.isArray(data.entries)
+      || data.entries.some((entry) => !isRecoveryArchiveJobSnapshot(entry))
       || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
     ) {
       throw new Error('Invalid recovery archive job list response')

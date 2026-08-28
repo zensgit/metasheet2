@@ -82,14 +82,18 @@ describe('MultitableApiClient recovery archive routes', () => {
   })
 
   it('encodes a bounded job-list cursor as a sheet-scoped GET query', async () => {
+    const planned = {
+      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
+      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
+    } as const
     const fetchFn = vi.fn().mockResolvedValue(response({ ok: true, data: {
-      entries: [], nextCursor: null,
+      entries: [planned], nextCursor: null,
     } }))
     const client = new MultitableApiClient({ fetchFn })
 
     await expect(client.listRecoveryArchiveJobs('sheet/a', {
       cursor: 'opaque /?', limit: 1,
-    })).resolves.toEqual({ entries: [], nextCursor: null })
+    })).resolves.toEqual({ entries: [planned], nextCursor: null })
     expect(fetchFn).toHaveBeenCalledWith(
       '/api/multitable/sheets/sheet%2Fa/recovery-archive/jobs?cursor=opaque%20%2F%3F&limit=1',
     )
@@ -99,6 +103,16 @@ describe('MultitableApiClient recovery archive routes', () => {
     { nextCursor: null },
     { entries: {}, nextCursor: null },
     { entries: [] },
+    { entries: [null], nextCursor: null },
+    { entries: [{ jobId: '55555555-5555-4555-8555-555555555555' }], nextCursor: null },
+    { entries: [{
+      jobId: '55555555-5555-4555-8555-555555555555', state: 'unknown', totalCount: '6001', completedCount: '0',
+      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
+    }], nextCursor: null },
+    { entries: [{
+      jobId: '55555555-5555-4555-8555-555555555555', state: 'planned', totalCount: '6001', completedCount: '0',
+      resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1', workerFence: 'internal',
+    }], nextCursor: null },
   ])('rejects a malformed successful job-list response instead of treating it as absence', async (data) => {
     const client = new MultitableApiClient({
       fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
