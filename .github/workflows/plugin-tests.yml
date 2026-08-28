@@ -897,15 +897,27 @@ jobs:
             tests/unit/elearning-assessment-admin-routes.test.ts \
             tests/unit/elearning-assessment-import.test.ts \
             tests/unit/elearning-notification-delivery.test.ts \
+            tests/unit/elearning-open-completion-policy.test.ts \
             tests/unit/elearning-reminder-port-scoping.test.ts \
             tests/unit/elearning-batch-assignment-routes.test.ts \
             tests/unit/elearning-batch-assignment-runtime.test.ts \
             tests/unit/elearning-batch-assignment.test.ts \
+            tests/unit/elearning-category-tree-policy.test.ts \
+            tests/unit/elearning-content-revision-policy.test.ts \
+            tests/unit/elearning-course-lifecycle-policy.test.ts \
+            tests/unit/elearning-course-progress-policy.test.ts \
+            tests/unit/elearning-course-publish-readiness-policy.test.ts \
             tests/unit/elearning-course-publish.test.ts \
+            tests/unit/elearning-course-stats-policy.test.ts \
+            tests/unit/elearning-course-version-items-policy.test.ts \
             tests/unit/elearning-credit-ledger.test.ts \
             tests/unit/elearning-credit-policy.test.ts \
             tests/unit/elearning-credit-postgres.test.ts \
             tests/unit/elearning-direct-assignment.test.ts \
+            tests/unit/elearning-document-completion-policy.test.ts \
+            tests/unit/elearning-document-media-authority.test.ts \
+            tests/unit/elearning-document-progress.test.ts \
+            tests/unit/elearning-document-session.test.ts \
             tests/unit/elearning-exam-review.test.ts \
             tests/unit/elearning-exam.test.ts \
             tests/unit/elearning-flags.test.ts \
