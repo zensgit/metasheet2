@@ -129,6 +129,7 @@ import {
 import { executeRecoveryArchiveSync } from '../multitable/recovery-archive-sync-execute'
 import { acceptFrozenRecoveryArchiveRestoreJob } from '../multitable/recovery-archive-async-plan'
 import {
+  cancelRecoveryArchiveRestoreJob,
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
   resumeRecoveryArchiveRestoreJob,
@@ -11426,7 +11427,22 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           jobId,
         },
       ),
-      // Cancel remains unavailable until the durable worker owns partial-job terminalization.
+      cancel:
+        Number.isSafeInteger(options.recoveryArchiveAuditedReplayHorizonMs) &&
+        (options.recoveryArchiveAuditedReplayHorizonMs ?? -1) >= 0
+          ? (context, jobId) => cancelRecoveryArchiveRestoreJob(
+              recoveryArchiveRestoreTransaction,
+              {
+                workspaceId: context.workspaceId,
+                baseId: context.baseId,
+                sheetId: context.sheetId,
+                actorId: context.actorId,
+                jobId,
+                replayHorizonMs: options.recoveryArchiveAuditedReplayHorizonMs!,
+                recheckAuthority: context.recheckAuthority,
+              },
+            )
+          : undefined,
     },
   })
 
