@@ -804,6 +804,104 @@ describeIfRealDbStep('Phase D5 durable archive restore jobs (real DB)', () => {
     )).toEqual({ ok: false, reason: 'token-replayed' })
   })
 
+  test('locks archive links from the authoritative links section, not stale record JSON', async () => {
+    const fixture = await seedVerifiedArchive('sync_authoritative_links')
+    const targetSheetId = `${fixture.sheetId}_target_sheet`
+    const linkFieldId = `${fixture.sheetId}_link_field`
+    const sourceRecordId = `${fixture.sheetId}_source_record`
+    const validTargetId = `${fixture.sheetId}_valid_target`
+    const staleTargetId = `${fixture.sheetId}_stale_target`
+    const linkProperty = { foreignSheetId: targetSheetId }
+    await q(
+      `INSERT INTO public.meta_sheets (id, base_id, name) VALUES ($1, $2, 'Target')`,
+      [targetSheetId, fixture.baseId],
+    )
+    await q(
+      `INSERT INTO public.meta_fields (id, sheet_id, name, type, property, "order")
+       VALUES ($1, $2, 'Relation', 'link', $3::jsonb, 1)`,
+      [linkFieldId, fixture.sheetId, JSON.stringify(linkProperty)],
+    )
+    await q(
+      `INSERT INTO public.meta_records (id, sheet_id, data, version, created_by, modified_by)
+       VALUES
+         ($1, $3, $5::jsonb, 2, $6, $6),
+         ($2, $4, '{}'::jsonb, 1, $6, $6),
+         ($7, $4, '{}'::jsonb, 1, $6, $6)`,
+      [
+        sourceRecordId,
+        validTargetId,
+        fixture.sheetId,
+        targetSheetId,
+        JSON.stringify({ [linkFieldId]: [] }),
+        fixture.actorId,
+        staleTargetId,
+      ],
+    )
+    const targetRecords = new Map([
+      [sourceRecordId, {
+        recordId: sourceRecordId,
+        exists: true,
+        data: { [linkFieldId]: [staleTargetId] },
+        version: 1,
+      }],
+    ])
+    const identity = mintScopedSyncToken(fixture, {
+      scopeKind: 'whole_sheet',
+      targetRecords,
+      liveRecords: [{ recordId: sourceRecordId, version: 2 }],
+      schema: [{ id: linkFieldId, type: 'link', property: linkProperty }],
+      selectedRecordIds: [],
+      selectedFieldIds: [],
+    })
+    const blocker = await pool.connect()
+    try {
+      await blocker.query('BEGIN')
+      await blocker.query(
+        `SELECT id FROM public.meta_records WHERE id=$1 FOR UPDATE`,
+        [staleTargetId],
+      )
+
+      expect(await applyMaterializedExactArchiveRecoverySyncInternal(
+        transaction,
+        syncApplyInput(fixture, identity.token),
+        {
+          workspaceId: fixture.workspaceId,
+          baseId: fixture.baseId,
+          targetRecords,
+          targetLinks: [{
+            fieldId: linkFieldId,
+            recordId: sourceRecordId,
+            foreignRecordId: validTargetId,
+          }],
+          selectedRecordIds: [],
+          selectedFieldIds: [],
+          auditedReplayHorizonMs: 0,
+        },
+      )).toMatchObject({ ok: true, applied: { reverts: 1 } })
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      blocker.release()
+    }
+
+    const restored = await q(
+      `SELECT data FROM public.meta_records WHERE id=$1`,
+      [sourceRecordId],
+    )
+    expect(restored.rows).toEqual([{ data: { [linkFieldId]: [validTargetId] } }])
+    const links = await q(
+      `SELECT field_id, record_id, foreign_record_id
+         FROM public.meta_links
+        WHERE record_id=$1
+        ORDER BY field_id, foreign_record_id`,
+      [sourceRecordId],
+    )
+    expect(links.rows).toEqual([{
+      field_id: linkFieldId,
+      record_id: sourceRecordId,
+      foreign_record_id: validTargetId,
+    }])
+  })
+
   test('rolls back live write, revision, operation, burn, and receipt when the mutation hook fails', async () => {
     const world = await seedSyncApplyWorld('sync_rollback')
     const operationsBefore = Number((await q(

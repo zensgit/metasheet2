@@ -605,6 +605,8 @@ export async function discoverRecoveryAuthoritySheetIds(
  *
  * The scope is deliberately conservative: every declared link sheet, every current inbound/outbound
  * edge touching the source sheet, and every target id present in the composed anchor are included.
+ * Archive sync passes its authenticated `links` section separately because archived record JSON is not
+ * a second link authority and may contain stale ids. Hot recovery retains the legacy composed-data scan.
  * All sheet rows are locked first; then source live rows plus discovered foreign rows are locked by
  * `(sheet_id,id)`. The later plan must prove each actual link target was already in this set. No
  * recovery may discover and lock a foreign record after it has begun authorization or mutation.
@@ -613,6 +615,7 @@ export async function lockExactAnchorRecoveryAuthorityScope(
   query: QueryFn,
   sourceSheetId: string,
   composed?: ReadonlyMap<string, RecordStateAtT>,
+  authoritativeLinks?: readonly MaterializedArchiveLink[],
 ): Promise<ExactAnchorLockedAuthorityScope> {
   const linkFields = await query(
     `SELECT id, property
@@ -635,14 +638,27 @@ export async function lockExactAnchorRecoveryAuthorityScope(
     foreignSheetByField.set(String(row.id), foreignSheetId)
   }
 
-  for (const state of composed?.values() ?? []) {
-    if (!state.exists || !state.data) continue
-    for (const [fieldId, foreignSheetId] of foreignSheetByField) {
-      for (const recordId of normalizeLinkIds(state.data[fieldId])) {
-        requestedRecordKeys.set(
-          recoveryRecordKey(foreignSheetId, recordId),
-          { sheetId: foreignSheetId, recordId },
-        )
+  if (authoritativeLinks) {
+    const composedRecordIds = new Set(composed?.keys() ?? [])
+    for (const edge of authoritativeLinks) {
+      if (!composedRecordIds.has(edge.recordId)) continue
+      const foreignSheetId = foreignSheetByField.get(edge.fieldId)
+      if (!foreignSheetId) continue
+      requestedRecordKeys.set(
+        recoveryRecordKey(foreignSheetId, edge.foreignRecordId),
+        { sheetId: foreignSheetId, recordId: edge.foreignRecordId },
+      )
+    }
+  } else {
+    for (const state of composed?.values() ?? []) {
+      if (!state.exists || !state.data) continue
+      for (const [fieldId, foreignSheetId] of foreignSheetByField) {
+        for (const recordId of normalizeLinkIds(state.data[fieldId])) {
+          requestedRecordKeys.set(
+            recoveryRecordKey(foreignSheetId, recordId),
+            { sheetId: foreignSheetId, recordId },
+          )
+        }
       }
     }
   }
@@ -1015,27 +1031,6 @@ function archiveTargetForAnchor(
   return result
 }
 
-function overlayArchiveLinksForLock(
-  targetRecords: ReadonlyMap<string, RecordStateAtT>,
-  targetLinks: readonly MaterializedArchiveLink[],
-): Map<string, RecordStateAtT> {
-  const result = new Map<string, RecordStateAtT>()
-  for (const [recordId, state] of targetRecords) {
-    result.set(recordId, {
-      ...state,
-      data: state.data === null ? null : { ...state.data },
-    })
-  }
-  for (const edge of targetLinks) {
-    const state = result.get(edge.recordId)
-    if (!state?.exists || !state.data) continue
-    const ids = normalizeLinkIds(state.data[edge.fieldId])
-    if (!ids.includes(edge.foreignRecordId)) ids.push(edge.foreignRecordId)
-    state.data[edge.fieldId] = ids
-  }
-  return result
-}
-
 function hydrateArchiveTargetLinks(
   targetRecords: ReadonlyMap<string, RecordStateAtT>,
   targetLinks: readonly MaterializedArchiveLink[],
@@ -1358,10 +1353,19 @@ async function applyExactAnchorRecoveryAttempt(
         created_at?: unknown
         updated_at?: unknown
       }>()
-      const lockTarget = execution.kind === 'archive_sync'
-        ? overlayArchiveLinksForLock(composed, execution.targetLinks)
-        : composed
-      const lockedScope = await lockExactAnchorRecoveryAuthorityScope(query, input.sheetId, lockTarget)
+      const archiveLockLinks = execution.kind === 'archive_sync'
+        ? execution.targetLinks.filter((edge) =>
+            composed.has(edge.recordId) &&
+            (execution.claims.scopeKind !== 'selected_fields' ||
+              execution.selectedFieldIds.includes(edge.fieldId)),
+          )
+        : undefined
+      const lockedScope = await lockExactAnchorRecoveryAuthorityScope(
+        query,
+        input.sheetId,
+        composed,
+        archiveLockLinks,
+      )
       for (const r of lockedScope.liveRows) {
         liveById.set(String(r.id), {
           data: requireLiveData(r.data),
