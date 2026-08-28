@@ -552,3 +552,25 @@ export async function assignElearningTrainingPlan(
     }
   })
 }
+
+/**
+ * Execute on a transaction already owned by the caller.
+ *
+ * This is intentionally a thin entry point over the canonical writer: the
+ * caller can lock additional eligibility facts first, while assignment
+ * validation, advisory locking, idempotency, and inserts stay byte-for-byte in
+ * the same implementation. The supplied queryable must be bound to the active
+ * transaction; this function never commits or rolls it back.
+ */
+export async function assignElearningTrainingPlanInTransaction(
+  tx: ElearningTrainingPlanAssignmentQueryable,
+  input: AssignElearningTrainingPlanInput,
+): Promise<ElearningTrainingPlanAssignmentResult> {
+  return assignElearningTrainingPlan(
+    {
+      query: (sql, params) => tx.query(sql, params),
+      transaction: async (handler) => handler(tx),
+    },
+    input,
+  )
+}
