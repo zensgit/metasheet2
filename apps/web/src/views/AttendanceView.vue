@@ -180,6 +180,19 @@
         @change-balance-leave-type="handleChangeSelfBalanceLeaveType"
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
+        <template #afterCommon>
+          <AttendanceEmployeeLeaveRequestCard
+            v-if="leaveRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :leave-types="leaveTypes"
+            :can-quick-fill="canQuickFillLeave"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedLeaveRequestCard"
+            @submit="submitDedicatedLeaveRequestCard"
+            @quick-fill="applyLeaveQuickFill"
+          />
+        </template>
         <template #historyFilters>
           <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
             <span>{{ tr('From', '开始') }}</span>
@@ -10123,6 +10136,7 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeLeaveRequestCard from './attendance/AttendanceEmployeeLeaveRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import {
   DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
@@ -14848,6 +14862,7 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
 }
 
 const overviewRequestToolsOpen = ref(false)
+const leaveRequestCardOpen = ref(false)
 
 function onOverviewRequestToolsToggle(event: Event): void {
   const target = event.currentTarget
@@ -17162,12 +17177,13 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
 }
 
 async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
-  if (action === 'missing-punch') {
-    await openMissingPunchQuickAction()
+  if (action === 'leave') {
+    await openDedicatedLeaveRequestCard()
     return
   }
-  if (action === 'leave') {
-    await openQuickRequestDraft('leave')
+  if (leaveRequestCardOpen.value) closeDedicatedLeaveRequestCard()
+  if (action === 'missing-punch') {
+    await openMissingPunchQuickAction()
     return
   }
   if (action === 'overtime') {
@@ -17183,6 +17199,37 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
     return
   }
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)
+}
+
+async function openDedicatedLeaveRequestCard(): Promise<void> {
+  requestForm.workDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  requestForm.requestType = 'leave'
+  leaveRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      tr(`Request form ready for ${formatRequestType('leave')}.`, `已为${formatRequestType('leave')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-leave-request-card]')
+  if (card instanceof HTMLElement) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  const typeField = document.getElementById('attendance-leave-card-type')
+  if (typeField instanceof HTMLElement && typeof typeField.focus === 'function') {
+    typeField.focus()
+  }
+}
+
+function closeDedicatedLeaveRequestCard(): void {
+  leaveRequestCardOpen.value = false
+}
+
+async function submitDedicatedLeaveRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedLeaveRequestCard()
 }
 
 async function openQuickRequestDraft(requestType: AttendanceRequest['request_type']): Promise<void> {
