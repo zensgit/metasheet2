@@ -6,6 +6,12 @@ import {
   type RecoveryArchiveCatalogEntry,
   type RecoveryArchiveCatalogPage,
 } from '../multitable/recovery-archive-catalog'
+import type { EvaluatePlanAuthorization } from '../multitable/exact-anchor-recovery-execute'
+import {
+  RecoveryArchivePreviewError,
+  type RecoveryArchivePreviewResult,
+  type RecoveryArchivePreviewScope,
+} from '../multitable/recovery-archive-preview'
 import {
   RecoveryArchiveRestoreJobError,
   type RecoveryArchiveRestoreJobQuery,
@@ -17,6 +23,23 @@ const EMPTY_BODY_SCHEMA = z.object({}).strict()
 const ACCEPT_BODY_SCHEMA = z.object({
   previewIdentity: z.string().trim().min(1),
   plan: z.record(z.unknown()),
+}).strict()
+const PREVIEW_SCOPE_SCHEMA = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('whole_sheet') }).strict(),
+  z.object({
+    kind: z.literal('selected_records'),
+    recordIds: z.array(z.string().trim().min(1)).min(1),
+  }).strict(),
+  z.object({
+    kind: z.literal('selected_fields'),
+    recordIds: z.array(z.string().trim().min(1)).min(1),
+    fieldIds: z.array(z.string().trim().min(1)).min(1),
+  }).strict(),
+])
+const PREVIEW_BODY_SCHEMA = z.object({
+  generationId: z.string().uuid(),
+  mode: z.enum(['revert', 'reset']),
+  scope: PREVIEW_SCOPE_SCHEMA,
 }).strict()
 const JOB_ID_SCHEMA = z.string().uuid()
 const GENERATION_ID_SCHEMA = z.string().uuid()
@@ -31,6 +54,7 @@ export interface RecoveryArchiveRestoreOwnerContext {
   readonly sheetId: string
   readonly actorId: string
   readonly recheckAuthority: (query: RecoveryArchiveRestoreJobQuery) => Promise<boolean>
+  readonly evaluatePlanAuthorization: EvaluatePlanAuthorization
 }
 
 export type RecoveryArchiveRestoreOwnerContextResolution =
@@ -46,6 +70,14 @@ export type RecoveryArchiveRestoreOwnerContextResolution =
     }
 
 export interface RecoveryArchiveRestoreOwnerService {
+  readonly preview?: (
+    context: RecoveryArchiveRestoreOwnerContext,
+    input: {
+      readonly generationId: string
+      readonly mode: 'revert' | 'reset'
+      readonly scope: RecoveryArchivePreviewScope
+    },
+  ) => Promise<RecoveryArchivePreviewResult>
   readonly listCatalog?: (
     context: RecoveryArchiveRestoreOwnerContext,
     input: { readonly cursor?: string; readonly limit?: number },
@@ -84,6 +116,26 @@ export function registerRecoveryArchiveRestoreOwnerRoutes(
   router: Router,
   dependencies: RecoveryArchiveRestoreOwnerRouteDependencies,
 ): void {
+  router.post('/sheets/:sheetId/recovery-archive/preview', async (req, res) => {
+    const parsed = PREVIEW_BODY_SCHEMA.safeParse(req.body ?? {})
+    if (!parsed.success || !hasNoQuery(req)) return sendValidationError(res)
+    const context = await resolveContext(req, res, dependencies)
+    if (!context) return
+    if (!dependencies.service.preview) {
+      return sendError(res, 503, 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE')
+    }
+    try {
+      const result = await dependencies.service.preview(context, {
+        generationId: parsed.data.generationId,
+        mode: parsed.data.mode,
+        scope: parsed.data.scope as RecoveryArchivePreviewScope,
+      })
+      return res.json({ ok: true, data: projectPreview(result) })
+    } catch (error) {
+      return sendServiceError(res, error)
+    }
+  })
+
   router.get('/sheets/:sheetId/recovery-archive/catalog', async (req, res) => {
     const parsed = CATALOG_QUERY_SCHEMA.safeParse(req.query)
     if (!parsed.success) return sendValidationError(res)
@@ -240,6 +292,19 @@ function projectSnapshot(snapshot: RecoveryArchiveRestoreJobSnapshot) {
   }
 }
 
+function projectPreview(result: RecoveryArchivePreviewResult) {
+  return {
+    generationId: result.generationId,
+    mode: result.mode,
+    scopeKind: result.scopeKind,
+    executionKind: result.executionKind,
+    executable: result.executable,
+    blockedReason: result.blockedReason,
+    previewIdentity: result.previewIdentity,
+    summary: result.summary,
+  }
+}
+
 function projectCatalogEntry(entry: RecoveryArchiveCatalogEntry) {
   return {
     generationId: entry.generationId,
@@ -257,6 +322,20 @@ function sendValidationError(res: Response) {
 }
 
 function sendServiceError(res: Response, error: unknown) {
+  if (error instanceof RecoveryArchivePreviewError) {
+    switch (error.code) {
+      case 'RECOVERY_ARCHIVE_PREVIEW_INVALID_INPUT':
+        return sendValidationError(res)
+      case 'RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED':
+        return sendError(res, 403, error.code)
+      case 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND':
+        return sendError(res, 404, error.code)
+      case 'RECOVERY_ARCHIVE_PREVIEW_DISABLED':
+      case 'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE':
+      case 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID':
+        return sendError(res, 503, error.code)
+    }
+  }
   if (error instanceof RecoveryArchiveCatalogError) {
     switch (error.code) {
       case 'RECOVERY_ARCHIVE_CATALOG_INVALID_INPUT':
@@ -299,6 +378,7 @@ function messageForErrorCode(code: string): string {
     case 'UNAUTHENTICATED':
       return 'Authentication required.'
     case 'FORBIDDEN':
+    case 'RECOVERY_ARCHIVE_PREVIEW_AUTHORITY_DENIED':
     case 'RECOVERY_ARCHIVE_RESTORE_JOB_AUTHORITY_DENIED':
     case 'RECOVERY_ARCHIVE_CATALOG_AUTHORITY_DENIED':
       return 'Insufficient permissions.'
@@ -306,9 +386,13 @@ function messageForErrorCode(code: string): string {
     case 'RECOVERY_ARCHIVE_RESTORE_JOB_NOT_FOUND':
       return 'Recovery job not found.'
     case 'RECOVERY_ARCHIVE_CATALOG_NOT_FOUND':
+    case 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND':
       return 'Recovery point not found.'
+    case 'RECOVERY_ARCHIVE_PREVIEW_DISABLED':
     case 'RECOVERY_ARCHIVE_CATALOG_DISABLED':
       return 'Archive recovery is disabled.'
+    case 'RECOVERY_ARCHIVE_PREVIEW_RUNTIME_UNAVAILABLE':
+    case 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID':
     case 'RECOVERY_ARCHIVE_CATALOG_PERSISTENCE_INVALID':
       return 'Archive recovery catalog is unavailable.'
     case 'RECOVERY_ARCHIVE_RUNTIME_UNAVAILABLE':

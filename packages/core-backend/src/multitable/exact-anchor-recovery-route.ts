@@ -146,7 +146,7 @@ export interface PreviewPlanSummary {
   driftCount: number
 }
 
-interface PreviewPlanDetails {
+export interface PreviewPlanDetails {
   summary: PreviewPlanSummary
   plan: ExactAnchorRecoveryPlan
   revertWrites: ExactAnchorRevertWriteIntent[]
@@ -168,7 +168,7 @@ function normalizeLinkIds(value: unknown): string[] {
  * snapshots). May throw `ExactAnchorPlanDataError` on malformed at-anchor/live substrate —
  * callers map that to `recovery-trust-required`.
  */
-function buildPreviewPlanDetails(
+export function buildPreviewPlanDetails(
   stateMap: Map<
     string,
     {

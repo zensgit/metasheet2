@@ -868,7 +868,7 @@ type ExactAnchorApplyExecution =
       readonly auditedReplayHorizonMs: number
     }
 
-type ExactAnchorLiveRecord = {
+export type ExactAnchorLiveRecord = {
   data: Record<string, unknown>
   version: number
   locked?: unknown
@@ -876,6 +876,13 @@ type ExactAnchorLiveRecord = {
   created_by?: unknown
   created_at?: unknown
   updated_at?: unknown
+}
+
+type ArchiveScopeExecution = {
+  readonly claims: Pick<ExactArchiveRecoveryIdentityClaims, 'scopeKind'>
+  readonly targetRecords: ReadonlyMap<string, RecordStateAtT>
+  readonly selectedRecordIds: readonly string[]
+  readonly selectedFieldIds: readonly string[]
 }
 
 function isOpaqueId(value: unknown): value is string {
@@ -1017,7 +1024,7 @@ async function lockArchiveSyncBinding(
 }
 
 function archiveTargetForAnchor(
-  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>,
+  execution: ArchiveScopeExecution,
 ): Map<string, RecordStateAtT> {
   if (execution.claims.scopeKind === 'whole_sheet') {
     return new Map(execution.targetRecords)
@@ -1056,7 +1063,7 @@ function hydrateArchiveTargetLinks(
 }
 
 function scopeArchiveRecoveryPlan(
-  execution: Extract<ExactAnchorApplyExecution, { kind: 'archive_sync' }>,
+  execution: ArchiveScopeExecution,
   targetRecords: ReadonlyMap<string, RecordStateAtT>,
   liveById: ReadonlyMap<string, ExactAnchorLiveRecord>,
   restorableFieldIds: ReadonlySet<string>,
@@ -1108,6 +1115,63 @@ function scopeArchiveRecoveryPlan(
     live.set(recordId, current)
   }
   return { targetRecords: target, liveById: live }
+}
+
+/**
+ * Shared D5 preview/apply scope assembly. Preview calls this exact helper before minting a token;
+ * execute calls the same underlying functions again under the recovery fence. Keeping selection,
+ * archived-link hydration, and selected-field overlay here prevents a preview-only fork.
+ *
+ * @internal Provider/runtime adapters may call this after D4 has authenticated the archive.
+ */
+export function prepareMaterializedArchiveRecoveryPreviewScopeInternal(input: {
+  readonly scopeKind: ExactArchiveRecoveryIdentityClaims['scopeKind']
+  readonly targetRecords: ReadonlyMap<string, RecordStateAtT>
+  readonly targetLinks: readonly MaterializedArchiveLink[]
+  readonly liveById: ReadonlyMap<string, ExactAnchorLiveRecord>
+  readonly selectedRecordIds: readonly string[]
+  readonly selectedFieldIds: readonly string[]
+  readonly writableLinkFieldIds: ReadonlySet<string>
+  readonly restorableFieldIds: ReadonlySet<string>
+}):
+  | {
+      readonly ok: true
+      readonly anchorTarget: Map<string, RecordStateAtT>
+      readonly targetRecords: Map<string, RecordStateAtT>
+      readonly liveById: Map<string, ExactAnchorLiveRecord>
+    }
+  | { readonly ok: false; readonly reason: ExactAnchorApplyRefusal } {
+  const execution: ArchiveScopeExecution = {
+    claims: { scopeKind: input.scopeKind },
+    targetRecords: input.targetRecords,
+    selectedRecordIds: input.selectedRecordIds,
+    selectedFieldIds: input.selectedFieldIds,
+  }
+  try {
+    const anchorTarget = archiveTargetForAnchor(execution)
+    const hydrated = hydrateArchiveTargetLinks(
+      input.targetRecords,
+      input.targetLinks,
+      input.writableLinkFieldIds,
+    )
+    const scoped = scopeArchiveRecoveryPlan(
+      execution,
+      hydrated,
+      input.liveById,
+      input.restorableFieldIds,
+    )
+    return {
+      ok: true,
+      anchorTarget,
+      targetRecords: scoped.targetRecords,
+      liveById: scoped.liveById,
+    }
+  } catch (error) {
+    if (error instanceof ApplyRefusalError) {
+      return { ok: false, reason: error.reason }
+    }
+    throw error
+  }
 }
 
 /**

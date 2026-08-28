@@ -7,6 +7,10 @@ import {
   type RecoveryArchiveCatalogEntry,
 } from '../../src/multitable/recovery-archive-catalog'
 import {
+  RecoveryArchivePreviewError,
+  type RecoveryArchivePreviewResult,
+} from '../../src/multitable/recovery-archive-preview'
+import {
   RecoveryArchiveRestoreJobError,
   type RecoveryArchiveRestoreJobSnapshot,
 } from '../../src/multitable/recovery-archive-restore-jobs'
@@ -28,9 +32,11 @@ const context: RecoveryArchiveRestoreOwnerContext = {
   sheetId: SHEET_ID,
   actorId: 'actor-owner-route',
   recheckAuthority: async () => true,
+  evaluatePlanAuthorization: async () => true,
 }
 
 const resolveContext = vi.fn<RecoveryArchiveRestoreOwnerRouteDependencies['resolveContext']>()
+const preview = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['preview']>>()
 const listCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['listCatalog']>>()
 const readCatalog = vi.fn<NonNullable<RecoveryArchiveRestoreOwnerService['readCatalog']>>()
 const read = vi.fn<RecoveryArchiveRestoreOwnerService['read']>()
@@ -67,6 +73,7 @@ function makeApp(serviceOverrides: Partial<RecoveryArchiveRestoreOwnerService> =
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext,
     service: {
+      preview,
       listCatalog,
       readCatalog,
       read,
@@ -94,21 +101,128 @@ function catalogEntry(
   }
 }
 
+function previewResult(
+  overrides: Partial<RecoveryArchivePreviewResult> = {},
+): RecoveryArchivePreviewResult {
+  return {
+    generationId: '33333333-3333-4333-8333-333333333333',
+    mode: 'revert',
+    scopeKind: 'selected_records',
+    executionKind: 'sync',
+    executable: true,
+    blockedReason: null,
+    previewIdentity: 'opaque-preview-identity',
+    summary: {
+      reverts: [{ recordId: 'record-visible', fieldIds: ['field-visible'] }],
+      resurrectIds: [],
+      deleteIds: [],
+      effectiveWriteCount: 1,
+      keptCreatedAfterAnchorCount: 0,
+      driftCount: 0,
+    },
+    ...overrides,
+  }
+}
+
 describe('Time Machine D5 owner routes', () => {
   beforeEach(() => {
     resolveContext.mockReset()
+    preview.mockReset()
     listCatalog.mockReset()
     readCatalog.mockReset()
     read.mockReset()
     resume.mockReset()
     cancel.mockReset()
     resolveContext.mockResolvedValue({ ok: true, context })
+    preview.mockResolvedValue(previewResult())
     listCatalog.mockResolvedValue({ entries: [catalogEntry()], nextCursor: 'opaque-cursor' })
     readCatalog.mockResolvedValue(catalogEntry())
     read.mockResolvedValue(snapshot())
     resume.mockResolvedValue(snapshot({ state: 'planned' }))
     cancel.mockResolvedValue(snapshot({ state: 'abandoned_partial' }))
     makeApp()
+  })
+
+  it('rejects additive preview keys before resolving authority', async () => {
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/preview`)
+      .send({
+        generationId: '33333333-3333-4333-8333-333333333333',
+        mode: 'revert',
+        scope: { kind: 'whole_sheet' },
+        rootHash: 'caller-controlled',
+      })
+
+    expect(result.status).toBe(400)
+    expect(result.body).toEqual({
+      ok: false,
+      error: { code: 'VALIDATION_ERROR', message: 'Request shape is invalid.' },
+    })
+    expect(resolveContext).not.toHaveBeenCalled()
+    expect(preview).not.toHaveBeenCalled()
+  })
+
+  it('projects only values-free preview fields and passes the closed request scope', async () => {
+    const result = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/preview`)
+      .send({
+        generationId: '33333333-3333-4333-8333-333333333333',
+        mode: 'revert',
+        scope: { kind: 'selected_records', recordIds: ['record-visible'] },
+      })
+
+    expect(result.status).toBe(200)
+    expect(result.body).toEqual({ ok: true, data: previewResult() })
+    expect(preview).toHaveBeenCalledWith(context, {
+      generationId: '33333333-3333-4333-8333-333333333333',
+      mode: 'revert',
+      scope: { kind: 'selected_records', recordIds: ['record-visible'] },
+    })
+    for (const forbidden of ['rootHash', 'sourceVectorHash', 'keyId', 'planHash', 'targetData']) {
+      expect(result.text).not.toContain(forbidden)
+    }
+  })
+
+  it('maps hidden and invalid preview substrate to fixed values-free responses', async () => {
+    preview.mockRejectedValueOnce(new RecoveryArchivePreviewError(
+      'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND',
+    ))
+    preview.mockRejectedValueOnce(new RecoveryArchivePreviewError(
+      'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID',
+    ))
+
+    const hidden = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/preview`)
+      .send({
+        generationId: '33333333-3333-4333-8333-333333333333',
+        mode: 'revert',
+        scope: { kind: 'whole_sheet' },
+      })
+    const invalid = await request(pinned.url())
+      .post(`/api/multitable/sheets/${SHEET_ID}/recovery-archive/preview`)
+      .send({
+        generationId: '33333333-3333-4333-8333-333333333333',
+        mode: 'revert',
+        scope: { kind: 'whole_sheet' },
+      })
+
+    expect(hidden.status).toBe(404)
+    expect(hidden.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_ARCHIVE_PREVIEW_NOT_FOUND',
+        message: 'Recovery point not found.',
+      },
+    })
+    expect(invalid.status).toBe(503)
+    expect(invalid.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_ARCHIVE_PREVIEW_SUBSTRATE_INVALID',
+        message: 'Archive recovery catalog is unavailable.',
+      },
+    })
+    expect(`${hidden.text}${invalid.text}`).not.toContain(SHEET_ID)
   })
 
   it('rejects additive catalog query keys before resolving authority', async () => {

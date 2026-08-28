@@ -122,6 +122,10 @@ import {
   type RecoveryArchiveCatalogTransaction,
 } from '../multitable/recovery-archive-catalog'
 import {
+  previewRecoveryArchive,
+  type RecoveryArchivePreviewRuntime,
+} from '../multitable/recovery-archive-preview'
+import {
   pruneEligibleRecoveryTokenBurns,
   readRecoveryArchiveRestoreJobStatus,
   resumeRecoveryArchiveRestoreJob,
@@ -6910,7 +6914,11 @@ async function applyPermissionDeEscalation(query: TxnQuery, opts: { scope: Permi
   if (diff) await recordConfigRevision(query, { sheetId, entityType: 'permission', entityId, action: live && target ? 'update' : live ? 'delete' : 'create', before: diff.before, after: diff.after, changedKeys: diff.changedKeys, batchId: randomUUID(), actorId, source: 'restore', restoredFromId })
 }
 
-export function univerMetaRouter(): Router {
+export interface UniverMetaRouterOptions {
+  readonly recoveryArchiveRuntime?: RecoveryArchivePreviewRuntime
+}
+
+export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router {
   const router = Router()
 
   router.get('/bases', async (req: Request, res: Response) => {
@@ -10557,6 +10565,7 @@ export function univerMetaRouter(): Router {
         baseId,
         sheetId,
         actorId,
+        evaluatePlanAuthorization: makePlanAuthorization(req, sheetId),
         recheckAuthority: async (freshQuery) => {
           const fresh = await resolveRecoverySheetAuthority(req, freshQuery, sheetId)
           if (
@@ -11267,6 +11276,20 @@ export function univerMetaRouter(): Router {
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
     service: {
+      preview: options.recoveryArchiveRuntime
+        ? (context, input) => {
+            const pool = poolManager.get()
+            return previewRecoveryArchive(
+              recoveryArchiveCatalogTransaction,
+              pool.query.bind(pool) as unknown as RecoveryArchiveCatalogQuery,
+              options.recoveryArchiveRuntime,
+              {
+                ...context,
+                ...input,
+              },
+            )
+          }
+        : undefined,
       listCatalog: (context, input) => listRecoveryArchiveCatalog(
         recoveryArchiveCatalogTransaction,
         {
