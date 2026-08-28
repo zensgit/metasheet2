@@ -115,7 +115,7 @@ async function boundedS3RangeBodyToBuffer(body: unknown, maxBytes: number): Prom
   const chunks: Uint8Array[] = []
   let total = 0
   try {
-    while (true) {
+    for (;;) {
       const step = await iterator.next()
       if (step.done) break
       const chunk = step.value
