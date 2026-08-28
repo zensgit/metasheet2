@@ -1,7 +1,7 @@
 # Time Machine Phase D2-D7 verification report
 
-**Status:** DRAFT / HOLD. Local exact-worktree verification. No staging or
-production acceptance claim.
+**Status:** DRAFT / HOLD. Local exact-worktree and Draft PR verification. No
+merge, staging, flag, deployment, or production acceptance claim.
 
 ## 1. Verification subject
 
@@ -9,23 +9,26 @@ production acceptance claim.
 |---|---|
 | source worktree | `/private/tmp/codex-tm-d55-runtime-api-20260828` |
 | current-main worktree | `/private/tmp/codex-tm-d2-d7-current-main-20260829` |
+| Draft PR | `#5305` |
 | D2-D6 head before D7 evidence | `d0fc5a5a2be412500604f70cba172536cb40f086` |
 | D7 test + runbook evidence | `70b5e53f2144dc09a2aa46d7af94adffcbac7de8` |
 | final source evidence head | `def68afe85d759f130656882c3bf5de2e98dbb8a` |
 | refreshed `origin/main` | `c479e9b321fe772149e367b5d90cb01c21654766` |
-| merge-base | `e0956fd5c13b5500ae68c2425b97706d8a761043` |
+| merge-base / PR base | `c479e9b321fe772149e367b5d90cb01c21654766` |
 | current-main integration merge | `023f5e793305401fbfdbe05d81ac9db90b1b2838` |
 | durable job rediscovery | `05d176c21d` |
-| implementation head before reports | `bb12c9264ab9948312826fdb56ffb30abbad8a9c` |
-| implementation tree before reports | `070114408bc85489a9b5fdb4a9807258e54dc0cb` |
+| runtime implementation before first reports | `bb12c9264ab9948312826fdb56ffb30abbad8a9c` |
+| final code-bearing head before report refresh | `73d3187c8b6be375c710ce38a92c42468c74c458` |
+| final code-bearing tree | `eb16faa33b49bcb4e7727bc5917a24a726d43254` |
+| code-head remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | flags | unchanged and OFF |
 | production | not accessed |
 
 The integration merge is a true two-parent merge of the final source evidence and
-current `origin/main`; both are ancestors. Durable rediscovery and application
-runtime wiring were then added as two bounded commits. The result remains local,
-so the evidence below is exact-worktree evidence rather than a remote
-required-context or merge-state claim.
+current `origin/main`; both are ancestors. Durable rediscovery, application
+runtime wiring, exact-head CI fix-forwards, and closed job-list validation were
+then added as bounded commits. Draft PR #5305 supplies remote review evidence but
+does not authorize merge or runtime enablement.
 
 ### Current-main integration checks
 
@@ -37,12 +40,43 @@ required-context or merge-state claim.
 - archive CI wiring and fail-not-skip: **6/6 + 1/1 PASS**.
 - core typecheck: **PASS**.
 - D6 client/modal and full-reload rediscovery: **2 files / 20 tests PASS**.
+- final archive client serialization: **1 file / 31 tests PASS**.
 - required web gate: **406 files / 5,150 tests / exit 0**.
 - web typecheck: **PASS**.
 - candidate diff check: **PASS**.
 - a fresh, fully migrated candidate database ran the archive restore real-DB file
   at **1 file / 20 tests PASS / 0 skipped**; exact and prefix residue were zero
   after the database was dropped.
+- Node 20 executed the complete archive roster at **14 files / 279 tests PASS /
+  0 skipped** inside the full multitable real-DB step.
+- shared full-schema cleanup regression set: **10 files / 182 tests PASS**;
+  catalog **41/41**, lease/PIT focused **13/13**, and lease whole-file **10/10**.
+
+### Draft PR exact-head progression
+
+Remote verification was treated as evidence, not ceremony:
+
+1. The first code-bearing matrix reached the complete Node 20 multitable
+   real-DB roster and failed **9 files / 92 tests**, plus one unhandled `57P01`.
+   The failures exposed three local-fixture defects: new D7 FK children were not
+   in D2 cleanup, immutable token burns were still deleted, and one test directly
+   terminated its own backend without owning the rejection.
+2. `5c1184e173` replaced partial delete cleanup with the complete child `TRUNCATE`
+   graph under test-only `SET LOCAL session_replication_role=replica`, and moved
+   backend termination to the shared scratch drain/drop helper. The same focused
+   full-schema set then passed **10 files / 182 tests** with zero DB residue.
+3. Review of `1eaaee9869` found that a successful job-list envelope still admitted
+   malformed elements. `4d3a50c627` closed the seven-field element shape. A Sol
+   exact-delta review then found scalar values were only string-typed;
+   `6e4a0ee4e7` aligned UUID, decimal, timestamp, terminal, and count invariants
+   with the backend wire and DB checks. Its re-review found the DB admission
+   threshold and numeric-primitive negatives still open; `6beed608f3` now
+   requires `totalCount > 5000` and rejects numeric JSON primitives.
+   `73d3187c8b` then removes overlapping-oracle ambiguity from both numeric
+   timestamp negatives.
+4. The final code-head remote matrix reached **48 SUCCESS / 1 intentional
+   SKIPPED / 0 failure**. Node 20's full multitable step executed all 14 archive
+   files and 279 tests with **0 skipped** in that archive roster.
 
 ## 2. D7 local commands and results
 
@@ -176,6 +210,11 @@ outside this change. It was not edited or misreported as fixed.
 | remove preview/execute stale-response identity guard | client/modal tests RED |
 | relax exact-literal archive/worker flags | contract and worker boot tests RED |
 | ignore the injected canonical route database and re-resolve the pool | route wiring test RED at `recovery route re-resolved the main pool` |
+| remove per-entry job-list validation | client spec RED at 4 malformed successful entries becoming accepted |
+| reduce timestamp validation to string-only | client spec RED at invalid resume deadline becoming accepted |
+| reduce positive-decimal validation to string-only | client spec RED at malformed total-count error shape and zero row version acceptance |
+| omit restore-plan child from full-schema cleanup | catalog real-DB suite RED at FK-protected cleanup; **40 tests RED** in the selected file |
+| omit test-only trigger bypass for immutable token burns | lease suite RED at immutable burn cleanup; **6 tests RED** |
 
 The lease-reclaim mutation was restored with `apply_patch`; the same two focused
 real-DB legs then passed **2/2**. Runtime source is byte-restored; only tests and
@@ -227,6 +266,11 @@ prefix=0
 
 No unrelated database was modified.
 
+The full-schema cleanup fix-forward used another fully migrated dedicated
+database. Five scratch database drops reported `CLEAN`, residual backends were
+zero, and the exact/prefix residue query returned zero after the focused
+**182-test** set and both cleanup mutations were restored.
+
 ## 6. Independent review
 
 Independent D6 review on `d0fc5a5a2b` returned **0 P1 / 0 P2 / 0 P3**.
@@ -261,15 +305,32 @@ The runtime slice then received a separate refute-first review. It identified th
 exact-ON no-factory refusal, a possible route pool re-resolution, and a shutdown
 failure question. The no-factory refusal is the deliberate owner/provider HOLD.
 The route concern was closed structurally by injecting the canonical database
-runtime and by the RED/restore mutation above. The shutdown concern did not
-survive call-chain review because the canonical loop contains worker failures and
-the default cancel path cannot reject. Final runtime review returned
-**0 P1 / 0 P2 / 0 P3**.
+runtime and by the RED/restore mutation above. That review returned
+**0 P1 / 0 P2 / 0 P3** for its bounded delta.
+
+A later Kimi read-only review of the published hardening returned **0 P1 / 0 P2**
+and three P3 observations: the sheet-ID comparison overlaps stronger stale
+response guards; the canonical worker loop contains tick failures, so the mocked
+drain-rejection branch is not production-discriminating and a genuinely stuck
+stop remains unbounded; and the older read-only catalog list still maps malformed
+successful data to an empty catalog. These are disclosed residuals, not evidence
+for flag enablement.
+
+The same review cycle exposed malformed job-list elements and led to
+`4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
+**10/10** plus web typecheck, and found one P2: UUID/decimal/timestamp values were
+still string-only and several validator branches lacked discrimination. The
+fix-forwards at `6e4a0ee4e7` and `6beed608f3` expand the exact spec to
+**31/31** and add RED/restore mutations for timestamp, decimal, admission
+threshold, and JSON primitive guards. `73d3187c8b` makes the timestamp mutation
+produce exactly two failures rather than relying on parse or terminal-shape
+rejection. Final Sol re-review at exact head `73d3187c8b` reran the focused spec
+and web typecheck and returned **0 P1 / 0 P2 / 0 P3**.
 
 ## 7. Final verdict
 
-**CURRENT-MAIN LOCAL D2-D7 IMPLEMENTATION: PASS WITH
-PROVIDER / STAGING / REMOTE-CI HOLD.**
+**CURRENT-MAIN DRAFT D2-D7 IMPLEMENTATION: PASS WITH
+PROVIDER / STAGING HOLD.**
 
 The D7 fault/scale evidence, durable job rediscovery, and provider-neutral runtime
 composition are implemented and locally verified. They do not close the
@@ -281,7 +342,10 @@ owner/provider or staging/production proof:
 - staging fault/storage/KMS runbook execution: not performed;
 - true OS-process restart: not performed;
 - current-main local integration and exact-worktree gates: passed;
-- remote PR required-context set and merge-state evidence: not produced;
+- Draft PR #5305 code-head matrix: `48 SUCCESS / 1 intentional SKIPPED /
+  0 failure` at `73d3187c8b`;
+- the report-only carrier commit must independently pass its exact-head checks
+  before owner review;
 - flags: OFF;
 - production: untouched.
 
