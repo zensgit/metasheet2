@@ -1,10 +1,17 @@
 'use strict'
 
+const crypto = require('node:crypto')
+
 const { transformRecord } = require('./transform-engine.cjs')
 const { validateRecord } = require('./validator.cjs')
 const { computeRecordIdempotencyKey } = require('./idempotency.cjs')
 const { deriveNextWatermark, normalizeWatermarkConfig } = require('./watermark.cjs')
 const { sanitizeIntegrationPayload } = require('./payload-redaction.cjs')
+const {
+  B2A_AUTHORIZED_RUN_ID,
+  B2A_PURPOSE_PIPELINE_RUNNER_READ,
+  assertB2aReadAuthorization,
+} = require('./b2a-trial-registry.cjs')
 
 class PipelineRunnerError extends Error {
   constructor(message, details = {}) {
@@ -64,6 +71,10 @@ function normalizePositiveIntegerOption(value, { defaultValue, max }) {
 
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
+}
+
+function trimmedString(value) {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
 }
 
 function buildCursorRunDetails(cursor) {
@@ -282,6 +293,19 @@ function createPipelineRunner(deps = {}) {
     ? deps.erpFeedbackWriter
     : null
   const clock = typeof deps.clock === 'function' ? deps.clock : () => Date.now()
+  // ─── B2a READ AUTHORIZATION, SUNK BELOW THE HTTP LAYER (W-2) ──────────────
+  //
+  // Both are OPTIONAL, and absent means DORMANT — the same two states the registry itself has, and
+  // the same guarantee: a runner constructed without them behaves byte-identically to the runner
+  // that shipped before this fence existed, down to the number of platform reads it makes.
+  //
+  // `b2aTrialRegistry` is built by `createB2aRegistry` in index.cjs from the SAME server config
+  // http-routes builds its copy from, so the two cannot disagree about what is registered (the
+  // builder is pure in its config, and a malformed registry throws at activation in either place).
+  // `b2aClaimStore` MUST be the same durable store the routes hand the guard (`context.storage`):
+  // the one-time operation claim is a record in that store, and two stores would mean two claims.
+  const b2aTrialRegistry = deps.b2aTrialRegistry || null
+  const b2aClaimStore = deps.b2aClaimStore || null
 
   async function loadExternalSystemForAdapter(input) {
     if (typeof externalSystemRegistry.getExternalSystemForAdapter === 'function') {
@@ -345,6 +369,77 @@ function createPipelineRunner(deps = {}) {
       // identity for legacy/null createdBy pipelines.
       targetAdapter: adapterRegistry.createAdapter(targetSystem, { role: 'target', principal: pipeline.createdBy }),
     }
+  }
+
+  /**
+   * THE RUNNER-LEVEL B2a READ FENCE (W-2) — the choke point sunk below HTTP.
+   *
+   * WHAT THIS CLOSES, stated as the gap it was. PR-C put entry point (3) at the ROUTE and said so in
+   * as many words: "a future in-process caller that invokes `runner.runPipeline` directly would
+   * bypass both fences. Every caller that exists today ... is a route and is covered." That second
+   * sentence was not true when it was written. `index.cjs` registers a cross-plugin communication
+   * namespace whose `runPipeline` and `replayDeadLetter` call THIS runner directly, with no route,
+   * no `requireAccess`, and — until this fence — no B2a guard. Any plugin holding
+   * `context.communication.call('integration-core', 'runPipeline', ...)` read an armed deployment's
+   * source without presenting a registration.
+   *
+   * WHERE IT SITS. Before `loadPipelineContext`, which is the first thing `runPipeline` does and
+   * which resolves BOTH systems through the credential-DECRYPTING accessor and creates BOTH adapters
+   * as one act. So the fence lands before any source connection, credential reload, source query or
+   * `sourceAdapter.read` — which is what §13 PR-C asks of it, and it is asserted rather than argued:
+   * the armed refusal tests drive a call-recording registry and require the decrypting accessor to
+   * have been called exactly zero times.
+   *
+   * ONLY TWO PLATFORM READS, AND ONLY WHEN ARMED. The registration key needs the pipeline row (its
+   * tenant, source binding, project scope and source object) and the source system's KIND. The kind
+   * comes through `getExternalSystem` — the credential-STRIPPED accessor, which never decrypts — so
+   * the registration keeps its full key without the fence itself doing the thing it exists to gate.
+   * `includeFieldMappings: false` keeps the pipeline read to the one row the key needs.
+   *
+   * DORMANT COSTS NOTHING. `b2aTrialRegistry === null` returns before either read, so an unarmed
+   * deployment makes the same platform calls, in the same order, that it made before this existed.
+   *
+   * NO DOUBLE BURN. See `B2A_AUTHORIZED_RUN_ID`: an HTTP-initiated run arrives carrying the run id
+   * the route already claimed under, and this guard CONTINUES that claim instead of taking a second
+   * one. An in-process caller carries no marker, gets a server-generated run id, and claims in its
+   * own right — one call, one operation, which is what `sourceReadOperationLimit: 1` means.
+   *
+   * `pipeline.projectId` IS NULLABLE, and a null data scope is refused (`missing_scope`) rather than
+   * treated as a wildcard — the same deliberate choice the route-level helper documents.
+   */
+  async function assertB2aPipelineSourceReadAuthorized(input) {
+    if (!b2aTrialRegistry) return null
+    const tenantId = input.tenantId
+    const workspaceId = input.workspaceId ?? null
+    const pipeline = await pipelineRegistry.getPipeline({
+      tenantId,
+      workspaceId,
+      id: input.pipelineId,
+      includeFieldMappings: false,
+    })
+    // A missing pipeline is the runner's own 'pipeline not found', raised here exactly as
+    // `loadPipelineContext` would have raised it a moment later. It is not a B2a refusal and must
+    // not be reported as one.
+    assertPipelineLoaded(pipeline, input)
+    const sourceSystem = await externalSystemRegistry.getExternalSystem({
+      tenantId,
+      workspaceId,
+      id: pipeline.sourceSystemId,
+    })
+    return assertB2aReadAuthorization({
+      registry: b2aTrialRegistry,
+      store: b2aClaimStore,
+      // The PIPELINE ROW's own tenant, not the caller's carrier — the tenant this read is authorized
+      // against must be the one that owns the record.
+      tenantScope: trimmedString(pipeline.tenantId) || trimmedString(tenantId),
+      sourceSystemType: sourceSystem && sourceSystem.kind,
+      sourceBindingRef: pipeline.sourceSystemId,
+      dataScopeRef: pipeline.projectId,
+      sourceObjects: [pipeline.sourceObject],
+      purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+      runId: trimmedString(input[B2A_AUTHORIZED_RUN_ID]) || `pipeline-runner:${crypto.randomUUID()}`,
+      now: Date.now(),
+    })
   }
 
   async function writeDeadLetter(input) {
@@ -528,6 +623,9 @@ function createPipelineRunner(deps = {}) {
   }
 
   async function runPipeline(input) {
+    // W-2: the B2a read fence, BEFORE `loadPipelineContext` decrypts either system's credentials or
+    // creates either adapter. Dormant deployments return from it without a single platform read.
+    await assertB2aPipelineSourceReadAuthorized(input)
     const context = await loadPipelineContext(input)
     const mode = input.mode || context.pipeline.mode || 'manual'
     const triggeredBy = input.triggeredBy || 'manual'
@@ -878,6 +976,19 @@ function createPipelineRunner(deps = {}) {
         })
       }
     }
+    // W-2: replay's SOURCE-READ leg is `runPipeline`, and that is where its B2a fence lives — before
+    // `loadPipelineContext` reloads the source credentials and builds the source adapter. Replay
+    // re-reads no rows off the wire (it re-feeds the stored payload), but it DOES reload the source
+    // system's credentials and construct its adapter, which is squarely inside what the fence is
+    // written against, so an armed unauthorized replay is refused there.
+    //
+    // ORDERING, deliberately: the K3 fence above runs FIRST. A replay that will be refused for a K3
+    // target must not spend the registration's single operation on its way to that refusal — the
+    // same rule the C6 safe-lifecycle fence follows at the route. The cost is stated rather than
+    // hidden: that fence's own target-kind lookup uses the adapter-capable accessor, so an armed
+    // replay reloads the TARGET system's credentials before the read fence runs. Narrowing it to the
+    // credential-stripped accessor would change what a DORMANT deployment does, which this change
+    // may not do; it is recorded as a residual instead of quietly re-ordered.
     const result = await runPipeline({
       tenantId: deadLetter.tenantId,
       workspaceId: deadLetter.workspaceId,
@@ -886,6 +997,9 @@ function createPipelineRunner(deps = {}) {
       triggeredBy: input.triggeredBy || 'replay',
       allowInactive: input.allowInactive,
       sourceRecords: [deadLetter.sourcePayload],
+      // Carry the route's already-asserted run marker through, so an HTTP-initiated replay CONTINUES
+      // the claim the route took instead of being refused as a second run on a spent registration.
+      ...(input[B2A_AUTHORIZED_RUN_ID] ? { [B2A_AUTHORIZED_RUN_ID]: input[B2A_AUTHORIZED_RUN_ID] } : {}),
     })
     if (result.metrics.rowsFailed > 0) return { deadLetter, replay: result }
     // Best-effort bookkeeping: the ERP write already succeeded, so even if

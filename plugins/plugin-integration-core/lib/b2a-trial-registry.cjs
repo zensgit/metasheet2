@@ -238,6 +238,30 @@ const B2A_PURPOSES = Object.freeze([
 //                                  radius and it is deliberately NOT ridden along here.
 const SEALED_SNAPSHOT_BINDING_REF = 'sealed-snapshot:active-binding'
 
+// ─── THE ALREADY-ASSERTED RUN MARKER (W-2) ───────────────────────────────────
+//
+// The choke point stands at TWO layers on the pipeline path now: the HTTP route (where PR-C put it)
+// and the pipeline RUNNER (sunk there so in-process callers — the cross-plugin communication API's
+// `runPipeline` / `replayDeadLetter` — are covered as well). Both must ASSERT. Exactly one may
+// CONSUME the registration's single operation.
+//
+// The mechanism is the one the stock-preparation route/wrapper pair already uses, and nothing new:
+// THE TWO GUARDS SHARE A RUN. Whichever layer asserts FIRST generates the run id and claims; the
+// layer beneath is handed that same id, and `claimReadOperation` recognises it as the run that
+// already holds the claim, so it CONTINUES (`operationClaimed: false`, `operationContinued: true`,
+// `pageReads` incremented) rather than taking a second one. A caller that presents NO marker gets a
+// freshly generated run id and claims in its own right — which is the correct behaviour for an
+// in-process caller that no route ever fenced.
+//
+// WHY A SYMBOL AND NOT A STRING KEY. The run id is the thing that decides whether a claim is
+// continued or refused, so a caller able to set it could ride somebody else's authorization. A
+// symbol cannot be expressed in JSON, so it cannot arrive over a cross-plugin call, an HTTP body or
+// a query string; only a module that imports this constant can set one, and every such module is
+// inside this plugin and generates the id server-side. `index.cjs` strips it off cross-plugin input
+// anyway — belt and braces, because "not expressible in JSON" is a property of today's transport
+// rather than a fence.
+const B2A_AUTHORIZED_RUN_ID = Symbol('b2aAuthorizedRunId')
+
 // Bounded exception window. 180 days is long enough for a real narrow-path activation (the v9.1
 // freeze estimates B2a at ≈3–5 pw of engineering plus gate calendar) and short enough that an
 // exception cannot quietly outlive the P2.5 migration meant to replace it. Reviewed bound; tighten
@@ -1539,6 +1563,7 @@ module.exports = {
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
   B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
   SEALED_SNAPSHOT_BINDING_REF,
+  B2A_AUTHORIZED_RUN_ID,
   readPlanSourceObjects,
   B2A_ERROR_CODES,
   B2A_REGISTRATION_REQUIRED,
