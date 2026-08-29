@@ -152,7 +152,7 @@ describe('MetaSheetServer recovery archive wiring', () => {
       recoveryArchiveApplication: { stopWorker(): Promise<void> }
     }).recoveryArchiveApplication = { stopWorker }
 
-    await server.stop()
+    await expect(server.stop()).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
 
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).not.toHaveBeenCalled()
@@ -171,5 +171,20 @@ describe('MetaSheetServer recovery archive wiring', () => {
 
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a failed signal shutdown with a non-zero exit code', async () => {
+    const server = new MetaSheetServer({ port: 0, host: '127.0.0.1', pluginDirs: [] })
+    const stop = vi.spyOn(server, 'stop').mockRejectedValue(
+      new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED'),
+    )
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as typeof process.exit)
+
+    ;(server as unknown as {
+      stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void
+    }).stopForSignal('SIGTERM')
+
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1))
+    expect(stop).toHaveBeenCalledWith('SIGTERM')
   })
 })

@@ -1126,6 +1126,20 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
     && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
 }
 
+function requireRecoveryArchiveObject<T extends object>(value: unknown, errorMessage: string): T {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error(errorMessage)
+  }
+  return value as T
+}
+
+function requireRecoveryArchiveJobSnapshot(value: unknown): RecoveryArchiveJobSnapshot {
+  if (!isRecoveryArchiveJobSnapshot(value)) {
+    throw new Error('Invalid recovery archive job response')
+  }
+  return value
+}
+
 // BS-4: scoped (multi-record) restore preview/execute results — a faithful client of the BS-2/BS-3 wire.
 export interface RestoreBatchPreviewRecord {
   recordId: string
@@ -2409,7 +2423,10 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson<RecoveryArchivePreview>(res)
+    return requireRecoveryArchiveObject<RecoveryArchivePreview>(
+      await this.parseJson<RecoveryArchivePreview>(res),
+      'Invalid recovery archive preview response',
+    )
   }
 
   async executeRecoveryArchive(
@@ -2421,7 +2438,10 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return this.parseJson<RecoveryArchiveExecuteResult>(res)
+    return requireRecoveryArchiveObject<RecoveryArchiveExecuteResult>(
+      await this.parseJson<RecoveryArchiveExecuteResult>(res),
+      'Invalid recovery archive execute response',
+    )
   }
 
   async acceptRecoveryArchiveJob(
@@ -2433,7 +2453,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ previewIdentity }),
     })
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async listRecoveryArchiveJobs(
@@ -2465,7 +2485,7 @@ export class MultitableApiClient implements CommentsApiClient {
     const res = await this.fetch(
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/jobs/${encodeURIComponent(jobId)}`,
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async resumeRecoveryArchiveJob(
@@ -2480,7 +2500,7 @@ export class MultitableApiClient implements CommentsApiClient {
         body: JSON.stringify({}),
       },
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   async cancelRecoveryArchiveJob(
@@ -2495,7 +2515,7 @@ export class MultitableApiClient implements CommentsApiClient {
         body: JSON.stringify({}),
       },
     )
-    return this.parseJson<RecoveryArchiveJobSnapshot>(res)
+    return requireRecoveryArchiveJobSnapshot(await this.parseJson<RecoveryArchiveJobSnapshot>(res))
   }
 
   // --- Global History & Point-in-Time Restore (read-only) ---

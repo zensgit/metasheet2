@@ -2842,6 +2842,13 @@ export class MetaSheetServer {
     return this.httpServer.address()
   }
 
+  private stopForSignal(signal: 'SIGTERM' | 'SIGINT'): void {
+    void this.stop(signal).then(
+      () => process.exit(0),
+      () => process.exit(1),
+    )
+  }
+
   /**
    * 停止服务器
    */
@@ -2858,12 +2865,14 @@ export class MetaSheetServer {
     this.stopElearningMediaWorkers = undefined
 
     let recoveryArchiveWorkerDrained = false
+    let recoveryArchiveWorkerStopFailed = false
     try {
       // This must finish before the pool-close task is even created: an in-flight chunk may still
       // be completing its transaction while the worker loop drains.
       await this.recoveryArchiveApplication.stopWorker()
       recoveryArchiveWorkerDrained = true
     } catch {
+      recoveryArchiveWorkerStopFailed = true
       this.logger.warn('Recovery archive restore worker stop failed')
     }
 
@@ -3122,6 +3131,10 @@ export class MetaSheetServer {
         resolve()
       }, 10000)) // 10 second timeout
     ])
+
+    if (recoveryArchiveWorkerStopFailed) {
+      throw new Error('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    }
 
     this.logger.info('Shutdown complete')
   }
@@ -4085,8 +4098,8 @@ export class MetaSheetServer {
 
     // Register signal handlers only for real runtime, not test runners.
     if (process.env.NODE_ENV !== 'test' && !process.env.VITEST) {
-      process.on('SIGTERM', () => this.stop('SIGTERM').then(() => process.exit(0)))
-      process.on('SIGINT', () => this.stop('SIGINT').then(() => process.exit(0)))
+      process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))
+      process.on('SIGINT', () => this.stopForSignal('SIGINT'))
     }
 
     if (startElearningMediaWorkers && process.env.NODE_ENV !== 'test' && !process.env.VITEST) {

@@ -215,4 +215,56 @@ describe('MultitableApiClient recovery archive routes', () => {
       'Invalid recovery archive job list response',
     )
   })
+
+  it('rejects empty successful preview, execute, and job responses with domain errors', async () => {
+    const operations: Array<{
+      message: string
+      call(client: MultitableApiClient): Promise<unknown>
+    }> = [
+      {
+        message: 'Invalid recovery archive preview response',
+        call: (client) => client.previewRecoveryArchive('sheet/a', {
+          generationId: catalogEntry.generationId,
+          mode: 'revert',
+          scope: { kind: 'whole_sheet' },
+        }),
+      },
+      {
+        message: 'Invalid recovery archive execute response',
+        call: (client) => client.executeRecoveryArchive('sheet/a', {
+          previewIdentity: 'server-preview-identity',
+          scope: { kind: 'whole_sheet' },
+        }),
+      },
+      {
+        message: 'Invalid recovery archive job response',
+        call: (client) => client.acceptRecoveryArchiveJob('sheet/a', 'server-preview-identity'),
+      },
+      {
+        message: 'Invalid recovery archive job response',
+        call: (client) => client.readRecoveryArchiveJob('sheet/a', plannedJob.jobId),
+      },
+      {
+        message: 'Invalid recovery archive job response',
+        call: (client) => client.resumeRecoveryArchiveJob('sheet/a', plannedJob.jobId),
+      },
+      {
+        message: 'Invalid recovery archive job response',
+        call: (client) => client.cancelRecoveryArchiveJob('sheet/a', plannedJob.jobId),
+      },
+    ]
+    const responseFactories = [
+      () => new Response(null, { status: 204 }),
+      () => new Response('', { status: 200 }),
+    ]
+
+    for (const operation of operations) {
+      for (const makeResponse of responseFactories) {
+        const client = new MultitableApiClient({
+          fetchFn: vi.fn().mockResolvedValue(makeResponse()),
+        })
+        await expect(operation.call(client)).rejects.toThrow(operation.message)
+      }
+    }
+  })
 })
