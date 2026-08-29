@@ -1012,6 +1012,56 @@ async function main() {
       await factory2({ system: SYSTEM, principal: 'owner-9' }).read({ object: 'items', limit: 3 })
       assert.equal(f2.calls.select[0].armed, false, 'omitting b2aAuthorization is dormant, byte-identical to before this dep existed')
     }
+
+    // 11g. H-2 (counter-review finding 2): W-5 armed its two floors on the BASE select but NOT on the
+    //      per-page LOOKUP select, so the lookup table's read ran with them silently off. The lookup
+    //      select now receives the SAME armed flag, and floor 1 (requestTimeoutMs=0) is mapped on the
+    //      lookup leg too. Adversarial: the BASE read succeeds, and the LOOKUP table would trip floor 1
+    //      ONLY when the armed flag reaches it — so pre-fix (5th arg missing) the lookup PROCEEDED and
+    //      the whole read succeeded, the evasion; post-fix it is refused with the fixed B2a code.
+    {
+      const facadeError = Object.assign(new Error('lookup timeout disabled'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({
+        select: ({ table, armed }) => {
+          if (table === 'dbo.bom_detail') return { data: [{ id: 1, part_id: 'part-1' }], metadata: {} }
+          // The lookup table (dbo.part_library): floor 1 fires ONLY when armed reaches it. Unarmed —
+          // the pre-fix bug — it proceeds and returns a row, so the whole read would succeed.
+          if (armed) throw facadeError
+          return { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} }
+        },
+      })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: LOOKUP_SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'dbo.bom_detail', limit: 3 })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'H-2: an armed read whose lookup source has requestTimeoutMs=0 must be refused on the lookup leg')
+      assert.equal(caught.name, 'B2aReadAuthorizationError', 'H-2: the lookup floor-1 refusal is the mapped B2a error')
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED',
+        'H-2: floor 1 is mapped on the LOOKUP leg, not swallowed as a generic lookup failure')
+      assert.equal(caught.details.reason, 'sqlserver_request_timeout_disabled')
+      // The threading itself: the base read (call 0) and the lookup read (call 1) both carry armed=true.
+      assert.equal(f.calls.select[0].armed, true, 'H-2: the base select is armed (as before)')
+      assert.equal(f.calls.select[1].table, 'dbo.part_library', 'H-2: the second call is the lookup table')
+      assert.equal(f.calls.select[1].armed, true, 'H-2: the lookup select now receives the armed flag too')
+
+      // DORMANT CONTROL: the SAME facade, no b2aAuthorization -> the lookup select is unarmed, floor 1
+      // is a no-op, and the read completes exactly as it did before this change.
+      const dormant = armedAwareFakeFacade({
+        select: ({ table, armed }) => {
+          if (table === 'dbo.bom_detail') return { data: [{ id: 1, part_id: 'part-1' }], metadata: {} }
+          if (armed) throw facadeError
+          return { data: [{ IdentityNo: 'M-001', IdentityName: 'Material One' }], metadata: {} }
+        },
+      })
+      const dormantRes = await adapterWith(dormant, 'owner-1', LOOKUP_SYSTEM).read({ object: 'dbo.bom_detail', limit: 3 })
+      assert.deepEqual(dormantRes.records, [{ id: 1, part_id: 'part-1', FNumber: 'M-001', FName: 'Material One' }])
+      assert.equal(dormant.calls.select[1].armed, false, 'H-2 dormant: the lookup select is unarmed, byte-identical to before')
+    }
   }
 
   console.log('data-source-sql-readonly-source-adapter.test.cjs: all assertions passed')

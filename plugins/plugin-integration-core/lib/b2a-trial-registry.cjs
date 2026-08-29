@@ -477,6 +477,47 @@ async function resolveB2aSourceObjects({ sourceObjects, sourceSystemType, loadSo
   return [...named, lookupObject]
 }
 
+// A deterministic, key-order-independent serialization, so a digest over it depends on VALUE and not
+// on the order a JSON column happened to deserialize its keys in. Used only to bind a config subtree
+// to itself across two reads (H-3) — never surfaced, so it carries no discipline concern of its own.
+function stableConfigString(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value ?? null)
+  if (Array.isArray(value)) return `[${value.map(stableConfigString).join(',')}]`
+  const keys = Object.keys(value).sort()
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableConfigString(value[key])}`).join(',')}}`
+}
+
+/**
+ * H-3 (external review finding 3): a values-free digest that BINDS the config-bound second read
+ * across the TOCTOU window between authorization and adapter creation.
+ *
+ * THE GAP IT CLOSES. `resolveB2aSourceObjects` authorizes the object list — the plan's objects plus
+ * the `lookupProjection.lookupObject` — through the NON-DECRYPTING config accessor. The adapter is
+ * then built from a SECOND, DECRYPTING read of the same row. Between the two, `lookupProjection` could
+ * change, so the second table the adapter actually reads may not be the one that was authorized. The
+ * caller snapshots this digest at authorization time and re-derives it from the decrypting read,
+ * refusing fail-closed on mismatch before the adapter (and its second read) exists.
+ *
+ * WHAT IS DIGESTED. The whole `lookupProjection` subtree — the object that widened the scope AND
+ * every field that composes that second read — so ANY change is a mismatch, including the projection
+ * appearing or disappearing (`null` compares equal to another absent projection, and refuses when one
+ * appears). `null` is returned for a kind with NO config-bound second read: nothing to bind, and the
+ * caller makes no comparison.
+ *
+ * @param {string}      sourceSystemType the source system's kind
+ * @param {object|null} config           the adapter-visible `config` subtree (the one both the
+ *                                        resolver and the adapter read `lookupProjection` from)
+ * @returns {string|null} a hex digest, or `null` when the kind has no config-bound second read
+ */
+function sourceConfigAuthorizationSnapshot(sourceSystemType, config) {
+  const kind = optionalString(sourceSystemType)
+  if (!kind || !B2A_CONFIG_BOUND_LOOKUP_KINDS.includes(kind)) return null
+  const projection = isPlainObject(config) && isPlainObject(config.lookupProjection)
+    ? config.lookupProjection
+    : null
+  return shortDigest('b2a:source-config-snapshot:v1', kind, stableConfigString(projection))
+}
+
 class B2aReadAuthorizationError extends Error {
   constructor(status, code, message, details = {}) {
     super(message)
@@ -1306,6 +1347,32 @@ function refuseRunnerWriteOutsideC6Lifecycle() {
     { dryRun: false })
 }
 
+/**
+ * H-3 (external review finding 3): the source system's config-bound second-read object changed between
+ * the authorization read (non-decrypting) and the adapter creation read (decrypting), so the object
+ * the adapter would read is not the one that was authorized. `B2A_AUTHORIZATION_INVALID`, not a new
+ * code: the authorization is real but no longer describes the read in front of it. VALUES-FREE.
+ */
+function refuseB2aSourceConfigChangedAfterAuthorization() {
+  refuse(B2A_AUTHORIZATION_INVALID, 'source_config_changed_after_authorization',
+    'the source system configuration changed between B2a authorization and adapter creation; the object read may differ from the one authorized',
+    {})
+}
+
+/**
+ * H-4 (external review finding 4): an armed live REPLAY of a stored dead-letter artifact. §6.1's
+ * `artifactReplayLimit` defaults to 0 and this cut refuses any non-zero value at config load (no O4
+ * authorization can be recorded yet), so no armed registration permits an artifact replay — the
+ * consumed one-shot claim is on the source-read operation, never on the artifact. Reuses the same
+ * `artifact_replay_not_authorized` reason the config layer refuses with; the code is the 403 runtime
+ * authorization refusal rather than the 500 config fault. VALUES-FREE.
+ */
+function refuseB2aArtifactReplayNotAuthorized() {
+  refuse(B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized',
+    'replaying a stored artifact requires a non-zero artifactReplayLimit, which no B2a registration may carry in this cut',
+    {})
+}
+
 // ─── R-05: THE READ-HARDENING CODES, SURFACED AT THE SEAM ────────────────────
 //
 // `B2A_SOURCE_TIMEOUT` and `B2A_PAGE_LIMIT_EXCEEDED` were frozen vocabulary with NO PRODUCER: pinned
@@ -1873,6 +1940,11 @@ module.exports = {
   B2A_CONFIG_BOUND_LOOKUP_KINDS,
   lookupProjectionSourceObject,
   resolveB2aSourceObjects,
+  // H-3 (finding 3): bind the config-bound second read across authorize -> adapter creation.
+  sourceConfigAuthorizationSnapshot,
+  refuseB2aSourceConfigChangedAfterAuthorization,
+  // H-4 (finding 4): refuse an armed runtime artifact replay the config layer permits no count for.
+  refuseB2aArtifactReplayNotAuthorized,
   B2A_ERROR_CODES,
   B2A_REGISTRATION_REQUIRED,
   B2A_AUTHORIZATION_INVALID,
