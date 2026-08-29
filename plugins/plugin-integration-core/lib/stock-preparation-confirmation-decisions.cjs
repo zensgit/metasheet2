@@ -21,7 +21,9 @@
 //
 // SCOPE (O1' ledger-semantics slice, owner ruling 2026-08-29: Q1-Q5 all A) —
 // still exactly ONE conflict class: duplicate_expanded_key.
-//   * reconcile ledgers ONLY duplicate_expanded_key manual-confirm holds; every
+//   * reconcile ledgers duplicate_expanded_key manual-confirm holds and, per
+//     the O1-B extension below, anonymous-family holds with derivable identity
+//     (as pending-only rows outside the confirmable class); every
 //     other manual-confirm class is counted (values-free) and left un-ledgered,
 //     so no pending row can accumulate for a class whose resolution semantics
 //     do not exist yet.
@@ -73,6 +75,33 @@
 //   resolvedAuxValue together with resolutionAction/notes — values entered
 //   against superseded input silently surviving into a revived decision would
 //   be exactly the automatic carry-forward the owner rejected (matrix Q5-B).
+//
+// O1-B EXTENSION — IDENTITY FOR THE ANONYMOUS HOLD FAMILIES (owner ruling
+// 2026-08-29, Q4-A). The three planner emitters that produce holds WITHOUT an
+// idempotencyKey (the keyless expanded/existing row families and the
+// `c2_row_error` UMBRELLA — 10 real BOM-expander types plus the ext-mapping
+// coercion codes) now carry a planner-derived, values-free HASH identity when
+// their emitter attaches anything stable. Those holds are ledgered as PENDING
+// decision rows. Three properties make this identity and not write capability:
+//   * NO new resolution action, and no change to the confirm boundary. The
+//     PRE-EXISTING conflict-type check in confirmConfirmationDecision already
+//     refuses anything outside the first cut, so an anonymous-family row lands
+//     as a VISIBLE PENDING queue entry that cannot yet be confirmed at all.
+//     "Ledgered pending" is the whole of what this cut grants.
+//   * The planner readback CANNOT SEE THEM. deriveDecisionCandidates returns
+//     anonymous candidates in a separate array that only reconcile consumes;
+//     loadConfirmedDuplicatePolicyReview destructures `candidates` and so is
+//     structurally incapable of emitting a policy for one. Not a filter — an
+//     absence of capability.
+//   * A hold whose emitter attaches NOTHING stable (the unvalidated
+//     `c2_row_error` fallback; a keyless row with no lineage discriminator)
+//     keeps today's counted-not-ledgered behaviour, now under the explicit
+//     ANONYMOUS_HOLD_IDENTITY_UNAVAILABLE deferral marker in run evidence
+//     rather than lumped in with the out-of-scope keyed classes.
+// Full per-family audit (what each emitter really attaches, repair surface,
+// identity granularity, and where NO identity exists):
+//   docs/development/takeover-beiliao-20260821/
+//     anonymous-hold-identity-spec-20260829.md
 //
 // Ledger semantics:
 //   * keyed by (staging project, target object, stableDecisionKey) with a
@@ -142,6 +171,7 @@ const {
   buildSheetStructureFromMvpTableTemplate,
 } = require('./stock-preparation-templates.cjs')
 const {
+  ANONYMOUS_HOLD_IDENTITY_PREFIX,
   DECISIONS,
   DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
   IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
@@ -166,6 +196,13 @@ const FIELD_IDS = Object.freeze(TEMPLATE.fields.map((field) => field.id))
 // CONSTRUCTION: candidates of any other class are never derived, so they can
 // be neither ledgered, confirmed, nor read back.
 const FIRST_CUT_CONFLICT_TYPE = 'duplicate_expanded_key'
+// O1-B. The fixed code an ANONYMOUS hold gets when its emitter attached nothing
+// stable to key it by (the unvalidated `c2_row_error` fallback, or a keyless row
+// carrying no lineage discriminator at all). Such holds stay counted-not-
+// ledgered — the pre-O1-B behaviour — but they now travel in run evidence under
+// their own family + count instead of being lumped in with genuinely
+// out-of-scope keyed classes. Deferral, stated; never a silent drop.
+const ANONYMOUS_HOLD_IDENTITY_DEFERRAL_CODE = 'ANONYMOUS_HOLD_IDENTITY_UNAVAILABLE'
 // Public status vocabulary. A 'cancelled' state is reserved for a later slice
 // (see the header) and deliberately NOT part of this frozen public set.
 const STATUSES = Object.freeze({
@@ -502,10 +539,49 @@ async function queryAll(scoped, filters) {
   )
 }
 
-// FIRST CUT: candidates are derived from duplicate_expanded_key manual-confirm
-// holds ONLY. Other manual-confirm classes are counted (values-free, by their
-// enum-shaped conflict type) and skipped — deliberately never ledgered, so the
-// queue cannot fill with rows no implemented resolution could ever discharge.
+// THE NAMESPACE WALL between the two addressing schemes a ledger row can be
+// keyed by (O1-B). A real idempotencyKey is a JSON object literal, so it can
+// never begin with the reserved prefix; a planner-derived anonymous identity
+// always does. Either direction crossed means the plan was not produced by the
+// planner — refuse rather than key a row under a scheme it does not belong to,
+// because `stableDecisionKey` folds rowIdentity in and a crossed row would
+// silently claim (or be claimed by) somebody else's decision history.
+function assertIdentityNamespace(value, field, mustBeAnonymous) {
+  const isAnonymous = value.startsWith(ANONYMOUS_HOLD_IDENTITY_PREFIX)
+  if (isAnonymous === mustBeAnonymous) return value
+  throw new StockPreparationConfirmationDecisionError(
+    422,
+    'CONFIRMATION_DECISION_IDENTITY_NAMESPACE_VIOLATION',
+    mustBeAnonymous
+      ? 'a derived anonymous-hold identity must use the reserved identity namespace'
+      : 'an idempotencyKey must not use the reserved anonymous-hold identity namespace',
+    { field },
+  )
+}
+
+// FIRST CUT + O1-B: candidates come from two DISJOINT sources.
+//   * duplicate_expanded_key manual-confirm holds, addressed by idempotencyKey.
+//     Unchanged — same recipe, same fingerprint inputs, so no ledger row that
+//     exists today is re-keyed by this change.
+//   * ANONYMOUS holds (manual_confirm carrying NO idempotencyKey: the keyless
+//     expanded/existing row families and the whole `c2_row_error` umbrella)
+//     that the planner could give a derived identity to. These are ledgered
+//     PENDING ONLY — no resolution action has semantics for them — and they are
+//     returned in a SEPARATE array so the planner readback structurally cannot
+//     receive them. Identity, not write capability.
+// Anonymous holds that share a derived identity are ONE decision row with an
+// occurrenceCount folded into the fingerprint: the expander attaches no per-row
+// discriminator to a rowError (see the O1-B spec), so the honest granularity is
+// the error LOCUS, and a change in how many errors sit on that locus is a
+// material change that must supersede rather than ride an old confirmation.
+// Everything else is counted (values-free, by its enum-shaped conflict type)
+// and skipped, exactly as before.
+function countByConflictType(entries) {
+  const counts = {}
+  for (const entry of entries) counts[entry.conflictType] = (counts[entry.conflictType] || 0) + 1
+  return counts
+}
+
 function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
   const scopedProjectNo = requiredString(projectNo, 'projectNo')
   const revision = requiredString(sourceRevision, 'sourceRevision')
@@ -519,46 +595,106 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
   }
   const candidates = []
   const outOfScopeByConflictType = {}
+  const identityLessByConflictType = {}
+  // Insertion-ordered, so the derived candidate list is a deterministic
+  // function of plan order — a reconcile-reproducibility requirement.
+  const anonymousGroups = new Map()
   for (const decision of plan.decisions) {
     if (!isPlainObject(decision) || decision.decision !== DECISIONS.MANUAL_CONFIRM) continue
     const conflictType = optionalString(decision.conflictSummary && decision.conflictSummary.type) || 'unknown_conflict'
-    if (conflictType !== FIRST_CUT_CONFLICT_TYPE) {
+    const idempotencyKey = optionalString(decision.idempotencyKey)
+    if (idempotencyKey) assertIdentityNamespace(idempotencyKey, 'plan.decisions[].idempotencyKey', false)
+    if (conflictType === FIRST_CUT_CONFLICT_TYPE) {
+      // The planner emits exactly one duplicate_expanded_key hold per group and
+      // always stamps the duplicated key on it. A hold of this class WITHOUT a
+      // key is not a planner artifact — refuse instead of ledgering an anonymous
+      // row nothing could ever match again.
+      if (!idempotencyKey) {
+        throw new StockPreparationConfirmationDecisionError(
+          422,
+          'CONFIRMATION_DECISION_PLAN_INVALID',
+          'duplicate_expanded_key manual-confirm decisions must carry an idempotencyKey',
+          { field: 'plan.decisions[].idempotencyKey' },
+        )
+      }
+      const rowIdentity = idempotencyKey
+      const stableDecisionKey = stableHash('stable-key', { projectNo: scopedProjectNo, rowIdentity, conflictType })
+      const inputFingerprint = stableHash('input', {
+        sourceRevision: revision,
+        stableDecisionKey,
+        conflictSummary: decision.conflictSummary || null,
+        changedFields: Array.isArray(decision.changedFields) ? decision.changedFields : [],
+      })
+      const decisionId = stableHash('revision-key', { stableDecisionKey, inputFingerprint })
+      candidates.push({
+        decisionId,
+        stableDecisionKey,
+        projectNo: scopedProjectNo,
+        rowIdentity,
+        conflictType,
+        inputFingerprint,
+        sourceRevision: revision,
+        duplicateGroupFingerprint: duplicateGroupFingerprint(rowIdentity),
+      })
+      continue
+    }
+    // A KEYED hold of any other class stays out of scope, unchanged.
+    if (idempotencyKey) {
       outOfScopeByConflictType[conflictType] = (outOfScopeByConflictType[conflictType] || 0) + 1
       continue
     }
-    // The planner emits exactly one duplicate_expanded_key hold per group and
-    // always stamps the duplicated key on it. A hold of this class WITHOUT a
-    // key is not a planner artifact — refuse instead of ledgering an anonymous
-    // row nothing could ever match again.
-    const rowIdentity = optionalString(decision.idempotencyKey)
-    if (!rowIdentity) {
-      throw new StockPreparationConfirmationDecisionError(
-        422,
-        'CONFIRMATION_DECISION_PLAN_INVALID',
-        'duplicate_expanded_key manual-confirm decisions must carry an idempotencyKey',
-        { field: 'plan.decisions[].idempotencyKey' },
-      )
+    const derivedRowIdentity = optionalString(decision.derivedRowIdentity)
+    if (!derivedRowIdentity) {
+      identityLessByConflictType[conflictType] = (identityLessByConflictType[conflictType] || 0) + 1
+      continue
     }
-    const stableDecisionKey = stableHash('stable-key', { projectNo: scopedProjectNo, rowIdentity, conflictType })
+    assertIdentityNamespace(derivedRowIdentity, 'plan.decisions[].derivedRowIdentity', true)
+    const groupKey = `${conflictType}\u0000${derivedRowIdentity}`
+    const group = anonymousGroups.get(groupKey)
+    if (group) {
+      group.occurrenceCount += 1
+      continue
+    }
+    anonymousGroups.set(groupKey, {
+      conflictType,
+      rowIdentity: derivedRowIdentity,
+      // Group members share their conflictSummary BY CONSTRUCTION: every field
+      // the summary carries for these classes is part of the identity context.
+      // The first occurrence is therefore a faithful, order-stable representative.
+      conflictSummary: decision.conflictSummary || null,
+      changedFields: Array.isArray(decision.changedFields) ? decision.changedFields : [],
+      occurrenceCount: 1,
+    })
+  }
+  const anonymousCandidates = []
+  for (const group of anonymousGroups.values()) {
+    const stableDecisionKey = stableHash('stable-key', {
+      projectNo: scopedProjectNo,
+      rowIdentity: group.rowIdentity,
+      conflictType: group.conflictType,
+    })
     const inputFingerprint = stableHash('input', {
       sourceRevision: revision,
       stableDecisionKey,
-      conflictSummary: decision.conflictSummary || null,
-      changedFields: Array.isArray(decision.changedFields) ? decision.changedFields : [],
+      conflictSummary: group.conflictSummary,
+      changedFields: group.changedFields,
+      occurrenceCount: group.occurrenceCount,
     })
-    const decisionId = stableHash('revision-key', { stableDecisionKey, inputFingerprint })
-    candidates.push({
-      decisionId,
+    anonymousCandidates.push({
+      decisionId: stableHash('revision-key', { stableDecisionKey, inputFingerprint }),
       stableDecisionKey,
       projectNo: scopedProjectNo,
-      rowIdentity,
-      conflictType,
+      rowIdentity: group.rowIdentity,
+      conflictType: group.conflictType,
       inputFingerprint,
       sourceRevision: revision,
-      duplicateGroupFingerprint: duplicateGroupFingerprint(rowIdentity),
+      occurrenceCount: group.occurrenceCount,
+      // NO duplicateGroupFingerprint, deliberately: the ONLY consumer of that
+      // field is the duplicate-policy readback, and an anonymous-family row
+      // must never be able to emit a policy that downgrades a hold.
     })
   }
-  if (candidates.length > MAX_DECISIONS_PER_RECONCILE) {
+  if (candidates.length + anonymousCandidates.length > MAX_DECISIONS_PER_RECONCILE) {
     throw new StockPreparationConfirmationDecisionError(
       413,
       'CONFIRMATION_DECISION_RECONCILE_LIMIT_EXCEEDED',
@@ -566,7 +702,7 @@ function deriveDecisionCandidates({ projectNo, plan, sourceRevision } = {}) {
       { maxDecisions: MAX_DECISIONS_PER_RECONCILE },
     )
   }
-  return { candidates, outOfScopeByConflictType }
+  return { candidates, anonymousCandidates, outOfScopeByConflictType, identityLessByConflictType }
 }
 
 // The DB-BACKED single-active-reconciler lease (see the CONCURRENCY header
@@ -676,7 +812,17 @@ function requireReconcileLease(reconcileLease) {
 async function reconcileConfirmationDecisions({ recordsApi, provisioning, targetProjectId, permission, projectNo, plan, sourceRevision, reconcileLease, now } = {}) {
   assertAdminPermission(permission)
   const lease = requireReconcileLease(reconcileLease)
-  const { candidates, outOfScopeByConflictType } = deriveDecisionCandidates({ projectNo, plan, sourceRevision })
+  const {
+    candidates: duplicateCandidates,
+    anonymousCandidates,
+    outOfScopeByConflictType,
+    identityLessByConflictType,
+  } = deriveDecisionCandidates({ projectNo, plan, sourceRevision })
+  // Reconcile is the ONLY consumer that sees both sets. The ledger lifecycle
+  // (create / supersede / reopen / orphan-sweep) is identical for both — an
+  // anonymous row is an ordinary pending decision row that simply happens to be
+  // addressed by a derived identity instead of an idempotencyKey.
+  const candidates = duplicateCandidates.concat(anonymousCandidates)
   const openedAt = normalizeIsoTime(undefined, 'openedAt', typeof now === 'function' ? now : () => new Date())
   const scopeKey = stableHash('reconcile-lock', { targetProjectId: requiredString(targetProjectId, 'targetProjectId'), projectNo: requiredString(projectNo, 'projectNo') })
   const acquired = await lease.acquire(scopeKey)
@@ -845,6 +991,19 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
         objectId: OBJECT_ID,
         candidateCount: candidates.length,
         outOfScopeManualConfirm: outOfScopeByConflictType,
+        // O1-B, values-free: family tokens and counts only. `ledgeredByFamily`
+        // counts DECISION ROWS (one per derived identity); `ledgeredHoldCount`
+        // counts the planner holds behind them, so a locus that folded 40 row
+        // errors into one row still reports both numbers honestly.
+        // `deferredByFamily` is the explicit marker replacing the old silent
+        // lumping of identity-less anonymous holds into the out-of-scope tally.
+        anonymousHoldIdentity: {
+          ledgeredByFamily: countByConflictType(anonymousCandidates),
+          ledgeredDecisionCount: anonymousCandidates.length,
+          ledgeredHoldCount: anonymousCandidates.reduce((total, candidate) => total + candidate.occurrenceCount, 0),
+          deferredByFamily: identityLessByConflictType,
+          deferralCode: ANONYMOUS_HOLD_IDENTITY_DEFERRAL_CODE,
+        },
         concurrencyModel: CONCURRENCY_MODEL,
         orphanSweep: { closed: counts.orphanSuperseded, reason: 'conflict_vanished_from_plan', truncated: sweepTruncated },
         ...counts,
@@ -1098,6 +1257,7 @@ module.exports = {
   OBJECT_ID,
   FIELD_IDS,
   FIRST_CUT_CONFLICT_TYPE,
+  ANONYMOUS_HOLD_IDENTITY_DEFERRAL_CODE,
   STATUSES,
   RESOLUTION_ACTIONS,
   IMPLEMENTED_RESOLUTION_ACTIONS,

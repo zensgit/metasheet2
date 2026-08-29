@@ -1,6 +1,6 @@
 # 222 升级 r6 · 一页执行单(2026-08-27)
 
-> 接 `codex-handoff-beiliao-20260825.md`。**2026-08-29 更新:r6 基线 = `916c912ee` 或更新**——B2a 收敛四支已全部合入(#5243 MSSQL 加固 / #5245 确认账本+迁移 077 / #5247 K3 四层永久围栏 / #5248 B2a 登记+choke)。values-free 纪律照旧。
+> 接 `codex-handoff-beiliao-20260825.md`。**2026-08-29 晚更新:r6 基线 = `3f30d8eb4` 或更新**——B2a 四支之外,W 修复波五支亦已全部合入(#5312 账本状态机三修 / #5313 迁移 078 claim CAS / #5314 通用出站写 unset=deny 门 / #5315 choke 下沉 runner / #5316 MSSQL armed floors)。**部署新增注意**:迁移含 **077+078** 两张新表;`INTEGRATION_CORE_OUTBOUND_HTTP_WRITE_TARGETS` **保持不设**(unset=deny 即正确姿态,222 无任何通用 http 写目标);K3 apply 恒拒与 B2a env 不设照旧。原 r6 基线注记如下——B2a 收敛四支已全部合入(#5243 MSSQL 加固 / #5245 确认账本+迁移 077 / #5247 K3 四层永久围栏 / #5248 B2a 登记+choke)。values-free 纪律照旧。
 >
 > **r6 新增能力与部署注意**:
 > 1. 迁移新增 **077**(确认裁决 reconcile 租约表)——迁移步骤照跑即含;

@@ -194,7 +194,7 @@ function projectionScalarIdentity(value) {
   return JSON.stringify([typeof value, value])
 }
 
-async function applyLookupProjection({ api, dataSourceId, principal, projection, records }) {
+async function applyLookupProjection({ api, dataSourceId, principal, projection, records, armed, b2aAuthorization }) {
   const enriched = []
   const seenLocalKeys = new Set()
   const seenMaterialCodes = new Set()
@@ -228,8 +228,20 @@ async function applyLookupProjection({ api, dataSourceId, principal, projection,
           where: { [projection.foreignKey]: localValue },
         },
         principal,
+        // H-2 (external review finding 2): thread the SAME armed flag the BASE select receives. W-5's
+        // two floors (requestTimeoutMs=0 refused pre-connect; strict offset ordering) were armed on the
+        // base leg but NOT on this per-page lookup select, so the lookup table's read ran with them
+        // silently off. Floor 2 is a no-op here (offset is 0), so a legitimate armed lookup is
+        // unaffected; floor 1 now covers this leg too.
+        armed,
       )
-    } catch {
+    } catch (error) {
+      // Floor 1's refusal takes precedence over the lookup catch-all, exactly as it does on the base
+      // leg: an operator needs the actionable "requestTimeoutMs=0" message, not a generic "lookup
+      // projection read failed". Only when armed, so a dormant/unarmed lookup is byte-identical.
+      if (armed && isDataSourceRequestTimeoutDisabledError(error)) {
+        refuseB2aArmedSqlServerRequestTimeoutDisabled(b2aAuthorization)
+      }
       throw coarseLookupProjectionError('lookup projection read failed')
     }
     if (result && result.error) {
@@ -636,7 +648,7 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, 
       }
       const baseRecords = rows.map((row) => (isPlainObject(row) ? { ...row } : row))
       const records = lookupProjection
-        ? await applyLookupProjection({ api, dataSourceId, principal, projection: lookupProjection, records: baseRecords })
+        ? await applyLookupProjection({ api, dataSourceId, principal, projection: lookupProjection, records: baseRecords, armed, b2aAuthorization })
         : baseRecords
       const fullPage = records.length >= request.limit
       const nextCursor = watermarkPlan && fullPage

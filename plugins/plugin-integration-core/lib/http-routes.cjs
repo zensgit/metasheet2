@@ -369,7 +369,6 @@ const {
 // gated stock-preparation source read must match a live, in-scope, unexpired entry.
 const {
   readPlanSourceObjects,
-  B2A_REGISTRATION_REQUIRED,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
@@ -382,6 +381,18 @@ const {
   // runner; this is what makes an HTTP-initiated run CONTINUE the claim taken here instead of being
   // refused by the runner as a second run on a spent registration. See the constant's own comment.
   B2A_AUTHORIZED_RUN_ID,
+  // R-wave (external review finding 4): the server-side C6 write-lifecycle context. Attached by the
+  // two governed write routes below AFTER their own lifecycle checks pass, and required by the
+  // runner for any live write — which is what closes the cross-plugin write door. See the constant.
+  C6_WRITE_LIFECYCLE_CONTEXT,
+  // R-wave (external review finding 3): composes the object list the guard matches against
+  // `objectScope`, including an object the source system's server-side config adds behind the read
+  // plan's back (`data-source:sql-readonly`'s `lookupProjection.lookupObject`).
+  resolveB2aSourceObjects,
+  // H-4 (external review finding 4): the runtime artifact-replay refusal. Thrown at THIS layer ahead
+  // of the read-authorization claim, so an armed replay the config layer permits no count for is
+  // refused before it spends the registration's single operation.
+  refuseB2aArtifactReplayNotAuthorized,
   B2aReadAuthorizationError,
   assertB2aReadAuthorization,
   createB2aRegistry,
@@ -3075,6 +3086,21 @@ function createHandlers(services, options = {}) {
    * guard refuses it with `missing_scope`. Deliberate — a null data scope is not a wildcard, and
    * treating it as one would let every project-less pipeline through the moment the gate is armed.
    */
+  /**
+   * R-02 (external review finding 3): a NON-DECRYPTING loader for one source system's stored config,
+   * or `null` when the registry offers no such accessor.
+   *
+   * `getExternalSystemAdapterConfig` reads the row and returns its config WITHOUT touching the
+   * credentials — see external-systems.cjs. That is what lets an object-scope check that must see a
+   * private config subtree (`lookupProjection`) still sit ahead of every credential reload, which is
+   * where §13 PR-C puts the fence. `null` here is not a pass: `resolveB2aSourceObjects` refuses
+   * fail-closed for a kind that can hide an object.
+   */
+  function b2aSourceSystemConfigLoader(req, systemId, scope = {}) {
+    if (typeof externalSystems.getExternalSystemAdapterConfig !== 'function') return null
+    return () => externalSystems.getExternalSystemAdapterConfig(scopedInput(req, { ...scope, id: systemId }))
+  }
+
   async function assertB2aPipelineReadAuthorized(req, pipeline, { tenantScope, purpose, runId }) {
     // DORMANT -> return before the metadata read below. Without this short-circuit an unarmed
     // deployment would make one EXTRA `getExternalSystem` call per C6 dry-run, which is a
@@ -3087,6 +3113,15 @@ function createHandlers(services, options = {}) {
     // binding repointed at a different adapter kind stops matching a registration written for the
     // old one. The adapter-capable accessor (which DOES decrypt) is still several lines away.
     const sourceSystem = await externalSystems.getExternalSystem(scopedInput(req, { id: pipeline.sourceSystemId }))
+    // R-02 (finding 3): `pipeline.sourceObject` is what the pipeline NAMES; a `data-source:sql-readonly`
+    // source with a configured `lookupProjection` also reads a second, distinct table. Adding it here
+    // means a registration that does not enumerate it is refused rather than silently widened. The
+    // config comes from the non-decrypting accessor, so this stays ahead of the credential reload.
+    const sourceObjects = await resolveB2aSourceObjects({
+      sourceObjects: [pipeline.sourceObject],
+      sourceSystemType: sourceSystem && sourceSystem.kind,
+      loadSourceSystemConfig: b2aSourceSystemConfigLoader(req, pipeline.sourceSystemId),
+    })
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: context.storage,
@@ -3098,7 +3133,7 @@ function createHandlers(services, options = {}) {
       sourceSystemType: sourceSystem && sourceSystem.kind,
       sourceBindingRef: pipeline.sourceSystemId,
       dataScopeRef: pipeline.projectId,
-      sourceObjects: [pipeline.sourceObject],
+      sourceObjects,
       purpose,
       runId,
       now: Date.now(),
@@ -3181,7 +3216,7 @@ function createHandlers(services, options = {}) {
    * wrapper normalizes again from the same raw body — `normalizeActionParameters` is pure and
    * idempotent, so the two cannot disagree.
    */
-  async function assertB2aStockPreparationReadAuthorized(action, rawParameters, { tenantScope, purpose, runId }) {
+  async function assertB2aStockPreparationReadAuthorized(action, rawParameters, { req, tenantScope, purpose, runId }) {
     if (!b2aTrialRegistry) return null
     const parameters = normalizeActionParameters(rawParameters)
     return assertB2aReadAuthorization({
@@ -3192,10 +3227,29 @@ function createHandlers(services, options = {}) {
       sourceSystemType: action.source.kind,
       sourceBindingRef: action.source.externalSystemId,
       dataScopeRef: parameters.projectNo,
-      sourceObjects: readPlanSourceObjects(action.source.readPlan),
+      // R-02 (finding 3): the read plan's own objects PLUS any the source system's server-side config
+      // adds behind it. `req` is required only to scope that config read — armed-only, one extra
+      // credential-free platform read, and a dormant deployment returns above without doing it.
+      sourceObjects: await b2aTableActionSourceObjects(req, action, { tenantId: tenantScope }),
       purpose,
       runId,
       now: Date.now(),
+    })
+  }
+
+  /**
+   * The object list a stock-preparation table action's read WILL touch. See `resolveB2aSourceObjects`
+   * — the plan's declarative objects, widened by a config-bound lookup object when the source kind
+   * can carry one, and refused fail-closed when such a kind's config cannot be resolved.
+   */
+  async function b2aTableActionSourceObjects(req, action, scope = {}) {
+    return resolveB2aSourceObjects({
+      sourceObjects: readPlanSourceObjects(action.source.readPlan),
+      sourceSystemType: action.source.kind,
+      loadSourceSystemConfig: b2aSourceSystemConfigLoader(req, action.source.externalSystemId, {
+        ...scope,
+        ...(action.source.workspaceId ? { workspaceId: action.source.workspaceId } : {}),
+      }),
     })
   }
 
@@ -3968,6 +4022,16 @@ function createHandlers(services, options = {}) {
       // share ONE operation. Attached only when ARMED — a dormant deployment passes the runner the
       // exact object it passed before, with no extra key of any kind.
       if (b2aTrialRegistry) pipelineRunInput[B2A_AUTHORIZED_RUN_ID] = pipelineRunB2aRunId
+      // R-wave (finding 4): THE GOVERNED WRITE SURFACE. This route is a live write, and the marker
+      // says so with authority: it is attached only HERE, only after `requireAccess(req, 'write')`
+      // and only after `assertPipelineRunAllowed` above ran the E3-01 write fence and the B2a read
+      // authorization for this very pipeline. The runner refuses a markerless live write, which is
+      // what closes the cross-plugin door (`index.cjs` strips the marker off that input).
+      //
+      // ARMED-ONLY, exactly like the run marker one line above and for the same reason: the fence it
+      // feeds is armed-scoped, and a dormant deployment must hand the runner the object it always
+      // handed it — no extra key, not even one that is ignored.
+      if (b2aTrialRegistry) pipelineRunInput[C6_WRITE_LIFECYCLE_CONTEXT] = true
       return sendOk(res, await runner.runPipeline(pipelineRunInput), 202)
     },
 
@@ -4292,6 +4356,7 @@ function createHandlers(services, options = {}) {
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below.
       const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        req,
         tenantScope: dryRunTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: dryRunB2aRunId,
@@ -4364,6 +4429,7 @@ function createHandlers(services, options = {}) {
       // NO DOUBLE BURN: the prepare handoff below holds no B2a guard of its own, so this route's
       // claim is the only one taken on the path.
       const reconcileB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: b2aRunId('table-action-confirmation-decisions-reconcile'),
@@ -4435,6 +4501,7 @@ function createHandlers(services, options = {}) {
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
       const mvpPersistB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        req,
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
         runId: mvpPersistB2aRunId,
@@ -4499,6 +4566,7 @@ function createHandlers(services, options = {}) {
       // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
       // so a refusal never burns a single-use dry-run token.
       const applyB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+        req,
         tenantScope: applyTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: applyB2aRunId,
@@ -4609,7 +4677,14 @@ function createHandlers(services, options = {}) {
         sourceSystemType: action.source.kind,
         sourceBindingRef: action.source.externalSystemId,
         dataScopeRef: queuedJob.parameters && queuedJob.parameters.projectNo,
-        sourceObjects: readPlanSourceObjects(action.source.readPlan),
+        // R-02 (finding 3), same widening as the other four stock-prep entries — but computed under
+        // an explicit ARMED test, because unlike them this call site has no dormant short-circuit
+        // above it: `assertB2aReadAuthorization` returns null for a null registry only AFTER its
+        // arguments are evaluated, and a dormant deployment must not spend even the one extra
+        // credential-free platform read the resolver makes.
+        sourceObjects: b2aTrialRegistry
+          ? await b2aTableActionSourceObjects(req, action, { tenantId: routeScope.tenantId })
+          : readPlanSourceObjects(action.source.readPlan),
         purpose: B2A_PURPOSE_STOCK_PREPARATION_LARGE_BOM,
         // The JOB ID is the Run identity here, deliberately: re-running the SAME stored job
         // continues on the claim it already holds (bounded paging inside one operation), while a
@@ -6295,31 +6370,17 @@ function createHandlers(services, options = {}) {
         throw new HttpRouteError(501, 'REPLAY_NOT_IMPLEMENTED', 'Dead-letter replay is not implemented')
       }
       const body = requestBody(req)
-      const replayB2aRunId = b2aRunId('pipeline-dead-letter-replay')
-      // B2a entry point (3), second door. `replayDeadLetter` re-enters `runPipeline` with no
-      // `dryRun`, so it is another live non-dry run of the same pipeline and gets the same fence.
-      // The dead-letter row names its pipeline, so the pipeline id has to be resolved first.
+      // H-4 (external review finding 4): on an armed deployment a live artifact replay is refused
+      // outright. §6.1's `artifactReplayLimit` defaults to 0 and this cut refuses any non-zero value at
+      // config load, so no registration permits replaying a stored artifact — the one-shot claim the
+      // read fence would take is on the source-read OPERATION, never on the artifact, which is the
+      // finding. This SHADOWS the read/E3-01 write fences the ordinary run route runs for replay: an
+      // armed replay never reaches a source read, a claim, a marker or the runner, so none of that is
+      // set up here. The runner's own `replayDeadLetter` re-asserts it (the cross-plugin door). Refused
+      // FIRST, before the dead-letter row read, so nothing is spent. Dormant is byte-identical: the
+      // replay proceeds with no markers, exactly as it did before any B2a fence existed.
       if (b2aTrialRegistry) {
-        // The dead-letter row names the pipeline this replay will re-run, and that pipeline id is
-        // what both fences key on. `deadLetterStore` is contracted for `listDeadLetters` ONLY
-        // (`requireService` above asserts exactly that), so a single-row accessor may not exist.
-        // FAIL CLOSED when it does not: an armed deployment refuses a replay whose scope it cannot
-        // resolve, rather than replaying unfenced. That is the same default-refuse posture unknown
-        // entry points get, and it costs nothing while the gate is dormant.
-        if (typeof deadLetters.getDeadLetter !== 'function') {
-          throw new HttpRouteError(
-            403,
-            B2A_REGISTRATION_REQUIRED,
-            'dead-letter replay cannot resolve its pipeline scope for the B2a read guard',
-            { reason: 'replay_scope_unresolvable' },
-          )
-        }
-        const deadLetter = await deadLetters.getDeadLetter(scopedInput(req, { id: requestParams(req).id }))
-        await assertPipelineRunAllowed(req, {
-          pipelineId: deadLetter && deadLetter.pipelineId,
-          dryRun: false,
-          runId: replayB2aRunId,
-        })
+        refuseB2aArtifactReplayNotAuthorized()
       }
       const replayInput = scopedInput(req, {
         tenantId: body.tenantId,
@@ -6328,9 +6389,6 @@ function createHandlers(services, options = {}) {
         id: requestParams(req).id,
         triggeredBy: 'api',
       })
-      // W-2: `replayDeadLetter` forwards this marker into its internal `runPipeline`, so the runner's
-      // fence continues the claim taken above rather than refusing the replay as a second run.
-      if (b2aTrialRegistry) replayInput[B2A_AUTHORIZED_RUN_ID] = replayB2aRunId
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
   }

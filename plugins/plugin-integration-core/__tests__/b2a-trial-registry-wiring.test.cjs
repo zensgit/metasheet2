@@ -51,12 +51,20 @@ const {
   SEALED_SNAPSHOT_BINDING_REF,
   B2A_AUTHORIZED_RUN_ID,
   B2A_AUTHORIZATION_INVALID,
+  B2A_SOURCE_TIMEOUT_DISABLED_REJECTED,
+  // R-wave (external review finding 4): the server-side C6 write-lifecycle context.
+  C6_WRITE_LIFECYCLE_CONTEXT,
   readPlanSourceObjects,
   createB2aOperationClaim,
   B2A_OPERATION_CLAIM_TABLE,
   assertB2aReadAuthorization,
   createB2aRegistry,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
+// R-wave (external review finding 2): the REAL adapter whose armed read floors are opt-in on the
+// authorization stanza. Used below to prove the runner threads that stanza rather than discarding it.
+const {
+  createDataSourceSqlReadonlySourceAdapterFactory,
+} = require(path.join(LIB, 'adapters', 'data-source-sql-readonly-source-adapter.cjs'))
 const {
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
 } = require(path.join(LIB, 'stock-preparation-bom-expansion.cjs'))
@@ -264,10 +272,19 @@ function createSpies() {
     // W-2: what the ROUTE hands the runner under the shared-run marker. `undefined` for a dormant
     // deployment (nothing is attached at all) and the route's own server-generated run id when armed.
     runnerRunMarkers: [],
+    // R-wave (finding 4): what the ROUTE hands the runner under the C6 write-lifecycle marker.
+    // `undefined` when dormant — the same "no key at all" rule the run marker follows.
+    runnerWriteContexts: [],
+    // R-wave (finding 3): the NON-DECRYPTING config accessor the object-scope resolver uses. Armed
+    // reads over a kind that can hide an object call it; a dormant one must never call it at all.
+    configLoads: [],
+    // R-wave (finding 2): the `deps` object each adapter was created with, so "the stanza is
+    // threaded on the source side and the key is ABSENT when dormant" is a fact about an object.
+    adapterDeps: [],
   }
 }
 
-function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, includeGetDeadLetter, extraServices }) {
+function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, includeGetDeadLetter, extraServices, sourceSystemConfig, omitAdapterConfigAccessor }) {
   const system = (id) => ({
     id,
     tenantId: TENANT_ID,
@@ -275,15 +292,34 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
     kind: id === 'target_system' ? (targetKind || 'mock-target') : SYSTEM_KIND,
     role: id === 'target_system' ? 'target' : 'source',
     status: 'active',
-    config: { dataSourceId: 'ds_plm', object: 'DN_PDM_PathExAttrInfo' },
+    config: {
+      dataSourceId: 'ds_plm',
+      object: 'DN_PDM_PathExAttrInfo',
+      // R-wave (finding 3): the PRIVATE config subtree. The real `getExternalSystem` deletes it from
+      // the public projection, which is exactly why the guard needs its own non-decrypting accessor.
+      ...(id === 'target_system' ? {} : (sourceSystemConfig || {})),
+    },
   })
   return {
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
         spies.publicSystemLoads.push(input.id)
-        return system(input.id)
+        // The PUBLIC projection strips each kind's private config keys — modelled here, because a
+        // guard that could see `lookupProjection` through THIS accessor would prove nothing.
+        const { config, ...rest } = system(input.id)
+        const { lookupProjection: _private, ...publicConfig } = config
+        return { ...rest, config: publicConfig }
       },
+      // R-wave (finding 3): the NON-DECRYPTING adapter-config accessor. Omitted on request, which is
+      // the fail-closed leg: an armed read over a kind that can hide an object refuses without it.
+      ...(omitAdapterConfigAccessor === true ? {} : {
+        async getExternalSystemAdapterConfig(input = {}) {
+          spies.configLoads.push(input.id)
+          const resolved = system(input.id)
+          return { id: resolved.id, kind: resolved.kind, config: resolved.config }
+        },
+      }),
       async getExternalSystemForAdapter(input = {}) {
         // THE CREDENTIAL RELOAD. Every armed refusal below asserts this stayed at zero.
         spies.credentialLoads.push(input.id)
@@ -318,11 +354,13 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
       async runPipeline(input = {}) {
         spies.pipelineRuns.push(input.pipelineId)
         spies.runnerRunMarkers.push(input[B2A_AUTHORIZED_RUN_ID])
+        spies.runnerWriteContexts.push(input[C6_WRITE_LIFECYCLE_CONTEXT])
         return { id: 'run_1', status: 'succeeded' }
       },
       async replayDeadLetter(input = {}) {
         spies.pipelineRuns.push(input.id)
         spies.runnerRunMarkers.push(input[B2A_AUTHORIZED_RUN_ID])
+        spies.runnerWriteContexts.push(input[C6_WRITE_LIFECYCLE_CONTEXT])
         return { id: 'run_2', status: 'succeeded' }
       },
     },
@@ -394,7 +432,7 @@ function claimForStorage(storage) {
   return CLAIM_BY_STORAGE.get(storage)
 }
 
-function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, operationClaim, extraServices } = {}) {
+function mount({ registrations, raw, records, source, targetKind, pipelineProjectId, includeGetDeadLetter = true, action, storage, operationClaim, extraServices, sourceSystemConfig, omitAdapterConfigAccessor } = {}) {
   const routes = new Map()
   const spies = createSpies()
   const config = {
@@ -433,6 +471,9 @@ function mount({ registrations, raw, records, source, targetKind, pipelineProjec
         includeGetDeadLetter,
         // W-2: opt-in extra services (audit store, reconcile lease) for the routes that need them.
         extraServices,
+        // R-wave (finding 3): an optional private source config, and the fail-closed leg.
+        sourceSystemConfig,
+        omitAdapterConfigAccessor,
       }),
       // W-3 / migration 078. `operationClaim: null` is an ARMED deployment whose database is
       // unreachable. Applied AFTER the baseServices spread so the mount-level parameter stays the
@@ -896,21 +937,24 @@ async function R07_entry3_ordinaryPipelineRunner() {
   }
   assertNoExternalWork(denied.spies, 'R-07 (3)')
 
-  // The SECOND door: dead-letter replay re-enters `runPipeline`, so it gets the same fence.
+  // The SECOND door: dead-letter replay. H-4 (external review finding 4) refuses an armed artifact
+  // replay OUTRIGHT — §6.1 permits no non-zero artifactReplayLimit in this cut — ahead of scope
+  // resolution and the read-authorization claim. So a replay the read fence would once have refused for
+  // this other-consumer registration is now refused FIRST, for the artifact rather than the read.
   const replay = await call(denied.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
     user: WRITE_USER, params: { id: 'dl_1' }, body: {},
   })
-  assertB2aRefusal(replay, B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'R-07 (3) dead-letter replay')
+  assertB2aRefusal(replay, B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized', 'R-07 (3) dead-letter replay')
   assertNoExternalWork(denied.spies, 'R-07 (3) replay')
 
-  // FAIL-CLOSED when the dead-letter store cannot resolve the row: an armed deployment refuses a
-  // replay whose scope it cannot resolve rather than replaying unfenced.
+  // The refusal needs nothing from the dead-letter store: an armed replay is refused even where the
+  // store cannot resolve a single row, because H-4 lands ahead of that resolution entirely.
   const unresolvable = mount({ registrations: [registration()], includeGetDeadLetter: false })
   const unresolvableRes = await call(unresolvable.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
     user: WRITE_USER, params: { id: 'dl_1' }, body: {},
   })
-  assertB2aRefusal(unresolvableRes, B2A_REGISTRATION_REQUIRED, 'replay_scope_unresolvable',
-    'R-07 (3) unresolvable replay scope')
+  assertB2aRefusal(unresolvableRes, B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized',
+    'R-07 (3) armed replay refused before scope resolution')
   assertNoExternalWork(unresolvable.spies, 'R-07 (3) unresolvable')
 
   // Registered for this purpose and scope -> the run proceeds.
@@ -995,11 +1039,14 @@ async function E3_01_ordinaryMultitableWriteIsRefused() {
   assert.deepEqual(armed.spies.pipelineRuns, [], 'the runner was never entered, so upserts=0')
   assert.deepEqual(armed.spies.credentialLoads, [], 'refused before any credential reload')
 
-  // Dead-letter replay is the second non-dry door and gets the same refusal.
+  // Dead-letter replay is the second non-dry door — but on an armed deployment H-4 (finding 4) refuses
+  // an artifact replay OUTRIGHT, ahead of the E3-01 write fence, so the replay is refused for the
+  // artifact rather than for the multitable target. Either way the runner is never entered.
   const replay = await call(armed.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
     user: WRITE_USER, params: { id: 'dl_1' }, body: {},
   })
-  assert.equal(replay.body.error.code, C6_SAFE_LIFECYCLE_REQUIRED, JSON.stringify(replay.body.error))
+  assert.equal(replay.body.error.code, B2A_AUTHORIZATION_INVALID, JSON.stringify(replay.body.error))
+  assert.equal(replay.body.error.details.reason, 'artifact_replay_not_authorized', JSON.stringify(replay.body.error))
   assert.deepEqual(armed.spies.pipelineRuns, [], 'replay did not reach the runner either')
 
   // DISCRIMINATING CONTROL 1: the DRY path is untouched — a preview is read-only, and the C6
@@ -1548,7 +1595,22 @@ function runnerRegistration(overrides = {}) {
  * A REAL `createPipelineRunner`, wired the way index.cjs wires it. Not a stand-in: the whole point
  * of W-2 is that the fence is INSIDE this module, so a fake runner would assert nothing.
  */
-function createRunnerHarness({ registrations, storage, pipelineOverrides } = {}) {
+function createRunnerHarness({
+  registrations,
+  storage,
+  pipelineOverrides,
+  // R-wave (finding 3): the SOURCE system's private config, and the fail-closed leg that removes the
+  // non-decrypting accessor the object-scope resolver needs.
+  sourceSystemConfig,
+  omitAdapterConfigAccessor,
+  // H-3 (finding 3): the config the DECRYPTING adapter-creation read returns, when it must DIFFER from
+  // the one the authorization read saw — the TOCTOU. Defaults to `sourceSystemConfig`, so every other
+  // harness sees one config through both accessors and this parameter changes nothing.
+  sourceSystemConfigForAdapter,
+  // R-wave (finding 2): build the source adapter with a REAL factory instead of the recording fake,
+  // so "the stanza reaches the adapter" can be proven by the adapter's own armed floor firing.
+  sourceAdapterFactory,
+} = {}) {
   const spies = createSpies()
   const source = createRecordingSourceAdapter()
   const config = {}
@@ -1571,13 +1633,17 @@ function createRunnerHarness({ registrations, storage, pipelineOverrides } = {})
     options: {},
     ...(pipelineOverrides || {}),
   }
-  const system = (id) => ({
+  // H-3: `forAdapter` selects the config the DECRYPTING adapter read returns, which may differ from the
+  // authorization read's when `sourceSystemConfigForAdapter` is set — the config TOCTOU, modelled.
+  const system = (id, forAdapter = false) => ({
     id,
     tenantId: TENANT_ID,
     kind: id === 'target_system' ? 'mock-target' : SYSTEM_KIND,
     role: id === 'target_system' ? 'target' : 'source',
     status: 'active',
-    config: {},
+    config: id === 'target_system'
+      ? {}
+      : { dataSourceId: 'ds_plm', ...((forAdapter && sourceSystemConfigForAdapter !== undefined ? sourceSystemConfigForAdapter : sourceSystemConfig) || {}) },
   })
   const deadLetter = {
     id: 'dl_1',
@@ -1598,20 +1664,38 @@ function createRunnerHarness({ registrations, storage, pipelineOverrides } = {})
     },
     externalSystemRegistry: {
       async getExternalSystem(input = {}) {
-        // The credential-STRIPPED accessor. The fence may use this one; it never decrypts.
+        // The credential-STRIPPED accessor. The fence may use this one; it never decrypts. It also
+        // strips each kind's PRIVATE config subtree, which is why a second accessor exists.
         spies.publicSystemLoads.push(input.id)
-        return system(input.id)
+        const { config, ...rest } = system(input.id)
+        const { lookupProjection: _private, ...publicConfig } = config
+        return { ...rest, config: publicConfig }
       },
+      // R-wave (finding 3): the non-decrypting adapter-config accessor. `credentialLoads` stays
+      // untouched by it — which is the property that lets the object-scope widening sit INSIDE the
+      // fence instead of after the credential reload.
+      ...(omitAdapterConfigAccessor === true ? {} : {
+        async getExternalSystemAdapterConfig(input = {}) {
+          spies.configLoads.push(input.id)
+          const resolved = system(input.id)
+          return { id: resolved.id, kind: resolved.kind, config: resolved.config }
+        },
+      }),
       async getExternalSystemForAdapter(input = {}) {
         // THE CREDENTIAL RELOAD. Every armed refusal below requires this to have stayed empty of the
-        // SOURCE binding.
+        // SOURCE binding. H-3: this DECRYPTING read may return a config that changed since the
+        // authorization read — `forAdapter = true` selects it.
         spies.credentialLoads.push(input.id)
-        return system(input.id)
+        return system(input.id, true)
       },
     },
     adapterRegistry: {
       createAdapter(sys, options = {}) {
         spies.adapterCreations.push(sys && sys.id)
+        spies.adapterDeps.push({ id: sys && sys.id, options })
+        if (options.role === 'source' && typeof sourceAdapterFactory === 'function') {
+          return sourceAdapterFactory({ system: sys, ...options })
+        }
         if (options.role === 'target') {
           return {
             async upsert(input = {}) {
@@ -1656,6 +1740,27 @@ function runnerInput(overrides = {}) {
     triggeredBy: 'plugin',
     ...overrides,
   }
+}
+
+/**
+ * R-wave (finding 4). The shape a GOVERNED live write has by the time it reaches the runner: the
+ * C6 write-lifecycle context the two HTTP write routes attach AFTER their own lifecycle checks.
+ *
+ * Every case below whose subject is the READ fence uses this, because without it an armed live run
+ * is now refused one layer earlier — which is the new fence doing its job, not the read fence. The
+ * write fence has its own cases (`R3_*`), and the DISCRIMINATING control there is precisely that the
+ * same call without this marker is refused with a different code.
+ */
+function runnerWriteInput(overrides = {}) {
+  return runnerInput({ [C6_WRITE_LIFECYCLE_CONTEXT]: true, ...overrides })
+}
+
+function replayInput(overrides = {}) {
+  return { tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', ...overrides }
+}
+
+function governedReplayInput(overrides = {}) {
+  return replayInput({ [C6_WRITE_LIFECYCLE_CONTEXT]: true, ...overrides })
 }
 
 function claimKeysIn(store) {
@@ -1790,7 +1895,9 @@ async function W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload() {
       B2A_SCOPE_MISMATCH, 'object_out_of_scope', 'W-2 (2) runPipeline, source object out of scope'],
   ]) {
     const harness = createRunnerHarness({ registrations })
-    const error = await capturedRejection(harness.runner.runPipeline(runnerInput()))
+    // R-wave: a GOVERNED write (the marker the HTTP write routes attach), so what this case measures
+    // is still the READ fence and not the write fence standing in front of it.
+    const error = await capturedRejection(harness.runner.runPipeline(runnerWriteInput()))
     assertRunnerRefusal(error, code, reason, label)
     assert.deepEqual(harness.spies.credentialLoads, [], `${label}: refused BEFORE any credential reload`)
     assert.deepEqual(harness.spies.adapterCreations, [], `${label}: no adapter was created`)
@@ -1804,14 +1911,14 @@ async function W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload() {
     registrations: [runnerRegistration()],
     pipelineOverrides: { projectId: null },
   })
-  const nullScopeError = await capturedRejection(nullScope.runner.runPipeline(runnerInput()))
+  const nullScopeError = await capturedRejection(nullScope.runner.runPipeline(runnerWriteInput()))
   assertRunnerRefusal(nullScopeError, B2A_SCOPE_MISMATCH, 'missing_scope', 'W-2 (2) runPipeline, null project id')
   assert.equal(nullScopeError.details.dataScopeResolved, false)
   assert.deepEqual(nullScope.spies.credentialLoads, [], 'a project-less pipeline never reaches a credential')
 
   // Registered for this purpose and scope -> the in-process run proceeds and reads.
   const allowed = createRunnerHarness({ registrations: [runnerRegistration()] })
-  const ran = await allowed.runner.runPipeline(runnerInput())
+  const ran = await allowed.runner.runPipeline(runnerWriteInput())
   assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
   assert.deepEqual(allowed.spies.credentialLoads, [SOURCE_SYSTEM_ID, 'target_system'],
     'the authorized run loads both systems, as it always did')
@@ -1819,28 +1926,41 @@ async function W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload() {
   assert.equal(claimKeysIn(allowed.claimStore).length, 1, 'one in-process run spends exactly one operation')
 }
 
-async function W2_inProcessReplayDeadLetterIsFencedBeforeAnySourceCredentialReload() {
-  const denied = createRunnerHarness({ registrations: [registration()] })
-  const error = await capturedRejection(denied.runner.replayDeadLetter({ tenantId: TENANT_ID, workspaceId: null, id: 'dl_1' }))
-  assertRunnerRefusal(error, B2A_SCOPE_MISMATCH, 'purpose_not_permitted', 'W-2 (2) replayDeadLetter')
-  assert.deepEqual(denied.source.reads, [], 'replay refused: ZERO source rows')
-  assert.deepEqual(denied.spies.adapterCreations, [], 'replay refused: no adapter was built')
-  assert.deepEqual(denied.targetWrites, [], 'replay refused: ZERO target writes')
-  // THE RESIDUAL, pinned rather than described: the pre-existing K3 target-kind fence runs FIRST (so
-  // a replay that will be refused for a K3 target never spends the registration), and its own lookup
-  // uses the adapter-capable accessor. So the TARGET system's credentials are reloaded before the
-  // read fence — and the SOURCE system's are not, which is what B2a authorizes.
-  assert.deepEqual(denied.spies.credentialLoads, ['target_system'],
-    'replay refused before the SOURCE credential reload; only the K3 fence\'s target lookup ran')
+// ── H-4 (external review finding 4): armed artifact replay is REFUSED ─────────
+//
+// `artifactReplayLimit` was refused-if-nonzero at CONFIG LOAD but nothing consumed it at replay time,
+// so a FRESH registration (limit 0) could replay an OLD stored dead-letter artifact — the one-shot
+// claim landing on the NEW source-read operation, never on the artifact. Adversarially: the VALID,
+// in-scope runner registration that authorizes an ordinary run of this pipeline does NOT authorize
+// replaying a stored artifact, and the replay is refused ahead of every read and the claim.
+//
+// PERMANENT NEGATIVE CONTROL: pre-fix this same call SUCCEEDED (`metrics.rowsRead === 1`, one claim
+// spent) — the evasion. Post-fix it is refused. The dormant leg is the discriminator: the refusal is
+// armed-scoped, not a blanket break of replay.
+async function H4_armedArtifactReplayIsRefusedBeforeAnyReadOrClaim() {
+  const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
+  // Governed (the replay route's write-lifecycle context), so this is NOT the C6 write fence standing
+  // in front — that has its own markerless case in `R3_*`. This is the artifact-replay refusal itself,
+  // under the registration that authorizes the ordinary run of this very pipeline.
+  const error = await capturedRejection(armed.runner.replayDeadLetter(governedReplayInput()))
+  assertRunnerRefusal(error, B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized',
+    'H-4 an armed artifact replay under a valid runner registration')
+  // Refused ahead of EVERYTHING: the dead letter is never even read, so no source read, no adapter, no
+  // credential reload (not even the K3 fence's target lookup), and — the finding's core — NO claim.
+  assert.deepEqual(armed.source.reads, [], 'H-4: ZERO source rows')
+  assert.deepEqual(armed.spies.adapterCreations, [], 'H-4: no adapter was built')
+  assert.deepEqual(armed.targetWrites, [], 'H-4: ZERO target writes')
+  assert.deepEqual(armed.spies.credentialLoads, [], 'H-4: refused ahead of any credential reload')
+  assert.equal(claimKeysIn(armed.claimStore).length, 0,
+    'H-4: a refused artifact replay spends NO operation — the registration is not burned')
 
-  const allowed = createRunnerHarness({ registrations: [runnerRegistration()] })
-  const replayed = await allowed.runner.replayDeadLetter({ tenantId: TENANT_ID, workspaceId: null, id: 'dl_1' })
-  // The stored payload is re-fed through the pipeline. Whether it survives transform/idempotency is
-  // this fixture's business and not the fence's — what matters is that the replay RAN.
+  // THE DISCRIMINATING CONTROL. The SAME governed replay on a DORMANT runner still runs: the refusal
+  // is armed-scoped, not a blanket break of replay. A fence that also refused this would be an outage.
+  const dormant = createRunnerHarness()
+  const replayed = await dormant.runner.replayDeadLetter(governedReplayInput())
   assert.equal(replayed.replay.run.pipelineId, PIPELINE_ID, JSON.stringify(replayed))
-  assert.equal(replayed.replay.metrics.rowsRead, 1, 'the authorized replay re-fed its stored row')
-  assert.ok(allowed.spies.credentialLoads.includes(SOURCE_SYSTEM_ID), 'the authorized replay loads the source')
-  assert.equal(claimKeysIn(allowed.claimStore).length, 1, 'one in-process replay spends exactly one operation')
+  assert.equal(replayed.replay.metrics.rowsRead, 1, 'dormant: the stored artifact is re-fed and replayed')
+  assert.equal(claimKeysIn(dormant.claimStore).length, 0, 'dormant: no claim, exactly as before any B2a fence')
 }
 
 // ── NO DOUBLE BURN ───────────────────────────────────────────────────────────
@@ -1874,7 +1994,7 @@ async function W2_theRouteAndTheRunnerShareOneOperationClaim() {
   assert.equal(routeStanza.pageReads, 1)
 
   // The RUNNER half, handed the same run under the marker: it CONTINUES that claim.
-  const ran = await harness.runner.runPipeline(runnerInput({ [B2A_AUTHORIZED_RUN_ID]: routeRunId }))
+  const ran = await harness.runner.runPipeline(runnerWriteInput({ [B2A_AUTHORIZED_RUN_ID]: routeRunId }))
   assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
   const keys = claimKeysIn(harness.claimStore)
   assert.equal(keys.length, 1, 'one HTTP-initiated run spends exactly ONE claim, not two')
@@ -1884,42 +2004,15 @@ async function W2_theRouteAndTheRunnerShareOneOperationClaim() {
   // THE DISCRIMINATING CONTROL. Without the marker the runner would take a claim of its own — and on
   // a spent registration that is a refusal, which is exactly the failure the marker prevents. So the
   // marker is load-bearing, not decorative.
-  const unmarked = await capturedRejection(harness.runner.runPipeline(runnerInput()))
+  const unmarked = await capturedRejection(harness.runner.runPipeline(runnerWriteInput()))
   assertRunnerRefusal(unmarked, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
     'W-2 a second, unmarked run on a spent registration')
 
-  // REPLAY carries the marker the same way — it FORWARDS it into its internal `runPipeline`. Without
-  // that forwarding an armed HTTP replay would be refused by the runner as a second run, so this is
-  // the same load-bearing property on the second door.
-  const replayHarness = createRunnerHarness({ registrations: [runnerRegistration()] })
-  const replayRouteRunId = 'pipeline-dead-letter-replay:route-generated-1'
-  await assertB2aReadAuthorization({
-    registry: replayHarness.b2aTrialRegistry,
-    store: replayHarness.claimStore,
-    // MERGE-TRAIN (W-3 x W-2), replay door: same shared claim, same reason as above.
-    operationClaim: claimForStorage(replayHarness.claimStore),
-    tenantScope: TENANT_ID,
-    sourceSystemType: SYSTEM_KIND,
-    sourceBindingRef: SOURCE_SYSTEM_ID,
-    dataScopeRef: PIPELINE_PROJECT_ID,
-    sourceObjects: [PIPELINE_SOURCE_OBJECT],
-    purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
-    runId: replayRouteRunId,
-    now: Date.now(),
-  })
-  const replayed = await replayHarness.runner.replayDeadLetter({
-    tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', [B2A_AUTHORIZED_RUN_ID]: replayRouteRunId,
-  })
-  assert.equal(replayed.replay.metrics.rowsRead, 1, 'the marked replay continued the route\'s claim and ran')
-  const replayKeys = claimKeysIn(replayHarness.claimStore)
-  assert.equal(replayKeys.length, 1, 'one HTTP-initiated replay spends exactly ONE claim')
-  assert.equal(replayHarness.claimStore.get(replayKeys[0]).pageReads, 2, 'route + runner rode one operation')
-
-  const unmarkedReplay = await capturedRejection(replayHarness.runner.replayDeadLetter({
-    tenantId: TENANT_ID, workspaceId: null, id: 'dl_1',
-  }))
-  assertRunnerRefusal(unmarkedReplay, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
-    'W-2 a second, unmarked replay on a spent registration')
+  // The REPLAY door once shared a claim the same way (it forwarded the marker into its internal
+  // `runPipeline`). Since H-4 an armed artifact replay is refused OUTRIGHT — it never reaches a claim
+  // to share — so that property no longer exists to test here; the refusal itself is
+  // `H4_armedArtifactReplayIsRefusedBeforeAnyReadOrClaim`. The run door's claim-sharing above is the
+  // whole of what this case still measures.
 }
 
 // The route half of the same property: the HTTP layer really does hand its run id down, and hands
@@ -1928,7 +2021,6 @@ async function W2_theRoutesHandTheirRunToTheRunner() {
   for (const [route, params, prefix] of [
     [PIPELINE_RUN_ROUTE, { id: PIPELINE_ID }, 'pipeline-run:'],
     [PIPELINE_DRY_RUN_ROUTE, { id: PIPELINE_ID }, 'pipeline-dry-run:'],
-    [DEAD_LETTER_REPLAY_ROUTE, { id: 'dl_1' }, 'pipeline-dead-letter-replay:'],
   ]) {
     const armed = mount({ registrations: [runnerRegistration()] })
     const res = await call(armed.routes, 'POST', route, { user: WRITE_USER, params, body: {} })
@@ -1944,6 +2036,24 @@ async function W2_theRoutesHandTheirRunToTheRunner() {
     assert.ok(dormantRes.statusCode < 400, `${route} dormant: ${JSON.stringify(dormantRes.body)}`)
     assert.deepEqual(dormant.spies.runnerRunMarkers, [undefined], `${route}: dormant attaches no marker`)
   }
+
+  // The REPLAY route no longer HANDS a run down when armed — since H-4 it refuses the artifact replay
+  // before the runner is entered at all. Pin both halves: the armed refusal keeps the runner
+  // un-entered, and a DORMANT replay still reaches the runner with no marker, exactly as before.
+  const armedReplay = mount({ registrations: [runnerRegistration()] })
+  const armedReplayRes = await call(armedReplay.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
+    user: WRITE_USER, params: { id: 'dl_1' }, body: {},
+  })
+  assertB2aRefusal(armedReplayRes, B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized',
+    'the armed replay route refuses instead of handing a run down')
+  assert.deepEqual(armedReplay.spies.runnerRunMarkers, [], 'the armed replay route never enters the runner')
+
+  const dormantReplay = mount({})
+  const dormantReplayRes = await call(dormantReplay.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
+    user: WRITE_USER, params: { id: 'dl_1' }, body: {},
+  })
+  assert.ok(dormantReplayRes.statusCode < 400, `dormant replay: ${JSON.stringify(dormantReplayRes.body)}`)
+  assert.deepEqual(dormantReplay.spies.runnerRunMarkers, [undefined], 'dormant replay attaches no marker')
 }
 
 // ── DORMANCY at the runner layer ─────────────────────────────────────────────
@@ -1960,7 +2070,7 @@ async function W2_theRunnerIsDormantWhenTheRegistryIsUnset() {
   assert.deepEqual([...dormant.claimStore.keys()], [], 'dormant: the claim store is untouched')
 
   const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
-  const armedRan = await armed.runner.runPipeline(runnerInput())
+  const armedRan = await armed.runner.runPipeline(runnerWriteInput())
   // ... and an ARMED, AUTHORIZED run produces the same RESULT. The fence adds reads, never output.
   assert.equal(armedRan.run.status, dormantRan.run.status)
   assert.deepEqual(
@@ -1973,6 +2083,11 @@ async function W2_theRunnerIsDormantWhenTheRegistryIsUnset() {
   assert.deepEqual(armed.spies.publicSystemLoads, [SOURCE_SYSTEM_ID], 'armed: and one credential-STRIPPED system read')
   assert.deepEqual(armed.spies.credentialLoads, dormant.spies.credentialLoads,
     'the fence adds no credential reload of its own')
+  // R-wave (finding 3): the object-scope resolver's own read — armed only, and credential-free. A
+  // DORMANT deployment must not make it at all, which is the half that keeps dormancy exact.
+  assert.deepEqual(dormant.spies.configLoads, [], 'dormant: the adapter-config accessor is never called')
+  assert.deepEqual(armed.spies.configLoads, [SOURCE_SYSTEM_ID],
+    'armed: exactly one credential-free config read, for the source binding only')
 }
 
 // ── THE CROSS-PLUGIN DOOR, THROUGH THE REAL index.cjs ────────────────────────
@@ -2118,17 +2233,50 @@ async function W2_activationWiresTheFenceIntoTheCrossPluginApi() {
     const emptyApi = empty.namespaces.get('integration-core')
     assert.ok(emptyApi, 'the cross-plugin namespace is registered')
 
+    // A cross-plugin DRY RUN still reads the source, so the B2a read fence is what refuses it. It is
+    // spelled `dryRun: true` here since R-wave: a cross-plugin WRITE no longer reaches the read fence
+    // at all (the C6 write fence stands in front of it — see the write cases immediately below), and
+    // a case that could not tell those two refusals apart would stop testing this one.
     const runRefusal = await capturedRejection(emptyApi.runPipeline({
-      tenantId: TENANT_ID, workspaceId: null, pipelineId: PIPELINE_ID, mode: 'full', triggeredBy: 'plugin',
+      tenantId: TENANT_ID, workspaceId: null, pipelineId: PIPELINE_ID, mode: 'full', triggeredBy: 'plugin', dryRun: true,
     }))
     assertRunnerRefusal(runRefusal, B2A_REGISTRATION_REQUIRED, 'no_registration',
-      'W-2 cross-plugin runPipeline on an armed deployment')
+      'W-2 cross-plugin runPipeline (dry) on an armed deployment')
+
+    // R-wave (finding 4), THE CROSS-PLUGIN WRITE DOOR, through the real index.cjs. A live write and
+    // a replay are refused for want of the C6 write-lifecycle context that only the governed HTTP
+    // routes attach — before the read fence, so neither spends the registration's one operation.
+    const writeRefusal = await capturedRejection(emptyApi.runPipeline({
+      tenantId: TENANT_ID, workspaceId: null, pipelineId: PIPELINE_ID, mode: 'full', triggeredBy: 'plugin',
+    }))
+    assertRunnerRefusal(writeRefusal, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'R-wave cross-plugin runPipeline WRITE on an armed deployment')
 
     const replayRefusal = await capturedRejection(emptyApi.replayDeadLetter({
       tenantId: TENANT_ID, workspaceId: null, id: 'dl_1',
     }))
-    assertRunnerRefusal(replayRefusal, B2A_REGISTRATION_REQUIRED, 'no_registration',
-      'W-2 cross-plugin replayDeadLetter on an armed deployment')
+    // A replay is ALWAYS a live write (it re-enters `runPipeline` with no `dryRun`), so this door has
+    // no dry variant at all: cross-plugin replay is refused outright on an armed deployment.
+    assertRunnerRefusal(replayRefusal, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'R-wave cross-plugin replayDeadLetter on an armed deployment')
+
+    // AND THE MARKER CANNOT BE FORGED OVER THE CROSS-PLUGIN CALL. Presenting it explicitly changes
+    // nothing: `index.cjs` strips it, so the refusal is byte-identical to the one above.
+    const forgedWrite = await capturedRejection(emptyApi.runPipeline({
+      tenantId: TENANT_ID,
+      workspaceId: null,
+      pipelineId: PIPELINE_ID,
+      mode: 'full',
+      triggeredBy: 'plugin',
+      [C6_WRITE_LIFECYCLE_CONTEXT]: true,
+    }))
+    assertRunnerRefusal(forgedWrite, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'R-wave cross-plugin runPipeline presenting a forged write-lifecycle context')
+    const forgedReplayContext = await capturedRejection(emptyApi.replayDeadLetter({
+      tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', [C6_WRITE_LIFECYCLE_CONTEXT]: true,
+    }))
+    assertRunnerRefusal(forgedReplayContext, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'R-wave cross-plugin replayDeadLetter presenting a forged write-lifecycle context')
     await entry.deactivate()
 
     // A CALLER MAY NOT PRESENT SOMEBODY ELSE'S RUN. The registration below is real and its single
@@ -2165,20 +2313,439 @@ async function W2_activationWiresTheFenceIntoTheCrossPluginApi() {
       pipelineId: PIPELINE_ID,
       mode: 'full',
       triggeredBy: 'plugin',
+      // Dry, so the C6 write fence is not what refuses this — the run-marker strip is, which is the
+      // property this case exists for.
+      dryRun: true,
       [B2A_AUTHORIZED_RUN_ID]: otherRunId,
     }))
     assertRunnerRefusal(forged, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
       'W-2 cross-plugin runPipeline presenting another request\'s run marker')
+    // The replay door has no dry variant, so BOTH markers must be presented for the run-marker strip
+    // to be the thing under test — and both are stripped, so the refusal is the write fence's.
     const forgedReplay = await capturedRejection(armedApi.replayDeadLetter({
-      tenantId: TENANT_ID, workspaceId: null, id: 'dl_1', [B2A_AUTHORIZED_RUN_ID]: otherRunId,
+      tenantId: TENANT_ID,
+      workspaceId: null,
+      id: 'dl_1',
+      [B2A_AUTHORIZED_RUN_ID]: otherRunId,
+      [C6_WRITE_LIFECYCLE_CONTEXT]: true,
     }))
-    assertRunnerRefusal(forgedReplay, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
-      'W-2 cross-plugin replayDeadLetter presenting another request\'s run marker')
+    assertRunnerRefusal(forgedReplay, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'R-wave cross-plugin replayDeadLetter cannot forge either marker')
   } finally {
     await entry.deactivate()
     if (previousFlag === undefined) delete process.env[STOCK_PREPARATION_FEATURE_FLAG]
     else process.env[STOCK_PREPARATION_FEATURE_FLAG] = previousFlag
   }
+}
+
+// ═══ R-WAVE: THE THREE RUNNER-SEAM CLOSURES ══════════════════════════════════
+//
+// External post-merge review, findings 2, 3 and 4. Each one was a hole between two things that were
+// individually correct — an armed floor nobody armed, an object scope that described the plan rather
+// than the read, and a write lifecycle that lived only at HTTP.
+
+const LOOKUP_OBJECT = 'legacy_materials'
+
+// A `data-source:sql-readonly` system config carrying the optional, server-bound lookup projection.
+// Shape from that adapter's own `normalizeLookupProjection`: a SECOND, distinct table read on every
+// page to enrich the base rows. It lives in the PRIVATE config subtree, which the public accessor
+// strips — hence the guard's separate, non-decrypting one.
+function lookupProjectionConfig(lookupObject = LOOKUP_OBJECT, baseObject = PIPELINE_SOURCE_OBJECT) {
+  return {
+    lookupProjection: {
+      baseObject,
+      lookupObject,
+      localKey: 'material_id',
+      foreignKey: 'id',
+      fields: { FNumber: 'code', FName: 'name' },
+      maxRows: 3,
+    },
+  }
+}
+
+// ── (finding 2) THE RUNNER THREADS THE AUTHORIZATION STANZA ──────────────────
+//
+// W-5 armed two SQL-Server read floors inside `data-source:sql-readonly` and made them OPT-IN on the
+// authorization stanza the caller forwards. The runner captured that stanza and dropped it, so every
+// runner-initiated armed read ran with both floors off. Two independent witnesses below: the `deps`
+// object the adapter is built with, and the REAL adapter's floor actually firing.
+async function R1_theRunnerThreadsTheB2aStanzaIntoTheSourceAdapter() {
+  const sourceDeps = (harness) => harness.spies.adapterDeps.find((entry) => entry.options.role === 'source').options
+  const targetDeps = (harness) => harness.spies.adapterDeps.find((entry) => entry.options.role === 'target').options
+
+  const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
+  await armed.runner.runPipeline(runnerWriteInput())
+  const armedSource = sourceDeps(armed)
+  assert.equal(armedSource.b2aAuthorization.armed, true, 'the source adapter is handed the stanza')
+  assert.equal(armedSource.b2aAuthorization.purpose, B2A_PURPOSE_PIPELINE_RUNNER_READ,
+    'and it is THIS run\'s stanza, for this entry point')
+  assert.equal(armedSource.b2aAuthorization.registrationId, runnerRegistration().registrationId,
+    'the stanza names the registration that authorized THIS read')
+  assert.equal(armedSource.principal, 'owner@example.invalid', 'the C2a principal is untouched by the addition')
+  // SOURCE ONLY. A read authorization is not a write authorization, and handing it to the target
+  // adapter would imply it was.
+  assert.equal('b2aAuthorization' in targetDeps(armed), false, 'the TARGET adapter is handed no read stanza')
+
+  // DORMANT: the key is ABSENT — not `undefined`, absent — so every factory sees the deps object it
+  // saw before this dep existed.
+  const dormant = createRunnerHarness()
+  await dormant.runner.runPipeline(runnerInput())
+  assert.equal('b2aAuthorization' in sourceDeps(dormant), false, 'dormant: no key at all on the source deps')
+  assert.deepEqual(Object.keys(sourceDeps(dormant)).sort(), ['principal', 'role'],
+    'dormant: byte-identical deps to the pre-change runner')
+
+  // THE FLOOR ITSELF, on the runner path, through the REAL adapter and its REAL facade contract.
+  // `select`'s 5th argument is the armed flag, and floor 1 maps the facade's generic pre-connect
+  // refusal to the fixed B2a code — but ONLY when the stanza reached the adapter.
+  function armedAwareSource(thrown, facadeError) {
+    const armedFlags = []
+    const factory = createDataSourceSqlReadonlySourceAdapterFactory({
+      context: {
+        api: {
+          dataSources: {
+            async test() { return { success: true } },
+            async getSchema() { return { tables: [], views: [] } },
+            async getTableInfo() { return { columns: [] } },
+            async select(id, table, options, principal, armedFlag) {
+              armedFlags.push(armedFlag)
+              if (facadeError) throw facadeError
+              return { data: [], metadata: {} }
+            },
+          },
+        },
+      },
+    })
+    return {
+      armedFlags,
+      factory(deps) {
+        const adapter = factory(deps)
+        return {
+          ...adapter,
+          async read(input) {
+            try {
+              return await adapter.read(input)
+            } catch (error) {
+              thrown.push(error)
+              throw error
+            }
+          },
+        }
+      },
+    }
+  }
+
+  const timeoutDisabled = () => Object.assign(
+    new Error('data source has connection.requestTimeoutMs=0 (no timeout)'),
+    { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED', status: 422 },
+  )
+
+  const armedThrown = []
+  const armedReal = armedAwareSource(armedThrown, timeoutDisabled())
+  const armedFloor = createRunnerHarness({
+    registrations: [runnerRegistration()],
+    sourceAdapterFactory: armedReal.factory,
+  })
+  await capturedRejection(armedFloor.runner.runPipeline(runnerWriteInput()))
+  assert.deepEqual(armedReal.armedFlags, [true], 'the armed flag reached the facade on the RUNNER path')
+  assert.equal(armedThrown[0].code, B2A_SOURCE_TIMEOUT_DISABLED_REJECTED,
+    `the armed floor fired on the runner path (saw ${armedThrown[0] && armedThrown[0].code})`)
+
+  // THE DISCRIMINATING CONTROL: the same adapter, the same facade error, a DORMANT deployment. The
+  // floor is a strict no-op and the generic error propagates verbatim — which is exactly what an
+  // armed runner used to do before this change, and why the gap was invisible.
+  const dormantThrown = []
+  const dormantReal = armedAwareSource(dormantThrown, timeoutDisabled())
+  const dormantFloor = createRunnerHarness({ sourceAdapterFactory: dormantReal.factory })
+  await capturedRejection(dormantFloor.runner.runPipeline(runnerInput()))
+  assert.deepEqual(dormantReal.armedFlags, [false], 'dormant reads pass armed=false, never undefined')
+  assert.equal(dormantThrown[0].code, 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED',
+    'dormant: the facade error propagates unmapped, byte-identical to before')
+}
+
+// ── (finding 3) THE CONFIG-BOUND SECOND OBJECT IS IN SCOPE OR IT IS REFUSED ──
+async function R2_theLookupProjectionObjectIsPartOfTheObjectScope() {
+  // A registration naming ONLY the pipeline's own source object, against a source whose config adds
+  // a second table. Before this change the read was authorized and touched both.
+  const denied = createRunnerHarness({
+    registrations: [runnerRegistration()],
+    sourceSystemConfig: lookupProjectionConfig(),
+  })
+  const error = await capturedRejection(denied.runner.runPipeline(runnerWriteInput()))
+  assertRunnerRefusal(error, B2A_SCOPE_MISMATCH, 'object_out_of_scope',
+    'R-wave (3) a registration that does not enumerate the lookup object')
+  assert.equal(error.details.unauthorizedObjectCount, 1, 'exactly one object was outside the scope')
+  assert.equal(JSON.stringify(error.details).includes(LOOKUP_OBJECT), false,
+    'values-free: the refusal counts the unauthorized objects, it never names them')
+  assert.deepEqual(denied.spies.credentialLoads, [], 'refused BEFORE any credential reload')
+  assert.deepEqual(denied.source.reads, [], 'and before a single row was read')
+  assert.equal(claimKeysIn(denied.claimStore).length, 0, 'a scope refusal spends no operation')
+  // The config read that made the refusal possible is credential-free and armed-only.
+  assert.deepEqual(denied.spies.configLoads, [SOURCE_SYSTEM_ID])
+
+  // ENUMERATED -> the read proceeds. Without this leg the case above would pass for a registry that
+  // refused everything.
+  const allowed = createRunnerHarness({
+    registrations: [runnerRegistration({ objectScope: { sourceObjects: [PIPELINE_SOURCE_OBJECT, LOOKUP_OBJECT] } })],
+    sourceSystemConfig: lookupProjectionConfig(),
+  })
+  const ran = await allowed.runner.runPipeline(runnerWriteInput())
+  assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
+  assert.deepEqual(allowed.source.reads, [PIPELINE_SOURCE_OBJECT], 'the authorized run reads its source')
+
+  // DORMANT with the very same config: unchanged, and not one extra platform read.
+  const dormant = createRunnerHarness({ sourceSystemConfig: lookupProjectionConfig() })
+  const dormantRan = await dormant.runner.runPipeline(runnerInput())
+  assert.equal(dormantRan.run.status, 'succeeded')
+  assert.deepEqual(dormant.spies.configLoads, [], 'dormant: the config accessor is never called')
+
+  // FAIL-CLOSED: armed, a kind that can hide an object, and no way to resolve its config.
+  const unresolvable = createRunnerHarness({
+    registrations: [runnerRegistration()],
+    omitAdapterConfigAccessor: true,
+  })
+  const unresolvableError = await capturedRejection(unresolvable.runner.runPipeline(runnerWriteInput()))
+  assertRunnerRefusal(unresolvableError, B2A_SCOPE_MISMATCH, 'config_bound_object_unresolvable',
+    'R-wave (3) armed, and the private config cannot be resolved')
+  assert.deepEqual(unresolvable.spies.credentialLoads, [], 'the fail-closed leg reloads no credential either')
+
+  // THE ROUTE HALF. The same widening on the stock-preparation entry point, through the real routes:
+  // the read plan's objects PLUS the source system's configured lookup object, matched against a
+  // registration written for the plan alone.
+  const routeSource = createRecordingSourceAdapter()
+  const { routes, spies } = mount({
+    registrations: [registration()],
+    source: routeSource,
+    sourceSystemConfig: lookupProjectionConfig(LOOKUP_OBJECT, 'DN_PDM_PathExAttrInfo'),
+  })
+  const res = await routeDryRun(routes)
+  assertB2aRefusal(res, B2A_SCOPE_MISMATCH, 'object_out_of_scope',
+    'R-wave (3) the stock-preparation route, lookup object out of scope')
+  assert.equal(JSON.stringify(res.body).includes(LOOKUP_OBJECT), false, 'the route refusal names no object either')
+  assert.equal(routeSource.reads.length, 0, 'the route refused before the source adapter read anything')
+  assert.deepEqual(spies.credentialLoads, [], 'and before the credential reload')
+}
+
+// ── (finding 4) A LIVE WRITE NEEDS THE C6 WRITE-LIFECYCLE CONTEXT ────────────
+async function R3_aLiveRunnerWriteNeedsTheC6WriteLifecycleContext() {
+  // MARKERLESS + ARMED + LIVE -> refused, and refused BEFORE anything at all happens. The strongest
+  // form of "it costs nothing": not one platform read, and the registration is NOT spent.
+  const denied = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const error = await capturedRejection(denied.runner.runPipeline(runnerInput()))
+  assertRunnerRefusal(error, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+    'R-wave (4) an in-process live write with no lifecycle context')
+  assert.equal(error.details.dryRun, false)
+  assert.deepEqual(denied.spies.pipelineLoads, [], 'refused before even the pipeline row is read')
+  assert.deepEqual(denied.spies.publicSystemLoads, [], 'and before any system metadata read')
+  assert.deepEqual(denied.spies.credentialLoads, [], 'and before any credential reload')
+  assert.deepEqual(denied.source.reads, [], 'ZERO source rows')
+  assert.deepEqual(denied.targetWrites, [], 'ZERO target writes')
+  assert.equal(claimKeysIn(denied.claimStore).length, 0,
+    'a write refused for want of the lifecycle context does NOT burn the registration')
+
+  // THE ANTI-BLANKET-DENY LEG (E4-05). The SAME harness and the SAME registration, now carrying the
+  // context the governed HTTP write routes attach: the write proceeds and actually writes. A fence
+  // that refused this would not be a fence, it would be an outage.
+  const ran = await denied.runner.runPipeline(runnerWriteInput({ sourceRecords: [{ id: 'ROW-1' }] }))
+  assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
+  assert.deepEqual(denied.targetWrites, ['imported_items'], 'the governed write really wrote')
+  assert.equal(claimKeysIn(denied.claimStore).length, 1, 'and it spent exactly one operation')
+
+  // DRY RUNS ARE UNTOUCHED — armed, markerless, and they still read. Both spellings of the flag, so
+  // the fence uses the same coercion the write leg does rather than a stricter one that would refuse
+  // a legitimate preview.
+  for (const dryRun of [true, 'true']) {
+    const dry = createRunnerHarness({ registrations: [runnerRegistration()] })
+    const dryRan = await dry.runner.runPipeline(runnerInput({ dryRun }))
+    assert.equal(dryRan.run.status, 'succeeded', `dryRun: ${JSON.stringify(dryRun)} -> ${JSON.stringify(dryRan)}`)
+    assert.ok(dry.source.reads.length > 0, 'an armed markerless dry run still READS')
+    assert.deepEqual(dry.targetWrites, [], 'and writes nothing, which is why it needs no write context')
+  }
+
+  // DORMANT: a markerless live write is exactly what it always was.
+  const dormant = createRunnerHarness()
+  const dormantRan = await dormant.runner.runPipeline(runnerInput({ sourceRecords: [{ id: 'ROW-1' }] }))
+  assert.equal(dormantRan.run.status, 'succeeded')
+  assert.deepEqual(dormant.targetWrites, ['imported_items'], 'dormant: the write happens as before')
+
+  // REPLAY is always a live write. Markerless and armed, the C6 write fence runs FIRST (ahead of H-4),
+  // so this refuses with the lifecycle code, not the artifact-replay one — and it lands ahead of even
+  // the K3 fence's own target lookup (the credential-DECRYPTING accessor), so nothing is reloaded.
+  const replayDenied = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const replayError = await capturedRejection(replayDenied.runner.replayDeadLetter(replayInput()))
+  assertRunnerRefusal(replayError, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+    'R-wave (4) an in-process replay with no lifecycle context')
+  assert.deepEqual(replayDenied.spies.credentialLoads, [],
+    'the replay refusal lands ahead of even the K3 fence\'s target credential reload')
+  assert.equal(claimKeysIn(replayDenied.claimStore).length, 0, 'and spends no operation')
+
+  // A GOVERNED replay clears the C6 write fence (it carries the lifecycle context) — and is then
+  // refused by H-4 (finding 4), which sits directly behind it: no armed registration in this cut
+  // authorizes replaying a stored artifact. The two refusals are ordered and distinct codes, so this
+  // proves the C6 fence is not the only thing standing between a governed replay and a live re-write.
+  const replayGoverned = createRunnerHarness({ registrations: [runnerRegistration()] })
+  const governedReplayError = await capturedRejection(replayGoverned.runner.replayDeadLetter(governedReplayInput()))
+  assertRunnerRefusal(governedReplayError, B2A_AUTHORIZATION_INVALID, 'artifact_replay_not_authorized',
+    'R-wave (4) a governed replay clears C6 but is refused by H-4')
+  assert.equal(claimKeysIn(replayGoverned.claimStore).length, 0, 'the H-4 refusal spends no operation either')
+}
+
+// The ROUTE half of finding 4: the marker is attached by the two governed WRITE routes, by neither
+// the dry-run route nor a dormant deployment.
+async function R3_theGovernedWriteRoutesAttachTheLifecycleContext() {
+  // The run route attaches the lifecycle context when armed and nothing when dormant. The REPLAY route
+  // once did the same, but since H-4 an armed replay is refused before the runner is entered — there
+  // is no write to contextualise — so only its DORMANCY half remains (checked below).
+  {
+    const armed = mount({ registrations: [runnerRegistration()] })
+    const res = await call(armed.routes, 'POST', PIPELINE_RUN_ROUTE, { user: WRITE_USER, params: { id: PIPELINE_ID }, body: {} })
+    assert.ok(res.statusCode < 400, `pipelines/:id/run armed+authorized: ${JSON.stringify(res.body)}`)
+    assert.deepEqual(armed.spies.runnerWriteContexts, [true],
+      'pipelines/:id/run: the governed write route attaches the lifecycle context')
+
+    const dormant = mount({})
+    const dormantRes = await call(dormant.routes, 'POST', PIPELINE_RUN_ROUTE, { user: WRITE_USER, params: { id: PIPELINE_ID }, body: {} })
+    assert.ok(dormantRes.statusCode < 400, `pipelines/:id/run dormant: ${JSON.stringify(dormantRes.body)}`)
+    assert.deepEqual(dormant.spies.runnerWriteContexts, [undefined],
+      'pipelines/:id/run: dormant attaches no key at all')
+  }
+
+  // The DORMANT replay route enters the runner with no write context, byte-identical to before any B2a
+  // fence. (Its armed refusal is `H4_*` and `W2_theRoutesHandTheirRunToTheRunner`.)
+  const dormantReplay = mount({})
+  const dormantReplayRes = await call(dormantReplay.routes, 'POST', DEAD_LETTER_REPLAY_ROUTE, {
+    user: WRITE_USER, params: { id: 'dl_1' }, body: {},
+  })
+  assert.ok(dormantReplayRes.statusCode < 400, `dead-letters/:id/replay dormant: ${JSON.stringify(dormantReplayRes.body)}`)
+  assert.deepEqual(dormantReplay.spies.runnerWriteContexts, [undefined],
+    'dead-letters/:id/replay: dormant attaches no write context')
+
+  // The DRY-RUN route attaches nothing, armed or not: it is not a write, and a marker there would be
+  // an assertion nobody checked.
+  const dry = mount({ registrations: [runnerRegistration()] })
+  const dryRes = await call(dry.routes, 'POST', PIPELINE_DRY_RUN_ROUTE, {
+    user: WRITE_USER, params: { id: PIPELINE_ID }, body: {},
+  })
+  assert.ok(dryRes.statusCode < 400, JSON.stringify(dryRes.body))
+  assert.deepEqual(dry.spies.runnerWriteContexts, [undefined], 'the dry-run route attaches no write context')
+}
+
+// ═══ R2 HARDENING: THE FOUR CONFIRMED P1 EVASIONS ════════════════════════════
+//
+// External counter-review, findings H-1..H-4. H-2 (armed lookup leg) is proven in the adapter suite
+// (`data-source-sql-readonly-source-adapter.test.cjs`), where the fake facade can witness the lookup
+// select's armed flag; the other three are runner-seam and belong here.
+
+// ── H-1: a prototype-borne server marker is REFUSED by the gate ──────────────
+//
+// `index.cjs`'s `withoutServerOnlyRunMarkers` strips both markers with OWN-property `hasOwnProperty`
+// semantics. A gate that read a marker prototype-first would honour a survivor the strip cannot
+// remove — the asymmetry is the bypass. Each gate must read own-property-only, symmetric with the
+// strip. Two markers, two evasions, each with its permanent negative control.
+async function H1_aPrototypeBorneMarkerIsRefusedByTheGate() {
+  // (1) THE C6 WRITE-LIFECYCLE MARKER. Carried on the input's PROTOTYPE, it must NOT satisfy the write
+  // gate — the live write is refused. PERMANENT NEGATIVE CONTROL: pre-fix the prototype-following read
+  // accepted it and the write proceeded (no refusal) — the evasion, red before the fix.
+  {
+    const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
+    const input = Object.assign(
+      Object.create({ [C6_WRITE_LIFECYCLE_CONTEXT]: true }),
+      runnerInput({ sourceRecords: [{ id: 'ROW-1' }] }),
+    )
+    assert.equal(input[C6_WRITE_LIFECYCLE_CONTEXT], true, 'precondition: the marker IS visible via the prototype chain')
+    assert.equal(Object.prototype.hasOwnProperty.call(input, C6_WRITE_LIFECYCLE_CONTEXT), false,
+      'precondition: but it is NOT an own property')
+    const error = await capturedRejection(armed.runner.runPipeline(input))
+    assertRunnerRefusal(error, C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+      'H-1 a prototype-borne C6 lifecycle marker is refused, not honoured')
+    assert.deepEqual(armed.targetWrites, [], 'H-1: the prototype-marked write never wrote')
+    // SYMMETRY, not a blanket ban: an OWN-property lifecycle context still proceeds.
+    const ok = await armed.runner.runPipeline(runnerWriteInput({ sourceRecords: [{ id: 'ROW-1' }] }))
+    assert.equal(ok.run.status, 'succeeded', 'H-1: an own-property lifecycle context still proceeds')
+    assert.deepEqual(armed.targetWrites, ['imported_items'], 'H-1: and actually wrote')
+  }
+
+  // (2) THE B2a RUN-ID MARKER. The run id decides whether the runner CONTINUES another run's claim; a
+  // prototype-borne one would let a caller ride an authorization taken by someone else. Pre-claim the
+  // operation under ANOTHER run id, then present that id on the prototype: own-property-read, the
+  // runner takes its OWN id and is refused on the spent registration. PERMANENT NEGATIVE CONTROL:
+  // pre-fix the prototype read continued the other run's claim and the (dry) read proceeded.
+  {
+    const armed = createRunnerHarness({ registrations: [runnerRegistration()] })
+    const otherRunId = 'pipeline-run:belongs-to-another-request'
+    await assertB2aReadAuthorization({
+      registry: armed.b2aTrialRegistry,
+      store: armed.claimStore,
+      operationClaim: claimForStorage(armed.claimStore),
+      tenantScope: TENANT_ID,
+      sourceSystemType: SYSTEM_KIND,
+      sourceBindingRef: SOURCE_SYSTEM_ID,
+      dataScopeRef: PIPELINE_PROJECT_ID,
+      sourceObjects: [PIPELINE_SOURCE_OBJECT],
+      purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
+      runId: otherRunId,
+      now: Date.now(),
+    })
+    // Dry, so the C6 write fence is not what refuses this — the run-id read is, which is the property.
+    const input = Object.assign(
+      Object.create({ [B2A_AUTHORIZED_RUN_ID]: otherRunId }),
+      runnerInput({ dryRun: true }),
+    )
+    assert.equal(input[B2A_AUTHORIZED_RUN_ID], otherRunId, 'precondition: the run id IS visible via the prototype')
+    assert.equal(Object.prototype.hasOwnProperty.call(input, B2A_AUTHORIZED_RUN_ID), false,
+      'precondition: but it is NOT an own property')
+    const error = await capturedRejection(armed.runner.runPipeline(input))
+    assertRunnerRefusal(error, B2A_AUTHORIZATION_INVALID, 'operation_already_consumed',
+      'H-1 a prototype-borne run id cannot ride another run\'s claim')
+    assert.deepEqual(armed.source.reads, [], 'H-1: the ride-another-claim read never reached the source')
+  }
+}
+
+// ── H-3: a source-config change between authorize and adapter creation REFUSES ─
+//
+// Authorization resolves the config-bound second-read object (`lookupProjection.lookupObject`) through
+// the NON-DECRYPTING accessor; the adapter is then built from a SECOND, DECRYPTING read of the same
+// row. Between them the lookup object can change, so the table the adapter reads may differ from the
+// one authorized. The runner snapshots the authorization-time config and refuses fail-closed on
+// mismatch before the adapter exists. PERMANENT NEGATIVE CONTROL: pre-fix the swapped second table was
+// read.
+async function H3_aConfigChangeBetweenAuthorizationAndAdapterCreationRefuses() {
+  const AUTHORIZED_LOOKUP = 'legacy_materials'   // enumerated by the registration below
+  const SWAPPED_LOOKUP = 'legacy_costs'          // injected AFTER authorization, never authorized
+  const armed = createRunnerHarness({
+    registrations: [runnerRegistration({
+      objectScope: { sourceObjects: [PIPELINE_SOURCE_OBJECT, AUTHORIZED_LOOKUP] },
+    })],
+    // The NON-DECRYPTING config the authorization reads: lookupObject = AUTHORIZED_LOOKUP.
+    sourceSystemConfig: lookupProjectionConfig(AUTHORIZED_LOOKUP),
+    // The DECRYPTING config the adapter is built from: lookupObject SWAPPED. The second table the
+    // adapter would read is not the one authorization enumerated — the TOCTOU.
+    sourceSystemConfigForAdapter: lookupProjectionConfig(SWAPPED_LOOKUP),
+  })
+  const error = await capturedRejection(armed.runner.runPipeline(runnerWriteInput()))
+  assertRunnerRefusal(error, B2A_AUTHORIZATION_INVALID, 'source_config_changed_after_authorization',
+    'H-3 a lookup object swapped between authorize and adapter creation is refused')
+  // Refused BEFORE the source adapter is built, so the swapped second table is never read.
+  assert.deepEqual(armed.spies.adapterCreations, [], 'H-3: no adapter was created')
+  assert.deepEqual(armed.source.reads, [], 'H-3: ZERO source rows — the swapped table was never read')
+  // Authorization DID succeed first over the AUTHORIZED config (one claim spent), so the refusal is the
+  // config binding and not an object-scope mismatch. The one-shot is spent because the fence, and its
+  // claim, sit BEFORE the decrypting read by construction — a detected config swap costs the
+  // registration, which is fail-closed, not fail-open.
+  assert.equal(claimKeysIn(armed.claimStore).length, 1, 'H-3: authorization ran (one claim) then the binding refused')
+
+  // CONTROL: the SAME config through both reads authorizes AND proceeds — the binding refuses a
+  // CHANGE, not the config-bound-lookup feature itself.
+  const stable = createRunnerHarness({
+    registrations: [runnerRegistration({
+      objectScope: { sourceObjects: [PIPELINE_SOURCE_OBJECT, AUTHORIZED_LOOKUP] },
+    })],
+    sourceSystemConfig: lookupProjectionConfig(AUTHORIZED_LOOKUP),
+    sourceSystemConfigForAdapter: lookupProjectionConfig(AUTHORIZED_LOOKUP),
+  })
+  const ran = await stable.runner.runPipeline(runnerWriteInput())
+  assert.equal(ran.run.status, 'succeeded', JSON.stringify(ran))
+  assert.deepEqual(stable.spies.adapterCreations, [SOURCE_SYSTEM_ID, 'target_system'],
+    'H-3 control: both adapters are built when the config is unchanged')
 }
 
 const TESTS = [
@@ -2210,11 +2777,19 @@ const TESTS = [
   W2_reconcileRouteIsFencedBeforeAnyCredentialReload,
   W2_reconcileRouteIsUnchangedWhenDormantOrAuthorized,
   W2_inProcessRunPipelineIsFencedBeforeAnyCredentialReload,
-  W2_inProcessReplayDeadLetterIsFencedBeforeAnySourceCredentialReload,
   W2_theRouteAndTheRunnerShareOneOperationClaim,
   W2_theRoutesHandTheirRunToTheRunner,
   W2_theRunnerIsDormantWhenTheRegistryIsUnset,
   W2_activationWiresTheFenceIntoTheCrossPluginApi,
+  // R-wave: the three runner-seam closures from the external post-merge review.
+  R1_theRunnerThreadsTheB2aStanzaIntoTheSourceAdapter,
+  R2_theLookupProjectionObjectIsPartOfTheObjectScope,
+  R3_aLiveRunnerWriteNeedsTheC6WriteLifecycleContext,
+  R3_theGovernedWriteRoutesAttachTheLifecycleContext,
+  // R2 hardening: the four confirmed P1 evasions from the external counter-review.
+  H1_aPrototypeBorneMarkerIsRefusedByTheGate,
+  H3_aConfigChangeBetweenAuthorizationAndAdapterCreationRefuses,
+  H4_armedArtifactReplayIsRefusedBeforeAnyReadOrClaim,
 ]
 
 async function main() {
