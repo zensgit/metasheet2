@@ -297,6 +297,7 @@ describe('e-learning content client', () => {
   it.each([
     openedArticle({ status: 'opened' }),
     openedArticle({ completedAt: 'not-a-date' }),
+    openedArticle({ completedAt: '2026-02-31T00:00:00.000Z' }),
     openedArticle({ assurance: 'weak_server_recorded_launch' }),
     openedArticle({ itemType: 'external_link' }),
   ])('rejects malformed open results', async (body) => {

@@ -659,13 +659,13 @@ describe('ElearningAdminView', () => {
     expect(h.capabilities.mock.invocationCallOrder[0]).toBeLessThan(h.upload.mock.invocationCallOrder[0])
   })
 
-  it('fails closed without upload/publish/assign when enabled or a V0.1 capability is false', async () => {
+  it('fails closed without upload/publish/assign when neither content nor V0.1 is ready', async () => {
     h.capabilities.mockResolvedValue({
       enabled: true,
       capabilities: {
-        content: true,
+        content: false,
         assignment: true,
-        assessment: false,
+        assessment: true,
         incentive: true,
         analytics: true,
         media: true,
@@ -1157,5 +1157,45 @@ describe('ElearningAdminView', () => {
     const disabled = mountView()
     await flushUi()
     expect(disabled.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
+  })
+
+  it('keeps content-only and mixed content capabilities independent from legacy V0.1 readiness', async () => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: false,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const contentOnly = mountView()
+    await flushUi()
+    expect(contentOnly.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
+    expect(contentOnly.querySelector('[data-testid="elearning-content-target-user"]')).toBeNull()
+    expect(contentOnly.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+    expect((contentOnly.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: true,
+        assessment: false,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const mixed = mountView()
+    await flushUi()
+    expect(mixed.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
+    expect(mixed.querySelector('[data-testid="elearning-content-target-user"]')).not.toBeNull()
+    expect(mixed.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+    expect((mixed.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
   })
 })

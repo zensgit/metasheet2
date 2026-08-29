@@ -5,6 +5,7 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const SHA256_RE = /^[a-f0-9]{64}$/
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
+const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 export type ElearningContentItemType = 'article' | 'external_link'
 
@@ -285,7 +286,12 @@ function parseOpen(value: unknown, status: number): ElearningContentOpenResult {
     : 'weak_server_recorded_launch'
   if (value.assurance !== expectedAssurance) failShape(status)
   const completedAt = requireText(value.completedAt, status, 64)
-  if (!Number.isFinite(Date.parse(completedAt))) failShape(status)
+  const completedDate = new Date(completedAt)
+  if (
+    !CANONICAL_ISO_INSTANT_RE.test(completedAt)
+    || Number.isNaN(completedDate.getTime())
+    || completedDate.toISOString() !== completedAt
+  ) failShape(status)
   return {
     ...revision,
     itemId: requireUuid(value.itemId, status),
