@@ -29,6 +29,7 @@ import {
   type PublishElearningCourseInput,
 } from './elearning-course-publish'
 import { isElearningCreditSurfaceEnabled } from './elearning-credit-ledger'
+import type { adjustElearningCreditPostgres } from './elearning-credit-adjustment-postgres'
 import type {
   getElearningCreditWallet,
   listElearningCreditRules,
@@ -228,6 +229,7 @@ export interface ElearningPilotRuntimeOptions {
   publishElearningCreditRule?: typeof publishElearningCreditRule
   listElearningCreditRules?: typeof listElearningCreditRules
   getElearningCreditWallet?: typeof getElearningCreditWallet
+  adjustElearningCredit?: typeof adjustElearningCreditPostgres
 }
 
 function viewerId(req: Request): string | null {
@@ -324,6 +326,7 @@ export function createElearningPilotRuntime(
     publishElearningCreditRule: opts.publishElearningCreditRule,
     listElearningCreditRules: opts.listElearningCreditRules,
     getElearningCreditWallet: opts.getElearningCreditWallet,
+    adjustElearningCredit: opts.adjustElearningCredit,
   }) : null
   if (!inner && !credit) return null
 

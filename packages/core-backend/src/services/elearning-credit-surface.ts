@@ -76,9 +76,9 @@ export interface PublishElearningCreditRuleResult extends ElearningCreditRule {
 
 export interface ElearningCreditWalletItem {
   decisionId: string
-  behavior: Exclude<ElearningCreditBehavior, 'manual_adjust'>
+  behavior: ElearningCreditBehavior
   awardedPoints: number
-  status: 'awarded' | 'capped' | 'exhausted'
+  status: 'awarded' | 'capped' | 'exhausted' | 'adjusted'
   occurredAt: string
   createdAt: string
 }
@@ -420,9 +420,17 @@ function normalizeLimit(value: unknown): number {
 
 function storedWalletItem(row: Record<string, unknown>): ElearningCreditWalletItem {
   const decisionId = storedText(row.id)
-  const behavior = normalizeAutomaticBehavior(row.behavior)
+  let behavior: ElearningCreditBehavior
+  try {
+    behavior = normalizeElearningCreditBehavior(row.behavior)
+  } catch {
+    fail('unavailable')
+  }
   const awardedPoints = storedInt(row.awarded_points)
-  const status = row.status === 'awarded' || row.status === 'capped' || row.status === 'exhausted'
+  const status = row.status === 'awarded'
+    || row.status === 'capped'
+    || row.status === 'exhausted'
+    || row.status === 'adjusted'
     ? row.status
     : null
   const occurredAt = storedDate(row.occurred_at)
@@ -431,10 +439,12 @@ function storedWalletItem(row: Record<string, unknown>): ElearningCreditWalletIt
     !decisionId
     || !UUID_RE.test(decisionId)
     || awardedPoints === null
-    || awardedPoints < 0
     || !status
     || !occurredAt
     || !createdAt
+    || (behavior === 'manual_adjust'
+      ? status !== 'adjusted' || awardedPoints === 0
+      : status === 'adjusted' || awardedPoints < 0)
   ) fail('unavailable')
   return {
     decisionId: decisionId.toLowerCase(),
@@ -501,7 +511,18 @@ export async function getElearningCreditWallet(
                   created_at AT TIME ZONE 'UTC',
                   'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
                 ) AS cursor_created_at
-         FROM elearning_credit_decisions
+         FROM (
+           SELECT
+             id, org_id, user_id, behavior, awarded_points, status,
+             occurred_at, created_at
+           FROM elearning_credit_decisions
+           UNION ALL
+           SELECT
+             id, org_id, user_id, 'manual_adjust'::text AS behavior,
+             points AS awarded_points, 'adjusted'::text AS status,
+             created_at AS occurred_at, created_at
+           FROM elearning_credit_adjustments
+         ) wallet_entries
          WHERE org_id = $1 AND user_id = $2
          ${after}
          ORDER BY created_at DESC, id DESC

@@ -299,4 +299,70 @@ describe('e-learning credit rules and wallet surface', () => {
     await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
       .rejects.toMatchObject({ code: 'not_found' })
   })
+
+  it('unions manual adjustments into the closed stable wallet timeline', async () => {
+    const db = dbWith(async (sql) => {
+      if (sql.includes(':membership')) return { rows: [{ ok: 1 }], rowCount: 1 }
+      if (sql.includes(':balance')) return { rows: [{ balance_points: 7 }], rowCount: 1 }
+      if (sql.includes(':history')) {
+        expect(sql).toContain('UNION ALL')
+        expect(sql).toContain('FROM elearning_credit_adjustments')
+        return {
+          rows: [{
+            id: DECISION_1,
+            behavior: 'manual_adjust',
+            awarded_points: -3,
+            status: 'adjusted',
+            occurred_at: '2026-08-29T04:00:00.000Z',
+            created_at: '2026-08-29T04:00:00.000Z',
+            cursor_created_at: '2026-08-29T04:00:00.000123Z',
+            reason: 'must-not-leak',
+            actor_id: 'must-not-leak',
+          }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    const wallet = await getElearningCreditWallet(db, { orgId: ORG, userId: USER })
+    expect(wallet).toEqual({
+      userId: USER,
+      balancePoints: 7,
+      items: [{
+        decisionId: DECISION_1,
+        behavior: 'manual_adjust',
+        awardedPoints: -3,
+        status: 'adjusted',
+        occurredAt: '2026-08-29T04:00:00.000Z',
+        createdAt: '2026-08-29T04:00:00.000Z',
+      }],
+      nextCursor: null,
+    })
+    expect(JSON.stringify(wallet)).not.toMatch(/reason|actor_id|must-not-leak/)
+  })
+
+  it.each([
+    { behavior: 'manual_adjust', awarded_points: 0, status: 'adjusted' },
+    { behavior: 'manual_adjust', awarded_points: -1, status: 'awarded' },
+    { behavior: 'pass_exam', awarded_points: -1, status: 'awarded' },
+    { behavior: 'pass_exam', awarded_points: 1, status: 'adjusted' },
+  ])('fails closed on an impossible union wallet row %#', async (invalid) => {
+    const db = dbWith(async (sql) => {
+      if (sql.includes(':membership')) return { rows: [{ ok: 1 }], rowCount: 1 }
+      if (sql.includes(':balance')) return { rows: [{ balance_points: 1 }], rowCount: 1 }
+      return {
+        rows: [{
+          id: DECISION_1,
+          occurred_at: '2026-08-29T04:00:00.000Z',
+          created_at: '2026-08-29T04:00:00.000Z',
+          cursor_created_at: '2026-08-29T04:00:00.000123Z',
+          ...invalid,
+        }],
+        rowCount: 1,
+      }
+    })
+    await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
+      .rejects.toMatchObject({ code: 'unavailable' })
+  })
 })
