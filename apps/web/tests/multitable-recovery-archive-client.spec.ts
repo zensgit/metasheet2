@@ -21,6 +21,37 @@ const catalogEntry = {
   superseded: false,
 } as const
 
+const validPreview = {
+  generationId: catalogEntry.generationId,
+  mode: 'revert',
+  scopeKind: 'whole_sheet',
+  executionKind: 'sync',
+  executable: true,
+  blockedReason: null,
+  previewIdentity: 'server-preview-identity',
+  summary: {
+    reverts: [],
+    resurrectIds: [],
+    deleteIds: [],
+    effectiveWriteCount: 0,
+    keptCreatedAfterAnchorCount: 3,
+    driftCount: 0,
+  },
+} as const
+
+const validExecuteResult = {
+  mode: 'revert',
+  anchorSeq: '12',
+  checkpointId: 'checkpoint',
+  revertedCount: 2,
+  resurrectedCount: 0,
+  deletedCount: 0,
+  keptCreatedAfterAnchor: 3,
+} as const
+
+const { summary: _summary, ...previewWithoutSummary } = validPreview
+const { checkpointId: _checkpointId, ...executeWithoutCheckpointId } = validExecuteResult
+
 const recoveryArchiveOperationCases: Array<{
   name: string
   message: string
@@ -71,14 +102,8 @@ describe('MultitableApiClient recovery archive routes', () => {
       .mockResolvedValueOnce(response({ ok: true, data: {
         entries: [catalogEntry], nextCursor: 'cursor-2',
       } }))
-      .mockResolvedValueOnce(response({ ok: true, data: {
-        generationId: '4e3ecbc9-62d8-443d-8bc7-56f7d7bd12f9', mode: 'revert', scopeKind: 'whole_sheet', executionKind: 'sync',
-        executable: true, blockedReason: null, previewIdentity: 'server-preview-identity',
-        summary: { reverts: [], resurrectIds: [], deleteIds: [], effectiveWriteCount: 0, keptCreatedAfterAnchorCount: 3, driftCount: 0 },
-      } }))
-      .mockResolvedValueOnce(response({ ok: true, data: {
-        mode: 'revert', anchorSeq: '12', checkpointId: 'checkpoint', revertedCount: 2, resurrectedCount: 0, deletedCount: 0, keptCreatedAfterAnchor: 3,
-      } }))
+      .mockResolvedValueOnce(response({ ok: true, data: validPreview }))
+      .mockResolvedValueOnce(response({ ok: true, data: validExecuteResult }))
     const client = new MultitableApiClient({ fetchFn })
 
     const page = await client.listRecoveryArchiveCatalog('sheet/a', { limit: 20 })
@@ -278,4 +303,45 @@ describe('MultitableApiClient recovery archive routes', () => {
       }
     },
   )
+
+  it.each([
+    previewWithoutSummary,
+    { ...validPreview, internal: true },
+    { ...validPreview, generationId: 'not-a-uuid' },
+    { ...validPreview, mode: 'undo' },
+    { ...validPreview, scopeKind: 'record' },
+    { ...validPreview, executionKind: 'background' },
+    { ...validPreview, blockedReason: 'unknown' },
+    { ...validPreview, summary: { ...validPreview.summary, driftCount: -1 } },
+    { ...validPreview, summary: { ...validPreview.summary, reverts: [{ recordId: 'record-1', fieldIds: [1] }] } },
+    { ...validPreview, executable: true, blockedReason: 'no_changes', previewIdentity: null },
+    { ...validPreview, executable: false, blockedReason: null, previewIdentity: null },
+  ])('rejects a non-null malformed preview wire object', async (data) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
+    })
+
+    await expect(recoveryArchiveOperationCases[0].call(client)).rejects.toThrow(
+      'Invalid recovery archive preview response',
+    )
+  })
+
+  it.each([
+    executeWithoutCheckpointId,
+    { ...validExecuteResult, internal: true },
+    { ...validExecuteResult, mode: 'undo' },
+    { ...validExecuteResult, anchorSeq: '-1' },
+    { ...validExecuteResult, anchorSeq: 12 },
+    { ...validExecuteResult, checkpointId: '' },
+    { ...validExecuteResult, revertedCount: -1 },
+    { ...validExecuteResult, keptCreatedAfterAnchor: 1.5 },
+  ])('rejects a non-null malformed execute wire object', async (data) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
+    })
+
+    await expect(recoveryArchiveOperationCases[1].call(client)).rejects.toThrow(
+      'Invalid recovery archive execute response',
+    )
+  })
 })
