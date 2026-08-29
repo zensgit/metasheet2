@@ -363,7 +363,6 @@ const {
 // gated stock-preparation source read must match a live, in-scope, unexpired entry.
 const {
   readPlanSourceObjects,
-  B2A_REGISTRATION_REQUIRED,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_C6_EXTERNAL_WRITE_DRY_RUN,
@@ -384,6 +383,10 @@ const {
   // `objectScope`, including an object the source system's server-side config adds behind the read
   // plan's back (`data-source:sql-readonly`'s `lookupProjection.lookupObject`).
   resolveB2aSourceObjects,
+  // H-4 (external review finding 4): the runtime artifact-replay refusal. Thrown at THIS layer ahead
+  // of the read-authorization claim, so an armed replay the config layer permits no count for is
+  // refused before it spends the registration's single operation.
+  refuseB2aArtifactReplayNotAuthorized,
   B2aReadAuthorizationError,
   assertB2aReadAuthorization,
   createB2aRegistry,
@@ -6334,31 +6337,17 @@ function createHandlers(services, options = {}) {
         throw new HttpRouteError(501, 'REPLAY_NOT_IMPLEMENTED', 'Dead-letter replay is not implemented')
       }
       const body = requestBody(req)
-      const replayB2aRunId = b2aRunId('pipeline-dead-letter-replay')
-      // B2a entry point (3), second door. `replayDeadLetter` re-enters `runPipeline` with no
-      // `dryRun`, so it is another live non-dry run of the same pipeline and gets the same fence.
-      // The dead-letter row names its pipeline, so the pipeline id has to be resolved first.
+      // H-4 (external review finding 4): on an armed deployment a live artifact replay is refused
+      // outright. §6.1's `artifactReplayLimit` defaults to 0 and this cut refuses any non-zero value at
+      // config load, so no registration permits replaying a stored artifact — the one-shot claim the
+      // read fence would take is on the source-read OPERATION, never on the artifact, which is the
+      // finding. This SHADOWS the read/E3-01 write fences the ordinary run route runs for replay: an
+      // armed replay never reaches a source read, a claim, a marker or the runner, so none of that is
+      // set up here. The runner's own `replayDeadLetter` re-asserts it (the cross-plugin door). Refused
+      // FIRST, before the dead-letter row read, so nothing is spent. Dormant is byte-identical: the
+      // replay proceeds with no markers, exactly as it did before any B2a fence existed.
       if (b2aTrialRegistry) {
-        // The dead-letter row names the pipeline this replay will re-run, and that pipeline id is
-        // what both fences key on. `deadLetterStore` is contracted for `listDeadLetters` ONLY
-        // (`requireService` above asserts exactly that), so a single-row accessor may not exist.
-        // FAIL CLOSED when it does not: an armed deployment refuses a replay whose scope it cannot
-        // resolve, rather than replaying unfenced. That is the same default-refuse posture unknown
-        // entry points get, and it costs nothing while the gate is dormant.
-        if (typeof deadLetters.getDeadLetter !== 'function') {
-          throw new HttpRouteError(
-            403,
-            B2A_REGISTRATION_REQUIRED,
-            'dead-letter replay cannot resolve its pipeline scope for the B2a read guard',
-            { reason: 'replay_scope_unresolvable' },
-          )
-        }
-        const deadLetter = await deadLetters.getDeadLetter(scopedInput(req, { id: requestParams(req).id }))
-        await assertPipelineRunAllowed(req, {
-          pipelineId: deadLetter && deadLetter.pipelineId,
-          dryRun: false,
-          runId: replayB2aRunId,
-        })
+        refuseB2aArtifactReplayNotAuthorized()
       }
       const replayInput = scopedInput(req, {
         tenantId: body.tenantId,
@@ -6367,14 +6356,6 @@ function createHandlers(services, options = {}) {
         id: requestParams(req).id,
         triggeredBy: 'api',
       })
-      // W-2: `replayDeadLetter` forwards this marker into its internal `runPipeline`, so the runner's
-      // fence continues the claim taken above rather than refusing the replay as a second run.
-      if (b2aTrialRegistry) replayInput[B2A_AUTHORIZED_RUN_ID] = replayB2aRunId
-      // R-wave (finding 4): the SECOND governed write surface. A replay re-enters `runPipeline` with
-      // no `dryRun`, so it is a live write and needs the same lifecycle context — attached here after
-      // `requireAccess(req, 'write')` and the `assertPipelineRunAllowed` call above, and forwarded by
-      // `replayDeadLetter` into its internal `runPipeline`. Armed-only, for the same reason.
-      if (b2aTrialRegistry) replayInput[C6_WRITE_LIFECYCLE_CONTEXT] = true
       return sendOk(res, await runner.replayDeadLetter(replayInput), 202)
     },
   }
