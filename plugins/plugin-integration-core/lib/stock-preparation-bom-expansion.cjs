@@ -22,6 +22,22 @@ const LARGE_BOM_BOUNDED_ERROR_TYPES = Object.freeze([
   'read_count_exceeded',
   'read_time_limit_exceeded',
 ])
+// A BROKEN CURSOR (HG v1.2 §9.1(3), "cursor 断裂"), which is NOT a scale bound.
+//
+// `readAll`'s page loop stops when the adapter reports `done` or offers no `nextCursor`. A page that
+// says `done: false` and then supplies NOWHERE TO CONTINUE FROM is neither: the source stated the
+// batch was unfinished and then declined to say how to finish it. Before this constant the loop
+// simply broke out of the loop and returned what it had — a SILENTLY TRUNCATED batch that reached
+// the planner as a complete one, with `canApply: true`.
+//
+// It is deliberately NOT in `LARGE_BOM_BOUNDED_ERROR_TYPES`: those four mean "this BOM is too big
+// for the interactive path, take the background job", and routing a broken cursor there would tell
+// an operator to retry a read that will truncate again. It is a failed read, and it says so.
+const READ_CURSOR_BROKEN_ERROR_TYPE = 'read_cursor_broken'
+const INCOMPLETE_READ_ERROR_TYPES = Object.freeze([
+  ...LARGE_BOM_BOUNDED_ERROR_TYPES,
+  READ_CURSOR_BROKEN_ERROR_TYPE,
+])
 const STOCK_PREPARATION_BOM_SOURCE_KINDS = Object.freeze([
   'data-source:sql-readonly',
   'bridge:legacy-sql-readonly',
@@ -269,12 +285,16 @@ function isLargeBomBoundedErrorType(type) {
   return LARGE_BOM_BOUNDED_ERROR_TYPES.includes(type)
 }
 
+// Recognizes every INCOMPLETE-READ type, not only the four scale bounds, so a broken cursor keeps
+// its structural code instead of collapsing into `read_failed` with a driver message. What counts as
+// "large BOM, use the background job" is still decided by `isLargeBomBoundedExpansion`, which asks
+// the narrower `isLargeBomBoundedErrorType` — so this widening does not reroute a single expansion.
 function isReadLimitError(error) {
   return Boolean(
     error &&
     error.name === 'StockPreparationBomExpansionError' &&
     error.details &&
-    isLargeBomBoundedErrorType(error.details.code),
+    INCOMPLETE_READ_ERROR_TYPES.includes(error.details.code),
   )
 }
 
@@ -347,6 +367,19 @@ async function readAll(adapter, object, filters, options, readStats) {
     stat.count = records.length
     for (const record of records) {
       if (isPlainObject(record)) rows.push(record)
+    }
+    // COMPLETE-BATCH CHECK, opt-in. `done === false` with no `nextCursor` is the source saying the
+    // batch is unfinished and refusing to say where to resume — §9.1's 断游标. Gated on
+    // `requireCompleteBatch` so an unarmed deployment keeps the exact loop it had: the common fixture
+    // shape `{ records: [...] }` leaves `done` UNDEFINED and must keep terminating normally, which is
+    // why the test is `=== false` and not falsy.
+    if (options.requireCompleteBatch === true
+      && isPlainObject(result) && result.done === false && !result.nextCursor) {
+      throw new StockPreparationBomExpansionError('PLM read stopped on a broken cursor', {
+        code: READ_CURSOR_BROKEN_ERROR_TYPE,
+        object,
+        page,
+      })
     }
     if (!isPlainObject(result) || result.done === true || !result.nextCursor) break
     cursor = result.nextCursor
@@ -642,6 +675,9 @@ async function expandPlmProjectBom(input = {}) {
     maxElapsedMs: optionalPositiveInteger(input.maxElapsedMs, 'maxElapsedMs'),
     startedAtMs: Number.isFinite(input.startedAtMs) ? Number(input.startedAtMs) : Date.now(),
     now: typeof input.now === 'function' ? input.now : Date.now,
+    // Opt-in, and only the B2a seam opts in. Default `false` keeps every existing caller — every
+    // fixture, every demo, every dormant deployment — on the loop it already had.
+    requireCompleteBatch: input.requireCompleteBatch === true,
   }
   const readStats = []
   const errors = []
@@ -658,7 +694,12 @@ async function expandPlmProjectBom(input = {}) {
       addGlobalError(bounded.type, bounded)
       return
     }
-    addGlobalError('read_failed', { object, message: err && err.message })
+    // The read-only ORIGINAL CAUSE CLASS, kept alongside the message. `message` is dynamic and is
+    // never allowed into evidence; `causeClass` is `error.code || error.name` — a symbolic token —
+    // and it is the only thing a downstream seam can classify a driver failure by. Without it an
+    // mssql request timeout is indistinguishable from any other failed read, and the B2a seam has to
+    // call it "incomplete" when it is specifically "timed out".
+    addGlobalError('read_failed', { object, causeClass: safeErrorCode(err), message: err && err.message })
   }
   const addRowError = (error) => {
     rowErrors.push(error)
@@ -891,7 +932,7 @@ async function expandPlmProjectBom(input = {}) {
   } catch (err) {
     const bounded = readLimitErrorDetails(err)
     if (bounded) addGlobalError(bounded.type, bounded)
-    else addGlobalError('read_failed', { message: err && err.message })
+    else addGlobalError('read_failed', { causeClass: safeErrorCode(err), message: err && err.message })
   }
 
   const status = errors.length > 0 || rowErrors.length > 0 ? 'failed' : 'expanded'
@@ -949,6 +990,8 @@ module.exports = {
   DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_ROWS,
   LARGE_BOM_BOUNDED_ERROR_TYPES,
+  INCOMPLETE_READ_ERROR_TYPES,
+  READ_CURSOR_BROKEN_ERROR_TYPE,
   FORBIDDEN_PLAN_KEYS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
