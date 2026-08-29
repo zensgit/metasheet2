@@ -297,11 +297,29 @@ async function assertWalletIndex(db: Kysely<unknown>): Promise<void> {
 }
 
 async function assertImmutableTriggers(db: Kysely<unknown>): Promise<void> {
-  const result = await sql<{ name: string; definition: string; enabled: string }>`
+  const result = await sql<{
+    name: string
+    type: number
+    enabled: string
+    unrestricted_columns: boolean
+    without_when: boolean
+    canonical_function: boolean
+  }>`
     SELECT
       trigger_row.tgname AS name,
-      pg_get_triggerdef(trigger_row.oid) AS definition,
-      trigger_row.tgenabled::text AS enabled
+      trigger_row.tgtype::int AS type,
+      trigger_row.tgenabled::text AS enabled,
+      cardinality(trigger_row.tgattr::smallint[]) = 0 AS unrestricted_columns,
+      trigger_row.tgqual IS NULL AS without_when,
+      trigger_row.tgfoid = (
+        SELECT function_row.oid
+          FROM pg_proc function_row
+          JOIN pg_namespace function_namespace
+            ON function_namespace.oid = function_row.pronamespace
+         WHERE function_namespace.nspname = current_schema()
+           AND function_row.proname = ${IMMUTABLE_FUNCTION}
+           AND function_row.pronargs = 0
+      ) AS canonical_function
       FROM pg_trigger trigger_row
       JOIN pg_class table_row ON table_row.oid = trigger_row.tgrelid
       JOIN pg_namespace namespace ON namespace.oid = table_row.relnamespace
@@ -311,20 +329,20 @@ async function assertImmutableTriggers(db: Kysely<unknown>): Promise<void> {
      ORDER BY trigger_row.tgname
   `.execute(db)
   const expected = [
-    { name: ROW_TRIGGER, events: ['DELETE', 'UPDATE'], level: 'ROW' },
-    { name: TRUNCATE_TRIGGER, events: ['TRUNCATE'], level: 'STATEMENT' },
+    { name: ROW_TRIGGER, type: 27 },
+    { name: TRUNCATE_TRIGGER, type: 34 },
   ]
   if (result.rows.length !== expected.length) drift('immutable trigger set')
   for (const [index, wanted] of expected.entries()) {
     const actual = result.rows[index]
-    if (!actual || actual.name !== wanted.name || actual.enabled !== 'O') {
-      drift(`immutable trigger ${wanted.name}`)
-    }
-    const definition = normalizeDefinition(actual.definition)
     if (
-      !wanted.events.every((event) => definition.includes(event.toLowerCase()))
-      || !definition.includes(`foreach${wanted.level.toLowerCase()}`)
-      || !definition.includes(`executefunction${IMMUTABLE_FUNCTION}()`)
+      !actual
+      || actual.name !== wanted.name
+      || actual.type !== wanted.type
+      || actual.enabled !== 'O'
+      || !actual.unrestricted_columns
+      || !actual.without_when
+      || !actual.canonical_function
     ) drift(`immutable trigger ${wanted.name}`)
   }
 }

@@ -366,6 +366,49 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
     await migrate(creditAdjustmentUp)
   })
 
+  it('rejects a same-name immutable row trigger weakened by WHEN false', async () => {
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_adjustments_immutable_row
+        ON elearning_credit_adjustments;
+      CREATE TRIGGER elearning_credit_adjustments_immutable_row
+        BEFORE UPDATE OR DELETE ON elearning_credit_adjustments
+        FOR EACH ROW WHEN (false)
+        EXECUTE FUNCTION elearning_credit_reject_immutable_write()
+    `)
+    await expect(migrate(creditAdjustmentUp)).rejects.toThrow(
+      'elearning credit adjustment migration drift: immutable trigger elearning_credit_adjustments_immutable_row',
+    )
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_adjustments_immutable_row
+        ON elearning_credit_adjustments;
+      CREATE TRIGGER elearning_credit_adjustments_immutable_row
+        BEFORE UPDATE OR DELETE ON elearning_credit_adjustments
+        FOR EACH ROW EXECUTE FUNCTION elearning_credit_reject_immutable_write()
+    `)
+    await migrate(creditAdjustmentUp)
+  })
+
+  it('rejects a same-name immutable row trigger restricted to one update column', async () => {
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_adjustments_immutable_row
+        ON elearning_credit_adjustments;
+      CREATE TRIGGER elearning_credit_adjustments_immutable_row
+        BEFORE UPDATE OF reason OR DELETE ON elearning_credit_adjustments
+        FOR EACH ROW EXECUTE FUNCTION elearning_credit_reject_immutable_write()
+    `)
+    await expect(migrate(creditAdjustmentUp)).rejects.toThrow(
+      'elearning credit adjustment migration drift: immutable trigger elearning_credit_adjustments_immutable_row',
+    )
+    await firstPool.query(`
+      DROP TRIGGER elearning_credit_adjustments_immutable_row
+        ON elearning_credit_adjustments;
+      CREATE TRIGGER elearning_credit_adjustments_immutable_row
+        BEFORE UPDATE OR DELETE ON elearning_credit_adjustments
+        FOR EACH ROW EXECUTE FUNCTION elearning_credit_reject_immutable_write()
+    `)
+    await migrate(creditAdjustmentUp)
+  })
+
   it('serializes same-key replays and rejects a concurrent changed payload values-free', async () => {
     const orgId = `org-adjust-replay-${randomUUID()}`
     const actorId = `actor-adjust-replay-${randomUUID()}`
