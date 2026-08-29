@@ -1557,6 +1557,10 @@ export default defineConfig({
       // immutable commands, membership isolation, and stable keyset reads.
       // Excluded from no-DB collection and wired whole-file post-migrate.
       'tests/integration/elearning-credit-rules-wallet.db.test.ts',
+      // E-learning L4 manual credit adjustment authority. Requires real
+      // PostgreSQL for replay/conflict, balance locking, and migration drift.
+      // Excluded from no-DB collection and wired whole-file post-migrate.
+      'tests/integration/elearning-credit-adjustment.db.test.ts',
       // E-learning V0.1 exam service gate. Requires real PostgreSQL (start/
       // submit + advisory lock). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE sibling of

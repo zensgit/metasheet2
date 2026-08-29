@@ -910,6 +910,8 @@ jobs:
             tests/unit/elearning-course-publish.test.ts \
             tests/unit/elearning-course-stats-policy.test.ts \
             tests/unit/elearning-course-version-items-policy.test.ts \
+            tests/unit/elearning-credit-adjustment-postgres.test.ts \
+            tests/unit/elearning-credit-adjustment.test.ts \
             tests/unit/elearning-credit-ledger.test.ts \
             tests/unit/elearning-credit-policy.test.ts \
             tests/unit/elearning-credit-postgres.test.ts \
@@ -1032,6 +1034,7 @@ jobs:
             tests/integration/elearning-course-publish.db.test.ts \
             tests/integration/elearning-credit-ledger-authority.db.test.ts \
             tests/integration/elearning-credit-rules-wallet.db.test.ts \
+            tests/integration/elearning-credit-adjustment.db.test.ts \
             tests/integration/elearning-admin-scope-acl-migration-authority.db.test.ts \
             tests/integration/elearning-exam-service.db.test.ts \
             tests/integration/elearning-learner-courses.db.test.ts \
