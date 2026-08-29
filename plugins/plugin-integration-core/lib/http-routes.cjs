@@ -3213,7 +3213,14 @@ function createHandlers(services, options = {}) {
     const principal = Object.prototype.hasOwnProperty.call(options, 'principal')
       ? options.principal
       : requestPrincipal(req)
-    return adapterRegistry.createAdapter(system, { principal })
+    // W-5: forwards the B2a authorization stanza the caller already computed (dormant/unauthorized
+    // omits it entirely — no key at all, not even `undefined` — so a factory that doesn't know this
+    // dep sees exactly the same `deps` object it always has). Only `data-source:sql-readonly`
+    // interprets it (see its factory); every other adapter kind ignores the extra key.
+    return adapterRegistry.createAdapter(system, {
+      principal,
+      ...(options.b2aAuthorization ? { b2aAuthorization: options.b2aAuthorization } : {}),
+    })
   }
 
   function applyPermissionForUser(user) {
@@ -4277,12 +4284,14 @@ function createHandlers(services, options = {}) {
       const dryRunTenantId = resolveTenantId(req, {})
       const dryRunB2aRunId = b2aRunId('table-action-dry-run')
       // B2a entry point (1), ahead of the credential reload inside the adapter load below.
-      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const dryRunB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         tenantScope: dryRunTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: dryRunB2aRunId,
       })
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      // W-5: same stanza, forwarded so a `data-source:sql-readonly` source enforces its two SQL
+      // Server read floors for this run (see loadTableActionSourceAdapter / the adapter's read()).
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: dryRunB2aAuthorization })
       return sendOk(res, await dryRunStockPreparationAction({
         action,
         parameters: body.parameters,
@@ -4347,12 +4356,21 @@ function createHandlers(services, options = {}) {
       //
       // NO DOUBLE BURN: the prepare handoff below holds no B2a guard of its own, so this route's
       // claim is the only one taken on the path.
-      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const reconcileB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: b2aRunId('table-action-confirmation-decisions-reconcile'),
       })
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
+      // MERGE-TRAIN (W-2 x W-5). W-5 enforces the two armed SQL-Server read floors inside
+      // `data-source:sql-readonly` ONLY when the caller forwards its authorization stanza — the
+      // floors are opt-in, not fail-closed, so a source-read path that omits it reads with the floors
+      // silently off. This route is a B2a-gated source read that W-5 could not forward from because
+      // W-2 added it; without this line it would be the ONE armed stock-prep read escaping them.
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, {
+        tenantId,
+        requireActive: true,
+        b2aAuthorization: reconcileB2aAuthorization,
+      })
       const prepared = await prepareStockPreparationConfirmationDecisions({
         action,
         parameters: body.parameters,
@@ -4409,12 +4427,17 @@ function createHandlers(services, options = {}) {
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
       // B2a entry point (1), MVP-persist half — its OWN purpose, because committing a customer's BOM
       // into the internal snapshot tables is a different consumer from an interactive refresh.
-      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const mvpPersistB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         tenantScope: tenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
         runId: mvpPersistB2aRunId,
       })
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { tenantId, requireActive: true })
+      // W-5: same stanza, forwarded — see the dry-run route above for why.
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, {
+        tenantId,
+        requireActive: true,
+        b2aAuthorization: mvpPersistB2aAuthorization,
+      })
       const prepared = await prepareStockPreparationMvpSnapshot({
         action,
         parameters,
@@ -4468,12 +4491,13 @@ function createHandlers(services, options = {}) {
       const applyB2aRunId = b2aRunId('table-action-apply')
       // B2a entry point (1), apply half — ahead of the credential reload AND of the token consume,
       // so a refusal never burns a single-use dry-run token.
-      await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
+      const applyB2aAuthorization = await assertB2aStockPreparationReadAuthorized(action, body.parameters, {
         tenantScope: applyTenantId,
         purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
         runId: applyB2aRunId,
       })
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action)
+      // W-5: same stanza, forwarded — see the dry-run route above for why.
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       return sendOk(res, await applyStockPreparationAction({
         action,
@@ -4586,7 +4610,11 @@ function createHandlers(services, options = {}) {
         runId: `large-bom:${jobId}`,
         now: Date.now(),
       })
-      const sourceAdapter = await loadTableActionSourceAdapter(req, action, { principal: queuedJob.principal })
+      // W-5: same stanza, forwarded — see the dry-run route above for why.
+      const sourceAdapter = await loadTableActionSourceAdapter(req, action, {
+        principal: queuedJob.principal,
+        b2aAuthorization: largeBomB2aAuthorization,
+      })
       const job = await runLargeBomBackgroundExpansionJob({
         storage: context.storage,
         ...routeScope,

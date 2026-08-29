@@ -861,6 +861,159 @@ async function main() {
     assert.equal(f.calls.select[0].principal, 'owner-9', 'factory must thread the principal to the adapter')
   }
 
+  // 11. W-5: two fail-closed floors for ARMED B2a reads over SQL Server, both scoped to
+  //     `b2aAuthorization` being present (threaded per-call via the factory's `deps`, never off
+  //     `context`) — see http-routes.cjs's stock-preparation table-action/MVP-persist/large-BOM
+  //     entry points and b2a-trial-registry.cjs for the fixed code + refusal shape.
+  {
+    // A facade fake that records the 5th `select` argument (`armed`) explicitly — the shared
+    // `fakeFacade` above deliberately does NOT record it, so every one of its existing pinned
+    // `calls.select[i]` shape assertions stays byte-identical.
+    function armedAwareFakeFacade(overrides = {}) {
+      const calls = { select: [] }
+      const api = {
+        async test() { return { success: true } },
+        async getSchema() { return { tables: [], views: [] } },
+        async getTableInfo() { return { columns: [] } },
+        async select(id, table, options, principal, armed) {
+          calls.select.push({ id, table, options, principal, armed })
+          if (overrides.select) return overrides.select({ id, table, options, principal, armed })
+          return { data: [{ id: 1 }], metadata: {} }
+        },
+      }
+      return { api, calls }
+    }
+    const AUTHORIZATION = { registryId: 'reg', registryVersion: 1, registrationId: 'trial-1', purpose: 'stock-preparation.table-action' }
+
+    // 11a. Dormant/unauthorized (b2aAuthorization omitted): `armed` reaches the facade as `false` —
+    //      never `undefined`, so a facade that switches on truthiness sees a stable value — and
+    //      NOTHING about the call otherwise differs from before this change.
+    {
+      const f = armedAwareFakeFacade()
+      await adapterWith(f).read({ object: 'items', limit: 5 })
+      assert.equal(f.calls.select[0].armed, false, 'dormant read passes armed=false, never undefined')
+    }
+
+    // 11b. Armed + authorized: `armed=true` reaches the facade.
+    {
+      const f = armedAwareFakeFacade()
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      await a.read({ object: 'items', limit: 5 })
+      assert.equal(f.calls.select[0].armed, true, 'an armed, authorized read passes armed=true')
+    }
+
+    // 11c. Floor 1: the facade's generic pre-connect refusal (DATA_SOURCE_REQUEST_TIMEOUT_DISABLED)
+    //      is caught and re-thrown as the FIXED B2a code, carrying only values-free evidence.
+    {
+      const facadeError = Object.assign(
+        new Error("data source 'pg-1' has connection.requestTimeoutMs=0 (no timeout); this read requires a bounded request timeout and refuses to connect"),
+        { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED', status: 422, name: 'DataSourceRequestTimeoutDisabledError' },
+      )
+      const f = armedAwareFakeFacade({
+        select: () => { throw facadeError },
+      })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'items', limit: 5 })
+      } catch (error) {
+        caught = error
+      }
+      assert.ok(caught, 'floor 1 must refuse')
+      assert.notEqual(caught, facadeError, 'the core-backend generic error is MAPPED, not passed through verbatim')
+      assert.equal(caught.name, 'B2aReadAuthorizationError')
+      assert.equal(caught.status, 403)
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED')
+      assert.equal(caught.details.reason, 'sqlserver_request_timeout_disabled')
+      assert.deepEqual(caught.details, {
+        reason: 'sqlserver_request_timeout_disabled',
+        registryId: 'reg',
+        registryVersion: 1,
+        registrationId: 'trial-1',
+        purpose: 'stock-preparation.table-action',
+      })
+    }
+
+    // 11c-dormant: the SAME facade error, but WITHOUT b2aAuthorization, propagates completely
+    // unmapped — the floor is a strict no-op on a dormant/unauthorized read.
+    {
+      const facadeError = Object.assign(new Error('boom'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({ select: () => { throw facadeError } })
+      let caught
+      try {
+        await adapterWith(f).read({ object: 'items', limit: 5 })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught, facadeError, 'dormant: the facade error propagates verbatim, never mapped')
+    }
+
+    // 11d. Floor 2: #5243's own bare Error (no `.code`, unchanged message) propagates UNMAPPED —
+    //      "reuse the existing error, do not invent a parallel code" means this adapter does nothing
+    //      special with it at all.
+    {
+      const strictError = new Error(
+        'Offset pagination without an explicit orderBy is refused for data source "s" ' +
+        '(connection.strictOffsetOrdering=true): SQL Server OFFSET/FETCH cannot guarantee stable row ' +
+        'order across pages without a real ORDER BY key, so a multi-page read could duplicate or skip ' +
+        'rows. Pass options.orderBy on this select, or unset connection.strictOffsetOrdering to accept ' +
+        'that risk.'
+      )
+      const f = armedAwareFakeFacade({ select: () => { throw strictError } })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      let caught
+      try {
+        await a.read({ object: 'items', limit: 10, cursor: '20' })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught, strictError, 'floor 2 never wraps or re-throws — the underlying #5243 error passes through as-is')
+      assert.equal(f.calls.select[0].armed, true, 'the offset>0, no-orderBy page was requested under armed=true')
+      assert.equal(f.calls.select[0].options.offset, 20)
+      assert.equal('orderBy' in f.calls.select[0].options, false, 'no orderBy on a non-watermark page — this is exactly what forces the floor')
+    }
+
+    // 11e. Floor 1 takes precedence over the lookup-projection catch-all (an operator needs the
+    //      actionable message, not a generic "lookup projection base read failed").
+    {
+      const facadeError = Object.assign(new Error('timeout disabled'), { code: 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED' })
+      const f = armedAwareFakeFacade({ select: () => { throw facadeError } })
+      const a = createDataSourceSqlReadonlySourceAdapter({
+        system: LOOKUP_SYSTEM, context: { api: { dataSources: f.api } }, principal: 'owner-1', b2aAuthorization: AUTHORIZATION,
+      })
+      await assert.rejects(
+        () => a.read({ object: 'dbo.bom_detail', limit: 3 }),
+        /B2A_SOURCE_TIMEOUT_DISABLED_REJECTED|requestTimeoutMs/,
+      )
+      let caught
+      try {
+        await a.read({ object: 'dbo.bom_detail', limit: 3 })
+      } catch (error) {
+        caught = error
+      }
+      assert.equal(caught.code, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED', 'floor 1 wins over the lookup-projection generic message')
+    }
+
+    // 11f. The factory threads b2aAuthorization the SAME way it threads principal (per-call `deps`,
+    //      never read off `context`).
+    {
+      const f = armedAwareFakeFacade()
+      const factory = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f.api } } })
+      await factory({ system: SYSTEM, principal: 'owner-9', b2aAuthorization: AUTHORIZATION }).read({ object: 'items', limit: 3 })
+      assert.equal(f.calls.select[0].armed, true, 'the factory must thread b2aAuthorization to the adapter')
+      const f2 = armedAwareFakeFacade()
+      const factory2 = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f2.api } } })
+      await factory2({ system: SYSTEM, principal: 'owner-9' }).read({ object: 'items', limit: 3 })
+      assert.equal(f2.calls.select[0].armed, false, 'omitting b2aAuthorization is dormant, byte-identical to before this dep existed')
+    }
+  }
+
   console.log('data-source-sql-readonly-source-adapter.test.cjs: all assertions passed')
 }
 

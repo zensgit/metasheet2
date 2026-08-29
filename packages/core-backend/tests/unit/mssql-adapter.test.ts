@@ -293,6 +293,53 @@ describe('MSSQLAdapter — SQL generation (fake driver)', () => {
     })
   })
 
+  // W-5 (armed B2a floor 2): `options.strictOffsetOrdering` is a PER-CALL override of the SAME check
+  // above — the seam that resolves an armed B2a read's source config sets it for one read, without
+  // touching this data source's own connection.strictOffsetOrdering setting.
+  describe('select: options.strictOffsetOrdering per-call override (W-5)', () => {
+    it('options.strictOffsetOrdering:true refuses offset>0 without orderBy even when connection.strictOffsetOrdering is unset', async () => {
+      const fp = fakePool()
+      await expect(
+        adapterWithFakePool(fp).select('t', { limit: 10, offset: 20, strictOffsetOrdering: true })
+      ).rejects.toThrow(/strictOffsetOrdering/)
+      expect(fp.calls).toHaveLength(0)
+    })
+
+    it('options.strictOffsetOrdering:true refuses even when connection.strictOffsetOrdering is explicitly false', async () => {
+      const fp = fakePool()
+      await expect(
+        adapterWithFakePool(fp, { strictOffsetOrdering: false }).select('t', { limit: 10, offset: 20, strictOffsetOrdering: true })
+      ).rejects.toThrow(/strictOffsetOrdering/)
+      expect(fp.calls).toHaveLength(0)
+    })
+
+    it('options.strictOffsetOrdering:true + an explicit orderBy still runs normally (unaffected)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', {
+        limit: 10,
+        offset: 20,
+        strictOffsetOrdering: true,
+        orderBy: [{ column: 'id', direction: 'asc' }],
+      })
+      expect(fp.calls[0].sql).toContain('ORDER BY [id] ASC OFFSET 20 ROWS')
+    })
+
+    it('options.strictOffsetOrdering:true + offset omitted/0 is unaffected (TOP path never requires ORDER BY)', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', { limit: 10, strictOffsetOrdering: true })
+      expect(fp.calls[0].sql).toContain('SELECT TOP (10)')
+    })
+
+    it('options.strictOffsetOrdering unset/false is byte-identical to before this option existed', async () => {
+      const fp = fakePool()
+      await adapterWithFakePool(fp).select('t', { limit: 10, offset: 20 })
+      expect(fp.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+      const fp2 = fakePool()
+      await adapterWithFakePool(fp2).select('t', { limit: 10, offset: 20, strictOffsetOrdering: false })
+      expect(fp2.calls[0].sql).toContain('ORDER BY (SELECT NULL) OFFSET 20 ROWS')
+    })
+  })
+
   it('select: structured OR groups support C3 composite keyset predicates', async () => {
     const fp = fakePool()
     await adapterWithFakePool(fp).select('dbo.orders', {

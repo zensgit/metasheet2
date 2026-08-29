@@ -46,6 +46,10 @@ const {
   C6_SAFE_LIFECYCLE_REQUIRED,
   C6_FULL_BATCH_INCOMPLETE,
   B2A_REGISTRY_INVALID,
+  B2A_SOURCE_TIMEOUT_DISABLED_REJECTED,
+  DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CAUSE_CODE,
+  isDataSourceRequestTimeoutDisabledError,
+  refuseB2aArmedSqlServerRequestTimeoutDisabled,
   B2A_EXPIRY_HANDLINGS,
   MAX_B2A_REGISTRATION_WINDOW_MS,
   B2A_TIMEOUT_CAUSE_CLASSES,
@@ -74,6 +78,13 @@ const MIGRATION_078_PATH = path.join(
   __dirname, '..', '..', '..', 'packages', 'core-backend', 'migrations',
   '078_create_integration_b2a_operation_claim.sql',
 )
+
+// The literal core-backend's read-only facade exports as `DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE`
+// (packages/core-backend/src/data-adapters/data-source-plugin-facade.ts). Restated as a literal
+// rather than imported — this is a plain node .cjs test and that module is TypeScript — matching this
+// file's own `parseStrictIsoTimestamp`/production-policy cross-check precedent: the two are pinned
+// against each other BY VALUE so neither can drift silently apart, without a cross-package TS import.
+const DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE = 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED'
 
 const {
   PROD_CANONICAL_OBJECT_ID,
@@ -104,6 +115,7 @@ assert.deepEqual([...B2A_ERROR_CODES], [
   'B2A_SCHEMA_DRIFT',
   'C6_SAFE_LIFECYCLE_REQUIRED',
   'C6_FULL_BATCH_INCOMPLETE',
+  'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED',
 ])
 assert.equal(B2A_REGISTRATION_REQUIRED, 'B2A_REGISTRATION_REQUIRED')
 assert.equal(B2A_AUTHORIZATION_INVALID, 'B2A_AUTHORIZATION_INVALID')
@@ -113,6 +125,8 @@ assert.equal(B2A_PAGE_LIMIT_EXCEEDED, 'B2A_PAGE_LIMIT_EXCEEDED')
 assert.equal(B2A_SCHEMA_DRIFT, 'B2A_SCHEMA_DRIFT')
 assert.equal(C6_SAFE_LIFECYCLE_REQUIRED, 'C6_SAFE_LIFECYCLE_REQUIRED')
 assert.equal(C6_FULL_BATCH_INCOMPLETE, 'C6_FULL_BATCH_INCOMPLETE')
+assert.equal(B2A_SOURCE_TIMEOUT_DISABLED_REJECTED, 'B2A_SOURCE_TIMEOUT_DISABLED_REJECTED')
+assert.equal(DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CAUSE_CODE, DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE)
 
 const TENANT = 'tenant_1'
 const OTHER_TENANT = 'tenant_2'
@@ -1105,6 +1119,46 @@ async function E3_02_theResultSideClassifiesTheExpandersOwnBounds() {
   ]).code, B2A_SOURCE_TIMEOUT)
 }
 
+// ── W-5: TWO FAIL-CLOSED FLOORS FOR ARMED B2a READS OVER SQL SERVER ──────────
+//
+// Floor 1 gets its OWN fixed code (unlike floor 2, which reuses #5243's existing error verbatim and
+// mints nothing here — see MSSQLAdapter.ts / data-source-plugin-facade.ts). This suite pins: the
+// classifier that recognizes the core-backend facade's generic pre-connect refusal, the refusal
+// helper's shape (403, fixed code, values-free evidence), and that it is a strict no-op when dormant.
+async function W5_isDataSourceRequestTimeoutDisabledErrorRecognizesOnlyTheOneCode() {
+  assert.equal(isDataSourceRequestTimeoutDisabledError({ code: DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE }), true)
+  // Structural, not by message — a driver/adapter error that merely MENTIONS the words is not this.
+  assert.equal(isDataSourceRequestTimeoutDisabledError(new Error('data source has requestTimeoutMs=0')), false)
+  assert.equal(isDataSourceRequestTimeoutDisabledError({ code: 'DATA_SOURCE_NOT_READ_ONLY' }), false)
+  assert.equal(isDataSourceRequestTimeoutDisabledError({ code: 'ETIMEOUT' }), false)
+  assert.equal(isDataSourceRequestTimeoutDisabledError(null), false)
+  assert.equal(isDataSourceRequestTimeoutDisabledError(undefined), false)
+  assert.equal(isDataSourceRequestTimeoutDisabledError('DATA_SOURCE_REQUEST_TIMEOUT_DISABLED'), false, 'a bare string is not an error object')
+}
+
+async function W5_refuseB2aArmedSqlServerRequestTimeoutDisabledIsFixedCodeAndValuesFree() {
+  const authorization = {
+    registryId: 'reg-1', registryVersion: 1, registrationId: 'trial-1', purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  }
+  const refusal = captured(() => refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization))
+  assert.ok(refusal instanceof B2aReadAuthorizationError)
+  assert.equal(refusal.status, 403)
+  assert.equal(refusal.code, B2A_SOURCE_TIMEOUT_DISABLED_REJECTED)
+  assert.equal(refusal.details.reason, 'sqlserver_request_timeout_disabled')
+  // Evidence carries only the registry/registration identity and purpose the header discipline
+  // allows — no data-source id, no host, no connection setting, no message about "0".
+  assert.deepEqual(refusal.details, {
+    reason: 'sqlserver_request_timeout_disabled',
+    registryId: 'reg-1',
+    registryVersion: 1,
+    registrationId: 'trial-1',
+    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  })
+  // DORMANT: no authorization, no refusal — this floor never fires on an unarmed deployment.
+  assert.equal(refuseB2aArmedSqlServerRequestTimeoutDisabled(null), undefined)
+  assert.equal(refuseB2aArmedSqlServerRequestTimeoutDisabled(undefined), undefined)
+}
+
 // ── R-06: THE SCHEMA CONTRACT ────────────────────────────────────────────────
 
 function schemaAdapter(schema, { onGetSchema } = {}) {
@@ -1371,6 +1425,8 @@ const TESTS = [
   R05_anUnrecognizedCauseIsLeftAlone,
   R05_aMappedFailureKeepsItsOriginalCauseClass,
   E3_02_theResultSideClassifiesTheExpandersOwnBounds,
+  W5_isDataSourceRequestTimeoutDisabledErrorRecognizesOnlyTheOneCode,
+  W5_refuseB2aArmedSqlServerRequestTimeoutDisabledIsFixedCodeAndValuesFree,
   R06_theFirstArmedReadPinsAndAnIdenticalSchemaPasses,
   R06_driftRefusesWithCountsAndNoNames,
   R06_mappingIdentityDriftIsDriftEvenWhenTheSourceDidNotMove,

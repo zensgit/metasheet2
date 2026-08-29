@@ -340,7 +340,12 @@ export class MSSQLAdapter extends BaseDataAdapter {
       // sets connection.strictOffsetOrdering=true, an offset>0 read with no caller-supplied orderBy
       // is refused outright instead of silently running under the non-deterministic fallback.
       // Unset/false is byte-identical to the pre-existing behavior.
-      if (!orderBy && coerceMssqlConfigBoolean(conn.strictOffsetOrdering, false)) {
+      //
+      // W-5: `options.strictOffsetOrdering` ORs into the same check — a PER-CALL override a caller
+      // (the armed-B2a integration-core seam) sets for one read without touching the connection's
+      // own setting. Undefined/false leaves this byte-identical to before; nobody outside that one
+      // seam ever sets it, so this is a dormant, additive floor for everyone else.
+      if (!orderBy && (coerceMssqlConfigBoolean(conn.strictOffsetOrdering, false) || options.strictOffsetOrdering === true)) {
         throw new Error(
           `Offset pagination without an explicit orderBy is refused for data source "${this.config.name}" ` +
             '(connection.strictOffsetOrdering=true): SQL Server OFFSET/FETCH cannot guarantee stable row ' +

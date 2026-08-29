@@ -70,6 +70,12 @@ export interface QueryOptions {
     type?: 'inner' | 'left' | 'right' | 'full'
   }>
   raw?: boolean
+  // W-5: a PER-CALL override, consumed only by MSSQLAdapter. Undefined/false is byte-identical to
+  // this field never having existed — it ORs into the same connection.strictOffsetOrdering check
+  // #5243 already added (MSSQLAdapter.ts `select()`), it does not replace it. A caller that needs
+  // an offset>0 read to be refused without an orderBy for THIS one call — regardless of what the
+  // connection itself is configured with — sets this; every other adapter ignores it.
+  strictOffsetOrdering?: boolean
 }
 
 /**
