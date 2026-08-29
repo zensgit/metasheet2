@@ -19,12 +19,62 @@
 //      object's identifiers appear nowhere in this file, and a structural test
 //      asserts both.
 //
-// FIRST-CUT SCOPE — exactly ONE conflict class:
-//     duplicate_expanded_key  x  resolution keep_multiple_rows
-//   * reconcile ledgers duplicate_expanded_key manual-confirm holds; every
-//     other KEYED manual-confirm class is counted (values-free) and left
-//     un-ledgered, so no pending row can accumulate for a class whose
-//     resolution semantics do not exist yet.
+// SCOPE (O1' ledger-semantics slice, owner ruling 2026-08-29: Q1-Q5 all A) —
+// still exactly ONE conflict class: duplicate_expanded_key.
+//   * reconcile ledgers duplicate_expanded_key manual-confirm holds and, per
+//     the O1-B extension below, anonymous-family holds with derivable identity
+//     (as pending-only rows outside the confirmable class); every
+//     other manual-confirm class is counted (values-free) and left un-ledgered,
+//     so no pending row can accumulate for a class whose resolution semantics
+//     do not exist yet.
+//   * confirm accepts the FULL frozen action vocabulary. Planner consumption is
+//     a fixed action->policy map into the planner's OWN frozen duplicate-policy
+//     vocabulary (READBACK_POLICY_BY_RESOLUTION_ACTION below):
+//       - keep_multiple_rows -> keep_multiple_rows (the only RESOLVING policy;
+//         unchanged first-cut behaviour);
+//       - accept_current -> source_correction_required: the human rules that
+//         the CURRENT canonical state (rows, or their absence — E1: this class
+//         does not separate the two, and this module structurally cannot look)
+//         stands and the incoming duplicated set is NOT applied. In the
+//         planner's vocabulary a decided refusal of the incoming rows IS
+//         source_correction_required — the group holds under that NAMED reason
+//         (never the undecided default_hold), nothing is written anywhere, and
+//         the only path to release is an upstream source change, which moves
+//         the fingerprint and supersedes this decision (Q5-A).
+//       - manual_hold -> hold: an explicitly PARKED decision. The readback
+//         EMITS the non-resolving `hold` policy rather than staying silent, so
+//         a contrary stored table-scope keep_multiple_rows selection cannot
+//         release a group a human parked: the two durable sources disagree and
+//         the merge drops the selection (both-sources rule) — the hold stands.
+//     Every mapped policy is asserted at load time to be in the planner's
+//     IMPLEMENTED set, and exactly one action maps to the resolving policy —
+//     planner vocabulary drift fails loudly here instead of silently releasing.
+//   * value entry (Q2-A) is UNLOCKED: confirm accepts optional resolvedValue /
+//     resolvedAuxValue into the ledger's own human band. See VALUE SEMANTICS.
+//   * no `cancelled` migration/UI.
+//
+// VALUE SEMANTICS (Q2-A consumption rule — the smallest sound shape):
+//   Ledger values are a READ-ONLY REFERENCE for the human operator, nothing
+//   else. The confirming human may record the value(s) they intend for the
+//   canonical human columns; the machine NEVER consumes them:
+//     - no planner path reads them (the readback emits policy tokens only);
+//     - no apply path copies them anywhere — T-HUMAN-WALL (assertNoHumanFields,
+//       HG v1.2 §5.5 candidate 3) stays untouched, and this module still holds
+//       ZERO canonical-sheet capability, so the copy is structurally impossible
+//       from here even by mistake;
+//     - the human, who owns all 16 canonical human columns outright (Q1-A),
+//       reads the recorded values off the operator surface and edits canonical
+//       DIRECTLY themselves. Entry and application are two separate human acts.
+//   Surfaces (the values-free re-scoping of the ruling): value CONTENTS cross
+//   exactly ONE surface — readConfirmationDecisionValueEntry, the per-decision
+//   admin-gated operator read the /stock-prep workbench uses. Everywhere else
+//   (queue projection, reconcile/confirm/readback evidence, counts, logs,
+//   error payloads) only presence booleans, counts, column ids, statuses and
+//   fingerprints appear — never a value.
+//   REOPEN (Q5-A / W-4): a fingerprint-return reopen clears resolvedValue /
+//   resolvedAuxValue together with resolutionAction/notes — values entered
+//   against superseded input silently surviving into a revived decision would
+//   be exactly the automatic carry-forward the owner rejected (matrix Q5-B).
 //
 // O1-B EXTENSION — IDENTITY FOR THE ANONYMOUS HOLD FAMILIES (owner ruling
 // 2026-08-29, Q4-A). The three planner emitters that produce holds WITHOUT an
@@ -52,17 +102,6 @@
 // identity granularity, and where NO identity exists):
 //   docs/development/takeover-beiliao-20260821/
 //     anonymous-hold-identity-spec-20260829.md
-//   * confirm accepts ONLY keep_multiple_rows. accept_current / manual_hold
-//     exist in the frozen vocabulary but their planner semantics are NOT
-//     implemented in this cut, so selecting one is refused loudly at the
-//     boundary (CONFIRMATION_DECISION_ACTION_UNIMPLEMENTED) instead of being
-//     stored inert — the same refusal discipline the duplicate-policy
-//     selection boundary already uses.
-//   * the 16 human-column value entry is OUT of scope: resolvedValue /
-//     resolvedAuxValue are refused at confirm
-//     (CONFIRMATION_DECISION_VALUE_ENTRY_UNIMPLEMENTED); the columns stay in
-//     the schema only so the converged template needs no later migration.
-//   * no new-held-row entry surface, no FE view, no `cancelled` migration/UI.
 //
 // Ledger semantics:
 //   * keyed by (staging project, target object, stableDecisionKey) with a
@@ -75,8 +114,9 @@
 //   * fingerprint RETURN on reconcile (A→B→A — the source content reverts, and
 //     the revision handle is a pure content hash, so this is normal PLM/BOM
 //     behaviour) REOPENS the returning fingerprint's superseded row to pending
-//     and CLEARS the old human resolutionAction/notes (conservative default: a
-//     revived conflict must be re-confirmed by a human, never silently
+//     and CLEARS the old human resolutionAction/notes AND the entered
+//     resolvedValue/resolvedAuxValue (conservative default, owner-confirmed
+//     Q5-A: a revived conflict must be re-confirmed by a human, never silently
 //     re-armed with the old answer); any OTHER live row of the same stable
 //     key is still superseded in the same run.
 //   * a PENDING row whose conflict vanished from the current plan entirely is
@@ -109,13 +149,14 @@
 // holder finishes is a no-op. No lease configured => reconcile refuses
 // fail-closed (501), never a silent fallback to process-local locking.
 // MID-RUN, the holder re-asserts ownership with a CAS renew (extend expires_at
-// WHERE scope_key AND lease_id match) immediately before the FIRST ledger
-// write and then every RECONCILE_LEASE_RENEW_EVERY_WRITES writes; a renew that
-// matches zero rows means the lease expired and was taken over, and the run
-// ABORTS with CONFIRMATION_DECISION_RECONCILE_LEASE_LOST (partial counts in
-// the error payload). TRUE write fencing is impossible on the multitable
+// WHERE scope_key AND lease_id match) immediately before EVERY ledger write
+// (RECONCILE_LEASE_RENEW_EVERY_WRITES = 1); a renew that matches zero rows
+// means the lease expired and was taken over, and the run ABORTS with
+// CONFIRMATION_DECISION_RECONCILE_LEASE_LOST (partial counts in the error
+// payload). This narrows the takeover race to at most ONE in-flight write; it
+// does NOT close it: TRUE write fencing is impossible on the multitable
 // records API — no ledger write can be made conditional on the lease row — so
-// bounded abort is the ceiling here; idempotent replay (A-01) makes the writes
+// bounded abort is the ceiling here; idempotent replay (A-01) makes the write
 // that landed before the abort harmless to the takeover reconciler.
 // The human CONFIRM path needs no lease: it patches exactly one existing row
 // and refuses any row that is not pending; simultaneous confirms of the SAME
@@ -133,6 +174,7 @@ const {
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
   DECISIONS,
   DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
+  IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   __internals: { stableFingerprint: duplicateGroupFingerprint },
 } = require('./stock-preparation-conflict-planner.cjs')
 const { createTargetScopedRecordsApi } = require('./stock-preparation-table-actions.cjs')
@@ -174,22 +216,57 @@ const RESOLUTION_ACTIONS = Object.freeze({
   MANUAL_HOLD: 'manual_hold',
 })
 const RESOLUTION_ACTION_SET = new Set(Object.values(RESOLUTION_ACTIONS))
-// Derived, not hand-copied: the ONLY action with planner semantics in this cut
-// is the duplicate-resolving policy. The other vocabulary tokens are refused at
-// the confirm boundary (see confirmConfirmationDecision).
-const IMPLEMENTED_RESOLUTION_ACTIONS = Object.freeze([RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS])
+// The fixed action -> planner-policy consumption map (see the header). DERIVED
+// DISCIPLINE: an action is implemented iff it appears here, and everything it
+// maps to must already be a policy the PLANNER implements — asserted at load
+// below, so planner vocabulary drift breaks the module loudly at require time
+// instead of silently changing what a stored confirmation releases.
+const READBACK_POLICY_BY_RESOLUTION_ACTION = Object.freeze({
+  [RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS]: DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
+  [RESOLUTION_ACTIONS.ACCEPT_CURRENT]: 'source_correction_required',
+  [RESOLUTION_ACTIONS.MANUAL_HOLD]: 'hold',
+})
+for (const [mappedAction, mappedPolicy] of Object.entries(READBACK_POLICY_BY_RESOLUTION_ACTION)) {
+  if (!RESOLUTION_ACTION_SET.has(mappedAction)) {
+    throw new Error(`confirmation-decision readback maps unknown action: ${mappedAction}`)
+  }
+  if (!IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.includes(mappedPolicy)) {
+    throw new Error(`confirmation-decision readback maps ${mappedAction} to a policy the planner does not implement: ${mappedPolicy}`)
+  }
+}
+{
+  const resolvingActions = Object.entries(READBACK_POLICY_BY_RESOLUTION_ACTION)
+    .filter(([, mappedPolicy]) => mappedPolicy === DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY)
+    .map(([mappedAction]) => mappedAction)
+  if (resolvingActions.length !== 1 || resolvingActions[0] !== RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS) {
+    throw new Error('exactly keep_multiple_rows may map to the resolving duplicate policy')
+  }
+}
+// Derived from the map, not hand-copied. All three vocabulary tokens now have
+// planner consumption; the refusal branch below stays armed so a FUTURE token
+// added to RESOLUTION_ACTIONS without a map entry is refused, never stored inert.
+const IMPLEMENTED_RESOLUTION_ACTIONS = Object.freeze(Object.keys(READBACK_POLICY_BY_RESOLUTION_ACTION))
 const IMPLEMENTED_RESOLUTION_ACTION_SET = new Set(IMPLEMENTED_RESOLUTION_ACTIONS)
+// Ledger value-entry bounds (Q2-A). The cap is a plain sanity bound on a human
+// reference note, not business validation — canonical validation happens where
+// the human applies the value: on the canonical sheet itself.
+const MAX_RESOLVED_VALUE_LENGTH = 4000
 const READ_PAGE_LIMIT = 500
 const READ_MAX_PAGES = 50
 const MAX_DECISIONS_PER_RECONCILE = 2000
 const CONCURRENCY_MODEL = 'db_backed_reconcile_lease'
 const RECONCILE_LEASE_TABLE = 'integration_stock_prep_confirmation_reconcile_lease'
 const RECONCILE_LEASE_TTL_MS = 60_000
-// Mid-run lease keepalive cadence: renew every this many ledger WRITES. Up to
-// MAX_DECISIONS_PER_RECONCILE sequential remote writes can far outlive one
-// 60s TTL, so the write loop re-asserts ownership at this bounded cadence and
-// aborts the moment the CAS reports the lease gone (see the CONCURRENCY note).
-const RECONCILE_LEASE_RENEW_EVERY_WRITES = 25
+// Mid-run lease keepalive cadence: re-assert ownership via the renew CAS
+// before EVERY ledger write (cadence 1). A synthetic concurrency counter-proof
+// showed the earlier 25-write window admitting duplicate active decisions
+// inside one window — consistent with the documented bounded-abort ceiling,
+// but needlessly wide. Cadence 1 narrows the takeover race to at most ONE
+// in-flight write (the write already issued when the takeover lands); it does
+// NOT make it zero — TRUE fencing remains impossible on the multitable records
+// API because no ledger write can be made conditional on the lease row, and
+// idempotent replay (A-01) is what makes that one surviving write harmless.
+const RECONCILE_LEASE_RENEW_EVERY_WRITES = 1
 
 class StockPreparationConfirmationDecisionError extends Error {
   constructor(status, code, message, details = {}) {
@@ -222,6 +299,46 @@ function requiredString(value, field) {
     )
   }
   return normalized
+}
+
+// Q2-A value entry validation. VALUES-FREE ERRORS by construction: a refusal
+// names the column id, a fixed reason token and at most a LENGTH — never one
+// byte of the submitted content.
+function normalizeResolvedValueEntry({ resolvedValue, resolvedAuxValue } = {}) {
+  const entry = {}
+  for (const [field, raw] of [['resolvedValue', resolvedValue], ['resolvedAuxValue', resolvedAuxValue]]) {
+    if (raw === undefined || raw === null || raw === '') continue
+    if (typeof raw !== 'string') {
+      throw new StockPreparationConfirmationDecisionError(
+        422,
+        'CONFIRMATION_DECISION_VALUE_INVALID',
+        `${field} must be a string`,
+        { field, reason: 'not_a_string' },
+      )
+    }
+    const normalized = raw.trim()
+    if (!normalized) continue
+    if (normalized.length > MAX_RESOLVED_VALUE_LENGTH) {
+      throw new StockPreparationConfirmationDecisionError(
+        422,
+        'CONFIRMATION_DECISION_VALUE_INVALID',
+        `${field} exceeds the maximum length`,
+        { field, reason: 'too_long', maxLength: MAX_RESOLVED_VALUE_LENGTH, valueLength: normalized.length },
+      )
+    }
+    entry[field] = normalized
+  }
+  // The aux column is defined as auxiliary TO the primary — an aux value with
+  // no primary is an ambiguous half-entry, refused rather than guessed at.
+  if (entry.resolvedAuxValue && !entry.resolvedValue) {
+    throw new StockPreparationConfirmationDecisionError(
+      422,
+      'CONFIRMATION_DECISION_VALUE_INVALID',
+      'resolvedAuxValue requires resolvedValue',
+      { field: 'resolvedAuxValue', reason: 'aux_requires_primary' },
+    )
+  }
+  return entry
 }
 
 function normalizeIsoTime(value, field, now = () => new Date()) {
@@ -731,11 +848,11 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
     const counts = { created: 0, existing: 0, superseded: 0, reopened: 0, orphanSuperseded: 0, pending: 0, confirmed: 0 }
     // Bounded-abort write fencing (the ceiling available here — see the
     // CONCURRENCY header note): re-assert lease ownership via the CAS renew
-    // immediately before the FIRST ledger write and then every
-    // RECONCILE_LEASE_RENEW_EVERY_WRITES writes. A renew that reports the
-    // lease gone ABORTS the run with a fixed code and the partial counts; at
-    // most one cadence window of writes can race a takeover, and idempotent
-    // replay (A-01) makes those surviving writes harmless.
+    // immediately before EVERY ledger write (cadence 1). A renew that reports
+    // the lease gone ABORTS the run with a fixed code and the partial counts;
+    // at most ONE in-flight write can race a takeover — not zero, true
+    // fencing being impossible here — and idempotent replay (A-01) makes that
+    // surviving write harmless.
     let writesSinceRenew = RECONCILE_LEASE_RENEW_EVERY_WRITES
     const assertLeaseBeforeWrite = async () => {
       if (writesSinceRenew >= RECONCILE_LEASE_RENEW_EVERY_WRITES) {
@@ -794,11 +911,15 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
         // skipping it: without this the key wedges permanently (confirm
         // requires pending; readback requires confirmed + fingerprint match).
         // The OLD human decision is deliberately CLEARED, not carried forward
-        // — a revived conflict is a NEW question to the human (fail-safe
-        // default, flagged for the owner: O1' matrix Q5 may later rule to
-        // carry it forward). confirmedBy/confirmedAt are machine bookkeeping
-        // of that cleared confirmation and are cleared with it; openedAt
-        // stays — it truthfully records when the decision first opened.
+        // — a revived conflict is a NEW question to the human (Q5-A: the owner
+        // confirmed this conservative default on 2026-08-29 — a parked or
+        // decided row on stale input must be re-confirmed, never silently
+        // re-armed). resolvedValue/resolvedAuxValue clear with it: values
+        // entered against superseded input surviving into the revived decision
+        // would be the automatic carry-forward of matrix Q5-B, which the owner
+        // rejected. confirmedBy/confirmedAt are machine bookkeeping of that
+        // cleared confirmation and are cleared with it; openedAt stays — it
+        // truthfully records when the decision first opened.
         await assertLeaseBeforeWrite()
         await scoped.patchRecord({
           recordId: exact.id,
@@ -806,6 +927,8 @@ async function reconcileConfirmationDecisions({ recordsApi, provisioning, target
             status: STATUSES.PENDING,
             supersededAt: null,
             resolutionAction: null,
+            resolvedValue: null,
+            resolvedAuxValue: null,
             notes: null,
             confirmedBy: null,
             confirmedAt: null,
@@ -914,14 +1037,24 @@ async function listConfirmationDecisions({ recordsApi, provisioning, targetProje
   }
   const rows = await queryAll(scoped, filters)
   const counts = {}
+  const actionCounts = {}
+  let parked = 0
   for (const row of rows) {
     const rowStatus = optionalString(readCell(row, 'status')) || 'unknown'
     counts[rowStatus] = (counts[rowStatus] || 0) + 1
+    const rowAction = optionalString(readCell(row, 'resolutionAction'))
+    if (rowAction) actionCounts[rowAction] = (actionCounts[rowAction] || 0) + 1
+    if (rowStatus === STATUSES.CONFIRMED && rowAction === RESOLUTION_ACTIONS.MANUAL_HOLD) parked += 1
   }
   return {
     ok: true,
     rowCount: rows.length,
     byStatus: counts,
+    // Action tokens are enum-shaped, values-free. `parkedCount` singles out the
+    // human-parked rows (confirmed manual_hold): decided-and-standing-held, as
+    // opposed to PENDING rows, which are still an open question.
+    byResolutionAction: actionCounts,
+    parkedCount: parked,
     rows: rows.map((row) => ({
       decisionId: optionalString(readCell(row, 'decisionId')),
       conflictType: optionalString(readCell(row, 'conflictType')),
@@ -931,7 +1064,50 @@ async function listConfirmationDecisions({ recordsApi, provisioning, targetProje
       sourceRevisionPresent: Boolean(optionalString(readCell(row, 'sourceRevision'))),
       confirmedByPresent: Boolean(optionalString(readCell(row, 'confirmedBy'))),
       confirmedAtPresent: Boolean(optionalString(readCell(row, 'confirmedAt'))),
+      // Value/notes PRESENCE only. The contents cross exactly one surface —
+      // readConfirmationDecisionValueEntry — and the queue is not it.
+      notesPresent: Boolean(optionalString(readCell(row, 'notes'))),
+      resolvedValuePresent: Boolean(optionalString(readCell(row, 'resolvedValue'))),
+      resolvedAuxValuePresent: Boolean(optionalString(readCell(row, 'resolvedAuxValue'))),
     })),
+  }
+}
+
+// THE one surface where value CONTENTS may cross (see VALUE SEMANTICS in the
+// header): a per-decision, admin-gated read for the operator who is deciding —
+// the /stock-prep workbench detail pane. Deliberately NOT part of the queue
+// projection, run evidence, or any log/count payload, and deliberately free of
+// rowIdentity/projectNo/sourceRevision (the value-bearing SYSTEM cells): the
+// operator correlates by decisionId, which the queue already carries.
+async function readConfirmationDecisionValueEntry({ recordsApi, provisioning, targetProjectId, permission, decisionId } = {}) {
+  assertAdminPermission(permission)
+  const id = requiredString(decisionId, 'decisionId')
+  const scoped = await resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords'])
+  const matches = await scoped.queryRecords({ filters: { decisionId: id }, limit: 2, offset: 0 })
+  if (!Array.isArray(matches)) {
+    throw new StockPreparationConfirmationDecisionError(500, 'CONFIRMATION_DECISION_RECORDS_API_INVALID', 'queryRecords must return an array')
+  }
+  if (matches.length !== 1) {
+    throw new StockPreparationConfirmationDecisionError(
+      matches.length === 0 ? 404 : 409,
+      matches.length === 0 ? 'CONFIRMATION_DECISION_NOT_FOUND' : 'CONFIRMATION_DECISION_DUPLICATE',
+      'decisionId must resolve to exactly one decision row',
+    )
+  }
+  const record = matches[0]
+  return {
+    ok: true,
+    mode: 'confirmation_decision_value_entry',
+    decisionId: id,
+    conflictType: optionalString(readCell(record, 'conflictType')),
+    status: optionalString(readCell(record, 'status')),
+    resolutionAction: optionalString(readCell(record, 'resolutionAction')),
+    inputFingerprint: optionalString(readCell(record, 'inputFingerprint')),
+    valueEntry: {
+      resolvedValue: optionalString(readCell(record, 'resolvedValue')),
+      resolvedAuxValue: optionalString(readCell(record, 'resolvedAuxValue')),
+      notes: optionalString(readCell(record, 'notes')),
+    },
   }
 }
 
@@ -949,29 +1125,22 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
       { field: 'resolutionAction' },
     )
   }
-  // FIRST CUT: only keep_multiple_rows has planner semantics. Refuse the other
-  // vocabulary tokens HERE, at selection time, so the refusal lands on the
-  // operator instead of storing a confirmation nothing will ever consume.
+  // Refusal stays armed for FUTURE vocabulary tokens: an action in the frozen
+  // vocabulary with no entry in the consumption map is refused HERE, at
+  // selection time, so the refusal lands on the operator instead of storing a
+  // confirmation nothing will ever consume. (As of the O1' slice all three
+  // tokens are mapped, so this fires only if the vocabulary grows first.)
   if (!IMPLEMENTED_RESOLUTION_ACTION_SET.has(action)) {
     throw new StockPreparationConfirmationDecisionError(
       422,
       'CONFIRMATION_DECISION_ACTION_UNIMPLEMENTED',
-      'resolutionAction has no implemented planner semantics in the first cut',
+      'resolutionAction has no implemented planner semantics yet',
       { field: 'resolutionAction', implementedActions: IMPLEMENTED_RESOLUTION_ACTIONS.slice() },
     )
   }
-  // FIRST CUT: value entry belongs to the (out-of-scope) human-column line and
-  // keep_multiple_rows needs no value — refuse rather than store-and-ignore.
-  for (const [field, value] of [['resolvedValue', resolvedValue], ['resolvedAuxValue', resolvedAuxValue]]) {
-    if (optionalString(value)) {
-      throw new StockPreparationConfirmationDecisionError(
-        422,
-        'CONFIRMATION_DECISION_VALUE_ENTRY_UNIMPLEMENTED',
-        'resolution value entry is not part of the first cut',
-        { field },
-      )
-    }
-  }
+  // Q2-A value entry: validated into the ledger's own human band; consumed by
+  // no machine path (see VALUE SEMANTICS in the header).
+  const valueEntry = normalizeResolvedValueEntry({ resolvedValue, resolvedAuxValue })
   const scoped = await resolveScopedLedger(recordsApi, provisioning, targetProjectId, ['queryRecords', 'patchRecord'])
   const matches = await scoped.queryRecords({ filters: { decisionId: id }, limit: 2, offset: 0 })
   if (!Array.isArray(matches)) {
@@ -1016,6 +1185,8 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
   }
   const normalizedNotes = optionalString(notes)
   if (normalizedNotes) changes.notes = normalizedNotes
+  if (valueEntry.resolvedValue) changes.resolvedValue = valueEntry.resolvedValue
+  if (valueEntry.resolvedAuxValue) changes.resolvedAuxValue = valueEntry.resolvedAuxValue
   await scoped.patchRecord({ recordId: record.id, changes })
   return {
     ok: true,
@@ -1029,17 +1200,30 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
       actorPresent: true,
       confirmedAtPresent: true,
       notesPresent: Boolean(normalizedNotes),
+      // Presence booleans ONLY — the contents cross exactly one surface
+      // (readConfirmationDecisionValueEntry), and evidence is not it.
+      resolvedValuePresent: Boolean(valueEntry.resolvedValue),
+      resolvedAuxValuePresent: Boolean(valueEntry.resolvedAuxValue),
     },
   }
 }
 
-// Planner readback (read-only). Recomputes the first-cut candidates for the
-// CURRENT plan+revision and emits a keep_multiple_rows table-scope policy for
-// each duplicate group whose decision row is CONFIRMED with the SAME
-// inputFingerprint and resolutionAction keep_multiple_rows. Every other case —
-// pending, superseded, cancelled, stale fingerprint, other action — emits
-// nothing, so the hold stands. Superseding a stale row is reconcile's job (the
-// explicit write path); this function never writes anything.
+// Planner readback (read-only). Recomputes the candidates for the CURRENT
+// plan+revision and, for each duplicate group whose decision row is CONFIRMED
+// with the SAME inputFingerprint, emits the planner policy the fixed
+// action->policy map assigns (READBACK_POLICY_BY_RESOLUTION_ACTION):
+//   keep_multiple_rows -> keep_multiple_rows  (the only RESOLVING policy)
+//   accept_current     -> source_correction_required  (named non-resolving
+//                         hold: current state stands, incoming not applied)
+//   manual_hold        -> hold  (parked; emitting the token — instead of
+//                         staying silent — makes a contrary stored table-scope
+//                         release DISAGREE and drop at the merge, so a parked
+//                         group can never be released by an older selection)
+// Every other case — pending, superseded, cancelled, stale fingerprint, an
+// unmapped/legacy action token — emits nothing, so the hold stands. VALUE
+// COLUMNS ARE NEVER READ HERE: the readback consumes decision tokens only (the
+// wall analysis in the header). Superseding a stale row is reconcile's job
+// (the explicit write path); this function never writes anything.
 async function loadConfirmedDuplicatePolicyReview({ recordsApi, provisioning, targetProjectId, permission, projectNo, plan, sourceRevision } = {}) {
   assertAdminPermission(permission)
   const { candidates } = deriveDecisionCandidates({ projectNo, plan, sourceRevision })
@@ -1052,10 +1236,16 @@ async function loadConfirmedDuplicatePolicyReview({ recordsApi, provisioning, ta
     const row = byDecisionId.get(candidate.decisionId)
     if (!row) continue
     if (optionalString(readCell(row, 'inputFingerprint')) !== candidate.inputFingerprint) continue
-    if (optionalString(readCell(row, 'resolutionAction')) !== RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS) continue
+    const confirmedAction = optionalString(readCell(row, 'resolutionAction'))
+    // Own-property lookup ONLY: a hand-seeded row carrying a prototype key
+    // ('constructor', ...) must fall through to the hold, not to Object.prototype.
+    const mappedPolicy = confirmedAction && Object.prototype.hasOwnProperty.call(READBACK_POLICY_BY_RESOLUTION_ACTION, confirmedAction)
+      ? READBACK_POLICY_BY_RESOLUTION_ACTION[confirmedAction]
+      : undefined
+    if (!mappedPolicy) continue
     policies.push({
       fingerprint: candidate.duplicateGroupFingerprint,
-      policy: DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
+      policy: mappedPolicy,
       approvedAtPresent: true,
       approvedByPresent: true,
     })
@@ -1071,6 +1261,7 @@ module.exports = {
   STATUSES,
   RESOLUTION_ACTIONS,
   IMPLEMENTED_RESOLUTION_ACTIONS,
+  READBACK_POLICY_BY_RESOLUTION_ACTION,
   CONCURRENCY_MODEL,
   RECONCILE_LEASE_TABLE,
   StockPreparationConfirmationDecisionError,
@@ -1082,6 +1273,7 @@ module.exports = {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
   __internals: {
     stableHash,
