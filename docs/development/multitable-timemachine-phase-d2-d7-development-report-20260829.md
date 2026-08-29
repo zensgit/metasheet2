@@ -1,12 +1,13 @@
 # Time Machine Phase D2-D7 development report
 
-**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT HOLD. PR #5305 merged through
-`fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The post-merge
-closeout code checkpoint `6cf88c0e848495787d8dfec1af6348ba22325762`
-closes two disclosed local residuals: malformed catalog `2xx` responses now fail
-closed, and a stuck restore-worker drain is bounded at ten seconds. That
-checkpoint is local only: it has not been pushed, reviewed by remote CI, staged,
-or deployed. No Time Machine flag is enabled and production was not accessed.
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 merged
+through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
+closeout candidate `0767a3781e2452c8693a33c6197a2c7bef6d9490` is replayed onto
+then-current main `5eb83055937ebecc9be690bcf721a8cc89ca27d0`. It closes the
+disclosed malformed catalog/job-list success responses and bounds a stuck
+restore-worker drain at ten seconds. The candidate is local only: it has not
+been pushed, reviewed by remote CI, staged, or deployed. No Time Machine flag is
+enabled and production was not accessed.
 
 **Design authority:**
 `multitable-timemachine-phase-d1-durable-archive-design-lock-20260826.md`.
@@ -38,9 +39,12 @@ or deployed. No Time Machine flag is enabled and production was not accessed.
 | product-code remote matrix | `48 SUCCESS / 1 intentional SKIPPED / 0 failure` |
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
-| post-merge closeout base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
-| post-merge closeout code head | `6cf88c0e848495787d8dfec1af6348ba22325762` |
-| post-merge closeout code tree | `a6fe1e4d8a685dea8dd30563826ca4d3ecc76c64` |
+| post-merge closeout original base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| then-current main replay parent | `5eb83055937ebecc9be690bcf721a8cc89ca27d0` |
+| local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
+| empty catalog response hardening | `0d5fd1adf51f0447722d9d23fb675797f108da3f` |
+| empty job-list response hardening | `0767a3781e2452c8693a33c6197a2c7bef6d9490` |
+| post-merge closeout code tree | `e9bf2e6d4bac583c846d9037d66769c7a7ebac0c` |
 | post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
@@ -194,6 +198,11 @@ not reveal. They were fixed on the same branch before closeout:
    drain bound; timeout maps to the existing values-free stop error, and the
    server preserves the existing rule that the database pool stays open when the
    worker has not definitely drained.
+6. The current-main replay at `c1863ea288` preserves that product delta while
+   incorporating `5eb8305593` as the exact second parent. `0d5fd1adf5` and
+   `0767a3781e` then normalize successful 204/empty-body responses for both the
+   archive catalog and durable job list to their fixed values-free domain errors.
+   A truthy primitive catalog body is also rejected as malformed.
 
 ## 3. Architecture boundaries preserved
 
@@ -219,7 +228,7 @@ These are real residuals, not documentation polish:
 | no executed staging fault/storage/KMS window | D7 cannot claim staging acceptance yet |
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout checkpoint is local only | `6cf88c0e84` has local gates but no push, PR, independent exact-head review, or remote matrix |
+| post-merge closeout candidate is local only | `0767a3781e` has local gates and a Sonnet 5 review/fix-forward, but no push, PR, final exact-head review, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -228,20 +237,19 @@ failure domain.
 
 ## 5. Coordination status
 
-- Approval/automation remains a separate HOLD queue. Phase D did not edit its
+- Approval/automation remains a separate replay queue. Phase D did not edit its
   implementation branches or merge any approval PR.
 - Approval FWB and automation writes continue to use the shared writer-block
   entry; D5 did not create a second authority table or lock order.
-- Cloud Classroom used explicitly serialized shared/DB windows, returned both
-  with clean residue, and remains in separate worktrees. None of its product or
-  shared-union bytes are mixed into this Time Machine candidate.
+- Cloud Classroom remains in a separate product-only hardening worktree. None of
+  its product or shared-union bytes are mixed into this Time Machine candidate.
 
 ## 6. Change discipline
 
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
 - The post-merge closeout branch remains local. It was not pushed and no PR was
-  opened for `6cf88c0e84`.
+  opened for `0767a3781e`.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
@@ -254,8 +262,8 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Independently review `6cf88c0e84`, replay it onto then-current main if needed,
-   and require its complete exact-head remote checks before a separate landing
+2. Complete final independent review of `0767a3781e`, replay again if main moves,
+   and require complete exact-head remote checks before a separate landing
    decision. Local green evidence is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
    including a true process restart and provider/KMS fault legs.

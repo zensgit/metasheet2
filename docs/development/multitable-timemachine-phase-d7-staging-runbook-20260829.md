@@ -23,8 +23,8 @@ candidate SHA:
    is injected into both `/api/multitable` and compatibility `/api/univer-meta`
    mounts, and the application owns worker start and shutdown.
 2. Land and remotely verify the post-merge closeout that bounds a stuck worker
-   drain and rejects malformed catalog success data. At this runbook revision it
-   is local checkpoint `6cf88c0e84`, not a deployed build.
+   drain and rejects malformed catalog/job-list success data. At this runbook
+   revision it is local candidate `0767a3781e`, not a deployed build.
 3. The object store is independently durable from the hot database and the
    application host. Same-host local files do not satisfy this gate.
 4. Key custody uses a staging KMS/test key and never exposes plaintext key

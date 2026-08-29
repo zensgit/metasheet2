@@ -1,7 +1,8 @@
 # Time Machine Phase D2-D7 verification report
 
-**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT HOLD. PR #5305 is merged. The
-post-merge hardening checkpoint is locally verified but not pushed or remotely
+**Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
+merged. Local candidate `0767a3781e2452c8693a33c6197a2c7bef6d9490` is
+replayed onto then-current main and locally verified, but not pushed or remotely
 verified. No staging, flag, deployment, or production acceptance claim.
 
 ## 1. Verification subject
@@ -27,9 +28,11 @@ verified. No staging, flag, deployment, or production acceptance claim.
 | key-registry scratch-drain hardening | `e19b65041d9fd79a556bb58b0c40734b2066c874` |
 | final code/test tree before report refresh | `6ac12d5efa2849faecdd4de32f4414574b90bb82` |
 | post-merge closeout worktree | `/private/tmp/codex-tm-closeout-hardening-20260829` |
-| post-merge closeout base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
-| post-merge closeout code head | `6cf88c0e848495787d8dfec1af6348ba22325762` |
-| post-merge closeout code tree | `a6fe1e4d8a685dea8dd30563826ca4d3ecc76c64` |
+| post-merge closeout original base | `3f30d8eb4f27f9972b640e2d69e2c3dab2837ae5` |
+| then-current main replay parent | `5eb83055937ebecc9be690bcf721a8cc89ca27d0` |
+| local true-merge replay | `c1863ea288f4a23a0736b6984c51d8dfa867b714` |
+| post-merge closeout code head | `0767a3781e2452c8693a33c6197a2c7bef6d9490` |
+| post-merge closeout code tree | `e9bf2e6d4bac583c846d9037d66769c7a7ebac0c` |
 | post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
@@ -64,15 +67,18 @@ merge still does not authorize runtime enablement.
 
 ### Post-merge local closeout checks
 
-Checkpoint `6cf88c0e84` closes the two later review residuals without changing a
+Candidate `0767a3781e` closes the later review residuals without changing a
 migration, workflow, flag, writer, archive format, or provider contract:
 
 - pre-fix catalog test: **17 failures / 48 tests**, each malformed successful
   response resolved instead of rejecting; fixed client: **48/48 PASS**;
 - pre-fix application test: **1 failure / 10 tests**, because a never-resolving
   in-flight worker had no ten-second failure; fixed application: **10/10 PASS**;
-- client plus mounted modal neighbor: **2 files / 65 tests PASS**;
+- final archive client: **1 file / 53 tests PASS**;
+- client plus mounted modal neighbor: **2 files / 70 tests PASS**;
 - worker, application, and server wiring neighbors: **3 files / 32 tests PASS**;
+- current-main replay backend set: **3 files / 16 tests PASS**;
+- current-main D5-D7 unit set: **18 files / 208 tests PASS**;
 - Required Web: **406 files / 5,150 tests PASS**;
 - Time Machine archive CI wiring: **6/6 PASS**;
 - web and core-backend typecheck: **PASS**;
@@ -257,6 +263,8 @@ outside this change. It was not edited or misreported as fixed.
 | reduce positive-decimal validation to string-only | client spec RED at malformed total-count error shape and zero row version acceptance |
 | omit restore-plan child from full-schema cleanup | catalog real-DB suite RED at FK-protected cleanup; **40 tests RED** in the selected file |
 | omit test-only trigger bypass for immutable token burns | lease suite RED at immutable burn cleanup; **6 tests RED** |
+| remove the catalog null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
+| remove the job-list null-body guard | both 204 and empty-200 cases RED with raw `TypeError`; restored **53/53 PASS** |
 
 The lease-reclaim mutation was restored with `apply_patch`; the same two focused
 real-DB legs then passed **2/2**. Runtime source is byte-restored; only tests and
@@ -359,9 +367,11 @@ list mapped malformed successful data to an empty catalog. Those findings were
 not evidence for flag enablement.
 
 Post-merge checkpoint `6cf88c0e84` closes the latter two observations with
-pre-fix RED evidence and the local gates listed above. The overlapping sheet-ID
-comparison remains the disclosed P3; no external-model verdict is claimed for
-this new local delta.
+pre-fix RED evidence. A Sonnet 5 review of the later empty-catalog fix found
+**0 P1 / 1 P2 / 0 P3**: the adjacent durable job-list method retained the same
+204/empty-body raw `TypeError`. `0767a3781e` closes that finding with the second
+RED/restore mutation above. The overlapping sheet-ID comparison remains the
+disclosed P3; final exact-head review is still required before landing.
 
 The same review cycle exposed malformed job-list elements and led to
 `4d3a50c627`. Sol then reviewed that exact two-file delta, ran the focused spec at
@@ -390,7 +400,7 @@ owner/provider or staging/production proof:
 - current-main local integration and exact-worktree gates: passed;
 - PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
   1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
-- local closeout `6cf88c0e84` has no remote matrix or landing authorization;
+- local closeout `0767a3781e` has no remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 
