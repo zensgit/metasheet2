@@ -80,6 +80,44 @@ function contentCourse(over: Record<string, unknown> = {}) {
   }
 }
 
+function publishedCourse(over: Record<string, unknown> = {}) {
+  return {
+    courseId: COURSE,
+    courseVersionId: VERSION,
+    status: 'published',
+    itemCount: 2,
+    items: [
+      {
+        itemId: ARTICLE_ITEM,
+        itemType: 'article',
+        contentRevisionId: ARTICLE_REVISION,
+        position: 1,
+      },
+      {
+        itemId: LINK_ITEM,
+        itemType: 'external_link',
+        contentRevisionId: LINK_REVISION,
+        position: 2,
+      },
+    ],
+    ...over,
+  }
+}
+
+function openedArticle(over: Record<string, unknown> = {}) {
+  return {
+    itemId: ARTICLE_ITEM,
+    itemType: 'article',
+    title: 'Article',
+    articleHtml: '<p>Safe</p>',
+    externalUrl: null,
+    status: 'completed',
+    completedAt: CREATED,
+    assurance: 'weak_server_recorded_open',
+    ...over,
+  }
+}
+
 function lastCall(): { path: string; options: RequestInit } {
   const [path, options] = apiFetchMock.mock.calls.at(-1) ?? []
   return { path: String(path), options: (options ?? {}) as RequestInit }
@@ -218,6 +256,52 @@ describe('e-learning content client', () => {
       requestHash: 'leak',
     }))
     await expect(openElearningContentItem(LINK_ITEM, REQUEST)).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
+  })
+
+  it.each([
+    publishedCourse({ extra: true }),
+    publishedCourse({
+      items: [
+        publishedCourse().items[0],
+        { ...publishedCourse().items[1], itemId: ARTICLE_ITEM },
+      ],
+    }),
+    publishedCourse({
+      items: [
+        publishedCourse().items[0],
+        { ...publishedCourse().items[1], contentRevisionId: ARTICLE_REVISION },
+      ],
+    }),
+    publishedCourse({
+      itemCount: 1,
+      items: [{ ...publishedCourse().items[0], position: 2 }],
+    }),
+    publishedCourse({
+      items: [
+        { ...publishedCourse().items[0], position: 2 },
+        { ...publishedCourse().items[1], position: 1 },
+      ],
+    }),
+  ])('rejects malformed publish results', async (body) => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(201, body))
+    await expect(publishElearningContentCourse({
+      requestId: REQUEST,
+      title: 'Course',
+      items: [{ itemType: 'article', contentRevisionId: ARTICLE_REVISION }],
+    })).rejects.toMatchObject({ code: 'invalid_response', status: 201 })
+  })
+
+  it.each([
+    openedArticle({ status: 'opened' }),
+    openedArticle({ completedAt: 'not-a-date' }),
+    openedArticle({ assurance: 'weak_server_recorded_launch' }),
+    openedArticle({ itemType: 'external_link' }),
+  ])('rejects malformed open results', async (body) => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, body))
+    await expect(openElearningContentItem(ARTICLE_ITEM, REQUEST)).rejects.toMatchObject({
       code: 'invalid_response',
       status: 200,
     })

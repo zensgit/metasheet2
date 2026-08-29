@@ -29,6 +29,7 @@ import ElearningContentAdminSection from '../src/views/ElearningContentAdminSect
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
 const VERSION = '22222222-2222-4222-8222-222222222222'
+const SECOND_VERSION = '22222222-2222-4222-8222-222222222223'
 const ARTICLE_REVISION = '33333333-3333-4333-8333-333333333333'
 const LINK_REVISION = '44444444-4444-4444-8444-444444444444'
 const ARTICLE_ITEM = '55555555-5555-4555-8555-555555555555'
@@ -171,6 +172,46 @@ describe('ElearningContentAdminSection', () => {
       'external_link',
       'article',
     ])
+  })
+
+  it('keys direct-assignment retries by the exact course version and target user', async () => {
+    const root = mountView()
+    await fillArticleAndLink(root)
+    const target = root.querySelector('[data-testid="elearning-content-target-user"]') as HTMLInputElement
+    const publish = root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement
+
+    fill(target, 'user-1')
+    publish.click()
+    await flushUi(20)
+    const firstSourceKey = h.assign.mock.calls[0][0].sourceKey
+
+    publish.click()
+    await flushUi(20)
+    expect(h.assign.mock.calls[1][0].sourceKey).toBe(firstSourceKey)
+
+    fill(target, 'user-2')
+    publish.click()
+    await flushUi(20)
+    const secondTargetSourceKey = h.assign.mock.calls[2][0].sourceKey
+    expect(secondTargetSourceKey).not.toBe(firstSourceKey)
+
+    h.publishCourse.mockResolvedValueOnce({
+      courseId: COURSE,
+      courseVersionId: SECOND_VERSION,
+      status: 'published',
+      itemCount: 2,
+      items: [
+        { itemId: ARTICLE_ITEM, itemType: 'article', contentRevisionId: ARTICLE_REVISION, position: 1 },
+        { itemId: LINK_ITEM, itemType: 'external_link', contentRevisionId: LINK_REVISION, position: 2 },
+      ],
+    })
+    publish.click()
+    await flushUi(20)
+    expect(h.assign.mock.calls[3][0]).toEqual(expect.objectContaining({
+      targetUserId: 'user-2',
+      courseVersionId: SECOND_VERSION,
+    }))
+    expect(h.assign.mock.calls[3][0].sourceKey).not.toBe(secondTargetSourceKey)
   })
 
   it('keeps draft HTML out of rendering and validates empty ordered content locally', async () => {

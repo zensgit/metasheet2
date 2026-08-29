@@ -244,11 +244,12 @@ function validationError(): string | null {
   return null
 }
 
-function assignmentSourceKey(courseVersionId: string): string {
-  const existing = assignmentSourceKeys.get(courseVersionId)
+function assignmentSourceKey(courseVersionId: string, targetUserId: string): string {
+  const identity = JSON.stringify([courseVersionId, targetUserId])
+  const existing = assignmentSourceKeys.get(identity)
   if (existing) return existing
   const created = newUuid()
-  assignmentSourceKeys.set(courseVersionId, created)
+  assignmentSourceKeys.set(identity, created)
   return created
 }
 
@@ -288,7 +289,7 @@ async function publishCourse(): Promise<void> {
         await assignElearningDirect({
           targetUserId: target,
           courseVersionId: published.courseVersionId,
-          sourceKey: assignmentSourceKey(published.courseVersionId),
+          sourceKey: assignmentSourceKey(published.courseVersionId, target),
         })
         statusTone.value = 'info'
         status.value = elearningLabel('admin.assignSuccess', isZh.value)
