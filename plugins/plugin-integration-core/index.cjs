@@ -52,7 +52,11 @@ const { createPipelineRunner } = require('./lib/pipeline-runner.cjs')
 // W-2: the B2a read-authorization registry, built HERE as well as in http-routes so the pipeline
 // runner carries the fence too. The cross-plugin communication API below enters the runner directly
 // — no route, no `requireAccess` — so a fence that lived only in the HTTP layer left that door open.
-const { createB2aRegistry, B2A_AUTHORIZED_RUN_ID } = require('./lib/b2a-trial-registry.cjs')
+const {
+  createB2aRegistry,
+  B2A_AUTHORIZED_RUN_ID,
+  C6_WRITE_LIFECYCLE_CONTEXT,
+} = require('./lib/b2a-trial-registry.cjs')
 const { installStaging, listStagingDescriptors } = require('./lib/staging-installer.cjs')
 const { registerIntegrationRoutes } = require('./lib/http-routes.cjs')
 const {
@@ -136,22 +140,30 @@ function redactDeadLetterForCommunication(deadLetter) {
 }
 
 /**
- * W-2. Strip the runner's already-asserted run marker off cross-plugin input.
+ * W-2 + R-wave. Strip BOTH server-only markers off cross-plugin input.
  *
- * The marker is a SYMBOL, so it cannot be expressed in JSON and cannot arrive over a cross-plugin
- * call as things stand. Stripping it anyway costs one `hasOwnProperty` and removes the assumption:
- * "not expressible in JSON" is a property of today's transport, not a fence, and the marker decides
- * whether the runner CONTINUES an existing operation claim or takes its own. A caller able to set it
- * could ride an authorization somebody else was granted.
+ *   `B2A_AUTHORIZED_RUN_ID`        — decides whether the runner CONTINUES an existing operation
+ *                                    claim or takes its own. A caller able to set it could ride an
+ *                                    authorization somebody else was granted.
+ *   `C6_WRITE_LIFECYCLE_CONTEXT`   — asserts that a live write already passed the governed C6 write
+ *                                    lifecycle at an HTTP route. A caller able to set it would be
+ *                                    asserting that about itself, which is the whole bypass.
  *
- * Returns the input UNCHANGED — same object, not a copy — when the marker is absent, which is every
- * real call. The dormant path therefore hands the runner exactly what it handed it before.
+ * Both are SYMBOLS, so neither can be expressed in JSON and neither can arrive over a cross-plugin
+ * call as things stand. Stripping them anyway costs two `hasOwnProperty` calls and removes the
+ * assumption: "not expressible in JSON" is a property of today's transport, not a fence.
+ *
+ * Returns the input UNCHANGED — same object, not a copy — when neither marker is present, which is
+ * every real call. The dormant path therefore hands the runner exactly what it handed it before.
  */
-function withoutB2aAuthorizedRunMarker(input) {
+function withoutServerOnlyRunMarkers(input) {
   if (!input || typeof input !== 'object') return input
-  if (!Object.prototype.hasOwnProperty.call(input, B2A_AUTHORIZED_RUN_ID)) return input
+  const hasRunId = Object.prototype.hasOwnProperty.call(input, B2A_AUTHORIZED_RUN_ID)
+  const hasWriteContext = Object.prototype.hasOwnProperty.call(input, C6_WRITE_LIFECYCLE_CONTEXT)
+  if (!hasRunId && !hasWriteContext) return input
   const sanitized = { ...input }
   delete sanitized[B2A_AUTHORIZED_RUN_ID]
+  delete sanitized[C6_WRITE_LIFECYCLE_CONTEXT]
   return sanitized
 }
 
@@ -227,8 +239,14 @@ function buildCommunicationApi() {
       // W-2: this is an IN-PROCESS source read. It reaches the runner without passing a route, so the
       // B2a fence it meets is the runner's own — see `assertB2aPipelineSourceReadAuthorized`. On an
       // armed deployment an unregistered caller is refused here before any credential reload.
+      //
+      // R-wave (finding 4): it is also an in-process WRITE whenever `dryRun` is not set, and it runs
+      // none of the C6 write lifecycle the HTTP routes run. With the marker stripped below, the
+      // runner's own `assertC6WriteLifecycleContext` refuses such a call on an armed deployment. The
+      // intended posture, stated plainly: cross-plugin DRY RUNS work; cross-plugin WRITES do not —
+      // a plugin that needs to write drives the governed HTTP surface, which owns the lifecycle.
       return requireInitialized(pipelineRunner, 'pipeline runner is not initialized')
-        .runPipeline(withoutB2aAuthorizedRunMarker(input))
+        .runPipeline(withoutServerOnlyRunMarkers(input))
     },
     async listDeadLetters(input) {
       const rows = await requireInitialized(deadLetterStore, 'dead-letter store is not initialized')
@@ -247,8 +265,12 @@ function buildCommunicationApi() {
       }
       // W-2: replay's source-read leg is `runPipeline`, which carries the runner's B2a fence, so this
       // in-process door is gated on the same footing as the route.
+      //
+      // R-wave (finding 4): a replay is ALWAYS a live write — it re-enters `runPipeline` with no
+      // `dryRun` — so on an armed deployment this door is refused outright without the governed
+      // route's write-lifecycle context, which the stripper below guarantees it cannot forge.
       return redactReplayResultForCommunication(
-        await runner.replayDeadLetter(withoutB2aAuthorizedRunMarker(input)),
+        await runner.replayDeadLetter(withoutServerOnlyRunMarkers(input)),
       )
     },
     async listStagingDescriptors() {

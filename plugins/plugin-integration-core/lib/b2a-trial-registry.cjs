@@ -282,6 +282,37 @@ const SEALED_SNAPSHOT_BINDING_REF = 'sealed-snapshot:active-binding'
 // rather than a fence.
 const B2A_AUTHORIZED_RUN_ID = Symbol('b2aAuthorizedRunId')
 
+// ─── THE C6 WRITE-LIFECYCLE CONTEXT MARKER (R-wave, external review finding 4) ─
+//
+// WHAT THIS CLOSES, stated as the gap it was. The HTTP layer runs a C6 write lifecycle before a live
+// pipeline run: `assertPipelineRunAllowed` refuses the ordinary `pipeline-runner ->
+// metasheet:multitable upsert` path outright (E3-01) and gates the rest. `runner.runPipeline`
+// reached through the CROSS-PLUGIN communication API runs none of it — it goes straight to
+// `loadPipelineContext` and then to `targetAdapter.upsert`. K3 is permanently fenced at the adapter
+// and generic outbound HTTP writes are default-deny (W-1c), but a multitable-target write pipeline
+// is covered by NEITHER, so an in-process plugin could drive a live write with no lifecycle at all.
+//
+// THE MECHANISM IS `B2A_AUTHORIZED_RUN_ID`'S, VERBATIM, and for the same reason. A symbol cannot be
+// expressed in JSON, so it cannot arrive over a cross-plugin call, an HTTP body or a query string;
+// only a module that imports this constant can set one, and every such module is inside this plugin.
+// `index.cjs` strips it off cross-plugin input anyway — belt and braces, because "not expressible in
+// JSON" is a property of today's transport rather than a fence.
+//
+// WHAT IT MEANS WHEN PRESENT: this write arrived through a governed HTTP surface that already ran
+// the C6 lifecycle for it (`requireAccess` + `assertPipelineRunAllowed`, which is the E3-01 write
+// fence AND the B2a read authorization). It is a CONTEXT marker, not an authorization of its own:
+// the routes attach it only AFTER their own checks pass.
+//
+// ARMED-SCOPED, and this is the honest bound. The lifecycle it mirrors is itself armed-scoped
+// (`assertPipelineRunAllowed` returns before its E3-01 fence when `b2aTrialRegistry` is null), so on
+// a DORMANT deployment the route enforces nothing either and there is no differential to close —
+// while a dormant runner stays byte-identical, which is the guarantee the rest of this module rests
+// on. Arming the gate is what makes the cross-plugin write door fail closed.
+//
+// DRY RUNS ARE UNAFFECTED, deliberately (the E4-05 lesson): a dry run calls `previewUpsert`, never
+// `upsert`, so refusing it would break a read-only preview and close nothing.
+const C6_WRITE_LIFECYCLE_CONTEXT = Symbol('c6WriteLifecycleContext')
+
 // Bounded exception window. 180 days is long enough for a real narrow-path activation (the v9.1
 // freeze estimates B2a at ≈3–5 pw of engineering plus gate calendar) and short enough that an
 // exception cannot quietly outlive the P2.5 migration meant to replace it. Reviewed bound; tighten
@@ -376,6 +407,74 @@ function readPlanSourceObjects(readPlan) {
     }
   }
   return Object.freeze([...objects].sort())
+}
+
+// ─── R-02, SECOND HALF: OBJECTS THE PLAN DOES NOT NAME ───────────────────────
+//
+// `readPlanSourceObjects` above walks the plan and is exact about what the PLAN says. It is not
+// exact about what the READ does, and the difference is a real one: `data-source:sql-readonly`
+// carries an optional, server-config-bound `lookupProjection` (`config.lookupProjection`, see that
+// adapter's `normalizeLookupProjection`) whose `lookupObject` is a SECOND, DISTINCT table — the
+// adapter validates that it differs from `baseObject` — read on every page to enrich the base rows.
+//
+// So a registration whose `objectScope` names one table authorized a read that touches two. The
+// enumeration was honest about the plan and silent about the config, which is precisely the shape
+// "不扩大范围" forbids. The fix is at the guard seam, where the object list is composed: the lookup
+// object joins the list, so a registration that does not enumerate it is REFUSED with the ordinary
+// `object_out_of_scope` — the widening becomes a scope mismatch instead of a silent extra table.
+//
+// THE KIND ROSTER IS THE HONEST BOUND. Only this adapter kind has a config-bound second read today
+// (`PRIVATE_CONFIG_KEYS_BY_KIND` in external-systems.cjs lists `lookupProjection` for exactly it),
+// and resolving the private config costs a platform read, so it is asked for only where it can
+// matter. A FUTURE adapter kind that reads a second object off its own config outruns this roster
+// and must be added to it — the same visible-edit requirement `B2A_PURPOSES` imposes on a new entry
+// point, and stated here rather than left to be discovered.
+//
+// FAIL-CLOSED WHEN IT CANNOT BE RESOLVED. An armed read over such a kind whose caller cannot resolve
+// the private config refuses (`config_bound_object_unresolvable`) rather than authorizing against
+// the plan's list alone: "the config was unreadable" is not a reason to widen an object scope. The
+// private config comes from a NON-DECRYPTING accessor (`getExternalSystemAdapterConfig`), so the
+// fence still lands before any credential reload — the property W-2's ordering rests on.
+const B2A_CONFIG_BOUND_LOOKUP_KINDS = Object.freeze(['data-source:sql-readonly'])
+
+/**
+ * The `lookupProjection` second object a source system's server-side config adds, or `null`.
+ *
+ * Structural and forgiving on purpose: this reads a stored config that the ADAPTER validates
+ * strictly. A malformed one yields `null` here and is refused by the adapter later — this function
+ * exists to widen the scope check, never to become a second validator that could disagree.
+ */
+function lookupProjectionSourceObject(config) {
+  if (!isPlainObject(config)) return null
+  const projection = config.lookupProjection
+  if (!isPlainObject(projection)) return null
+  return optionalString(projection.lookupObject)
+}
+
+/**
+ * Every source object the read WILL touch: the ones the plan names, plus any the source system's
+ * server-side config adds behind the plan's back.
+ *
+ * @param {string[]}  o.sourceObjects         what the plan names
+ * @param {string}    o.sourceSystemType      the source system's kind
+ * @param {function}  o.loadSourceSystemConfig  `() => Promise<{config}|config|null>`, NON-DECRYPTING;
+ *                                            required when the kind can hide an object, else unused
+ * @returns {Promise<string[]>} the list to hand `assertB2aReadAuthorization` as `sourceObjects`
+ */
+async function resolveB2aSourceObjects({ sourceObjects, sourceSystemType, loadSourceSystemConfig } = {}) {
+  const named = (Array.isArray(sourceObjects) ? sourceObjects : []).map(optionalString).filter(Boolean)
+  const kind = optionalString(sourceSystemType)
+  if (!kind || !B2A_CONFIG_BOUND_LOOKUP_KINDS.includes(kind)) return named
+  if (typeof loadSourceSystemConfig !== 'function') {
+    refuse(B2A_SCOPE_MISMATCH, 'config_bound_object_unresolvable',
+      'a B2a-gated read over a source whose server-side configuration can add a second object must be able to resolve that configuration',
+      { objectCount: named.length })
+  }
+  const loaded = await loadSourceSystemConfig()
+  const config = isPlainObject(loaded) && isPlainObject(loaded.config) ? loaded.config : loaded
+  const lookupObject = lookupProjectionSourceObject(config)
+  if (!lookupObject || named.includes(lookupObject)) return named
+  return [...named, lookupObject]
 }
 
 class B2aReadAuthorizationError extends Error {
@@ -1187,6 +1286,26 @@ async function assertB2aReadAuthorization(options = {}) {
   throw lastRefusal
 }
 
+/**
+ * THE RUNNER-LEVEL C6 WRITE-LIFECYCLE REFUSAL (external review finding 4).
+ *
+ * Thrown when a live (non-dry) pipeline run reaches the runner WITHOUT the server-side
+ * `C6_WRITE_LIFECYCLE_CONTEXT` marker that the governed HTTP write surfaces attach — i.e. through
+ * the cross-plugin communication API, which runs no lifecycle of its own.
+ *
+ * The CODE is the existing `C6_SAFE_LIFECYCLE_REQUIRED`, not a new one: this is the same property
+ * the route already refuses with (a live write outside the C6 dry-run -> token -> apply lifecycle),
+ * reached at a second layer. Inventing a parallel code for one property is exactly what §13's frozen
+ * vocabulary exists to prevent. The `reason` token is what distinguishes the layers.
+ *
+ * VALUES-FREE: a fixed code, a coarse reason and one boolean. No pipeline id, no object, no target.
+ */
+function refuseRunnerWriteOutsideC6Lifecycle() {
+  refuse(C6_SAFE_LIFECYCLE_REQUIRED, 'runner_write_outside_c6_lifecycle',
+    'a live pipeline write must enter through the governed C6 write surface, which attaches the server-side write-lifecycle context',
+    { dryRun: false })
+}
+
 // ─── R-05: THE READ-HARDENING CODES, SURFACED AT THE SEAM ────────────────────
 //
 // `B2A_SOURCE_TIMEOUT` and `B2A_PAGE_LIMIT_EXCEEDED` were frozen vocabulary with NO PRODUCER: pinned
@@ -1471,6 +1590,18 @@ function refuseB2aArmedSqlServerRequestTimeoutDisabled(authorization) {
 // COST, stated: an ARMED read now makes one `getSchema` call per plan object before the read (to pin
 // or compare) and one after it (E3-05's mid-read check). A DORMANT read makes none — the whole path
 // is skipped when the authorization is `null`.
+//
+// TODO(R-02-LOOKUP-SCHEMA-PIN): the OBJECT SCOPE half of R-02's config-bound second read is closed
+// (see `resolveB2aSourceObjects` above — the `lookupProjection.lookupObject` now has to be
+// enumerated by the registration or the read is refused). The CONTRACT half is not. This contract
+// digests one `getSchema` per object in the list its CALLER passes, and every caller passes the
+// PLAN's objects (`readPlanSourceObjects(action.source.readPlan)` in
+// stock-preparation-table-actions.cjs's `assertB2aReadHardeningBeforeExpansion`), so the lookup
+// table's columns are not pinned and a drift in THEM is not detected. Closing it means threading the
+// source system's private config into that seam so the contract covers the same list the guard
+// matched — a change in a module outside this wave's file set, and one extra `getSchema` per armed
+// read. It is recorded here rather than half-done: an under-covered contract that looked total would
+// be worse than one whose bound is written down.
 
 const SCHEMA_CONTRACT_KEY_PREFIX = 'integration:b2a:schema-contract:'
 const B2A_SCHEMA_CONTRACT_VERSION = 1
@@ -1736,7 +1867,12 @@ module.exports = {
   B2A_PURPOSE_SEALED_SNAPSHOT_SQLSERVER,
   SEALED_SNAPSHOT_BINDING_REF,
   B2A_AUTHORIZED_RUN_ID,
+  C6_WRITE_LIFECYCLE_CONTEXT,
+  refuseRunnerWriteOutsideC6Lifecycle,
   readPlanSourceObjects,
+  B2A_CONFIG_BOUND_LOOKUP_KINDS,
+  lookupProjectionSourceObject,
+  resolveB2aSourceObjects,
   B2A_ERROR_CODES,
   B2A_REGISTRATION_REQUIRED,
   B2A_AUTHORIZATION_INVALID,
