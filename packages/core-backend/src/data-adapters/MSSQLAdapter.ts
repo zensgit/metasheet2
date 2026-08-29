@@ -295,6 +295,7 @@ export class MSSQLAdapter extends BaseDataAdapter {
   }
 
   async select<T = Record<string, DbValue>>(table: string, options: QueryOptions = {}): Promise<QueryResult<T>> {
+    const conn = this.config.connection
     const selectClause = options.select?.length
       ? options.select.map(col => this.quoteIdent(col)).join(', ')
       : '*'
@@ -327,7 +328,27 @@ export class MSSQLAdapter extends BaseDataAdapter {
       : null
 
     if (offset != null && offset > 0) {
-      // OFFSET requires an ORDER BY; fall back to a stable no-op ordering.
+      // #4591 (DATA_SOURCE_OFFSET_ORDERING_REQUIRED, still DRAFT — the full ordering-requirement
+      // design is owner-gated, see
+      // docs/development/database-system-integration-line-design-and-verification-20260724.md §6
+      // Fences, and is NOT implemented here): SQL Server's OFFSET/FETCH syntax requires SOME
+      // ORDER BY to be syntactically legal at all; without a real sort key the server gives no
+      // guarantee of stable row order across separate OFFSET calls, so a multi-page read can
+      // duplicate or skip rows. `(SELECT NULL)` below is that syntactic no-op, not a fix.
+      //
+      // This is a narrow, OPT-IN, DEFAULT-OFF belt local to this adapter: when a source explicitly
+      // sets connection.strictOffsetOrdering=true, an offset>0 read with no caller-supplied orderBy
+      // is refused outright instead of silently running under the non-deterministic fallback.
+      // Unset/false is byte-identical to the pre-existing behavior.
+      if (!orderBy && coerceMssqlConfigBoolean(conn.strictOffsetOrdering, false)) {
+        throw new Error(
+          `Offset pagination without an explicit orderBy is refused for data source "${this.config.name}" ` +
+            '(connection.strictOffsetOrdering=true): SQL Server OFFSET/FETCH cannot guarantee stable row ' +
+            'order across pages without a real ORDER BY key, so a multi-page read could duplicate or skip ' +
+            'rows. Pass options.orderBy on this select, or unset connection.strictOffsetOrdering to accept ' +
+            'that risk.'
+        )
+      }
       sql += ` ORDER BY ${orderBy ?? '(SELECT NULL)'} OFFSET ${offset} ROWS`
       sql += ` FETCH NEXT ${limit} ROWS ONLY`
     } else if (orderBy) {
