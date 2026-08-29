@@ -155,11 +155,21 @@ async function mountFlow(
   const template = options.template ?? COMPLEX_TEMPLATE
   const route = options.route ?? 'edit'
   await page.setViewportSize({ width: options.width, height: options.height })
-  await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => route.fulfill({
-    status: 200,
-    contentType: 'application/json',
-    body: JSON.stringify(template),
-  }))
+  await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => {
+    const request = route.request()
+    const responseTemplate = request.method() === 'PATCH'
+      ? {
+          ...template,
+          approvalGraph: (request.postDataJSON() as { approvalGraph?: typeof template.approvalGraph })
+            .approvalGraph ?? template.approvalGraph,
+        }
+      : template
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(responseTemplate),
+    })
+  })
   await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -391,5 +401,6 @@ test('flag OFF keeps the linear legacy editor editable and saves its real graph'
     approvalGraph?: { nodes?: Array<{ key?: string; name?: string }> }
   }
   expect(payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.name).toBe('财务复核')
+  await expect(stepRow.locator('input').first()).toHaveValue('财务复核')
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 })
