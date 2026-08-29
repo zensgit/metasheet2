@@ -74,15 +74,25 @@
 // dry-run-shaped (`B2a-DRY` ApplyCommand count must be 0), so "one authorization, one read" is the
 // intended shape, not a limitation of it.
 //
-// HOW STRONG THE CLAIM IS, HONESTLY. The plugin's storage contract is `get`/`set`/(optional
-// `delete`) — there is no compare-and-set primitive and no transaction. `claimReadOperation` below
-// does get -> set -> READ BACK AND VERIFY THE STORED RUN IS OURS. On a single process that is exact.
-// On a store shared by several processes it NARROWS the race, it does not close it: two writers
-// interleaving between the read-back and the set could both believe they won. That is stated here,
-// and in the claim function, rather than being described as atomic — a fence that is documented as
-// stronger than it is, is worse than one whose edge is known. Closing it needs a storage-level CAS
-// (see `updatePointer` in sealed-export/generation-store.cjs for the shape a real one takes), which
-// is a storage-contract change, not a change to this file.
+// HOW STRONG THE CLAIM IS — MIGRATION 078 CHANGED THIS ANSWER. The plugin's key-value storage
+// contract is `get`/`set`/(optional `delete`) with no compare-and-set and no transaction, and its
+// `set` is an unconditional upsert. `claimReadOperation` used to do get -> set -> READ BACK AND
+// VERIFY over exactly that: exact on a single process, and on a store shared by several processes it
+// NARROWED the race without closing it — two writers interleaving between the read-back and the set
+// could both believe they won. The old header said so rather than claiming atomicity, and then said
+// closing it needed a storage-contract change. That last part was wrong: it needed a TABLE.
+//
+// It now has one. `integration_b2a_operation_claim` (migration 078) has the claim key as its PRIMARY
+// KEY, and claiming is a plain INSERT, so of two concurrent claimers exactly one lands — the
+// identical shape PR-A already uses for the confirmation-decision reconcile lease (migration 077).
+// The loser reads the winning row back and either CONTINUES on it (same Run) or is refused. The
+// AUTHORITY for who holds an operation is that row. The `plugin_kv` record survives only as a
+// values-free PROJECTION carrying the `pageReads` re-entry counter for evidence.
+//
+// FAIL-CLOSED, WITH NO FALLBACK. An ARMED deployment that cannot reach the claim (no `db`) refuses
+// every gated read with `operation_claim_unavailable`. It does NOT fall back to the kv-only path:
+// "the database was unavailable" is not a reason to widen a one-time authorization. A DORMANT
+// deployment is untouched — it never reaches this code at all.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // SHAPE: A FILE, NOT AN ENV-JSON BLOB
@@ -728,13 +738,25 @@ function isRegistry(value) {
 
 const CLAIM_KEY_PREFIX = 'integration:b2a:operation-claim:'
 const VERSION_KEY_PREFIX = 'integration:b2a:registration-version:'
+// Migration 078. The AUTHORITY for "who holds this registration's one source-read operation".
+const B2A_OPERATION_CLAIM_TABLE = 'integration_b2a_operation_claim'
+
+// The OPERATION identity, hashed: tenant + system type + binding + data scope + object scope +
+// purpose + operationRef (`matchingKeyOf`). Hashed because every one of those components is or can
+// be a customer identifier, and this value lands in a durable row, a key listing and a log.
+function operationDigest(registration) {
+  return crypto.createHash('sha256').update(matchingKeyOf(registration)).digest('hex').slice(0, 32)
+}
 
 // Store keys must never carry a customer identifier in the clear: they can end up in a durable row,
 // a key listing or a log. The scope half is hashed; the registration id (a deployment-authored slug)
 // stays readable so an operator can correlate a claim with the file they wrote.
+//
+// This is ALSO the primary key of `integration_b2a_operation_claim` — the kv projection and the SQL
+// row are deliberately keyed identically, so an operator reading either one is looking at the same
+// operation.
 function claimKey(registration) {
-  const scopeDigest = crypto.createHash('sha256').update(matchingKeyOf(registration)).digest('hex').slice(0, 32)
-  return `${CLAIM_KEY_PREFIX}${registration.registrationId}:${registration.registrationVersion}:${scopeDigest}`
+  return `${CLAIM_KEY_PREFIX}${registration.registrationId}:${registration.registrationVersion}:${operationDigest(registration)}`
 }
 
 function versionKey(registration) {
@@ -753,6 +775,82 @@ function requireClaimStore(store) {
     )
   }
   return store
+}
+
+function requireOperationClaim(operationClaim) {
+  // FAIL-CLOSED, and this one has no fallback BY DESIGN. The kv store above cannot enforce
+  // one-shot-ness across processes (its `set` is an unconditional upsert), so an armed deployment
+  // that cannot reach the DB-enforced claim refuses rather than quietly degrading to the
+  // read-then-write shape this migration exists to replace. "The database was unavailable" is not a
+  // reason to widen an authorization.
+  if (!operationClaim || typeof operationClaim.claim !== 'function') {
+    refuse(
+      B2A_AUTHORIZATION_INVALID,
+      'operation_claim_unavailable',
+      'a B2a-gated read requires the database-enforced one-shot operation claim',
+      {},
+    )
+  }
+  return operationClaim
+}
+
+/**
+ * THE DB-ENFORCED ONE-SHOT CLAIM (migration 078).
+ *
+ * Shaped on `createConfirmationDecisionReconcileLease` (PR-A) deliberately: this plugin already
+ * solved the identical "an in-process read-then-write is not a concurrency guarantee" problem there,
+ * and solving it a second way would leave two protocols to reason about.
+ *
+ * ACQUISITION IS A PLAIN INSERT. `claim_key` is the table's PRIMARY KEY, so of two concurrent
+ * claimers for the same operation exactly one row lands and the other's INSERT dies at the unique
+ * index — inside the database, not inside a process. The loser then READS the winning row back and
+ * asks one question: is the run that holds it MY run?
+ *
+ *   SAME RUN  -> `held: true, claimed: false`. Bounded paging inside one operation, and the
+ *                large-BOM expansion job that legitimately re-enters the guard under its own job id.
+ *   OTHER RUN -> `held: false`. The caller refuses with the fixed `operation_already_consumed` code.
+ *
+ * WHY THERE IS NO TTL AND NO STEAL — the one place this deliberately diverges from 077. A lease is a
+ * temporary right that must be recoverable when its holder dies. An operation claim is PERMANENT:
+ * the registration's single authorization is spent, and a second source-read Run needs a second
+ * registration and a second one-time human authorization. A claim that expired would be a renewable
+ * one-shot, which is not a thing.
+ *
+ * FAIL-CLOSED ON ANY INSERT FAILURE. A failed INSERT is not assumed to be a unique violation: the
+ * row is read back and the decision is made from what is actually there. If nothing is there — the
+ * INSERT failed for some other reason entirely — the answer is `held: false`, i.e. refuse. Never
+ * fail-open.
+ *
+ * @param {object} options.db scoped SQL helper (`insertOne`/`selectOne`), from `createDb` in index.cjs
+ */
+function createB2aOperationClaim({ db } = {}) {
+  if (!db || typeof db.insertOne !== 'function' || typeof db.selectOne !== 'function') {
+    throw new Error('createB2aOperationClaim: scoped db helper (insertOne/selectOne) is required')
+  }
+  return {
+    table: B2A_OPERATION_CLAIM_TABLE,
+    async claim({ claimKey: key, registrationId, registrationVersion, operationDigest: digest, runId, claimedAtMs }) {
+      const row = {
+        claim_key: key,
+        registration_id: registrationId,
+        registration_version: registrationVersion,
+        operation_digest: digest,
+        run_id: runId,
+        claimed_at: new Date(claimedAtMs).toISOString(),
+      }
+      try {
+        await db.insertOne(B2A_OPERATION_CLAIM_TABLE, row)
+        return { held: true, claimed: true, holderRunId: runId }
+      } catch {
+        // Unique violation (someone already claimed this operation) — resolve against the row that
+        // is actually there. Any other insert failure lands here too and resolves to refused.
+      }
+      const current = await db.selectOne(B2A_OPERATION_CLAIM_TABLE, { claim_key: key })
+      if (!current) return { held: false, claimed: false, holderRunId: null }
+      const holderRunId = typeof current.run_id === 'string' ? current.run_id : null
+      return { held: holderRunId === runId, claimed: false, holderRunId }
+    },
+  }
 }
 
 /**
@@ -794,42 +892,56 @@ async function assertNoRegistrationVersionDowngrade(store, registration) {
  * DIFFERENT RUN -> refused. `sourceReadOperationLimit` is 1: a new source-read Run needs a new
  * operation and a new one-time authorization.
  *
- * HOW ATOMIC THIS IS, precisely. The plugin storage contract is `get`/`set` with no compare-and-set
- * and no transaction, so this is get -> set -> read back and verify the stored run is ours. On one
- * process that is exact. On a store shared by several processes it narrows the race without closing
- * it: two writers interleaving between the read-back and the set could both conclude they won.
- * Documented rather than described as atomic — a fence claimed to be stronger than it is, is worse
- * than one whose edge is known. Closing it needs a storage-level CAS (see `updatePointer` in
- * sealed-export/generation-store.cjs), which is a storage-contract change, not a change here.
+ * HOW ATOMIC THIS IS, precisely — and this is the sentence migration 078 changed. The decision is
+ * now a single INSERT into `integration_b2a_operation_claim`, whose PRIMARY KEY is the claim key. Of
+ * two concurrent claimers exactly one row lands; the other's INSERT dies at the unique index, INSIDE
+ * THE DATABASE, and it then reads the winning row back to learn whose it is. What used to be here —
+ * get -> set -> read back over a kv `set` that is an unconditional upsert — was exact on one process
+ * and merely NARROWED the race on a store shared by several, and said so. It is gone.
+ *
+ * WHAT THE kv RECORD IS NOW. A values-free PROJECTION, not the authority. It carries `pageReads`,
+ * the re-entry counter evidence stanzas report, and nothing decides anything from it any more. If it
+ * were wiped, a same-run re-entry would simply restart the counter at 1 — an evidence detail — while
+ * the operation's ownership, which is the property that matters, still comes from the SQL row.
  */
-async function claimReadOperation(store, registration, runId, now) {
+async function claimReadOperation(store, operationClaim, registration, runId, now) {
   const key = claimKey(registration)
-  const existing = await store.get(key)
-  if (isPlainObject(existing)) {
-    if (existing.runId !== runId) {
+  const decision = await operationClaim.claim({
+    claimKey: key,
+    registrationId: registration.registrationId,
+    registrationVersion: registration.registrationVersion,
+    operationDigest: operationDigest(registration),
+    runId,
+    claimedAtMs: now,
+  })
+  if (!decision.held) {
+    if (decision.holderRunId === null) {
+      // The claim could not be established AND no row is there to explain why: the database did not
+      // accept the INSERT for some reason other than a conflict. Fail closed — an unestablished
+      // claim authorizes nothing.
       refuse(
         B2A_AUTHORIZATION_INVALID,
-        'operation_already_consumed',
-        'this B2a registration has already been consumed by another source-read run',
-        { registrationId: registration.registrationId, sourceReadOperationLimit: 1 },
+        'operation_claim_lost',
+        'the durable claim on this B2a registration could not be established',
+        { registrationId: registration.registrationId },
       )
     }
-    const pageReads = Number.isInteger(existing.pageReads) ? existing.pageReads + 1 : 1
-    await store.set(key, { ...existing, pageReads })
-    return { claimed: false, continued: true, pageReads }
-  }
-  await store.set(key, { runId, claimedAtMs: now, pageReads: 1 })
-  const readBack = await store.get(key)
-  if (!isPlainObject(readBack) || readBack.runId !== runId) {
-    // Someone else's claim landed between the read and the write.
     refuse(
       B2A_AUTHORIZATION_INVALID,
-      'operation_claim_lost',
-      'another source-read run claimed this B2a registration concurrently',
-      { registrationId: registration.registrationId },
+      'operation_already_consumed',
+      'this B2a registration has already been consumed by another source-read run',
+      { registrationId: registration.registrationId, sourceReadOperationLimit: 1 },
     )
   }
-  return { claimed: true, continued: false, pageReads: 1 }
+  const existing = await store.get(key)
+  if (decision.claimed) {
+    await store.set(key, { runId, claimedAtMs: now, pageReads: 1 })
+    return { claimed: true, continued: false, pageReads: 1 }
+  }
+  const previous = isPlainObject(existing) ? existing : {}
+  const pageReads = Number.isInteger(previous.pageReads) ? previous.pageReads + 1 : 1
+  await store.set(key, { ...previous, runId, claimedAtMs: previous.claimedAtMs || now, pageReads })
+  return { claimed: false, continued: true, pageReads }
 }
 
 // ─── THE CHOKE POINT ─────────────────────────────────────────────────────────
@@ -843,7 +955,9 @@ async function claimReadOperation(store, registration, runId, now) {
  * durable storage without violating the property it enforces.
  *
  * @param {object|null} o.registry         server-resolved; `null` => dormant => returns `null`
- * @param {object}      o.store            durable claim store (`context.storage`)
+ * @param {object}      o.store            durable kv projection store (`context.storage`)
+ * @param {object}      o.operationClaim   DB-enforced one-shot claim (`createB2aOperationClaim`);
+ *                                         REQUIRED when armed — absent means refuse, never degrade
  * @param {string}      o.tenantScope      server-resolved from the request principal
  * @param {string}      o.sourceSystemType server-resolved (which product)
  * @param {string}      o.sourceBindingRef server-resolved (which instance)
@@ -912,6 +1026,8 @@ async function assertB2aReadAuthorization(options = {}) {
       'a B2a-gated read must identify its source-read run', scoped)
   }
   const store = requireClaimStore(options.store)
+  // Migration 078. NOT optional when armed, and there is no non-CAS fallback behind it.
+  const operationClaim = requireOperationClaim(options.operationClaim)
 
   // 1. BINDING — tenant + system type + binding instance. The half `tenant + project` could not
   //    express, and the reason review ruled that key insufficient.
@@ -1007,7 +1123,7 @@ async function assertB2aReadAuthorization(options = {}) {
   for (const registration of candidates) {
     await assertNoRegistrationVersionDowngrade(store, registration)
     try {
-      const claim = await claimReadOperation(store, registration, runId, now)
+      const claim = await claimReadOperation(store, operationClaim, registration, runId, now)
       return Object.freeze({
         armed: true,
         registryId: registry.registryId,
@@ -1570,5 +1686,7 @@ module.exports = {
   B2aReadAuthorizationError,
   assertB2aReadAuthorization,
   createB2aRegistry,
+  createB2aOperationClaim,
+  B2A_OPERATION_CLAIM_TABLE,
   resolveB2aRegistryConfig,
 }

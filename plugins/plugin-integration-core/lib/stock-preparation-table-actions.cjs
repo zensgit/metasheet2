@@ -949,11 +949,14 @@ async function consumeDryRunToken(tokenStore, token, expected) {
  * Returns `null` when the registry is dormant — callers then add nothing to their evidence, which is
  * what keeps a dormant deployment byte-identical.
  */
-async function assertB2aTrialForStockPreparationRead({ registry, store, tenantId, action, parameters, purpose, runId, now }) {
+async function assertB2aTrialForStockPreparationRead({ registry, store, operationClaim, tenantId, action, parameters, purpose, runId, now }) {
   const source = (action && action.source) || {}
   return assertB2aReadAuthorization({
     registry,
     store,
+    // Migration 078: the DB-enforced one-shot claim. Threaded, never defaulted — an armed read that
+    // arrives here without it is refused by the guard, not quietly given the kv-only path.
+    operationClaim,
     tenantScope: tenantId,
     // The system TYPE the runtime can actually verify is the adapter kind
     // (`data-source:sql-readonly` / `bridge:legacy-sql-readonly`). Naming it here rather than a
@@ -1182,6 +1185,7 @@ async function dryRunStockPreparationAction(input = {}) {
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
     tenantId: input.tenantId,
     action,
     parameters,
@@ -1316,6 +1320,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
     tenantId: input.tenantId,
     action,
     parameters,
@@ -1491,6 +1496,7 @@ async function applyStockPreparationAction(input = {}) {
   const b2aTrialRegistration = await assertB2aTrialForStockPreparationRead({
     registry: input.b2aTrialRegistry,
     store: input.b2aClaimStore,
+    operationClaim: input.b2aOperationClaim,
     tenantId: input.tenantId,
     action,
     parameters,

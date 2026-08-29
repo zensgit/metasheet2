@@ -22,6 +22,7 @@ const { createExternalSystemRegistry } = require('./lib/external-systems.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
+const { createB2aOperationClaim } = require('./lib/b2a-trial-registry.cjs')
 const {
   createStockPreparationPackInstallStore,
 } = require('./lib/stock-preparation-pack-install-store.cjs')
@@ -74,6 +75,7 @@ let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationPackInstallStore = null
 let stockPreparationConfirmationDecisionLease = null
+let b2aOperationClaim = null
 let readSourceCompositionConfigStore = null
 let bridgeAgentChecklistStore = null
 let adapterRegistry = null
@@ -254,6 +256,11 @@ module.exports = {
     // HG v1.2 PR-A: DB-backed single-active-reconciler lease (migration 077) for the
     // confirmation-decision ledger. The reconcile route fails closed without it.
     stockPreparationConfirmationDecisionLease = createConfirmationDecisionReconcileLease({ db })
+    // HG v1.2 PR-C: DB-enforced one-shot source-read operation claim (migration 078). Built here so
+    // the B2a guard's `sourceReadOperationLimit: 1` is a PRIMARY KEY, not a read-then-write over the
+    // plugin kv store — whose `set` is an unconditional upsert and cannot decide a race between two
+    // processes. An ARMED deployment that cannot reach it refuses; a DORMANT one never calls it.
+    b2aOperationClaim = createB2aOperationClaim({ db })
     // C-R4-1 (#1709): the composition config store validates each step's read config is approved at
     // save time via readSourceConfigStore.getForRuntime, and the run route re-loads them at runtime.
     readSourceCompositionConfigStore = createReadSourceCompositionConfigStore({ db, readSourceConfigStore })
@@ -360,6 +367,7 @@ module.exports = {
         stockPreparationAuditStore,
         stockPreparationPackInstallStore,
         stockPreparationConfirmationDecisionLease,
+        b2aOperationClaim,
         readSourceCompositionConfigStore,
         bridgeAgentChecklistStore,
         adapterRegistry,
