@@ -1574,27 +1574,46 @@ jobs:
       - name: Start core backend (background)
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          HOST: 127.0.0.1
           PORT: 8900
         run: |
           nohup pnpm -F @metasheet/core-backend dev:core > server.log 2>&1 & echo $! > server.pid
-          sleep 5
-          echo "Server PID: $(cat server.pid)"
+          server_pid="$(cat server.pid)"
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8900/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "${server_pid}" 2>/dev/null; then
+              echo "Core backend exited before readiness"
+              cat server.log
+              exit 1
+            fi
+            sleep 1
+          done
+          if [ "${ready}" -ne 1 ]; then
+            echo "Core backend readiness timed out"
+            cat server.log
+            exit 1
+          fi
+          echo "Server PID: ${server_pid}"
 
       - name: Run plugin smoke test
         env:
-          API_ORIGIN: http://localhost:8900
+          API_ORIGIN: http://127.0.0.1:8900
         run: |
           pnpm --filter @metasheet/core-backend smoke:plugins
 
       - name: Config snapshot (non-blocking)
         if: always()
         run: |
-          curl -sf http://localhost:8900/metrics/config || true
+          curl -sf http://127.0.0.1:8900/metrics/config || true
 
       - name: Admin KV list (non-blocking)
         if: always()
         env:
-          API_ORIGIN: http://localhost:8900
+          API_ORIGIN: http://127.0.0.1:8900
         run: |
           set +e
           curl -sf "${API_ORIGIN}/api/admin/plugin-kv?plugin=@metasheet/plugin-test-a" || true
