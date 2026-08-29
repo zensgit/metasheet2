@@ -1,9 +1,13 @@
 # Time Machine Phase D2-D7 verification report
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 is
-merged. Local candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95` is
-replayed onto then-current main and locally verified, but not pushed or remotely
-verified. No staging, flag, deployment, or production acceptance claim.
+merged. Local code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
+and report carrier `b8893e6b860d09b2b5518adbdbffbadb74073d8d` are
+replayed by true merge onto then-current main
+`9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` at
+`0464d551d829ac020a6504e49c54f64a8d17c03a` and locally verified, but not
+pushed or remotely verified. No staging, flag, deployment, or production
+acceptance claim.
 
 ## 1. Verification subject
 
@@ -36,6 +40,10 @@ verified. No staging, flag, deployment, or production acceptance claim.
 | final mutation-locked code/test head | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
 | post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
 | prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
+| final local report carrier before latest replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| latest then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| latest local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| latest local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
 | post-merge closeout remote CI | not run |
 | flags | unchanged and OFF |
 | production | not accessed |
@@ -95,6 +103,14 @@ The discriminating evidence for this local closeout is the exact pre-fix
 RED-to-fixed-GREEN run above. No temporary production-guard neutralization is
 claimed: the local safety reviewer refused the attempted weakening, and it was
 not bypassed.
+
+The latest true-merge replay at `0464d551d8` has ordered parents
+`b8893e6b86` and `9d29e7a7d3`, no manual conflict resolution, and no path
+overlap between the two parent deltas. On that exact tree, the archive client
+and modal passed **2 files / 95 tests**, the D5-D7 set passed **18 files / 210
+tests**, application plus server wiring passed **2 files / 17 tests**, archive
+wiring/fail-not-skip passed **6/6 + 1/1**, both web and core typechecks passed,
+and diff-check was clean. Remote exact-head CI remains unrun.
 
 ### Draft PR exact-head progression
 

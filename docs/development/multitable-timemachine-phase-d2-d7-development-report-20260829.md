@@ -2,8 +2,11 @@
 
 **Status:** MERGED FOUNDATION / LOCAL CLOSEOUT CANDIDATE HOLD. PR #5305 merged
 through `fac252067ab1c22d910266ac2ba29016c2b5fe43` on 2026-08-29. The local
-closeout candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95` is replayed onto
-then-current main `5eb83055937ebecc9be690bcf721a8cc89ca27d0`. It closes the
+closeout code/test candidate `9c5c082a53a26e4ae55f02b1724b99826e9abb95`
+and its report carrier `b8893e6b860d09b2b5518adbdbffbadb74073d8d`
+are replayed by true merge onto then-current main
+`9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` at
+`0464d551d829ac020a6504e49c54f64a8d17c03a`. The code/test candidate closes the
 disclosed malformed catalog/job-list/preview/execute/job success responses,
 bounds a stuck restore-worker drain at ten seconds, makes every concurrent stop
 caller observe the same result, and makes a failed signal shutdown exit
@@ -51,6 +54,10 @@ enabled and production was not accessed.
 | exact response-shape mutation lock | `9c5c082a53a26e4ae55f02b1724b99826e9abb95` |
 | post-merge closeout code/test tree | `3831f7c62a13e296715dbfb1f18becfacba82fb2` |
 | prior report-only carriers | `886a24da5d1f4533a40b5310ec0dd2510523b105`, `6f468e3f211713483c02d0ab8a7cb747fc7078a7`, `332b13efd87e3352250c6ffa39be0a95ef01b5c4` |
+| final local report carrier before latest replay | `b8893e6b860d09b2b5518adbdbffbadb74073d8d` |
+| latest then-current main replay parent | `9d29e7a7d339be5ce4fb276c2e96b1a2ae67e17c` |
+| latest local true-merge replay | `0464d551d829ac020a6504e49c54f64a8d17c03a` |
+| latest local replay tree | `c8574f916171d50f0fc8fe9e9426bc3f41aa29b1` |
 | post-merge closeout remote matrix | not run; local checkpoint only |
 
 The integration merge is a true two-parent merge of the final source evidence
