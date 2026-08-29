@@ -172,7 +172,8 @@ describe('ElearningCreditAdminSection', () => {
     await flushUi()
     expect(h.adjust.mock.calls[2]?.[0]).toMatchObject({ requestId: REQUEST_B, points: -2 })
     const status = q('elearning-credit-adjust-status').textContent ?? ''
-    expect(status).toContain('8')
+    expect(status).toContain('Balance after adjustment: 8')
+    expect(status).not.toContain('Current balance')
     expect(status).not.toContain('correction-secret')
     expect(status).not.toContain('user-adjust-secret')
   })

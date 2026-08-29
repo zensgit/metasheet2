@@ -345,7 +345,10 @@ describe('e-learning credit rules and wallet surface', () => {
   it.each([
     { behavior: 'manual_adjust', awarded_points: 0, status: 'adjusted' },
     { behavior: 'manual_adjust', awarded_points: -1, status: 'awarded' },
+    { behavior: 'manual_adjust', awarded_points: -2_147_483_648, status: 'adjusted' },
+    { behavior: 'manual_adjust', awarded_points: 2_147_483_648, status: 'adjusted' },
     { behavior: 'pass_exam', awarded_points: -1, status: 'awarded' },
+    { behavior: 'pass_exam', awarded_points: 2_147_483_648, status: 'awarded' },
     { behavior: 'pass_exam', awarded_points: 1, status: 'adjusted' },
   ])('fails closed on an impossible union wallet row %#', async (invalid) => {
     const db = dbWith(async (sql) => {
@@ -364,5 +367,69 @@ describe('e-learning credit rules and wallet surface', () => {
     })
     await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
       .rejects.toMatchObject({ code: 'unavailable' })
+  })
+
+  it.each([
+    { behavior: 'manual_adjust', awarded_points: -2_147_483_647, status: 'adjusted' },
+    { behavior: 'manual_adjust', awarded_points: 2_147_483_647, status: 'adjusted' },
+    { behavior: 'pass_exam', awarded_points: 0, status: 'exhausted' },
+    { behavior: 'pass_exam', awarded_points: 2_147_483_647, status: 'awarded' },
+  ])('accepts an inclusive int4 wallet boundary %#', async (boundary) => {
+    const db = dbWith(async (sql) => {
+      if (sql.includes(':membership')) return { rows: [{ ok: 1 }], rowCount: 1 }
+      if (sql.includes(':balance')) {
+        return { rows: [{ balance_points: 2_147_483_647 }], rowCount: 1 }
+      }
+      if (sql.includes(':history')) {
+        return {
+          rows: [{
+            id: DECISION_1,
+            occurred_at: '2026-08-29T04:00:00.000Z',
+            created_at: '2026-08-29T04:00:00.000Z',
+            cursor_created_at: '2026-08-29T04:00:00.000123Z',
+            ...boundary,
+          }],
+          rowCount: 1,
+        }
+      }
+      return { rows: [], rowCount: 0 }
+    })
+
+    await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
+      .resolves.toMatchObject({
+        balancePoints: 2_147_483_647,
+        items: [{ awardedPoints: boundary.awarded_points }],
+      })
+  })
+
+  it('fails closed when the stored wallet balance exceeds int4', async () => {
+    let historyQueried = false
+    const db = dbWith(async (sql) => {
+      if (sql.includes(':snapshot')) return { rows: [], rowCount: 0 }
+      if (sql.includes(':membership')) return { rows: [{ ok: 1 }], rowCount: 1 }
+      if (sql.includes(':balance')) {
+        return { rows: [{ balance_points: 2_147_483_648 }], rowCount: 1 }
+      }
+      if (sql.includes(':history')) {
+        historyQueried = true
+        return {
+          rows: [{
+            id: DECISION_1,
+            behavior: 'pass_exam',
+            awarded_points: 1,
+            status: 'awarded',
+            occurred_at: '2026-08-29T04:00:00.000Z',
+            created_at: '2026-08-29T04:00:00.000Z',
+            cursor_created_at: '2026-08-29T04:00:00.000123Z',
+          }],
+          rowCount: 1,
+        }
+      }
+      throw new Error('unexpected wallet query')
+    })
+
+    await expect(getElearningCreditWallet(db, { orgId: ORG, userId: USER }))
+      .rejects.toMatchObject({ code: 'unavailable' })
+    expect(historyQueried).toBe(false)
   })
 })

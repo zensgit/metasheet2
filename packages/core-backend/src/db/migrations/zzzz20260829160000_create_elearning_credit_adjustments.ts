@@ -12,6 +12,9 @@ const ACTOR_FK = 'elearning_credit_adjustments_actor_org_fk'
 const USER_FK = 'elearning_credit_adjustments_user_org_fk'
 const ROW_TRIGGER = 'elearning_credit_adjustments_immutable_row'
 const TRUNCATE_TRIGGER = 'elearning_credit_adjustments_immutable_truncate'
+const IMMUTABLE_FUNCTION_SOURCE = `BEGIN
+      RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+    END;`
 
 const EXPECTED_COLUMNS = [
   { name: 'id', type: 'uuid', nullable: false },
@@ -80,11 +83,34 @@ async function relationPresent(db: Kysely<unknown>, name: string): Promise<boole
   return result.rows[0]?.present === true
 }
 
-async function immutableFunctionPresent(db: Kysely<unknown>): Promise<boolean> {
-  const result = await sql<{ present: boolean }>`
-    SELECT to_regprocedure(${`${IMMUTABLE_FUNCTION}()`}) IS NOT NULL AS present
+async function assertImmutableFunction(db: Kysely<unknown>): Promise<void> {
+  const result = await sql<{
+    language: string
+    result_type: string
+    source: string
+    security_definer: boolean
+  }>`
+    SELECT
+      language_row.lanname AS language,
+      function_row.prorettype::regtype::text AS result_type,
+      function_row.prosrc AS source,
+      function_row.prosecdef AS security_definer
+      FROM pg_proc function_row
+      JOIN pg_namespace namespace ON namespace.oid = function_row.pronamespace
+      JOIN pg_language language_row ON language_row.oid = function_row.prolang
+     WHERE namespace.nspname = current_schema()
+       AND function_row.proname = ${IMMUTABLE_FUNCTION}
+       AND function_row.pronargs = 0
   `.execute(db)
-  return result.rows[0]?.present === true
+  const row = result.rows[0]
+  if (
+    result.rows.length !== 1
+    || !row
+    || row.language !== 'plpgsql'
+    || row.result_type !== 'trigger'
+    || row.security_definer
+    || row.source.trim() !== IMMUTABLE_FUNCTION_SOURCE
+  ) drift('immutable function')
 }
 
 async function readObjectState(db: Kysely<unknown>): Promise<{
@@ -100,7 +126,7 @@ async function readObjectState(db: Kysely<unknown>): Promise<{
 async function assertPrerequisites(db: Kysely<unknown>): Promise<void> {
   await ensureCanonicalUserOrgsTable(db)
   if (!(await relationPresent(db, BALANCES_TABLE))) drift(`${BALANCES_TABLE} missing`)
-  if (!(await immutableFunctionPresent(db))) drift(`${IMMUTABLE_FUNCTION} missing`)
+  await assertImmutableFunction(db)
 }
 
 async function assertColumns(db: Kysely<unknown>): Promise<void> {

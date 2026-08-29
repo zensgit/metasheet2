@@ -246,8 +246,8 @@ async function submitAdjustment(): Promise<void> {
     adjustmentRequestId = ''
     attemptedAdjustmentPayload = ''
     adjustStatus.value = text(
-      `Adjustment saved. Current balance: ${result.balancePoints}.`,
-      `调整已保存，当前余额：${result.balancePoints}。`,
+      `Adjustment saved. Balance after adjustment: ${result.balancePoints}.`,
+      `调整已保存，调整后余额：${result.balancePoints}。`,
     )
   } catch (value) {
     adjustError.value = true

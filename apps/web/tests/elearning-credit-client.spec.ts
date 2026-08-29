@@ -177,11 +177,45 @@ describe('e-learning credit client', () => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ items: [manual] })))
     await expect(getMyElearningCreditWallet()).resolves.toEqual(wallet({ items: [manual] }))
 
+    for (const boundary of [
+      { ...manual, awardedPoints: -2_147_483_647 },
+      { ...manual, awardedPoints: 2_147_483_647 },
+      {
+        ...manual,
+        behavior: 'pass_exam',
+        status: 'exhausted',
+        awardedPoints: 0,
+      },
+      {
+        ...manual,
+        behavior: 'pass_exam',
+        status: 'awarded',
+        awardedPoints: 2_147_483_647,
+      },
+    ]) {
+      apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+        balancePoints: 2_147_483_647,
+        items: [boundary],
+      })))
+      await expect(getMyElearningCreditWallet()).resolves.toMatchObject({
+        balancePoints: 2_147_483_647,
+        items: [{ awardedPoints: boundary.awardedPoints }],
+      })
+    }
+
     for (const impossible of [
       { ...manual, awardedPoints: 0 },
+      { ...manual, awardedPoints: -2_147_483_648 },
+      { ...manual, awardedPoints: 2_147_483_648 },
       { ...manual, status: 'awarded' },
       { ...manual, behavior: 'pass_exam', status: 'adjusted' },
       { ...manual, behavior: 'pass_exam', status: 'awarded', awardedPoints: -1 },
+      {
+        ...manual,
+        behavior: 'pass_exam',
+        status: 'awarded',
+        awardedPoints: 2_147_483_648,
+      },
     ]) {
       apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({ items: [impossible] })))
       await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
@@ -213,6 +247,8 @@ describe('e-learning credit client', () => {
     for (const over of [
       { points: 0 },
       { points: 1.5 },
+      { points: 2_147_483_648 },
+      { points: -2_147_483_648 },
       { userId: ' ' },
       { reason: '' },
       { requestId: 'not-a-uuid' },
@@ -236,5 +272,23 @@ describe('e-learning credit client', () => {
       points: 3,
       reason: 'correction',
     })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, adjustment({
+      points: 2_147_483_648,
+    })))
+    await expect(adjustElearningCredit({
+      requestId: REQUEST,
+      userId: 'user-2',
+      points: 3,
+      reason: 'correction',
+    })).rejects.toMatchObject({ code: 'invalid_response', status: 200 })
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, wallet({
+      balancePoints: 2_147_483_648,
+    })))
+    await expect(getMyElearningCreditWallet()).rejects.toMatchObject({
+      code: 'invalid_response',
+      status: 200,
+    })
   })
 })

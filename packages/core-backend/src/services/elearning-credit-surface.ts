@@ -11,6 +11,7 @@ export const ELEARNING_CREDIT_RULE_REQUEST_DOMAIN =
 export const ELEARNING_CREDIT_RULE_REQUEST_HASH_VERSION = 1 as const
 export const ELEARNING_CREDIT_WALLET_PAGE_DEFAULT = 20 as const
 export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
+const POSTGRES_INT4_MAX = 2_147_483_647
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -443,8 +444,13 @@ function storedWalletItem(row: Record<string, unknown>): ElearningCreditWalletIt
     || !occurredAt
     || !createdAt
     || (behavior === 'manual_adjust'
-      ? status !== 'adjusted' || awardedPoints === 0
-      : status === 'adjusted' || awardedPoints < 0)
+      ? status !== 'adjusted'
+        || awardedPoints === 0
+        || awardedPoints < -POSTGRES_INT4_MAX
+        || awardedPoints > POSTGRES_INT4_MAX
+      : status === 'adjusted'
+        || awardedPoints < 0
+        || awardedPoints > POSTGRES_INT4_MAX)
   ) fail('unavailable')
   return {
     decisionId: decisionId.toLowerCase(),
@@ -495,7 +501,11 @@ export async function getElearningCreditWallet(
       const balancePoints = balance.rows.length === 0
         ? 0
         : storedInt(balance.rows[0]?.balance_points)
-      if (balancePoints === null || balancePoints < 0) fail('unavailable')
+      if (
+        balancePoints === null
+        || balancePoints < 0
+        || balancePoints > POSTGRES_INT4_MAX
+      ) fail('unavailable')
 
       const params: unknown[] = [orgId, userId]
       let after = ''

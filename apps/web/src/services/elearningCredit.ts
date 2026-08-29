@@ -315,7 +315,7 @@ function parseWallet(value: unknown, status: number): ElearningCreditWallet {
     : requireText(value.nextCursor, status)
   return {
     userId: requireText(value.userId, status),
-    balancePoints: requireSafeInt(value.balancePoints, status),
+    balancePoints: requireSafeInt(value.balancePoints, status, 0, PG_INT4_MAX),
     items: value.items.map((item) => parseWalletItem(item, status)),
     nextCursor,
   }

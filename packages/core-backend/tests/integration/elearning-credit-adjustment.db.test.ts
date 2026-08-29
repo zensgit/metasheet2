@@ -18,6 +18,14 @@ import {
   type AdjustElearningCreditInput,
 } from '../../src/services/elearning-credit-adjustment'
 import { adjustElearningCreditPostgres } from '../../src/services/elearning-credit-adjustment-postgres'
+import {
+  claimElearningCredit,
+  type ClaimElearningCreditInput,
+} from '../../src/services/elearning-credit-ledger'
+import {
+  type ElearningCreditPgQuery,
+  PostgresElearningCreditLedgerStore,
+} from '../../src/services/elearning-credit-postgres'
 import type {
   ElearningCreditSurfaceDb,
   ElearningCreditSurfaceQueryable,
@@ -93,16 +101,44 @@ function surfaceDb(
   }
 }
 
-function twoPartyQueryBarrier(marker: string): (text: string) => Promise<void> {
+function twoPartyQueryBarrier(...markers: string[]): (text: string) => Promise<void> {
   let arrivals = 0
   let release: (() => void) | undefined
   const bothArrived = new Promise<void>((resolve) => { release = resolve })
   return async (text) => {
-    if (!text.includes(marker)) return
+    if (!markers.some((marker) => text.includes(marker))) return
     arrivals += 1
     if (arrivals === 2) release?.()
     await bothArrived
   }
+}
+
+function creditStore(
+  pool: Pool,
+  beforeQuery?: (text: string) => Promise<void>,
+): PostgresElearningCreditLedgerStore {
+  return new PostgresElearningCreditLedgerStore(async (handler) => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const runQuery: ElearningCreditPgQuery = async <Row extends Record<string, unknown>>(
+        text: string,
+        values?: unknown[],
+      ) => {
+        await beforeQuery?.(text)
+        const result = await client.query(text, values)
+        return { rowCount: result.rowCount, rows: result.rows as Row[] }
+      }
+      const value = await handler(runQuery)
+      await client.query('COMMIT')
+      return value
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  })
 }
 
 async function migrate(action: (db: Kysely<unknown>) => Promise<void>): Promise<void> {
@@ -136,6 +172,21 @@ function adjustment(
     points: 5,
     reason: 'verified manual adjustment',
     ...over,
+  }
+}
+
+function automaticAward(
+  orgId: string,
+  userId: string,
+): ClaimElearningCreditInput {
+  const effectId = randomUUID()
+  return {
+    behavior: 'pass_exam',
+    effectKey: `attempt:${effectId}`,
+    occurredAt: '2026-08-29T00:00:00.000Z',
+    orgId,
+    reference: { attemptId: effectId },
+    userId,
   }
 }
 
@@ -273,6 +324,27 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
       },
     ])
 
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger AS $$
+      BEGIN
+        RETURN OLD;
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await expect(migrate(creditAdjustmentUp)).rejects.toThrow(
+      'elearning credit adjustment migration drift: immutable function',
+    )
+    await firstPool.query(`
+      CREATE OR REPLACE FUNCTION elearning_credit_reject_immutable_write()
+      RETURNS trigger AS $$
+      BEGIN
+        RAISE EXCEPTION 'ELEARNING_CREDIT_IMMUTABLE';
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await migrate(creditAdjustmentUp)
+
     await firstPool.query(
       `ALTER TABLE elearning_credit_adjustments
        DROP CONSTRAINT elearning_credit_adjustments_org_source_key`,
@@ -389,6 +461,122 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
         'DROP TRIGGER elearning_credit_adjustment_test_pause_balance ON elearning_credit_balances',
       )
       await firstPool.query('DROP FUNCTION elearning_credit_adjustment_test_pause_balance()')
+    }
+  }, 30_000)
+
+  it('serializes an automatic award behind a manual adjustment balance lock', async () => {
+    const orgId = `org-adjust-auto-${randomUUID()}`
+    const actorId = `actor-adjust-auto-${randomUUID()}`
+    const userId = `user-adjust-auto-${randomUUID()}`
+    const advisoryKey = 2_026_082_916
+    await seedMember(orgId, actorId)
+    await seedMember(orgId, userId)
+    await firstPool.query(
+      `INSERT INTO elearning_credit_balances (org_id, user_id, balance_points)
+       VALUES ($1, $2, 0)`,
+      [orgId, userId],
+    )
+    await firstPool.query(
+      `INSERT INTO elearning_credit_rules (
+         org_id, id, version, behavior, points, daily_cap, time_zone, status
+       ) VALUES ($1, $2, 1, 'pass_exam', 10, NULL, 'UTC', 'active')`,
+      [orgId, `rule-adjust-auto-${randomUUID()}`],
+    )
+    await firstPool.query(`
+      CREATE FUNCTION elearning_credit_adjustment_test_gate_automatic_balance()
+      RETURNS trigger AS $$
+      BEGIN
+        IF current_setting('application_name') = 'elearning-credit-adjustment-second' THEN
+          PERFORM pg_advisory_xact_lock(${advisoryKey});
+        END IF;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql
+    `)
+    await firstPool.query(`
+      CREATE TRIGGER elearning_credit_adjustment_test_gate_automatic_balance
+      BEFORE UPDATE ON elearning_credit_balances
+      FOR EACH ROW EXECUTE FUNCTION elearning_credit_adjustment_test_gate_automatic_balance()
+    `)
+
+    const gateClient = await firstPool.connect()
+    let releaseManual: (() => void) | undefined
+    let markManualReady: (() => void) | undefined
+    let markAutomaticReady: (() => void) | undefined
+    const manualRelease = new Promise<void>((resolve) => { releaseManual = resolve })
+    const manualReady = new Promise<void>((resolve) => { markManualReady = resolve })
+    const automaticReady = new Promise<void>((resolve) => { markAutomaticReady = resolve })
+    try {
+      await gateClient.query('SELECT pg_advisory_lock($1)', [advisoryKey])
+      const manualPromise = adjustElearningCreditPostgres(
+        surfaceDb(firstPool, async (text) => {
+          if (!text.includes(':set-balance')) return
+          markManualReady?.()
+          await manualRelease
+        }),
+        adjustment(orgId, actorId, userId, { points: 5 }),
+        ENABLED,
+      )
+      await manualReady
+
+      const automaticPromise = claimElearningCredit(
+        creditStore(secondPool, async (text) => {
+          if (text.includes('SET balance_points = elearning_credit_balances.balance_points +')) {
+            markAutomaticReady?.()
+          }
+        }),
+        automaticAward(orgId, userId),
+        ENABLED,
+      )
+      await automaticReady
+
+      let observedLockWait = false
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const activity = await adminPool.query(
+          `SELECT 1
+             FROM pg_stat_activity
+            WHERE datname = $1
+              AND application_name = 'elearning-credit-adjustment-second'
+              AND wait_event_type = 'Lock'`,
+          [scratchName],
+        )
+        if (activity.rows.length === 1) {
+          observedLockWait = true
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      expect(observedLockWait).toBe(true)
+
+      releaseManual?.()
+      await gateClient.query('SELECT pg_advisory_unlock($1)', [advisoryKey])
+      const [manual, automatic] = await Promise.all([manualPromise, automaticPromise])
+      expect(manual).toMatchObject({ balancePoints: 5, duplicate: false, points: 5 })
+      expect(automatic).toMatchObject({ awardedPoints: 10, duplicate: false, status: 'awarded' })
+      expect(await firstPool.query(
+        `SELECT
+           (SELECT balance_points FROM elearning_credit_balances
+             WHERE org_id = $1 AND user_id = $2) AS balance,
+           (SELECT count(*)::int FROM elearning_credit_adjustments
+             WHERE org_id = $1 AND user_id = $2) AS adjustments,
+           (SELECT count(*)::int FROM elearning_credit_decisions
+             WHERE org_id = $1 AND user_id = $2) AS decisions`,
+        [orgId, userId],
+      ).then((result) => result.rows)).toEqual([{
+        adjustments: 1,
+        balance: 15,
+        decisions: 1,
+      }])
+    } finally {
+      releaseManual?.()
+      await gateClient.query('SELECT pg_advisory_unlock($1)', [advisoryKey])
+      gateClient.release()
+      await firstPool.query(
+        'DROP TRIGGER elearning_credit_adjustment_test_gate_automatic_balance ON elearning_credit_balances',
+      )
+      await firstPool.query(
+        'DROP FUNCTION elearning_credit_adjustment_test_gate_automatic_balance()',
+      )
     }
   }, 30_000)
 
