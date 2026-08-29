@@ -2096,12 +2096,13 @@ describe('Attendance self-service dashboard', () => {
 
     setFormValue(card!, '[data-makeup-card-time]', '2026-04-15T09:00')
     card!.querySelector<HTMLButtonElement>('[data-makeup-card-submit]')!.click()
-    await flushUi(4)
+    await flushUi(8)
 
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
     expect(createBodies[0].requestType).toBe('missed_check_in')
     expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
+    expect(createBodies[0].workDate).toBe('2026-04-15')
     expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull()
   })
 
