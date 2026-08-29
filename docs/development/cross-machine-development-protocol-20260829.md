@@ -24,6 +24,8 @@
 5. **部署身份入库**:任何机向 222(或其他共享目标)部署,快照必须推 tag(`deploy-rN-YYYYMMDD`),ZIP/TGZ SHA-256 记入 PR 或部署评论;未推 tag 的部署身份视为不可复原。
 6. **owner 指令入库**:优先级变更、线的搁置/解除,以本文(或 decision-register)的提交为准;单机通道(聊天/Downloads)收到的指令,由收到方**当日**落成本文的 PR 送达另一机。
 
+7. **flake 归属车道**(2026-08-29 增补,T 层默认前进,24h 异步否决):共享 CI 门里某车道的真库/集成套件对**未触及其代码域**的 PR 偶发红,处理次序为:①重跑一次,绿即放行;②同一 PR 上红第二次,通报归属机修复(引用 run 链接与失败断言),在其修复或标记 quarantine 前**过路者不得顺手改对方套件**;③归属机 48h 未响应,升 owner。首例实录:#5316 上 `multitable-recovery-archive-restore-jobs-realdb`(timemachine 域)单项偶发 `RECOVERY_ARCHIVE_RESTORE_JOB_IDENTITY_INVALID`,同 commit 重跑全绿,main 一小时前同套件亦绿。
+
 ## 3. 当前生效的 owner 状态指令(随本文送达)
 
 - **elearning 全线搁置已解除(2026-08-29 owner 明示)**:按已 ratify 的 design-lock 分阶段实现 L0–L6;现有 PR 继续遵守 DRAFT/HOLD 与 default-OFF 边界,每个切片独立测试和审阅;未经 owner 明确授权不得 Ready、合并、启用 flag 或部署。
