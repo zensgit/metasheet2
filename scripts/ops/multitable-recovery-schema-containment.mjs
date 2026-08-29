@@ -14,6 +14,7 @@
  * table/column, validation state, or ON DELETE action.
  */
 
+import { pathToFileURL } from 'node:url'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
@@ -831,7 +832,7 @@ async function main() {
   process.exitCode = result.exitCode
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main()
 }
 

@@ -38,6 +38,7 @@ import { recheckFwbPermissionGates, type FwbGateChecks } from '../../src/multita
 import { resolveSheetCapabilitiesForUser } from '../../src/multitable/sheet-capabilities'
 import { isAdmin as rbacIsAdmin, invalidateUserPerms } from '../../src/rbac/service'
 import { isAdminOnQuery } from '../../src/services/approval-record-link-txn-auth'
+import { fenceWriterEntriesInOrder } from '../../src/multitable/canonical-sheet-fence'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 
@@ -81,6 +82,11 @@ function setFlags(fwb: boolean, durable: boolean) {
   else delete process.env.APPROVAL_FWB_WRITEBACK_ENABLED
   if (durable) process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = 'true'
   else delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+}
+
+function setWriterFence(enabled: boolean) {
+  if (enabled) process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
+  else delete process.env.MULTITABLE_ENABLE_WRITER_FENCE
 }
 
 function updateConfirmation(
@@ -500,6 +506,7 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
 
   afterAll(async () => {
     setFlags(false, false)
+    setWriterFence(false)
     try { svc?.shutdown() } catch { /* noop */ }
     for (const ruleId of ruleIds) {
       await q('DELETE FROM automation_rules WHERE id = $1', [ruleId]).catch(() => {})
@@ -1419,5 +1426,142 @@ describeIfDatabase('FWB-2 production write_approval_form_values mode:update (rea
     expect(await recordData(REC_A)).toEqual(before)
     expect(await claimCount(instanceId, ruleId)).toBe(0)
     setFlags(false, false)
+  })
+
+  test('D-H1 FWB-2 fences rule and pinned target, ignores a decoy block, and adds no flag-off preflight read', async () => {
+    setFlags(true, true)
+    setWriterFence(false)
+    const cfg = updateConfig() as Record<string, unknown>
+    const executorQuery = async (sqlText: string, params?: unknown[]) => poolManager.get().query(sqlText, params) as never
+    let preflightReads = 0
+    const countingQuery = async (sqlText: string, params?: unknown[]) => {
+      if (sqlText.includes('SELECT v.form_schema')) preflightReads += 1
+      return executorQuery(sqlText, params)
+    }
+
+    const offInstance = await startInstance({
+      summary: 'fence-off',
+      amount: 1,
+      linked: { recordId: REC_A },
+    })
+    await approveInstance(offInstance)
+    const offRule = `rule_fwb2_fence_off_${TS}`
+    ruleIds.push(offRule)
+    const offRun = await buildExecutor({ queryFn: countingQuery as never }).execute(
+      executorRule(offRule, cfg),
+      triggerPayload(offInstance, `evt_fwb2_fence_off_${TS}`),
+    )
+    expect(offRun.steps[0]?.status).toBe('success')
+    expect(preflightReads).toBe(0)
+
+    const blockedLegs = [
+      { blockedSheetId: RULE_SHEET, label: 'rule' },
+      { blockedSheetId: TARGET_SHEET, label: 'target' },
+    ] as const
+    setWriterFence(true)
+    try {
+      for (const leg of blockedLegs) {
+        const instanceId = await startInstance({
+          summary: `blocked-${leg.label}`,
+          amount: 2,
+          linked: { recordId: REC_A },
+        })
+        await approveInstance(instanceId)
+        const before = await recordData(REC_A)
+        const ruleId = `rule_fwb2_fence_${leg.label}_${TS}`
+        ruleIds.push(ruleId)
+        await q("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [leg.blockedSheetId])
+        try {
+          const run = await buildExecutor({}).execute(
+            executorRule(ruleId, cfg),
+            triggerPayload(instanceId, `evt_fwb2_fence_${leg.label}_${TS}`),
+          )
+          expect(run.steps[0]?.status).toBe('failed')
+          expect(run.steps[0]?.error).toBe('fwb_execution_failed')
+          expect(await recordData(REC_A)).toEqual(before)
+          expect(await claimCount(instanceId, ruleId)).toBe(0)
+        } finally {
+          await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [leg.blockedSheetId])
+        }
+      }
+
+      const decoyInstance = await startInstance({
+        summary: 'decoy-does-not-block',
+        amount: 3,
+        linked: { recordId: REC_A },
+      })
+      await approveInstance(decoyInstance)
+      const decoyRule = `rule_fwb2_fence_decoy_${TS}`
+      ruleIds.push(decoyRule)
+      await q("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [SECONDARY_SHEET])
+      try {
+        const run = await buildExecutor({}).execute(
+          executorRule(decoyRule, cfg),
+          triggerPayload(decoyInstance, `evt_fwb2_fence_decoy_${TS}`),
+        )
+        expect(run.steps[0]?.status).toBe('success')
+        expect(await recordData(REC_A)).toMatchObject({ [F_TITLE]: 'decoy-does-not-block' })
+      } finally {
+        await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = $1', [SECONDARY_SHEET])
+      }
+    } finally {
+      setWriterFence(false)
+      setFlags(false, false)
+    }
+  })
+
+  test('D-H1 multi-sheet writer fences order mirrored inputs identically and complete without 40P01', async () => {
+    setWriterFence(true)
+    await q(
+      'UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = ANY($1::text[])',
+      [[RULE_SHEET, TARGET_SHEET]],
+    )
+    let markFirstHeld!: () => void
+    let markSecondStarted!: () => void
+    const firstHeld = new Promise<void>((resolve) => { markFirstHeld = resolve })
+    const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve })
+    const firstOrder: string[] = []
+    const secondOrder: string[] = []
+
+    try {
+      const first = poolManager.get().transaction(async ({ query }) => {
+        let firstFence = true
+        await fenceWriterEntriesInOrder(async (sqlText, params) => {
+          const result = await query(sqlText, params)
+          if (sqlText.includes('pg_advisory_xact_lock')) firstOrder.push(String(params?.[0] ?? ''))
+          if (firstFence && sqlText.includes('pg_advisory_xact_lock')) {
+            firstFence = false
+            markFirstHeld()
+            await secondStarted
+          }
+          return result as never
+        }, [RULE_SHEET, TARGET_SHEET])
+      })
+
+      const second = (async () => {
+        await firstHeld
+        return poolManager.get().transaction(async ({ query }) => {
+          let firstFence = true
+          await fenceWriterEntriesInOrder(async (sqlText, params) => {
+            if (firstFence && sqlText.includes('pg_advisory_xact_lock')) {
+              firstFence = false
+              markSecondStarted()
+            }
+            const result = await query(sqlText, params)
+            if (sqlText.includes('pg_advisory_xact_lock')) secondOrder.push(String(params?.[0] ?? ''))
+            return result as never
+          }, [TARGET_SHEET, RULE_SHEET])
+        })
+      })()
+
+      await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined])
+      expect(firstOrder).toEqual(secondOrder)
+      expect(firstOrder).toEqual([
+        `meta:auto-number:sheet:${RULE_SHEET}`,
+        `meta:auto-number:sheet:${TARGET_SHEET}`,
+      ])
+    } finally {
+      setWriterFence(false)
+    }
   })
 })

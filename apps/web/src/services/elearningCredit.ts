@@ -1,0 +1,299 @@
+import { apiFetch } from '../utils/api'
+import { ElearningApiError } from './elearning'
+
+export const ELEARNING_CREDIT_WALLET_PAGE_DEFAULT = 20 as const
+export const ELEARNING_CREDIT_WALLET_PAGE_MAX = 100 as const
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
+const AUTOMATIC_BEHAVIORS = [
+  'login',
+  'complete_course',
+  'complete_plan',
+  'pass_exam',
+  'submit_survey',
+  'complete_map',
+  'complete_offline',
+] as const
+const WALLET_STATUSES = ['awarded', 'capped', 'exhausted'] as const
+const FORBIDDEN_KEYS = new Set([
+  'actorId',
+  'actor_id',
+  'effectKey',
+  'effect_key',
+  'rawReference',
+  'raw_reference',
+  'reference',
+  'requestHash',
+  'request_hash',
+  'sourceKey',
+  'source_key',
+])
+
+export type ElearningCreditAutomaticBehavior = (typeof AUTOMATIC_BEHAVIORS)[number]
+export type ElearningCreditWalletStatus = (typeof WALLET_STATUSES)[number]
+
+export interface ElearningCreditRule {
+  behavior: ElearningCreditAutomaticBehavior
+  ruleId: string
+  version: number
+  points: number
+  dailyCap: number | null
+  timeZone: string
+  createdAt: string
+}
+
+export interface ElearningCreditRulePublishInput {
+  requestId: string
+  behavior: ElearningCreditAutomaticBehavior
+  points: number
+  dailyCap: number | null
+  timeZone: string
+}
+
+export interface ElearningCreditWalletItem {
+  decisionId: string
+  behavior: ElearningCreditAutomaticBehavior
+  awardedPoints: number
+  status: ElearningCreditWalletStatus
+  occurredAt: string
+  createdAt: string
+}
+
+export interface ElearningCreditWallet {
+  userId: string
+  balancePoints: number
+  items: ElearningCreditWalletItem[]
+  nextCursor: string | null
+}
+
+function fail(code: string, status: number): never {
+  throw new ElearningApiError(code, status)
+}
+
+function failShape(status: number): never {
+  fail('invalid_response', status)
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value)
+  return actual.length === keys.length
+    && keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+}
+
+function hasForbiddenKeys(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasForbiddenKeys)
+  if (!isPlainObject(value)) return false
+  return Object.entries(value).some(([key, child]) => (
+    FORBIDDEN_KEYS.has(key) || hasForbiddenKeys(child)
+  ))
+}
+
+function requireUuid(value: unknown, status: number): string {
+  if (typeof value !== 'string' || !UUID_RE.test(value)) failShape(status)
+  return value.toLowerCase()
+}
+
+function requireInputUuid(value: string): string {
+  if (!UUID_RE.test(value)) fail('invalid_input', 400)
+  return value.toLowerCase()
+}
+
+function requireText(value: unknown, status: number): string {
+  if (typeof value !== 'string' || value.trim() === '') failShape(status)
+  return value
+}
+
+function requireIsoTimestamp(value: unknown, status: number): string {
+  const text = requireText(value, status)
+  if (!Number.isFinite(Date.parse(text))) failShape(status)
+  return text
+}
+
+function requireSafeInt(value: unknown, status: number, min = 0): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min) {
+    failShape(status)
+  }
+  return value
+}
+
+function requirePositiveInput(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) fail('invalid_input', 400)
+  return value
+}
+
+function requireNullablePositiveInput(value: number | null): number | null {
+  return value === null ? null : requirePositiveInput(value)
+}
+
+function requireBehavior(value: unknown, status: number): ElearningCreditAutomaticBehavior {
+  if (!AUTOMATIC_BEHAVIORS.includes(value as ElearningCreditAutomaticBehavior)) {
+    failShape(status)
+  }
+  return value as ElearningCreditAutomaticBehavior
+}
+
+function requireInputBehavior(value: string): ElearningCreditAutomaticBehavior {
+  if (!AUTOMATIC_BEHAVIORS.includes(value as ElearningCreditAutomaticBehavior)) {
+    fail('invalid_input', 400)
+  }
+  return value as ElearningCreditAutomaticBehavior
+}
+
+function requireStatus(value: unknown, status: number): ElearningCreditWalletStatus {
+  if (!WALLET_STATUSES.includes(value as ElearningCreditWalletStatus)) failShape(status)
+  return value as ElearningCreditWalletStatus
+}
+
+function requireTimeZone(value: string): string {
+  const timeZone = value.trim()
+  if (timeZone === '' || timeZone.length > 128) fail('invalid_input', 400)
+  try {
+    return new Intl.DateTimeFormat('en-US', { timeZone }).resolvedOptions().timeZone
+  } catch {
+    fail('invalid_input', 400)
+  }
+}
+
+function readErrorCode(payload: unknown): string {
+  if (!isPlainObject(payload) || typeof payload.error !== 'string') return 'request_failed'
+  const code = payload.error.trim()
+  if (code === 'ORG_CONTEXT_REQUIRED') return code
+  return STABLE_ERROR_CODE_RE.test(code) ? code : 'request_failed'
+}
+
+async function requestJson(path: string, init: RequestInit): Promise<unknown> {
+  let response: Response
+  try {
+    response = await apiFetch(path, init)
+  } catch {
+    fail('network_error', 0)
+  }
+  let payload: unknown
+  try {
+    payload = await response.json()
+  } catch {
+    payload = undefined
+  }
+  if (response.status !== 200) fail(readErrorCode(payload), response.status)
+  if (hasForbiddenKeys(payload)) failShape(response.status)
+  return payload
+}
+
+function parseRule(value: unknown, status: number): ElearningCreditRule {
+  const keys = [
+    'behavior', 'ruleId', 'version', 'points', 'dailyCap', 'timeZone', 'createdAt',
+  ] as const
+  if (!isPlainObject(value) || !exactKeys(value, keys)) failShape(status)
+  const dailyCap = value.dailyCap === null
+    ? null
+    : requireSafeInt(value.dailyCap, status, 1)
+  return {
+    behavior: requireBehavior(value.behavior, status),
+    ruleId: requireUuid(value.ruleId, status),
+    version: requireSafeInt(value.version, status, 1),
+    points: requireSafeInt(value.points, status, 1),
+    dailyCap,
+    timeZone: requireText(value.timeZone, status),
+    createdAt: requireIsoTimestamp(value.createdAt, status),
+  }
+}
+
+function parseWalletItem(value: unknown, status: number): ElearningCreditWalletItem {
+  const keys = [
+    'decisionId', 'behavior', 'awardedPoints', 'status', 'occurredAt', 'createdAt',
+  ] as const
+  if (!isPlainObject(value) || !exactKeys(value, keys)) failShape(status)
+  return {
+    decisionId: requireUuid(value.decisionId, status),
+    behavior: requireBehavior(value.behavior, status),
+    awardedPoints: requireSafeInt(value.awardedPoints, status),
+    status: requireStatus(value.status, status),
+    occurredAt: requireIsoTimestamp(value.occurredAt, status),
+    createdAt: requireIsoTimestamp(value.createdAt, status),
+  }
+}
+
+function parseWallet(value: unknown, status: number): ElearningCreditWallet {
+  if (!isPlainObject(value) || !exactKeys(value, [
+    'userId', 'balancePoints', 'items', 'nextCursor',
+  ])) failShape(status)
+  if (!Array.isArray(value.items)) failShape(status)
+  const nextCursor = value.nextCursor === null
+    ? null
+    : requireText(value.nextCursor, status)
+  return {
+    userId: requireText(value.userId, status),
+    balancePoints: requireSafeInt(value.balancePoints, status),
+    items: value.items.map((item) => parseWalletItem(item, status)),
+    nextCursor,
+  }
+}
+
+export async function listElearningCreditRules(): Promise<ElearningCreditRule[]> {
+  const payload = await requestJson('/api/elearning/admin/credit-rules', { method: 'GET' })
+  if (!isPlainObject(payload) || !exactKeys(payload, ['items']) || !Array.isArray(payload.items)) {
+    failShape(200)
+  }
+  return payload.items.map((item) => parseRule(item, 200))
+}
+
+export async function publishElearningCreditRule(
+  input: ElearningCreditRulePublishInput,
+): Promise<ElearningCreditRule> {
+  const body = {
+    requestId: requireInputUuid(input.requestId),
+    behavior: requireInputBehavior(input.behavior),
+    points: requirePositiveInput(input.points),
+    dailyCap: requireNullablePositiveInput(input.dailyCap),
+    timeZone: requireTimeZone(input.timeZone),
+  }
+  return parseRule(await requestJson('/api/elearning/admin/credit-rules', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }), 200)
+}
+
+function walletQuery(cursor: string | null, limit: number): URLSearchParams {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > ELEARNING_CREDIT_WALLET_PAGE_MAX) {
+    fail('invalid_input', 400)
+  }
+  const query = new URLSearchParams({ limit: String(limit) })
+  if (cursor !== null) {
+    const value = cursor.trim()
+    if (value === '' || value.length > 512) fail('invalid_input', 400)
+    query.set('cursor', value)
+  }
+  return query
+}
+
+export async function getMyElearningCreditWallet(
+  cursor: string | null = null,
+  limit: number = ELEARNING_CREDIT_WALLET_PAGE_DEFAULT,
+): Promise<ElearningCreditWallet> {
+  const query = walletQuery(cursor, limit)
+  return parseWallet(await requestJson(
+    `/api/elearning/credits/wallet?${query.toString()}`,
+    { method: 'GET' },
+  ), 200)
+}
+
+export async function getAdminElearningCreditWallet(
+  userId: string,
+  cursor: string | null = null,
+  limit: number = ELEARNING_CREDIT_WALLET_PAGE_DEFAULT,
+): Promise<ElearningCreditWallet> {
+  const target = userId.trim()
+  if (target === '' || target.length > 512) fail('invalid_input', 400)
+  const query = walletQuery(cursor, limit)
+  query.set('userId', target)
+  return parseWallet(await requestJson(
+    `/api/elearning/admin/credits/wallet?${query.toString()}`,
+    { method: 'GET' },
+  ), 200)
+}

@@ -66,10 +66,15 @@ async function resetSheetBHistory(): Promise<void> {
   await q('DELETE FROM meta_recovery_token_burns WHERE sheet_id = $1', [SB]).catch(() => {})
   await q('DELETE FROM meta_records_trash WHERE sheet_id = $1', [SB]).catch(() => {})
   await q('DELETE FROM meta_record_revisions WHERE sheet_id = $1', [SB]).catch(() => {})
-  // Keep the baseline live REC_B1 (and REC_A1 on SA); wipe only transient records used by SNAP tests.
-  await q('DELETE FROM meta_records WHERE sheet_id = $1 AND id <> $2', [SB, REC_B1]).catch(() => {})
-  await q('UPDATE meta_records SET data = $1::jsonb, version = 1 WHERE id = $2', [JSON.stringify({ [FLD_B_NAME]: 'b1' }), REC_B1]).catch(() => {})
+  // The exact-anchor fixture activates its checkpoint before fixture events. Keep SB empty at that boundary;
+  // otherwise a baseline for REC_B1 followed by a synthetic post-floor create for the same id is causally
+  // impossible and the target-window validator correctly refuses it.
+  await q('DELETE FROM meta_records WHERE sheet_id = $1', [SB]).catch(() => {})
   fixtureB = await prepareExactAnchorHistoryFixture(SB)
+  await q(
+    'INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)',
+    [REC_B1, SB, JSON.stringify({ [FLD_B_NAME]: 'b1' })],
+  )
   // Stable survivor so the sheet always has a covering checkpoint + a sealed endpoint for exact-anchor
   // recovery tests that layer additional records on top.
   await fixtureB.insertRevision({

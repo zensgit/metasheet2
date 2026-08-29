@@ -355,8 +355,10 @@ flags 全 default-OFF · triggers 出厂 DISABLED · 无 flag 翻转 / 无 trigg
 1. **阶梯 L0 的天花板裁量**——census linkage 的事故模式已封死，蓄意替换（T2 空壳、构造式 tag、
    `CLASSIFIER_MODULE` 迁移）**封不死**，越过需要给源码埋点或读覆盖率。**是否满足 L0 由 owner 裁**；
    本记录只把边界写清楚，不自证。
-2. **obs-kit 是否设为 required check**——目前不是，因此其**全部**执行层证据（含新加的残留断言）
-   在合并时**只是建议性**的。
+2. **CI required-check 状态——已闭合（2026-08-26 实时核验）。** Branch protection 当时要求
+   `recovery-schema-drift` 与 hermetic observation-kit contract；real-DB observation-kit
+   execution-proof 仍是 path-filtered / non-required。策略变更后须重新查询 live protection；
+   历史 NIT-2/NIT-4 的方法边界保持不变。
 3. **阶梯锁文件头 `Status: PROPOSED` 的 ledger-sync**——owner 已用 #5014 的 `RATIFY 642b765a96`
    评论批准，文件头未同步（一行 docs PR）。
 

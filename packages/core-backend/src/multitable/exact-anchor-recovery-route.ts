@@ -146,7 +146,7 @@ export interface PreviewPlanSummary {
   driftCount: number
 }
 
-interface PreviewPlanDetails {
+export interface PreviewPlanDetails {
   summary: PreviewPlanSummary
   plan: ExactAnchorRecoveryPlan
   revertWrites: ExactAnchorRevertWriteIntent[]
@@ -168,7 +168,7 @@ function normalizeLinkIds(value: unknown): string[] {
  * snapshots). May throw `ExactAnchorPlanDataError` on malformed at-anchor/live substrate —
  * callers map that to `recovery-trust-required`.
  */
-function buildPreviewPlanDetails(
+export function buildPreviewPlanDetails(
   stateMap: Map<
     string,
     {
@@ -444,16 +444,21 @@ export async function previewExactAnchorRecovery(
     return { ok: false as const, reason: 'recovery-trust-required' as const }
   }
 
-  // 4. History integrity via the AUTHORITATIVE production entry (NOT precheckSheetHistoryIntegrityStrict
-  //    directly — that bypasses checkStrictEnablementPrecondition / RECONSTRUCTION_CAUSALITY_LANDED /
-  //    active-checkpoint gating). A real chain failure keeps the established values-free
-  //    HISTORY_INCOMPLETE contract; missing/malformed trust substrate remains a separate refusal.
-  const integrity = await precheckSheetHistoryIntegrity(query, input.sheetId)
-  if (!integrity.ok) return { ok: false as const, reason: 'history-incomplete' as const }
-
-  // 5. Exact-anchor resolution + token mint (token is gated at finalize — not returned when doomed).
+  // 4. Exact-anchor resolution selects the retained checkpoint and exact endpoint AFTER the full-read gate.
+  //    Its token remains local until the target-window integrity check below succeeds.
   const resolved = await resolveExactAnchor(query, input)
   if (resolved.ok === false) return { ok: false as const, reason: resolved.reason }
+
+  // 5. History integrity via the AUTHORITATIVE production entry (NOT the exported strict test seam).
+  //    Validate only the selected checkpoint's trusted target window; pre-floor history and post-anchor
+  //    generations are not recovery authority. Current live drift remains a separate projection in the
+  //    strict implementation. Unauthorized actors never reach this point (step 2).
+  const integrity = await precheckSheetHistoryIntegrity(query, input.sheetId, {
+    checkpointId: resolved.checkpointId,
+    trustedSinceSeq: resolved.trustedSinceSeq,
+    anchorSeq: resolved.anchorSeq,
+  })
+  if (!integrity.ok) return { ok: false as const, reason: 'history-incomplete' as const }
 
   // 6. Live/field plan work — values-free restorable projection summary.
   const liveLoaded = await loadLiveByIdForPreview(query, input.sheetId)
@@ -720,6 +725,12 @@ export function mapApplyRefusal(reason: ExactAnchorApplyRefusal): { status: numb
         code: 'RECORD_LOCKED',
         message:
           'A target record is locked; exact-anchor recovery is all-or-nothing and nothing was written. Unlock and re-preview.',
+      }
+    case 'scope-too-large':
+      return {
+        status: 413,
+        code: 'ARCHIVE_SYNC_SCOPE_TOO_LARGE',
+        message: 'This archive recovery exceeds the 5,000-record synchronous ceiling; use the asynchronous restore path.',
       }
     case 'history-incomplete':
       return mapHistoryIncompleteRefusal()

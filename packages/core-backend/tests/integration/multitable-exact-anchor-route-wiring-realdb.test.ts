@@ -13,7 +13,7 @@
  *
  * Requires DATABASE_URL. Flags toggled only inside this process (default OFF everywhere real).
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import express, { type Express } from 'express'
 import request from 'supertest'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -61,6 +61,13 @@ const REC_TGT_LIVE = `rec_earw_tgt_l_${TS}` // target num = 99 (live link target
 const q = (sql: string, params: unknown[] = []) => poolManager.get().query(sql, params)
 const txn = <T>(fn: (query: QueryFn) => Promise<T>): Promise<T> =>
   poolManager.get().transaction(async ({ query }) => fn(query as unknown as QueryFn)) as Promise<T>
+
+const burnCountForToken = async (token: string): Promise<number> => Number(
+  ((await q(
+    'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE token_sha256 = $1',
+    [createHash('sha256').update(token).digest('hex')],
+  )).rows[0] as { c: number }).c,
+)
 
 let app: Express
 let curPerms = ['multitable:read', 'multitable:write', 'multitable:share']
@@ -473,13 +480,13 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(rejected.status).toBe(400)
     expect(rejected.body?.error?.code).toBe('VALIDATION_ERROR')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
-    expect((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0]?.c).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
 
     const malformed = await revertExecute({ previewIdentity: token, asOf: 123 })
     expect(malformed.status).toBe(400)
     expect(malformed.body?.error?.code).toBe('VALIDATION_ERROR')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
-    expect((await q('SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0]?.c).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
 
     const accepted = await revertExecute({ previewIdentity: token })
     expect(accepted.status).toBe(200)
@@ -524,7 +531,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     const aLive = (await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0] as { data: Record<string, unknown> }
     expect(aLive.data[F_STR]).toBe('A-at-anchor')
     expect((await q('SELECT 1 FROM meta_records WHERE id = $1', [REC_B])).rows.length).toBe(1) // kept
-    expect(Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBeGreaterThanOrEqual(1)
+    expect(await burnCountForToken(rToken)).toBe(1)
 
     // re-seed for reset — soft-delete B into trash
     const { anchorOp: op2 } = await seedWorld()
@@ -743,10 +750,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(refusedExecute.body?.error?.code).toBe('PREVIEW_IDENTITY_INVALID')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_SRC_LINK])
       .toEqual([REC_TGT_LIVE])
-    expect((await q(
-      'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1',
-      [SHEET],
-    )).rows[0]?.c).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
   })
 
   test('LIVE-LINK-DUPLICATE: duplicate authoritative edges fail closed before a token is exposed', async () => {
@@ -1122,10 +1126,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(execute.status).toBe(403)
     expect(execute.body?.error?.code).toBe('FORBIDDEN')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]?.data?.[F_STR]).toBe('A-live-now')
-    expect((await q(
-      'SELECT count(*)::int AS c FROM meta_recovery_token_burns WHERE sheet_id = $1',
-      [SHEET],
-    )).rows[0]?.c).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
   })
 
   test('AUTHORITY-LOCKS: related user/role revokes fail fast, while unrelated last-login writes remain unblocked', async () => {
@@ -1476,7 +1477,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(ex.status).toBe(409)
     expect(ex.body?.error?.code).toBe('RECOVERY_TRUST_REQUIRED')
     expect((await q('SELECT data FROM meta_records WHERE id = $1', [REC_A])).rows[0]).toEqual(before)
-    expect(Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
   })
 
   test('RECORD_LOCKED: locked target → 409 RECORD_LOCKED values-free, zero writes', async () => {
@@ -1490,7 +1491,7 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(ex.status).toBe(409)
     expect(ex.body?.error?.code).toBe('RECORD_LOCKED')
     expect(JSON.stringify(ex.body)).not.toMatch(/rev-now|A-live-now|A-at-anchor/) // values-free
-    expect(Number(((await q('SELECT count(*)::int c FROM meta_recovery_token_burns WHERE sheet_id = $1', [SHEET])).rows[0] as { c: number }).c)).toBe(0)
+    expect(await burnCountForToken(token)).toBe(0)
   })
 
   test('LINK-TARGET-RACE: recovery locks a foreign target through commit so concurrent delete cannot invalidate authorization', async () => {
@@ -1620,12 +1621,19 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     await sealOp(REC_DEL, [
       { seq: String(seqBase - 50n), version: 1, action: 'create', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_pre_${TS}` },
     ])
-    await sealOp(REC_DEL, [
+    const { opId: deleteOp } = await sealOp(REC_DEL, [
       { seq: String(seqBase + 1400n), version: 1, action: 'delete', snap: { [F_STR]: 'was-at-anchor' }, batchId: `batch_del_post_${TS}` },
     ])
+    const deleteRevisionId = String((await q(
+      `SELECT id::text AS id FROM meta_record_revisions
+       WHERE sheet_id = $1 AND record_id = $2 AND operation_id = $3::uuid`,
+      [SHEET, REC_DEL, deleteOp],
+    )).rows[0]?.id)
     await q(
-      'INSERT INTO meta_records_trash (record_id, sheet_id, data, original_version) VALUES ($1,$2,$3::jsonb,1)',
-      [REC_DEL, SHEET, JSON.stringify({ [F_STR]: 'was-at-anchor' })],
+      `INSERT INTO meta_records_trash
+         (record_id, sheet_id, data, original_version, delete_revision_id)
+       VALUES ($1,$2,$3::jsonb,1,$4)`,
+      [REC_DEL, SHEET, JSON.stringify({ [F_STR]: 'was-at-anchor' }), deleteRevisionId],
     )
     await q(
       `SELECT setval('meta_record_chain_seq', GREATEST((SELECT last_value FROM meta_record_chain_seq), $1::bigint), true)`,
@@ -1640,10 +1648,12 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     expect(pv.body?.data?.previewIdentity).toBeNull()
   })
 
-  test('healed-gap trust failure preserves HISTORY_INCOMPLETE before minting a token', async () => {
+  test('a post-anchor healed gap does not contaminate the trusted target generation', async () => {
     enableRecoveryExecute()
     const { anchorOp, seqBase } = await seedWorld()
-    // Healed gap: live at version 3 with only v1+v3 revisions (delete v2) on REC_A
+    // Current live is version 3 with only v1+v3 revisions (delete v2) on REC_A. The selected anchor is v1,
+    // so target-generation A validates only the checkpoint-to-anchor window; current projection separately
+    // proves that live equals the latest captured v3 snapshot.
     await sealOp(REC_A, [
       { seq: String(seqBase + 1500n), version: 3, action: 'update', snap: { [F_STR]: 'healed-v3' }, batchId: `batch_healed_${TS}` },
     ])
@@ -1652,9 +1662,8 @@ describeIfDatabase('multitable L8 exact-anchor route wiring (real DB)', () => {
     ])
     await q('DELETE FROM meta_record_revisions WHERE record_id = $1 AND version = 2 AND sheet_id = $2', [REC_A, SHEET])
     const pv = await revertPreview({ anchorOperationId: anchorOp })
-    expect(pv.status).toBe(409)
-    expect(pv.body?.error?.code).toBe('HISTORY_INCOMPLETE')
-    expect(pv.body?.data?.previewIdentity).toBeUndefined()
+    expect(pv.status).toBe(200)
+    expect(pv.body?.data?.previewIdentity).toBeTruthy()
     expect(JSON.stringify(pv.body)).not.toMatch(/healed-v3|A-live-now/) // values-free
   })
 

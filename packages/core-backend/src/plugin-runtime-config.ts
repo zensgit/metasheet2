@@ -5,6 +5,7 @@ const INTEGRATION_CORE_C6_TEST_FAILURE_INJECTION_ENV = 'INTEGRATION_CORE_C6_TEST
 const C6_TEST_FAILURE_INJECTION_ENABLED_ENV = 'METASHEET_C6_TEST_FAILURE_INJECTION_ENABLED'
 const INTEGRATION_CORE_CUSTOMER_PACKS_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH'
 const INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV = 'INTEGRATION_CORE_STOCK_PREPARATION_EXT_FIELD_MAPPING_PATH'
+const INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV = 'INTEGRATION_CORE_B2A_REGISTRY_PATH'
 
 function parsePluginJsonEnv(env: NodeJS.ProcessEnv, key: string): unknown {
   const raw = env[key]
@@ -126,12 +127,36 @@ export function resolvePluginRuntimeConfig(
     INTEGRATION_CORE_EXT_FIELD_MAPPING_PATH_ENV,
     'a JSON object'
   )
+  // B2a TRIAL REGISTRATION — the third artifact on this reader, and the one that ARMS a gate rather
+  // than supplying data to one.
+  //
+  // The other two are inputs to a capability: without a pack there are no `ext_` columns, without a
+  // mapping no `ext_` values. This one is the reverse. Unset -> the key is omitted -> the plugin's
+  // registry is `null` -> the B2a gate is DORMANT and every stock-prep source read behaves exactly
+  // as it did before this key existed (synthetic fixtures, local demos and the whole existing test
+  // corpus are untouched). SET -> the gate is ARMED and every gated stock-prep read must match a
+  // live, in-scope, unexpired registration or be refused before the source adapter is invoked.
+  //
+  // So "unreadable/malformed -> THROW" matters even more here than it does for the other two: a typo
+  // in this path must never be indistinguishable from "no registry configured", because that
+  // difference is the difference between a gate and no gate. The throw names the ENV KEY and never
+  // echoes the path, same as its siblings.
+  //
+  // A registration file carries owner names, expiry dates and a customer's project numbers. It is a
+  // reviewed, signed-off artifact that belongs in a file on the deployment's own machine — never
+  // inline in a process environment where it cannot be diffed.
+  const b2aTrialRegistry = readDeployJsonObjectFile(
+    env,
+    INTEGRATION_CORE_B2A_REGISTRY_PATH_ENV,
+    'a JSON object with registryId, registryVersion and registrations'
+  )
 
   return {
     ...(tableActions !== undefined ? { tableActions } : {}),
     ...(stockPreparationTableActions !== undefined ? { stockPreparationTableActions } : {}),
     ...(stockPreparationCustomerPacks !== undefined ? { stockPreparationCustomerPacks } : {}),
     ...(stockPreparationExtFieldMapping !== undefined ? { stockPreparationExtFieldMapping } : {}),
+    ...(b2aTrialRegistry !== undefined ? { b2aTrialRegistry } : {}),
     ...(c6TestFailureInjection !== undefined || c6TestFailureInjectionDeployEnabled
       ? {
           c6TestFailureInjection: {

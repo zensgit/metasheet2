@@ -37,7 +37,15 @@ export interface DataSourceReadOnlyFacade {
     dataSourceId: string,
     table: string,
     options: Pick<QueryOptions, 'limit' | 'offset' | 'where' | 'orderBy'>,
-    principal: string | undefined
+    principal: string | undefined,
+    // W-5: OMITTED (or false) is byte-identical to this parameter never having existed — every
+    // caller that predates it, and every caller that never passes it, behaves exactly as before.
+    // `true` is a per-call, B2a-agnostic request for this facade's own hardened-read floors (see
+    // `authorize`/`select` below): refuse a sqlserver source configured with requestTimeoutMs=0
+    // before opening any connection, and force the existing (#5243) strict-offset-ordering check on
+    // for this one read. The facade decides nothing about WHO gets to ask for `true` — that policy
+    // lives at the integration-core seam that resolves an armed B2a read's source config.
+    strict?: boolean
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
 
@@ -99,9 +107,24 @@ export const DATA_SOURCE_NOT_READ_ONLY_CODE = 'DATA_SOURCE_NOT_READ_ONLY'
 export const DATA_SOURCE_NOT_WRITABLE_CODE = 'DATA_SOURCE_NOT_WRITABLE'
 export const DATA_SOURCE_NOT_C6_WRITE_TARGET_CODE = 'DATA_SOURCE_NOT_C6_WRITE_TARGET'
 export const DATA_SOURCE_QUERY_INVALID_CODE = 'DATA_SOURCE_QUERY_INVALID'
+// W-5: thrown only when a caller opts into `select(..., strict=true)` (see `DataSourceReadOnlyFacade`
+// above) AND the resolved source is a `sqlserver` data source configured with
+// `connection.requestTimeoutMs=0` ("no timeout" — a legitimate, deliberate mssql convention for the
+// general adapter; MSSQLAdapter.ts's `?? 30000` deliberately does not override an explicit 0). This
+// facade stays B2a-agnostic: it knows only "a caller demanded a bounded-timeout read and this source
+// cannot give it one", never why. The integration-core seam that sets `strict=true` is the one that
+// maps this generic code onto its own fixed B2a error vocabulary.
+export const DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE = 'DATA_SOURCE_REQUEST_TIMEOUT_DISABLED'
 
 export function writableSourceMessage(dataSourceId: string): string {
   return `data source '${dataSourceId}' is writable; the read-only bridge refuses a writable binding`
+}
+
+export function requestTimeoutDisabledMessage(dataSourceId: string): string {
+  return (
+    `data source '${dataSourceId}' has connection.requestTimeoutMs=0 (no timeout); ` +
+    'this read requires a bounded request timeout and refuses to connect'
+  )
 }
 
 export function writeTargetReadOnlyMessage(dataSourceId: string): string {
@@ -366,7 +389,7 @@ function normalizeWriteRows(
 export function createDataSourcePluginFacade(
   getManager: () => DataSourceManager
 ): DataSourceReadOnlyFacade {
-  async function authorize(dataSourceId: string, principal: string | undefined) {
+  async function authorize(dataSourceId: string, principal: string | undefined, strict = false) {
     const owner = requirePrincipal(principal)
     const manager = getManager()
     // A dangling / not-visible binding (deleted row OR owner mismatch) is a CONFIG error, not a
@@ -392,6 +415,24 @@ export function createDataSourcePluginFacade(
         'DataSourceNotReadOnlyError'
       )
     }
+    // W-5 floor 1, `strict` only (default false — byte-identical to before this parameter existed):
+    // a sqlserver source with requestTimeoutMs=0 refuses BEFORE the connect a few lines below, so no
+    // connection is ever opened for a read that demanded a bounded timeout and cannot get one. Scoped
+    // to `type === 'sqlserver'` — MSSQLAdapter's `?? 30000` no-override-on-0 convention is the only
+    // place this exposure exists; every other dialect is unaffected regardless of `strict`.
+    if (strict) {
+      const config = adapter.getConfig()
+      if (config.type === 'sqlserver') {
+        const requestTimeoutMs = config.connection?.requestTimeoutMs
+        if (requestTimeoutMs === 0 || requestTimeoutMs === '0') {
+          throw new DataSourceBridgeConfigError(
+            DATA_SOURCE_REQUEST_TIMEOUT_DISABLED_CODE,
+            requestTimeoutDisabledMessage(dataSourceId),
+            'DataSourceRequestTimeoutDisabledError'
+          )
+        }
+      }
+    }
     if (!adapter.isConnected()) {
       await manager.connectDataSource(dataSourceId)
     }
@@ -413,8 +454,8 @@ export function createDataSourcePluginFacade(
       const { adapter } = await authorize(dataSourceId, principal)
       return adapter.getTableInfo(object, schema)
     },
-    async select(dataSourceId, table, options, principal) {
-      const { manager } = await authorize(dataSourceId, principal)
+    async select(dataSourceId, table, options, principal, strict) {
+      const { manager } = await authorize(dataSourceId, principal, strict === true)
       // manager.select enforces the A5 row caps and is read-only; no write path is reachable here.
       const queryOptions: QueryOptions = {
         limit: options.limit,
@@ -426,6 +467,13 @@ export function createDataSourcePluginFacade(
       const orderBy = normalizeOrderBy(options.orderBy)
       if (orderBy) {
         queryOptions.orderBy = orderBy
+      }
+      // W-5 floor 2, `strict` only: forces MSSQLAdapter's own (#5243) strict-offset-ordering check
+      // on for this one call, regardless of what connection.strictOffsetOrdering is configured to.
+      // A no-op for every other dialect (nothing else reads this field) and a no-op whenever orderBy
+      // is already set or offset is absent/0 — it only ever narrows an offset>0, no-orderBy read.
+      if (strict === true) {
+        queryOptions.strictOffsetOrdering = true
       }
       return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
     },

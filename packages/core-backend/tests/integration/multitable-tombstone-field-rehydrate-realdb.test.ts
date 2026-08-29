@@ -22,6 +22,10 @@ import request from 'supertest'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import {
+  __resetRecoveryWriterStateColumnProbe,
+} from '../../src/multitable/canonical-sheet-fence'
+import { prepareFieldLinkRestoreFencePlan } from '../../src/multitable/link-writer-fence'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -29,6 +33,7 @@ const TS = Date.now()
 const BASE = `base_tsr_${TS}`
 const UNDELETE_FLAG = 'MULTITABLE_ENABLE_CONFIG_UNDELETE'
 const CAPTURE_FLAG = 'MULTITABLE_TOMBSTONE_CAPTURE_ENABLED'
+const WRITER_FENCE_FLAG = 'MULTITABLE_ENABLE_WRITER_FENCE'
 
 type Actor = { id: string; roles: string[]; perms: string[] }
 const MANAGER: Actor = { id: `u_tsr_mgr_${TS}`, roles: ['member'], perms: ['multitable:read', 'multitable:write'] }
@@ -40,6 +45,11 @@ let actor: Actor = MANAGER
 let seq = 0
 const CREATED_SHEETS: string[] = []
 
+type Client = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number | null }>
+  release: () => void
+}
+
 async function freshSheet(tag: string): Promise<string> {
   const id = `sheet_tsr_${tag}_${TS}`
   await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [id, BASE, id])
@@ -49,8 +59,15 @@ async function freshSheet(tag: string): Promise<string> {
 const mkFieldId = (tag: string) => `fld_tsr_${tag}_${TS}_${seq++}`
 const mkRecordId = (tag: string) => `rec_tsr_${tag}_${TS}_${seq++}`
 
-async function insertField(sheetId: string, fieldId: string, name: string, type: string, order: number): Promise<void> {
-  await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, name, type, '{}', order])
+async function insertField(
+  sheetId: string,
+  fieldId: string,
+  name: string,
+  type: string,
+  order: number,
+  property: Record<string, unknown> = {},
+): Promise<void> {
+  await q('INSERT INTO meta_fields (id, sheet_id, name, type, property, "order") VALUES ($1,$2,$3,$4,$5::jsonb,$6)', [fieldId, sheetId, name, type, JSON.stringify(property), order])
 }
 async function insertRecord(sheetId: string, recordId: string, data: Record<string, unknown>): Promise<void> {
   await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1)', [recordId, sheetId, JSON.stringify(data)])
@@ -69,6 +86,43 @@ const preview = (sheetId: string, revisionId: string, as: Actor = MANAGER) => { 
 const execute = (sheetId: string, body: Record<string, unknown>, as: Actor = MANAGER) => { actor = as; return request(app).post(`/api/multitable/sheets/${sheetId}/config-restore-execute`).send(body) }
 const getRecord = (recordId: string, as: Actor = MANAGER) => { actor = as; return request(app).get(`/api/multitable/records/${recordId}`) }
 const rowCount = async (sql: string, params: unknown[]): Promise<number> => (await q(sql, params)).rows.length
+
+const connect = async (): Promise<Client> => {
+  const internal = poolManager.get().getInternalPool()
+  if (!internal) throw new Error('no internal pool')
+  return await internal.connect() as unknown as Client
+}
+
+const waitForBlocker = async (blockerPid: number): Promise<void> => {
+  const deadline = Date.now() + 5_000
+  while (Date.now() < deadline) {
+    const result = await q(
+      `SELECT count(*)::int AS n
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND $1::int = ANY(pg_blocking_pids(pid))`,
+      [blockerPid],
+    )
+    if (Number((result.rows[0] as { n: number }).n) > 0) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error('field undelete did not reach the expected lock wait')
+}
+
+const settleWhileMutationLockHeld = async <T>(promise: Promise<T>, label: string): Promise<T> =>
+  new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`${label} waited on an unfenced row lock`)), 3_000)
+    promise.then(
+      (value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
 
 async function lastFieldDeleteRevisionId(sheetId: string, fieldId: string): Promise<string> {
   const r = await q(
@@ -113,9 +167,14 @@ describeIfDatabase('4c-2 R1 rehydration — field undelete (real DB)', () => {
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
   })
 
-  afterEach(() => {
+  afterEach(async () => {
     delete process.env[UNDELETE_FLAG]
     delete process.env[CAPTURE_FLAG]
+    delete process.env[WRITER_FENCE_FLAG]
+    __resetRecoveryWriterStateColumnProbe()
+    if (CREATED_SHEETS.length > 0) {
+      await q('UPDATE meta_sheets SET recovery_writer_state = NULL WHERE id = ANY($1::text[])', [CREATED_SHEETS])
+    }
   })
 
   test('sentinel: DATABASE_URL set', () => { expect(process.env.DATABASE_URL).toBeTruthy() })
@@ -221,5 +280,276 @@ describeIfDatabase('4c-2 R1 rehydration — field undelete (real DB)', () => {
     expect(await rowCount('SELECT 1 FROM meta_records WHERE sheet_id = $1 AND data ? $2', [s, F])).toBe(0) // no values
     expect(await rowCount('SELECT 1 FROM meta_links WHERE field_id = $1', [F])).toBe(0)
     expect(await rowCount('SELECT 1 FROM meta_field_auto_number_sequences WHERE field_id = $1', [F])).toBe(0)
+  })
+
+  test('D-H1 flag OFF keeps field-link restore preflight query-inert', async () => {
+    delete process.env[WRITER_FENCE_FLAG]
+    let queryCount = 0
+    const plan = await prepareFieldLinkRestoreFencePlan(async () => {
+      queryCount += 1
+      return { rows: [] }
+    }, {
+      sourceSheetId: 'sheet_source',
+      fieldId: 'field_link',
+      before: { type: 'link', property: { foreignSheetId: 'sheet_target' } },
+      deleteRevisionId: 'revision_delete',
+    })
+    expect(plan).toBeNull()
+    expect(queryCount).toBe(0)
+  })
+
+  test('D-H1 field-link undelete fences the configured target and restores its live edge', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_positive_source')
+    const target = await freshSheet('dh1_positive_target')
+    const fieldId = mkFieldId('dh1_positive')
+    const sourceRecordId = mkRecordId('dh1_positive_source')
+    const targetRecordId = mkRecordId('dh1_positive_target')
+    await insertField(source, fieldId, 'D-H1 Link', 'link', 1, { foreignSheetId: target })
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    const p = await preview(source, revisionId)
+    const response = await execute(source, {
+      revisionId,
+      previewToken: p.body.data.previewToken,
+      confirm: 'undelete',
+    })
+
+    expect(response.status).toBe(200)
+    expect(await rowCount(
+      'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+      [fieldId, sourceRecordId, targetRecordId],
+    )).toBe(1)
+  })
+
+  test('D-H1 field-link undelete preserves legacy unconfigured edges by fencing their live target owners', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_legacy_source')
+    const target = await freshSheet('dh1_legacy_target')
+    const fieldId = mkFieldId('dh1_legacy')
+    const sourceRecordId = mkRecordId('dh1_legacy_source')
+    const targetRecordId = mkRecordId('dh1_legacy_target')
+    await insertField(source, fieldId, 'D-H1 Legacy Link', 'link', 1)
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    const p = await preview(source, revisionId)
+    const response = await execute(source, {
+      revisionId,
+      previewToken: p.body.data.previewToken,
+      confirm: 'undelete',
+    })
+
+    expect(response.status).toBe(200)
+    expect(await rowCount(
+      'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+      [fieldId, sourceRecordId, targetRecordId],
+    )).toBe(1)
+  })
+
+  test('D-H1 field-link undelete returns the existing values-free 409 when its target sheet is blocked', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_block_source')
+    const target = await freshSheet('dh1_block_target')
+    const fieldId = mkFieldId('dh1_block')
+    const sourceRecordId = mkRecordId('dh1_block_source')
+    const targetRecordId = mkRecordId('dh1_block_target')
+    await insertField(source, fieldId, 'D-H1 Blocked Link', 'link', 1, { foreignSheetId: target })
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+    const p = await preview(source, revisionId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    await q("UPDATE meta_sheets SET recovery_writer_state = 'applying' WHERE id = $1", [target])
+    const response = await execute(source, {
+      revisionId,
+      previewToken: p.body.data.previewToken,
+      confirm: 'undelete',
+    })
+
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'RECOVERY_IN_PROGRESS',
+        message: 'Another recovery operation is in progress on this sheet; retry shortly.',
+      },
+    })
+    expect(JSON.stringify(response.body)).not.toContain(target)
+    expect(await rowCount('SELECT 1 FROM meta_fields WHERE id = $1', [fieldId])).toBe(0)
+    expect(await rowCount('SELECT 1 FROM meta_links WHERE field_id = $1', [fieldId])).toBe(0)
+  })
+
+  test('D-H1 field-link undelete fails closed without waiting on an in-flight target-owner move', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_move_source')
+    const target = await freshSheet('dh1_move_target')
+    const decoy = await freshSheet('dh1_move_decoy')
+    const fieldId = mkFieldId('dh1_move')
+    const sourceRecordId = mkRecordId('dh1_move_source')
+    const targetRecordId = mkRecordId('dh1_move_target')
+    await insertField(source, fieldId, 'D-H1 Moving Link', 'link', 1, { foreignSheetId: target })
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+    const p = await preview(source, revisionId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    const mover = await connect()
+    let responsePromise: Promise<request.Response> | undefined
+    try {
+      await mover.query('BEGIN')
+      await mover.query('UPDATE meta_records SET sheet_id = $2 WHERE id = $1', [targetRecordId, decoy])
+      responsePromise = execute(source, {
+        revisionId,
+        previewToken: p.body.data.previewToken,
+        confirm: 'undelete',
+      }).then((response) => response)
+
+      const response = await settleWhileMutationLockHeld(responsePromise, 'field-link endpoint recheck')
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({
+        ok: false,
+        error: {
+          code: 'LINK_WRITER_FENCE_PLAN_CHANGED',
+          message: 'Link field configuration changed concurrently; retry the write',
+        },
+      })
+      expect(JSON.stringify(response.body)).not.toContain(targetRecordId)
+      expect(JSON.stringify(response.body)).not.toContain(decoy)
+      expect(await rowCount('SELECT 1 FROM meta_fields WHERE id = $1', [fieldId])).toBe(0)
+    } finally {
+      await mover.query('ROLLBACK').catch(() => {})
+      await responsePromise?.catch(() => {})
+      mover.release()
+    }
+  })
+
+  test('D-H1 field-link undelete never replays a target resurrected on an unfenced sheet after plan entry', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_late_source')
+    const target = await freshSheet('dh1_late_target')
+    const decoy = await freshSheet('dh1_late_decoy')
+    const fieldId = mkFieldId('dh1_late')
+    const sourceRecordId = mkRecordId('dh1_late_source')
+    const targetRecordId = mkRecordId('dh1_late_target')
+    await insertField(source, fieldId, 'D-H1 Late Link', 'link', 1, { foreignSheetId: target })
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+    await q('DELETE FROM meta_records WHERE id = $1', [targetRecordId])
+    const p = await preview(source, revisionId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    const blocker = await connect()
+    let responsePromise: Promise<request.Response> | undefined
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('LOCK TABLE meta_fields IN SHARE MODE')
+      responsePromise = execute(source, {
+        revisionId,
+        previewToken: p.body.data.previewToken,
+        confirm: 'undelete',
+      }).then((response) => response)
+      await waitForBlocker(blockerPid)
+      await insertRecord(decoy, targetRecordId, {})
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(200)
+      expect(await rowCount('SELECT 1 FROM meta_fields WHERE id = $1', [fieldId])).toBe(1)
+      expect(await rowCount(
+        'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+        [fieldId, sourceRecordId, targetRecordId],
+      )).toBe(0)
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => {})
+      await responsePromise?.catch(() => {})
+      blocker.release()
+    }
+  })
+
+  test('D-H1 field-link undelete pins its capture against a concurrent retention delete', async () => {
+    process.env[CAPTURE_FLAG] = 'true'
+    process.env[UNDELETE_FLAG] = 'true'
+    const source = await freshSheet('dh1_prune_source')
+    const target = await freshSheet('dh1_prune_target')
+    const fieldId = mkFieldId('dh1_prune')
+    const sourceRecordId = mkRecordId('dh1_prune_source')
+    const targetRecordId = mkRecordId('dh1_prune_target')
+    await insertField(source, fieldId, 'D-H1 Prune Link', 'link', 1, { foreignSheetId: target })
+    await insertRecord(source, sourceRecordId, {})
+    await insertRecord(target, targetRecordId, {})
+    await insertLink(fieldId, sourceRecordId, targetRecordId)
+    expect((await deleteField(fieldId)).status).toBe(200)
+    const revisionId = await lastFieldDeleteRevisionId(source, fieldId)
+    const p = await preview(source, revisionId)
+
+    process.env[WRITER_FENCE_FLAG] = 'true'
+    const blocker = await connect()
+    const retention = await connect()
+    let responsePromise: Promise<request.Response> | undefined
+    try {
+      await blocker.query('BEGIN')
+      const blockerPid = Number(((await blocker.query('SELECT pg_backend_pid() AS pid')).rows[0] as { pid: number }).pid)
+      await blocker.query('LOCK TABLE meta_fields IN SHARE MODE')
+      responsePromise = execute(source, {
+        revisionId,
+        previewToken: p.body.data.previewToken,
+        confirm: 'undelete',
+      }).then((response) => response)
+      await waitForBlocker(blockerPid)
+
+      await retention.query('BEGIN')
+      await retention.query("SELECT set_config('metasheet.mrho_retention', 'on', true)")
+      await retention.query("SET LOCAL lock_timeout = '500ms'")
+      let pruneError: unknown
+      try {
+        await retention.query(
+          "DELETE FROM meta_link_tombstones WHERE source_revision_id = $1 AND field_id = $2 AND reason = 'field_delete'",
+          [revisionId, fieldId],
+        )
+      } catch (error) {
+        pruneError = error
+      }
+      expect((pruneError as { code?: unknown } | undefined)?.code).toBe('55P03')
+      await retention.query('ROLLBACK')
+      await blocker.query('COMMIT')
+
+      const response = await responsePromise
+      expect(response.status).toBe(200)
+      expect(await rowCount(
+        'SELECT 1 FROM meta_links WHERE field_id = $1 AND record_id = $2 AND foreign_record_id = $3',
+        [fieldId, sourceRecordId, targetRecordId],
+      )).toBe(1)
+    } finally {
+      await retention.query('ROLLBACK').catch(() => {})
+      await blocker.query('ROLLBACK').catch(() => {})
+      await responsePromise?.catch(() => {})
+      retention.release()
+      blocker.release()
+    }
   })
 })

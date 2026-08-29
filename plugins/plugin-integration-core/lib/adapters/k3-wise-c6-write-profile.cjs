@@ -22,6 +22,10 @@
 // VALUES-FREE: everything this module reports upward is a closed-set code or a count.
 
 const { AdapterValidationError } = require('../contracts.cjs')
+// E4 / G-4 LAYER 3 of FOUR (HG v1.2 §10.2.3). The write-source facade is the last thing between
+// the C6 apply engine and the K3 adapter. It refuses BEFORE the adapter is obtained, independently
+// of the route and of the apply engine. Acceptance E4-03.
+const { refuseK3ExternalWritePermanently } = require('../k3-external-write-permanent-fence.cjs')
 const { K3_WISE_MATERIAL_PROFILES } = require('./k3-wise-document-templates.cjs')
 const {
   isMeaningfulK3Identifier,
@@ -373,6 +377,28 @@ function createK3WiseC6WriteSource({ system, createAdapter, b4 } = {}) {
   }
 
   async function writeRows(object, rows, policy) {
+    // ===== E4 LAYER 3 of FOUR — UNCONDITIONAL (HG v1.2 §10.2.3) =======================
+    // No predicate. Reaching this function AT ALL is already the violation: it exists for one
+    // purpose, which is to put a K3 Save on the wire. There is deliberately no parameter, no
+    // option, no policy field and no env read that could reach past this line — the refusal is
+    // the first statement, before `targetAdapter()` is even resolved, so no adapter is created,
+    // no credential is decrypted and no login is attempted.
+    //
+    // This fence is what catches a caller who has bypassed BOTH outer layers (the route and
+    // `applyExternalWrite`) and driven `insertRows`/`updateRows` on this facade directly — the
+    // "direct write-source/profile" invocation path of acceptance E4-03. Both entry points funnel
+    // here, so one refusal covers both; that is also why neither carries a duplicate check.
+    refuseK3ExternalWritePermanently(
+      // `code` and `status` are attached alongside the details bag. AdapterValidationError carries
+      // its code inside `details` by convention, but the C6 row-error path reads `error.code` first
+      // (valuesFreeErrorCode) and so does the HTTP mapper. Without this the fixed token collapsed
+      // to the generic `AdapterValidationError` in apply evidence — witnessed during the
+      // layer-removal drill, which is the only situation in which this branch is reachable at all.
+      (status, code, message, details) => Object.assign(
+        new AdapterValidationError(message, details), { code, status },
+      ),
+    )
+    // ================================================================================
     const result = await targetAdapter().upsert({
       object,
       records: rows,

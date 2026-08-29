@@ -14,6 +14,15 @@
 //   optionSets      — dictionary literals for select fields (pack or template)
 //   roleViews       — role-banded views over the main table (column hiding only)
 //
+// plus ONE placement key:
+//   targetObjectId  — OPTIONAL. Absent = the frozen canonical main table (the
+//                     original and unchanged posture). Present = install into
+//                     the `plm_stock_preparation_sandbox*` namespace instead,
+//                     validated by the target-provisioning module's own
+//                     assertSandboxObjectId. It is server config, not request
+//                     input: see normalizePackTargetObjectId below for why that
+//                     is structural rather than a convention.
+//
 // What a pack can NEVER do, by construction:
 //   * touch the frozen template (no field may be redefined, removed, retyped —
 //     an `ext_` id that would collide with a template id is rejected by
@@ -48,6 +57,16 @@ const {
 
 const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
+// WHERE a pack's columns land. The sandbox-objectId rule is NOT re-implemented
+// here — it is imported from the target-provisioning module, which is the same
+// authority the sandbox ensure/inspect paths already use. A second copy of that
+// regex is exactly how "a sandbox target" comes to mean two different things in
+// two modules. Safe to require statically: target-provisioning's own imports are
+// leaf-only (templates + extension-namespace) and it never reaches back here, so
+// this adds no edge to the load-time cycle documented in
+// stock-preparation-ext-field-mapping.cjs.
+const { assertSandboxObjectId } = require('./stock-preparation-target-provisioning.cjs')
+
 // The 1-200 cap, duplicate-value rejection, allowed-option-key whitelist and
 // executable-key rejection all live in the C6 option-sync normalizer. Reused
 // (never re-implemented) so a pack literal and a runtime option sync can never
@@ -64,7 +83,7 @@ const {
 const PACK_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/
 const ROLE_VIEW_ID_PATTERN = /^[a-z][a-z0-9-]{1,31}$/
 
-const PACK_KEYS = Object.freeze(['packId', 'packVersion', 'label', 'extensionFields', 'optionSets', 'roleViews'])
+const PACK_KEYS = Object.freeze(['packId', 'packVersion', 'label', 'targetObjectId', 'extensionFields', 'optionSets', 'roleViews'])
 const EXTENSION_FIELD_KEYS = Object.freeze(['id', 'label', 'type', 'ownership'])
 const OPTION_SET_KEYS = Object.freeze(['fieldId', 'options'])
 const ROLE_VIEW_KEYS = Object.freeze(['viewId', 'label', 'hideOwnerships', 'hideFieldIds'])
@@ -84,6 +103,7 @@ const STOCK_PREPARATION_CUSTOMER_PACK_ERROR_REASONS = Object.freeze([
   'PACK_ID_INVALID',
   'PACK_VERSION_INVALID',
   'PACK_LABEL_INVALID',
+  'PACK_TARGET_OBJECT_ID_INVALID',
   'EXTENSION_FIELDS_INVALID',
   'EXTENSION_FIELD_UNKNOWN_KEY',
   'EXTENSION_FIELD_INLINE_OPTIONS',
@@ -178,6 +198,63 @@ function safeLabel(value, reason, label) {
     fail(reason, `${label} must not be secret-shaped`, { field: label })
   }
   return text
+}
+
+/**
+ * WHERE THIS PACK'S COLUMNS LAND.
+ *
+ * ABSENT — the frozen canonical main table. This is the posture every pack had
+ * before the key existed and the one a canonical deployment keeps: omission is
+ * how a pack asks for `plm_stock_preparation_main`, and nothing about that path
+ * changes.
+ *
+ * PRESENT — the pack installs into the stock-preparation SANDBOX namespace
+ * instead, and the value must satisfy `assertSandboxObjectId`: inside
+ * `plm_stock_preparation_sandbox*`, and not the production canonical id. An
+ * unlisted or malformed value is REFUSED with this module's own closed reason
+ * (`PACK_TARGET_OBJECT_ID_INVALID`), never coerced and never defaulted back to
+ * canonical — a pack that names a target it may not have must not quietly
+ * install somewhere else.
+ *
+ * PRESENT-AND-CANONICAL IS ALSO REFUSED, deliberately. Omission is already how a
+ * pack says "canonical"; spelling the canonical objectId out is not a second way
+ * to say the same thing, it is the shape a redirection attempt takes, and
+ * `assertSandboxObjectId` rejects it with `reason: 'prod_canonical'`. So the key,
+ * when present, means exactly one thing: sandbox.
+ *
+ * WHY THIS IS STILL NEVER REQUEST-SUPPLIED — the property the old hardcode was
+ * really protecting. A pack reaches the installer through ONE door: the
+ * server-held catalog (stock-preparation-customer-pack-catalog.cjs), built from
+ * the `stockPreparationCustomerPacks` config key, which
+ * packages/core-backend/src/plugin-runtime-config.ts populates from a deploy-time
+ * JSON file named by INTEGRATION_CORE_STOCK_PREPARATION_CUSTOMER_PACKS_PATH. The
+ * install route takes a `packId` from the path and nothing else — its body
+ * allowlist is the single key `mode` (VALID_CUSTOMER_PACK_INSTALL_BODY_KEYS in
+ * http-routes.cjs), so a request can carry neither a pack nor a targetObjectId.
+ * The set of installable targets is therefore exactly the set of targets the
+ * server's own pack file declares, and it is closed to the network.
+ *
+ * The catalog normalizes EVERY configured pack at build time, so a deployment
+ * that mis-declares a target fails at plugin activation with this reason
+ * attached — not on a deployer's first install call, and never as a silent
+ * install onto the wrong sheet.
+ */
+function normalizePackTargetObjectId(value) {
+  if (value === undefined || value === null) {
+    return STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
+  }
+  try {
+    return assertSandboxObjectId(value, 'pack.targetObjectId')
+  } catch (error) {
+    // Re-thrown in THIS module's closed vocabulary. Without it a pack naming a
+    // bad target would surface a StockPreparationTargetProvisioningError and a
+    // caller branching on `.reason` would see nothing at all — the same reason
+    // `assertNoContentKeys` re-throws the template module's error above.
+    fail('PACK_TARGET_OBJECT_ID_INVALID', 'pack.targetObjectId must be a stock-preparation sandbox target objectId', {
+      field: 'pack.targetObjectId',
+      provisioningReason: error && error.details && error.details.reason ? error.details.reason : 'UNKNOWN',
+    })
+  }
 }
 
 function normalizeExtensionField(input, index) {
@@ -443,7 +520,7 @@ function normalizeCustomerPack(input) {
     label: input.label === undefined || input.label === null
       ? packId
       : safeLabel(input.label, 'PACK_LABEL_INVALID', 'pack.label'),
-    targetObjectId: STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    targetObjectId: normalizePackTargetObjectId(input.targetObjectId),
     extensionFields,
     optionSets: normalizeOptionSets(input.optionSets, catalog),
     roleViews: normalizeRoleViews(input.roleViews, catalog),
@@ -498,5 +575,6 @@ module.exports = {
     buildFieldCatalog,
     resolveHiddenFieldIds,
     normalizeExtensionFields,
+    normalizePackTargetObjectId,
   },
 }
