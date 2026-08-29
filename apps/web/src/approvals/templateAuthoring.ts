@@ -1480,7 +1480,11 @@ export function draftFromTemplate(template: ApprovalTemplateDetailDTO): Template
 export function buildFormSchema(draft: TemplateAuthoringDraft): FormSchema {
   return {
     fields: draft.fields.map((field) => {
-      const base = field.original ? { ...field.original } : {}
+      const base: Partial<FormField> = field.original ? { ...field.original } : {}
+      // Persisted props belong to their original field type. Retype keeps the draft carriers so an
+      // author can switch back without losing work, but a cross-type save must let the target arm
+      // below rebuild only target-owned props.
+      if (field.original && field.original.type !== field.type) delete base.props
       const next: FormField = {
         ...base,
         id: field.id.trim(),

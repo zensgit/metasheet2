@@ -442,22 +442,76 @@ test('B11 — legacy compatibility: an unsupported field type keeps the WHOLE te
   await page.screenshot({ path: `${OUT}/afb-mounted-b11.png` })
 })
 
-// --- B12: attachment/number boundaries ----------------------------------------------
+// --- B12: Lock-8 controls and attachment boundary -----------------------------------
 
-test('B12 — attachment/number boundaries: attachment remains absent from the palette; number FWB display props stay unavailable in the inspector', async ({ page }) => {
-  await mountFields(page)
-  // Attachment is never an offered palette type (AuthorableFieldType excludes it, FB-D8).
-  await expect(page.locator('[data-testid="approval-form-palette-chip-attachment"]')).toHaveCount(0)
+test('B12 — number, date range, and explanation controls remain usable and responsive; attachment stays absent', async ({ page }) => {
+  for (const [width, height] of [[1440, 900], [1024, 768], [390, 844]] as const) {
+    await page.setViewportSize({ width, height })
+    await mountFields(page)
+    await expect(page.locator('[data-testid="approval-form-palette-chip-attachment"]')).toHaveCount(0)
+    const initialCard = cards(page).first()
 
-  await page.click('[data-testid="approval-form-palette-chip-number"]')
-  await cards(page).last().click()
-  // The inspector's common controls render for a number field; no currency/FWB-specific control
-  // exists (no test id for one — the ABSENCE of any such affordance is the assertion).
-  await expect(page.locator('[data-testid="approval-form-field-inspector-label"]')).toBeVisible()
-  const inspectorHtml = await page.locator('[data-testid="approval-form-field-inspector"]').innerHTML()
-  expect(inspectorHtml).not.toContain('currencySymbol')
-  expect(inspectorHtml).not.toContain('thousandsSeparator')
-  await page.screenshot({ path: `${OUT}/afb-mounted-b12.png` })
+    await page.click('[data-testid="approval-form-palette-chip-number"]')
+    const numberCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="number"]').last()
+    await numberCard.click()
+    const currency = page.locator('[data-testid="approval-form-field-inspector-number-currency"]')
+    const thousands = page.locator('[data-testid="approval-form-field-inspector-number-thousands"]')
+    const uppercase = page.locator('[data-testid="approval-form-field-inspector-number-uppercase"]')
+    await expect(currency).toHaveAccessibleName('货币符号')
+    await expect(thousands).toHaveAccessibleName('显示千位分隔符')
+    await expect(uppercase).toHaveAccessibleName('显示中文大写')
+    await currency.selectOption('¥')
+    await thousands.check()
+    await uppercase.check()
+    await initialCard.click()
+    await numberCard.click()
+    await expect(currency).toHaveValue('¥')
+    await expect(thousands).toBeChecked()
+    await expect(uppercase).toBeChecked()
+
+    await page.click('[data-testid="approval-form-palette-chip-date_range"]')
+    const dateRangeCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="date_range"]').last()
+    await dateRangeCard.click()
+    const dateType = page.locator('[data-testid="approval-form-field-inspector-date-range-type"]')
+    const startLabel = page.locator('[data-testid="approval-form-field-inspector-date-range-start-label"]')
+    const endLabel = page.locator('[data-testid="approval-form-field-inspector-date-range-end-label"]')
+    const durationLabel = page.locator('[data-testid="approval-form-field-inspector-date-range-duration-label"]')
+    await expect(dateType).toHaveAccessibleName(/日期类型/)
+    await expect(startLabel).toHaveAccessibleName(/起始控件名称/)
+    await expect(endLabel).toHaveAccessibleName(/结束控件名称/)
+    await expect(durationLabel).toHaveAccessibleName(/时长控件名称/)
+    await dateType.selectOption('date_minute')
+    await startLabel.fill('开始时间')
+    await startLabel.blur()
+    await endLabel.fill('结束时间')
+    await endLabel.blur()
+    await durationLabel.fill('合计时长')
+    await durationLabel.blur()
+    await numberCard.click()
+    await dateRangeCard.click()
+    await expect(dateType).toHaveValue('date_minute')
+    await expect(startLabel).toHaveValue('开始时间')
+    await expect(endLabel).toHaveValue('结束时间')
+    await expect(durationLabel).toHaveValue('合计时长')
+
+    await page.click('[data-testid="approval-form-palette-chip-explanation"]')
+    const explanationCard = page.locator('[data-testid="approval-form-builder-card"][data-field-type="explanation"]').last()
+    await explanationCard.click()
+    const explanation = page.locator('[data-testid="approval-form-field-inspector-explanation-text"]')
+    await expect(explanation).toHaveAccessibleName('说明内容')
+    await explanation.fill('第一行\n第二行')
+    await explanation.blur()
+    await dateRangeCard.click()
+    await explanationCard.click()
+    await expect(explanation).toHaveValue('第一行\n第二行')
+
+    await page.waitForTimeout(100)
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(overflow, `B12 horizontal overflow at ${width}x${height}`).toBeLessThanOrEqual(1)
+    await page.screenshot({ path: `${OUT}/afb-mounted-b12-${width}.png` })
+  }
 })
 
 // --- B13: mounted detail/sub-form preview ----------------------------------------

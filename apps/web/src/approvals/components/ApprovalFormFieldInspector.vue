@@ -238,6 +238,7 @@
         <textarea
           class="approval-form-field-inspector__control"
           data-testid="approval-form-field-inspector-explanation-text"
+          aria-label="说明内容"
           rows="3"
           :value="textValue('explanationText')"
           @input="onTextInput('explanationText', $event)"

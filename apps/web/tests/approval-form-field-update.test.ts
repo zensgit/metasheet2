@@ -30,6 +30,7 @@ import {
   type IdentityRandomSource,
 } from '../src/approvals/approvalFormIdentity'
 import {
+  buildFormSchema,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
@@ -180,6 +181,109 @@ describe('retypeFormField - identity preservation (FB-D5)', () => {
     expect(
       retypeFormField(draftWith([field(1)]), 'local_1', 'no_such_type' as never),
     ).toMatchObject({ ok: false, reason: 'unsupported_field_type' })
+  })
+})
+
+describe('buildFormSchema - cross-type props ownership', () => {
+  it('drops persisted date_range props when retyped to number', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'date_range',
+      label: '日期区间',
+      props: {
+        dateType: 'date_minute',
+        startLabel: '开始',
+        endLabel: '结束',
+        durationLabel: '时长',
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'date_range',
+        original,
+        dateRangeDateType: 'date_minute',
+        dateRangeStartLabel: '开始',
+        dateRangeEndLabel: '结束',
+        dateRangeDurationLabel: '时长',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'number')
+    assertOk(retyped)
+    const configured = updateFormFieldProperties(retyped.draft, 'local_1', {
+      numberCurrencySymbol: '¥',
+      numberThousandsSeparator: true,
+    })
+    assertOk(configured)
+
+    expect(buildFormSchema(configured.draft).fields[0].props).toEqual({
+      currencySymbol: '¥',
+      thousandsSeparator: true,
+    })
+  })
+
+  it('drops persisted explanation props when retyped to number', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'explanation',
+      label: '说明',
+      props: { text: '仅供参考' },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'explanation',
+        original,
+        explanationText: '仅供参考',
+      }),
+    ])
+    const retyped = retypeFormField(source, 'local_1', 'number')
+    assertOk(retyped)
+    const configured = updateFormFieldProperties(retyped.draft, 'local_1', {
+      numberUppercaseCny: true,
+    })
+    assertOk(configured)
+
+    expect(buildFormSchema(configured.draft).fields[0].props).toEqual({
+      uppercaseCny: true,
+    })
+  })
+
+  it('preserves persisted number props after retyping away and back', () => {
+    const original: FormField = {
+      id: 'field_1',
+      type: 'number',
+      label: '金额',
+      props: {
+        min: 0,
+        precision: 2,
+        derivedFrom: {
+          operandColumnIds: ['quantity', 'price'],
+          operation: 'product',
+        },
+      },
+    }
+    const source = draftWith([
+      field(1, {
+        type: 'number',
+        original,
+        numberCurrencySymbol: '¥',
+        numberThousandsSeparator: true,
+      }),
+    ])
+    const away = retypeFormField(source, 'local_1', 'text')
+    assertOk(away)
+    const back = retypeFormField(away.draft, 'local_1', 'number')
+    assertOk(back)
+
+    expect(buildFormSchema(back.draft).fields[0].props).toEqual({
+      min: 0,
+      precision: 2,
+      derivedFrom: {
+        operandColumnIds: ['quantity', 'price'],
+        operation: 'product',
+      },
+      currencySymbol: '¥',
+      thousandsSeparator: true,
+    })
   })
 })
 
