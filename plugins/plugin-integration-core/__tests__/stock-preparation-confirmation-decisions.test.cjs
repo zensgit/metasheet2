@@ -1,31 +1,60 @@
 'use strict'
 
-// B-stage confirmation-decision LEDGER tests (first cut: duplicate_expanded_key
-// x keep_multiple_rows ONLY), structured on the HG v1.2 §15.2 acceptance
-// matrix. Guards, each RED-witnessed by mutation (see the landing commit body
-// for the mutation table):
+// B-stage confirmation-decision LEDGER tests (conflict class: exactly
+// duplicate_expanded_key; O1' semantics: full frozen action vocabulary + Q2-A
+// value entry), structured on the HG v1.2 §15.2 acceptance matrix. Guards,
+// each RED-witnessed by mutation (see the landing commit/PR bodies for the
+// mutation tables):
 //   A-01 same-fingerprint reconcile replay is idempotent (no row growth)
 //   A-02 fingerprint change supersedes the live row; the OLD confirmation does
 //        NOT clear the NEW conflict
-//   A-03 out-of-scope conflict classes / unknown or unimplemented actions are
-//        refused with fixed codes; canonical/external writes stay at ZERO
+//   A-03 out-of-scope conflict classes / unknown actions are refused with
+//        fixed codes; canonical/external writes stay at ZERO; the
+//        unimplemented-action refusal stays armed for future vocabulary tokens
 //   A-04 two INDEPENDENT reconcilers (separate module instances over one
 //        shared substrate) end with exactly ONE active decision row; the loser
 //        gets the fixed conflict code and has written nothing
 //   G1   the ledger holds NO canonical-sheet write capability (structural + runtime)
 //   G3   a stale confirmation (different source revision) never downgrades a hold
-//   G4   only a CONFIRMED keep_multiple_rows decision downgrades; accept_current is inert
+//   G4   only a CONFIRMED keep_multiple_rows decision RESOLVES; accept_current
+//        maps to the NAMED non-resolving source_correction_required policy and
+//        manual_hold to the non-resolving hold policy — neither ever releases
 //   G7   an unregistered / malformed / stale confirm is refused
 //   G8   the queue endpoint emits NO source cell values (seeded-marker negative control)
 //   M77  migration 077 defines the DB-level lease uniqueness the module leans on
 //   W4a  A→B→A fingerprint RETURN reopens the superseded row (human decision
-//        cleared, stale intermediate pending superseded in the same run) — no
-//        permanent wedge
+//        cleared — resolutionAction, notes AND entered values — stale
+//        intermediate pending superseded in the same run) — no permanent wedge
 //   W4b  a conflict that vanished from the plan is closed by the orphan sweep
 //        (pending only; confirmed orphans stay untouched)
 //   W4c  lease renew is CAS-guarded; an overtaken holder ABORTS mid-run with
 //        CONFIRMATION_DECISION_RECONCILE_LEASE_LOST and no duplicate active
 //        rows result
+//   V1   value entry (Q2-A): validated into the ledger's own human band with
+//        values-free refusals; the wall stays — the readback consumes decision
+//        tokens only, and the ONE content-bearing surface is the dedicated
+//        per-decision operator read (readConfirmationDecisionValueEntry)
+//   V2   value LEAK canary: a marker seeded through confirm-time value entry
+//        appears in NO reconcile/confirm/list/readback response and NO thrown
+//        error payload (negative control: it IS in the raw rows)
+//   S1   accept_current end to end: confirmed accept_current holds the group
+//        under the NAMED source_correction_required reason — dry-run stays
+//        manual_confirm_required, zero canonical writes
+//   S2   manual_hold end to end: confirmed manual_hold parks the group (held,
+//        never released by the readback), the queue projection distinguishes
+//        human-parked (confirmed x manual_hold, parkedCount) from pending, and
+//        a fingerprint change supersedes the parked row exactly like any other
+//   O1B  the anonymous hold families (keyless expanded/existing rows + the
+//        c2_row_error umbrella) ledger as PENDING under a derived identity;
+//        occurrenceCount folds into the fingerprint; the identity namespace is
+//        fenced both ways; and such a row can NEVER downgrade a hold
+//   X-1  CONVERGENCE: an anonymous-family row is refused at confirm for EVERY
+//        frozen action token — O1-A widened the action gate, so the
+//        conflict-type gate is now the sole refusal and must be swept
+//   X-2  CONVERGENCE: O1-A's require-time asserts (every mapped policy is one
+//        the planner implements; exactly one action maps to the resolving
+//        policy) still BITE with O1-B's families in the same file — witnessed
+//        by mutating a real copy in place, not merely by the module loading
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -38,6 +67,8 @@ const {
   FIRST_CUT_CONFLICT_TYPE,
   STATUSES,
   RESOLUTION_ACTIONS,
+  IMPLEMENTED_RESOLUTION_ACTIONS,
+  READBACK_POLICY_BY_RESOLUTION_ACTION,
   RECONCILE_LEASE_TABLE,
   StockPreparationConfirmationDecisionError,
   createConfirmationDecisionReconcileLease,
@@ -47,6 +78,7 @@ const {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
   __internals: ledgerInternals,
 } = require(MODULE_PATH)
@@ -64,6 +96,8 @@ const {
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs'))
 const {
   ANONYMOUS_HOLD_IDENTITY_PREFIX,
+  DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
+  IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES,
   planStockPreparationConflicts,
   __internals: plannerInternals,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-conflict-planner.cjs'))
@@ -396,7 +430,7 @@ async function testA03OutOfScopeConflictAndUnknownActionRefusedWithZeroCanonical
   assert.equal(rows.length, 1)
   assert.equal(rows[0].data.conflictType, FIRST_CUT_CONFLICT_TYPE)
 
-  // Unknown / unimplemented actions: fixed refusal codes, nothing written.
+  // Unknown actions: fixed refusal code, nothing written.
   const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
   const { decisionId, inputFingerprint } = list.rows[0]
   const base = { decisionId, inputFingerprint, confirmedBy: 'admin-user' }
@@ -405,13 +439,21 @@ async function testA03OutOfScopeConflictAndUnknownActionRefusedWithZeroCanonical
     'CONFIRMATION_DECISION_ACTION_INVALID',
     'A-03 unknown action',
   )
-  for (const action of [RESOLUTION_ACTIONS.ACCEPT_CURRENT, RESOLUTION_ACTIONS.MANUAL_HOLD]) {
-    await rejectsWithCode(
-      () => confirmConfirmationDecision(scopedCall(env, { ...base, resolutionAction: action })),
-      'CONFIRMATION_DECISION_ACTION_UNIMPLEMENTED',
-      `A-03 unimplemented action ${action}`,
-    )
-  }
+  // O1': all three frozen vocabulary tokens are implemented, DERIVED from the
+  // consumption map — so the unimplemented-refusal branch is armed exactly for
+  // future tokens added to the vocabulary without a map entry, and every mapped
+  // policy is one the planner implements (asserted at module load; re-stated
+  // here so the coverage claim is visible in the suite).
+  assert.deepEqual(
+    IMPLEMENTED_RESOLUTION_ACTIONS.slice().sort(),
+    Object.values(RESOLUTION_ACTIONS).sort(),
+    'A-03: the full frozen action vocabulary has planner consumption',
+  )
+  assert.deepEqual(READBACK_POLICY_BY_RESOLUTION_ACTION, {
+    keep_multiple_rows: 'keep_multiple_rows',
+    accept_current: 'source_correction_required',
+    manual_hold: 'hold',
+  }, 'A-03: the action -> planner-policy map is the ruled O1\' consumption rule')
   const afterRefusals = ledgerRows(env.records)
   assert.equal(afterRefusals.length, 1)
   assert.equal(afterRefusals[0].data.status, STATUSES.PENDING, 'refused confirms leave the row untouched')
@@ -537,8 +579,8 @@ async function testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecisio
     now: () => new Date('2026-08-29T10:00:00.000Z'),
   }))
 
-  // Cycle 1: rev-1 opens A; a human confirms it WITH notes, so the later
-  // revival has actual human content to clear.
+  // Cycle 1: rev-1 opens A; a human confirms it WITH notes AND entered values,
+  // so the later revival has actual human content of every kind to clear.
   await call('rev-1')
   const first = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', status: STATUSES.PENDING }))
   const original = first.rows[0]
@@ -548,6 +590,8 @@ async function testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecisio
     resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
     confirmedBy: 'admin-user',
     notes: 'first-cycle decision',
+    resolvedValue: 'first-cycle value',
+    resolvedAuxValue: 'first-cycle aux',
   }))
 
   // Cycle 2: rev-2 supersedes A and opens B (plain A-02 behaviour).
@@ -575,6 +619,8 @@ async function testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecisio
   // silently carried forward.
   assert.equal(revived.data.resolutionAction, null, 'W-4(a): the old human resolutionAction is cleared on reopen')
   assert.equal(revived.data.notes, null, 'W-4(a): the old human notes are cleared on reopen')
+  assert.equal(revived.data.resolvedValue, null, 'W-4(a)/Q5-A: values entered against superseded input are cleared, never carried forward')
+  assert.equal(revived.data.resolvedAuxValue, null, 'W-4(a)/Q5-A: the aux value clears with the primary')
   assert.equal(revived.data.confirmedBy, null, 'stale confirmation bookkeeping is cleared with it')
   assert.equal(revived.data.confirmedAt, null)
 
@@ -722,9 +768,13 @@ async function testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows() 
   const holderLease = createConfirmationDecisionReconcileLease({ db: sharedLeaseDb, ttlMs: 1, now: () => new Date(0) })
   const stealerLease = createConfirmationDecisionReconcileLease({ db: sharedLeaseDb, now: () => new Date(1000) })
   const scopeKey = ledgerInternals.stableHash('reconcile-lock', { targetProjectId: STAGING, projectNo: 'P-001' })
-  // 26 candidates: the renew cadence is every 25 writes, so the holder renews
-  // before write #1 (still unstolen), writes #1..#25 land, the steal happens
-  // after write #1, and the renew before write #26 discovers the loss.
+  // 26 candidates against renew cadence 1 (tightened after a synthetic
+  // concurrency counter-proof showed the old 25-write window admitting
+  // duplicate active decisions): the holder renews before write #1 (still
+  // unstolen), write #1 lands, the steal happens right after it, and the renew
+  // before write #2 discovers the loss — the overtaken holder aborts before
+  // its SECOND write, not its 26th. The one landed write is the honest
+  // ceiling: it was already in flight when the takeover happened.
   const keys = Array.from({ length: 26 }, (_, index) => `KEY-${String(index).padStart(2, '0')}`)
   const plan = planOf(keys.map((key) => duplicateHold(key)))
   let stolenLeaseId = null
@@ -756,11 +806,11 @@ async function testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows() 
       assert.equal(error.code, 'CONFIRMATION_DECISION_RECONCILE_LEASE_LOST', 'W-4(c): the overtaken holder aborts with the fixed code')
       assert.equal(error.status, 409)
       assert.equal(error.details.partial, true)
-      assert.equal(error.details.counts.created, 25, 'W-4(c): partial counts surface in the abort payload')
+      assert.equal(error.details.counts.created, 1, 'W-4(c): cadence 1 — the overtaken holder aborts before its SECOND write')
       return true
     },
   )
-  assert.equal(ledgerRows(records).length, 25, 'the holder stopped mid-run — a bounded, not unbounded, overrun')
+  assert.equal(ledgerRows(records).length, 1, 'the holder stopped after AT MOST one in-flight write — the tightened, still-nonzero ceiling')
   assert.ok(sharedLeaseDb.rows.get(scopeKey), 'the aborted holder must NOT free the stealer lease on release')
   assert.equal(sharedLeaseDb.rows.get(scopeKey).lease_id, stolenLeaseId)
 
@@ -778,8 +828,8 @@ async function testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows() 
     sourceRevision: 'rev-1',
     reconcileLease: stealerLease,
   })
-  assert.equal(takeover.counts.existing, 25, 'the aborted holder partial writes replay as no-ops (A-01)')
-  assert.equal(takeover.counts.created, 1, 'the takeover writes only what the holder never reached')
+  assert.equal(takeover.counts.existing, 1, 'the aborted holder single landed write replays as a no-op (A-01)')
+  assert.equal(takeover.counts.created, 25, 'the takeover writes only what the holder never reached')
   const active = ledgerRows(records).filter((row) => ACTIVE_STATUSES.includes(row.data.status))
   assert.equal(active.length, 26, 'every key ends with exactly one active row')
   assert.equal(new Set(active.map((row) => row.data.stableDecisionKey)).size, 26, 'W-4(c): no duplicate active rows for any key')
@@ -810,11 +860,23 @@ async function testConfirmRefusesUnregisteredMalformedAndStale() {
     'CONFIRMATION_DECISION_REVISION_MISMATCH',
     'stale fingerprint',
   )
-  // FIRST-CUT boundary: value entry belongs to the out-of-scope human-column line.
+  // Q2-A value VALIDATION boundary (the unlock does not mean anything-goes):
+  // non-string, over-length and aux-without-primary are refused with the fixed
+  // code, and the refusal names the column id only — never the content.
   await rejectsWithCode(
-    () => confirmConfirmationDecision(scopedCall(env, { ...base, decisionId, inputFingerprint, resolvedValue: 'anything' })),
-    'CONFIRMATION_DECISION_VALUE_ENTRY_UNIMPLEMENTED',
-    'value entry refused',
+    () => confirmConfirmationDecision(scopedCall(env, { ...base, decisionId, inputFingerprint, resolvedValue: { nested: 'object' } })),
+    'CONFIRMATION_DECISION_VALUE_INVALID',
+    'non-string value',
+  )
+  await rejectsWithCode(
+    () => confirmConfirmationDecision(scopedCall(env, { ...base, decisionId, inputFingerprint, resolvedValue: 'x'.repeat(4001) })),
+    'CONFIRMATION_DECISION_VALUE_INVALID',
+    'over-length value',
+  )
+  await rejectsWithCode(
+    () => confirmConfirmationDecision(scopedCall(env, { ...base, decisionId, inputFingerprint, resolvedAuxValue: 'aux-alone' })),
+    'CONFIRMATION_DECISION_VALUE_INVALID',
+    'aux value without primary',
   )
   // MALFORMED plan: a duplicate-class hold with no idempotencyKey is not a
   // planner artifact and must be refused, not anonymously ledgered.
@@ -890,9 +952,11 @@ async function testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows() {
   // hold must stand.
   assert.deepEqual((await readback('rev-2')).policies, [], 'a stale confirmation never downgrades')
 
-  // G4: a confirmed row whose resolutionAction is NOT keep_multiple_rows is
-  // inert for the planner. (Seeded directly — the confirm boundary refuses this
-  // action, which is itself asserted in A-03.)
+  // G4 (O1' shape): a confirmed accept_current row emits the NAMED
+  // NON-RESOLVING source_correction_required policy — the group holds under a
+  // human-decided reason, and nothing can resolve into write decisions except
+  // keep_multiple_rows (the load-time map assert pins that). Seeded directly
+  // so this stays a pure readback-mapping check.
   const acceptEnv = (() => {
     const { candidates } = deriveDecisionCandidates({ projectNo: 'P-001', plan, sourceRevision: 'rev-1' })
     const candidate = candidates[0]
@@ -918,7 +982,46 @@ async function testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows() {
     plan,
     sourceRevision: 'rev-1',
   }))
-  assert.deepEqual(acceptReview.policies, [], 'a confirmed accept_current row must not downgrade the hold')
+  assert.deepEqual(acceptReview.policies, [{
+    fingerprint: plannerInternals.stableFingerprint('KEY-A'),
+    policy: 'source_correction_required',
+    approvedAtPresent: true,
+    approvedByPresent: true,
+  }], 'G4: accept_current maps to the named non-resolving policy')
+  assert.notEqual(acceptReview.policies[0].policy, 'keep_multiple_rows', 'G4: accept_current must never emit the resolving policy')
+
+  // A confirmed row carrying an UNMAPPED action token (legacy/hand-seeded)
+  // emits nothing — the hold stands, never a guessed release. 'constructor'
+  // additionally probes the map lookup: a prototype key must fall through to
+  // the hold, not resolve to Object.prototype members.
+  for (const unmappedAction of ['legacy_unknown_action', 'constructor']) {
+  const unmappedEnv = (() => {
+    const { candidates } = deriveDecisionCandidates({ projectNo: 'P-001', plan, sourceRevision: 'rev-1' })
+    const candidate = candidates[0]
+    return ledgerEnv({
+      rows: [seedLedgerRow({
+        decisionId: candidate.decisionId,
+        stableDecisionKey: candidate.stableDecisionKey,
+        projectNo: 'P-001',
+        rowIdentity: candidate.rowIdentity,
+        conflictType: candidate.conflictType,
+        inputFingerprint: candidate.inputFingerprint,
+        sourceRevision: 'rev-1',
+        status: STATUSES.CONFIRMED,
+        openedAt: '2026-08-27T09:00:00.000Z',
+        resolutionAction: unmappedAction,
+        confirmedBy: 'admin-user',
+        confirmedAt: '2026-08-27T09:30:00.000Z',
+      }, 'rec_seed_unmapped')],
+    })
+  })()
+  const unmappedReview = await loadConfirmedDuplicatePolicyReview(scopedCall(unmappedEnv, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision: 'rev-1',
+  }))
+  assert.deepEqual(unmappedReview.policies, [], `an unmapped action token (${unmappedAction}) emits nothing — the hold stands`)
+  }
 
   // A-03 companion: a confirmed row for ANOTHER conflict class never reaches
   // the planner, even when seeded with the exact ids the (out-of-scope)
@@ -987,6 +1090,291 @@ async function testQueueEndpointEmitsNoCellValues() {
   assert.ok(list.rows[0].inputFingerprint.startsWith('sha256:'))
   assert.equal(list.rows[0].sourceRevisionPresent, true, 'presence booleans replace the values')
   assert.equal(Object.prototype.hasOwnProperty.call(list.rows[0], 'rowIdentity'), false, 'rowIdentity never crosses the queue surface')
+  assert.equal(list.rows[0].notesPresent, false)
+  assert.equal(list.rows[0].resolvedValuePresent, false)
+  assert.equal(list.rows[0].resolvedAuxValuePresent, false)
+  assert.deepEqual(list.byResolutionAction, {}, 'no action decided yet')
+  assert.equal(list.parkedCount, 0)
+}
+
+// ── V1: value entry — stored, validated, read back ONLY through the operator
+// surface; whitespace-only treated as absent ────────────────────────────────
+
+async function testV1ValueEntryStoredAndReadOnlyThroughOperatorSurface() {
+  const env = ledgerEnv()
+  await reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan: planOf([duplicateHold('KEY-A')]),
+    sourceRevision: 'rev-1',
+  }))
+  const pending = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  const { decisionId, inputFingerprint } = pending.rows[0]
+
+  const confirmed = await confirmConfirmationDecision(scopedCall(env, {
+    decisionId,
+    inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+    confirmedBy: 'admin-user',
+    notes: 'entered-note',
+    resolvedValue: '  entered-value  ',
+    resolvedAuxValue: 'entered-aux',
+  }))
+  // Confirm evidence: presence booleans only, never content.
+  assert.equal(confirmed.evidence.resolvedValuePresent, true)
+  assert.equal(confirmed.evidence.resolvedAuxValuePresent, true)
+  assert.equal(JSON.stringify(confirmed).includes('entered-value'), false, 'V1: confirm response carries no value content')
+
+  // Stored (trimmed) in the ledger's own human band.
+  const raw = ledgerRows(env.records)[0]
+  assert.equal(raw.data.resolvedValue, 'entered-value', 'V1: the value is stored trimmed')
+  assert.equal(raw.data.resolvedAuxValue, 'entered-aux')
+
+  // Queue: presence flags true, contents absent.
+  const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  assert.equal(list.rows[0].resolvedValuePresent, true)
+  assert.equal(list.rows[0].resolvedAuxValuePresent, true)
+  assert.equal(list.rows[0].notesPresent, true)
+  assert.equal(JSON.stringify(list).includes('entered-value'), false, 'V1: the queue stays values-free')
+
+  // THE one sanctioned content surface: the per-decision operator read.
+  const read = await readConfirmationDecisionValueEntry(scopedCall(env, { decisionId }))
+  assert.equal(read.mode, 'confirmation_decision_value_entry')
+  assert.deepEqual(read.valueEntry, {
+    resolvedValue: 'entered-value',
+    resolvedAuxValue: 'entered-aux',
+    notes: 'entered-note',
+  })
+  assert.equal(read.resolutionAction, RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS)
+  assert.equal(Object.prototype.hasOwnProperty.call(read, 'rowIdentity'), false, 'V1: the operator read still hides the value-bearing system cells')
+  assert.equal(JSON.stringify(read).includes('P-001'), false, 'V1: projectNo does not cross the operator read')
+
+  await rejectsWithCode(
+    () => readConfirmationDecisionValueEntry(scopedCall(env, { decisionId: 'sha256:0000000000000000000000000000dead' })),
+    'CONFIRMATION_DECISION_NOT_FOUND',
+    'V1 unknown decisionId read',
+  )
+
+  // Whitespace-only entry is ABSENT, not stored: fresh decision, blank value.
+  const blankEnv = ledgerEnv()
+  await reconcileConfirmationDecisions(scopedCall(blankEnv, {
+    projectNo: 'P-001',
+    plan: planOf([duplicateHold('KEY-B')]),
+    sourceRevision: 'rev-1',
+  }))
+  const blankPending = await listConfirmationDecisions(scopedCall(blankEnv, { projectNo: 'P-001' }))
+  const blankConfirmed = await confirmConfirmationDecision(scopedCall(blankEnv, {
+    decisionId: blankPending.rows[0].decisionId,
+    inputFingerprint: blankPending.rows[0].inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+    confirmedBy: 'admin-user',
+    resolvedValue: '   ',
+  }))
+  assert.equal(blankConfirmed.evidence.resolvedValuePresent, false, 'V1: whitespace-only is absent, not a stored empty value')
+  assert.equal(ledgerRows(blankEnv.records)[0].data.resolvedValue, undefined)
+}
+
+// ── V2: value LEAK canary — the marker crosses NO surface but the operator
+// read, and NO error payload, while provably present in the raw rows ────────
+
+async function testV2ValueLeakCanaryAcrossSurfacesAndErrors() {
+  const env = ledgerEnv()
+  const plan = planOf([duplicateHold('KEY-A')])
+  await reconcileConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' }))
+  const pending = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  const { decisionId, inputFingerprint } = pending.rows[0]
+
+  const errorSurfaces = []
+  async function captureError(promiseFactory, label) {
+    try {
+      await promiseFactory()
+      assert.fail(`${label}: expected a refusal`)
+    } catch (error) {
+      assert.ok(error instanceof StockPreparationConfirmationDecisionError, `${label}: ${error && error.message}`)
+      errorSurfaces.push([label, JSON.stringify({ name: error.name, code: error.code, message: error.message, details: error.details })])
+      return error
+    }
+  }
+
+  // A refused entry whose CONTENT carries the marker: the refusal must name
+  // the column and the length, never the content.
+  const overlong = await captureError(
+    () => confirmConfirmationDecision(scopedCall(env, {
+      decisionId,
+      inputFingerprint,
+      resolutionAction: RESOLUTION_ACTIONS.MANUAL_HOLD,
+      confirmedBy: 'admin-user',
+      resolvedValue: `${LEAK_MARKER}-${'x'.repeat(4001)}`,
+    })),
+    'over-length marker value',
+  )
+  assert.equal(overlong.code, 'CONFIRMATION_DECISION_VALUE_INVALID')
+
+  // The accepted entry: marker in BOTH value columns and the notes.
+  const confirmed = await confirmConfirmationDecision(scopedCall(env, {
+    decisionId,
+    inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.MANUAL_HOLD,
+    confirmedBy: 'admin-user',
+    notes: `note-${LEAK_MARKER}`,
+    resolvedValue: `value-${LEAK_MARKER}`,
+    resolvedAuxValue: `aux-${LEAK_MARKER}`,
+  }))
+
+  // NEGATIVE CONTROL: the marker IS in the underlying store.
+  assert.ok(JSON.stringify(env.records.rows(LEDGER_SHEET)).includes(LEAK_MARKER), 'V2 negative control: marker present in raw rows')
+
+  // Errors thrown AFTER the values exist (the row they refuse CARRIES the marker).
+  await captureError(
+    () => confirmConfirmationDecision(scopedCall(env, {
+      decisionId,
+      inputFingerprint,
+      resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      confirmedBy: 'admin-user',
+    })),
+    'double confirm over marker-bearing row',
+  )
+
+  // Every machine surface: confirm response, reconcile replay, queue, readback.
+  const surfaces = [
+    ['confirm response', JSON.stringify(confirmed)],
+    ['reconcile replay', JSON.stringify(await reconcileConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' })))],
+    ['queue projection', JSON.stringify(await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' })))],
+    ['planner readback', JSON.stringify(await loadConfirmedDuplicatePolicyReview(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' })))],
+    ...errorSurfaces,
+  ]
+  for (const [label, serialized] of surfaces) {
+    assert.equal(serialized.includes(LEAK_MARKER), false, `V2: value content leaked through ${label}`)
+  }
+
+  // The ONE sanctioned surface carries it — the boundary is a decision, not an
+  // accident, so the test states it positively.
+  const read = await readConfirmationDecisionValueEntry(scopedCall(env, { decisionId }))
+  assert.equal(read.valueEntry.resolvedValue, `value-${LEAK_MARKER}`)
+}
+
+// ── S1: accept_current end to end — the group holds under the NAMED
+// source_correction_required reason; nothing resolves, nothing is written ───
+
+async function testS1AcceptCurrentHoldsGroupUnderNamedReasonEndToEnd() {
+  const storage = createMemoryStorage()
+  const sourceAdapter = createSourceAdapter(duplicateRootPlmData())
+  const canonicalRecords = createCanonicalRecordsApi()
+  const ledger = ledgerEnv()
+  const action = normalizeStockPreparationActionConfig({
+    actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+    source: { externalSystemId: 'plm_source_1', kind: 'data-source:sql-readonly' },
+    target: { sheetId: 'sheet_stock', objectId: 'stockPreparationMain' },
+  })
+  const confirmationDecisionResolver = async ({ projectNo, plan, sourceRevision }) =>
+    loadConfirmedDuplicatePolicyReview(scopedCall(ledger, { projectNo, plan, sourceRevision }))
+  const dryRunInput = () => ({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter,
+    recordsApi: canonicalRecords,
+    tokenStore: storage,
+    policyStore: storage,
+    confirmationDecisionResolver,
+  })
+
+  const prepared = await prepareStockPreparationConfirmationDecisions({
+    action,
+    parameters: { projectNo: 'P-001' },
+    sourceAdapter,
+    recordsApi: canonicalRecords,
+    policyStore: storage,
+  })
+  await reconcileConfirmationDecisions(scopedCall(ledger, {
+    projectNo: 'P-001',
+    plan: prepared.plan,
+    sourceRevision: prepared.revision,
+  }))
+  const queue = await listConfirmationDecisions(scopedCall(ledger, { projectNo: 'P-001', status: STATUSES.PENDING }))
+  await confirmConfirmationDecision(scopedCall(ledger, {
+    decisionId: queue.rows[0].decisionId,
+    inputFingerprint: queue.rows[0].inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.ACCEPT_CURRENT,
+    confirmedBy: 'admin-user',
+    resolvedValue: 'reference note for the standing state',
+  }))
+
+  // The confirmed accept_current is consulted, holds the group under its NAMED
+  // reason, and RELEASES NOTHING: no add decisions, no canonical write, the
+  // run stays manual_confirm_required.
+  const held = await dryRunStockPreparationAction(dryRunInput())
+  assert.equal(held.status, 'manual_confirm_required', 'S1: accept_current never flips the run to ready')
+  assert.equal(held.counts.manual_confirm, 1)
+  assert.equal(held.counts.add, 0)
+  assert.equal(held.evidence.confirmationDecision.matchedPolicyCount, 1, 'S1: the decision WAS consulted — this hold is decided, not pending')
+  assert.equal(held.evidence.confirmationDecision.conflictingPolicyCount, 0)
+  const resolution = held.evidence.plan.duplicateExpandedKeyResolution
+  assert.equal(resolution.resolvedGroupCount, 0, 'S1: nothing resolves into write decisions')
+  assert.equal(resolution.heldGroupCount, 1)
+  assert.deepEqual(resolution.heldReasonCounts, { source_correction_required: 1 },
+    'S1: the group holds under the NAMED human-decided reason, not the anonymous default_hold')
+  assert.equal(resolution.heldPolicies[0].policy, 'source_correction_required')
+  assert.equal(resolution.heldPolicies[0].scope, 'table_scope')
+  assert.equal(canonicalRecords.rows.length, 0, 'S1: zero canonical writes')
+  assert.equal(JSON.stringify(held.evidence).includes(LEAK_MARKER), false)
+  assert.equal(JSON.stringify(held.evidence).includes('reference note'), false, 'S1: the entered value stays out of dry-run evidence')
+}
+
+// ── S2: manual_hold end to end — parked, distinguishable, never released by
+// the readback; a fingerprint change supersedes it like any decision ────────
+
+async function testS2ManualHoldParksGroupAndSupersedesOnFingerprintChange() {
+  const env = ledgerEnv()
+  const plan = planOf([duplicateHold('KEY-A')])
+  const call = (sourceRevision) => reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision,
+  }))
+  await call('rev-1')
+  const pending = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  await confirmConfirmationDecision(scopedCall(env, {
+    decisionId: pending.rows[0].decisionId,
+    inputFingerprint: pending.rows[0].inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.MANUAL_HOLD,
+    confirmedBy: 'admin-user',
+    notes: 'parked pending supplier callback',
+    resolvedValue: 'intended value once unparked',
+  }))
+
+  // The readback EMITS the non-resolving hold policy — never silence, so a
+  // contrary durable release for the same fingerprint has to DISAGREE at the
+  // merge instead of winning by default; and never keep_multiple_rows.
+  const review = await loadConfirmedDuplicatePolicyReview(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' }))
+  assert.equal(review.policies.length, 1)
+  assert.equal(review.policies[0].policy, 'hold', 'S2: manual_hold maps to the non-resolving hold policy')
+
+  // Queue projection: human-parked is DISTINGUISHABLE from pending.
+  const parkedList = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  assert.deepEqual(parkedList.byStatus, { confirmed: 1 })
+  assert.deepEqual(parkedList.byResolutionAction, { manual_hold: 1 })
+  assert.equal(parkedList.parkedCount, 1, 'S2: parkedCount singles out confirmed x manual_hold')
+  assert.equal(parkedList.rows[0].status, STATUSES.CONFIRMED)
+  assert.equal(parkedList.rows[0].resolutionAction, RESOLUTION_ACTIONS.MANUAL_HOLD)
+  assert.equal(parkedList.rows[0].resolvedValuePresent, true)
+
+  // The parked decision is CONFIRMED — reconcile replay treats it as settled,
+  // not as an open question.
+  const replay = await call('rev-1')
+  assert.equal(replay.counts.existing, 1)
+  assert.equal(replay.counts.confirmed, 1)
+  assert.equal(replay.counts.created, 0)
+
+  // Q5-A: a fingerprint change supersedes the PARKED row exactly like any
+  // other decision — parked-on-stale-input never survives as parked.
+  const moved = await call('rev-2')
+  assert.equal(moved.counts.superseded, 1, 'S2: the parked row is superseded by the fingerprint change')
+  assert.equal(moved.counts.created, 1)
+  const after = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  assert.deepEqual(after.byStatus, { pending: 1, superseded: 1 })
+  assert.equal(after.parkedCount, 0, 'S2: a superseded park is no longer a standing park')
+  // ... and the stale park never releases nor parks the NEW input: no policy
+  // for rev-2 until a human decides again.
+  assert.deepEqual((await loadConfirmedDuplicatePolicyReview(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-2' }))).policies, [])
 }
 
 // ── end to end: dry-run -> reconcile -> confirm -> downgraded dry-run ───────
@@ -1348,6 +1736,9 @@ async function testO1bAnonymousRowsCanNeverDowngradeAHold() {
   // type outside the first cut, so an anonymous row is ledgered as a visible
   // PENDING queue entry that cannot even be confirmed yet. O1-B leaves that
   // boundary untouched — this cut adds identity, not a resolution surface.
+  // POST-CONVERGENCE: this spot-check uses keep_multiple_rows only; the sweep
+  // over ALL THREE frozen tokens — which is what actually matters now that
+  // O1-A widened the action gate — is X-1 below.
   const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', status: STATUSES.PENDING }))
   assert.equal(list.rows.length, 3)
   for (const row of list.rows) {
@@ -1359,7 +1750,7 @@ async function testO1bAnonymousRowsCanNeverDowngradeAHold() {
         confirmedBy: 'admin-user',
       })),
       'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
-      'an anonymous-family row has no implemented resolution action',
+      'an anonymous-family row is outside the confirmable conflict class',
     )
   }
 
@@ -1402,6 +1793,131 @@ async function testO1bAnonymousRowsCanNeverDowngradeAHold() {
   }
 }
 
+// ── CONVERGENCE GUARDS (O1-A x O1-B) ────────────────────────────────────────
+// Neither branch could carry these: each property is only at risk once BOTH
+// slices are in the same file. They are the two interactions the merge train
+// had to prove, written as tests so a later slice cannot silently undo them.
+
+async function testX1AnonymousRowRefusedForEVERYFrozenActionToken() {
+  // X-1. THE INTERACTION. Before convergence an anonymous-family row confirmed
+  // with accept_current / manual_hold was refused by the ACTION gate
+  // (CONFIRMATION_DECISION_ACTION_UNIMPLEMENTED) before the conflict-type gate
+  // was ever reached — O1-B's own guard therefore only ever exercised
+  // keep_multiple_rows. O1-A widened the action gate to the full frozen
+  // vocabulary, so for the other two tokens the CONFLICT-TYPE gate is now the
+  // ONLY refusal left. Sweep all three tokens so that gate can never be
+  // relaxed without a red test.
+  const env = ledgerEnv()
+  const plan = anonymousPlan()
+  await reconcileConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' }))
+  const list = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', status: STATUSES.PENDING }))
+  assert.equal(list.rows.length, 3, 'X-1 fixture: three anonymous families ledgered pending')
+
+  const frozenTokens = Object.values(RESOLUTION_ACTIONS)
+  assert.deepEqual(
+    frozenTokens.slice().sort(),
+    IMPLEMENTED_RESOLUTION_ACTIONS.slice().sort(),
+    'X-1 premise: every frozen token now clears the ACTION gate, so only the conflict-type gate remains',
+  )
+  for (const row of list.rows) {
+    for (const action of frozenTokens) {
+      await rejectsWithCode(
+        () => confirmConfirmationDecision(scopedCall(env, {
+          decisionId: row.decisionId,
+          inputFingerprint: row.inputFingerprint,
+          resolutionAction: action,
+          confirmedBy: 'admin-user',
+        })),
+        'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
+        `X-1 anonymous-family row must be refused for ${action} by the conflict-type gate`,
+      )
+    }
+  }
+
+  // Value entry, unlocked by O1-A, must not become a side door either: a
+  // refused confirm writes nothing, values included.
+  await rejectsWithCode(
+    () => confirmConfirmationDecision(scopedCall(env, {
+      decisionId: list.rows[0].decisionId,
+      inputFingerprint: list.rows[0].inputFingerprint,
+      resolutionAction: RESOLUTION_ACTIONS.MANUAL_HOLD,
+      resolvedValue: 'operator-intended-value',
+      confirmedBy: 'admin-user',
+    })),
+    'CONFIRMATION_DECISION_ACTION_CONFLICT_MISMATCH',
+    'X-1 value entry does not bypass the conflict-type gate',
+  )
+  const after = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001' }))
+  assert.equal(after.byStatus[STATUSES.CONFIRMED], undefined, 'X-1 no anonymous row may reach confirmed')
+  assert.equal(after.parkedCount, 0, 'X-1 no anonymous row may be parked')
+  assert.deepEqual(after.byResolutionAction, {}, 'X-1 no resolutionAction may be stored on an anonymous row')
+  for (const row of after.rows) {
+    assert.equal(row.resolvedValuePresent, false, 'X-1 a refused confirm stores no value')
+  }
+}
+
+async function testX2LoadAssertStaysArmedWithTheAnonymousFamiliesPresent() {
+  // X-2. O1-A's require-time asserts couple this module to the PLANNER's frozen
+  // policy vocabulary. O1-B rewrites that same planner. The asserts passing is
+  // implied by this file loading at all, but "it loaded" does not prove the
+  // asserts still BITE — a slice that deleted them would stay green. Mutate a
+  // real copy in place and require it: both asserts must throw, with O1-B's
+  // anonymous families sitting in the very same file.
+  const mappedPolicies = Object.values(READBACK_POLICY_BY_RESOLUTION_ACTION)
+  for (const policy of mappedPolicies) {
+    assert.ok(
+      IMPLEMENTED_DUPLICATE_EXPANDED_KEY_POLICIES.includes(policy),
+      `X-2 every mapped policy must be one the planner implements: ${policy}`,
+    )
+  }
+  const resolving = Object.entries(READBACK_POLICY_BY_RESOLUTION_ACTION)
+    .filter(([, policy]) => policy === DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY)
+    .map(([action]) => action)
+  assert.deepEqual(resolving, [RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS],
+    'X-2 exactly one action may map to the resolving duplicate policy')
+
+  const source = fs.readFileSync(MODULE_PATH, 'utf8')
+  assert.ok(source.includes('ANONYMOUS_HOLD_IDENTITY_PREFIX'),
+    'X-2 premise: the mutated copy carries O1-B\'s anonymous families too')
+
+  const mutations = [
+    // A second action mapped to the RESOLVING policy — the exactly-one assert.
+    [
+      `  [RESOLUTION_ACTIONS.ACCEPT_CURRENT]: 'source_correction_required',`,
+      `  [RESOLUTION_ACTIONS.ACCEPT_CURRENT]: DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,`,
+      'exactly keep_multiple_rows may map to the resolving duplicate policy',
+    ],
+    // A mapped policy the planner does not implement — the vocabulary-drift assert.
+    [
+      `  [RESOLUTION_ACTIONS.MANUAL_HOLD]: 'hold',`,
+      `  [RESOLUTION_ACTIONS.MANUAL_HOLD]: 'merge_quantity',`,
+      'a policy the planner does not implement',
+    ],
+  ]
+  for (const [find, replace, expectedFragment] of mutations) {
+    assert.ok(source.includes(find), `X-2 mutation anchor must exist: ${find.trim()}`)
+    const probe = path.join(path.dirname(MODULE_PATH), `.__x2-load-assert-probe-${process.pid}.cjs`)
+    assert.equal(fs.existsSync(probe), false, 'X-2 probe must not collide with a real module')
+    fs.writeFileSync(probe, source.replace(find, replace))
+    try {
+      assert.throws(
+        () => require(probe),
+        (error) => {
+          assert.ok(
+            error && typeof error.message === 'string' && error.message.includes(expectedFragment),
+            `X-2 load assert must fire with "${expectedFragment}", got: ${error && error.message}`,
+          )
+          return true
+        },
+        'X-2 the require-time assert must still BITE, not merely exist',
+      )
+    } finally {
+      delete require.cache[require.resolve(probe)]
+      fs.unlinkSync(probe)
+    }
+  }
+}
+
 async function main() {
   const tests = [
     testLedgerHoldsNoCanonicalWriteCapability,
@@ -1417,11 +1933,17 @@ async function main() {
     testConfirmRefusesUnregisteredMalformedAndStale,
     testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows,
     testQueueEndpointEmitsNoCellValues,
+    testV1ValueEntryStoredAndReadOnlyThroughOperatorSurface,
+    testV2ValueLeakCanaryAcrossSurfacesAndErrors,
+    testS1AcceptCurrentHoldsGroupUnderNamedReasonEndToEnd,
+    testS2ManualHoldParksGroupAndSupersedesOnFingerprintChange,
     testEndToEndConfirmedDecisionDowngradesTheDuplicateHold,
     testO1bAnonymousFamiliesLedgerAsPendingAndRepeatReconcileIsStable,
     testO1bOccurrenceCountChangeSupersedesTheLocusRow,
     testO1bIdentityNamespaceIsFencedBothWays,
     testO1bAnonymousRowsCanNeverDowngradeAHold,
+    testX1AnonymousRowRefusedForEVERYFrozenActionToken,
+    testX2LoadAssertStaysArmedWithTheAnonymousFamiliesPresent,
   ]
   for (const test of tests) {
     await test()
