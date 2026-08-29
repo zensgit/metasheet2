@@ -1152,6 +1152,25 @@ describe('ElearningLearnerView', () => {
     expect(disabled.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
   })
 
+  it('keeps an incentive-only wallet available without requesting course content', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, {
+      content: false,
+      assignment: false,
+      assessment: false,
+      incentive: true,
+      media: false,
+    }))
+    const root = mountView()
+    await flushUi()
+
+    expect(root.querySelector('[data-testid="elearning-credit-wallet-balance"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+    expect(h.startWatch).not.toHaveBeenCalled()
+    expect(h.startExam).not.toHaveBeenCalled()
+    expect(root.querySelector('[data-testid^="elearning-course-"]')).toBeNull()
+  })
+
   it('does not leak stale queued beats from a stopped session into a new session', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => {

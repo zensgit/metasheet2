@@ -659,21 +659,23 @@ describe('ElearningAdminView', () => {
     expect(h.capabilities.mock.invocationCallOrder[0]).toBeLessThan(h.upload.mock.invocationCallOrder[0])
   })
 
-  it('fails closed without upload/publish/assign when neither content nor V0.1 is ready', async () => {
+  it('keeps incentive-only admin available while legacy publishing stays disabled', async () => {
     h.capabilities.mockResolvedValue({
       enabled: true,
       capabilities: {
         content: false,
-        assignment: true,
-        assessment: true,
+        assignment: false,
+        assessment: false,
         incentive: true,
         analytics: true,
-        media: true,
+        media: false,
       },
     })
     const root = mountView()
     await fillMinimum(root)
-    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('feature_disabled')
+    expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).not.toBeNull()
+    expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
     const publish = root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement
     expect(publish.disabled).toBe(true)
     publish.click()
@@ -684,6 +686,9 @@ describe('ElearningAdminView', () => {
 
     app?.unmount()
     container?.remove()
+  })
+
+  it('keeps all surfaces fail-closed when the master flag is disabled', async () => {
     h.capabilities.mockResolvedValue({
       enabled: false,
       capabilities: {

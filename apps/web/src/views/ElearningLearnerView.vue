@@ -600,10 +600,10 @@ async function ensureV01Ready(): Promise<void> {
   const contentReady = isElearningContentReady(capabilities)
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
-  if (!assessmentReady.value && !contentReady) {
+  if (!assessmentReady.value && !contentReady && !incentiveEnabled.value) {
     throw new ElearningApiError('feature_disabled', 404)
   }
-  ready.value = true
+  ready.value = assessmentReady.value || contentReady
 }
 
 async function refreshCourses(): Promise<void> {

@@ -519,7 +519,7 @@ async function ensureV01Ready(): Promise<void> {
   incentiveEnabled.value = capabilities.enabled === true
     && capabilities.capabilities.incentive === true
   ready.value = isElearningV01Ready(capabilities)
-  if (!ready.value && !contentEnabled.value) {
+  if (!ready.value && !contentEnabled.value && !incentiveEnabled.value) {
     throw new ElearningApiError('feature_disabled', 404)
   }
 }
