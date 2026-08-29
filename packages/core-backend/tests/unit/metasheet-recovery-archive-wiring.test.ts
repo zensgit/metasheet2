@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import { Router } from 'express'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -7,6 +9,8 @@ import { pool as pgPool } from '../../src/db/pg'
 const routeMocks = vi.hoisted(() => ({
   univerMetaRouter: vi.fn(),
 }))
+
+const indexSource = readFileSync(new URL('../../src/index.ts', import.meta.url), 'utf8')
 
 vi.mock('../../src/routes/univer-meta', () => ({
   univerMetaRouter: routeMocks.univerMetaRouter,
@@ -152,7 +156,12 @@ describe('MetaSheetServer recovery archive wiring', () => {
       recoveryArchiveApplication: { stopWorker(): Promise<void> }
     }).recoveryArchiveApplication = { stopWorker }
 
-    await expect(server.stop()).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    const firstStop = server.stop('SIGTERM')
+    const reentrantStop = server.stop('SIGINT')
+
+    expect(reentrantStop).toBe(firstStop)
+    await expect(firstStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
+    await expect(reentrantStop).rejects.toThrow('RECOVERY_ARCHIVE_RESTORE_WORKER_STOP_FAILED')
 
     expect(stopWorker).toHaveBeenCalledTimes(1)
     expect(poolEnd).not.toHaveBeenCalled()
@@ -186,5 +195,10 @@ describe('MetaSheetServer recovery archive wiring', () => {
 
     await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(1))
     expect(stop).toHaveBeenCalledWith('SIGTERM')
+  })
+
+  it('registers both runtime signals through the non-zero failure mapper', () => {
+    expect(indexSource).toContain("process.on('SIGTERM', () => this.stopForSignal('SIGTERM'))")
+    expect(indexSource).toContain("process.on('SIGINT', () => this.stopForSignal('SIGINT'))")
   })
 })

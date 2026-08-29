@@ -415,7 +415,7 @@ export class MetaSheetServer {
   private port: number
   private host?: string
   private portLocked: boolean
-  private shuttingDown = false
+  private stopPromise: Promise<void> | null = null
   private snapshotService: SnapshotService
   private observabilityShutdown?: () => Promise<void>
   private observabilityEnabled = false
@@ -2852,9 +2852,12 @@ export class MetaSheetServer {
   /**
    * 停止服务器
    */
-  async stop(signal = 'SIGTERM'): Promise<void> {
-    if (this.shuttingDown) return
-    this.shuttingDown = true
+  stop(signal = 'SIGTERM'): Promise<void> {
+    this.stopPromise ??= this.stopOnce(signal)
+    return this.stopPromise
+  }
+
+  private async stopOnce(signal: string): Promise<void> {
     this.logger.info(`Received ${signal}, shutting down gracefully...`)
 
     try {

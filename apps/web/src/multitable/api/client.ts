@@ -1060,6 +1060,43 @@ const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
   'totalCount',
 ] as const
 
+const RECOVERY_ARCHIVE_PREVIEW_KEYS = [
+  'blockedReason',
+  'executable',
+  'executionKind',
+  'generationId',
+  'mode',
+  'previewIdentity',
+  'scopeKind',
+  'summary',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS = [
+  'deleteIds',
+  'driftCount',
+  'effectiveWriteCount',
+  'keptCreatedAfterAnchorCount',
+  'resurrectIds',
+  'reverts',
+] as const
+
+const RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS = [
+  'anchorSeq',
+  'checkpointId',
+  'deletedCount',
+  'keptCreatedAfterAnchor',
+  'mode',
+  'resurrectedCount',
+  'revertedCount',
+] as const
+
+const RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS: ReadonlySet<unknown> = new Set([
+  'no_changes',
+  'schema_drift',
+  'inbound_unprovable',
+  'async_plan_required',
+])
+
 function isRecoveryArchiveUuid(value: unknown): value is string {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
@@ -1126,11 +1163,88 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
     && (state !== 'cancelled_zero_write' || snapshot.completedCount === '0')
 }
 
-function requireRecoveryArchiveObject<T extends object>(value: unknown, errorMessage: string): T {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error(errorMessage)
+function hasRecoveryArchiveExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  return keys.length === expectedKeys.length
+    && keys.every((key, index) => key === expectedKeys[index])
+}
+
+function isRecoveryArchiveOpaque(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.trim() === value
+}
+
+function isRecoveryArchiveNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+}
+
+function isRecoveryArchiveStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isRecoveryArchiveOpaque)
+}
+
+function isRecoveryArchivePreview(value: unknown): value is RecoveryArchivePreview {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_PREVIEW_KEYS)) return false
+  if (!hasRecoveryArchiveExactKeys(value.summary, RECOVERY_ARCHIVE_PREVIEW_SUMMARY_KEYS)) return false
+  const summary = value.summary
+  if (
+    !Array.isArray(summary.reverts)
+    || summary.reverts.some((revert) => (
+      !hasRecoveryArchiveExactKeys(revert, ['fieldIds', 'recordId'])
+      || !isRecoveryArchiveOpaque(revert.recordId)
+      || !isRecoveryArchiveStringArray(revert.fieldIds)
+    ))
+    || !isRecoveryArchiveStringArray(summary.resurrectIds)
+    || !isRecoveryArchiveStringArray(summary.deleteIds)
+    || !isRecoveryArchiveNonNegativeInteger(summary.effectiveWriteCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.keptCreatedAfterAnchorCount)
+    || !isRecoveryArchiveNonNegativeInteger(summary.driftCount)
+  ) {
+    return false
   }
-  return value as T
+  const blockedReasonValid = value.blockedReason === null
+    || RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+  const previewIdentityValid = value.previewIdentity === null
+    || isRecoveryArchiveOpaque(value.previewIdentity)
+  const executionStateValid = value.executable === true
+    ? value.blockedReason === null && isRecoveryArchiveOpaque(value.previewIdentity)
+    : value.executable === false
+      && RECOVERY_ARCHIVE_PREVIEW_BLOCKED_REASONS.has(value.blockedReason)
+      && value.previewIdentity === null
+  return isRecoveryArchiveUuid(value.generationId)
+    && (value.mode === 'revert' || value.mode === 'reset')
+    && (value.scopeKind === 'whole_sheet' || value.scopeKind === 'selected_records' || value.scopeKind === 'selected_fields')
+    && (value.executionKind === 'sync' || value.executionKind === 'async')
+    && blockedReasonValid
+    && previewIdentityValid
+    && executionStateValid
+}
+
+function isRecoveryArchiveExecuteResult(value: unknown): value is RecoveryArchiveExecuteResult {
+  if (!hasRecoveryArchiveExactKeys(value, RECOVERY_ARCHIVE_EXECUTE_RESULT_KEYS)) return false
+  return (value.mode === 'revert' || value.mode === 'reset')
+    && isRecoveryArchiveDecimal(value.anchorSeq)
+    && isRecoveryArchiveOpaque(value.checkpointId)
+    && isRecoveryArchiveNonNegativeInteger(value.revertedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.resurrectedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.deletedCount)
+    && isRecoveryArchiveNonNegativeInteger(value.keptCreatedAfterAnchor)
+}
+
+function requireRecoveryArchivePreview(value: unknown): RecoveryArchivePreview {
+  if (!isRecoveryArchivePreview(value)) {
+    throw new Error('Invalid recovery archive preview response')
+  }
+  return value
+}
+
+function requireRecoveryArchiveExecuteResult(value: unknown): RecoveryArchiveExecuteResult {
+  if (!isRecoveryArchiveExecuteResult(value)) {
+    throw new Error('Invalid recovery archive execute response')
+  }
+  return value
 }
 
 function requireRecoveryArchiveJobSnapshot(value: unknown): RecoveryArchiveJobSnapshot {
@@ -2423,10 +2537,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return requireRecoveryArchiveObject<RecoveryArchivePreview>(
-      await this.parseJson<RecoveryArchivePreview>(res),
-      'Invalid recovery archive preview response',
-    )
+    return requireRecoveryArchivePreview(await this.parseJson<RecoveryArchivePreview>(res))
   }
 
   async executeRecoveryArchive(
@@ -2438,10 +2549,7 @@ export class MultitableApiClient implements CommentsApiClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    return requireRecoveryArchiveObject<RecoveryArchiveExecuteResult>(
-      await this.parseJson<RecoveryArchiveExecuteResult>(res),
-      'Invalid recovery archive execute response',
-    )
+    return requireRecoveryArchiveExecuteResult(await this.parseJson<RecoveryArchiveExecuteResult>(res))
   }
 
   async acceptRecoveryArchiveJob(
