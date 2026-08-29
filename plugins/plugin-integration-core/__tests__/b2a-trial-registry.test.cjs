@@ -70,8 +70,24 @@ const {
   createB2aOperationClaim,
   B2A_OPERATION_CLAIM_TABLE,
   readPlanSourceObjects,
+  // R-wave (external post-merge review, findings 3 and 4).
+  B2A_CONFIG_BOUND_LOOKUP_KINDS,
+  lookupProjectionSourceObject,
+  resolveB2aSourceObjects,
+  B2A_AUTHORIZED_RUN_ID,
+  C6_WRITE_LIFECYCLE_CONTEXT,
+  refuseRunnerWriteOutsideC6Lifecycle,
   resolveB2aRegistryConfig,
 } = require(path.join(LIB, 'b2a-trial-registry.cjs'))
+
+async function capturedRejection(promise) {
+  try {
+    await promise
+  } catch (error) {
+    return error
+  }
+  throw new assert.AssertionError({ message: 'expected a rejection, got a resolution' })
+}
 
 const MODULE_PATH = path.join(LIB, 'b2a-trial-registry.cjs')
 const MIGRATION_078_PATH = path.join(
@@ -1002,6 +1018,122 @@ function theReadPlanNamesItsOwnObjects() {
   assert.deepEqual(readPlanSourceObjects({ steps: [{ object: 'X' }, { nested: { object: 'Y' } }] }), ['X', 'Y'])
 }
 
+// ── R-02, SECOND HALF: THE OBJECT A CONFIG ADDS BEHIND THE PLAN'S BACK ───────
+//
+// External post-merge review, finding 3. `readPlanSourceObjects` is exact about the PLAN; a
+// `data-source:sql-readonly` source with a configured `lookupProjection` reads a SECOND table the
+// plan never names. The resolver below is what makes `objectScope` cover the read rather than the
+// plan — the unit half; the wiring suite drives it through the runner and the routes.
+async function R02_theConfigBoundLookupObjectJoinsTheObjectList() {
+  const projection = (lookupObject) => ({
+    lookupProjection: {
+      baseObject: 'base_items',
+      lookupObject,
+      localKey: 'material_id',
+      foreignKey: 'id',
+      fields: { FNumber: 'code', FName: 'name' },
+      maxRows: 3,
+    },
+  })
+  const load = (config) => async () => config
+
+  // THE ROSTER, restated rather than imported-and-compared-to-itself: a kind on it pays for one
+  // config read, a kind off it does not, and a future kind that hides an object has to be added.
+  assert.deepEqual([...B2A_CONFIG_BOUND_LOOKUP_KINDS], ['data-source:sql-readonly'])
+
+  // A kind that cannot hide an object: the list is the plan's, and the loader is never called.
+  let loaderCalls = 0
+  assert.deepEqual(await resolveB2aSourceObjects({
+    sourceObjects: ['base_items'],
+    sourceSystemType: 'bridge:legacy-sql-readonly',
+    loadSourceSystemConfig: async () => { loaderCalls += 1; return projection('lookup_items') },
+  }), ['base_items'])
+  assert.equal(loaderCalls, 0, 'a kind off the roster costs no config read')
+
+  // On the roster, no projection configured: unchanged.
+  assert.deepEqual(await resolveB2aSourceObjects({
+    sourceObjects: ['base_items'],
+    sourceSystemType: 'data-source:sql-readonly',
+    loadSourceSystemConfig: load({ dataSourceId: 'ds_1' }),
+  }), ['base_items'])
+
+  // On the roster WITH a projection: the lookup object joins the list — the whole point.
+  assert.deepEqual(await resolveB2aSourceObjects({
+    sourceObjects: ['base_items'],
+    sourceSystemType: 'data-source:sql-readonly',
+    loadSourceSystemConfig: load(projection('lookup_items')),
+  }), ['base_items', 'lookup_items'])
+
+  // The accessor's own envelope (`{ id, kind, config }`) is accepted as well as a bare config, so
+  // the resolver cannot silently miss a projection because a caller passed the row wrapper.
+  assert.deepEqual(await resolveB2aSourceObjects({
+    sourceObjects: ['base_items'],
+    sourceSystemType: 'data-source:sql-readonly',
+    loadSourceSystemConfig: load({ id: 'sys_1', kind: 'data-source:sql-readonly', config: projection('lookup_items') }),
+  }), ['base_items', 'lookup_items'])
+
+  // No duplicate when the plan already names it.
+  assert.deepEqual(await resolveB2aSourceObjects({
+    sourceObjects: ['base_items', 'lookup_items'],
+    sourceSystemType: 'data-source:sql-readonly',
+    loadSourceSystemConfig: load(projection('lookup_items')),
+  }), ['base_items', 'lookup_items'])
+
+  // A malformed stored projection adds nothing here — the ADAPTER validates it strictly and refuses;
+  // this resolver widens a scope and must never become a second validator that could disagree.
+  for (const config of [{ lookupProjection: null }, { lookupProjection: 'x' }, { lookupProjection: { lookupObject: '  ' } }, null]) {
+    assert.deepEqual(await resolveB2aSourceObjects({
+      sourceObjects: ['base_items'],
+      sourceSystemType: 'data-source:sql-readonly',
+      loadSourceSystemConfig: load(config),
+    }), ['base_items'], `malformed projection ${JSON.stringify(config)} widens nothing`)
+  }
+
+  // FAIL-CLOSED: on the roster, and no way to resolve the config at all.
+  const error = await capturedRejection(resolveB2aSourceObjects({
+    sourceObjects: ['base_items'],
+    sourceSystemType: 'data-source:sql-readonly',
+  }))
+  assert.equal(error.name, 'B2aReadAuthorizationError')
+  assert.equal(error.status, 403)
+  assert.equal(error.code, B2A_SCOPE_MISMATCH)
+  assert.equal(error.details.reason, 'config_bound_object_unresolvable')
+  assert.deepEqual(error.details, { reason: 'config_bound_object_unresolvable', objectCount: 1 },
+    'values-free: a reason and a count, no object names')
+
+  // The extractor itself, on the shapes it must not be fooled by.
+  assert.equal(lookupProjectionSourceObject(projection('lookup_items')), 'lookup_items')
+  assert.equal(lookupProjectionSourceObject({ lookupProjection: { lookupObject: ' padded ' } }), 'padded')
+  for (const bad of [undefined, null, 'config', 42, {}, { lookupProjection: {} }, { lookupProjection: [] }]) {
+    assert.equal(lookupProjectionSourceObject(bad), null, `${JSON.stringify(bad)} names no lookup object`)
+  }
+}
+
+// ── FINDING 4: THE TWO SERVER-ONLY MARKERS ARE DISTINCT AND UNFORGEABLE ──────
+function theServerOnlyMarkersAreSymbolsAndDistinct() {
+  for (const marker of [B2A_AUTHORIZED_RUN_ID, C6_WRITE_LIFECYCLE_CONTEXT]) {
+    assert.equal(typeof marker, 'symbol', 'a server-only marker must not be expressible in JSON')
+    // The property is what matters: a symbol key never survives a JSON round trip, so it cannot
+    // arrive over a cross-plugin call, an HTTP body or a query string.
+    assert.deepEqual(JSON.parse(JSON.stringify({ [marker]: true, kept: 1 })), { kept: 1 })
+  }
+  assert.notEqual(B2A_AUTHORIZED_RUN_ID, C6_WRITE_LIFECYCLE_CONTEXT,
+    'the read-run marker and the write-lifecycle marker are different keys')
+
+  // The runner-level write refusal: the EXISTING fixed code, a coarse reason, one boolean.
+  let caught
+  try {
+    refuseRunnerWriteOutsideC6Lifecycle()
+  } catch (error) {
+    caught = error
+  }
+  assert.ok(caught, 'the refusal throws')
+  assert.equal(caught.name, 'B2aReadAuthorizationError')
+  assert.equal(caught.status, 403)
+  assert.equal(caught.code, C6_SAFE_LIFECYCLE_REQUIRED, 'no parallel code is invented for one property')
+  assert.deepEqual(caught.details, { reason: 'runner_write_outside_c6_lifecycle', dryRun: false })
+}
+
 // ── R-05: THE CAUSE-CLASS ROSTERS ARE THE WHOLE CONTRACT ─────────────────────
 
 // Each roster restated as a literal. Importing the constant and comparing it to itself passes just
@@ -1420,6 +1552,8 @@ const TESTS = [
   aMalformedRegistryAtCheckTimeIsFailClosed,
   theBuiltRegistryIsImmutable,
   theReadPlanNamesItsOwnObjects,
+  R02_theConfigBoundLookupObjectJoinsTheObjectList,
+  theServerOnlyMarkersAreSymbolsAndDistinct,
   R05_theCauseClassRostersAreClosedAndRestated,
   R05_theCauseClassIsStructuralNeverTheMessage,
   R05_anUnrecognizedCauseIsLeftAlone,
