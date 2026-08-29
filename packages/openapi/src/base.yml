@@ -4729,10 +4729,60 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningCreditRule'
-    ElearningCreditWalletItem:
+    ElearningCreditAdjustmentRequest:
+      type: object
+      additionalProperties: false
+      required: [requestId, userId, points, reason]
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        points:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum: [0]
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+    ElearningCreditAdjustmentResult:
+      type: object
+      additionalProperties: false
+      required: [adjustmentId, userId, points, balancePoints, createdAt]
+      properties:
+        adjustmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        userId:
+          type: string
+          minLength: 1
+        points:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum: [0]
+        balancePoints:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditAutomaticWalletItem:
       type: object
       additionalProperties: false
       required: [decisionId, behavior, awardedPoints, status, occurredAt, createdAt]
+      description: Server-derived, rule-backed automatic credit decision with nonnegative points.
       properties:
         decisionId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -4740,7 +4790,9 @@ components:
           $ref: '#/components/schemas/ElearningCreditAutomaticBehavior'
         awardedPoints:
           type: integer
+          format: int32
           minimum: 0
+          maximum: 2147483647
         status:
           type: string
           enum: [awarded, capped, exhausted]
@@ -4750,6 +4802,48 @@ components:
         createdAt:
           type: string
           format: date-time
+    ElearningCreditManualWalletItem:
+      type: object
+      additionalProperties: false
+      required: [decisionId, behavior, awardedPoints, status, occurredAt, createdAt]
+      description: Server-recorded manual adjustment with nonzero signed int4 points.
+      properties:
+        decisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        behavior:
+          type: string
+          enum: [manual_adjust]
+        awardedPoints:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum: [0]
+        status:
+          type: string
+          enum: [adjusted]
+        occurredAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditWalletItem:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+        - $ref: '#/components/schemas/ElearningCreditManualWalletItem'
+      discriminator:
+        propertyName: behavior
+        mapping:
+          login: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_course: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_plan: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          pass_exam: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          submit_survey: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_map: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_offline: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          manual_adjust: '#/components/schemas/ElearningCreditManualWalletItem'
     ElearningCreditWallet:
       type: object
       additionalProperties: false
@@ -4760,7 +4854,9 @@ components:
           minLength: 1
         balancePoints:
           type: integer
+          format: int32
           minimum: 0
+          maximum: 2147483647
         items:
           type: array
           items:

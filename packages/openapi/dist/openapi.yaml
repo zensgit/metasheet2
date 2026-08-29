@@ -5648,7 +5648,67 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ElearningCreditRule'
-    ElearningCreditWalletItem:
+    ElearningCreditAdjustmentRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - requestId
+        - userId
+        - points
+        - reason
+      properties:
+        requestId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        userId:
+          type: string
+          minLength: 1
+          maxLength: 512
+        points:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum:
+              - 0
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+    ElearningCreditAdjustmentResult:
+      type: object
+      additionalProperties: false
+      required:
+        - adjustmentId
+        - userId
+        - points
+        - balancePoints
+        - createdAt
+      properties:
+        adjustmentId:
+          $ref: '#/components/schemas/ElearningUuid'
+        userId:
+          type: string
+          minLength: 1
+        points:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum:
+              - 0
+        balancePoints:
+          type: integer
+          format: int32
+          minimum: 0
+          maximum: 2147483647
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditAutomaticWalletItem:
       type: object
       additionalProperties: false
       required:
@@ -5658,6 +5718,9 @@ components:
         - status
         - occurredAt
         - createdAt
+      description: >-
+        Server-derived, rule-backed automatic credit decision with nonnegative
+        points.
       properties:
         decisionId:
           $ref: '#/components/schemas/ElearningUuid'
@@ -5665,7 +5728,9 @@ components:
           $ref: '#/components/schemas/ElearningCreditAutomaticBehavior'
         awardedPoints:
           type: integer
+          format: int32
           minimum: 0
+          maximum: 2147483647
         status:
           type: string
           enum:
@@ -5678,6 +5743,57 @@ components:
         createdAt:
           type: string
           format: date-time
+    ElearningCreditManualWalletItem:
+      type: object
+      additionalProperties: false
+      required:
+        - decisionId
+        - behavior
+        - awardedPoints
+        - status
+        - occurredAt
+        - createdAt
+      description: Server-recorded manual adjustment with nonzero signed int4 points.
+      properties:
+        decisionId:
+          $ref: '#/components/schemas/ElearningUuid'
+        behavior:
+          type: string
+          enum:
+            - manual_adjust
+        awardedPoints:
+          type: integer
+          format: int32
+          minimum: -2147483647
+          maximum: 2147483647
+          not:
+            enum:
+              - 0
+        status:
+          type: string
+          enum:
+            - adjusted
+        occurredAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    ElearningCreditWalletItem:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+        - $ref: '#/components/schemas/ElearningCreditManualWalletItem'
+      discriminator:
+        propertyName: behavior
+        mapping:
+          login: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_course: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_plan: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          pass_exam: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          submit_survey: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_map: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          complete_offline: '#/components/schemas/ElearningCreditAutomaticWalletItem'
+          manual_adjust: '#/components/schemas/ElearningCreditManualWalletItem'
     ElearningCreditWallet:
       type: object
       additionalProperties: false
@@ -5692,7 +5808,9 @@ components:
           minLength: 1
         balancePoints:
           type: integer
+          format: int32
           minimum: 0
+          maximum: 2147483647
         items:
           type: array
           items:
@@ -17141,6 +17259,51 @@ paths:
           $ref: '#/components/responses/ElearningError'
         '409':
           description: requestId reused with a different normalized payload
+          $ref: '#/components/responses/ElearningError'
+        '503':
+          description: unavailable
+          $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/credits/adjustments:
+    post:
+      operationId: adjustElearningCredit
+      summary: Apply a manual credit adjustment to a same-organization learner
+      description: |
+        Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+        `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+        Organization and actor are derived only from the authenticated server
+        context and are never accepted from the request body. `requestId` is
+        organization-scoped: the same normalized payload replays the same
+        closed result, while a changed payload returns values-free 409.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ElearningCreditAdjustmentRequest'
+      responses:
+        '200':
+          description: Applied adjustment or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningCreditAdjustmentResult'
+        '400':
+          description: invalid_input
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          description: ORG_CONTEXT_REQUIRED or insufficient elearning:admin
+          $ref: '#/components/responses/ElearningError'
+        '404':
+          description: >-
+            Target or actor is not active in the organization, or incentive
+            flags are off
+          $ref: '#/components/responses/ElearningError'
+        '409':
+          description: requestId conflict, insufficient balance, or int4 balance overflow
           $ref: '#/components/responses/ElearningError'
         '503':
           description: unavailable

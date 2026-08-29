@@ -8403,6 +8403,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/credits/adjustments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply a manual credit adjustment to a same-organization learner
+         * @description Global `elearning:admin` only. Requires `ELEARNING_ENABLED` and
+         *     `ELEARNING_INCENTIVE_ENABLED` to each equal the exact literal `true`.
+         *     Organization and actor are derived only from the authenticated server
+         *     context and are never accepted from the request body. `requestId` is
+         *     organization-scoped: the same normalized payload replays the same
+         *     closed result, while a changed payload returns values-free 409.
+         */
+        post: operations["adjustElearningCredit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/credits/wallet": {
         parameters: {
             query?: never;
@@ -18056,9 +18081,32 @@ export interface components {
         ElearningCreditRuleList: {
             items: components["schemas"]["ElearningCreditRule"][];
         };
-        ElearningCreditWalletItem: {
+        ElearningCreditAdjustmentRequest: {
+            requestId: string;
+            userId: string;
+            /** Format: int32 */
+            points: number;
+            reason: string;
+        };
+        ElearningCreditAdjustmentResult: {
+            adjustmentId: components["schemas"]["ElearningUuid"];
+            userId: string;
+            /** Format: int32 */
+            points: number;
+            /** Format: int32 */
+            balancePoints: number;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        /** @description Server-derived, rule-backed automatic credit decision with nonnegative points. */
+        ElearningCreditAutomaticWalletItem: {
             decisionId: components["schemas"]["ElearningUuid"];
-            behavior: components["schemas"]["ElearningCreditAutomaticBehavior"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            behavior: "login" | "complete_course" | "complete_plan" | "pass_exam" | "submit_survey" | "complete_map" | "complete_offline";
+            /** Format: int32 */
             awardedPoints: number;
             /** @enum {string} */
             status: "awarded" | "capped" | "exhausted";
@@ -18067,8 +18115,27 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
         };
+        /** @description Server-recorded manual adjustment with nonzero signed int4 points. */
+        ElearningCreditManualWalletItem: {
+            decisionId: components["schemas"]["ElearningUuid"];
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            behavior: "manual_adjust";
+            /** Format: int32 */
+            awardedPoints: number;
+            /** @enum {string} */
+            status: "adjusted";
+            /** Format: date-time */
+            occurredAt: string;
+            /** Format: date-time */
+            createdAt: string;
+        };
+        ElearningCreditWalletItem: components["schemas"]["ElearningCreditAutomaticWalletItem"] | components["schemas"]["ElearningCreditManualWalletItem"];
         ElearningCreditWallet: {
             userId: string;
+            /** Format: int32 */
             balancePoints: number;
             items: components["schemas"]["ElearningCreditWalletItem"][];
             nextCursor: string | null;
@@ -19957,6 +20024,41 @@ export interface operations {
             /** @description Incentive surface flags off */
             404: components["responses"]["ElearningError"];
             /** @description requestId reused with a different normalized payload */
+            409: components["responses"]["ElearningError"];
+            /** @description unavailable */
+            503: components["responses"]["ElearningError"];
+        };
+    };
+    adjustElearningCredit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ElearningCreditAdjustmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Applied adjustment or exact idempotent replay. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningCreditAdjustmentResult"];
+                };
+            };
+            /** @description invalid_input */
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            /** @description ORG_CONTEXT_REQUIRED or insufficient elearning:admin */
+            403: components["responses"]["ElearningError"];
+            /** @description Target or actor is not active in the organization, or incentive flags are off */
+            404: components["responses"]["ElearningError"];
+            /** @description requestId conflict, insufficient balance, or int4 balance overflow */
             409: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
