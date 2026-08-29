@@ -18,6 +18,10 @@
   after this component so the reports-only sections between them (zero DOM
   nodes in overview mode) do not break that adjacency.
 
+  `afterCommon` is a layout-only slot immediately below the frozen 常用
+  band. The parent owns any dedicated request card; this component still
+  fetches nothing and does not restyle the first viewport.
+
   Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
   DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
 
@@ -320,6 +324,8 @@
         </div>
         <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
       </div>
+
+    <slot name="afterCommon" />
 
     <div class="attendance-ew__tools">
       <div class="attendance__card attendance__card--selfservice attendance-ew__balance" data-selfservice-card="annual-balance">

@@ -180,6 +180,18 @@
         @change-balance-leave-type="handleChangeSelfBalanceLeaveType"
         @open-balance-trace="handleOpenSelfBalanceTrace"
       >
+        <template #afterCommon>
+          <AttendanceEmployeeMakeupRequestCard
+            v-if="makeupRequestCardOpen"
+            :tr="tr"
+            :request-form="requestForm"
+            :anomalies="eligibleMakeupAnomalies"
+            :today-work-date="todayWorkDateKey"
+            :submitting="requestSubmitting"
+            @cancel="closeDedicatedMakeupRequestCard"
+            @submit="submitDedicatedMakeupRequestCard"
+          />
+        </template>
         <template #historyFilters>
           <label class="attendance__field attendance-ew__history-filter-control" for="attendance-from-date">
             <span>{{ tr('From', '开始') }}</span>
@@ -10123,7 +10135,9 @@ import {
 import { resolveAttendanceReadinessOrgId, useAttendanceApprovalDirectoryReadiness } from './attendance/useAttendanceApprovalDirectoryReadiness'
 import AttendanceReportFieldsSection from './attendance/AttendanceReportFieldsSection.vue'
 import AttendanceEmployeeWorkspace from './attendance/AttendanceEmployeeWorkspace.vue'
+import AttendanceEmployeeMakeupRequestCard from './attendance/AttendanceEmployeeMakeupRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
+import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
 import {
   DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
   resolveEmployeeQuickActionIcons,
@@ -14848,6 +14862,11 @@ function overviewSectionBinding(id: AttendanceOverviewSectionId): Record<string,
 }
 
 const overviewRequestToolsOpen = ref(false)
+const makeupRequestCardOpen = ref(false)
+
+const eligibleMakeupAnomalies = computed(() =>
+  anomalies.value.filter(item => item.state !== 'pending'),
+)
 
 function onOverviewRequestToolsToggle(event: Event): void {
   const target = event.currentTarget
@@ -17163,9 +17182,10 @@ async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void>
 
 async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Promise<void> {
   if (action === 'missing-punch') {
-    await openMissingPunchQuickAction()
+    await openDedicatedMakeupRequestCard()
     return
   }
+  if (makeupRequestCardOpen.value) closeDedicatedMakeupRequestCard()
   if (action === 'leave') {
     await openQuickRequestDraft('leave')
     return
@@ -17197,14 +17217,41 @@ async function openQuickRequestDraft(requestType: AttendanceRequest['request_typ
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
 
-async function openMissingPunchQuickAction(): Promise<void> {
+async function openDedicatedMakeupRequestCard(): Promise<void> {
   clearRequestSubmitStatus()
-  const anomaly = anomalies.value.find(item => item.state !== 'pending')
-  if (anomaly) {
-    await prefillRequestFromAnomaly(anomaly)
-    return
+  const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
+  requestForm.workDate = draft.workDate
+  requestForm.requestType = draft.requestType
+  makeupRequestCardOpen.value = true
+  setStatus(
+    appendStatusContext(
+      draft.anomaly
+        ? tr('Request form updated from anomaly.', '已根据异常记录填充申请表单。')
+        : tr(`Request form ready for ${formatRequestType('missed_check_in')}.`, `已为${formatRequestType('missed_check_in')}准备申请表单。`),
+      requestTimezoneContextHint.value,
+    ),
+  )
+  await nextTick()
+  if (typeof document === 'undefined') return
+  const card = document.querySelector('[data-attendance-makeup-request-card]')
+  if (card instanceof HTMLElement && typeof card.scrollIntoView === 'function') {
+    card.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
-  await openQuickRequestDraft('missed_check_in')
+  const focusId = draft.anomaly ? 'attendance-makeup-card-anomaly' : 'attendance-makeup-card-time'
+  const focusField = document.getElementById(focusId)
+  if (focusField instanceof HTMLElement && typeof focusField.focus === 'function') {
+    focusField.focus()
+  }
+}
+
+function closeDedicatedMakeupRequestCard(): void {
+  makeupRequestCardOpen.value = false
+}
+
+async function submitDedicatedMakeupRequestCard(): Promise<void> {
+  await submitRequest()
+  if (statusKind.value !== 'error') closeDedicatedMakeupRequestCard()
 }
 
 function buildQuery(params: Record<string, string | undefined>): URLSearchParams {
