@@ -236,6 +236,13 @@ not reveal. They were fixed on the same branch before closeout:
    coherence. Five guard-category mutations each turned the matching cases red;
    the restored exact head passed **78/78** client tests and **95/95** with the
    modal neighbor. Sol's follow-up verdict is **0 P1 / 0 P2 / 0 P3**.
+10. Luna high performed a read-only report-truthfulness review after true-merge
+    replay `0464d551d8`. It verified the parent order, zero-overlap merge, HOLD
+    boundaries, and local gates, then found stale prose that still said no
+    current-main replay. Report-only carrier `f92112aa64` corrected that state.
+    Its follow-up found no code issue and identified only review-provenance and
+    report-head wording; this report records Luna's scope explicitly and uses
+    lineage wording so a report-only child does not invalidate itself.
 
 ## 3. Architecture boundaries preserved
 
@@ -262,7 +269,7 @@ These are real residuals, not documentation polish:
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
 | fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout candidate is local only | code/test checkpoint `9c5c082a53` is carried by true-merge replay `0464d551d8` onto main `9d29e7a7d3`, with local gates plus Opus 5, Sol, and Luna review evidence, but no push, PR, or remote matrix |
+| post-merge closeout candidate is local only | code/test checkpoint `9c5c082a53` is carried by true-merge replay `0464d551d8` onto main `9d29e7a7d3`, with local gates plus Opus 5 and Sol code-review evidence and Luna report-truthfulness review, but no push, PR, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -283,7 +290,8 @@ failure domain.
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
 - The post-merge closeout branch remains local. Code replay `0464d551d8` and
-  report head `771d7b38ee` were not pushed, and no closeout PR was opened.
+  the report lineage through `f92112aa64` were not pushed, and no closeout PR
+  was opened. This report-only correction is a child of that lineage.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
