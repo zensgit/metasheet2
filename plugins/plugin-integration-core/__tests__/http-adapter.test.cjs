@@ -1,6 +1,8 @@
 'use strict'
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const {
   AdapterValidationError,
@@ -10,6 +12,48 @@ const {
   HttpAdapterError,
   createHttpAdapter,
 } = require(path.join(__dirname, '..', 'lib', 'adapters', 'http-adapter.cjs'))
+const {
+  OUTBOUND_HTTP_WRITE_DISABLED,
+  OUTBOUND_HTTP_WRITE_TARGETS_ENV,
+  OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED,
+} = require(path.join(__dirname, '..', 'lib', 'outbound-http-write-gate.cjs'))
+
+// W-1(c) CONVERSION, NOT DELETION (#5247 precedent).
+//
+// Generic outbound HTTP write became default-deny, so every `upsert` leg below would refuse. The
+// suite is NOT weakened to match: it now runs under a SYNTHETIC ALLOWLIST that names this suite's
+// synthetic system, which keeps every original assertion about the AUTHORIZED write path live —
+// counts, body shape, key fields, values-free failure diagnostics — and adds section 6, which
+// proves the refusal itself with ZERO outbound calls.
+//
+// That pairing is the E4-05 lesson applied to a gate rather than a ban: a gate that refuses
+// everything would pass a "nothing was written" test while having broken the product. The authorized
+// path working is half the proof.
+const ALLOWLISTED_WRITE_OBJECTS = Object.freeze([
+  'materials',
+  'read_only',
+  'unsafe_write',
+  'network_sink',
+  'network_sink_with_query',
+])
+
+function writeSyntheticAllowlist() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms-outbound-http-write-'))
+  const file = path.join(dir, 'outbound-http-write-targets.json')
+  fs.writeFileSync(file, JSON.stringify({
+    allowlistId: 'http-adapter-suite-synthetic',
+    allowlistVersion: 1,
+    targets: [{
+      entryId: 'suite-http-plm',
+      systemId: 'sys_http',
+      // Identity matching, never URL matching: the entry never mentions plm.example.test.
+      systemName: 'HTTP PLM',
+      kind: 'http',
+      objects: [...ALLOWLISTED_WRITE_OBJECTS],
+    }],
+  }, null, 2), 'utf8')
+  return file
+}
 
 function jsonResponse(status, body) {
   return {
@@ -128,6 +172,13 @@ function createSystem(overrides = {}) {
           path: '/api/body-read-fail?token=raw-secret',
           operations: ['read'],
         },
+        // W-1(c): configured for write, deliberately ABSENT from the synthetic allowlist. Proves
+        // the object scope is enforced and not decoration — same system, same credentials, same
+        // reachable endpoint, refused because the file does not name this object.
+        unlisted_write: {
+          upsertPath: '/api/materials/batch',
+          operations: ['upsert'],
+        },
       },
     },
     ...overrides,
@@ -135,6 +186,45 @@ function createSystem(overrides = {}) {
 }
 
 async function main() {
+  // --- 0. DEFAULT POSTURE: env unset => every write refused, ZERO outbound calls ---
+  // Runs FIRST, before the allowlist is installed, so it observes the real default rather than a
+  // state this suite manufactured by deleting something.
+  {
+    delete process.env[OUTBOUND_HTTP_WRITE_TARGETS_ENV]
+    const { calls: deniedCalls, fetchImpl: deniedFetch } = createFetchMock()
+    const deniedAdapter = createHttpAdapter({ system: createSystem(), fetchImpl: deniedFetch })
+
+    const refusal = await deniedAdapter.upsert({
+      object: 'materials',
+      records: [{ code: 'A-01', name: 'Bolt' }],
+      keyFields: ['code'],
+    }).catch((error) => error)
+    assert.ok(refusal instanceof HttpAdapterError, 'unset env refuses the write')
+    assert.equal(refusal.code, OUTBOUND_HTTP_WRITE_DISABLED, 'fixed refusal code')
+    assert.equal(refusal.details.code, OUTBOUND_HTTP_WRITE_DISABLED, 'code also rides details')
+    assert.equal(refusal.status, 403, 'a refused caller cannot fix this by editing the request')
+    assert.equal(deniedCalls.length, 0, 'ZERO outbound calls when the capability is unauthorized')
+    assert.doesNotMatch(
+      JSON.stringify({ message: refusal.message, details: refusal.details, code: refusal.code }),
+      /plm\.example\.test|token-1|key-1|\/api\//,
+      'the refusal names no host, credential or path',
+    )
+
+    // READ is untouched by the gate — the E4-05 control. A blanket deny that also killed the read
+    // leg would be a FAIL, not a pass.
+    const stillReads = await deniedAdapter.read({ object: 'materials', limit: 5 })
+    assert.equal(stillReads.records.length, 2, 'read still works with the write capability disabled')
+    assert.equal(deniedCalls.length, 1, 'the read is the only call that reached fetch')
+    // So do listObjects/getSchema/testConnection: all GET-or-local, none body-bearing.
+    assert.deepEqual((await deniedAdapter.testConnection()), { ok: true, status: 200 }, 'health probe unaffected')
+    assert.equal((await deniedAdapter.getSchema({ object: 'materials' })).object, 'materials', 'schema unaffected')
+    assert.equal((await deniedAdapter.listObjects()).length > 0, true, 'listObjects unaffected')
+  }
+
+  // From here on the suite runs AUTHORIZED, so every original assertion about the write path stays
+  // live rather than being deleted.
+  process.env[OUTBOUND_HTTP_WRITE_TARGETS_ENV] = writeSyntheticAllowlist()
+
   const { calls, fetchImpl } = createFetchMock()
   const adapter = createHttpAdapter({
     system: createSystem(),
@@ -337,6 +427,57 @@ async function main() {
     /raw-secret|socket closed|\?/,
     'response body read failure diagnostics avoid raw cause messages and query values',
   )
+
+  // --- 6. W-1(c) OUTBOUND WRITE GATE, with the allowlist INSTALLED --------
+  // Section 0 proved the unset default. These legs prove the gate still discriminates while it is
+  // armed — the property that separates an authorization gate from a blanket deny.
+  {
+    const before = calls.length
+
+    // 6a. OBJECT SCOPE. Same system, same allowlist, an object the file does not enumerate.
+    const outOfScope = await adapter.upsert({
+      object: 'unlisted_write',
+      records: [{ code: 'A-01' }],
+      keyFields: ['code'],
+    }).catch((error) => error)
+    assert.ok(outOfScope instanceof HttpAdapterError, 'an unlisted object is refused')
+    assert.equal(outOfScope.code, OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED,
+      'an armed gate reports a DISTINCT code from the unset one, so an operator can tell them apart')
+    assert.equal(calls.length, before, 'ZERO outbound calls for an out-of-scope object')
+
+    // 6b. SYSTEM IDENTITY. A different system id, everything else identical — including the
+    // baseUrl, which the allowlist deliberately does not match on.
+    const { calls: otherCalls, fetchImpl: otherFetch } = createFetchMock()
+    const otherAdapter = createHttpAdapter({
+      system: createSystem({ id: 'sys_http_other' }),
+      fetchImpl: otherFetch,
+    })
+    const otherRefusal = await otherAdapter.upsert({
+      object: 'materials',
+      records: [{ code: 'A-01' }],
+      keyFields: ['code'],
+    }).catch((error) => error)
+    assert.equal(otherRefusal.code, OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED,
+      'an unlisted system is refused even though its URL is the authorized one')
+    assert.equal(otherCalls.length, 0, 'ZERO outbound calls for an unlisted system')
+
+    // 6c. THE TRANSPORT LAYER (enforcement point 1b). `testConnection` takes its method and path
+    // straight off an authenticated request body in http-routes.cjs `externalSystemsTest`, so a
+    // request-steered DELETE is a generic outbound write that never goes near `upsert`. The
+    // allowlist entry above authorizes the `upsert` entry point only, so this is refused.
+    const steered = await adapter.testConnection({ method: 'DELETE', path: '/api/materials/A-01' })
+    assert.equal(steered.ok, false, 'a request-steered non-safe method is refused')
+    assert.equal(steered.code, OUTBOUND_HTTP_WRITE_TARGET_NOT_AUTHORIZED,
+      'armed, but this entry authorizes the `upsert` entry point only, not a request-steered verb')
+    assert.doesNotMatch(String(steered.message), /plm\.example\.test|token-1|key-1|A-01/,
+      'the surfaced refusal message stays values-free')
+    assert.equal(calls.length, before, 'ZERO outbound calls for a request-steered verb')
+
+    // 6d. DISCRIMINATING CONTROL. The same probe with a SAFE method still works, so 6c is
+    // attributable to the verb and not to testConnection being broken.
+    assert.deepEqual(await adapter.testConnection(), { ok: true, status: 200 }, 'GET health probe still works')
+    assert.equal(calls.length, before + 1, 'the safe probe is the only call that reached fetch')
+  }
 
   console.log('✓ http-adapter: config-driven read/upsert tests passed')
 }
