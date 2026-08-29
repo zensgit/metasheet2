@@ -460,6 +460,13 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (!state.table && !state.walletIndex) return
   if (!state.table || !state.walletIndex) drift('partial object set on down')
   await assertSchema(db)
+  await sql`LOCK TABLE elearning_credit_adjustments IN ACCESS EXCLUSIVE MODE`.execute(db)
+  const used = await sql<{ used: string }>`
+    SELECT count(*)::text AS used FROM elearning_credit_adjustments
+  `.execute(db)
+  if (used.rows[0]?.used !== '0') {
+    throw new Error('ELEARNING_CREDIT_ADJUSTMENT_DOWN_IN_USE')
+  }
   await sql`DROP TABLE elearning_credit_adjustments`.execute(db)
   const finalState = await readObjectState(db)
   if (finalState.table || finalState.walletIndex) drift('objects remain after down')

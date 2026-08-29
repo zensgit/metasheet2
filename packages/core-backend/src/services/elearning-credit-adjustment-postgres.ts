@@ -90,7 +90,7 @@ class PostgresElearningCreditAdjustmentTx implements ElearningCreditAdjustmentTx
          AND membership.user_id = $2
          AND membership.is_active = true
          AND account.is_active = true
-       FOR KEY SHARE OF membership, account`,
+       FOR SHARE OF membership, account`,
       [input.orgId, input.userId],
     )
     if (result.rows.length > 1) unavailable()

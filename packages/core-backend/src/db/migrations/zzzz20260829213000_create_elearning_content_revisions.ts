@@ -45,67 +45,89 @@ const NEW_EVIDENCE_COLUMNS = [
   'completion_assurance',
 ] as const
 
+function ownedColumn(
+  table: string,
+  name: string,
+  type: string,
+  notNull: boolean,
+  expression: string | null = null,
+  generated = '',
+) {
+  return { table, name, type, notNull, generated, expression }
+}
+
 const OWNED_COLUMN_DEFINITIONS = [
-  {
-    table: 'elearning_course_version_items',
-    name: 'article_revision_id',
-    type: 'uuid',
-    notNull: false,
-    generated: '',
-    expression: null,
-  },
-  {
-    table: 'elearning_course_version_items',
-    name: 'external_link_revision_id',
-    type: 'uuid',
-    notNull: false,
-    generated: '',
-    expression: null,
-  },
-  {
-    table: 'elearning_course_version_items',
-    name: 'canonical_content_revision_id',
-    type: 'uuid',
-    notNull: false,
-    generated: 's',
-    expression: `CASE
+  ownedColumn('elearning_course_version_items', 'article_revision_id', 'uuid', false),
+  ownedColumn('elearning_course_version_items', 'external_link_revision_id', 'uuid', false),
+  ownedColumn(
+    'elearning_course_version_items',
+    'canonical_content_revision_id',
+    'uuid',
+    false,
+    `CASE
       WHEN item_type = 'article'::text THEN article_revision_id
       WHEN item_type = 'external_link'::text THEN external_link_revision_id
       ELSE NULL::uuid
     END`,
-  },
-  {
-    table: 'elearning_completion_evidence',
-    name: 'item_type',
-    type: 'text',
-    notNull: true,
-    generated: '',
-    expression: null,
-  },
-  {
-    table: 'elearning_completion_evidence',
-    name: 'content_revision_id',
-    type: 'uuid',
-    notNull: false,
-    generated: '',
-    expression: null,
-  },
-  {
-    table: 'elearning_completion_evidence',
-    name: 'open_event_id',
-    type: 'uuid',
-    notNull: false,
-    generated: '',
-    expression: null,
-  },
-  {
-    table: 'elearning_completion_evidence',
-    name: 'completion_assurance',
-    type: 'text',
-    notNull: false,
-    generated: '',
-    expression: null,
-  },
+    's',
+  ),
+  ownedColumn('elearning_completion_evidence', 'item_type', 'text', true),
+  ownedColumn('elearning_completion_evidence', 'content_revision_id', 'uuid', false),
+  ownedColumn('elearning_completion_evidence', 'open_event_id', 'uuid', false),
+  ownedColumn('elearning_completion_evidence', 'completion_assurance', 'text', false),
+
+  ownedColumn('elearning_content_revisions', 'id', 'uuid', true),
+  ownedColumn('elearning_content_revisions', 'org_id', 'text', true),
+  ownedColumn('elearning_content_revisions', 'item_type', 'text', true),
+  ownedColumn('elearning_content_revisions', 'title', 'text', true),
+  ownedColumn('elearning_content_revisions', 'article_html', 'text', false),
+  ownedColumn('elearning_content_revisions', 'external_url', 'text', false),
+  ownedColumn('elearning_content_revisions', 'content_digest', 'text', true),
+  ownedColumn('elearning_content_revisions', 'created_by', 'text', true),
+  ownedColumn('elearning_content_revisions', 'created_at', 'timestamp with time zone', true, 'now()'),
+
+  ownedColumn('elearning_content_revision_requests', 'id', 'uuid', true),
+  ownedColumn('elearning_content_revision_requests', 'org_id', 'text', true),
+  ownedColumn('elearning_content_revision_requests', 'source_key', 'uuid', true),
+  ownedColumn('elearning_content_revision_requests', 'request_hash', 'text', true),
+  ownedColumn('elearning_content_revision_requests', 'request_hash_version', 'smallint', true),
+  ownedColumn('elearning_content_revision_requests', 'content_revision_id', 'uuid', true),
+  ownedColumn('elearning_content_revision_requests', 'actor_id', 'text', true),
+  ownedColumn('elearning_content_revision_requests', 'created_at', 'timestamp with time zone', true, 'now()'),
+
+  ownedColumn('elearning_content_course_publish_requests', 'id', 'uuid', true),
+  ownedColumn('elearning_content_course_publish_requests', 'org_id', 'text', true),
+  ownedColumn('elearning_content_course_publish_requests', 'source_key', 'uuid', true),
+  ownedColumn('elearning_content_course_publish_requests', 'request_hash', 'text', true),
+  ownedColumn('elearning_content_course_publish_requests', 'request_hash_version', 'smallint', true),
+  ownedColumn('elearning_content_course_publish_requests', 'course_id', 'uuid', true),
+  ownedColumn('elearning_content_course_publish_requests', 'course_version_id', 'uuid', true),
+  ownedColumn('elearning_content_course_publish_requests', 'item_count', 'integer', true),
+  ownedColumn('elearning_content_course_publish_requests', 'actor_id', 'text', true),
+  ownedColumn('elearning_content_course_publish_requests', 'created_at', 'timestamp with time zone', true, 'now()'),
+
+  ownedColumn('elearning_open_completion_events', 'id', 'uuid', true),
+  ownedColumn('elearning_open_completion_events', 'org_id', 'text', true),
+  ownedColumn('elearning_open_completion_events', 'user_id', 'text', true),
+  ownedColumn('elearning_open_completion_events', 'course_version_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_events', 'course_version_item_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_events', 'item_type', 'text', true),
+  ownedColumn('elearning_open_completion_events', 'content_revision_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_events', 'event_kind', 'text', true),
+  ownedColumn('elearning_open_completion_events', 'event_digest', 'text', true),
+  ownedColumn('elearning_open_completion_events', 'server_received_at', 'timestamp with time zone', true),
+  ownedColumn('elearning_open_completion_events', 'created_at', 'timestamp with time zone', true, 'now()'),
+
+  ownedColumn('elearning_open_completion_requests', 'id', 'uuid', true),
+  ownedColumn('elearning_open_completion_requests', 'org_id', 'text', true),
+  ownedColumn('elearning_open_completion_requests', 'user_id', 'text', true),
+  ownedColumn('elearning_open_completion_requests', 'source_key', 'uuid', true),
+  ownedColumn('elearning_open_completion_requests', 'course_version_item_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_requests', 'request_hash', 'text', true),
+  ownedColumn('elearning_open_completion_requests', 'request_hash_version', 'smallint', true),
+  ownedColumn('elearning_open_completion_requests', 'event_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_requests', 'completion_evidence_id', 'uuid', true),
+  ownedColumn('elearning_open_completion_requests', 'created_at', 'timestamp with time zone', true, 'now()'),
 ] as const
 
 const CONTENT_CHECK_DEFINITIONS = [
@@ -900,15 +922,51 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
   for (const constraint of [
     {
       table: 'elearning_content_revisions',
+      name: 'elearning_content_revisions_pkey',
+      type: 'p' as const,
+      columns: ['id'],
+    },
+    {
+      table: 'elearning_content_revisions',
+      name: 'elearning_content_revisions_org_id_id_uniq',
+      type: 'u' as const,
+      columns: ['org_id', 'id'],
+    },
+    {
+      table: 'elearning_content_revisions',
       name: 'elearning_content_revisions_org_id_id_type_uniq',
       type: 'u' as const,
       columns: ['org_id', 'id', 'item_type'],
     },
     {
       table: 'elearning_content_revision_requests',
+      name: 'elearning_content_revision_requests_pkey',
+      type: 'p' as const,
+      columns: ['id'],
+    },
+    {
+      table: 'elearning_content_revision_requests',
+      name: 'elearning_content_revision_requests_org_id_id_uniq',
+      type: 'u' as const,
+      columns: ['org_id', 'id'],
+    },
+    {
+      table: 'elearning_content_revision_requests',
       name: 'elearning_content_revision_requests_org_source_uniq',
       type: 'u' as const,
       columns: ['org_id', 'source_key'],
+    },
+    {
+      table: 'elearning_content_course_publish_requests',
+      name: 'elearning_content_course_publish_requests_pkey',
+      type: 'p' as const,
+      columns: ['id'],
+    },
+    {
+      table: 'elearning_content_course_publish_requests',
+      name: 'elearning_content_course_publish_requests_org_id_id_uniq',
+      type: 'u' as const,
+      columns: ['org_id', 'id'],
     },
     {
       table: 'elearning_content_course_publish_requests',
@@ -933,6 +991,27 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
     },
     {
       table: 'elearning_open_completion_events',
+      name: 'elearning_open_completion_events_pkey',
+      type: 'p' as const,
+      columns: ['id'],
+    },
+    {
+      table: 'elearning_open_completion_events',
+      name: 'elearning_open_completion_events_org_id_id_uniq',
+      type: 'u' as const,
+      columns: ['org_id', 'id'],
+    },
+    {
+      table: 'elearning_open_completion_events',
+      name: 'elearning_open_completion_events_org_id_id_identity_uniq',
+      type: 'u' as const,
+      columns: [
+        'org_id', 'id', 'user_id', 'course_version_id',
+        'course_version_item_id', 'item_type', 'content_revision_id',
+      ],
+    },
+    {
+      table: 'elearning_open_completion_events',
       name: 'elearning_open_completion_events_effect_uniq',
       type: 'u' as const,
       columns: ['org_id', 'user_id', 'course_version_item_id'],
@@ -942,6 +1021,18 @@ async function assertSchema(db: Kysely<unknown>): Promise<void> {
       name: 'elearning_open_completion_events_request_identity_uniq',
       type: 'u' as const,
       columns: ['org_id', 'id', 'user_id', 'course_version_item_id'],
+    },
+    {
+      table: 'elearning_open_completion_requests',
+      name: 'elearning_open_completion_requests_pkey',
+      type: 'p' as const,
+      columns: ['id'],
+    },
+    {
+      table: 'elearning_open_completion_requests',
+      name: 'elearning_open_completion_requests_org_id_id_uniq',
+      type: 'u' as const,
+      columns: ['org_id', 'id'],
     },
     {
       table: 'elearning_open_completion_requests',

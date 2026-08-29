@@ -69,6 +69,7 @@ async function query(
 function surfaceDb(
   pool: Pool,
   beforeQuery?: (text: string) => Promise<void>,
+  afterQuery?: (text: string) => Promise<void>,
 ): ElearningCreditSurfaceDb {
   const runQuery = async (
     target: Pool | PoolClient,
@@ -76,7 +77,9 @@ function surfaceDb(
     params?: unknown[],
   ) => {
     await beforeQuery?.(text)
-    return query(target, text, params)
+    const result = await query(target, text, params)
+    await afterQuery?.(text)
+    return result
   }
   return {
     query: (text, params) => runQuery(pool, text, params),
@@ -366,6 +369,52 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
     await migrate(creditAdjustmentUp)
   })
 
+  it('refuses down once adjustment authority has rows and preserves balance plus replay truth', async () => {
+    const orgId = `org-adjust-down-${randomUUID()}`
+    const actorId = `actor-adjust-down-${randomUUID()}`
+    const userId = `user-adjust-down-${randomUUID()}`
+    const requestId = randomUUID()
+    await seedMember(orgId, actorId)
+    await seedMember(orgId, userId)
+    await adjustElearningCreditPostgres(
+      surfaceDb(firstPool),
+      adjustment(orgId, actorId, userId, { requestId }),
+      ENABLED,
+    )
+
+    let downError: unknown
+    try {
+      await migrate(creditAdjustmentDown)
+    } catch (error) {
+      downError = error
+    }
+    const tablePresent = await firstPool.query(
+      `SELECT to_regclass('elearning_credit_adjustments') IS NOT NULL AS present`,
+    ).then((result) => result.rows[0]?.present === true)
+    const balanceAfter = await firstPool.query(
+      `SELECT balance_points FROM elearning_credit_balances
+        WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    ).then((result) => result.rows[0]?.balance_points)
+    if (!tablePresent) await migrate(creditAdjustmentUp)
+
+    expect({
+      downError: downError instanceof Error ? downError.message : null,
+      tablePresent,
+      balanceAfter,
+    }).toEqual({
+      downError: 'ELEARNING_CREDIT_ADJUSTMENT_DOWN_IN_USE',
+      tablePresent: true,
+      balanceAfter: 5,
+    })
+    expect(await firstPool.query(
+      `SELECT count(*)::int AS count
+         FROM elearning_credit_adjustments
+        WHERE org_id = $1 AND source_key = $2`,
+      [orgId, requestId],
+    ).then((result) => result.rows)).toEqual([{ count: 1 }])
+  })
+
   it('rejects a same-name immutable row trigger weakened by WHEN false', async () => {
     await firstPool.query(`
       DROP TRIGGER elearning_credit_adjustments_immutable_row
@@ -505,6 +554,56 @@ describe('e-learning credit adjustment PostgreSQL authority', () => {
       )
       await firstPool.query('DROP FUNCTION elearning_credit_adjustment_test_pause_balance()')
     }
+  }, 30_000)
+
+  it('holds active membership rows until an in-flight adjustment commits', async () => {
+    const orgId = `org-adjust-revoke-${randomUUID()}`
+    const actorId = `actor-adjust-revoke-${randomUUID()}`
+    const userId = `user-adjust-revoke-${randomUUID()}`
+    await seedMember(orgId, actorId)
+    await seedMember(orgId, userId)
+
+    let membershipReads = 0
+    let releaseAdjustment: (() => void) | undefined
+    let reportMembershipLocks: (() => void) | undefined
+    const adjustmentMayContinue = new Promise<void>((resolve) => {
+      releaseAdjustment = resolve
+    })
+    const membershipLocksHeld = new Promise<void>((resolve) => {
+      reportMembershipLocks = resolve
+    })
+    const adjustmentPromise = adjustElearningCreditPostgres(
+      surfaceDb(firstPool, undefined, async (text) => {
+        if (!text.includes('elearning-credit-adjustment:membership')) return
+        membershipReads += 1
+        if (membershipReads !== 2) return
+        reportMembershipLocks?.()
+        await adjustmentMayContinue
+      }),
+      adjustment(orgId, actorId, userId),
+      ENABLED,
+    )
+    await membershipLocksHeld
+
+    let revocationSettled = false
+    const revocationPromise = secondPool.query(
+      `UPDATE user_orgs SET is_active = false
+        WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    ).finally(() => {
+      revocationSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    const settledBeforeAdjustment = revocationSettled
+    releaseAdjustment?.()
+    const [result] = await Promise.all([adjustmentPromise, revocationPromise])
+
+    expect(settledBeforeAdjustment).toBe(false)
+    expect(result).toMatchObject({ balancePoints: 5, duplicate: false })
+    expect(await firstPool.query(
+      `SELECT is_active FROM user_orgs WHERE org_id = $1 AND user_id = $2`,
+      [orgId, userId],
+    ).then((queryResult) => queryResult.rows)).toEqual([{ is_active: false }])
   }, 30_000)
 
   it('serializes an automatic award behind a manual adjustment balance lock', async () => {

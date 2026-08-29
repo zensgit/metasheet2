@@ -493,6 +493,66 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     }
     await migrate(contentRuntimeUp)
 
+    await firstPool.query(
+      'ALTER TABLE elearning_content_revisions ALTER COLUMN item_type DROP NOT NULL',
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_content_revisions.item_type',
+      )
+    } finally {
+      await firstPool.query(
+        'ALTER TABLE elearning_content_revisions ALTER COLUMN item_type SET NOT NULL',
+      )
+    }
+    await migrate(contentRuntimeUp)
+
+    await firstPool.query(
+      'ALTER TABLE elearning_content_revisions ALTER COLUMN title TYPE varchar(200)',
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_content_revisions.title',
+      )
+    } finally {
+      await firstPool.query(
+        'ALTER TABLE elearning_content_revisions ALTER COLUMN title TYPE text',
+      )
+    }
+    await migrate(contentRuntimeUp)
+
+    await firstPool.query(
+      'ALTER TABLE elearning_content_revisions ALTER COLUMN created_at DROP DEFAULT',
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_content_revisions.created_at',
+      )
+    } finally {
+      await firstPool.query(
+        'ALTER TABLE elearning_content_revisions ALTER COLUMN created_at SET DEFAULT now()',
+      )
+    }
+    await migrate(contentRuntimeUp)
+
+    await firstPool.query(
+      'ALTER TABLE elearning_content_revisions DROP CONSTRAINT elearning_content_revisions_pkey',
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: elearning_content_revisions_pkey',
+      )
+    } finally {
+      await firstPool.query(
+        `ALTER TABLE elearning_content_revisions
+           ADD CONSTRAINT elearning_content_revisions_pkey PRIMARY KEY (id)`,
+      )
+    }
+    await migrate(contentRuntimeUp)
+
     const eventShape = await firstPool.query<{ definition: string }>(
       `SELECT pg_get_constraintdef(oid, true) AS definition
          FROM pg_constraint

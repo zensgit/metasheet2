@@ -87,6 +87,8 @@ describe('Postgres e-learning credit adjustment adapter', () => {
     ])
     expect(statements[1]).toContain('pg_advisory_xact_lock')
     expect(statements[3]).toContain('membership.org_id = $1')
+    expect(statements[3]).toContain('FOR SHARE OF membership, account')
+    expect(statements[3]).not.toContain('FOR KEY SHARE')
     expect(statements[6]).toContain('FOR UPDATE')
     expect(statements[7]).toContain('balance_points = $4')
     expect(params[3]).toEqual([ORG, ACTOR])
