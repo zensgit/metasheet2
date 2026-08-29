@@ -68,6 +68,54 @@ const DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY = 'keep_multiple_rows'
 // nothing, and the rows hold anonymously.
 const DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON = 'unsupported_policy'
 
+// ── O1-B: identity for the ANONYMOUS hold families ──────────────────────────
+//
+// Three planner emitters produce manual_confirm holds WITHOUT an idempotencyKey
+// (:1023 expanded-keyless, :1029 existing-keyless, :1035 the c2_row_error
+// UMBRELLA — which is `rowError.type || 'c2_row_error'`, an unvalidated
+// passthrough covering 10 real BOM-expander types plus the ext-mapping coercion
+// codes). The confirmation-decision ledger keys every row on `rowIdentity`, so
+// without an identity these holds can only ever be counted, never ledgered.
+//
+// This block derives a values-free identity from the context the emitters
+// ACTUALLY carry — see docs/development/takeover-beiliao-20260821/
+// anonymous-hold-identity-spec-20260829.md for the per-family audit. The
+// identity is a HASH: component refs, paths and order ids go IN, nothing comes
+// back OUT. It is a pure function of the plan input, so the same source state
+// reproduces the same identity — the property supersede/reopen leans on.
+//
+// The prefix is a RESERVED NAMESPACE. A real idempotencyKey is
+// `JSON.stringify({projectNo, componentSourceId, parentSourceId, path})`
+// (stock-preparation-bom-expansion.cjs makeIdempotencyKey), so it always starts
+// with '{' and can never produce this prefix. The ledger fences both directions.
+const ANONYMOUS_HOLD_IDENTITY_PREFIX = 'anon-hold:v1:'
+
+// Row-granularity context for the two keyless-ROW families. projectNo is folded
+// in but does NOT count as a discriminator: a row carrying nothing but the
+// project number addresses nothing, and an identity that addresses nothing is
+// worse than an honest refusal (see ANONYMOUS_HOLD_IDENTITY_UNAVAILABLE).
+const ANONYMOUS_ROW_IDENTITY_FIELDS = Object.freeze([
+  'componentSourceId',
+  'parentSourceId',
+  'path',
+  'depth',
+])
+
+// Locus-granularity context for the 10 expander rowError types. Read every one
+// of the 12 emit sites before changing this: NONE of them attaches an order id,
+// a component ref or a path — `field` (a frozen read-plan source column name),
+// `depth` and, for invalid_quantity only, `relation` is the whole of it.
+const ANONYMOUS_LOCUS_IDENTITY_FIELDS = Object.freeze(['field', 'depth', 'relation'])
+
+// Cell-granularity context for the ext-mapping coercion codes. The mapper emits
+// { type, target, sourceColumn, expectedType } and the expander adds `depth`;
+// all four are CONFIG identifiers (an ext_ field id, a source column name, a
+// pack-derived type token), never customer values. The planner's `details`
+// projection drops target/sourceColumn/expectedType, so the identity reads the
+// raw rowError instead of the conflictSummary — deliberately, so conflictSummary
+// (which feeds the ledger's inputFingerprint) is left untouched.
+const ANONYMOUS_CELL_IDENTITY_FIELDS = Object.freeze(['target', 'sourceColumn', 'expectedType', 'depth'])
+
 const DUPLICATE_SOURCE_DETAIL_FIELDS = Object.freeze([
   'sourceDetailId',
   'detailSourceId',
@@ -503,6 +551,66 @@ function stableFingerprint(value) {
     .slice(0, 16)}`
 }
 
+// ── O1-B identity derivation (pure; see the constant block near the top) ─────
+
+// Scalars are String()-normalised before hashing: the canonical records API can
+// hand `depth` back as "2" where the expander produced 2, and an identity that
+// flips on that round trip would supersede its own ledger row on every other
+// reconcile. Non-scalars go through the key-sorted stringifier.
+function anonymousIdentityScalar(value) {
+  return value !== null && typeof value === 'object' ? stableStringify(value) : String(value)
+}
+
+function anonymousIdentityContext(source, fields) {
+  const context = {}
+  for (const field of fields) {
+    const value = source ? source[field] : undefined
+    // isBlank() treats numeric 0 as PRESENT — depth 0 (the BOM root) is a real
+    // discriminator and must never be dropped here.
+    if (isBlank(value)) continue
+    context[field] = anonymousIdentityScalar(value)
+  }
+  return context
+}
+
+function anonymousHoldIdentity(granularity, context) {
+  return `${ANONYMOUS_HOLD_IDENTITY_PREFIX}${granularity}:sha256:${crypto
+    .createHash('sha256')
+    .update(`stock-preparation-anonymous-hold-identity:${granularity}:v1\0`)
+    .update(stableStringify(context))
+    .digest('hex')
+    .slice(0, 32)}`
+}
+
+// A keyless expanded/existing row. `undefined` (no identity) when the row
+// carries no lineage discriminator at all beyond its project number — that row
+// addresses nothing, and a ledger row nothing could ever be matched back to is
+// worse than an honest deferral.
+function anonymousRowIdentity(conflictType, row, projectNo) {
+  const context = anonymousIdentityContext(row, ANONYMOUS_ROW_IDENTITY_FIELDS)
+  if (Object.keys(context).length === 0) return undefined
+  context.conflictType = conflictType
+  if (!isBlank(projectNo)) context.projectNo = anonymousIdentityScalar(projectNo)
+  return anonymousHoldIdentity('row', context)
+}
+
+// A C2 rowError. Coercion refusals name the mapped CELL they refused (ext
+// target x source column x declared type x depth) and get `cell` granularity;
+// every other rowError gets `locus` granularity — the (field, depth, relation)
+// position, which is genuinely all its emitter attaches. `undefined` when the
+// error carries nothing but its type (the unvalidated `c2_row_error` fallback).
+function anonymousRowErrorIdentity(conflictType, rowError) {
+  const cell = anonymousIdentityContext(rowError, ANONYMOUS_CELL_IDENTITY_FIELDS)
+  if (cell.target !== undefined && cell.sourceColumn !== undefined) {
+    cell.conflictType = conflictType
+    return anonymousHoldIdentity('cell', cell)
+  }
+  const locus = anonymousIdentityContext(rowError, ANONYMOUS_LOCUS_IDENTITY_FIELDS)
+  if (Object.keys(locus).length === 0) return undefined
+  locus.conflictType = conflictType
+  return anonymousHoldIdentity('locus', locus)
+}
+
 function firstPresent(row, fields) {
   for (const field of fields) {
     const value = row && row[field]
@@ -919,13 +1027,26 @@ function addDecision(decisions, counts, decision) {
 }
 
 function manualConfirm(decisions, counts, input) {
-  addDecision(decisions, counts, {
+  const decision = {
     decision: DECISIONS.MANUAL_CONFIRM,
     idempotencyKey: input.idempotencyKey,
     conflictSummary: makeConflictSummary(input.type, input.details),
     changedFields: Array.isArray(input.changedFields) ? input.changedFields.slice() : [],
     source: input.source || 'planner',
-  })
+  }
+  // O1-B. The reserved namespace is enforced HERE too, not only at the ledger:
+  // a keyed hold whose key looks like a derived anonymous identity would let a
+  // forged plan claim a ledger row that belongs to a different addressing
+  // scheme. Fail closed rather than key it.
+  if (typeof decision.idempotencyKey === 'string' && decision.idempotencyKey.startsWith(ANONYMOUS_HOLD_IDENTITY_PREFIX)) {
+    throw new StockPreparationConflictPlannerError('idempotencyKey must not use the reserved anonymous-hold identity namespace', {
+      field: 'idempotencyKey',
+    })
+  }
+  // Added LAST and only when present, so every keyed hold's decision object is
+  // byte-identical to the pre-O1-B one.
+  if (input.derivedRowIdentity) decision.derivedRowIdentity = input.derivedRowIdentity
+  addDecision(decisions, counts, decision)
 }
 
 function makeAddDecision(row, runId, plannedAt, plmFields, humanFields) {
@@ -1020,27 +1141,36 @@ function planStockPreparationConflicts(input = {}) {
     duplicatePolicyReview: input.duplicatePolicyReview,
   })
 
+  // O1-B: the three ANONYMOUS emitters. Each hold now carries a derived,
+  // values-free identity when its row/error offers one — the loop variables
+  // used to be discarded outright, which is exactly why these classes could
+  // never be ledgered. `details` and `conflictSummary` are UNCHANGED: the
+  // identity rides beside them so no existing fingerprint moves.
   for (const row of expanded.missing) {
     manualConfirm(decisions, counts, {
       type: 'missing_expanded_idempotency_key',
       source: 'expanded_row',
+      derivedRowIdentity: anonymousRowIdentity('missing_expanded_idempotency_key', row, row.projectNo),
     })
   }
   for (const row of existing.missing) {
     manualConfirm(decisions, counts, {
       type: 'missing_existing_idempotency_key',
       source: 'existing_row',
+      derivedRowIdentity: anonymousRowIdentity('missing_existing_idempotency_key', row, row.projectNo),
     })
   }
   for (const rowError of rowErrors) {
+    const rowErrorType = rowError.type || 'c2_row_error'
     manualConfirm(decisions, counts, {
-      type: rowError.type || 'c2_row_error',
+      type: rowErrorType,
       source: 'c2_row_error',
       details: {
         field: rowError.field,
         depth: rowError.depth,
         relation: rowError.relation,
       },
+      derivedRowIdentity: anonymousRowErrorIdentity(rowErrorType, rowError),
     })
   }
 
@@ -1190,6 +1320,7 @@ module.exports = {
   RUN_FIELD_IDS,
   LINEAGE_FIELD_IDS,
   IDENTITY_FIELD_IDS,
+  ANONYMOUS_HOLD_IDENTITY_PREFIX,
   DUPLICATE_EXPANDED_KEY_POLICIES,
   DUPLICATE_EXPANDED_KEY_RESOLVING_POLICY,
   DUPLICATE_EXPANDED_KEY_UNSUPPORTED_HELD_REASON,
@@ -1202,6 +1333,9 @@ module.exports = {
   planStockPreparationConflicts,
   summarizeConflictPlanForEvidence,
   __internals: {
+    anonymousHoldIdentity,
+    anonymousRowErrorIdentity,
+    anonymousRowIdentity,
     assertNoHumanFields,
     changedFields,
     normalizeInstalledFieldProperties,
