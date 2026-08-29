@@ -262,7 +262,7 @@ These are real residuals, not documentation polish:
 | no true OS-process restart exercise | the 5,001-record test proves same-process lease takeover, not host/process recovery |
 | fixed ten-second worker-stop bound | the bound is fail-closed but is not composition-configurable; changing it is a separate runtime policy decision |
 | sheet ID discovery comparison overlaps stronger generation/job guards | defense remains, but removing that comparison alone is not mutation-discriminating |
-| post-merge closeout candidate is local only | `9c5c082a53` has local gates plus Opus 5 and Sol fix-forwards and final local review, but no current-main replay, push, PR, or remote matrix |
+| post-merge closeout candidate is local only | code/test checkpoint `9c5c082a53` is carried by true-merge replay `0464d551d8` onto main `9d29e7a7d3`, with local gates plus Opus 5, Sol, and Luna review evidence, but no push, PR, or remote matrix |
 
 The provider rows cannot be closed by choosing an adapter implicitly. D1 leaves
 KMS/key custody and the production object backend as explicit owner decisions.
@@ -282,8 +282,8 @@ failure domain.
 
 - PR #5305 was merged through `fac252067a`; this report now records that result
   rather than preserving the obsolete Draft claim.
-- The post-merge closeout branch remains local. It was not pushed and no PR was
-  opened for `9c5c082a53`.
+- The post-merge closeout branch remains local. Code replay `0464d551d8` and
+  report head `771d7b38ee` were not pushed, and no closeout PR was opened.
 - No deployment, dispatch, staging action, or production access was performed.
 - No flag was enabled or changed.
 - D7 adds only the bounded durable-list and application-runtime slices described
@@ -296,9 +296,11 @@ failure domain.
 
 1. Obtain the explicit owner choices for KMS/key custody and the staging/production
    object backend; do not infer them from another product surface.
-2. Replay `9c5c082a53` because main has moved, then require complete exact-head
-   remote checks and another bounded replay-delta review before a separate
-   landing decision. Local green evidence is not that decision.
+2. Recheck `origin/main` before any push. The current true-merge replay
+   `0464d551d8` is bound to main `9d29e7a7d3`; if main moves again, replay first.
+   Then require complete exact-head remote checks and another bounded
+   replay-delta review before a separate landing decision. Local green evidence
+   is not that decision.
 3. Obtain a new owner staging-only authorization and execute the D7 runbook,
    including a true process restart and provider/KMS fault legs.
 4. Keep production and all Time Machine flags unchanged until a later, separate

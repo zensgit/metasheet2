@@ -460,7 +460,8 @@ owner/provider or staging/production proof:
 - current-main local integration and exact-worktree gates: passed;
 - PR #5305 merged at `fac252067a`; its product-code matrix reached `48 SUCCESS /
   1 intentional SKIPPED / 0 failure` at `73d3187c8b` before the report carrier;
-- local closeout `9c5c082a53` has no current-main replay, remote matrix, or landing authorization;
+- local closeout code/test checkpoint `9c5c082a53` is carried by current-main
+  replay `0464d551d8`, but has no remote matrix or landing authorization;
 - flags: OFF;
 - production: untouched.
 
