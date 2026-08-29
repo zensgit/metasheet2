@@ -9,6 +9,17 @@
 //
 // It mirrors metasheet-staging-source-adapter.cjs (offset-cursor pagination over an injected host
 // capability), swapping the read backend from multitable records to the data-source facade.
+//
+// W-5: this is the ONE seam every armed B2a read reaching this adapter kind funnels through
+// (stock-preparation table actions/MVP-persist/large-BOM, all of which can legitimately target a
+// `data-source:sql-readonly` source — see http-routes.cjs's `loadTableActionSourceAdapter`), so the
+// two SQL-Server read floors (requestTimeoutMs=0 refused pre-connect; offset pagination without a
+// stable orderBy forced strict) are enforced HERE, once, rather than duplicated at every caller.
+// `b2aAuthorization` is threaded in PER CALL via `adapterRegistry.createAdapter(system, { ...,
+// b2aAuthorization })` (see b2a-trial-registry.cjs's evidence-carrying stanza) — never read off
+// `context`, which is a single object shared across all requests for the life of the plugin and so
+// cannot safely hold per-request state. Omitted (the dormant/unarmed case, and every OTHER adapter
+// kind's factory that ignores the extra dep) is byte-identical to this parameter never existing.
 
 const {
   AdapterValidationError,
@@ -18,6 +29,10 @@ const {
   unsupportedAdapterOperation,
 } = require('../contracts.cjs')
 const { getPath, isBlank } = require('../transform-engine.cjs')
+const {
+  isDataSourceRequestTimeoutDisabledError,
+  refuseB2aArmedSqlServerRequestTimeoutDisabled,
+} = require('../b2a-trial-registry.cjs')
 
 const ADAPTER_KIND = 'data-source:sql-readonly'
 const WATERMARK_CURSOR_PREFIX = 'dswm1:'
@@ -527,7 +542,7 @@ function mapObjects(schemaInfo) {
   return [...tables.map((t) => toEntry(t, 'table')), ...views.map((v) => toEntry(v, 'view'))]
 }
 
-function createDataSourceSqlReadonlySourceAdapter({ system, context, principal } = {}) {
+function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const config = normalizedSystem.config || {}
   // The integration row carries only the reference to the data source — NEVER its credentials.
@@ -584,15 +599,30 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
       const effectiveWhere = combineWhereClauses(where, watermarkPlan && watermarkPlan.where)
       if (effectiveWhere) selectOptions.where = effectiveWhere
       if (watermarkPlan) selectOptions.orderBy = watermarkPlan.orderBy
+      // W-5: `b2aAuthorization` is the evidence-carrying stanza `assertB2aReadAuthorization` returned
+      // for THIS run (undefined/null on a dormant or unauthorized deployment). `Boolean(...)` is the
+      // ONLY thing that reaches the facade — never the stanza itself, keeping the read-only facade
+      // (packages/core-backend) fully B2a-agnostic. Two floors follow from that one flag being true:
+      // requestTimeoutMs=0 refuses before any connection, and offset pagination without a stable
+      // orderBy is forced to refuse (#5243) regardless of this data source's own
+      // connection.strictOffsetOrdering setting. Both are no-ops when `b2aAuthorization` is absent —
+      // byte-identical to this parameter never having existed.
+      const armed = Boolean(b2aAuthorization)
       let result
       try {
         result = await api.select(
           dataSourceId,
           request.object,
           selectOptions,
-          principal
+          principal,
+          armed
         )
       } catch (error) {
+        // Floor 1's refusal takes precedence over the lookup-projection catch-all below: an operator
+        // needs the actionable "requestTimeoutMs=0" message, not a generic "base read failed".
+        if (armed && isDataSourceRequestTimeoutDisabledError(error)) {
+          refuseB2aArmedSqlServerRequestTimeoutDisabled(b2aAuthorization)
+        }
         if (lookupProjection) throw coarseLookupProjectionError('lookup projection base read failed')
         throw error
       }
@@ -644,8 +674,12 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal }
 function createDataSourceSqlReadonlySourceAdapterFactory({ context } = {}) {
   // `principal` is supplied per-run by the caller (e.g. the pipeline owner `createdBy`, wired in a
   // later slice). Absent a principal, the host facade fails closed on read — no fallback identity.
-  return ({ system, principal } = {}) =>
-    createDataSourceSqlReadonlySourceAdapter({ system, context, principal })
+  // `b2aAuthorization` (W-5) is likewise per-call, supplied through `adapterRegistry.createAdapter(
+  // system, { principal, b2aAuthorization })` by a caller that already computed it (see
+  // http-routes.cjs's stock-preparation table-action/MVP-persist/large-BOM entry points) — never
+  // read off `context`, which is shared across every request for the life of the plugin.
+  return ({ system, principal, b2aAuthorization } = {}) =>
+    createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization })
 }
 
 const DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA = {
