@@ -609,10 +609,9 @@ async function ensureV01Ready(): Promise<void> {
 async function refreshCourses(): Promise<void> {
   if (!ready.value) return
   const result = await listMyElearningCourses()
-  if (!assessmentReady.value && result.courses.some(isElearningAssessmentCourse)) {
-    throw new ElearningApiError('feature_disabled', 404)
-  }
-  courses.value = result.courses
+  courses.value = assessmentReady.value
+    ? result.courses
+    : result.courses.filter((course) => !isElearningAssessmentCourse(course))
 }
 
 async function onContentCompleted(): Promise<void> {

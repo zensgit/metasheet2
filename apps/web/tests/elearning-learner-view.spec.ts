@@ -1106,15 +1106,40 @@ describe('ElearningLearnerView', () => {
     expect(root.textContent).toContain('已完成')
   })
 
-  it('fails closed on assessment courses without media and on a disabled master flag', async () => {
+  it('filters assessment variants only when assessment capability is unavailable', async () => {
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: false, media: false }))
+    h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
+    const contentMode = mountView()
+    await flushUi()
+    expect(contentMode.querySelector(`[data-testid="elearning-course-${COURSE}"]`)).toBeNull()
+    expect(contentMode.querySelector(`[data-testid="elearning-course-${COURSE_DONE}"]`)).not.toBeNull()
+    expect(contentMode.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue(v01Capabilities())
+    h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
+    const assessmentMode = mountView()
+    await flushUi()
+    expect([...assessmentMode.querySelectorAll('[data-testid^="elearning-course-"]')].map(
+      (element) => element.getAttribute('data-testid'),
+    )).toEqual([
+      `elearning-course-${COURSE}`,
+      `elearning-course-${COURSE_DONE}`,
+    ])
+    expect(assessmentMode.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+  })
+
+  it('filters assessment-only responses in content mode and fails closed on a disabled master flag', async () => {
     h.capabilities.mockResolvedValue(v01Capabilities({}, { media: false, incentive: true, analytics: true }))
     const root = mountView()
     await flushUi()
     expect(h.list).toHaveBeenCalledTimes(1)
     expect(h.startWatch).not.toHaveBeenCalled()
     expect(h.startExam).not.toHaveBeenCalled()
-    expect(root.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
-    expect(root.textContent).not.toContain('暂无已指派课程')
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector(`[data-testid="elearning-course-${COURSE}"]`)).toBeNull()
+    expect(root.textContent).toContain('暂无可学习课程')
 
     app?.unmount()
     container?.remove()

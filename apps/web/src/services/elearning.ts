@@ -31,6 +31,7 @@ const ATTEMPT_STATUSES = [
 ] as const
 const CAPABILITY_KEYS = ['content', 'assignment', 'assessment', 'incentive', 'analytics', 'media'] as const
 const STABLE_ERROR_CODE_RE = /^[a-z][a-z0-9_]{0,62}$/
+const CANONICAL_ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 
 export type ElearningQuestionType = (typeof QUESTION_TYPES)[number]
 export type ElearningExamQuestionType = (typeof EXAM_QUESTION_TYPES)[number]
@@ -586,6 +587,18 @@ function requireNullableString(value: unknown, status: number): string | null {
   return requireNonEmptyString(value, status)
 }
 
+function requireNullableCanonicalIsoInstant(value: unknown, status: number): string | null {
+  if (value === null) return null
+  const text = requireNonEmptyString(value, status)
+  const date = new Date(text)
+  if (
+    !CANONICAL_ISO_INSTANT_RE.test(text)
+    || Number.isNaN(date.getTime())
+    || date.toISOString() !== text
+  ) failShape(status)
+  return text
+}
+
 function parseLatestAttempt(value: unknown, status: number): ElearningLearnerLatestAttempt | null {
   if (value === null) return null
   if (!isPlainObject(value) || !exactKeys(value, [
@@ -728,7 +741,7 @@ function parseLearnerContentItem(value: unknown, status: number): ElearningLearn
   ])) failShape(status)
   if (value.itemType !== 'article' && value.itemType !== 'external_link') failShape(status)
   if (value.status !== 'not_started' && value.status !== 'completed') failShape(status)
-  const completedAt = requireNullableString(value.completedAt, status)
+  const completedAt = requireNullableCanonicalIsoInstant(value.completedAt, status)
   if ((value.status === 'completed') !== (completedAt !== null)) failShape(status)
   return {
     itemId: requireUuid(value.itemId, status),

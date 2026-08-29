@@ -160,6 +160,18 @@ describe('e-learning content client', () => {
         contentCourse().items[1],
       ],
     }),
+    contentCourse({
+      items: [
+        { ...contentCourse().items[0], completedAt: '2026-02-31T00:00:00.000Z' },
+        contentCourse().items[1],
+      ],
+    }),
+    contentCourse({
+      items: [
+        { ...contentCourse().items[0], completedAt: '2026-08-29T01:02:03Z' },
+        contentCourse().items[1],
+      ],
+    }),
     assessmentCourse({ video: { ...assessmentCourse().video, status: 'completed', completedAt: null } }),
   ])('rejects mixed, extra, unknown, or invalid status shapes', async (course) => {
     apiFetchMock.mockResolvedValueOnce(jsonResponse(200, { courses: [course] }))
