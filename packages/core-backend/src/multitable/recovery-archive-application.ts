@@ -49,6 +49,7 @@ const COMPOSITION_FACTORY_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_COMPOSITION_FAC
 const DATABASE_RUNTIME_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_DATABASE_RUNTIME_FAILED'
 const WORKER_BOOT_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_BOOT_FAILED'
 const WORKER_STOP_FAILED = 'RECOVERY_ARCHIVE_APPLICATION_WORKER_STOP_FAILED'
+const WORKER_STOP_TIMEOUT_MS = 10_000
 
 export function createRecoveryArchiveApplication(
   factory: RecoveryArchiveApplicationCompositionFactory | undefined,
@@ -130,15 +131,31 @@ export function createRecoveryArchiveApplication(
       if (workerStop) return workerStop
       if (!workerLoop) return
       const loop = workerLoop
-      workerStop = loop.stop().catch(() => {
-        throw new Error(WORKER_STOP_FAILED)
-      })
+      workerStop = stopRecoveryArchiveWorkerLoop(loop)
       try {
         await workerStop
       } finally {
         workerLoop = null
       }
     },
+  })
+}
+
+function stopRecoveryArchiveWorkerLoop(loop: RecoveryArchiveRestoreWorkerLoop): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(WORKER_STOP_FAILED))
+    }, WORKER_STOP_TIMEOUT_MS)
+    void loop.stop().then(
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      () => {
+        clearTimeout(timer)
+        reject(new Error(WORKER_STOP_FAILED))
+      },
+    )
   })
 }
 

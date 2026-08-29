@@ -1031,6 +1031,16 @@ export interface RecoveryArchiveJobPage {
   nextCursor: string | null
 }
 
+const RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS = [
+  'anchorSeq',
+  'archivedAt',
+  'coverageRowCount',
+  'expiresAt',
+  'generationId',
+  'recoveryPointAt',
+  'superseded',
+] as const
+
 const RECOVERY_ARCHIVE_JOB_STATES: ReadonlySet<unknown> = new Set([
   'planned',
   'applying',
@@ -1050,21 +1060,40 @@ const RECOVERY_ARCHIVE_JOB_SNAPSHOT_KEYS = [
   'totalCount',
 ] as const
 
-function isRecoveryArchiveJobUuid(value: unknown): value is string {
+function isRecoveryArchiveUuid(value: unknown): value is string {
   return typeof value === 'string'
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
-function isRecoveryArchiveJobDecimal(value: unknown): value is string {
+function isRecoveryArchiveDecimal(value: unknown): value is string {
   return typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
 }
 
 function isRecoveryArchiveJobPositiveDecimal(value: unknown): value is string {
-  return isRecoveryArchiveJobDecimal(value) && value !== '0'
+  return isRecoveryArchiveDecimal(value) && value !== '0'
 }
 
-function isRecoveryArchiveJobTimestamp(value: unknown): value is string {
+function isRecoveryArchiveTimestamp(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !Number.isNaN(Date.parse(value))
+}
+
+function isRecoveryArchiveCatalogEntry(value: unknown): value is RecoveryArchiveCatalogEntry {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const keys = Object.keys(value).sort()
+  if (
+    keys.length !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS.length
+    || keys.some((key, index) => key !== RECOVERY_ARCHIVE_CATALOG_ENTRY_KEYS[index])
+  ) {
+    return false
+  }
+  const entry = value as Record<string, unknown>
+  return isRecoveryArchiveUuid(entry.generationId)
+    && isRecoveryArchiveTimestamp(entry.recoveryPointAt)
+    && isRecoveryArchiveTimestamp(entry.archivedAt)
+    && isRecoveryArchiveTimestamp(entry.expiresAt)
+    && isRecoveryArchiveDecimal(entry.anchorSeq)
+    && isRecoveryArchiveDecimal(entry.coverageRowCount)
+    && typeof entry.superseded === 'boolean'
 }
 
 function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJobSnapshot {
@@ -1078,12 +1107,12 @@ function isRecoveryArchiveJobSnapshot(value: unknown): value is RecoveryArchiveJ
   }
   const snapshot = value as Record<string, unknown>
   if (
-    !isRecoveryArchiveJobUuid(snapshot.jobId)
+    !isRecoveryArchiveUuid(snapshot.jobId)
     || !RECOVERY_ARCHIVE_JOB_STATES.has(snapshot.state)
     || !isRecoveryArchiveJobPositiveDecimal(snapshot.totalCount)
-    || !isRecoveryArchiveJobDecimal(snapshot.completedCount)
-    || !isRecoveryArchiveJobTimestamp(snapshot.resumeDeadline)
-    || (snapshot.terminalAt !== null && !isRecoveryArchiveJobTimestamp(snapshot.terminalAt))
+    || !isRecoveryArchiveDecimal(snapshot.completedCount)
+    || !isRecoveryArchiveTimestamp(snapshot.resumeDeadline)
+    || (snapshot.terminalAt !== null && !isRecoveryArchiveTimestamp(snapshot.terminalAt))
     || !isRecoveryArchiveJobPositiveDecimal(snapshot.rowVersion)
   ) {
     return false
@@ -2357,9 +2386,16 @@ export class MultitableApiClient implements CommentsApiClient {
       `/api/multitable/sheets/${encodeURIComponent(sheetId)}/recovery-archive/catalog${qs(params ?? {})}`,
     )
     const data = await this.parseJson<Partial<RecoveryArchiveCatalogPage>>(res)
+    if (
+      !Array.isArray(data.entries)
+      || data.entries.some((entry) => !isRecoveryArchiveCatalogEntry(entry))
+      || (data.nextCursor !== null && typeof data.nextCursor !== 'string')
+    ) {
+      throw new Error('Invalid recovery archive catalog response')
+    }
     return {
-      entries: Array.isArray(data.entries) ? data.entries : [],
-      nextCursor: typeof data.nextCursor === 'string' ? data.nextCursor : null,
+      entries: data.entries,
+      nextCursor: data.nextCursor,
     }
   }
 

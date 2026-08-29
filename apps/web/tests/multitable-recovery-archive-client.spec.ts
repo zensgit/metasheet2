@@ -11,14 +11,21 @@ const plannedJob = {
   resumeDeadline: '2026-08-30T00:00:00.000Z', terminalAt: null, rowVersion: '1',
 } as const
 
+const catalogEntry = {
+  generationId: '4e3ecbc9-62d8-443d-8bc7-56f7d7bd12f9',
+  recoveryPointAt: '2026-08-29T00:00:00Z',
+  archivedAt: '2026-08-29T00:01:00Z',
+  expiresAt: '2026-08-30T00:00:00Z',
+  anchorSeq: '12',
+  coverageRowCount: '7',
+  superseded: false,
+} as const
+
 describe('MultitableApiClient recovery archive routes', () => {
   it('uses the sheet-scoped catalog, whole-sheet preview, and identity-only execute contracts', async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(response({ ok: true, data: {
-        entries: [{
-          generationId: '4e3ecbc9-62d8-443d-8bc7-56f7d7bd12f9', recoveryPointAt: '2026-08-29T00:00:00Z',
-          archivedAt: '2026-08-29T00:01:00Z', expiresAt: '2026-08-30T00:00:00Z', anchorSeq: '12', coverageRowCount: '7', superseded: false,
-        }], nextCursor: 'cursor-2',
+        entries: [catalogEntry], nextCursor: 'cursor-2',
       } }))
       .mockResolvedValueOnce(response({ ok: true, data: {
         generationId: '4e3ecbc9-62d8-443d-8bc7-56f7d7bd12f9', mode: 'revert', scopeKind: 'whole_sheet', executionKind: 'sync',
@@ -50,6 +57,34 @@ describe('MultitableApiClient recovery archive routes', () => {
         method: 'POST', body: JSON.stringify({ previewIdentity: 'server-preview-identity', scope: { kind: 'whole_sheet' } }),
       })],
     ])
+  })
+
+  it.each([
+    { nextCursor: null },
+    { entries: {}, nextCursor: null },
+    { entries: [] },
+    { entries: [null], nextCursor: null },
+    { entries: [{ generationId: catalogEntry.generationId }], nextCursor: null },
+    { entries: [{ ...catalogEntry, objectKey: 'internal' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, generationId: 'not-a-uuid' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, generationId: 5 }], nextCursor: null },
+    { entries: [{ ...catalogEntry, recoveryPointAt: 'invalid' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, archivedAt: 0 }], nextCursor: null },
+    { entries: [{ ...catalogEntry, expiresAt: 'invalid' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, anchorSeq: '-1' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, anchorSeq: 12 }], nextCursor: null },
+    { entries: [{ ...catalogEntry, coverageRowCount: '01' }], nextCursor: null },
+    { entries: [{ ...catalogEntry, coverageRowCount: 7 }], nextCursor: null },
+    { entries: [{ ...catalogEntry, superseded: 'false' }], nextCursor: null },
+    { entries: [], nextCursor: 1 },
+  ])('rejects a malformed successful catalog response instead of treating it as absence', async (data) => {
+    const client = new MultitableApiClient({
+      fetchFn: vi.fn().mockResolvedValue(response({ ok: true, data })),
+    })
+
+    await expect(client.listRecoveryArchiveCatalog('sheet/a')).rejects.toThrow(
+      'Invalid recovery archive catalog response',
+    )
   })
 
   it('accepts, reads, resumes, and cancels an async job without sending plan or worker fields', async () => {
