@@ -355,6 +355,40 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
     return publicRow(credentialStore, row)
   }
 
+  /**
+   * The ADAPTER-VISIBLE CONFIG of one external system, WITHOUT decrypting anything.
+   *
+   * WHY THIS EXISTS AS A THIRD ACCESSOR. The two that already exist are the wrong shape for a guard:
+   *   * `getExternalSystem` returns the PUBLIC projection, which deliberately deletes each kind's
+   *     private config subtree (`PRIVATE_CONFIG_KEYS_BY_KIND` — `lookupProjection` for
+   *     `data-source:sql-readonly`). A guard reading it cannot see a config-bound second read at all.
+   *   * `getExternalSystemForAdapter` sees everything, and DECRYPTS the credentials to do it. Every
+   *     B2a read fence is contracted to land before any credential reload, and its tests assert that
+   *     accessor was called exactly zero times on a refusal, so a guard may not use it.
+   *
+   * So: the same row, the full config, and no `parseAdapterCredentials` call. It returns the config
+   * and the kind ONLY — never the credentials, never the ciphertext, never a fingerprint — because
+   * the one caller (the B2a object-scope resolver) needs exactly that and nothing else.
+   */
+  async function getExternalSystemAdapterConfig(input) {
+    const tenantId = requiredString(input?.tenantId, 'tenantId')
+    const workspaceId = normalizeWorkspaceId(input?.workspaceId)
+    const id = requiredString(input?.id, 'id')
+    const row = await db.selectOne(TABLE, {
+      tenant_id: tenantId,
+      workspace_id: workspaceId,
+      id,
+    })
+    if (!row) {
+      throw new ExternalSystemNotFoundError('external system not found', { id, tenantId, workspaceId })
+    }
+    return {
+      id: row.id,
+      kind: row.kind,
+      config: row.config ?? {},
+    }
+  }
+
   async function getExternalSystemForAdapter(input) {
     const tenantId = requiredString(input?.tenantId, 'tenantId')
     const workspaceId = normalizeWorkspaceId(input?.workspaceId)
@@ -563,6 +597,7 @@ function createExternalSystemRegistry({ db, credentialStore, idGenerator = crypt
   return {
     upsertExternalSystem,
     getExternalSystem,
+    getExternalSystemAdapterConfig,
     getExternalSystemForAdapter,
     getExternalSystemInstanceDigest,
     deleteExternalSystem,

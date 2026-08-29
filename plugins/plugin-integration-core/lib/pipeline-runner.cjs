@@ -23,7 +23,10 @@ const {
 const {
   B2A_AUTHORIZED_RUN_ID,
   B2A_PURPOSE_PIPELINE_RUNNER_READ,
+  C6_WRITE_LIFECYCLE_CONTEXT,
   assertB2aReadAuthorization,
+  refuseRunnerWriteOutsideC6Lifecycle,
+  resolveB2aSourceObjects,
 } = require('./b2a-trial-registry.cjs')
 
 class PipelineRunnerError extends Error {
@@ -339,7 +342,11 @@ function createPipelineRunner(deps = {}) {
     return externalSystemRegistry.getExternalSystem(input)
   }
 
-  async function loadPipelineContext(input) {
+  /**
+   * @param {object|null} b2aAuthorization the stanza `assertB2aPipelineSourceReadAuthorized` returned
+   *        for THIS run, or `null` when dormant/unarmed. See the source-adapter creation below.
+   */
+  async function loadPipelineContext(input, b2aAuthorization = null) {
     const tenantId = input.tenantId
     const workspaceId = input.workspaceId ?? null
     const pipeline = await pipelineRegistry.getPipeline({
@@ -407,7 +414,27 @@ function createPipelineRunner(deps = {}) {
       // read a per-owner-scoped backend (the data-source:sql-readonly bridge) authorize reads with it;
       // adapters that don't need it (staging/k3/http) ignore the extra dep. A null createdBy stays
       // null here, so an owner-scoped source fails closed downstream — no fallback identity.
-      sourceAdapter: adapterRegistry.createAdapter(sourceSystem, { role: 'source', principal: pipeline.createdBy }),
+      //
+      // W-5 x R-wave (external review finding 2): the B2a authorization stanza rides along on the
+      // SOURCE side only. W-5 armed two SQL-Server read floors inside
+      // `data-source-sql-readonly-source-adapter.cjs` — refuse `connection.requestTimeoutMs=0`
+      // pre-connect, and force strict offset ordering — but both are OPT-IN: the adapter enforces
+      // them only when a caller forwards this stanza. The four stock-preparation routes and the
+      // reconcile route forward it; THIS caller captured it and threw it away, so every
+      // runner-initiated armed read ran with those floors silently off. That was W-5's own disclosed
+      // residual, and this is its closure.
+      //
+      // SOURCE ONLY, deliberately: a B2a registration authorizes a READ, and the floors it turns on
+      // are read floors. Attaching it to the target adapter would imply a write authorization this
+      // stanza does not carry.
+      //
+      // DORMANT IS BYTE-IDENTICAL: `null` omits the key ENTIRELY — not `undefined`, no key at all —
+      // so every adapter factory sees exactly the `deps` object it saw before this dep existed.
+      sourceAdapter: adapterRegistry.createAdapter(sourceSystem, {
+        role: 'source',
+        principal: pipeline.createdBy,
+        ...(b2aAuthorization ? { b2aAuthorization } : {}),
+      }),
       // C6: write-gated data-source targets use the same owner-scoped boundary. Existing targets
       // ignore this dep; the C6 target requires it and fails closed instead of inventing a service
       // identity for legacy/null createdBy pipelines.
@@ -470,6 +497,24 @@ function createPipelineRunner(deps = {}) {
       workspaceId,
       id: pipeline.sourceSystemId,
     })
+    // R-02 (external review finding 3): `pipeline.sourceObject` is what the PIPELINE names, and for a
+    // `data-source:sql-readonly` source it is not everything the read touches — that adapter's
+    // server-config-bound `lookupProjection` reads a second, distinct table on every page. The
+    // resolver adds it so an armed registration that does not enumerate it is refused
+    // (`object_out_of_scope`) instead of being silently widened. It resolves the private config
+    // through the NON-DECRYPTING accessor, so the fence still precedes every credential reload; a
+    // registry that cannot offer one refuses fail-closed rather than authorizing the narrow list.
+    const sourceObjects = await resolveB2aSourceObjects({
+      sourceObjects: [pipeline.sourceObject],
+      sourceSystemType: sourceSystem && sourceSystem.kind,
+      loadSourceSystemConfig: typeof externalSystemRegistry.getExternalSystemAdapterConfig === 'function'
+        ? () => externalSystemRegistry.getExternalSystemAdapterConfig({
+          tenantId,
+          workspaceId,
+          id: pipeline.sourceSystemId,
+        })
+        : null,
+    })
     return assertB2aReadAuthorization({
       registry: b2aTrialRegistry,
       store: b2aClaimStore,
@@ -483,11 +528,46 @@ function createPipelineRunner(deps = {}) {
       sourceSystemType: sourceSystem && sourceSystem.kind,
       sourceBindingRef: pipeline.sourceSystemId,
       dataScopeRef: pipeline.projectId,
-      sourceObjects: [pipeline.sourceObject],
+      sourceObjects,
       purpose: B2A_PURPOSE_PIPELINE_RUNNER_READ,
       runId: trimmedString(input[B2A_AUTHORIZED_RUN_ID]) || `pipeline-runner:${crypto.randomUUID()}`,
       now: Date.now(),
     })
+  }
+
+  /**
+   * THE RUNNER-LEVEL C6 WRITE-LIFECYCLE FENCE (external review finding 4).
+   *
+   * WHAT IT REFUSES: a run that will WRITE and did not arrive through a governed write surface. The
+   * HTTP routes run `assertPipelineRunAllowed` — the E3-01 multitable write fence plus the B2a read
+   * authorization — and then attach `C6_WRITE_LIFECYCLE_CONTEXT`. The cross-plugin communication
+   * API runs none of that and, by `index.cjs`'s stripper, cannot present the marker. So the default
+   * posture for `context.communication.call('integration-core', 'runPipeline'|'replayDeadLetter')`
+   * on an armed deployment is: a dry run proceeds, a WRITE is refused. A plugin that needs a write
+   * goes through the governed HTTP surface, which is where the lifecycle lives.
+   *
+   * "WOULD WRITE" IS `dryRun !== true`, and that is exact rather than approximate: the only call to
+   * `targetAdapter.upsert` in this module is guarded by `if (!dryRun && cleanRecords.length > 0)`,
+   * and `dryRun` there is this same `coerceTruthyFlag` reading — the SAME coercion, so a run this
+   * fence treats as a write is precisely a run that can reach the upsert. (Strict `!== true`, which
+   * the K3 and W-1c gates above use, would refuse a `dryRun: "true"` preview: a blanket deny that
+   * kills a read-only path is the E4-05 failure mode, not a fence.)
+   *
+   * WHERE IT SITS: FIRST, ahead of the B2a read fence. A run that is going to be refused for want of
+   * the lifecycle context must not spend the registration's single operation on its way to that
+   * refusal — the same rule the K3 replay ordering follows a few hundred lines below. It therefore
+   * costs zero platform reads: it inspects the input and the registry handle, nothing else.
+   *
+   * ARMED-SCOPED, mirroring the route fence it doubles: `assertPipelineRunAllowed` returns before
+   * its own E3-01 check when the registry is unset, so a dormant deployment has no route-level
+   * lifecycle for this door to bypass — and a dormant runner stays byte-identical, down to the
+   * absence of this check.
+   */
+  function assertC6WriteLifecycleContext(input = {}) {
+    if (!b2aTrialRegistry) return
+    if (coerceTruthyFlag(input.dryRun, 'input.dryRun')) return
+    if (input[C6_WRITE_LIFECYCLE_CONTEXT] === true) return
+    refuseRunnerWriteOutsideC6Lifecycle()
   }
 
   async function writeDeadLetter(input) {
@@ -671,10 +751,17 @@ function createPipelineRunner(deps = {}) {
   }
 
   async function runPipeline(input) {
+    // R-wave (finding 4): the C6 write-lifecycle fence, FIRST — before the read fence, so a write
+    // that will be refused for want of the lifecycle context never spends the registration's one
+    // operation, and before any platform read of any kind.
+    assertC6WriteLifecycleContext(input)
     // W-2: the B2a read fence, BEFORE `loadPipelineContext` decrypts either system's credentials or
     // creates either adapter. Dormant deployments return from it without a single platform read.
-    await assertB2aPipelineSourceReadAuthorized(input)
-    const context = await loadPipelineContext(input)
+    // R-wave (finding 2): its RETURN VALUE is the authorization stanza, and it is threaded into the
+    // source adapter below — armed read floors are opt-in on that stanza, so discarding it left them
+    // off for every runner-initiated read.
+    const b2aAuthorization = await assertB2aPipelineSourceReadAuthorized(input)
+    const context = await loadPipelineContext(input, b2aAuthorization)
     const mode = input.mode || context.pipeline.mode || 'manual'
     const triggeredBy = input.triggeredBy || 'manual'
     const dryRun = coerceTruthyFlag(input.dryRun, 'input.dryRun')
@@ -985,6 +1072,13 @@ function createPipelineRunner(deps = {}) {
   }
 
   async function replayDeadLetter(input = {}) {
+    // R-wave (finding 4). A replay re-enters `runPipeline` with NO `dryRun`, so it is always a live
+    // write and always needs the lifecycle context its own governed route attaches. Asserted HERE as
+    // well as inside `runPipeline` for the reason the K3 fence below is: everything between this
+    // line and that one — the dead-letter row read, the pipeline read, and the K3 fence's own
+    // target-kind lookup, which uses the credential-DECRYPTING accessor — would otherwise run for a
+    // caller that is going to be refused anyway.
+    assertC6WriteLifecycleContext(input)
     if (typeof deadLetterStore.getDeadLetter !== 'function' || typeof deadLetterStore.markReplayed !== 'function') {
       throw new PipelineRunnerError('dead-letter replay requires getDeadLetter() and markReplayed()')
     }
@@ -1067,6 +1161,11 @@ function createPipelineRunner(deps = {}) {
       // Carry the route's already-asserted run marker through, so an HTTP-initiated replay CONTINUES
       // the claim the route took instead of being refused as a second run on a spent registration.
       ...(input[B2A_AUTHORIZED_RUN_ID] ? { [B2A_AUTHORIZED_RUN_ID]: input[B2A_AUTHORIZED_RUN_ID] } : {}),
+      // R-wave (finding 4): and the write-lifecycle context the governed replay route attached, for
+      // the same reason — the internal `runPipeline` re-asserts it, and a replay that passed the
+      // check above must not then fail it one layer down. Forwarded only when genuinely present, so
+      // a dormant replay hands the runner exactly the object it handed it before.
+      ...(input[C6_WRITE_LIFECYCLE_CONTEXT] === true ? { [C6_WRITE_LIFECYCLE_CONTEXT]: true } : {}),
     })
     if (result.metrics.rowsFailed > 0) return { deadLetter, replay: result }
     // Best-effort bookkeeping: the ERP write already succeeded, so even if
