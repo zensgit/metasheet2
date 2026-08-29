@@ -723,12 +723,12 @@ async function assertConstraintColumns(
     || (row.referenced_columns ?? []).join('\0')
       !== (input.referencedColumns ?? []).join('\0')
     || !row.validated
+    || row.deferrable
+    || row.deferred
     || (input.type === 'f' && (
       row.delete_action !== 'r'
       || row.update_action !== 'a'
       || row.match_type !== 's'
-      || row.deferrable
-      || row.deferred
     ))
   ) drift(input.name)
 }

@@ -416,6 +416,28 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     }
     await migrate(contentRuntimeUp)
 
+    await firstPool.query(
+      `ALTER TABLE elearning_open_completion_events
+         DROP CONSTRAINT elearning_open_completion_events_effect_uniq,
+         ADD CONSTRAINT elearning_open_completion_events_effect_uniq
+         UNIQUE (org_id, user_id, course_version_item_id)
+         DEFERRABLE INITIALLY IMMEDIATE`,
+    )
+    try {
+      await expect(migrate(contentRuntimeUp)).rejects.toThrow(
+        'elearning content runtime migration drift: '
+        + 'elearning_open_completion_events_effect_uniq',
+      )
+    } finally {
+      await firstPool.query(
+        `ALTER TABLE elearning_open_completion_events
+           DROP CONSTRAINT elearning_open_completion_events_effect_uniq,
+           ADD CONSTRAINT elearning_open_completion_events_effect_uniq
+           UNIQUE (org_id, user_id, course_version_item_id)`,
+      )
+    }
+    await migrate(contentRuntimeUp)
+
     const immutableDefinition = await firstPool.query<{ definition: string }>(
       `SELECT pg_get_functiondef(
          'elearning_content_reject_immutable_write()'::regprocedure
