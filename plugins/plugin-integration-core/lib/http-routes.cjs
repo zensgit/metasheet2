@@ -137,6 +137,10 @@ const ROUTES = [
   ['GET', '/api/integration/stock-preparation/confirmation-decisions/readiness', 'stockPreparationConfirmationDecisionsReadiness'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/ensure', 'stockPreparationConfirmationDecisionsEnsure'],
   ['POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', 'stockPreparationConfirmationDecisionsConfirm'],
+  // O1' value unlock: the ONE surface where entered value CONTENTS may cross — a per-decision,
+  // admin-gated operator read for the /stock-prep workbench detail pane. The queue (GET list) and
+  // every evidence/log payload stay values-free (presence booleans only).
+  ['GET', '/api/integration/stock-preparation/confirmation-decisions/value-entry', 'stockPreparationConfirmationDecisionsValueEntry'],
   ['GET', '/api/integration/stock-preparation/confirmation-decisions', 'stockPreparationConfirmationDecisionsList'],
   // CUSTOMER PACK entry point — the executable surface for the config pack line. Admin-gated; the
   // pack itself is NEVER request-supplied (server-held allowlist, see
@@ -289,8 +293,9 @@ const {
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
 } = require('./stock-preparation-table-actions.cjs')
-// B-stage confirmation-decision LEDGER (first cut: duplicate_expanded_key x keep_multiple_rows).
-// One managed supporting table; never a canonical-sheet write capability (see the module header).
+// B-stage confirmation-decision LEDGER (O1' semantics: duplicate_expanded_key; full frozen action
+// vocabulary + Q2-A value entry). One managed supporting table; never a canonical-sheet write
+// capability (see the module header).
 const {
   StockPreparationConfirmationDecisionError,
   inspectConfirmationDecisionTarget,
@@ -298,6 +303,7 @@ const {
   reconcileConfirmationDecisions,
   listConfirmationDecisions,
   confirmConfirmationDecision,
+  readConfirmationDecisionValueEntry,
   loadConfirmedDuplicatePolicyReview,
 } = require('./stock-preparation-confirmation-decisions.cjs')
 const {
@@ -918,10 +924,11 @@ const VALID_STOCK_PREPARATION_TARGET_REQUEST_KEYS = new Set(['tenantId', 'worksp
 // Confirmation-decision LEDGER request surfaces. Ensure takes NO body keys at all (the staging
 // project is auth-derived; a projectId/baseId here would be a steering vector on a write route).
 // The confirm body carries the full converged key vocabulary; resolvedValue/resolvedAuxValue are
-// then refused by the module with a NAMED first-cut error rather than a generic unknown-field 400.
+// validated and stored by the module since the O1' ledger-semantics slice (Q2-A value unlock).
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_READINESS_QUERY_KEYS = new Set(['tenantId', 'workspaceId'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_ENSURE_BODY_KEYS = new Set()
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_LIST_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'projectNo', 'status'])
+const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS = new Set(['tenantId', 'workspaceId', 'decisionId'])
 const VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_CONFIRM_BODY_KEYS = new Set([
   'decisionId',
   'inputFingerprint',
@@ -5829,6 +5836,32 @@ function createHandlers(services, options = {}) {
         permission: 'admin',
         projectNo,
         status: firstString(input.status),
+      })
+      return sendOk(res, result)
+    },
+
+    // O1' value unlock: the dedicated per-decision operator read — the ONLY surface where entered
+    // resolvedValue/resolvedAuxValue/notes CONTENTS cross (the queue and all evidence stay
+    // values-free). Admin-gated read; the module refuses a decisionId that does not resolve to
+    // exactly one ledger row.
+    async stockPreparationConfirmationDecisionsValueEntry(req, res) {
+      requireAccess(req, 'admin')
+      const input = normalizeStockPreparationConfirmBody(
+        requestQuery(req),
+        VALID_STOCK_PREPARATION_CONFIRMATION_DECISION_VALUE_ENTRY_QUERY_KEYS,
+        'CONFIRMATION_DECISION_VALUE_ENTRY_REQUEST_INVALID',
+      )
+      const decisionId = firstString(input.decisionId)
+      if (!decisionId) {
+        throw new HttpRouteError(400, 'CONFIRMATION_DECISION_VALUE_ENTRY_REQUEST_INVALID', 'decisionId is required', { field: 'decisionId' })
+      }
+      const tenantId = resolveTenantId(req, input)
+      const result = await readConfirmationDecisionValueEntry({
+        recordsApi: getMultitableRecordsApi(),
+        provisioning: getMultitableProvisioning(),
+        targetProjectId: resolveIntegrationStagingProjectId(tenantId, undefined),
+        permission: 'admin',
+        decisionId,
       })
       return sendOk(res, result)
     },
