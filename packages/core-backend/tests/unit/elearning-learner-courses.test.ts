@@ -26,6 +26,10 @@ const VERSION = '22222222-2222-4222-8222-222222222222'
 const VERSION_B = '23232323-2323-4232-8232-232323232323'
 const VIDEO = '33333333-3333-4333-8333-333333333333'
 const EXAM_ITEM = '44444444-4444-4444-8444-444444444444'
+const ARTICLE_ITEM = '45454545-4545-4454-8454-454545454545'
+const LINK_ITEM = '46464646-4646-4464-8464-464646464646'
+const ARTICLE_REVISION = '47474747-4747-4474-8474-474747474747'
+const LINK_REVISION = '48484848-4848-4484-8484-484848484848'
 const ATTEMPT = '55555555-5555-4555-8555-555555555555'
 const ATTEMPT_B = '56565656-5656-4565-8565-565656565656'
 const MEMBER = '67676767-6767-4676-8676-676767676767'
@@ -84,6 +88,22 @@ const PUBLIC_ATTEMPT_KEYS = [
   'startedAt',
   'submittedAt',
   'gradedAt',
+] as const
+const PUBLIC_CONTENT_COURSE_KEYS = [
+  'courseId',
+  'courseVersionId',
+  'title',
+  'access',
+  'assignment',
+  'items',
+  'completed',
+] as const
+const PUBLIC_CONTENT_ITEM_KEYS = [
+  'itemId',
+  'itemType',
+  'title',
+  'status',
+  'completedAt',
 ] as const
 
 const SECRET_TOKENS = [
@@ -183,6 +203,28 @@ function baseRow(over: Record<string, unknown> = {}): Record<string, unknown> {
   }
 }
 
+function contentRow(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    course_id: COURSE,
+    course_version_id: VERSION,
+    title: 'Content course',
+    assignment_deadline: DEADLINE,
+    assignment_assigned_at: ASSIGNED_AT,
+    access_kind: 'assignment',
+    assignment_member_id: MEMBER,
+    scope_revision_rule_id: null,
+    item_id: ARTICLE_ITEM,
+    item_type: 'article',
+    item_position: 1,
+    item_revision_id: ARTICLE_REVISION,
+    item_title: 'Safe article',
+    item_completed_at: null,
+    evidence_item_type: null,
+    evidence_revision_id: null,
+    ...over,
+  }
+}
+
 function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
   db: ElearningLearnerCoursesDb
   queries: string[]
@@ -271,7 +313,10 @@ function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
         rowCount: rules.length,
       }
     }
-    if (tag === 'elearning-learner-courses:details') {
+    if (
+      tag === 'elearning-learner-courses:details'
+      || tag === 'elearning-learner-courses:content-details'
+    ) {
       const versionIds = queryParams[2]
       const assignmentMemberIds = queryParams[3]
       const scopeRevisionRuleIds = queryParams[4]
@@ -282,7 +327,12 @@ function createMemoryDb(rows: Array<Record<string, unknown>> | Error): {
         versionIds.length !== assignmentMemberIds.length
         || versionIds.length !== scopeRevisionRuleIds.length
       ) throw new Error('misaligned access arrays')
-      const selected = rows.filter((row) => versionIds.includes(String(row.course_version_id)))
+      const selected = rows.filter((row) => (
+        versionIds.includes(String(row.course_version_id))
+        && (tag === 'elearning-learner-courses:content-details'
+          ? row.item_type === 'article' || row.item_type === 'external_link'
+          : row.video_item_id != null)
+      ))
       return { rows: selected, rowCount: selected.length }
     }
     throw new Error(`unexpected query: ${sql}`)
@@ -301,6 +351,7 @@ describe('elearning learner courses source SQL', () => {
     const audienceSource = await fs.readFile(AUDIENCE_SOURCE, 'utf8')
     expect(source).toContain('listElearningCourseAccessCandidates')
     expect(source).toContain('/* elearning-learner-courses:details */')
+    expect(source).toContain('/* elearning-learner-courses:content-details */')
     expect(source).toContain('unnest($3::uuid[], $4::uuid[], $5::uuid[]) WITH ORDINALITY')
     expect(source).toContain('current_member.id = access.assignment_member_id')
     expect(source).toContain('current_member.revoked_at IS NULL')
@@ -324,6 +375,8 @@ describe('elearning learner courses source SQL', () => {
     expect(source).toContain("v.status IN ('published', 'retired')")
     expect(source).toContain("i.item_type = 'video'")
     expect(source).toContain("i.item_type = 'exam'")
+    expect(source).toContain("item.item_type IN ('article', 'external_link')")
+    expect(source).toContain('evidence.content_revision_id AS evidence_revision_id')
     expect(source).toContain('i.completion_policy_version = \'${ELEARNING_WATCH_POLICY_VERSION}\'')
     expect(source).toContain('i.completion_threshold_bps = ${ELEARNING_WATCH_THRESHOLD_BPS}')
     expect(source).toContain("media.status = 'ready'")
@@ -434,6 +487,77 @@ describe('elearning learner courses input and SQL dispatch', () => {
 })
 
 describe('elearning learner courses public mapping', () => {
+  it('returns ordered article/link items without leaking stored content and completes only when every item has evidence', async () => {
+    const rows = [
+      contentRow({
+        item_id: LINK_ITEM,
+        item_type: 'external_link',
+        item_position: 2,
+        item_revision_id: LINK_REVISION,
+        item_title: 'External reference',
+        item_completed_at: COMPLETED_AT,
+        evidence_item_type: 'external_link',
+        evidence_revision_id: LINK_REVISION,
+        external_url: 'https://private.example/path',
+      }),
+      contentRow({
+        item_id: ARTICLE_ITEM,
+        item_type: 'article',
+        item_position: 1,
+        item_title: 'Safe article',
+        article_html: '<p>secret body</p>',
+      }),
+    ]
+    const { db } = createMemoryDb(rows)
+    const [course] = await listElearningLearnerCourses(db, { orgId: ORG, userId: USER })
+    const raw = JSON.parse(JSON.stringify(course)) as Record<string, unknown>
+    expect(Object.keys(raw)).toEqual([...PUBLIC_CONTENT_COURSE_KEYS])
+    const items = raw.items as Array<Record<string, unknown>>
+    expect(items).toHaveLength(2)
+    for (const item of items) expect(Object.keys(item)).toEqual([...PUBLIC_CONTENT_ITEM_KEYS])
+    expect(items).toEqual([
+      {
+        itemId: ARTICLE_ITEM,
+        itemType: 'article',
+        title: 'Safe article',
+        status: 'not_started',
+        completedAt: null,
+      },
+      {
+        itemId: LINK_ITEM,
+        itemType: 'external_link',
+        title: 'External reference',
+        status: 'completed',
+        completedAt: COMPLETED_AT,
+      },
+    ])
+    expect(raw.completed).toBe(false)
+    expect(JSON.stringify(raw)).not.toMatch(/secret body|private\.example|articleHtml|externalUrl/)
+
+    const completed = createMemoryDb(rows.map((row) => row.item_id === ARTICLE_ITEM
+      ? {
+          ...row,
+          item_completed_at: COMPLETED_AT,
+          evidence_item_type: 'article',
+          evidence_revision_id: ARTICLE_REVISION,
+        }
+      : row))
+    await expect(listElearningLearnerCourses(completed.db, {
+      orgId: ORG,
+      userId: USER,
+    })).resolves.toMatchObject([{ completed: true }])
+
+    const wrongRevision = createMemoryDb([contentRow({
+      item_completed_at: COMPLETED_AT,
+      evidence_item_type: 'article',
+      evidence_revision_id: LINK_REVISION,
+    })])
+    await expect(listElearningLearnerCourses(wrongRevision.db, {
+      orgId: ORG,
+      userId: USER,
+    })).rejects.toMatchObject({ code: 'unavailable' })
+  })
+
   it('returns the exact public DTO for an assigned not-started course and keeps expired deadlines', async () => {
     const { db } = createMemoryDb([baseRow({
       assignment_deadline: '2000-01-01T00:00:00.000Z',

@@ -311,6 +311,11 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
       /submitElearningManualGrade\(db,\s*input,\s*\{\s*env\s*\}\)/,
     )
     expect(runtimeSrc).toMatch(/publishElearningCourse/)
+    expect(runtimeSrc).toMatch(/createElearningContentRouter/)
+    expect(runtimeSrc).toMatch(/storeElearningContentRevision/)
+    expect(runtimeSrc).toMatch(/publishElearningContentCourse/)
+    expect(runtimeSrc).toMatch(/recordElearningOpenCompletion/)
+    expect(runtimeSrc).toMatch(/if\s*\(content\)\s*router\.use\(content\)/)
     expect(runtimeSrc).toMatch(/listElearningLearnerCourses/)
     expect(runtimeSrc).toMatch(
       /opts\.publishElearningCourse\s*\?\?\s*publishElearningCourse/,
@@ -344,7 +349,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(routeSrc).toMatch(
       /gate\(\s*deps\.adminGuard,\s*'exam',\s*parsePublishJson\s*\)/,
     )
-    expect(routeSrc).toMatch(/gate\(\s*deps\.readGuard,\s*'exam',\s*null\s*\)/)
+    expect(routeSrc).toMatch(/gate\(\s*deps\.readGuard,\s*'content',\s*null\s*\)/)
   })
 
   test('JWT identity then org then RBAC precede body parsing; actor/org ignore client overrides', async () => {
@@ -873,7 +878,7 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(startSrc.includes('elearningPilotRuntime.router')).toBe(false)
   })
 
-  test('exam flags OFF 404 the exam routes with no service call; watch ticket still issues', async () => {
+  test('exam flags OFF 404 exam routes while the content-gated learner catalog remains available', async () => {
     const examStartCalls: unknown[] = []
     const ticketCalls: unknown[] = []
     const publishCalls: unknown[] = []
@@ -930,8 +935,8 @@ describe('elearning pilot runtime (flag-gated production wiring)', () => {
     expect(publishCalls).toHaveLength(0)
 
     const learner = await serve(app).get('/api/elearning/me/courses')
-    expect(learner.status).toBe(404)
-    expect(learner.body).toEqual({ error: 'not_found' })
-    expect(learnerCalls).toHaveLength(0)
+    expect(learner.status).toBe(200)
+    expect(learner.body).toEqual({ courses: LEARNER_COURSES })
+    expect(learnerCalls).toEqual([{ orgId: ORG, userId: ACTOR }])
   })
 })
