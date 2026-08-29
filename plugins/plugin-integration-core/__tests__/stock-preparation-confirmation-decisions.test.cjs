@@ -18,6 +18,14 @@
 //   G7   an unregistered / malformed / stale confirm is refused
 //   G8   the queue endpoint emits NO source cell values (seeded-marker negative control)
 //   M77  migration 077 defines the DB-level lease uniqueness the module leans on
+//   W4a  A→B→A fingerprint RETURN reopens the superseded row (human decision
+//        cleared, stale intermediate pending superseded in the same run) — no
+//        permanent wedge
+//   W4b  a conflict that vanished from the plan is closed by the orphan sweep
+//        (pending only; confirmed orphans stay untouched)
+//   W4c  lease renew is CAS-guarded; an overtaken holder ABORTS mid-run with
+//        CONFIRMATION_DECISION_RECONCILE_LEASE_LOST and no duplicate active
+//        rows result
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -515,6 +523,266 @@ async function testA04TwoIndependentReconcilersYieldOneActiveDecision() {
   assert.equal(ledgerRows(records).filter((row) => ACTIVE_STATUSES.includes(row.data.status)).length, 1)
 }
 
+// ── W-4(a): A→B→A fingerprint RETURN must reopen, not wedge ─────────────────
+
+async function testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecision() {
+  const env = ledgerEnv()
+  const plan = planOf([duplicateHold('KEY-A')])
+  const call = (sourceRevision) => reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision,
+    now: () => new Date('2026-08-29T10:00:00.000Z'),
+  }))
+
+  // Cycle 1: rev-1 opens A; a human confirms it WITH notes, so the later
+  // revival has actual human content to clear.
+  await call('rev-1')
+  const first = await listConfirmationDecisions(scopedCall(env, { projectNo: 'P-001', status: STATUSES.PENDING }))
+  const original = first.rows[0]
+  await confirmConfirmationDecision(scopedCall(env, {
+    decisionId: original.decisionId,
+    inputFingerprint: original.inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+    confirmedBy: 'admin-user',
+    notes: 'first-cycle decision',
+  }))
+
+  // Cycle 2: rev-2 supersedes A and opens B (plain A-02 behaviour).
+  await call('rev-2')
+
+  // Cycle 3: the source content REVERTS — the revision handle is a pure
+  // content hash, so rev-1's fingerprint RETURNS. Pre-fix this run was a total
+  // no-op: A stayed superseded (unconfirmable), B stayed pending (stale) — the
+  // key was permanently wedged.
+  const third = await call('rev-1')
+  assert.equal(third.counts.reopened, 1, 'W-4(a): the RETURNED fingerprint reopens its superseded row')
+  assert.equal(third.counts.created, 0, 'reopen reuses the row — stable decisionId, no duplicate')
+  assert.equal(third.counts.superseded, 1, 'W-4(a): the stale rev-2 pending row is superseded in the SAME run despite the exact hit')
+  assert.equal(third.counts.pending, 1)
+
+  const rows = ledgerRows(env.records)
+  assert.equal(rows.length, 2, 'no row growth across the oscillation')
+  const revived = rows.find((row) => row.data.decisionId === original.decisionId)
+  const stale = rows.find((row) => row.data.decisionId !== original.decisionId)
+  assert.equal(revived.data.status, STATUSES.PENDING)
+  assert.equal(stale.data.status, STATUSES.SUPERSEDED)
+  assert.equal(revived.data.supersededAt, null, 'supersededAt is cleared on reopen')
+  // Conservative default (flagged for the owner — O1' matrix Q5): a revived
+  // conflict is a NEW question to the human. The old answer is cleared, never
+  // silently carried forward.
+  assert.equal(revived.data.resolutionAction, null, 'W-4(a): the old human resolutionAction is cleared on reopen')
+  assert.equal(revived.data.notes, null, 'W-4(a): the old human notes are cleared on reopen')
+  assert.equal(revived.data.confirmedBy, null, 'stale confirmation bookkeeping is cleared with it')
+  assert.equal(revived.data.confirmedAt, null)
+
+  // Cleared means NOT auto-downgraded: the readback stays empty until a human
+  // re-confirms the revived row.
+  const readback = () => loadConfirmedDuplicatePolicyReview(scopedCall(env, { projectNo: 'P-001', plan, sourceRevision: 'rev-1' }))
+  assert.deepEqual((await readback()).policies, [], 'a revived conflict must be re-confirmed by a human')
+
+  // ... and the key is fully un-wedged: pending -> confirmable -> readable.
+  await confirmConfirmationDecision(scopedCall(env, {
+    decisionId: original.decisionId,
+    inputFingerprint: original.inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+    confirmedBy: 'admin-user',
+  }))
+  assert.equal((await readback()).policies.length, 1, 'W-4(a): the oscillated key confirms and reads back again — no permanent wedge')
+
+  // Replay after the revival: plain A-01 no-op (reopen fires only on RETURN).
+  const replay = await call('rev-1')
+  assert.equal(replay.counts.reopened, 0)
+  assert.equal(replay.counts.existing, 1)
+  assert.equal(replay.counts.created, 0)
+  assert.equal(ledgerRows(env.records).length, 2)
+}
+
+// ── W-4(b): a conflict that vanishes from the plan is closed by the sweep ───
+
+async function testW4bVanishedConflictSweepClosesOrphanPendingRows() {
+  const env = ledgerEnv()
+  const call = (plan) => reconcileConfirmationDecisions(scopedCall(env, {
+    projectNo: 'P-001',
+    plan,
+    sourceRevision: 'rev-1',
+    now: () => new Date('2026-08-29T11:00:00.000Z'),
+  }))
+  const bothPlan = planOf([duplicateHold('KEY-A'), duplicateHold('KEY-B')])
+  await call(bothPlan)
+  assert.equal(ledgerRows(env.records).length, 2)
+
+  const { candidates } = deriveDecisionCandidates({ projectNo: 'P-001', plan: bothPlan, sourceRevision: 'rev-1' })
+  const byIdentity = new Map(candidates.map((candidate) => [candidate.rowIdentity, candidate]))
+  // Confirm KEY-B so the sweep later has a confirmed orphan to LEAVE ALONE.
+  await confirmConfirmationDecision(scopedCall(env, {
+    decisionId: byIdentity.get('KEY-B').decisionId,
+    inputFingerprint: byIdentity.get('KEY-B').inputFingerprint,
+    resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+    confirmedBy: 'admin-user',
+  }))
+
+  // KEY-A vanishes from the source while still PENDING: the sweep closes it.
+  const swept = await call(planOf([duplicateHold('KEY-B')]))
+  assert.equal(swept.counts.orphanSuperseded, 1, 'W-4(b): the vanished pending conflict is closed')
+  assert.equal(swept.counts.superseded, 0, 'the sweep is distinguishable from a fingerprint supersede')
+  assert.equal(swept.counts.created, 0)
+  assert.equal(swept.counts.existing, 1)
+  assert.deepEqual(
+    swept.evidence.orphanSweep,
+    { closed: 1, reason: 'conflict_vanished_from_plan', truncated: false },
+    'W-4(b): the sweep reason travels in the run evidence',
+  )
+
+  const afterSweep = ledgerRows(env.records)
+  const keyARow = afterSweep.find((row) => row.data.stableDecisionKey === byIdentity.get('KEY-A').stableDecisionKey)
+  const keyBRow = afterSweep.find((row) => row.data.stableDecisionKey === byIdentity.get('KEY-B').stableDecisionKey)
+  assert.equal(keyARow.data.status, STATUSES.SUPERSEDED, 'the orphan is closed with the frozen superseded status, not a new one')
+  assert.equal(keyARow.data.supersededAt, '2026-08-29T11:00:00.000Z')
+  assert.equal(keyBRow.data.status, STATUSES.CONFIRMED, 'the still-present confirmed row is untouched')
+
+  // The closed orphan is no longer confirmable — the queue cannot wedge on it.
+  await rejectsWithCode(
+    () => confirmConfirmationDecision(scopedCall(env, {
+      decisionId: byIdentity.get('KEY-A').decisionId,
+      inputFingerprint: byIdentity.get('KEY-A').inputFingerprint,
+      resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS,
+      confirmedBy: 'admin-user',
+    })),
+    'CONFIRMATION_DECISION_NOT_PENDING',
+    'W-4(b) swept row refuses confirm',
+  )
+
+  // KEY-B vanishes too — but it is CONFIRMED: a historical human decision the
+  // sweep must NOT touch (the readback already ignores it via the fingerprint
+  // bind, so it is inert, not dangerous).
+  const emptied = await call(planOf([]))
+  assert.equal(emptied.counts.orphanSuperseded, 0, 'W-4(b): confirmed orphans are never swept')
+  assert.equal(
+    ledgerRows(env.records).find((row) => row.data.stableDecisionKey === byIdentity.get('KEY-B').stableDecisionKey).data.status,
+    STATUSES.CONFIRMED,
+  )
+
+  // Sweep replay is idempotent: nothing left to close, no row growth.
+  const replay = await call(planOf([duplicateHold('KEY-B')]))
+  assert.equal(replay.counts.orphanSuperseded, 0)
+  assert.equal(replay.counts.existing, 1)
+  assert.equal(ledgerRows(env.records).length, 2)
+}
+
+// ── W-4(c): lease renew CAS + mid-run lost-lease abort ──────────────────────
+
+async function testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows() {
+  // renew CAS semantics first, in isolation.
+  const casDb = makeFakeLeaseDb()
+  const casLease = createConfirmationDecisionReconcileLease({ db: casDb, ttlMs: 60_000, now: () => new Date(0) })
+  const casGot = await casLease.acquire('scope-cas')
+  assert.equal(casGot.held, true)
+  assert.deepEqual(await casLease.renew({ scopeKey: 'scope-cas', leaseId: casGot.leaseId }), { held: true })
+  assert.equal(casDb.rows.get('scope-cas').expires_at, new Date(60_000).toISOString(), 'renew CAS-extends expires_at over the existing 077 columns')
+  assert.deepEqual(await casLease.renew({ scopeKey: 'scope-cas', leaseId: casGot.leaseId, ttlMs: 5 }), { held: true })
+  assert.equal(casDb.rows.get('scope-cas').expires_at, new Date(5).toISOString(), 'renew honours an explicit ttlMs')
+  assert.deepEqual(
+    await casLease.renew({ scopeKey: 'scope-cas', leaseId: 'someone-else' }),
+    { held: false },
+    'W-4(c): renew is CAS-guarded by lease_id — a non-holder extends nothing',
+  )
+  assert.equal(casDb.rows.get('scope-cas').expires_at, new Date(5).toISOString(), 'a refused renew leaves expires_at untouched')
+
+  // A lease surface WITHOUT renew is refused fail-closed: without mid-run
+  // renewal the write loop cannot notice a lost lease at all.
+  const noRenewEnv = ledgerEnv()
+  await rejectsWithCode(
+    () => reconcileConfirmationDecisions(scopedCall(noRenewEnv, {
+      projectNo: 'P-001',
+      plan: planOf([duplicateHold('KEY-A')]),
+      sourceRevision: 'rev-1',
+      reconcileLease: { acquire: async () => ({ held: true, leaseId: 'x' }), release: async () => {} },
+    })),
+    'CONFIRMATION_DECISION_RECONCILE_LEASE_UNAVAILABLE',
+    'W-4(c) lease without renew',
+  )
+
+  // THE overrun reproduction, deterministic: a holder whose lease TTL (1ms on
+  // a frozen clock) is expired the moment anyone looks — exactly like a 60s
+  // TTL against a write loop slower than 60s — and a stealer that takes the
+  // lease over right after the holder's FIRST write lands.
+  const provisioning = makeFakeProvisioning({
+    stagingProjectId: STAGING,
+    sheetIdByObjectId: { [OBJECT_ID]: LEDGER_SHEET },
+  })
+  const records = makeStrictRecordsApi({
+    stagingProjectId: STAGING,
+    objectIdBySheetId: { [LEDGER_SHEET]: OBJECT_ID },
+    rowsBySheet: { [LEDGER_SHEET]: [] },
+  })
+  const sharedLeaseDb = makeFakeLeaseDb()
+  const holderLease = createConfirmationDecisionReconcileLease({ db: sharedLeaseDb, ttlMs: 1, now: () => new Date(0) })
+  const stealerLease = createConfirmationDecisionReconcileLease({ db: sharedLeaseDb, now: () => new Date(1000) })
+  const scopeKey = ledgerInternals.stableHash('reconcile-lock', { targetProjectId: STAGING, projectNo: 'P-001' })
+  // 26 candidates: the renew cadence is every 25 writes, so the holder renews
+  // before write #1 (still unstolen), writes #1..#25 land, the steal happens
+  // after write #1, and the renew before write #26 discovers the loss.
+  const keys = Array.from({ length: 26 }, (_, index) => `KEY-${String(index).padStart(2, '0')}`)
+  const plan = planOf(keys.map((key) => duplicateHold(key)))
+  let stolenLeaseId = null
+  const interceptedRecords = {
+    ...records,
+    async createRecord(input) {
+      const created = await records.createRecord(input)
+      if (!stolenLeaseId) {
+        const grabbed = await stealerLease.acquire(scopeKey)
+        assert.equal(grabbed.held, true, 'the stealer takes over the expired lease mid-run')
+        stolenLeaseId = grabbed.leaseId
+      }
+      return created
+    },
+  }
+  await assert.rejects(
+    () => reconcileConfirmationDecisions({
+      recordsApi: interceptedRecords,
+      provisioning,
+      targetProjectId: STAGING,
+      permission: 'admin',
+      projectNo: 'P-001',
+      plan,
+      sourceRevision: 'rev-1',
+      reconcileLease: holderLease,
+    }),
+    (error) => {
+      assert.ok(error instanceof StockPreparationConfirmationDecisionError, `expected ledger error, got ${error && error.name}: ${error && error.message}`)
+      assert.equal(error.code, 'CONFIRMATION_DECISION_RECONCILE_LEASE_LOST', 'W-4(c): the overtaken holder aborts with the fixed code')
+      assert.equal(error.status, 409)
+      assert.equal(error.details.partial, true)
+      assert.equal(error.details.counts.created, 25, 'W-4(c): partial counts surface in the abort payload')
+      return true
+    },
+  )
+  assert.equal(ledgerRows(records).length, 25, 'the holder stopped mid-run — a bounded, not unbounded, overrun')
+  assert.ok(sharedLeaseDb.rows.get(scopeKey), 'the aborted holder must NOT free the stealer lease on release')
+  assert.equal(sharedLeaseDb.rows.get(scopeKey).lease_id, stolenLeaseId)
+
+  // The takeover reconciler finishes the job; the ledger converges with NO
+  // duplicate active rows — the one-active-decision invariant migration 077
+  // exists for.
+  await stealerLease.release(scopeKey, stolenLeaseId)
+  const takeover = await reconcileConfirmationDecisions({
+    recordsApi: records,
+    provisioning,
+    targetProjectId: STAGING,
+    permission: 'admin',
+    projectNo: 'P-001',
+    plan,
+    sourceRevision: 'rev-1',
+    reconcileLease: stealerLease,
+  })
+  assert.equal(takeover.counts.existing, 25, 'the aborted holder partial writes replay as no-ops (A-01)')
+  assert.equal(takeover.counts.created, 1, 'the takeover writes only what the holder never reached')
+  const active = ledgerRows(records).filter((row) => ACTIVE_STATUSES.includes(row.data.status))
+  assert.equal(active.length, 26, 'every key ends with exactly one active row')
+  assert.equal(new Set(active.map((row) => row.data.stableDecisionKey)).size, 26, 'W-4(c): no duplicate active rows for any key')
+}
+
 // ── G7: unregistered / malformed / stale confirms are refused ───────────────
 
 async function testConfirmRefusesUnregisteredMalformedAndStale() {
@@ -886,6 +1154,9 @@ async function main() {
     testA02FingerprintChangeSupersedesAndOldConfirmationDoesNotClearNewConflict,
     testA03OutOfScopeConflictAndUnknownActionRefusedWithZeroCanonicalWrites,
     testA04TwoIndependentReconcilersYieldOneActiveDecision,
+    testW4aFingerprintReturnReopensSupersededRowAndClearsHumanDecision,
+    testW4bVanishedConflictSweepClosesOrphanPendingRows,
+    testW4cLeaseOverrunAbortsWithFixedCodeAndNoDuplicateActiveRows,
     testConfirmRefusesUnregisteredMalformedAndStale,
     testReadbackDowngradesOnlyConfirmedMatchingKeepMultipleRows,
     testQueueEndpointEmitsNoCellValues,
